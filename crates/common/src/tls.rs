@@ -44,10 +44,14 @@ impl TlsIdentity {
 
     /// Build a rustls server configuration for Axum or raw Tokio listeners.
     pub fn server_config(&self) -> Result<Arc<ServerConfig>, TlsError> {
-        let config = ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(self.certificate_chain.clone(), self.private_key.clone_key())
-            .map_err(TlsError::Rustls)?;
+        let config = ServerConfig::builder_with_provider(
+            tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().into(),
+        )
+        .with_safe_default_protocol_versions()
+        .map_err(TlsError::Rustls)?
+        .with_no_client_auth()
+        .with_single_cert(self.certificate_chain.clone(), self.private_key.clone_key())
+        .map_err(TlsError::Rustls)?;
 
         Ok(Arc::new(config))
     }

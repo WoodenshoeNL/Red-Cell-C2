@@ -12,6 +12,9 @@ axum = { version = "0.8.8", features = ["ws"] }
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 clap = { version = "4.5", features = ["derive"] }
 red-cell-common = { path = "../common" }
+serde_json = "1.0"
+sqlx = { version = "0.8.6", features = ["sqlite", "runtime-tokio-rustls", "macros", "migrate"] }
+thiserror = "2.0"
 tokio = { version = "1.45", features = ["macros", "rt-multi-thread", "signal"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }

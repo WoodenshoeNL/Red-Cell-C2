@@ -1655,6 +1655,7 @@ dependencies = [
  "clap",
  "futures-util",
  "red-cell-common",
+ "serde",
  "serde_json",
  "sha3",
  "sqlx",

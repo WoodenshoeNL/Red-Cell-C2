@@ -20,7 +20,9 @@ use uuid::Uuid;
 
 use crate::{
     AuthError, AuthService, AuthenticationFailure, AuthenticationResult, EventBus,
-    authorize_websocket_command, login_failure_message, login_success_message,
+    ListenerEventAction, ListenerManager, authorize_websocket_command,
+    listener_config_from_operator, listener_error_event, listener_event_for_action,
+    listener_removed_event, login_failure_message, login_success_message, operator_requests_start,
 };
 
 /// Tracks currently connected operator WebSocket clients.
@@ -77,6 +79,7 @@ where
     S: Clone + Send + Sync + 'static,
     AuthService: FromRef<S>,
     EventBus: FromRef<S>,
+    ListenerManager: FromRef<S>,
     OperatorConnectionManager: FromRef<S>,
 {
     Router::new().route("/", get(websocket_handler::<S>))
@@ -91,6 +94,7 @@ where
     S: Clone + Send + Sync + 'static,
     AuthService: FromRef<S>,
     EventBus: FromRef<S>,
+    ListenerManager: FromRef<S>,
     OperatorConnectionManager: FromRef<S>,
 {
     websocket.on_upgrade(move |socket| handle_operator_socket(state, socket))
@@ -101,6 +105,7 @@ where
     S: Clone + Send + Sync + 'static,
     AuthService: FromRef<S>,
     EventBus: FromRef<S>,
+    ListenerManager: FromRef<S>,
     OperatorConnectionManager: FromRef<S>,
 {
     let connection_id = Uuid::new_v4();
@@ -132,7 +137,7 @@ where
     loop {
         tokio::select! {
             incoming = socket.recv() => {
-                match handle_incoming_frame(&mut socket, &session, incoming).await {
+                match handle_incoming_frame(&state, &mut socket, &session, incoming).await {
                     Ok(SocketLoopControl::Continue) => {}
                     Ok(SocketLoopControl::Break) | Err(()) => break,
                 }
@@ -209,11 +214,17 @@ async fn handle_authentication(
     Ok(())
 }
 
-async fn handle_incoming_frame(
+async fn handle_incoming_frame<S>(
+    state: &S,
     socket: &mut WebSocket,
     session: &crate::OperatorSession,
     incoming: Option<Result<WsMessage, axum::Error>>,
-) -> Result<SocketLoopControl, ()> {
+) -> Result<SocketLoopControl, ()>
+where
+    S: Clone + Send + Sync + 'static,
+    EventBus: FromRef<S>,
+    ListenerManager: FromRef<S>,
+{
     let Some(frame) = incoming else {
         return Ok(SocketLoopControl::Break);
     };
@@ -245,7 +256,7 @@ async fn handle_incoming_frame(
                         "dispatching operator websocket command"
                     );
 
-                    dispatch_operator_command(session, message).await;
+                    dispatch_operator_command(state, session, message).await;
                     Ok(SocketLoopControl::Continue)
                 }
                 Err(error) => {
@@ -282,13 +293,135 @@ async fn handle_incoming_frame(
     }
 }
 
-async fn dispatch_operator_command(session: &crate::OperatorSession, message: OperatorMessage) {
-    debug!(
-        connection_id = %session.connection_id,
-        username = %session.username,
-        event = ?message.event_code(),
-        "operator websocket command has no registered handler yet"
-    );
+async fn dispatch_operator_command<S>(
+    state: &S,
+    session: &crate::OperatorSession,
+    message: OperatorMessage,
+) where
+    S: Clone + Send + Sync + 'static,
+    EventBus: FromRef<S>,
+    ListenerManager: FromRef<S>,
+{
+    let events = EventBus::from_ref(state);
+    let listeners = ListenerManager::from_ref(state);
+
+    match message {
+        OperatorMessage::ListenerNew(message) => {
+            let name = message.info.name.clone().unwrap_or_default();
+            match listener_config_from_operator(&message.info) {
+                Ok(config) => match listeners.create(config).await {
+                    Ok(summary) => {
+                        events.broadcast(listener_event_for_action(
+                            &session.username,
+                            &summary,
+                            ListenerEventAction::Created,
+                        ));
+
+                        if operator_requests_start(&message.info) {
+                            match listeners.start(&summary.name).await {
+                                Ok(started) => {
+                                    events.broadcast(listener_event_for_action(
+                                        &session.username,
+                                        &started,
+                                        ListenerEventAction::Started,
+                                    ));
+                                }
+                                Err(error) => {
+                                    events.broadcast(listener_error_event(
+                                        &session.username,
+                                        &summary.name,
+                                        &error,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        events.broadcast(listener_error_event(&session.username, &name, &error));
+                    }
+                },
+                Err(error) => {
+                    events.broadcast(listener_error_event(&session.username, &name, &error));
+                }
+            }
+        }
+        OperatorMessage::ListenerEdit(message) => {
+            let name = message.info.name.clone().unwrap_or_default();
+            match listener_config_from_operator(&message.info) {
+                Ok(config) => match listeners.update(config).await {
+                    Ok(summary) => {
+                        events.broadcast(listener_event_for_action(
+                            &session.username,
+                            &summary,
+                            ListenerEventAction::Updated,
+                        ));
+                    }
+                    Err(error) => {
+                        events.broadcast(listener_error_event(&session.username, &name, &error));
+                    }
+                },
+                Err(error) => {
+                    events.broadcast(listener_error_event(&session.username, &name, &error));
+                }
+            }
+        }
+        OperatorMessage::ListenerRemove(message) => {
+            let name = message.info.name;
+            match listeners.delete(&name).await {
+                Ok(()) => {
+                    events.broadcast(listener_removed_event(&session.username, &name));
+                }
+                Err(error) => {
+                    events.broadcast(listener_error_event(&session.username, &name, &error));
+                }
+            }
+        }
+        OperatorMessage::ListenerMark(message) => {
+            let result = if message.info.mark.eq_ignore_ascii_case("online")
+                || message.info.mark.eq_ignore_ascii_case("start")
+            {
+                listeners.start(&message.info.name).await
+            } else if message.info.mark.eq_ignore_ascii_case("offline")
+                || message.info.mark.eq_ignore_ascii_case("stop")
+            {
+                listeners.stop(&message.info.name).await
+            } else {
+                Err(crate::ListenerManagerError::UnsupportedMark {
+                    mark: message.info.mark.clone(),
+                })
+            };
+
+            match result {
+                Ok(summary) => {
+                    let action = if summary.state.status == crate::ListenerStatus::Running {
+                        ListenerEventAction::Started
+                    } else {
+                        ListenerEventAction::Stopped
+                    };
+                    events.broadcast(listener_event_for_action(
+                        &session.username,
+                        &summary,
+                        action,
+                    ));
+                }
+                Err(error) => {
+                    events.broadcast(listener_error_event(
+                        &session.username,
+                        &message.info.name,
+                        &error,
+                    ));
+                }
+            }
+        }
+        other => {
+            debug!(
+                connection_id = %session.connection_id,
+                username = %session.username,
+                event = ?other.event_code(),
+                "operator websocket command has no registered handler yet"
+            );
+        }
+    }
 }
 
 async fn cleanup_connection(
@@ -355,17 +488,18 @@ mod tests {
     use uuid::Uuid;
 
     use super::{OperatorConnectionManager, routes};
-    use crate::{AuthService, EventBus, hash_password};
+    use crate::{AuthService, Database, EventBus, ListenerManager, hash_password};
 
     #[derive(Clone)]
     struct TestState {
         auth: AuthService,
         events: EventBus,
         connections: OperatorConnectionManager,
+        listeners: ListenerManager,
     }
 
     impl TestState {
-        fn new() -> Self {
+        async fn new() -> Self {
             let profile = Profile::parse(
                 r#"
                 Teamserver {
@@ -389,10 +523,13 @@ mod tests {
             )
             .expect("test profile should parse");
 
+            let database = Database::connect_in_memory().await.expect("database should initialize");
+
             Self {
                 auth: AuthService::from_profile(&profile),
                 events: EventBus::default(),
                 connections: OperatorConnectionManager::new(),
+                listeners: ListenerManager::new(database),
             }
         }
     }
@@ -412,6 +549,12 @@ mod tests {
     impl FromRef<TestState> for OperatorConnectionManager {
         fn from_ref(input: &TestState) -> Self {
             input.connections.clone()
+        }
+    }
+
+    impl FromRef<TestState> for ListenerManager {
+        fn from_ref(input: &TestState) -> Self {
+            input.listeners.clone()
         }
     }
 
@@ -437,7 +580,7 @@ mod tests {
 
     #[tokio::test]
     async fn websocket_requires_login_before_other_messages() {
-        let state = TestState::new();
+        let state = TestState::new().await;
         let connection_registry = state.connections.clone();
         let (mut socket, server) = spawn_server(state).await;
 
@@ -463,7 +606,7 @@ mod tests {
 
     #[tokio::test]
     async fn websocket_forwards_event_bus_messages_after_login() {
-        let state = TestState::new();
+        let state = TestState::new().await;
         let event_bus = state.events.clone();
         let connection_registry = state.connections.clone();
         let auth = state.auth.clone();
@@ -501,7 +644,7 @@ mod tests {
 
     #[tokio::test]
     async fn websocket_closes_when_authenticated_operator_lacks_permission() {
-        let state = TestState::new();
+        let state = TestState::new().await;
         let connection_registry = state.connections.clone();
         let (mut socket, server) = spawn_server(state).await;
 

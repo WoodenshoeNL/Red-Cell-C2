@@ -2,7 +2,8 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use red_cell::database::{
-    AuditLogEntry, Database, LinkRecord, LootRecord, PersistedListener, TeamserverError,
+    AuditLogEntry, Database, LinkRecord, ListenerStatus, LootRecord, PersistedListener,
+    PersistedListenerState, TeamserverError,
 };
 use red_cell_common::{
     AgentEncryptionInfo, AgentInfo, HttpListenerConfig, HttpListenerProxyConfig,
@@ -154,6 +155,7 @@ async fn listener_repository_supports_crud_queries() -> Result<(), TeamserverErr
             name: listener.name().to_owned(),
             protocol: listener.protocol(),
             config: listener.clone(),
+            state: PersistedListenerState { status: ListenerStatus::Created, last_error: None },
         })
     );
 
@@ -167,6 +169,7 @@ async fn listener_repository_supports_crud_queries() -> Result<(), TeamserverErr
             name: listener.name().to_owned(),
             protocol: listener.protocol(),
             config: listener.clone(),
+            state: PersistedListenerState { status: ListenerStatus::Created, last_error: None },
         }]
     );
 

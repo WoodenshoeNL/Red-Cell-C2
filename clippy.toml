@@ -1,0 +1,15 @@
+doc-valid-idents = [
+    "AES",
+    "Axum",
+    "egui",
+    "Havoc",
+    "JSON",
+    "PyO3",
+    "SQLite",
+    "SQLx",
+    "Tokio",
+    "WebSocket",
+    "YAOTL",
+]
+too-many-arguments-threshold = 8
+type-complexity-threshold = 300

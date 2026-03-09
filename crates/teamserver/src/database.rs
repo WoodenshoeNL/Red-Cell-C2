@@ -33,6 +33,18 @@ pub enum TeamserverError {
         /// Human-readable conversion failure reason.
         message: String,
     },
+    /// Returned when attempting to register an agent that already exists in memory.
+    #[error("agent 0x{agent_id:08X} already exists")]
+    DuplicateAgent {
+        /// Duplicate agent identifier.
+        agent_id: u32,
+    },
+    /// Returned when an in-memory agent cannot be found.
+    #[error("agent 0x{agent_id:08X} not found")]
+    AgentNotFound {
+        /// Missing agent identifier.
+        agent_id: u32,
+    },
 }
 
 /// Connection pool and repository factory for the teamserver database.

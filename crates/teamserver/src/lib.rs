@@ -3,6 +3,7 @@
 pub mod agents;
 pub mod auth;
 pub mod database;
+pub mod demon;
 pub mod events;
 pub mod listeners;
 pub mod rbac;
@@ -17,6 +18,10 @@ pub use database::{
     AgentRepository, AuditLogEntry, AuditLogRepository, Database, LinkRecord, LinkRepository,
     ListenerRepository, ListenerStatus, LootRecord, LootRepository, PersistedListener,
     PersistedListenerState, TeamserverError,
+};
+pub use demon::{
+    DemonCallbackPackage, DemonPacketParser, DemonParserError, ParsedDemonInit, ParsedDemonPacket,
+    build_init_ack,
 };
 pub use events::{EventBus, EventReceiver};
 pub use listeners::{

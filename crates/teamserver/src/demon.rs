@@ -1,0 +1,718 @@
+//! Incoming Havoc Demon transport parsing for the teamserver.
+
+use std::borrow::Cow;
+
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use red_cell_common::crypto::{
+    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, CryptoError, decrypt_agent_data, encrypt_agent_data,
+};
+use red_cell_common::demon::{DemonCommand, DemonEnvelope, DemonHeader, DemonProtocolError};
+use red_cell_common::{AgentEncryptionInfo, AgentInfo};
+use thiserror::Error;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
+
+use crate::{AgentRegistry, TeamserverError};
+
+const PROCESS_ARCH_X86: u32 = 1;
+const PROCESS_ARCH_X64: u32 = 2;
+const PROCESS_ARCH_IA64: u32 = 3;
+const VER_NT_WORKSTATION: u32 = 0x0000_0001;
+
+/// A decrypted Demon callback package parsed from an agent request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DemonCallbackPackage {
+    /// Raw command identifier.
+    pub command_id: u32,
+    /// Request identifier correlated with the originating task.
+    pub request_id: u32,
+    /// Raw package payload bytes.
+    pub payload: Vec<u8>,
+}
+
+impl DemonCallbackPackage {
+    /// Return the typed command identifier if it matches a known Havoc constant.
+    pub fn command(&self) -> Result<DemonCommand, DemonProtocolError> {
+        self.command_id.try_into()
+    }
+}
+
+/// Parsed registration payload for a new Demon agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedDemonInit {
+    /// Outer transport header.
+    pub header: DemonHeader,
+    /// Request identifier supplied by the implant.
+    pub request_id: u32,
+    /// Fully parsed agent metadata, including the stored transport key/IV.
+    pub agent: AgentInfo,
+}
+
+/// Normalized result of parsing a Demon request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParsedDemonPacket {
+    /// First-time registration with metadata and session key material.
+    Init(Box<ParsedDemonInit>),
+    /// Reconnect probe from an already-registered agent.
+    Reconnect {
+        /// Outer transport header.
+        header: DemonHeader,
+        /// Request identifier supplied by the implant.
+        request_id: u32,
+    },
+    /// One or more decrypted callback packages from an existing agent.
+    Callback {
+        /// Outer transport header.
+        header: DemonHeader,
+        /// Parsed callback packages in transmission order.
+        packages: Vec<DemonCallbackPackage>,
+    },
+}
+
+/// Errors returned while parsing incoming Demon traffic.
+#[derive(Debug, Error)]
+pub enum DemonParserError {
+    /// The envelope or command stream did not match the Havoc wire format.
+    #[error("invalid demon protocol data: {0}")]
+    Protocol(#[from] DemonProtocolError),
+    /// Stored or transmitted AES material could not be used.
+    #[error("invalid agent crypto material: {0}")]
+    Crypto(#[from] CryptoError),
+    /// The parser could not update the shared agent registry.
+    #[error("agent registry operation failed: {0}")]
+    Registry(#[from] TeamserverError),
+    /// Base64 decoding failed for a persisted key or IV.
+    #[error("invalid base64 in stored {field} for agent 0x{agent_id:08X}: {message}")]
+    InvalidStoredCryptoEncoding {
+        /// Agent identifier associated with the invalid value.
+        agent_id: u32,
+        /// Stored field name.
+        field: &'static str,
+        /// Decoder error message.
+        message: String,
+    },
+    /// The parser found malformed or incomplete metadata in a `DEMON_INIT` request.
+    #[error("invalid demon init payload: {0}")]
+    InvalidInit(&'static str),
+}
+
+/// Parser for incoming Demon transport packets backed by the teamserver agent registry.
+#[derive(Clone, Debug)]
+pub struct DemonPacketParser {
+    registry: AgentRegistry,
+}
+
+impl DemonPacketParser {
+    /// Create a packet parser that resolves agent session keys from the provided registry.
+    #[must_use]
+    pub fn new(registry: AgentRegistry) -> Self {
+        Self { registry }
+    }
+
+    /// Parse an incoming Demon request and update the registry for newly registered agents.
+    pub async fn parse(
+        &self,
+        bytes: &[u8],
+        external_ip: impl Into<String>,
+    ) -> Result<ParsedDemonPacket, DemonParserError> {
+        let now = OffsetDateTime::now_utc();
+        self.parse_at(bytes, external_ip.into(), now).await
+    }
+
+    async fn parse_at(
+        &self,
+        bytes: &[u8],
+        external_ip: String,
+        now: OffsetDateTime,
+    ) -> Result<ParsedDemonPacket, DemonParserError> {
+        let envelope = DemonEnvelope::from_bytes(bytes)?;
+        let mut offset = 0_usize;
+        let command_id = read_u32_be(&envelope.payload, &mut offset, "top-level command id")?;
+        let request_id = read_u32_be(&envelope.payload, &mut offset, "top-level request id")?;
+        let remaining = &envelope.payload[offset..];
+
+        if command_id == u32::from(DemonCommand::DemonInit) {
+            if remaining.is_empty() {
+                return Ok(ParsedDemonPacket::Reconnect { header: envelope.header, request_id });
+            }
+
+            let agent = parse_init_agent(envelope.header.agent_id, remaining, &external_ip, now)?;
+            if self.registry.get(agent.agent_id).await.is_some() {
+                self.registry.update_agent(agent.clone()).await?;
+            } else {
+                self.registry.insert(agent.clone()).await?;
+            }
+
+            return Ok(ParsedDemonPacket::Init(Box::new(ParsedDemonInit {
+                header: envelope.header,
+                request_id,
+                agent,
+            })));
+        }
+
+        let (key, iv) = self.decode_registry_crypto(envelope.header.agent_id).await?;
+        let decrypted = decrypt_agent_data(&key, &iv, remaining)?;
+        let packages = parse_callback_packages(command_id, request_id, &decrypted)?;
+
+        Ok(ParsedDemonPacket::Callback { header: envelope.header, packages })
+    }
+
+    async fn decode_registry_crypto(
+        &self,
+        agent_id: u32,
+    ) -> Result<([u8; AGENT_KEY_LENGTH], [u8; AGENT_IV_LENGTH]), DemonParserError> {
+        let encryption = self.registry.encryption(agent_id).await?;
+        decode_agent_crypto(agent_id, &encryption)
+    }
+}
+
+/// Build the encrypted acknowledgement body returned after a Demon init or reconnect request.
+pub fn build_init_ack(
+    agent_id: u32,
+    encryption: &AgentEncryptionInfo,
+) -> Result<Vec<u8>, DemonParserError> {
+    let (key, iv) = decode_agent_crypto(agent_id, encryption)?;
+    let payload = agent_id.to_le_bytes();
+
+    if key.iter().all(|byte| *byte == 0) {
+        return Ok(payload.to_vec());
+    }
+
+    Ok(encrypt_agent_data(&key, &iv, &payload))
+}
+
+fn decode_agent_crypto(
+    agent_id: u32,
+    encryption: &AgentEncryptionInfo,
+) -> Result<([u8; AGENT_KEY_LENGTH], [u8; AGENT_IV_LENGTH]), DemonParserError> {
+    let key = decode_fixed::<AGENT_KEY_LENGTH>(agent_id, "aes_key", encryption.aes_key.as_bytes())?;
+    let iv = decode_fixed::<AGENT_IV_LENGTH>(agent_id, "aes_iv", encryption.aes_iv.as_bytes())?;
+    Ok((key, iv))
+}
+
+fn decode_fixed<const N: usize>(
+    agent_id: u32,
+    field: &'static str,
+    encoded: &[u8],
+) -> Result<[u8; N], DemonParserError> {
+    let decoded = BASE64_STANDARD.decode(encoded).map_err(|error| {
+        DemonParserError::InvalidStoredCryptoEncoding {
+            agent_id,
+            field,
+            message: error.to_string(),
+        }
+    })?;
+
+    let actual = decoded.len();
+    decoded.try_into().map_err(|_| {
+        DemonParserError::Protocol(DemonProtocolError::BufferTooShort {
+            context: field,
+            expected: N,
+            actual,
+        })
+    })
+}
+
+fn parse_callback_packages(
+    first_command_id: u32,
+    first_request_id: u32,
+    decrypted: &[u8],
+) -> Result<Vec<DemonCallbackPackage>, DemonParserError> {
+    let mut offset = 0_usize;
+    let first_payload =
+        read_length_prefixed_bytes_be(decrypted, &mut offset, "first callback payload")?;
+    let mut packages = vec![DemonCallbackPackage {
+        command_id: first_command_id,
+        request_id: first_request_id,
+        payload: first_payload,
+    }];
+
+    while offset < decrypted.len() {
+        let command_id = read_u32_be(decrypted, &mut offset, "callback command id")?;
+        let request_id = read_u32_be(decrypted, &mut offset, "callback request id")?;
+        let payload = read_length_prefixed_bytes_be(decrypted, &mut offset, "callback payload")?;
+        packages.push(DemonCallbackPackage { command_id, request_id, payload });
+    }
+
+    Ok(packages)
+}
+
+fn parse_init_agent(
+    agent_id: u32,
+    payload: &[u8],
+    external_ip: &str,
+    now: OffsetDateTime,
+) -> Result<AgentInfo, DemonParserError> {
+    let mut offset = 0_usize;
+    let key = read_fixed::<AGENT_KEY_LENGTH>(payload, &mut offset, "init AES key")?;
+    let iv = read_fixed::<AGENT_IV_LENGTH>(payload, &mut offset, "init AES IV")?;
+    let encrypted = &payload[offset..];
+
+    let decrypted = if key.iter().all(|byte| *byte == 0) {
+        Cow::Borrowed(encrypted)
+    } else {
+        Cow::Owned(decrypt_agent_data(&key, &iv, encrypted)?)
+    };
+
+    let mut decrypted_offset = 0_usize;
+    let parsed_agent_id = read_u32_be(&decrypted, &mut decrypted_offset, "init agent id")?;
+    if parsed_agent_id != agent_id && agent_id != 0 {
+        return Err(DemonParserError::InvalidInit("decrypted agent id does not match header"));
+    }
+
+    let hostname = read_length_prefixed_string_be(&decrypted, &mut decrypted_offset, "hostname")?;
+    let username = read_length_prefixed_string_be(&decrypted, &mut decrypted_offset, "username")?;
+    let domain_name =
+        read_length_prefixed_string_be(&decrypted, &mut decrypted_offset, "domain name")?;
+    let internal_ip =
+        read_length_prefixed_string_be(&decrypted, &mut decrypted_offset, "internal ip")?;
+    let process_path =
+        read_length_prefixed_utf16_be(&decrypted, &mut decrypted_offset, "process path")?;
+    let process_pid = read_u32_be(&decrypted, &mut decrypted_offset, "process pid")?;
+    let process_tid = read_u32_be(&decrypted, &mut decrypted_offset, "process tid")?;
+    let process_ppid = read_u32_be(&decrypted, &mut decrypted_offset, "process ppid")?;
+    let process_arch = read_u32_be(&decrypted, &mut decrypted_offset, "process arch")?;
+    let elevated = read_u32_be(&decrypted, &mut decrypted_offset, "elevated")? != 0;
+    let base_address = read_u64_be(&decrypted, &mut decrypted_offset, "base address")?;
+    let os_major = read_u32_be(&decrypted, &mut decrypted_offset, "os major")?;
+    let os_minor = read_u32_be(&decrypted, &mut decrypted_offset, "os minor")?;
+    let os_product_type = read_u32_be(&decrypted, &mut decrypted_offset, "os product type")?;
+    let os_service_pack = read_u32_be(&decrypted, &mut decrypted_offset, "os service pack")?;
+    let os_build = read_u32_be(&decrypted, &mut decrypted_offset, "os build")?;
+    let os_arch = read_u32_be(&decrypted, &mut decrypted_offset, "os arch")?;
+    let sleep_delay = read_u32_be(&decrypted, &mut decrypted_offset, "sleep delay")?;
+    let sleep_jitter = read_u32_be(&decrypted, &mut decrypted_offset, "sleep jitter")?;
+    let kill_date = read_u64_be(&decrypted, &mut decrypted_offset, "kill date")?;
+    let working_hours = read_u32_be(&decrypted, &mut decrypted_offset, "working hours")?;
+    let timestamp =
+        now.format(&Rfc3339).map_err(|_| DemonParserError::InvalidInit("invalid timestamp"))?;
+
+    Ok(AgentInfo {
+        agent_id: parsed_agent_id,
+        active: true,
+        reason: String::new(),
+        encryption: AgentEncryptionInfo {
+            aes_key: BASE64_STANDARD.encode(key),
+            aes_iv: BASE64_STANDARD.encode(iv),
+        },
+        hostname,
+        username,
+        domain_name,
+        external_ip: external_ip.to_owned(),
+        internal_ip,
+        process_name: basename(&process_path),
+        base_address,
+        process_pid,
+        process_tid,
+        process_ppid,
+        process_arch: process_arch_label(process_arch).to_owned(),
+        elevated,
+        os_version: windows_version_label(
+            os_major,
+            os_minor,
+            os_product_type,
+            os_service_pack,
+            os_build,
+        ),
+        os_arch: windows_arch_label(os_arch).to_owned(),
+        sleep_delay,
+        sleep_jitter,
+        kill_date: (kill_date != 0).then_some(i64::try_from(kill_date).unwrap_or(i64::MAX)),
+        working_hours: (working_hours != 0)
+            .then_some(i32::try_from(working_hours).unwrap_or(i32::MAX)),
+        first_call_in: timestamp.clone(),
+        last_call_in: timestamp,
+    })
+}
+
+fn basename(path: &str) -> String {
+    path.rsplit(['\\', '/']).next().unwrap_or(path).to_owned()
+}
+
+fn process_arch_label(value: u32) -> &'static str {
+    match value {
+        PROCESS_ARCH_X64 => "x64",
+        PROCESS_ARCH_X86 => "x86",
+        PROCESS_ARCH_IA64 => "IA64",
+        _ => "Unknown",
+    }
+}
+
+fn windows_arch_label(value: u32) -> &'static str {
+    match value {
+        0 => "x86",
+        9 => "x64/AMD64",
+        5 => "ARM",
+        12 => "ARM64",
+        6 => "Itanium-based",
+        _ => "Unknown",
+    }
+}
+
+fn windows_version_label(
+    major: u32,
+    minor: u32,
+    product_type: u32,
+    service_pack: u32,
+    build: u32,
+) -> String {
+    let mut version =
+        if major == 10 && minor == 0 && product_type != VER_NT_WORKSTATION && build == 20_348 {
+            "Windows 2022 Server 22H2".to_owned()
+        } else if major == 10 && minor == 0 && product_type != VER_NT_WORKSTATION && build == 17_763
+        {
+            "Windows 2019 Server".to_owned()
+        } else if major == 10
+            && minor == 0
+            && product_type == VER_NT_WORKSTATION
+            && (22_000..=22_621).contains(&build)
+        {
+            "Windows 11".to_owned()
+        } else if major == 10 && minor == 0 && product_type != VER_NT_WORKSTATION {
+            "Windows 2016 Server".to_owned()
+        } else if major == 10 && minor == 0 && product_type == VER_NT_WORKSTATION {
+            "Windows 10".to_owned()
+        } else if major == 6 && minor == 3 && product_type != VER_NT_WORKSTATION {
+            "Windows Server 2012 R2".to_owned()
+        } else if major == 6 && minor == 3 && product_type == VER_NT_WORKSTATION {
+            "Windows 8.1".to_owned()
+        } else if major == 6 && minor == 2 && product_type != VER_NT_WORKSTATION {
+            "Windows Server 2012".to_owned()
+        } else if major == 6 && minor == 2 && product_type == VER_NT_WORKSTATION {
+            "Windows 8".to_owned()
+        } else if major == 6 && minor == 1 && product_type != VER_NT_WORKSTATION {
+            "Windows Server 2008 R2".to_owned()
+        } else if major == 6 && minor == 1 && product_type == VER_NT_WORKSTATION {
+            "Windows 7".to_owned()
+        } else {
+            "Unknown".to_owned()
+        };
+
+    if service_pack != 0 {
+        version.push_str(" Service Pack ");
+        version.push_str(&service_pack.to_string());
+    }
+
+    version
+}
+
+fn read_fixed<const N: usize>(
+    bytes: &[u8],
+    offset: &mut usize,
+    context: &'static str,
+) -> Result<[u8; N], DemonParserError> {
+    let remaining = bytes.len().saturating_sub(*offset);
+    if remaining < N {
+        return Err(
+            DemonProtocolError::BufferTooShort { context, expected: N, actual: remaining }.into()
+        );
+    }
+
+    let value: [u8; N] = bytes[*offset..*offset + N].try_into().map_err(|_| {
+        DemonProtocolError::BufferTooShort { context, expected: N, actual: remaining }
+    })?;
+    *offset += N;
+    Ok(value)
+}
+
+fn read_u32_be(
+    bytes: &[u8],
+    offset: &mut usize,
+    context: &'static str,
+) -> Result<u32, DemonParserError> {
+    Ok(u32::from_be_bytes(read_fixed::<4>(bytes, offset, context)?))
+}
+
+fn read_u64_be(
+    bytes: &[u8],
+    offset: &mut usize,
+    context: &'static str,
+) -> Result<u64, DemonParserError> {
+    Ok(u64::from_be_bytes(read_fixed::<8>(bytes, offset, context)?))
+}
+
+fn read_length_prefixed_bytes_be(
+    bytes: &[u8],
+    offset: &mut usize,
+    context: &'static str,
+) -> Result<Vec<u8>, DemonParserError> {
+    let len = usize::try_from(read_u32_be(bytes, offset, context)?)
+        .map_err(|_| DemonParserError::InvalidInit("length conversion overflow"))?;
+    let remaining = bytes.len().saturating_sub(*offset);
+    if remaining < len {
+        return Err(DemonProtocolError::BufferTooShort {
+            context,
+            expected: len,
+            actual: remaining,
+        }
+        .into());
+    }
+
+    let value = bytes[*offset..*offset + len].to_vec();
+    *offset += len;
+    Ok(value)
+}
+
+fn read_length_prefixed_string_be(
+    bytes: &[u8],
+    offset: &mut usize,
+    context: &'static str,
+) -> Result<String, DemonParserError> {
+    let raw = read_length_prefixed_bytes_be(bytes, offset, context)?;
+    Ok(String::from_utf8_lossy(&raw).trim_end_matches('\0').to_owned())
+}
+
+fn read_length_prefixed_utf16_be(
+    bytes: &[u8],
+    offset: &mut usize,
+    context: &'static str,
+) -> Result<String, DemonParserError> {
+    let raw = read_length_prefixed_bytes_be(bytes, offset, context)?;
+    if raw.len() % 2 != 0 {
+        return Err(DemonParserError::InvalidInit("utf16 field length must be even"));
+    }
+
+    let words: Vec<u16> =
+        raw.chunks_exact(2).map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]])).collect();
+    Ok(String::from_utf16_lossy(&words).trim_end_matches('\0').to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use red_cell_common::crypto::{
+        AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data, encrypt_agent_data,
+    };
+    use red_cell_common::demon::{DEMON_MAGIC_VALUE, DemonCommand, DemonEnvelope};
+    use time::macros::datetime;
+
+    use super::{DemonPacketParser, DemonParserError, ParsedDemonPacket, build_init_ack};
+    use crate::{AgentRegistry, Database};
+
+    fn u32_be(value: u32) -> [u8; 4] {
+        value.to_be_bytes()
+    }
+
+    fn u64_be(value: u64) -> [u8; 8] {
+        value.to_be_bytes()
+    }
+
+    fn add_bytes(buf: &mut Vec<u8>, bytes: &[u8]) {
+        buf.extend_from_slice(&u32_be(u32::try_from(bytes.len()).unwrap_or_default()));
+        buf.extend_from_slice(bytes);
+    }
+
+    fn add_str(buf: &mut Vec<u8>, value: &str) {
+        add_bytes(buf, value.as_bytes());
+    }
+
+    fn add_utf16(buf: &mut Vec<u8>, value: &str) {
+        let utf16: Vec<u8> = value.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        add_bytes(buf, &utf16);
+    }
+
+    async fn test_registry() -> AgentRegistry {
+        let database = Database::connect_in_memory().await.expect("in-memory db should work");
+        AgentRegistry::new(database)
+    }
+
+    fn build_init_packet(
+        agent_id: u32,
+        key: [u8; AGENT_KEY_LENGTH],
+        iv: [u8; AGENT_IV_LENGTH],
+    ) -> Vec<u8> {
+        let mut metadata = Vec::new();
+        metadata.extend_from_slice(&u32_be(agent_id));
+        add_str(&mut metadata, "wkstn-01");
+        add_str(&mut metadata, "operator");
+        add_str(&mut metadata, "REDCELL");
+        add_str(&mut metadata, "10.0.0.25");
+        add_utf16(&mut metadata, "C:\\Windows\\explorer.exe");
+        metadata.extend_from_slice(&u32_be(1337));
+        metadata.extend_from_slice(&u32_be(1338));
+        metadata.extend_from_slice(&u32_be(512));
+        metadata.extend_from_slice(&u32_be(2));
+        metadata.extend_from_slice(&u32_be(1));
+        metadata.extend_from_slice(&u64_be(0x401000));
+        metadata.extend_from_slice(&u32_be(10));
+        metadata.extend_from_slice(&u32_be(0));
+        metadata.extend_from_slice(&u32_be(1));
+        metadata.extend_from_slice(&u32_be(0));
+        metadata.extend_from_slice(&u32_be(22000));
+        metadata.extend_from_slice(&u32_be(9));
+        metadata.extend_from_slice(&u32_be(15));
+        metadata.extend_from_slice(&u32_be(20));
+        metadata.extend_from_slice(&u64_be(1_893_456_000));
+        metadata.extend_from_slice(&u32_be(0b101010));
+
+        let encrypted = encrypt_agent_data(&key, &iv, &metadata);
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u32_be(u32::from(DemonCommand::DemonInit)));
+        payload.extend_from_slice(&u32_be(7));
+        payload.extend_from_slice(&key);
+        payload.extend_from_slice(&iv);
+        payload.extend_from_slice(&encrypted);
+
+        DemonEnvelope::new(agent_id, payload).expect("init envelope should be valid").to_bytes()
+    }
+
+    fn build_callback_packet(
+        agent_id: u32,
+        key: [u8; AGENT_KEY_LENGTH],
+        iv: [u8; AGENT_IV_LENGTH],
+    ) -> Vec<u8> {
+        let mut decrypted = Vec::new();
+        decrypted.extend_from_slice(&u32_be(3));
+        decrypted.extend_from_slice(&[0xaa, 0xbb, 0xcc]);
+        decrypted.extend_from_slice(&u32_be(u32::from(DemonCommand::CommandOutput)));
+        decrypted.extend_from_slice(&u32_be(99));
+        decrypted.extend_from_slice(&u32_be(5));
+        decrypted.extend_from_slice(b"hello");
+
+        let encrypted = encrypt_agent_data(&key, &iv, &decrypted);
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u32_be(u32::from(DemonCommand::CommandCheckin)));
+        payload.extend_from_slice(&u32_be(42));
+        payload.extend_from_slice(&encrypted);
+
+        DemonEnvelope::new(agent_id, payload).expect("callback envelope should be valid").to_bytes()
+    }
+
+    #[tokio::test]
+    async fn parse_registers_new_agent_from_demon_init() {
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry.clone());
+        let key = [0x41; AGENT_KEY_LENGTH];
+        let iv = [0x24; AGENT_IV_LENGTH];
+        let packet = build_init_packet(0x1234_5678, key, iv);
+
+        let parsed = parser
+            .parse_at(&packet, "203.0.113.10".to_owned(), datetime!(2026-03-09 19:30:00 UTC))
+            .await
+            .expect("init packet should parse");
+
+        let ParsedDemonPacket::Init(init) = parsed else {
+            panic!("expected init packet");
+        };
+
+        assert_eq!(init.header.magic, DEMON_MAGIC_VALUE);
+        assert_eq!(init.request_id, 7);
+        assert_eq!(init.agent.agent_id, 0x1234_5678);
+        assert_eq!(init.agent.hostname, "wkstn-01");
+        assert_eq!(init.agent.process_name, "explorer.exe");
+        assert_eq!(init.agent.os_version, "Windows 11");
+        assert_eq!(init.agent.os_arch, "x64/AMD64");
+        assert_eq!(init.agent.external_ip, "203.0.113.10");
+        assert_eq!(init.agent.sleep_delay, 15);
+        assert_eq!(init.agent.kill_date, Some(1_893_456_000));
+        assert_eq!(init.agent.working_hours, Some(0b101010));
+        assert_eq!(registry.get(0x1234_5678).await, Some(init.agent));
+    }
+
+    #[tokio::test]
+    async fn parse_decrypts_callback_packages_for_existing_agent() {
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry.clone());
+        let key = [0x41; AGENT_KEY_LENGTH];
+        let iv = [0x24; AGENT_IV_LENGTH];
+        let init_packet = build_init_packet(0x0102_0304, key, iv);
+        parser
+            .parse_at(&init_packet, "198.51.100.5".to_owned(), datetime!(2026-03-09 19:31:00 UTC))
+            .await
+            .expect("init should succeed");
+
+        let callback_packet = build_callback_packet(0x0102_0304, key, iv);
+        let parsed = parser
+            .parse_at(
+                &callback_packet,
+                "198.51.100.5".to_owned(),
+                datetime!(2026-03-09 19:32:00 UTC),
+            )
+            .await
+            .expect("callback should parse");
+
+        let ParsedDemonPacket::Callback { header, packages } = parsed else {
+            panic!("expected callback packet");
+        };
+
+        assert_eq!(header.agent_id, 0x0102_0304);
+        assert_eq!(packages.len(), 2);
+        assert_eq!(packages[0].command_id, u32::from(DemonCommand::CommandCheckin));
+        assert_eq!(packages[0].request_id, 42);
+        assert_eq!(packages[0].payload, vec![0xaa, 0xbb, 0xcc]);
+        assert_eq!(packages[1].command_id, u32::from(DemonCommand::CommandOutput));
+        assert_eq!(packages[1].request_id, 99);
+        assert_eq!(packages[1].payload, b"hello");
+    }
+
+    #[tokio::test]
+    async fn parse_returns_reconnect_for_existing_agent_init_probe() {
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry.clone());
+        let key = [0x41; AGENT_KEY_LENGTH];
+        let iv = [0x24; AGENT_IV_LENGTH];
+        let init_packet = build_init_packet(0x1111_2222, key, iv);
+        parser
+            .parse_at(&init_packet, "192.0.2.10".to_owned(), datetime!(2026-03-09 19:33:00 UTC))
+            .await
+            .expect("init should succeed");
+
+        let payload =
+            [u32_be(u32::from(DemonCommand::DemonInit)).as_slice(), u32_be(123).as_slice()]
+                .concat();
+        let reconnect = DemonEnvelope::new(0x1111_2222, payload)
+            .expect("reconnect envelope should be valid")
+            .to_bytes();
+
+        let parsed = parser
+            .parse_at(&reconnect, "192.0.2.10".to_owned(), datetime!(2026-03-09 19:34:00 UTC))
+            .await
+            .expect("reconnect should parse");
+
+        assert_eq!(
+            parsed,
+            ParsedDemonPacket::Reconnect {
+                header: red_cell_common::demon::DemonHeader {
+                    size: 16,
+                    magic: DEMON_MAGIC_VALUE,
+                    agent_id: 0x1111_2222,
+                },
+                request_id: 123,
+            }
+        );
+    }
+
+    #[test]
+    fn build_init_ack_encrypts_agent_identifier() {
+        let key = [0x33; AGENT_KEY_LENGTH];
+        let iv = [0x44; AGENT_IV_LENGTH];
+        let encryption = red_cell_common::AgentEncryptionInfo {
+            aes_key: BASE64_STANDARD.encode(key),
+            aes_iv: BASE64_STANDARD.encode(iv),
+        };
+
+        let ack = build_init_ack(0xAABB_CCDD, &encryption).expect("ack should build");
+        let decrypted = decrypt_agent_data(&key, &iv, &ack).expect("ack should decrypt");
+
+        assert_eq!(decrypted, 0xAABB_CCDDu32.to_le_bytes());
+    }
+
+    #[tokio::test]
+    async fn parse_rejects_init_with_mismatched_agent_id() {
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry);
+        let mut packet =
+            build_init_packet(0x9999_AAAA, [0x41; AGENT_KEY_LENGTH], [0x24; AGENT_IV_LENGTH]);
+        let start = 12 + 8 + AGENT_KEY_LENGTH + AGENT_IV_LENGTH;
+        packet[start..start + 4].copy_from_slice(&u32_be(0x1111_2222));
+
+        let error = parser
+            .parse_at(&packet, "203.0.113.1".to_owned(), datetime!(2026-03-09 19:35:00 UTC))
+            .await
+            .expect_err("mismatched init should fail");
+
+        assert!(matches!(error, DemonParserError::Crypto(_) | DemonParserError::InvalidInit(_)));
+    }
+}

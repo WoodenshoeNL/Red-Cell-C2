@@ -1,0 +1,58 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux-x86_64:
+    name: Build Linux x86_64 release artifacts
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85.0
+
+      - name: Cache Cargo registry and target directory
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: true
+          cache-all-crates: true
+
+      - name: Build release binaries
+        run: cargo build --release --locked --bin red-cell --bin red-cell-client
+
+      - name: Package release artifacts
+        run: |
+          mkdir -p dist
+          cp target/release/red-cell dist/red-cell-linux-x86_64
+          cp target/release/red-cell-client dist/red-cell-client-linux-x86_64
+          tar -C dist -czf red-cell-linux-x86_64.tar.gz \
+            red-cell-linux-x86_64 \
+            red-cell-client-linux-x86_64
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: red-cell-linux-x86_64
+          path: red-cell-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+      - name: Publish GitHub release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: red-cell-linux-x86_64.tar.gz

@@ -12,9 +12,11 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
+use red_cell_common::AgentInfo;
 use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::{
-    EventCode, FlatInfo, Message, MessageHead, OperatorMessage, TeamserverLogInfo,
+    AgentEncryptionInfo as OperatorAgentEncryptionInfo, AgentInfo as OperatorAgentInfo,
+    AgentPivotsInfo, EventCode, FlatInfo, Message, MessageHead, OperatorMessage, TeamserverLogInfo,
 };
 use serde_json::Value;
 use thiserror::Error;
@@ -140,7 +142,25 @@ where
         "operator authenticated"
     );
 
-    let mut event_receiver = EventBus::from_ref(&state).subscribe();
+    let event_bus = EventBus::from_ref(&state);
+    let mut event_receiver = event_bus.subscribe();
+    if let Err(error) = send_session_snapshot(
+        &mut socket,
+        &event_bus,
+        &ListenerManager::from_ref(&state),
+        &AgentRegistry::from_ref(&state),
+    )
+    .await
+    {
+        warn!(
+            connection_id = %session.connection_id,
+            username = %session.username,
+            %error,
+            "failed to synchronize operator session state"
+        );
+        cleanup_connection(&auth, &connections, connection_id).await;
+        return;
+    }
 
     loop {
         tokio::select! {
@@ -645,6 +665,95 @@ fn teamserver_log_event(user: &str, text: &str) -> OperatorMessage {
     })
 }
 
+#[derive(Debug, Error)]
+enum SnapshotSyncError {
+    #[error(transparent)]
+    Send(#[from] SendMessageError),
+    #[error(transparent)]
+    Listener(#[from] crate::ListenerManagerError),
+}
+
+async fn send_session_snapshot(
+    socket: &mut WebSocket,
+    events: &EventBus,
+    listeners: &ListenerManager,
+    registry: &AgentRegistry,
+) -> Result<(), SnapshotSyncError> {
+    for summary in listeners
+        .list()
+        .await?
+        .into_iter()
+        .filter(|summary| summary.state.status == crate::ListenerStatus::Running)
+    {
+        send_operator_message(
+            socket,
+            &listener_event_for_action("teamserver", &summary, ListenerEventAction::Created),
+        )
+        .await?;
+    }
+
+    for message in events.recent_teamserver_logs() {
+        send_operator_message(socket, &message).await?;
+    }
+
+    for agent in registry.list_active().await {
+        send_operator_message(socket, &agent_snapshot_event(&agent)).await?;
+    }
+
+    Ok(())
+}
+
+fn agent_snapshot_event(agent: &AgentInfo) -> OperatorMessage {
+    OperatorMessage::AgentNew(Box::new(Message {
+        head: MessageHead {
+            event: EventCode::Session,
+            user: "teamserver".to_owned(),
+            timestamp: agent.last_call_in.clone(),
+            one_time: "true".to_owned(),
+        },
+        info: OperatorAgentInfo {
+            active: agent.active.to_string(),
+            background_check: false,
+            domain_name: agent.domain_name.clone(),
+            elevated: agent.elevated,
+            encryption: OperatorAgentEncryptionInfo {
+                aes_key: agent.encryption.aes_key.clone(),
+                aes_iv: agent.encryption.aes_iv.clone(),
+            },
+            internal_ip: agent.internal_ip.clone(),
+            external_ip: agent.external_ip.clone(),
+            first_call_in: agent.first_call_in.clone(),
+            last_call_in: agent.last_call_in.clone(),
+            hostname: agent.hostname.clone(),
+            listener: "null".to_owned(),
+            magic_value: "deadbeef".to_owned(),
+            name_id: agent.name_id(),
+            os_arch: agent.os_arch.clone(),
+            os_build: String::new(),
+            os_version: agent.os_version.clone(),
+            pivots: AgentPivotsInfo::default(),
+            port_fwds: Vec::new(),
+            process_arch: agent.process_arch.clone(),
+            process_name: agent.process_name.clone(),
+            process_pid: agent.process_pid.to_string(),
+            process_ppid: agent.process_ppid.to_string(),
+            process_path: agent.process_name.clone(),
+            reason: agent.reason.clone(),
+            note: agent.note.clone(),
+            sleep_delay: Value::from(agent.sleep_delay),
+            sleep_jitter: Value::from(agent.sleep_jitter),
+            kill_date: agent.kill_date.map_or(Value::Null, Value::from),
+            working_hours: agent.working_hours.map_or(Value::Null, Value::from),
+            socks_cli: Vec::new(),
+            socks_cli_mtx: None,
+            socks_svr: Vec::new(),
+            tasked_once: false,
+            username: agent.username.clone(),
+            pivot_parent: String::new(),
+        },
+    }))
+}
+
 async fn cleanup_connection(
     auth: &AuthService,
     connections: &OperatorConnectionManager,
@@ -712,7 +821,7 @@ mod tests {
     use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
     use uuid::Uuid;
 
-    use super::{OperatorConnectionManager, routes};
+    use super::{OperatorConnectionManager, routes, teamserver_log_event};
     use crate::{AgentRegistry, AuthService, Database, EventBus, ListenerManager, hash_password};
 
     #[derive(Clone)]
@@ -882,6 +991,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn websocket_sends_session_snapshot_after_login() {
+        let state = TestState::new().await;
+        let registry = state.registry.clone();
+        let listeners = state.listeners.clone();
+        let events = state.events.clone();
+        registry.insert(sample_agent(0xDEAD_BEEF)).await.expect("agent should insert");
+        listeners.create(sample_http_listener("alpha", 0)).await.expect("listener should persist");
+        listeners.start("alpha").await.expect("listener should start");
+        let expected_log = teamserver_log_event("teamserver", "snapshot entry");
+        assert_eq!(events.broadcast(expected_log.clone()), 0);
+        let (mut socket, server) = spawn_server(state).await;
+
+        login(&mut socket, "operator", "password1234").await;
+
+        let listener_event = read_operator_message(&mut socket).await;
+        let OperatorMessage::ListenerNew(message) = listener_event else {
+            panic!("expected listener snapshot event");
+        };
+        assert_eq!(message.info.name.as_deref(), Some("alpha"));
+        assert_eq!(message.info.status.as_deref(), Some("Online"));
+
+        assert_eq!(read_operator_message(&mut socket).await, expected_log);
+
+        let agent_event = read_operator_message(&mut socket).await;
+        let OperatorMessage::AgentNew(message) = agent_event else {
+            panic!("expected agent snapshot event");
+        };
+        assert_eq!(message.info.name_id, "DEADBEEF");
+        assert_eq!(message.info.listener, "null");
+        assert_eq!(message.info.magic_value, "deadbeef");
+
+        socket.close(None).await.expect("close should send");
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn websocket_closes_when_authenticated_operator_lacks_permission() {
         let state = TestState::new().await;
         let connection_registry = state.connections.clone();
@@ -939,6 +1084,10 @@ mod tests {
 
         login(&mut sender, "operator", "password1234").await;
         login(&mut observer, "operator", "password1234").await;
+        let snapshot = read_operator_message(&mut sender).await;
+        assert!(matches!(snapshot, OperatorMessage::AgentNew(_)));
+        let snapshot = read_operator_message(&mut observer).await;
+        assert!(matches!(snapshot, OperatorMessage::AgentNew(_)));
 
         sender
             .send(ClientMessage::Text(
@@ -1030,6 +1179,8 @@ mod tests {
         let (mut socket, server) = spawn_server(state).await;
 
         login(&mut socket, "admin", "adminpass").await;
+        let snapshot = read_operator_message(&mut socket).await;
+        assert!(matches!(snapshot, OperatorMessage::AgentNew(_)));
 
         socket
             .send(ClientMessage::Text(agent_remove_message("admin", "DEADBEEF").into()))
@@ -1218,5 +1369,28 @@ mod tests {
             first_call_in: "2026-03-09T18:45:00Z".to_owned(),
             last_call_in: "2026-03-09T18:46:00Z".to_owned(),
         }
+    }
+
+    fn sample_http_listener(name: &str, port: u16) -> red_cell_common::ListenerConfig {
+        red_cell_common::ListenerConfig::from(red_cell_common::HttpListenerConfig {
+            name: name.to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["c2.redcell.test".to_owned()],
+            host_bind: "127.0.0.1".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: port,
+            port_conn: Some(port),
+            method: Some("GET".to_owned()),
+            behind_redirector: false,
+            user_agent: Some("Mozilla/5.0".to_owned()),
+            headers: vec!["X-Test: true".to_owned()],
+            uris: vec!["/".to_owned()],
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: None,
+            proxy: None,
+        })
     }
 }

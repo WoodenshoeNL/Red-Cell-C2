@@ -1,5 +1,8 @@
 //! Operator event broadcasting infrastructure.
 
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+
 use red_cell_common::operator::OperatorMessage;
 use tokio::sync::broadcast;
 use tracing::warn;
@@ -10,6 +13,8 @@ const DEFAULT_EVENT_BUS_CAPACITY: usize = 256;
 #[derive(Clone, Debug)]
 pub struct EventBus {
     sender: broadcast::Sender<OperatorMessage>,
+    recent_teamserver_logs: Arc<Mutex<VecDeque<OperatorMessage>>>,
+    history_capacity: usize,
 }
 
 impl Default for EventBus {
@@ -23,7 +28,11 @@ impl EventBus {
     #[must_use]
     pub fn new(capacity: usize) -> Self {
         let (sender, _) = broadcast::channel(capacity);
-        Self { sender }
+        Self {
+            sender,
+            recent_teamserver_logs: Arc::new(Mutex::new(VecDeque::with_capacity(capacity))),
+            history_capacity: capacity,
+        }
     }
 
     /// Subscribe to future operator events.
@@ -36,7 +45,26 @@ impl EventBus {
     ///
     /// Returns the number of active subscribers that received the event.
     pub fn broadcast(&self, event: OperatorMessage) -> usize {
+        if matches!(event, OperatorMessage::TeamserverLog(_)) {
+            let mut history = match self.recent_teamserver_logs.lock() {
+                Ok(history) => history,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if history.len() == self.history_capacity {
+                history.pop_front();
+            }
+            history.push_back(event.clone());
+        }
+
         self.sender.send(event).unwrap_or_default()
+    }
+
+    /// Return the retained recent teamserver log messages in original order.
+    pub fn recent_teamserver_logs(&self) -> Vec<OperatorMessage> {
+        match self.recent_teamserver_logs.lock() {
+            Ok(history) => history.iter().cloned().collect(),
+            Err(poisoned) => poisoned.into_inner().iter().cloned().collect(),
+        }
     }
 }
 
@@ -128,5 +156,31 @@ mod tests {
         assert_eq!(receiver.recv().await, None);
         assert!(receiver.is_closed());
         assert_eq!(receiver.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn recent_teamserver_logs_retain_only_log_events() {
+        let bus = EventBus::new(2);
+        let first = log_message("one");
+        let second = log_message("two");
+        let third = log_message("three");
+
+        assert_eq!(bus.broadcast(first), 0);
+        assert_eq!(
+            bus.broadcast(OperatorMessage::InitConnectionSuccess(Message {
+                head: MessageHead {
+                    event: EventCode::InitConnection,
+                    user: "operator".to_owned(),
+                    timestamp: String::new(),
+                    one_time: String::new(),
+                },
+                info: red_cell_common::operator::MessageInfo { message: "ok".to_owned() },
+            })),
+            0
+        );
+        assert_eq!(bus.broadcast(second.clone()), 0);
+        assert_eq!(bus.broadcast(third.clone()), 0);
+
+        assert_eq!(bus.recent_teamserver_logs(), vec![second, third]);
     }
 }

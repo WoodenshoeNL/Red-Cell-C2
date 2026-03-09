@@ -5,6 +5,7 @@ use std::future::pending;
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use axum::body::{Body, to_bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -12,6 +13,7 @@ use axum::routing::any;
 use axum::{Json, Router};
 use axum_server::tls_rustls::RustlsConfig;
 use red_cell_common::config::Profile;
+use red_cell_common::demon::{DEMON_MAGIC_VALUE, DemonHeader};
 use red_cell_common::operator::{
     EventCode, ListenerErrorInfo, ListenerInfo, ListenerMarkInfo, Message, MessageHead, NameInfo,
     OperatorMessage,
@@ -401,6 +403,7 @@ impl ListenerManager {
 const DEFAULT_FAKE_404_BODY: &str =
     include_str!("../../../src/Havoc/teamserver/pkg/handlers/404.html");
 const DEFAULT_HTTP_METHOD: &str = "POST";
+const MINIMUM_DEMON_CALLBACK_BYTES: usize = DemonHeader::SERIALIZED_LEN + 8;
 const HEADER_VALIDATION_IGNORES: [&str; 2] = ["connection", "accept-encoding"];
 
 #[derive(Clone, Debug)]
@@ -467,11 +470,7 @@ impl HttpListenerState {
     }
 
     fn callback_placeholder_response(&self) -> Response {
-        build_response(
-            StatusCode::NOT_IMPLEMENTED,
-            self.response_body.as_ref(),
-            &self.response_headers,
-        )
+        build_response(StatusCode::OK, self.response_body.as_ref(), &self.response_headers)
     }
 }
 
@@ -805,23 +804,32 @@ fn http_listener_subject_alt_names(config: &HttpListenerConfig) -> Vec<String> {
 
 async fn http_listener_handler(
     State(state): State<Arc<HttpListenerState>>,
-    request: Request<axum::body::Body>,
+    request: Request<Body>,
 ) -> Response {
     if !http_request_matches(&state, &request) {
+        return state.fake_404_response();
+    }
+
+    let (_, body) = request.into_parts();
+    let Ok(body) = to_bytes(body, usize::MAX).await else {
+        return state.fake_404_response();
+    };
+
+    if !is_valid_demon_callback_request(&body) {
         return state.fake_404_response();
     }
 
     state.callback_placeholder_response()
 }
 
-fn http_request_matches(state: &HttpListenerState, request: &Request<axum::body::Body>) -> bool {
+fn http_request_matches(state: &HttpListenerState, request: &Request<Body>) -> bool {
     request.method() == state.method
         && uri_matches(&state.config, request)
         && user_agent_matches(&state.config, request.headers())
         && headers_match(&state.required_headers, request.headers())
 }
 
-fn uri_matches(config: &HttpListenerConfig, request: &Request<axum::body::Body>) -> bool {
+fn uri_matches(config: &HttpListenerConfig, request: &Request<Body>) -> bool {
     if config.uris.is_empty() || (config.uris.len() == 1 && config.uris[0].is_empty()) {
         return true;
     }
@@ -851,6 +859,18 @@ fn headers_match(expected_headers: &[ExpectedHeader], headers: &HeaderMap) -> bo
             .and_then(|value| value.to_str().ok())
             .is_some_and(|actual| actual.eq_ignore_ascii_case(&expected.expected_value))
     })
+}
+
+fn is_valid_demon_callback_request(body: &[u8]) -> bool {
+    if body.len() < MINIMUM_DEMON_CALLBACK_BYTES {
+        return false;
+    }
+
+    if body[4..8] != DEMON_MAGIC_VALUE.to_be_bytes() {
+        return false;
+    }
+
+    DemonHeader::from_bytes(body).is_ok()
 }
 
 fn parse_method(config: &HttpListenerConfig) -> Result<Method, ListenerManagerError> {
@@ -1055,6 +1075,7 @@ mod tests {
     };
     use crate::Database;
     use axum::http::StatusCode;
+    use red_cell_common::demon::{DemonCommand, DemonEnvelope};
     use red_cell_common::operator::ListenerInfo;
     use red_cell_common::{HttpListenerConfig, HttpListenerResponseConfig, ListenerConfig};
     use reqwest::Client;
@@ -1185,9 +1206,10 @@ mod tests {
             .post(format!("http://127.0.0.1:{port}/submit"))
             .header("User-Agent", "Agent-UA")
             .header("X-Auth", "123")
+            .body(valid_demon_request_body(0x1234_5678))
             .send()
             .await?;
-        assert_eq!(valid.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(valid.status(), StatusCode::OK);
         assert_eq!(
             valid.headers().get("server").and_then(|value| value.to_str().ok()),
             Some("ExampleFront")
@@ -1232,8 +1254,12 @@ mod tests {
         wait_for_listener(port, true).await?;
 
         let client = Client::builder().danger_accept_invalid_certs(true).build()?;
-        let response = client.post(format!("https://127.0.0.1:{port}/")).send().await?;
-        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        let response = client
+            .post(format!("https://127.0.0.1:{port}/"))
+            .body(valid_demon_request_body(1))
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response.headers().get("server").and_then(|value| value.to_str().ok()),
             Some("TLSFront")
@@ -1241,6 +1267,31 @@ mod tests {
         assert_eq!(response.text().await?, "tls");
 
         manager.stop("edge-https").await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn http_listener_returns_fake_404_for_invalid_demon_callback_body()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let manager = manager().await?;
+        let port = available_port()?;
+        manager.create(http_listener("edge-http-invalid", port)).await?;
+        manager.start("edge-http-invalid").await?;
+        wait_for_listener(port, false).await?;
+
+        let client = Client::new();
+
+        let too_short =
+            client.post(format!("http://127.0.0.1:{port}/")).body(vec![0_u8; 8]).send().await?;
+        assert_eq!(too_short.status(), StatusCode::NOT_FOUND);
+
+        let mut invalid_magic = valid_demon_request_body(0x0102_0304);
+        invalid_magic[4..8].copy_from_slice(&0xFEED_FACE_u32.to_be_bytes());
+        let invalid_magic =
+            client.post(format!("http://127.0.0.1:{port}/")).body(invalid_magic).send().await?;
+        assert_eq!(invalid_magic.status(), StatusCode::NOT_FOUND);
+
+        manager.stop("edge-http-invalid").await?;
         Ok(())
     }
 
@@ -1309,5 +1360,19 @@ mod tests {
         }
 
         Err(format!("listener on port {port} did not become ready").into())
+    }
+
+    fn valid_demon_request_body(agent_id: u32) -> Vec<u8> {
+        let payload = [
+            u32::from(DemonCommand::DemonInit).to_be_bytes().as_slice(),
+            7_u32.to_be_bytes().as_slice(),
+        ]
+        .concat();
+
+        DemonEnvelope::new(agent_id, payload)
+            .unwrap_or_else(|error| {
+                panic!("failed to build valid demon request body: {error}");
+            })
+            .to_bytes()
     }
 }

@@ -24,7 +24,7 @@ Rewrite of the [Havoc C2 framework](./src/Havoc) in Rust — teamserver and oper
 | **Database** | SQLite via sqlx |
 | **Config format** | HCL/YAOTL (same as Havoc `.yaotl` profiles) |
 | **Operator protocol** | JSON over WebSocket (same structure as Havoc) |
-| **Agent protocol** | Demon binary protocol — unchanged (0xDEADBEEF magic, AES-256-CBC, per-agent keys) |
+| **Agent protocol** | Demon binary protocol — unchanged (0xDEADBEEF magic, AES-256-CTR, per-agent keys) |
 | **Client UI** | egui (pure Rust, immediate-mode) |
 | **Plugin system** | Python via PyO3 (client + teamserver) |
 | **New features** | RBAC, REST API, DNS listener, structured audit logging |

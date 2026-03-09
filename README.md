@@ -29,7 +29,7 @@ The original Havoc source lives at `./src/Havoc` and serves as the reference imp
 | Database | SQLite via sqlx |
 | Config format | HCL/YAOTL (same `.yaotl` profile format as Havoc) |
 | Operator protocol | JSON over WebSocket |
-| Agent protocol | Demon binary protocol — unchanged (0xDEADBEEF, AES-256-CBC) |
+| Agent protocol | Demon binary protocol — unchanged (0xDEADBEEF, AES-256-CTR) |
 | Client UI | egui |
 | Plugin system | Python via PyO3 |
 | New features | RBAC, REST API, DNS listener, structured audit logging |

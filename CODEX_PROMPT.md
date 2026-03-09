@@ -34,7 +34,7 @@ The original Havoc source is at `./src/Havoc` — use it as reference for:
 | Database | SQLite via sqlx — async, with migrations |
 | Config format | HCL/YAOTL (use `hcl-rs` crate) |
 | Operator protocol | JSON over WebSocket — types defined in `crates/common` |
-| Agent protocol | Demon binary — 0xDEADBEEF magic, AES-256-CBC, per-agent keys |
+| Agent protocol | Demon binary — 0xDEADBEEF magic, AES-256-CTR, per-agent keys |
 | Client UI | egui |
 | Error handling | `thiserror` for library errors, `anyhow` only in binary entry points |
 | Logging | `tracing` crate throughout |

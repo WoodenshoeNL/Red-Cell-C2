@@ -89,7 +89,7 @@ For each recently changed Rust file, check:
 **Protocol correctness** (when touching agent communication):
 - Magic bytes must be `0xDEADBEEF`
 - Packet format: Size(u32) + Magic(u32) + AgentID(u32) + encrypted payload
-- AES-256-CBC with per-agent key+IV
+- AES-256-CTR with per-agent key+IV
 - Command IDs must match: DEMON_INIT=99, COMMAND_CHECKIN=100, COMMAND_GET_JOB=1
 
 **Tests**:

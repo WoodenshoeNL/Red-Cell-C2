@@ -1,9 +1,8 @@
 //! Agent transport cryptography helpers.
 
 use aes::Aes256;
-use cbc::{Decryptor, Encryptor};
-use cipher::block_padding::Pkcs7;
-use cipher::{BlockDecryptMut, BlockEncryptMut, InvalidLength, KeyIvInit};
+use cipher::{InvalidLength, KeyIvInit, StreamCipher};
+use ctr::Ctr128BE;
 use thiserror::Error;
 
 /// Agent communication key length in bytes.
@@ -17,7 +16,7 @@ pub const AGENT_IV_LENGTH: usize = 16;
 pub struct AgentCryptoMaterial {
     /// AES-256 session key.
     pub key: [u8; AGENT_KEY_LENGTH],
-    /// CBC initialization vector.
+    /// Initial CTR counter block.
     pub iv: [u8; AGENT_IV_LENGTH],
 }
 
@@ -30,9 +29,6 @@ pub enum CryptoError {
     /// The supplied IV does not have the required 16-byte length.
     #[error("invalid AES IV length: expected {expected} bytes, got {actual}")]
     InvalidIvLength { expected: usize, actual: usize },
-    /// The ciphertext was not valid PKCS#7-padded AES-256-CBC data.
-    #[error("failed to decrypt agent data")]
-    DecryptionFailed,
     /// Randomness for new key material could not be obtained from the OS.
     #[error("failed to generate agent key material: {0}")]
     RandomGeneration(String),
@@ -44,46 +40,27 @@ impl From<InvalidLength> for CryptoError {
     }
 }
 
-/// Encrypt agent transport data with AES-256-CBC and PKCS#7 padding.
+type AgentCtr = Ctr128BE<Aes256>;
+
+/// Encrypt agent transport data with AES-256-CTR.
+///
+/// Havoc uses a big-endian 128-bit counter on both the teamserver and Demon sides.
 ///
 /// Returns an empty buffer if the supplied key or IV length is invalid.
 pub fn encrypt_agent_data(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Vec<u8> {
-    if validate_key_and_iv(key, iv).is_err() {
-        return Vec::new();
-    }
-
-    let cipher = match Encryptor::<Aes256>::new_from_slices(key, iv) {
-        Ok(cipher) => cipher,
-        Err(_) => return Vec::new(),
-    };
-    let mut buffer = vec![0_u8; plaintext.len() + AGENT_IV_LENGTH];
-    buffer[..plaintext.len()].copy_from_slice(plaintext);
-
-    match cipher.encrypt_padded_mut::<Pkcs7>(&mut buffer, plaintext.len()) {
-        Ok(ciphertext) => ciphertext.to_vec(),
-        Err(_) => Vec::new(),
-    }
+    apply_agent_keystream(key, iv, plaintext).unwrap_or_default()
 }
 
-/// Decrypt agent transport data with AES-256-CBC and PKCS#7 padding.
+/// Decrypt agent transport data with AES-256-CTR.
 pub fn decrypt_agent_data(
     key: &[u8],
     iv: &[u8],
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
-    validate_key_and_iv(key, iv)?;
-
-    let cipher = Decryptor::<Aes256>::new_from_slices(key, iv)?;
-    let mut buffer = ciphertext.to_vec();
-
-    let plaintext = cipher
-        .decrypt_padded_mut::<Pkcs7>(&mut buffer)
-        .map_err(|_| CryptoError::DecryptionFailed)?;
-
-    Ok(plaintext.to_vec())
+    apply_agent_keystream(key, iv, ciphertext)
 }
 
-/// Generate fresh per-agent AES-256-CBC key material.
+/// Generate fresh per-agent AES-256-CTR key material.
 pub fn generate_agent_crypto_material() -> Result<AgentCryptoMaterial, CryptoError> {
     let mut key = [0_u8; AGENT_KEY_LENGTH];
     let mut iv = [0_u8; AGENT_IV_LENGTH];
@@ -92,6 +69,16 @@ pub fn generate_agent_crypto_material() -> Result<AgentCryptoMaterial, CryptoErr
     getrandom::fill(&mut iv).map_err(|error| CryptoError::RandomGeneration(error.to_string()))?;
 
     Ok(AgentCryptoMaterial { key, iv })
+}
+
+fn apply_agent_keystream(key: &[u8], iv: &[u8], input: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    validate_key_and_iv(key, iv)?;
+
+    let mut output = input.to_vec();
+    let mut cipher = AgentCtr::new_from_slices(key, iv)?;
+    cipher.apply_keystream(&mut output);
+
+    Ok(output)
 }
 
 fn validate_key_and_iv(key: &[u8], iv: &[u8]) -> Result<(), CryptoError> {
@@ -127,8 +114,8 @@ mod tests {
         let iv = hex!("000102030405060708090a0b0c0d0e0f");
         let plaintext = b"red-cell agent metadata";
         let expected_ciphertext = hex!(
-            "425075c7524208f3ca3143665f8dcd3a
-             47a1eec602616042b47dc0f8f6d629fb"
+            "c5da5e70975ce5b1b7919df285ba0f27
+             1e2e93b8f2fd48"
         );
 
         let ciphertext = encrypt_agent_data(&key, &iv, plaintext);
@@ -144,8 +131,8 @@ mod tests {
         );
         let iv = hex!("000102030405060708090a0b0c0d0e0f");
         let ciphertext = hex!(
-            "425075c7524208f3ca3143665f8dcd3a
-             47a1eec602616042b47dc0f8f6d629fb"
+            "c5da5e70975ce5b1b7919df285ba0f27
+             1e2e93b8f2fd48"
         );
 
         let plaintext = decrypt_agent_data(&key, &iv, &ciphertext)
@@ -169,15 +156,18 @@ mod tests {
     }
 
     #[test]
-    fn decrypt_agent_data_rejects_invalid_padding() {
+    fn decrypt_agent_data_rejects_invalid_iv_length() {
         let key = [0x11; AGENT_KEY_LENGTH];
-        let iv = [0x22; AGENT_IV_LENGTH];
         let ciphertext = [0x33; AGENT_IV_LENGTH];
 
-        let error = decrypt_agent_data(&key, &iv, &ciphertext)
-            .expect_err("invalid ciphertext must fail decryption");
+        let error = decrypt_agent_data(&key, &[0x22; AGENT_IV_LENGTH - 1], &ciphertext)
+            .expect_err("invalid IV length must fail decryption");
 
-        assert!(matches!(error, CryptoError::DecryptionFailed));
+        assert!(matches!(
+            error,
+            CryptoError::InvalidIvLength { expected, actual }
+                if expected == AGENT_IV_LENGTH && actual == AGENT_IV_LENGTH - 1
+        ));
     }
 
     #[test]

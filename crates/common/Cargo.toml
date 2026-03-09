@@ -11,8 +11,8 @@ workspace = true
 
 [dependencies]
 aes = "0.8"
-cbc = "0.1"
 cipher = "0.4"
+ctr = "0.9"
 getrandom = "0.3"
 hcl = { package = "hcl-rs", version = "0.19.4" }
 rcgen = { version = "0.14.7", default-features = false, features = ["pem", "crypto", "aws_lc_rs"] }

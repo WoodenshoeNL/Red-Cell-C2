@@ -228,7 +228,7 @@ pub struct AgentEncryptionInfo {
     /// Base64-encoded AES-256 key.
     #[serde(rename = "AESKey")]
     pub aes_key: String,
-    /// Base64-encoded AES-CBC IV.
+    /// Base64-encoded AES-CTR counter block.
     #[serde(rename = "AESIv")]
     pub aes_iv: String,
 }

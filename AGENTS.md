@@ -2,7 +2,35 @@
 
 ## Goal
 
-The Goal of the project is a rewrite of Havoc (./src/Havoc) in Rust (Client and Team server).
+Rewrite of the [Havoc C2 framework](./src/Havoc) in Rust — teamserver and operator client. The original Demon agent (C/ASM) is kept as-is; protocol compatibility is maintained.
+
+## Onboarding (new VM setup)
+
+1. **Install `br`** (beads_rust issue tracker):
+   ```bash
+   curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/beads_rust/main/install.sh" | bash
+   ```
+2. **Clone the repo** (or `git pull` if already cloned) — `br` auto-imports issues from `.beads/issues.jsonl` on first use.
+3. **Verify**: `br ready` should show available work.
+
+## Architecture Decisions
+
+| Concern | Decision |
+|---|---|
+| **Repo structure** | Cargo workspace: `crates/teamserver`, `crates/client`, `crates/common` |
+| **Binaries** | `red-cell` (teamserver), `red-cell-client` (operator GUI) |
+| **Rust edition** | 2024, latest stable |
+| **Teamserver framework** | Axum + Tokio |
+| **Database** | SQLite via sqlx |
+| **Config format** | HCL/YAOTL (same as Havoc `.yaotl` profiles) |
+| **Operator protocol** | JSON over WebSocket (same structure as Havoc) |
+| **Agent protocol** | Demon binary protocol — unchanged (0xDEADBEEF magic, AES-256-CBC, per-agent keys) |
+| **Client UI** | egui (pure Rust, immediate-mode) |
+| **Plugin system** | Python via PyO3 (client + teamserver) |
+| **New features** | RBAC, REST API, DNS listener, structured audit logging |
+| **Testing** | Full suite: unit + integration (mock Demon agent) + E2E |
+
+The original Havoc source lives in `./src/Havoc` as reference only — do not modify it.
 
 <!-- br-agent-instructions-v1 -->
 

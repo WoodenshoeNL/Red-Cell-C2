@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use red_cell_common::config::Profile;
+use red_cell_common::config::{OperatorRole, Profile};
 use red_cell_common::operator::{
     EventCode, LoginInfo, Message, MessageHead, MessageInfo, OperatorMessage,
 };
@@ -69,6 +69,8 @@ pub struct OperatorSession {
     pub token: String,
     /// Username for the authenticated operator.
     pub username: String,
+    /// RBAC role assigned to the operator account.
+    pub role: OperatorRole,
     /// Connection identifier used by the current WebSocket.
     pub connection_id: Uuid,
 }
@@ -76,7 +78,7 @@ pub struct OperatorSession {
 /// In-memory operator credential store and active session registry.
 #[derive(Debug, Clone)]
 pub struct AuthService {
-    credentials: Arc<BTreeMap<String, String>>,
+    credentials: Arc<BTreeMap<String, OperatorAccount>>,
     sessions: Arc<RwLock<SessionRegistry>>,
 }
 
@@ -88,7 +90,15 @@ impl AuthService {
             .operators
             .users
             .iter()
-            .map(|(username, config)| (username.clone(), hash_password(&config.password)))
+            .map(|(username, config)| {
+                (
+                    username.clone(),
+                    OperatorAccount {
+                        password_hash: hash_password(&config.password),
+                        role: config.role,
+                    },
+                )
+            })
             .collect();
 
         Self {
@@ -103,17 +113,21 @@ impl AuthService {
         connection_id: Uuid,
         login: &LoginInfo,
     ) -> AuthenticationResult {
-        let Some(expected_password_hash) = self.credentials.get(&login.user) else {
+        let Some(account) = self.credentials.get(&login.user) else {
             return AuthenticationResult::Failure(AuthenticationFailure::UnknownUser);
         };
 
-        if !login.password.eq_ignore_ascii_case(expected_password_hash) {
+        if !login.password.eq_ignore_ascii_case(&account.password_hash) {
             return AuthenticationResult::Failure(AuthenticationFailure::WrongPassword);
         }
 
         let token = Uuid::new_v4().to_string();
-        let session =
-            OperatorSession { token: token.clone(), username: login.user.clone(), connection_id };
+        let session = OperatorSession {
+            token: token.clone(),
+            username: login.user.clone(),
+            role: account.role,
+            connection_id,
+        };
 
         self.sessions.write().await.insert(session);
 
@@ -156,6 +170,12 @@ impl AuthService {
     pub async fn session_count(&self) -> usize {
         self.sessions.read().await.len()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OperatorAccount {
+    password_hash: String,
+    role: OperatorRole,
 }
 
 #[derive(Debug, Default)]
@@ -259,9 +279,15 @@ mod tests {
             Operators {
               user "operator" {
                 Password = "password1234"
+                Role = "Operator"
               }
               user "admin" {
                 Password = "adminpw"
+                Role = "Admin"
+              }
+              user "analyst" {
+                Password = "readonly"
+                Role = "Analyst"
               }
             }
 
@@ -316,6 +342,7 @@ mod tests {
             .await
             .expect("session should be associated to the connection");
         assert_eq!(by_connection.username, "operator");
+        assert_eq!(by_connection.role, red_cell_common::config::OperatorRole::Operator);
         assert_eq!(by_connection.token, success.token);
 
         let by_token = service
@@ -419,6 +446,25 @@ mod tests {
         assert_eq!(removed.token, success.token);
         assert_eq!(service.session_count().await, 0);
         assert!(service.session_for_token(&success.token).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn authenticate_login_tracks_configured_role_on_session() {
+        let service = AuthService::from_profile(&profile());
+        let connection_id = Uuid::new_v4();
+
+        let result = service
+            .authenticate_login(
+                connection_id,
+                &LoginInfo { user: "analyst".to_owned(), password: hash_password("readonly") },
+            )
+            .await;
+
+        assert!(matches!(result, AuthenticationResult::Success(_)));
+
+        let session =
+            service.session_for_connection(connection_id).await.expect("session should be stored");
+        assert_eq!(session.role, red_cell_common::config::OperatorRole::Analyst);
     }
 
     #[test]

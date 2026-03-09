@@ -7,7 +7,7 @@ use axum::{
     Router,
     body::Body,
     extract::{
-        State,
+        FromRef, State,
         ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
     },
     http::{Request, StatusCode},
@@ -17,10 +17,11 @@ use axum::{
 use axum_server::{Handle, tls_rustls::RustlsConfig};
 use clap::Parser;
 use red_cell::{
-    AuthError, AuthService, AuthenticationFailure, AuthenticationResult, login_failure_message,
-    login_success_message,
+    AuthError, AuthService, AuthenticationFailure, AuthenticationResult, ReadAccess,
+    authorize_websocket_command, login_failure_message, login_success_message,
 };
 use red_cell_common::config::{Profile, ProfileValidationError};
+use red_cell_common::operator::OperatorMessage;
 use red_cell_common::tls::{TlsKeyAlgorithm, resolve_tls_identity};
 use tokio::net::lookup_host;
 use tracing::{debug, info, warn};
@@ -44,6 +45,12 @@ struct Cli {
 struct AppState {
     profile: Profile,
     auth: AuthService,
+}
+
+impl FromRef<AppState> for AuthService {
+    fn from_ref(input: &AppState) -> Self {
+        input.auth.clone()
+    }
 }
 
 #[tokio::main]
@@ -217,9 +224,45 @@ async fn handle_operator_socket(state: AppState, mut socket: WebSocket) {
         }
     }
 
+    let Some(session) = state.auth.session_for_connection(connection_id).await else {
+        let _ = socket.send(WsMessage::Close(None)).await;
+        return;
+    };
+
     while let Some(frame) = socket.recv().await {
         match frame {
             Ok(WsMessage::Close(_)) => break,
+            Ok(WsMessage::Text(payload)) => {
+                match serde_json::from_str::<OperatorMessage>(payload.as_str()) {
+                    Ok(message) => match authorize_websocket_command(&session, &message) {
+                        Ok(permission) => {
+                            debug!(
+                                %connection_id,
+                                username = %session.username,
+                                role = ?session.role,
+                                permission = permission.as_str(),
+                                "authorized operator websocket command placeholder"
+                            );
+                        }
+                        Err(error) => {
+                            warn!(
+                                %connection_id,
+                                username = %session.username,
+                                role = ?session.role,
+                                %error,
+                                "rejecting unauthorized operator websocket command"
+                            );
+                            let _ = socket.send(WsMessage::Close(None)).await;
+                            break;
+                        }
+                    },
+                    Err(error) => {
+                        warn!(%connection_id, %error, "failed to parse operator websocket message");
+                        let _ = socket.send(WsMessage::Close(None)).await;
+                        break;
+                    }
+                }
+            }
             Ok(_) => {}
             Err(error) => {
                 warn!(%connection_id, %error, "operator websocket receive loop failed");
@@ -277,8 +320,10 @@ async fn send_login_error(
     }
 }
 
-async fn api_placeholder(State(state): State<AppState>) -> impl IntoResponse {
+async fn api_placeholder(State(state): State<AppState>, operator: ReadAccess) -> impl IntoResponse {
     debug!(
+        username = %operator.username,
+        role = ?operator.role,
         listener_count = state.profile.listeners.http.len()
             + state.profile.listeners.smb.len()
             + state.profile.listeners.external.len(),
@@ -343,9 +388,11 @@ async fn wait_for_shutdown_signal(handle: Handle<SocketAddr>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, load_profile, resolve_bind_addr, tls_subject_alt_names};
+    use super::{AppState, Cli, load_profile, resolve_bind_addr, tls_subject_alt_names};
+    use axum::extract::FromRef;
     use clap::Parser;
-    use red_cell_common::config::Profile;
+    use red_cell::AuthService;
+    use red_cell_common::config::{OperatorRole, Profile};
     use tempfile::NamedTempFile;
 
     #[test]
@@ -420,5 +467,63 @@ mod tests {
 
         assert!(message.contains("profile validation failed"));
         assert!(message.contains("Teamserver.Host"));
+    }
+
+    #[test]
+    fn app_state_exposes_auth_service_via_from_ref() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "Neo" {
+                Password = "password1234"
+                Role = "Operator"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let state = AppState { auth: AuthService::from_profile(&profile), profile };
+        let _ = AuthService::from_ref(&state);
+    }
+
+    #[test]
+    fn explicit_operator_roles_parse_in_teamserver_profiles() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "admin" {
+                Password = "password1234"
+              }
+              user "operator" {
+                Password = "password1234"
+                Role = "Operator"
+              }
+              user "analyst" {
+                Password = "password1234"
+                Role = "Analyst"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        assert_eq!(profile.operators.users["admin"].role, OperatorRole::Admin);
+        assert_eq!(profile.operators.users["operator"].role, OperatorRole::Operator);
+        assert_eq!(profile.operators.users["analyst"].role, OperatorRole::Analyst);
     }
 }

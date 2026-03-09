@@ -225,6 +225,24 @@ pub struct OperatorConfig {
     /// Operator password.
     #[serde(rename = "Password")]
     pub password: String,
+    /// Operator role used by the teamserver RBAC layer.
+    #[serde(rename = "Role", default)]
+    pub role: OperatorRole,
+}
+
+/// Role assigned to an operator account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+pub enum OperatorRole {
+    /// Full teamserver access.
+    #[default]
+    #[serde(rename = "Admin", alias = "admin")]
+    Admin,
+    /// Can task agents and manage listeners.
+    #[serde(rename = "Operator", alias = "operator")]
+    Operator,
+    /// Read-only access for agents, sessions, and loot.
+    #[serde(rename = "Analyst", alias = "analyst")]
+    Analyst,
 }
 
 /// Listener definitions grouped by transport.
@@ -516,6 +534,10 @@ mod tests {
             profile.operators.users.get("Neo").map(|operator| operator.password.as_str()),
             Some("password1234")
         );
+        assert_eq!(
+            profile.operators.users.get("Neo").map(|operator| operator.role),
+            Some(OperatorRole::Admin)
+        );
         assert_eq!(profile.demon.sleep, Some(2));
         assert_eq!(profile.demon.jitter, Some(15));
         assert!(!profile.demon.trust_x_forwarded_for);
@@ -608,6 +630,41 @@ mod tests {
         assert!(listener.secure);
         assert_eq!(cert.cert, "/tmp/server.crt");
         assert_eq!(cert.key, "/tmp/server.key");
+    }
+
+    #[test]
+    fn parses_operator_roles_and_defaults_missing_roles_to_admin() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "admin" {
+                Password = "adminpw"
+              }
+
+              user "operator" {
+                Password = "operatorpw"
+                Role = "Operator"
+              }
+
+              user "analyst" {
+                Password = "analystpw"
+                Role = "analyst"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile with roles should parse");
+
+        assert_eq!(profile.operators.users["admin"].role, OperatorRole::Admin);
+        assert_eq!(profile.operators.users["operator"].role, OperatorRole::Operator);
+        assert_eq!(profile.operators.users["analyst"].role, OperatorRole::Analyst);
     }
 
     #[test]

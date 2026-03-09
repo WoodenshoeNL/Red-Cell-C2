@@ -14,6 +14,7 @@ CODEX_PROMPT_FILE="$SCRIPT_DIR/CODEX_PROMPT.md"
 RUNTIME_PROMPT_DIR="/tmp"
 SLEEP_ON_NO_WORK=60   # seconds to wait when no tasks are ready
 SLEEP_BETWEEN_TASKS=15 # seconds between task iterations
+STALE_THRESHOLD=7200  # seconds before an in_progress task is considered stuck (2h)
 
 MAX_LOOPS="${1:-0}"   # 0 = run forever
 LOOP_COUNT=0
@@ -22,6 +23,42 @@ mkdir -p "$LOG_DIR"
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+}
+
+# Reset any tasks that have been stuck in_progress longer than STALE_THRESHOLD
+reset_stuck_tasks() {
+    local stuck
+    stuck=$(br list --status=in_progress --json 2>/dev/null | python3 -c "
+import sys, json
+from datetime import datetime, timezone
+
+threshold = $STALE_THRESHOLD
+now = datetime.now(timezone.utc)
+try:
+    issues = json.load(sys.stdin)
+    for issue in issues:
+        ts = issue.get('updated_at') or issue.get('created_at', '')
+        if ts:
+            try:
+                dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                if (now - dt).total_seconds() > threshold:
+                    print(issue['id'])
+            except ValueError:
+                pass
+except Exception:
+    pass
+" 2>/dev/null || true)
+
+    if [ -n "$stuck" ]; then
+        for stuck_id in $stuck; do
+            log "SAFEGUARD: $stuck_id stuck in_progress for >${STALE_THRESHOLD}s — resetting to open"
+            br reopen "$stuck_id" \
+                --reason="Reset by loop safeguard: stuck in_progress for >${STALE_THRESHOLD}s" \
+                2>/dev/null \
+                && log "SAFEGUARD: $stuck_id reset to open" \
+                || log "WARNING: failed to reset $stuck_id"
+        done
+    fi
 }
 
 if [ ! -f "$CODEX_PROMPT_FILE" ]; then
@@ -64,6 +101,9 @@ while true; do
     br sync --import-only --quiet 2>/dev/null \
         && log "br sync import: ok" \
         || log "WARNING: br sync import failed, continuing"
+
+    # Reset any tasks stuck in_progress longer than STALE_THRESHOLD
+    reset_stuck_tasks
 
     # Find the next task: prefer non-epic tasks, highest priority first
     NEXT_ID=$(br ready --json 2>/dev/null | python3 -c "

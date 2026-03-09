@@ -50,6 +50,7 @@ struct AppState {
     auth: AuthService,
     events: EventBus,
     connections: OperatorConnectionManager,
+    agent_registry: AgentRegistry,
     listeners: ListenerManager,
 }
 
@@ -83,6 +84,12 @@ impl FromRef<AppState> for ListenerManager {
     }
 }
 
+impl FromRef<AppState> for AgentRegistry {
+    fn from_ref(input: &AppState) -> Self {
+        input.agent_registry.clone()
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -111,6 +118,7 @@ async fn main() -> Result<()> {
         auth: AuthService::from_profile(&profile),
         events,
         connections: OperatorConnectionManager::new(),
+        agent_registry,
         listeners,
     });
     let handle = Handle::new();
@@ -519,12 +527,16 @@ mod tests {
             database: database.clone(),
             events: events.clone(),
             connections: OperatorConnectionManager::new(),
+            agent_registry: agent_registry.clone(),
             listeners: ListenerManager::new(database, agent_registry, events),
             profile,
         };
 
         let _ = AuthService::from_ref(&state);
         let _ = Database::from_ref(&state);
+        let _ = EventBus::from_ref(&state);
+        let _ = OperatorConnectionManager::from_ref(&state);
+        let _ = AgentRegistry::from_ref(&state);
         let _ = ListenerManager::from_ref(&state);
     }
 

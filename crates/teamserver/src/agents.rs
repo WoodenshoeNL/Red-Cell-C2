@@ -133,6 +133,36 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Update an operator-authored note for an agent and persist the change.
+    pub async fn set_note(
+        &self,
+        agent_id: u32,
+        note: impl Into<String>,
+    ) -> Result<AgentInfo, TeamserverError> {
+        let entry =
+            self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
+        let note = note.into();
+
+        self.repository.set_note(agent_id, &note).await?;
+
+        let mut info = entry.info.write().await;
+        info.note = note;
+        Ok(info.clone())
+    }
+
+    /// Remove an agent from memory and SQLite.
+    pub async fn remove(&self, agent_id: u32) -> Result<AgentInfo, TeamserverError> {
+        let entry = {
+            let mut entries = self.entries.write().await;
+            entries.remove(&agent_id).ok_or(TeamserverError::AgentNotFound { agent_id })?
+        };
+
+        self.repository.delete(agent_id).await?;
+
+        let info = entry.info.read().await;
+        Ok(info.clone())
+    }
+
     /// Return the current AES key and IV for an agent.
     pub async fn encryption(&self, agent_id: u32) -> Result<AgentEncryptionInfo, TeamserverError> {
         let entry =
@@ -241,6 +271,7 @@ mod tests {
             agent_id,
             active: true,
             reason: String::new(),
+            note: String::new(),
             encryption: AgentEncryptionInfo {
                 aes_key: "YWVzLWtleQ==".to_owned(),
                 aes_iv: "YWVzLWl2".to_owned(),
@@ -379,6 +410,53 @@ mod tests {
             .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?;
         assert!(!persisted.active);
         assert_eq!(persisted.reason, "lost contact");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn set_note_updates_memory_and_database() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let agent = sample_agent(0x1000_000C);
+        registry.insert(agent.clone()).await?;
+
+        let updated = registry.set_note(agent.agent_id, "tracked through VPN").await?;
+
+        assert_eq!(updated.note, "tracked through VPN");
+        assert_eq!(
+            registry
+                .get(agent.agent_id)
+                .await
+                .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?
+                .note,
+            "tracked through VPN"
+        );
+        assert_eq!(
+            database
+                .agents()
+                .get(agent.agent_id)
+                .await?
+                .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?
+                .note,
+            "tracked through VPN"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn remove_deletes_agent_from_memory_and_database() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let agent = sample_agent(0x1000_000D);
+        registry.insert(agent.clone()).await?;
+
+        let removed = registry.remove(agent.agent_id).await?;
+
+        assert_eq!(removed, agent);
+        assert!(registry.get(agent.agent_id).await.is_none());
+        assert_eq!(database.agents().get(agent.agent_id).await?, None);
 
         Ok(())
     }

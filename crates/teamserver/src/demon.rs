@@ -292,6 +292,7 @@ fn parse_init_agent(
         agent_id: parsed_agent_id,
         active: true,
         reason: String::new(),
+        note: String::new(),
         encryption: AgentEncryptionInfo {
             aes_key: BASE64_STANDARD.encode(key),
             aes_iv: BASE64_STANDARD.encode(iv),

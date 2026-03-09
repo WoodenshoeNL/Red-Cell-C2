@@ -396,6 +396,8 @@ pub struct AgentInfo {
     pub process_path: String,
     #[serde(rename = "Reason")]
     pub reason: String,
+    #[serde(rename = "Note", default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
     #[serde(rename = "SleepDelay")]
     pub sleep_delay: Value,
     #[serde(rename = "SleepJitter")]
@@ -1131,6 +1133,7 @@ mod tests {
                 process_ppid: "1000".to_string(),
                 process_path: "C:\\Windows\\explorer.exe".to_string(),
                 reason: "manual".to_string(),
+                note: "vpn foothold".to_string(),
                 sleep_delay: json!(5),
                 sleep_jitter: json!(10),
                 kill_date: Value::Null,

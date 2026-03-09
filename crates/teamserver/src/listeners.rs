@@ -812,6 +812,7 @@ fn agent_new_event(
             process_ppid: agent.process_ppid.to_string(),
             process_path: agent.process_name.clone(),
             reason: agent.reason.clone(),
+            note: agent.note.clone(),
             sleep_delay: Value::from(agent.sleep_delay),
             sleep_jitter: Value::from(agent.sleep_jitter),
             kill_date: agent.kill_date.map_or(Value::Null, Value::from),
@@ -1903,6 +1904,7 @@ mod tests {
             agent_id,
             active: true,
             reason: String::new(),
+            note: String::new(),
             encryption: AgentEncryptionInfo {
                 aes_key: BASE64_STANDARD.encode(key),
                 aes_iv: BASE64_STANDARD.encode(iv),

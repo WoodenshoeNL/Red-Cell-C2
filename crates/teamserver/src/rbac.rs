@@ -244,7 +244,6 @@ fn required_permission(message: &OperatorMessage) -> Result<Permission, Authoriz
         | OperatorMessage::InitConnectionProfile(_)
         | OperatorMessage::ListenerError(_)
         | OperatorMessage::AgentNew(_)
-        | OperatorMessage::AgentRemove(_)
         | OperatorMessage::AgentResponse(_)
         | OperatorMessage::AgentUpdate(_)
         | OperatorMessage::ChatListener(_)
@@ -265,6 +264,7 @@ fn required_permission(message: &OperatorMessage) -> Result<Permission, Authoriz
         | OperatorMessage::BuildPayloadMsOffice(_)
         | OperatorMessage::HostFileAdd(_)
         | OperatorMessage::HostFileRemove(_)
+        | OperatorMessage::AgentRemove(_)
         | OperatorMessage::TeamserverProfile(_) => Ok(Permission::Admin),
     }
 }
@@ -448,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn websocket_command_rejects_server_only_messages() {
+    fn websocket_command_requires_admin_for_agent_remove() {
         let message = OperatorMessage::AgentRemove(Message {
             head: message_head(),
             info: FlatInfo::default(),
@@ -456,7 +456,14 @@ mod tests {
 
         assert_eq!(
             authorize_websocket_command(&session(OperatorRole::Admin), &message),
-            Err(AuthorizationError::UnsupportedWebSocketCommand)
+            Ok(Permission::Admin)
+        );
+        assert_eq!(
+            authorize_websocket_command(&session(OperatorRole::Operator), &message),
+            Err(AuthorizationError::PermissionDenied {
+                role: OperatorRole::Operator,
+                required: Permission::Admin.as_str(),
+            })
         );
     }
 

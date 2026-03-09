@@ -12,15 +12,20 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
-use red_cell_common::operator::OperatorMessage;
+use red_cell_common::demon::DemonCommand;
+use red_cell_common::operator::{
+    EventCode, FlatInfo, Message, MessageHead, OperatorMessage, TeamserverLogInfo,
+};
+use serde_json::Value;
 use thiserror::Error;
+use time::OffsetDateTime;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::{
-    AuthError, AuthService, AuthenticationFailure, AuthenticationResult, EventBus,
-    ListenerEventAction, ListenerManager, authorize_websocket_command,
+    AgentRegistry, AuthError, AuthService, AuthenticationFailure, AuthenticationResult, EventBus,
+    Job, ListenerEventAction, ListenerManager, authorize_websocket_command,
     listener_config_from_operator, listener_error_event, listener_event_for_action,
     listener_removed_event, login_failure_message, login_success_message, operator_requests_start,
 };
@@ -80,6 +85,7 @@ where
     AuthService: FromRef<S>,
     EventBus: FromRef<S>,
     ListenerManager: FromRef<S>,
+    AgentRegistry: FromRef<S>,
     OperatorConnectionManager: FromRef<S>,
 {
     Router::new().route("/", get(websocket_handler::<S>))
@@ -95,6 +101,7 @@ where
     AuthService: FromRef<S>,
     EventBus: FromRef<S>,
     ListenerManager: FromRef<S>,
+    AgentRegistry: FromRef<S>,
     OperatorConnectionManager: FromRef<S>,
 {
     websocket.on_upgrade(move |socket| handle_operator_socket(state, socket))
@@ -106,6 +113,7 @@ where
     AuthService: FromRef<S>,
     EventBus: FromRef<S>,
     ListenerManager: FromRef<S>,
+    AgentRegistry: FromRef<S>,
     OperatorConnectionManager: FromRef<S>,
 {
     let connection_id = Uuid::new_v4();
@@ -224,6 +232,7 @@ where
     S: Clone + Send + Sync + 'static,
     EventBus: FromRef<S>,
     ListenerManager: FromRef<S>,
+    AgentRegistry: FromRef<S>,
 {
     let Some(frame) = incoming else {
         return Ok(SocketLoopControl::Break);
@@ -301,9 +310,11 @@ async fn dispatch_operator_command<S>(
     S: Clone + Send + Sync + 'static,
     EventBus: FromRef<S>,
     ListenerManager: FromRef<S>,
+    AgentRegistry: FromRef<S>,
 {
     let events = EventBus::from_ref(state);
     let listeners = ListenerManager::from_ref(state);
+    let registry = AgentRegistry::from_ref(state);
 
     match message {
         OperatorMessage::ListenerNew(message) => {
@@ -413,6 +424,30 @@ async fn dispatch_operator_command<S>(
                 }
             }
         }
+        OperatorMessage::AgentTask(message) => {
+            if let Err(error) = handle_agent_task(
+                &registry,
+                &events,
+                session,
+                sanitize_agent_task(session, message),
+            )
+            .await
+            {
+                events.broadcast(teamserver_log_event(&session.username, &error.to_string()));
+            }
+        }
+        OperatorMessage::AgentRemove(message) => {
+            if let Err(error) = handle_agent_remove(
+                &registry,
+                &events,
+                session,
+                sanitize_agent_remove(session, message),
+            )
+            .await
+            {
+                events.broadcast(teamserver_log_event(&session.username, &error.to_string()));
+            }
+        }
         other => {
             debug!(
                 connection_id = %session.connection_id,
@@ -422,6 +457,192 @@ async fn dispatch_operator_command<S>(
             );
         }
     }
+}
+
+#[derive(Debug, Error)]
+enum AgentCommandError {
+    #[error("invalid agent id `{agent_id}`")]
+    InvalidAgentId { agent_id: String },
+    #[error("agent id is required")]
+    MissingAgentId,
+    #[error("agent note is required")]
+    MissingNote,
+    #[error("unsupported agent remove payload")]
+    InvalidRemovePayload,
+    #[error("invalid numeric command id `{command_id}`")]
+    InvalidCommandId { command_id: String },
+    #[error(transparent)]
+    Teamserver(#[from] crate::TeamserverError),
+}
+
+async fn handle_agent_task(
+    registry: &AgentRegistry,
+    events: &EventBus,
+    session: &crate::OperatorSession,
+    message: Message<red_cell_common::operator::AgentTaskInfo>,
+) -> Result<(), AgentCommandError> {
+    let agent_id = parse_agent_id(&message.info.demon_id)?;
+    let _agent =
+        registry.get(agent_id).await.ok_or(crate::TeamserverError::AgentNotFound { agent_id })?;
+
+    if let Some(note) = note_from_task(&message.info)? {
+        registry.set_note(agent_id, note).await?;
+    } else {
+        registry.enqueue_job(agent_id, build_job(&message.info)?).await?;
+    }
+
+    events.broadcast(OperatorMessage::AgentTask(message));
+    debug!(
+        connection_id = %session.connection_id,
+        username = %session.username,
+        agent_id = format_args!("{agent_id:08X}"),
+        "handled operator agent task command"
+    );
+    Ok(())
+}
+
+async fn handle_agent_remove(
+    registry: &AgentRegistry,
+    events: &EventBus,
+    session: &crate::OperatorSession,
+    message: Message<FlatInfo>,
+) -> Result<(), AgentCommandError> {
+    let Some(agent_id) = flat_info_string(&message.info, &["AgentID", "DemonID"]) else {
+        return Err(AgentCommandError::InvalidRemovePayload);
+    };
+    let agent_id = parse_agent_id(&agent_id)?;
+    registry.remove(agent_id).await?;
+    events.broadcast(OperatorMessage::AgentRemove(message));
+    debug!(
+        connection_id = %session.connection_id,
+        username = %session.username,
+        agent_id = format_args!("{agent_id:08X}"),
+        "handled operator agent remove command"
+    );
+    Ok(())
+}
+
+fn sanitize_agent_task(
+    session: &crate::OperatorSession,
+    mut message: Message<red_cell_common::operator::AgentTaskInfo>,
+) -> Message<red_cell_common::operator::AgentTaskInfo> {
+    message.head.user = session.username.clone();
+    message
+}
+
+fn sanitize_agent_remove(
+    session: &crate::OperatorSession,
+    mut message: Message<FlatInfo>,
+) -> Message<FlatInfo> {
+    message.head.user = session.username.clone();
+    message
+}
+
+fn build_job(info: &red_cell_common::operator::AgentTaskInfo) -> Result<Job, AgentCommandError> {
+    let command_id = info.command_id.trim();
+    let request_id = u32::from_str_radix(info.task_id.trim(), 16).unwrap_or_default();
+    let payload = task_payload(info);
+
+    if is_teamserver_note_command(info) {
+        return Err(AgentCommandError::MissingNote);
+    }
+
+    let command = if is_exit_command(info) {
+        u32::from(DemonCommand::CommandExit)
+    } else {
+        command_id.parse::<u32>().map_err(|_| AgentCommandError::InvalidCommandId {
+            command_id: command_id.to_owned(),
+        })?
+    };
+
+    Ok(Job {
+        command,
+        request_id,
+        payload,
+        command_line: info.command_line.clone(),
+        task_id: info.task_id.clone(),
+        created_at: OffsetDateTime::now_utc().unix_timestamp().to_string(),
+    })
+}
+
+fn task_payload(info: &red_cell_common::operator::AgentTaskInfo) -> Vec<u8> {
+    if is_exit_command(info) {
+        return exit_method(info).to_be_bytes().to_vec();
+    }
+
+    flat_info_string_from_extra(&info.extra, &["PayloadBase64", "Payload"])
+        .map(|payload| payload.into_bytes())
+        .unwrap_or_default()
+}
+
+fn note_from_task(
+    info: &red_cell_common::operator::AgentTaskInfo,
+) -> Result<Option<String>, AgentCommandError> {
+    if !is_teamserver_note_command(info) {
+        return Ok(None);
+    }
+
+    let note = info
+        .arguments
+        .clone()
+        .or_else(|| info.task_message.clone())
+        .or_else(|| flat_info_string_from_extra(&info.extra, &["Note", "note"]))
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or(AgentCommandError::MissingNote)?;
+
+    Ok(Some(note))
+}
+
+fn is_teamserver_note_command(info: &red_cell_common::operator::AgentTaskInfo) -> bool {
+    info.command_id.eq_ignore_ascii_case("Teamserver")
+        && info.command.as_deref().is_some_and(|command| {
+            command.eq_ignore_ascii_case("note") || command.eq_ignore_ascii_case("agent::note")
+        })
+}
+
+fn is_exit_command(info: &red_cell_common::operator::AgentTaskInfo) -> bool {
+    info.command_id.trim() == u32::from(DemonCommand::CommandExit).to_string()
+        || info.command.as_deref().is_some_and(|command| {
+            command.eq_ignore_ascii_case("kill") || command.eq_ignore_ascii_case("agent::kill")
+        })
+}
+
+fn exit_method(info: &red_cell_common::operator::AgentTaskInfo) -> u32 {
+    match info.arguments.as_deref() {
+        Some(argument) if argument.eq_ignore_ascii_case("process") => 2,
+        _ => 1,
+    }
+}
+
+fn parse_agent_id(agent_id: &str) -> Result<u32, AgentCommandError> {
+    let trimmed = agent_id.trim();
+    if trimmed.is_empty() {
+        return Err(AgentCommandError::MissingAgentId);
+    }
+
+    u32::from_str_radix(trimmed.trim_start_matches("0x").trim_start_matches("0X"), 16)
+        .map_err(|_| AgentCommandError::InvalidAgentId { agent_id: trimmed.to_owned() })
+}
+
+fn flat_info_string(info: &FlatInfo, keys: &[&str]) -> Option<String> {
+    flat_info_string_from_extra(&info.fields, keys)
+}
+
+fn flat_info_string_from_extra(extra: &BTreeMap<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| extra.get(*key)).and_then(Value::as_str).map(ToOwned::to_owned)
+}
+
+fn teamserver_log_event(user: &str, text: &str) -> OperatorMessage {
+    OperatorMessage::TeamserverLog(Message {
+        head: MessageHead {
+            event: EventCode::Teamserver,
+            user: user.to_owned(),
+            timestamp: OffsetDateTime::now_utc().unix_timestamp().to_string(),
+            one_time: String::new(),
+        },
+        info: TeamserverLogInfo { text: text.to_owned() },
+    })
 }
 
 async fn cleanup_connection(
@@ -471,17 +692,21 @@ enum SendMessageError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::time::Duration;
 
     use axum::extract::FromRef;
     use futures_util::{SinkExt, StreamExt};
     use red_cell_common::{
+        AgentEncryptionInfo,
         config::Profile,
+        demon::DemonCommand,
         operator::{
-            AgentTaskInfo, EventCode, LoginInfo, Message, MessageHead, OperatorMessage,
+            AgentTaskInfo, EventCode, FlatInfo, LoginInfo, Message, MessageHead, OperatorMessage,
             SessionCode, TeamserverLogInfo,
         },
     };
+    use serde_json::Value;
     use tokio::net::TcpListener;
     use tokio::time::timeout;
     use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
@@ -495,6 +720,7 @@ mod tests {
         auth: AuthService,
         events: EventBus,
         connections: OperatorConnectionManager,
+        registry: AgentRegistry,
         listeners: ListenerManager,
     }
 
@@ -516,6 +742,10 @@ mod tests {
                     Password = "readonly"
                     Role = "Analyst"
                   }
+                  user "admin" {
+                    Password = "adminpass"
+                    Role = "Admin"
+                  }
                 }
 
                 Demon {}
@@ -531,6 +761,7 @@ mod tests {
                 auth: AuthService::from_profile(&profile),
                 events: events.clone(),
                 connections: OperatorConnectionManager::new(),
+                registry: registry.clone(),
                 listeners: ListenerManager::new(database, registry, events),
             }
         }
@@ -551,6 +782,12 @@ mod tests {
     impl FromRef<TestState> for OperatorConnectionManager {
         fn from_ref(input: &TestState) -> Self {
             input.connections.clone()
+        }
+    }
+
+    impl FromRef<TestState> for AgentRegistry {
+        fn from_ref(input: &TestState) -> Self {
+            input.registry.clone()
         }
     }
 
@@ -692,6 +929,155 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn websocket_agent_task_enqueues_job_and_broadcasts_event() {
+        let state = TestState::new().await;
+        let registry = state.registry.clone();
+        registry.insert(sample_agent(0xDEAD_BEEF)).await.expect("agent should insert");
+        let (mut sender, server) = spawn_server(state.clone()).await;
+        let (mut observer, _) = spawn_server(state).await;
+
+        login(&mut sender, "operator", "password1234").await;
+        login(&mut observer, "operator", "password1234").await;
+
+        sender
+            .send(ClientMessage::Text(
+                agent_task_message(
+                    "operator",
+                    AgentTaskInfo {
+                        task_id: "2A".to_owned(),
+                        command_line: "checkin".to_owned(),
+                        demon_id: "DEADBEEF".to_owned(),
+                        command_id: u32::from(DemonCommand::CommandCheckin).to_string(),
+                        ..AgentTaskInfo::default()
+                    },
+                )
+                .into(),
+            ))
+            .await
+            .expect("task should send");
+
+        let event = read_operator_message(&mut observer).await;
+        let OperatorMessage::AgentTask(message) = event else {
+            panic!("expected agent task broadcast");
+        };
+        assert_eq!(message.head.user, "operator");
+        assert_eq!(message.info.demon_id, "DEADBEEF");
+
+        let queued = registry.queued_jobs(0xDEAD_BEEF).await.expect("queue should load");
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].command, u32::from(DemonCommand::CommandCheckin));
+        assert_eq!(queued[0].request_id, 0x2A);
+        assert_eq!(queued[0].command_line, "checkin");
+
+        sender.close(None).await.expect("close should send");
+        observer.close(None).await.expect("close should send");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_agent_note_updates_registry() {
+        let state = TestState::new().await;
+        let registry = state.registry.clone();
+        registry.insert(sample_agent(0xDEAD_BEEF)).await.expect("agent should insert");
+        let (mut socket, server) = spawn_server(state).await;
+
+        login(&mut socket, "operator", "password1234").await;
+
+        socket
+            .send(ClientMessage::Text(
+                agent_task_message(
+                    "operator",
+                    AgentTaskInfo {
+                        task_id: "2B".to_owned(),
+                        command_line: "note tracked through vpn".to_owned(),
+                        demon_id: "DEADBEEF".to_owned(),
+                        command_id: "Teamserver".to_owned(),
+                        command: Some("note".to_owned()),
+                        arguments: Some("tracked through vpn".to_owned()),
+                        ..AgentTaskInfo::default()
+                    },
+                )
+                .into(),
+            ))
+            .await
+            .expect("note should send");
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let updated = registry.get(0xDEAD_BEEF).await.expect("agent should exist");
+                if updated.note == "tracked through vpn" {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("agent note should update");
+
+        let updated = registry.get(0xDEAD_BEEF).await.expect("agent should exist");
+        assert_eq!(updated.note, "tracked through vpn");
+
+        socket.close(None).await.expect("close should send");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_agent_remove_deletes_agent_for_admins() {
+        let state = TestState::new().await;
+        let registry = state.registry.clone();
+        registry.insert(sample_agent(0xDEAD_BEEF)).await.expect("agent should insert");
+        let (mut socket, server) = spawn_server(state).await;
+
+        login(&mut socket, "admin", "adminpass").await;
+
+        socket
+            .send(ClientMessage::Text(agent_remove_message("admin", "DEADBEEF").into()))
+            .await
+            .expect("remove should send");
+
+        let event = read_operator_message(&mut socket).await;
+        assert!(matches!(event, OperatorMessage::AgentRemove(_)));
+        assert!(registry.get(0xDEAD_BEEF).await.is_none());
+
+        socket.close(None).await.expect("close should send");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_reports_missing_agents_for_agent_commands() {
+        let state = TestState::new().await;
+        let (mut socket, server) = spawn_server(state).await;
+
+        login(&mut socket, "operator", "password1234").await;
+
+        socket
+            .send(ClientMessage::Text(
+                agent_task_message(
+                    "operator",
+                    AgentTaskInfo {
+                        task_id: "2C".to_owned(),
+                        command_line: "checkin".to_owned(),
+                        demon_id: "DEADBEEF".to_owned(),
+                        command_id: u32::from(DemonCommand::CommandCheckin).to_string(),
+                        ..AgentTaskInfo::default()
+                    },
+                )
+                .into(),
+            ))
+            .await
+            .expect("task should send");
+
+        let event = read_operator_message(&mut socket).await;
+        let OperatorMessage::TeamserverLog(message) = event else {
+            panic!("expected teamserver log");
+        };
+        assert!(message.info.text.contains("not found"));
+
+        socket.close(None).await.expect("close should send");
+        server.abort();
+    }
+
     async fn spawn_server(
         state: TestState,
     ) -> (
@@ -755,5 +1141,82 @@ mod tests {
             info: LoginInfo { user: user.to_owned(), password: hash_password(password) },
         }))
         .expect("login should serialize")
+    }
+
+    fn agent_task_message(user: &str, info: AgentTaskInfo) -> String {
+        serde_json::to_string(&OperatorMessage::AgentTask(Message {
+            head: MessageHead {
+                event: EventCode::Session,
+                user: user.to_owned(),
+                timestamp: String::new(),
+                one_time: String::new(),
+            },
+            info,
+        }))
+        .expect("task should serialize")
+    }
+
+    fn agent_remove_message(user: &str, demon_id: &str) -> String {
+        let mut fields = BTreeMap::new();
+        fields.insert("DemonID".to_owned(), Value::String(demon_id.to_owned()));
+
+        serde_json::to_string(&OperatorMessage::AgentRemove(Message {
+            head: MessageHead {
+                event: EventCode::Session,
+                user: user.to_owned(),
+                timestamp: String::new(),
+                one_time: String::new(),
+            },
+            info: FlatInfo { fields },
+        }))
+        .expect("remove should serialize")
+    }
+
+    async fn login(
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        user: &str,
+        password: &str,
+    ) {
+        socket
+            .send(ClientMessage::Text(login_message(user, password).into()))
+            .await
+            .expect("login should send");
+        let response = read_operator_message(socket).await;
+        assert!(matches!(response, OperatorMessage::InitConnectionSuccess(_)));
+    }
+
+    fn sample_agent(agent_id: u32) -> red_cell_common::AgentInfo {
+        red_cell_common::AgentInfo {
+            agent_id,
+            active: true,
+            reason: String::new(),
+            note: String::new(),
+            encryption: AgentEncryptionInfo {
+                aes_key: "YWVzLWtleQ==".to_owned(),
+                aes_iv: "YWVzLWl2".to_owned(),
+            },
+            hostname: "wkstn-01".to_owned(),
+            username: "operator".to_owned(),
+            domain_name: "REDCELL".to_owned(),
+            external_ip: "203.0.113.10".to_owned(),
+            internal_ip: "10.0.0.25".to_owned(),
+            process_name: "explorer.exe".to_owned(),
+            base_address: 0x401000,
+            process_pid: 1337,
+            process_tid: 1338,
+            process_ppid: 512,
+            process_arch: "x64".to_owned(),
+            elevated: true,
+            os_version: "Windows 11".to_owned(),
+            os_arch: "x64".to_owned(),
+            sleep_delay: 15,
+            sleep_jitter: 20,
+            kill_date: Some(1_893_456_000),
+            working_hours: Some(0b101010),
+            first_call_in: "2026-03-09T18:45:00Z".to_owned(),
+            last_call_in: "2026-03-09T18:46:00Z".to_owned(),
+        }
     }
 }

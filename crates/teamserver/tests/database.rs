@@ -25,6 +25,7 @@ fn sample_agent(agent_id: u32) -> AgentInfo {
         agent_id,
         active: true,
         reason: String::new(),
+        note: String::new(),
         encryption: AgentEncryptionInfo {
             aes_key: "YWVzLWtleQ==".to_owned(),
             aes_iv: "YWVzLWl2".to_owned(),

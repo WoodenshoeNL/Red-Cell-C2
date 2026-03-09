@@ -143,16 +143,17 @@ impl AgentRepository {
         sqlx::query(
             r#"
             INSERT INTO ts_agents (
-                agent_id, active, reason, aes_key, aes_iv, hostname, username, domain_name,
+                agent_id, active, reason, note, aes_key, aes_iv, hostname, username, domain_name,
                 external_ip, internal_ip, process_name, base_address, process_pid, process_tid,
                 process_ppid, process_arch, elevated, os_version, os_arch, sleep_delay,
                 sleep_jitter, kill_date, working_hours, first_call_in, last_call_in
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(i64::from(agent.agent_id))
         .bind(bool_to_i64(agent.active))
         .bind(&agent.reason)
+        .bind(&agent.note)
         .bind(&agent.encryption.aes_key)
         .bind(&agent.encryption.aes_iv)
         .bind(&agent.hostname)
@@ -186,7 +187,7 @@ impl AgentRepository {
         sqlx::query(
             r#"
             UPDATE ts_agents SET
-                active = ?, reason = ?, aes_key = ?, aes_iv = ?, hostname = ?, username = ?,
+                active = ?, reason = ?, note = ?, aes_key = ?, aes_iv = ?, hostname = ?, username = ?,
                 domain_name = ?, external_ip = ?, internal_ip = ?, process_name = ?,
                 base_address = ?, process_pid = ?, process_tid = ?, process_ppid = ?,
                 process_arch = ?, elevated = ?, os_version = ?, os_arch = ?, sleep_delay = ?,
@@ -197,6 +198,7 @@ impl AgentRepository {
         )
         .bind(bool_to_i64(agent.active))
         .bind(&agent.reason)
+        .bind(&agent.note)
         .bind(&agent.encryption.aes_key)
         .bind(&agent.encryption.aes_iv)
         .bind(&agent.hostname)
@@ -286,6 +288,17 @@ impl AgentRepository {
     /// Delete an agent row.
     pub async fn delete(&self, agent_id: u32) -> Result<(), TeamserverError> {
         sqlx::query("DELETE FROM ts_agents WHERE agent_id = ?")
+            .bind(i64::from(agent_id))
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Update the operator-authored note for an agent.
+    pub async fn set_note(&self, agent_id: u32, note: &str) -> Result<(), TeamserverError> {
+        sqlx::query("UPDATE ts_agents SET note = ? WHERE agent_id = ?")
+            .bind(note)
             .bind(i64::from(agent_id))
             .execute(&self.pool)
             .await?;
@@ -762,6 +775,7 @@ struct AgentRow {
     agent_id: i64,
     active: i64,
     reason: String,
+    note: String,
     aes_key: String,
     aes_iv: String,
     hostname: String,
@@ -794,6 +808,7 @@ impl TryFrom<AgentRow> for AgentInfo {
             agent_id: u32_from_i64("agent_id", row.agent_id)?,
             active: bool_from_i64("active", row.active)?,
             reason: row.reason,
+            note: row.note,
             encryption: red_cell_common::AgentEncryptionInfo {
                 aes_key: row.aes_key,
                 aes_iv: row.aes_iv,

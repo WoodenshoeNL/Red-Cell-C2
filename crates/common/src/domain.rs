@@ -245,6 +245,9 @@ pub struct AgentInfo {
     /// Optional inactive reason or registration source.
     #[serde(rename = "Reason", default)]
     pub reason: String,
+    /// Optional operator-authored note attached to the agent.
+    #[serde(rename = "Note", default)]
+    pub note: String,
     /// Per-agent transport keys.
     #[serde(rename = "Encryption", default)]
     pub encryption: AgentEncryptionInfo,

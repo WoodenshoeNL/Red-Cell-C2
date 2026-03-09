@@ -6,18 +6,26 @@ use anyhow::{Context, Result, anyhow};
 use axum::{
     Router,
     body::Body,
-    extract::State,
+    extract::{
+        State,
+        ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
+    },
     http::{Request, StatusCode},
     response::IntoResponse,
     routing::{any, get},
 };
 use axum_server::{Handle, tls_rustls::RustlsConfig};
 use clap::Parser;
+use red_cell::{
+    AuthError, AuthService, AuthenticationFailure, AuthenticationResult, login_failure_message,
+    login_success_message,
+};
 use red_cell_common::config::{Profile, ProfileValidationError};
 use red_cell_common::tls::{TlsKeyAlgorithm, resolve_tls_identity};
 use tokio::net::lookup_host;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
+use uuid::Uuid;
 
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -35,6 +43,7 @@ struct Cli {
 #[derive(Debug, Clone)]
 struct AppState {
     profile: Profile,
+    auth: AuthService,
 }
 
 #[tokio::main]
@@ -129,28 +138,143 @@ fn tls_subject_alt_names(host: &str) -> Vec<String> {
 }
 
 fn build_router(profile: Profile) -> Router {
+    let auth = AuthService::from_profile(&profile);
+
     Router::new()
         .nest("/havoc", websocket_routes())
         .nest("/api/v1", api_routes())
         .fallback(any(agent_listener_placeholder))
-        .with_state(AppState { profile })
+        .with_state(AppState { profile, auth })
 }
 
 fn websocket_routes() -> Router<AppState> {
-    Router::new().route("/", get(websocket_placeholder))
+    Router::new().route("/", get(websocket_handler))
 }
 
 fn api_routes() -> Router<AppState> {
     Router::new().route("/", get(api_placeholder))
 }
 
-async fn websocket_placeholder(State(state): State<AppState>) -> impl IntoResponse {
+async fn websocket_handler(
+    State(state): State<AppState>,
+    websocket: WebSocketUpgrade,
+) -> impl IntoResponse {
     debug!(
         operator_count = state.profile.operators.users.len(),
-        "operator websocket placeholder hit"
+        "operator websocket upgrade requested"
     );
 
-    (StatusCode::NOT_IMPLEMENTED, "operator websocket endpoint not implemented yet")
+    websocket.on_upgrade(move |socket| handle_operator_socket(state, socket))
+}
+
+async fn handle_operator_socket(state: AppState, mut socket: WebSocket) {
+    let connection_id = Uuid::new_v4();
+
+    let Some(frame) = socket.recv().await else {
+        warn!(%connection_id, "operator websocket closed before authentication");
+        return;
+    };
+
+    let response = match frame {
+        Ok(WsMessage::Text(payload)) => {
+            authenticate_operator_message(&state.auth, connection_id, payload.as_str()).await
+        }
+        Ok(WsMessage::Close(_)) => return,
+        Ok(_) => {
+            send_login_error(
+                &mut socket,
+                "",
+                AuthenticationFailure::WrongPassword,
+                "operator websocket requires a text login message",
+            )
+            .await;
+            let _ = socket.send(WsMessage::Close(None)).await;
+            return;
+        }
+        Err(error) => {
+            warn!(%connection_id, %error, "failed to receive operator authentication frame");
+            return;
+        }
+    };
+
+    if send_operator_message(&mut socket, &response).await.is_err() {
+        let _ = state.auth.remove_connection(connection_id).await;
+        return;
+    }
+
+    match state.auth.session_for_connection(connection_id).await {
+        Some(session) => {
+            info!(
+                %connection_id,
+                username = %session.username,
+                token = %session.token,
+                "operator authenticated"
+            );
+        }
+        None => {
+            let _ = socket.send(WsMessage::Close(None)).await;
+            return;
+        }
+    }
+
+    while let Some(frame) = socket.recv().await {
+        match frame {
+            Ok(WsMessage::Close(_)) => break,
+            Ok(_) => {}
+            Err(error) => {
+                warn!(%connection_id, %error, "operator websocket receive loop failed");
+                break;
+            }
+        }
+    }
+
+    let _ = state.auth.remove_connection(connection_id).await;
+}
+
+async fn authenticate_operator_message(
+    auth: &AuthService,
+    connection_id: Uuid,
+    payload: &str,
+) -> red_cell_common::operator::OperatorMessage {
+    match auth.authenticate_message(connection_id, payload).await {
+        Ok(AuthenticationResult::Success(success)) => {
+            login_success_message(&success.username, &success.token)
+        }
+        Ok(AuthenticationResult::Failure(failure)) => login_failure_message("", &failure),
+        Err(AuthError::InvalidLoginMessage) => {
+            login_failure_message("", &AuthenticationFailure::WrongPassword)
+        }
+        Err(AuthError::InvalidMessageJson(error)) => {
+            warn!(%connection_id, %error, "failed to parse operator login message");
+            login_failure_message("", &AuthenticationFailure::WrongPassword)
+        }
+    }
+}
+
+async fn send_operator_message(
+    socket: &mut WebSocket,
+    message: &red_cell_common::operator::OperatorMessage,
+) -> Result<()> {
+    let payload = serde_json::to_string(message).context("failed to serialize operator message")?;
+    socket
+        .send(WsMessage::Text(payload.into()))
+        .await
+        .context("failed to send operator websocket message")?;
+    Ok(())
+}
+
+async fn send_login_error(
+    socket: &mut WebSocket,
+    user: &str,
+    failure: AuthenticationFailure,
+    log_message: &str,
+) {
+    warn!(%log_message, "rejecting operator websocket authentication");
+
+    if let Err(error) = send_operator_message(socket, &login_failure_message(user, &failure)).await
+    {
+        warn!(%error, "failed to send operator websocket authentication error");
+    }
 }
 
 async fn api_placeholder(State(state): State<AppState>) -> impl IntoResponse {

@@ -225,7 +225,7 @@ pub struct LoginInfo {
     #[serde(rename = "User")]
     pub user: String,
     /// SHA3-256 password hash, hex encoded.
-    #[serde(rename = "Password")]
+    #[serde(rename = "Password", alias = "Password_SHA3")]
     pub password: String,
 }
 

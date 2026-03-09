@@ -433,6 +433,50 @@ mod tests {
     }
 
     #[test]
+    fn parses_listener_tls_certificate_paths() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "0.0.0.0"
+              Port = 40056
+            }
+
+            Operators {
+              user "Neo" {
+                Password = "password1234"
+              }
+            }
+
+            Listeners {
+              Http {
+                Name = "https listener"
+                Hosts = ["listener.local"]
+                HostBind = "127.0.0.1"
+                HostRotation = "round-robin"
+                PortBind = 443
+                Secure = true
+
+                Cert {
+                  Cert = "/tmp/server.crt"
+                  Key = "/tmp/server.key"
+                }
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("inline HTTPS listener profile should parse");
+
+        let listener = &profile.listeners.http[0];
+        let cert = listener.cert.as_ref().expect("certificate block should be present");
+
+        assert!(listener.secure);
+        assert_eq!(cert.cert, "/tmp/server.crt");
+        assert_eq!(cert.key, "/tmp/server.key");
+    }
+
+    #[test]
     fn parses_from_reader() {
         let profile =
             Profile::from_reader(include_str!("../../../src/Havoc/data/havoc.yaotl").as_bytes())

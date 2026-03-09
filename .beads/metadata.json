@@ -1,7 +1,4 @@
 {
-  "database": "dolt",
-  "backend": "dolt",
-  "dolt_mode": "server",
-  "dolt_database": "Red_Cell_C2",
-  "project_id": "2f1ab76b-5945-4815-905f-8ee7aa3abcfd"
+  "database": "beads.db",
+  "jsonl_export": "issues.jsonl"
 }

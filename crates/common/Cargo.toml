@@ -8,3 +8,8 @@ rust-version.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+hcl = { package = "hcl-rs", version = "0.19.4" }
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"

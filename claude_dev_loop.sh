@@ -1,16 +1,16 @@
 #!/bin/bash
-# Codex development loop — picks up beads tasks and implements them
+# Claude development loop — picks up beads tasks and implements them using Claude
 #
 # Usage:
-#   ./codex_loop.sh          # run forever
-#   ./codex_loop.sh 5        # run exactly 5 loops then exit
+#   ./claude_dev_loop.sh         # run forever
+#   ./claude_dev_loop.sh 5       # run exactly 5 loops then exit
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="$SCRIPT_DIR/logs"
-LOG_FILE="$LOG_DIR/codex_dev.log"
-CODEX_PROMPT_FILE="$SCRIPT_DIR/CODEX_PROMPT.md"
+LOG_FILE="$LOG_DIR/claude_dev.log"
+DEV_PROMPT_FILE="$SCRIPT_DIR/CLAUDE_DEV_PROMPT.md"
 RUNTIME_PROMPT_DIR="/tmp"
 SLEEP_ON_NO_WORK=60   # seconds to wait when no tasks are ready
 SLEEP_BETWEEN_TASKS=15 # seconds between task iterations
@@ -24,21 +24,21 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
 }
 
-if [ ! -f "$CODEX_PROMPT_FILE" ]; then
-    log "ERROR: $CODEX_PROMPT_FILE not found. Exiting."
+if [ ! -f "$DEV_PROMPT_FILE" ]; then
+    log "ERROR: $DEV_PROMPT_FILE not found. Exiting."
     exit 1
 fi
 
 if [ "$MAX_LOOPS" -gt 0 ] 2>/dev/null; then
     log "========================================================"
-    log "  Codex development loop starting (max $MAX_LOOPS loops)"
-    log "  Prompt template: $CODEX_PROMPT_FILE"
+    log "  Claude development loop starting (max $MAX_LOOPS loops)"
+    log "  Prompt template: $DEV_PROMPT_FILE"
     log "  Log: $LOG_FILE"
     log "========================================================"
 else
     log "========================================================"
-    log "  Codex development loop starting (unlimited)"
-    log "  Prompt template: $CODEX_PROMPT_FILE"
+    log "  Claude development loop starting (unlimited)"
+    log "  Prompt template: $DEV_PROMPT_FILE"
     log "  Log: $LOG_FILE"
     log "========================================================"
 fi
@@ -50,9 +50,9 @@ while true; do
             log "Reached max loops ($MAX_LOOPS). Exiting."
             exit 0
         fi
-        log "=== Codex loop iteration $((LOOP_COUNT + 1)) of $MAX_LOOPS ==="
+        log "=== Claude dev loop iteration $((LOOP_COUNT + 1)) of $MAX_LOOPS ==="
     else
-        log "=== Starting Codex loop iteration $((LOOP_COUNT + 1)) ==="
+        log "=== Starting Claude dev loop iteration $((LOOP_COUNT + 1)) ==="
     fi
 
     # Pull latest before picking up work
@@ -97,10 +97,10 @@ except Exception:
     IN_PROGRESS=$(br list --status=in_progress 2>/dev/null || echo "None")
 
     # Build runtime prompt
-    RUNTIME_PROMPT="$RUNTIME_PROMPT_DIR/red_cell_codex_$(date +%s)_$$.md"
+    RUNTIME_PROMPT="$RUNTIME_PROMPT_DIR/red_cell_claude_dev_$(date +%s)_$$.md"
 
     cat > "$RUNTIME_PROMPT" << HEREDOC
-$(cat "$CODEX_PROMPT_FILE")
+$(cat "$DEV_PROMPT_FILE")
 
 ---
 
@@ -131,18 +131,18 @@ br update $NEXT_ID --status=in_progress
 Then implement it fully following the workflow in this prompt.
 HEREDOC
 
-    log "Running Codex on task $NEXT_ID..."
+    log "Running Claude on task $NEXT_ID..."
 
-    codex exec \
-        --dangerously-bypass-approvals-and-sandbox \
-        < "$RUNTIME_PROMPT" \
+    cat "$RUNTIME_PROMPT" | claude -p \
+        --dangerously-skip-permissions \
+        --verbose \
         2>&1 | tee -a "$LOG_FILE"
 
-    CODEX_EXIT=${PIPESTATUS[0]}
-    if [ "$CODEX_EXIT" -ne 0 ]; then
-        log "WARNING: Codex exited with code $CODEX_EXIT for task $NEXT_ID"
+    CLAUDE_EXIT=${PIPESTATUS[0]}
+    if [ "$CLAUDE_EXIT" -ne 0 ]; then
+        log "WARNING: Claude exited with code $CLAUDE_EXIT for task $NEXT_ID"
     else
-        log "Codex completed task $NEXT_ID"
+        log "Claude completed task $NEXT_ID"
     fi
 
     # Clean up runtime prompt

@@ -1,7 +1,9 @@
 //! Havoc-compatible teamserver profile parsing.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::io::Read;
+use std::path::Path;
 
 use serde::{Deserialize, Deserializer};
 use thiserror::Error;
@@ -39,6 +41,122 @@ impl Profile {
     pub fn from_reader(reader: impl Read) -> Result<Self, ProfileError> {
         hcl::from_reader(reader).map_err(ProfileError::from)
     }
+
+    /// Parse a profile from a filesystem path.
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Self, ProfileError> {
+        let path = path.as_ref();
+        let input = fs::read_to_string(path)
+            .map_err(|source| ProfileError::Read { path: path.display().to_string(), source })?;
+
+        Self::parse(&input)
+    }
+
+    /// Validate the parsed profile for required fields and structural consistency.
+    pub fn validate(&self) -> Result<(), ProfileValidationError> {
+        let mut errors = Vec::new();
+
+        if self.teamserver.host.trim().is_empty() {
+            errors.push("Teamserver.Host must not be empty".to_owned());
+        }
+
+        if self.teamserver.port == 0 {
+            errors.push("Teamserver.Port must be greater than zero".to_owned());
+        }
+
+        if self.operators.users.is_empty() {
+            errors.push("Operators must define at least one user".to_owned());
+        }
+
+        for (username, operator) in &self.operators.users {
+            if username.trim().is_empty() {
+                errors.push("Operators.user labels must not be empty".to_owned());
+            }
+
+            if operator.password.trim().is_empty() {
+                errors.push(format!(
+                    "Operators.user \"{username}\" must define a non-empty Password"
+                ));
+            }
+        }
+
+        for listener in &self.listeners.http {
+            if listener.name.trim().is_empty() {
+                errors.push("Listeners.Http.Name must not be empty".to_owned());
+            }
+
+            if listener.host_bind.trim().is_empty() {
+                errors.push(format!("Listeners.Http \"{}\" must define HostBind", listener.name));
+            }
+
+            if listener.hosts.is_empty() {
+                errors.push(format!(
+                    "Listeners.Http \"{}\" must define at least one Hosts entry",
+                    listener.name
+                ));
+            }
+
+            if listener.port_bind == 0 {
+                errors.push(format!(
+                    "Listeners.Http \"{}\" must define a PortBind greater than zero",
+                    listener.name
+                ));
+            }
+
+            if listener.host_rotation.trim().is_empty() {
+                errors
+                    .push(format!("Listeners.Http \"{}\" must define HostRotation", listener.name));
+            }
+
+            if let Some(cert) = &listener.cert {
+                if cert.cert.trim().is_empty() || cert.key.trim().is_empty() {
+                    errors.push(format!(
+                        "Listeners.Http \"{}\" must define non-empty Cert and Key paths",
+                        listener.name
+                    ));
+                }
+            }
+        }
+
+        for listener in &self.listeners.smb {
+            if listener.name.trim().is_empty() {
+                errors.push("Listeners.Smb.Name must not be empty".to_owned());
+            }
+
+            if listener.pipe_name.trim().is_empty() {
+                errors.push(format!("Listeners.Smb \"{}\" must define PipeName", listener.name));
+            }
+        }
+
+        for listener in &self.listeners.external {
+            if listener.name.trim().is_empty() {
+                errors.push("Listeners.External.Name must not be empty".to_owned());
+            }
+
+            if listener.endpoint.trim().is_empty() {
+                errors
+                    .push(format!("Listeners.External \"{}\" must define Endpoint", listener.name));
+            }
+        }
+
+        if let Some(service) = &self.service {
+            if service.endpoint.trim().is_empty() {
+                errors.push("Service.Endpoint must not be empty".to_owned());
+            }
+
+            if service.password.trim().is_empty() {
+                errors.push("Service.Password must not be empty".to_owned());
+            }
+        }
+
+        if let Some(webhook) = &self.webhook
+            && let Some(discord) = &webhook.discord
+            && discord.url.trim().is_empty()
+        {
+            errors.push("WebHook.Discord.Url must not be empty".to_owned());
+        }
+
+        if errors.is_empty() { Ok(()) } else { Err(ProfileValidationError { errors }) }
+    }
 }
 
 /// Errors returned while parsing a YAOTL profile.
@@ -47,6 +165,22 @@ pub enum ProfileError {
     /// The underlying HCL parser or deserializer rejected the input.
     #[error("failed to parse YAOTL profile: {0}")]
     Parse(#[from] hcl::Error),
+    /// The profile file could not be read from disk.
+    #[error("failed to read YAOTL profile from {path}: {source}")]
+    Read {
+        /// Filesystem path that could not be read.
+        path: String,
+        /// Underlying I/O error.
+        source: std::io::Error,
+    },
+}
+
+/// Validation failures reported for a parsed profile.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("profile validation failed: {0}", .errors.join("; "))]
+pub struct ProfileValidationError {
+    /// Human-readable validation failures.
+    pub errors: Vec<String>,
 }
 
 /// Teamserver bind settings and payload build tooling.
@@ -485,5 +619,61 @@ mod tests {
         assert_eq!(profile.teamserver.port, 40056);
         assert_eq!(profile.demon.sleep, Some(2));
         assert!(profile.teamserver.build.is_none());
+    }
+
+    #[test]
+    fn loads_profile_from_file() {
+        let temp_dir = tempfile::TempDir::new().expect("temporary directory should be created");
+        let profile_path = temp_dir.path().join("profile.yaotl");
+
+        std::fs::write(&profile_path, include_str!("../../../src/Havoc/profiles/havoc.yaotl"))
+            .expect("profile fixture should be written");
+
+        let profile = Profile::from_file(&profile_path).expect("profile should load from disk");
+
+        assert_eq!(profile.teamserver.host, "0.0.0.0");
+        assert_eq!(profile.teamserver.port, 40056);
+    }
+
+    #[test]
+    fn validates_sample_profile() {
+        let profile = Profile::parse(include_str!("../../../src/Havoc/profiles/havoc.yaotl"))
+            .expect("sample profile should parse");
+
+        assert!(profile.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_profile_configuration() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = ""
+              Port = 0
+            }
+
+            Operators {}
+
+            Listeners {
+              Http {
+                Name = ""
+                Hosts = []
+                HostBind = ""
+                HostRotation = ""
+                PortBind = 0
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("invalid profile should still parse");
+
+        let error = profile.validate().expect_err("validation should fail");
+
+        assert!(error.errors.iter().any(|entry| entry.contains("Teamserver.Host")));
+        assert!(error.errors.iter().any(|entry| entry.contains("Teamserver.Port")));
+        assert!(error.errors.iter().any(|entry| entry.contains("Operators must define")));
+        assert!(error.errors.iter().any(|entry| entry.contains("PortBind")));
     }
 }

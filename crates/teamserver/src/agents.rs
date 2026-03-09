@@ -177,12 +177,38 @@ impl AgentRegistry {
         Ok(jobs.pop_front())
     }
 
+    /// Drain all queued jobs for an agent in FIFO order.
+    pub async fn dequeue_jobs(&self, agent_id: u32) -> Result<Vec<Job>, TeamserverError> {
+        let entry =
+            self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
+        let mut jobs = entry.jobs.lock().await;
+        Ok(jobs.drain(..).collect())
+    }
+
     /// Return a snapshot of the current queued jobs for an agent.
     pub async fn queued_jobs(&self, agent_id: u32) -> Result<Vec<Job>, TeamserverError> {
         let entry =
             self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
         let jobs = entry.jobs.lock().await;
         Ok(jobs.iter().cloned().collect())
+    }
+
+    /// Update an agent's last callback timestamp and persist the change.
+    pub async fn set_last_call_in(
+        &self,
+        agent_id: u32,
+        last_call_in: impl Into<String>,
+    ) -> Result<AgentInfo, TeamserverError> {
+        let entry =
+            self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
+        let updated = {
+            let mut info = entry.info.write().await;
+            info.last_call_in = last_call_in.into();
+            info.clone()
+        };
+
+        self.repository.update(&updated).await?;
+        Ok(updated)
     }
 
     async fn entry(&self, agent_id: u32) -> Option<Arc<AgentEntry>> {
@@ -402,6 +428,54 @@ mod tests {
         assert_eq!(registry.dequeue_job(agent.agent_id).await?, Some(first));
         assert_eq!(registry.dequeue_job(agent.agent_id).await?, Some(second));
         assert_eq!(registry.dequeue_job(agent.agent_id).await?, None);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dequeue_jobs_drains_queue_in_fifo_order() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let agent = sample_agent(0x1000_000A);
+        let first = sample_job(3);
+        let second = sample_job(4);
+        registry.insert(agent.clone()).await?;
+
+        registry.enqueue_job(agent.agent_id, first.clone()).await?;
+        registry.enqueue_job(agent.agent_id, second.clone()).await?;
+
+        assert_eq!(registry.dequeue_jobs(agent.agent_id).await?, vec![first, second]);
+        assert!(registry.queued_jobs(agent.agent_id).await?.is_empty());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn set_last_call_in_updates_memory_and_database() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let agent = sample_agent(0x1000_000B);
+        registry.insert(agent.clone()).await?;
+
+        let updated = registry.set_last_call_in(agent.agent_id, "2026-03-09T21:00:00Z").await?;
+
+        assert_eq!(updated.last_call_in, "2026-03-09T21:00:00Z");
+        assert_eq!(
+            registry
+                .get(agent.agent_id)
+                .await
+                .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?
+                .last_call_in,
+            "2026-03-09T21:00:00Z"
+        );
+        assert_eq!(
+            database
+                .agents()
+                .get(agent.agent_id)
+                .await?
+                .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?
+                .last_call_in,
+            "2026-03-09T21:00:00Z"
+        );
 
         Ok(())
     }

@@ -12,12 +12,17 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::{Json, Router};
 use axum_server::tls_rustls::RustlsConfig;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use red_cell_common::config::Profile;
-use red_cell_common::demon::{DEMON_MAGIC_VALUE, DemonHeader};
+use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, encrypt_agent_data};
+use red_cell_common::demon::{
+    DEMON_MAGIC_VALUE, DemonCommand, DemonHeader, DemonMessage, DemonPackage, DemonProtocolError,
+};
 use red_cell_common::operator::{
     AgentEncryptionInfo as OperatorAgentEncryptionInfo, AgentInfo as OperatorAgentInfo,
-    AgentPivotsInfo, EventCode, ListenerErrorInfo, ListenerInfo, ListenerMarkInfo, Message,
-    MessageHead, NameInfo, OperatorMessage,
+    AgentPivotsInfo, AgentUpdateInfo, EventCode, ListenerErrorInfo, ListenerInfo, ListenerMarkInfo,
+    Message, MessageHead, NameInfo, OperatorMessage,
 };
 use red_cell_common::tls::{
     TlsKeyAlgorithm, install_default_crypto_provider, resolve_tls_identity,
@@ -28,9 +33,12 @@ use red_cell_common::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
+use tracing::debug;
 use tracing::{info, warn};
 
 use crate::{
@@ -818,6 +826,131 @@ fn agent_new_event(
     }))
 }
 
+fn agent_update_event(agent: &red_cell_common::AgentInfo) -> OperatorMessage {
+    OperatorMessage::AgentUpdate(Message {
+        head: MessageHead {
+            event: EventCode::Session,
+            user: "teamserver".to_owned(),
+            timestamp: agent.last_call_in.clone(),
+            one_time: String::new(),
+        },
+        info: AgentUpdateInfo { agent_id: agent.name_id(), marked: "Alive".to_owned() },
+    })
+}
+
+async fn serialize_job_packages(
+    state: &HttpListenerState,
+    agent_id: u32,
+    jobs: Vec<crate::Job>,
+) -> Result<Vec<u8>, ListenerManagerError> {
+    let (key, iv) = decode_agent_crypto(state, agent_id).await?;
+    let mut packages = Vec::with_capacity(jobs.len());
+
+    for job in jobs {
+        let payload = if job.payload.is_empty() {
+            Vec::new()
+        } else {
+            encrypt_agent_data(&key, &iv, &job.payload)
+        };
+        packages.push(DemonPackage {
+            command_id: job.command,
+            request_id: job.request_id,
+            payload,
+        });
+    }
+
+    DemonMessage::new(packages).to_bytes().map_err(callback_protocol_error)
+}
+
+async fn decode_agent_crypto(
+    state: &HttpListenerState,
+    agent_id: u32,
+) -> Result<([u8; AGENT_KEY_LENGTH], [u8; AGENT_IV_LENGTH]), ListenerManagerError> {
+    let encryption = state.registry.encryption(agent_id).await?;
+    let key = decode_fixed(agent_id, "aes_key", encryption.aes_key.as_bytes(), AGENT_KEY_LENGTH)?;
+    let iv = decode_fixed(agent_id, "aes_iv", encryption.aes_iv.as_bytes(), AGENT_IV_LENGTH)?;
+    Ok((key, iv))
+}
+
+fn callback_protocol_error(error: DemonProtocolError) -> ListenerManagerError {
+    ListenerManagerError::InvalidConfig {
+        message: format!("failed to serialize queued job payload: {error}"),
+    }
+}
+
+async fn build_callback_response(
+    state: &HttpListenerState,
+    agent_id: u32,
+    packages: Vec<crate::DemonCallbackPackage>,
+) -> Result<Vec<u8>, ListenerManagerError> {
+    let mut requested_jobs = false;
+
+    for package in packages {
+        match package.command() {
+            Ok(DemonCommand::CommandGetJob) => {
+                requested_jobs = true;
+            }
+            Ok(DemonCommand::CommandCheckin) => {
+                let timestamp = OffsetDateTime::now_utc().format(&Rfc3339).map_err(|error| {
+                    ListenerManagerError::InvalidConfig {
+                        message: format!("failed to format callback timestamp: {error}"),
+                    }
+                })?;
+                let agent = state.registry.set_last_call_in(agent_id, timestamp).await?;
+                state.events.broadcast(agent_update_event(&agent));
+            }
+            Ok(command) => {
+                debug!(
+                    listener = %state.config.name,
+                    agent_id = format_args!("{agent_id:08X}"),
+                    ?command,
+                    "ignoring unhandled demon callback command"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    listener = %state.config.name,
+                    agent_id = format_args!("{agent_id:08X}"),
+                    %error,
+                    command_id = package.command_id,
+                    "ignoring unknown demon callback command"
+                );
+            }
+        }
+    }
+
+    if !requested_jobs {
+        return Ok(Vec::new());
+    }
+
+    let jobs = state.registry.dequeue_jobs(agent_id).await?;
+    if jobs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    serialize_job_packages(state, agent_id, jobs).await
+}
+
+fn decode_fixed<const N: usize>(
+    agent_id: u32,
+    field: &'static str,
+    encoded: &[u8],
+    expected_len: usize,
+) -> Result<[u8; N], ListenerManagerError> {
+    let decoded =
+        BASE64_STANDARD.decode(encoded).map_err(|error| ListenerManagerError::InvalidConfig {
+            message: format!(
+                "invalid base64 in stored {field} for agent 0x{agent_id:08X}: {error}"
+            ),
+        })?;
+    let actual = decoded.len();
+    decoded.try_into().map_err(|_| ListenerManagerError::InvalidConfig {
+        message: format!(
+            "stored {field} for agent 0x{agent_id:08X} had length {actual}, expected {expected_len}"
+        ),
+    })
+}
+
 impl ListenerManager {
     async fn spawn_listener_runtime(
         &self,
@@ -943,7 +1076,20 @@ async fn http_listener_handler(
                 }
             }
         }
-        Ok(ParsedDemonPacket::Callback { .. }) => state.callback_placeholder_response(),
+        Ok(ParsedDemonPacket::Callback { header, packages }) => {
+            match build_callback_response(&state, header.agent_id, packages).await {
+                Ok(response) => state.callback_bytes_response(&response),
+                Err(error) => {
+                    warn!(
+                        listener = %state.config.name,
+                        agent_id = format_args!("{:08X}", header.agent_id),
+                        %error,
+                        "failed to process demon callback"
+                    );
+                    state.fake_404_response()
+                }
+            }
+        }
         Err(error) => {
             warn!(listener = %state.config.name, %error, "failed to parse demon callback");
             state.fake_404_response()
@@ -1221,10 +1367,15 @@ mod tests {
         ListenerEventAction, ListenerManager, ListenerManagerError, ListenerStatus,
         action_from_mark, listener_config_from_operator, operator_requests_start,
     };
-    use crate::{AgentRegistry, Database, EventBus};
+    use crate::{AgentRegistry, Database, EventBus, Job};
     use axum::http::StatusCode;
-    use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data};
-    use red_cell_common::demon::{DemonCommand, DemonEnvelope};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use red_cell_common::AgentEncryptionInfo;
+    use red_cell_common::crypto::{
+        AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data, encrypt_agent_data,
+    };
+    use red_cell_common::demon::{DemonCommand, DemonEnvelope, DemonMessage};
     use red_cell_common::operator::{ListenerInfo, OperatorMessage};
     use red_cell_common::{HttpListenerConfig, HttpListenerResponseConfig, ListenerConfig};
     use reqwest::Client;
@@ -1489,6 +1640,179 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn http_listener_returns_empty_body_when_agent_has_no_jobs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let manager = ListenerManager::new(database, registry.clone(), EventBus::default());
+        let port = available_port()?;
+        let key = [0x51; AGENT_KEY_LENGTH];
+        let iv = [0x19; AGENT_IV_LENGTH];
+        let agent_id = 0x1020_3040;
+
+        registry.insert(sample_agent_info(agent_id, key, iv)).await?;
+        manager.create(http_listener("edge-http-empty-jobs", port)).await?;
+        manager.start("edge-http-empty-jobs").await?;
+        wait_for_listener(port, false).await?;
+
+        let response = Client::new()
+            .post(format!("http://127.0.0.1:{port}/"))
+            .body(valid_demon_callback_body(
+                agent_id,
+                key,
+                iv,
+                u32::from(DemonCommand::CommandGetJob),
+                7,
+                &[],
+            ))
+            .send()
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.bytes().await?.is_empty());
+
+        manager.stop("edge-http-empty-jobs").await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn http_listener_serializes_all_queued_jobs_for_get_job()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let manager = ListenerManager::new(database, registry.clone(), EventBus::default());
+        let port = available_port()?;
+        let key = [0x61; AGENT_KEY_LENGTH];
+        let iv = [0x27; AGENT_IV_LENGTH];
+        let agent_id = 0x5566_7788;
+
+        registry.insert(sample_agent_info(agent_id, key, iv)).await?;
+        registry
+            .enqueue_job(
+                agent_id,
+                Job {
+                    command: u32::from(DemonCommand::CommandSleep),
+                    request_id: 41,
+                    payload: vec![1, 2, 3, 4],
+                    command_line: "sleep 10".to_owned(),
+                    task_id: "task-41".to_owned(),
+                    created_at: "2026-03-09T20:10:00Z".to_owned(),
+                },
+            )
+            .await?;
+        registry
+            .enqueue_job(
+                agent_id,
+                Job {
+                    command: u32::from(DemonCommand::CommandCheckin),
+                    request_id: 42,
+                    payload: vec![5, 6, 7],
+                    command_line: "checkin".to_owned(),
+                    task_id: "task-42".to_owned(),
+                    created_at: "2026-03-09T20:11:00Z".to_owned(),
+                },
+            )
+            .await?;
+        manager.create(http_listener("edge-http-jobs", port)).await?;
+        manager.start("edge-http-jobs").await?;
+        wait_for_listener(port, false).await?;
+
+        let response = Client::new()
+            .post(format!("http://127.0.0.1:{port}/"))
+            .body(valid_demon_callback_body(
+                agent_id,
+                key,
+                iv,
+                u32::from(DemonCommand::CommandGetJob),
+                9,
+                &[],
+            ))
+            .send()
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.bytes().await?;
+        let message = DemonMessage::from_bytes(bytes.as_ref())?;
+        assert_eq!(message.packages.len(), 2);
+        assert_eq!(message.packages[0].command_id, u32::from(DemonCommand::CommandSleep));
+        assert_eq!(message.packages[0].request_id, 41);
+        assert_eq!(decrypt_agent_data(&key, &iv, &message.packages[0].payload)?, vec![1, 2, 3, 4]);
+        assert_eq!(message.packages[1].command_id, u32::from(DemonCommand::CommandCheckin));
+        assert_eq!(message.packages[1].request_id, 42);
+        assert_eq!(decrypt_agent_data(&key, &iv, &message.packages[1].payload)?, vec![5, 6, 7]);
+        assert!(registry.queued_jobs(agent_id).await?.is_empty());
+
+        manager.stop("edge-http-jobs").await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn http_listener_checkin_updates_last_call_in_and_broadcasts_agent_update()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let manager = ListenerManager::new(database.clone(), registry.clone(), events.clone());
+        let mut event_receiver = events.subscribe();
+        let port = available_port()?;
+        let key = [0x71; AGENT_KEY_LENGTH];
+        let iv = [0x37; AGENT_IV_LENGTH];
+        let agent_id = 0xCAFE_BABE;
+
+        registry.insert(sample_agent_info(agent_id, key, iv)).await?;
+        let before = registry
+            .get(agent_id)
+            .await
+            .ok_or_else(|| "agent should exist before checkin".to_owned())?
+            .last_call_in;
+
+        manager.create(http_listener("edge-http-checkin", port)).await?;
+        manager.start("edge-http-checkin").await?;
+        wait_for_listener(port, false).await?;
+
+        let response = Client::new()
+            .post(format!("http://127.0.0.1:{port}/"))
+            .body(valid_demon_multi_callback_body(
+                agent_id,
+                key,
+                iv,
+                (u32::from(DemonCommand::CommandGetJob), 5, Vec::new()),
+                &[(u32::from(DemonCommand::CommandCheckin), 6, vec![0xaa, 0xbb])],
+            ))
+            .send()
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.bytes().await?.is_empty());
+
+        let updated =
+            registry.get(agent_id).await.ok_or_else(|| "agent should still exist".to_owned())?;
+        assert_ne!(updated.last_call_in, before);
+        assert_eq!(
+            database
+                .agents()
+                .get(agent_id)
+                .await?
+                .ok_or_else(|| "agent should be persisted".to_owned())?
+                .last_call_in,
+            updated.last_call_in
+        );
+
+        let event = event_receiver
+            .recv()
+            .await
+            .ok_or_else(|| "agent update event should broadcast".to_owned())?;
+        let OperatorMessage::AgentUpdate(message) = event else {
+            panic!("unexpected operator event");
+        };
+        assert_eq!(message.info.agent_id, format!("{agent_id:08X}"));
+        assert_eq!(message.info.marked, "Alive");
+
+        manager.stop("edge-http-checkin").await?;
+        Ok(())
+    }
+
     #[test]
     fn operator_payload_maps_to_http_listener_config() -> Result<(), ListenerManagerError> {
         let info = ListenerInfo {
@@ -1570,6 +1894,42 @@ mod tests {
             .to_bytes()
     }
 
+    fn sample_agent_info(
+        agent_id: u32,
+        key: [u8; AGENT_KEY_LENGTH],
+        iv: [u8; AGENT_IV_LENGTH],
+    ) -> red_cell_common::AgentInfo {
+        red_cell_common::AgentInfo {
+            agent_id,
+            active: true,
+            reason: String::new(),
+            encryption: AgentEncryptionInfo {
+                aes_key: BASE64_STANDARD.encode(key),
+                aes_iv: BASE64_STANDARD.encode(iv),
+            },
+            hostname: "wkstn-01".to_owned(),
+            username: "operator".to_owned(),
+            domain_name: "REDCELL".to_owned(),
+            external_ip: "203.0.113.10".to_owned(),
+            internal_ip: "10.0.0.25".to_owned(),
+            process_name: "explorer.exe".to_owned(),
+            base_address: 0x401000,
+            process_pid: 1337,
+            process_tid: 1338,
+            process_ppid: 512,
+            process_arch: "x64".to_owned(),
+            elevated: true,
+            os_version: "Windows 11".to_owned(),
+            os_arch: "x64".to_owned(),
+            sleep_delay: 15,
+            sleep_jitter: 20,
+            kill_date: Some(1_893_456_000),
+            working_hours: Some(0b101010),
+            first_call_in: "2026-03-09T19:00:00Z".to_owned(),
+            last_call_in: "2026-03-09T19:01:00Z".to_owned(),
+        }
+    }
+
     fn valid_demon_init_body(
         agent_id: u32,
         key: [u8; AGENT_KEY_LENGTH],
@@ -1611,6 +1971,56 @@ mod tests {
 
         DemonEnvelope::new(agent_id, payload)
             .unwrap_or_else(|error| panic!("failed to build demon init request body: {error}"))
+            .to_bytes()
+    }
+
+    fn valid_demon_callback_body(
+        agent_id: u32,
+        key: [u8; AGENT_KEY_LENGTH],
+        iv: [u8; AGENT_IV_LENGTH],
+        command_id: u32,
+        request_id: u32,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        valid_demon_multi_callback_body(
+            agent_id,
+            key,
+            iv,
+            (command_id, request_id, payload.to_vec()),
+            &[],
+        )
+    }
+
+    fn valid_demon_multi_callback_body(
+        agent_id: u32,
+        key: [u8; AGENT_KEY_LENGTH],
+        iv: [u8; AGENT_IV_LENGTH],
+        first: (u32, u32, Vec<u8>),
+        additional: &[(u32, u32, Vec<u8>)],
+    ) -> Vec<u8> {
+        let mut decrypted = Vec::new();
+        decrypted
+            .extend_from_slice(&u32::try_from(first.2.len()).unwrap_or_default().to_be_bytes());
+        decrypted.extend_from_slice(&first.2);
+
+        for (command_id, request_id, payload) in additional {
+            decrypted.extend_from_slice(&command_id.to_be_bytes());
+            decrypted.extend_from_slice(&request_id.to_be_bytes());
+            decrypted
+                .extend_from_slice(&u32::try_from(payload.len()).unwrap_or_default().to_be_bytes());
+            decrypted.extend_from_slice(payload);
+        }
+
+        let encrypted = encrypt_agent_data(&key, &iv, &decrypted);
+        let payload = [
+            first.0.to_be_bytes().as_slice(),
+            first.1.to_be_bytes().as_slice(),
+            encrypted.as_slice(),
+        ]
+        .concat();
+
+        DemonEnvelope::new(agent_id, payload)
+            .unwrap_or_else(|error| panic!("failed to build demon callback request body: {error}"))
             .to_bytes()
     }
 

@@ -2,14 +2,22 @@
 
 use std::collections::BTreeMap;
 use std::future::pending;
+use std::net::IpAddr;
 use std::sync::Arc;
 
+use axum::extract::State;
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::{Json, http::StatusCode};
+use axum::routing::any;
+use axum::{Json, Router};
+use axum_server::tls_rustls::RustlsConfig;
 use red_cell_common::config::Profile;
 use red_cell_common::operator::{
     EventCode, ListenerErrorInfo, ListenerInfo, ListenerMarkInfo, Message, MessageHead, NameInfo,
     OperatorMessage,
+};
+use red_cell_common::tls::{
+    TlsKeyAlgorithm, install_default_crypto_provider, resolve_tls_identity,
 };
 use red_cell_common::{
     ExternalListenerConfig, HttpListenerConfig, HttpListenerProxyConfig,
@@ -390,6 +398,83 @@ impl ListenerManager {
     }
 }
 
+const DEFAULT_FAKE_404_BODY: &str =
+    include_str!("../../../src/Havoc/teamserver/pkg/handlers/404.html");
+const DEFAULT_HTTP_METHOD: &str = "POST";
+const HEADER_VALIDATION_IGNORES: [&str; 2] = ["connection", "accept-encoding"];
+
+#[derive(Clone, Debug)]
+struct HttpListenerState {
+    config: HttpListenerConfig,
+    method: Method,
+    required_headers: Vec<ExpectedHeader>,
+    response_headers: Vec<(HeaderName, HeaderValue)>,
+    response_body: Arc<[u8]>,
+    default_fake_404_body: Arc<[u8]>,
+}
+
+#[derive(Clone, Debug)]
+struct ExpectedHeader {
+    name: HeaderName,
+    expected_value: String,
+}
+
+impl HttpListenerState {
+    fn build(config: &HttpListenerConfig) -> Result<Self, ListenerManagerError> {
+        let method = parse_method(config)?;
+        let required_headers = config
+            .headers
+            .iter()
+            .filter_map(|header| parse_expected_header(header, &config.name).transpose())
+            .collect::<Result<Vec<_>, _>>()?;
+        let response_headers = config
+            .response
+            .as_ref()
+            .map_or(Ok(Vec::new()), |response| parse_response_headers(response, &config.name))?;
+        let response_body = config
+            .response
+            .as_ref()
+            .and_then(|response| response.body.as_deref())
+            .unwrap_or_default()
+            .as_bytes()
+            .to_vec()
+            .into();
+
+        Ok(Self {
+            config: config.clone(),
+            method,
+            required_headers,
+            response_headers,
+            response_body,
+            default_fake_404_body: DEFAULT_FAKE_404_BODY.as_bytes().to_vec().into(),
+        })
+    }
+
+    fn fake_404_response(&self) -> Response {
+        let body = if self.response_body.is_empty() {
+            self.default_fake_404_body.clone()
+        } else {
+            self.response_body.clone()
+        };
+
+        let mut response =
+            build_response(StatusCode::NOT_FOUND, body.as_ref(), &self.response_headers);
+        let headers = response.headers_mut();
+        set_default_header(headers, "server", "nginx");
+        set_default_header(headers, "content-type", "text/html");
+        set_default_header(headers, "x-havoc", "true");
+        response
+    }
+
+    fn callback_placeholder_response(&self) -> Response {
+        build_response(
+            StatusCode::NOT_IMPLEMENTED,
+            self.response_body.as_ref(),
+            &self.response_headers,
+        )
+    }
+}
+
 /// Convert a Havoc operator listener payload into a shared listener config.
 pub fn listener_config_from_operator(
     info: &ListenerInfo,
@@ -420,10 +505,10 @@ pub fn listener_config_from_operator(
                 .and_then(|value| optional_trimmed(Some(value))),
             secure: parse_bool("Secure", info.secure.as_deref()).unwrap_or(false),
             cert: None,
-            response: info
-                .response_headers
-                .as_deref()
-                .map(|headers| HttpListenerResponseConfig { headers: split_csv(Some(headers)) }),
+            response: info.response_headers.as_deref().map(|headers| HttpListenerResponseConfig {
+                headers: split_csv(Some(headers)),
+                body: None,
+            }),
             proxy: proxy_from_operator(info)?,
         })),
         Ok(ListenerProtocol::Smb) => Ok(ListenerConfig::from(SmbListenerConfig {
@@ -572,9 +657,10 @@ fn profile_listener_configs(profile: &Profile) -> Vec<ListenerConfig> {
             cert: config
                 .cert
                 .map(|cert| red_cell_common::ListenerTlsConfig { cert: cert.cert, key: cert.key }),
-            response: config
-                .response
-                .map(|response| HttpListenerResponseConfig { headers: response.headers }),
+            response: config.response.map(|response| HttpListenerResponseConfig {
+                headers: response.headers,
+                body: response.body,
+            }),
             proxy: config.proxy.map(|proxy| HttpListenerProxyConfig {
                 enabled: true,
                 proxy_type: Some("http".to_owned()),
@@ -606,24 +692,270 @@ async fn spawn_listener_runtime(
     config: &ListenerConfig,
 ) -> Result<JoinHandle<()>, ListenerManagerError> {
     match config {
-        ListenerConfig::Http(config) => {
-            let address = format!("{}:{}", config.host_bind, config.port_bind);
-            let listener = TcpListener::bind(address.as_str()).await.map_err(|error| {
-                ListenerManagerError::StartFailed {
-                    name: config.name.clone(),
-                    message: format!("failed to bind {address}: {error}"),
-                }
-            })?;
-
-            Ok(tokio::spawn(async move {
-                loop {
-                    let _ = listener.accept().await;
-                }
-            }))
-        }
+        ListenerConfig::Http(config) => spawn_http_listener_runtime(config).await,
         ListenerConfig::Smb(_) | ListenerConfig::External(_) => Ok(tokio::spawn(async move {
             pending::<()>().await;
         })),
+    }
+}
+
+async fn spawn_http_listener_runtime(
+    config: &HttpListenerConfig,
+) -> Result<JoinHandle<()>, ListenerManagerError> {
+    let state = Arc::new(HttpListenerState::build(config)?);
+    let address = format!("{}:{}", config.host_bind, config.port_bind);
+    let listener = TcpListener::bind(address.as_str()).await.map_err(|error| {
+        ListenerManagerError::StartFailed {
+            name: config.name.clone(),
+            message: format!("failed to bind {address}: {error}"),
+        }
+    })?;
+    let std_listener = listener.into_std().map_err(|error| ListenerManagerError::StartFailed {
+        name: config.name.clone(),
+        message: format!("failed to convert bound socket {address} into std listener: {error}"),
+    })?;
+    let router = Router::new().fallback(any(http_listener_handler)).with_state(state.clone());
+
+    if config.secure {
+        install_default_crypto_provider();
+        let tls_config = build_http_tls_config(config).await?;
+        let server = axum_server::from_tcp_rustls(std_listener, tls_config).map_err(|error| {
+            ListenerManagerError::StartFailed {
+                name: config.name.clone(),
+                message: format!("failed to start HTTPS listener on {address}: {error}"),
+            }
+        })?;
+
+        Ok(tokio::spawn(async move {
+            if let Err(error) = server.serve(router.into_make_service()).await {
+                warn!(listener = %state.config.name, %error, "https listener exited");
+            }
+        }))
+    } else {
+        let server = axum_server::from_tcp(std_listener).map_err(|error| {
+            ListenerManagerError::StartFailed {
+                name: config.name.clone(),
+                message: format!("failed to start HTTP listener on {address}: {error}"),
+            }
+        })?;
+
+        Ok(tokio::spawn(async move {
+            if let Err(error) = server.serve(router.into_make_service()).await {
+                warn!(listener = %state.config.name, %error, "http listener exited");
+            }
+        }))
+    }
+}
+
+async fn build_http_tls_config(
+    config: &HttpListenerConfig,
+) -> Result<RustlsConfig, ListenerManagerError> {
+    let subject_alt_names = http_listener_subject_alt_names(config);
+    let cert_config =
+        config.cert.as_ref().map(|cert| red_cell_common::config::HttpListenerCertConfig {
+            cert: cert.cert.clone(),
+            key: cert.key.clone(),
+        });
+    let identity =
+        resolve_tls_identity(&subject_alt_names, cert_config.as_ref(), TlsKeyAlgorithm::EcdsaP256)
+            .map_err(|error| ListenerManagerError::StartFailed {
+                name: config.name.clone(),
+                message: format!("failed to resolve TLS identity: {error}"),
+            })?;
+
+    RustlsConfig::from_pem(identity.certificate_pem().to_vec(), identity.private_key_pem().to_vec())
+        .await
+        .map_err(|error| ListenerManagerError::StartFailed {
+            name: config.name.clone(),
+            message: format!("failed to build rustls configuration: {error}"),
+        })
+}
+
+fn http_listener_subject_alt_names(config: &HttpListenerConfig) -> Vec<String> {
+    let mut names = Vec::new();
+
+    for value in config
+        .hosts
+        .iter()
+        .chain(std::iter::once(&config.host_bind))
+        .chain(config.host_header.iter())
+    {
+        let trimmed = value.trim();
+        if trimmed.is_empty() || names.iter().any(|entry| entry == trimmed) {
+            continue;
+        }
+
+        names.push(trimmed.to_owned());
+        if trimmed.parse::<IpAddr>().is_ok_and(|address| address.is_unspecified()) {
+            if !names.iter().any(|entry| entry == "127.0.0.1") {
+                names.push("127.0.0.1".to_owned());
+            }
+            if !names.iter().any(|entry| entry == "localhost") {
+                names.push("localhost".to_owned());
+            }
+        }
+    }
+
+    if names.is_empty() {
+        names.push("127.0.0.1".to_owned());
+    }
+
+    names
+}
+
+async fn http_listener_handler(
+    State(state): State<Arc<HttpListenerState>>,
+    request: Request<axum::body::Body>,
+) -> Response {
+    if !http_request_matches(&state, &request) {
+        return state.fake_404_response();
+    }
+
+    state.callback_placeholder_response()
+}
+
+fn http_request_matches(state: &HttpListenerState, request: &Request<axum::body::Body>) -> bool {
+    request.method() == state.method
+        && uri_matches(&state.config, request)
+        && user_agent_matches(&state.config, request.headers())
+        && headers_match(&state.required_headers, request.headers())
+}
+
+fn uri_matches(config: &HttpListenerConfig, request: &Request<axum::body::Body>) -> bool {
+    if config.uris.is_empty() || (config.uris.len() == 1 && config.uris[0].is_empty()) {
+        return true;
+    }
+
+    let request_uri = request
+        .uri()
+        .path_and_query()
+        .map_or_else(|| request.uri().path(), axum::http::uri::PathAndQuery::as_str);
+
+    config.uris.iter().any(|uri| uri == request_uri)
+}
+
+fn user_agent_matches(config: &HttpListenerConfig, headers: &HeaderMap) -> bool {
+    match config.user_agent.as_deref() {
+        Some(expected) => {
+            headers.get(axum::http::header::USER_AGENT).and_then(|value| value.to_str().ok())
+                == Some(expected)
+        }
+        None => true,
+    }
+}
+
+fn headers_match(expected_headers: &[ExpectedHeader], headers: &HeaderMap) -> bool {
+    expected_headers.iter().all(|expected| {
+        headers
+            .get(&expected.name)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|actual| actual.eq_ignore_ascii_case(&expected.expected_value))
+    })
+}
+
+fn parse_method(config: &HttpListenerConfig) -> Result<Method, ListenerManagerError> {
+    config.method.as_deref().unwrap_or(DEFAULT_HTTP_METHOD).parse::<Method>().map_err(|error| {
+        ListenerManagerError::InvalidConfig {
+            message: format!("invalid HTTP method for listener `{}`: {error}", config.name),
+        }
+    })
+}
+
+fn parse_expected_header(
+    header: &str,
+    listener_name: &str,
+) -> Result<Option<ExpectedHeader>, ListenerManagerError> {
+    let Some((name, value)) = split_header(header) else {
+        return Err(ListenerManagerError::InvalidConfig {
+            message: format!(
+                "listener `{listener_name}` has an invalid required header `{header}`"
+            ),
+        });
+    };
+
+    if HEADER_VALIDATION_IGNORES.iter().any(|ignored| name.eq_ignore_ascii_case(ignored)) {
+        return Ok(None);
+    }
+
+    let name = HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
+        ListenerManagerError::InvalidConfig {
+            message: format!(
+                "listener `{listener_name}` has an invalid required header name `{name}`: {error}"
+            ),
+        }
+    })?;
+
+    Ok(Some(ExpectedHeader { name, expected_value: value.to_owned() }))
+}
+
+fn parse_response_headers(
+    response: &HttpListenerResponseConfig,
+    listener_name: &str,
+) -> Result<Vec<(HeaderName, HeaderValue)>, ListenerManagerError> {
+    response
+        .headers
+        .iter()
+        .map(|header| {
+            let Some((name, value)) = split_header(header) else {
+                return Err(ListenerManagerError::InvalidConfig {
+                    message: format!(
+                        "listener `{listener_name}` has an invalid response header `{header}`"
+                    ),
+                });
+            };
+
+            let name = HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
+                ListenerManagerError::InvalidConfig {
+                    message: format!(
+                        "listener `{listener_name}` has an invalid response header name `{name}`: {error}"
+                    ),
+                }
+            })?;
+            let value = HeaderValue::from_str(value).map_err(|error| {
+                ListenerManagerError::InvalidConfig {
+                    message: format!(
+                        "listener `{listener_name}` has an invalid response header value for `{name}`: {error}"
+                    ),
+                }
+            })?;
+
+            Ok((name, value))
+        })
+        .collect()
+}
+
+fn split_header(header: &str) -> Option<(&str, &str)> {
+    let (name, value) = header.split_once(':')?;
+    let name = name.trim();
+    let value = value.trim();
+
+    if name.is_empty() {
+        return None;
+    }
+
+    Some((name, value))
+}
+
+fn build_response(
+    status: StatusCode,
+    body: &[u8],
+    headers: &[(HeaderName, HeaderValue)],
+) -> Response {
+    let mut response = Response::new(axum::body::Body::from(body.to_vec()));
+    *response.status_mut() = status;
+
+    let response_headers = response.headers_mut();
+    for (name, value) in headers {
+        response_headers.insert(name.clone(), value.clone());
+    }
+
+    response
+}
+
+fn set_default_header(headers: &mut HeaderMap, name: &'static str, value: &'static str) {
+    let header_name = HeaderName::from_static(name);
+    if !headers.contains_key(&header_name) {
+        headers.insert(header_name, HeaderValue::from_static(value));
     }
 }
 
@@ -714,13 +1046,19 @@ fn proxy_from_operator(
 
 #[cfg(test)]
 mod tests {
+    use std::net::TcpListener as StdTcpListener;
+    use std::time::Duration;
+
     use super::{
         ListenerEventAction, ListenerManager, ListenerManagerError, ListenerStatus,
         action_from_mark, listener_config_from_operator, operator_requests_start,
     };
     use crate::Database;
+    use axum::http::StatusCode;
     use red_cell_common::operator::ListenerInfo;
-    use red_cell_common::{HttpListenerConfig, ListenerConfig};
+    use red_cell_common::{HttpListenerConfig, HttpListenerResponseConfig, ListenerConfig};
+    use reqwest::Client;
+    use tokio::time::sleep;
 
     fn http_listener(name: &str, port: u16) -> ListenerConfig {
         ListenerConfig::from(HttpListenerConfig {
@@ -801,6 +1139,111 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn http_listener_returns_fake_404_for_non_matching_requests()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let manager = manager().await?;
+        let port = available_port()?;
+        let config = ListenerConfig::from(HttpListenerConfig {
+            name: "edge-http".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["127.0.0.1".to_owned()],
+            host_bind: "127.0.0.1".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: port,
+            port_conn: Some(port),
+            method: Some("POST".to_owned()),
+            behind_redirector: false,
+            user_agent: Some("Agent-UA".to_owned()),
+            headers: vec!["Accept-Encoding: gzip".to_owned(), "X-Auth: 123".to_owned()],
+            uris: vec!["/submit".to_owned()],
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: Some(HttpListenerResponseConfig {
+                headers: vec![
+                    "Server: ExampleFront".to_owned(),
+                    "Content-Type: text/plain".to_owned(),
+                ],
+                body: Some("decoy".to_owned()),
+            }),
+            proxy: None,
+        });
+
+        manager.create(config).await?;
+        manager.start("edge-http").await?;
+        wait_for_listener(port, false).await?;
+
+        let client = Client::new();
+
+        let invalid = client.get(format!("http://127.0.0.1:{port}/nope")).send().await?;
+        assert_eq!(invalid.status(), StatusCode::NOT_FOUND);
+        assert_eq!(invalid.text().await?, "decoy");
+
+        let valid = client
+            .post(format!("http://127.0.0.1:{port}/submit"))
+            .header("User-Agent", "Agent-UA")
+            .header("X-Auth", "123")
+            .send()
+            .await?;
+        assert_eq!(valid.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(
+            valid.headers().get("server").and_then(|value| value.to_str().ok()),
+            Some("ExampleFront")
+        );
+        assert_eq!(valid.text().await?, "decoy");
+
+        manager.stop("edge-http").await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn https_listener_generates_tls_and_accepts_requests()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let manager = manager().await?;
+        let port = available_port()?;
+        let config = ListenerConfig::from(HttpListenerConfig {
+            name: "edge-https".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["localhost".to_owned()],
+            host_bind: "127.0.0.1".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: port,
+            port_conn: Some(port),
+            method: None,
+            behind_redirector: false,
+            user_agent: None,
+            headers: Vec::new(),
+            uris: vec!["/".to_owned()],
+            host_header: None,
+            secure: true,
+            cert: None,
+            response: Some(HttpListenerResponseConfig {
+                headers: vec!["Server: TLSFront".to_owned()],
+                body: Some("tls".to_owned()),
+            }),
+            proxy: None,
+        });
+
+        manager.create(config).await?;
+        manager.start("edge-https").await?;
+        wait_for_listener(port, true).await?;
+
+        let client = Client::builder().danger_accept_invalid_certs(true).build()?;
+        let response = client.post(format!("https://127.0.0.1:{port}/")).send().await?;
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(
+            response.headers().get("server").and_then(|value| value.to_str().ok()),
+            Some("TLSFront")
+        );
+        assert_eq!(response.text().await?, "tls");
+
+        manager.stop("edge-https").await?;
+        Ok(())
+    }
+
     #[test]
     fn operator_payload_maps_to_http_listener_config() -> Result<(), ListenerManagerError> {
         let info = ListenerInfo {
@@ -844,5 +1287,27 @@ mod tests {
         ));
 
         Ok(())
+    }
+
+    fn available_port() -> Result<u16, Box<dyn std::error::Error>> {
+        let listener = StdTcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        drop(listener);
+        Ok(port)
+    }
+
+    async fn wait_for_listener(port: u16, secure: bool) -> Result<(), Box<dyn std::error::Error>> {
+        let client = Client::builder().danger_accept_invalid_certs(true).build()?;
+        let scheme = if secure { "https" } else { "http" };
+        let url = format!("{scheme}://127.0.0.1:{port}/");
+
+        for _ in 0..40 {
+            match client.get(&url).send().await {
+                Ok(_) => return Ok(()),
+                Err(_) => sleep(Duration::from_millis(25)).await,
+            }
+        }
+
+        Err(format!("listener on port {port} did not become ready").into())
     }
 }

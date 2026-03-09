@@ -63,6 +63,9 @@ pub struct ListenerTlsConfig {
 pub struct HttpListenerResponseConfig {
     /// Headers added to every listener response.
     pub headers: Vec<String>,
+    /// Optional static response body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
 }
 
 /// Upstream proxy configuration for an HTTP listener.
@@ -563,6 +566,7 @@ mod tests {
             }),
             response: Some(HttpListenerResponseConfig {
                 headers: vec!["Server: nginx".to_string()],
+                body: Some("{\"status\":\"ok\"}".to_string()),
             }),
             proxy: Some(HttpListenerProxyConfig {
                 enabled: true,
@@ -732,6 +736,48 @@ mod tests {
         assert_eq!(info.port_bind, 443);
         assert_eq!(info.port_conn, Some(8443));
         assert_eq!(info.proxy.as_ref().map(|proxy| proxy.port), Some(8080));
+        Ok(())
+    }
+
+    #[test]
+    fn response_body_round_trips_with_http_listener_config()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let payload = json!({
+            "protocol": "http",
+            "config": {
+                "name": "edge",
+                "kill_date": null,
+                "working_hours": null,
+                "hosts": ["c2.local"],
+                "host_bind": "127.0.0.1",
+                "host_rotation": "round-robin",
+                "port_bind": 8080,
+                "port_conn": null,
+                "method": "POST",
+                "behind_redirector": false,
+                "user_agent": null,
+                "headers": [],
+                "uris": ["/submit"],
+                "host_header": null,
+                "secure": false,
+                "cert": null,
+                "response": {
+                    "headers": ["Server: nginx"],
+                    "body": "hello"
+                },
+                "proxy": null
+            }
+        });
+
+        let config: ListenerConfig = serde_json::from_value(payload.clone())?;
+        let encoded = serde_json::to_value(&config)?;
+
+        assert_eq!(encoded["protocol"], payload["protocol"]);
+        assert_eq!(encoded["config"]["response"]["body"], payload["config"]["response"]["body"]);
+        assert_eq!(
+            encoded["config"]["response"]["headers"],
+            payload["config"]["response"]["headers"]
+        );
         Ok(())
     }
 }

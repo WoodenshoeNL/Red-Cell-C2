@@ -357,6 +357,9 @@ pub struct HttpListenerResponseConfig {
     /// HTTP response headers.
     #[serde(rename = "Headers", default)]
     pub headers: Vec<String>,
+    /// Optional static response body.
+    #[serde(rename = "Body", default)]
+    pub body: Option<String>,
 }
 
 /// Upstream proxy settings for HTTP listeners.
@@ -571,6 +574,10 @@ mod tests {
         assert_eq!(http_listener.uris, vec!["/Collector/2.0/settings/"]);
         assert_eq!(http_listener.headers.len(), 7);
         assert_eq!(http_listener.response.as_ref().map(|response| response.headers.len()), Some(8));
+        assert_eq!(
+            http_listener.response.as_ref().and_then(|response| response.body.as_deref()),
+            None
+        );
 
         let smb_listener = &profile.listeners.smb[0];
         assert_eq!(smb_listener.name, "Pivot - Smb");
@@ -630,6 +637,47 @@ mod tests {
         assert!(listener.secure);
         assert_eq!(cert.cert, "/tmp/server.crt");
         assert_eq!(cert.key, "/tmp/server.key");
+    }
+
+    #[test]
+    fn parses_listener_response_body() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "Neo" {
+                Password = "password1234"
+              }
+            }
+
+            Listeners {
+              Http {
+                Name = "body listener"
+                Hosts = ["listener.local"]
+                HostBind = "127.0.0.1"
+                HostRotation = "round-robin"
+                PortBind = 8080
+
+                Response {
+                  Headers = ["Server: nginx"]
+                  Body = "{\"status\":\"ok\"}"
+                }
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("inline listener profile should parse");
+
+        let response =
+            profile.listeners.http[0].response.as_ref().expect("response block should be present");
+
+        assert_eq!(response.body.as_deref(), Some("{\"status\":\"ok\"}"));
     }
 
     #[test]

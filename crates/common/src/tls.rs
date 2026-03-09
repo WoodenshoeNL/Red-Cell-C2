@@ -4,6 +4,7 @@ use std::fs;
 use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256, PKCS_RSA_SHA256};
 use thiserror::Error;
@@ -91,6 +92,15 @@ pub enum TlsError {
     /// rustls rejected the certificate/key combination.
     #[error("failed to build rustls server configuration: {0}")]
     Rustls(#[source] tokio_rustls::rustls::Error),
+}
+
+/// Install the default rustls crypto provider once for the current process.
+pub fn install_default_crypto_provider() {
+    static PROVIDER: OnceLock<()> = OnceLock::new();
+
+    if PROVIDER.set(()).is_ok() {
+        let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+    }
 }
 
 /// Generate a self-signed certificate for the provided DNS names and/or IP addresses.

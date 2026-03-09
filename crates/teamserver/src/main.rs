@@ -20,7 +20,9 @@ use red_cell::{
 };
 use red_cell_common::ListenerConfig;
 use red_cell_common::config::{Profile, ProfileValidationError};
-use red_cell_common::tls::{TlsKeyAlgorithm, resolve_tls_identity};
+use red_cell_common::tls::{
+    TlsKeyAlgorithm, install_default_crypto_provider, resolve_tls_identity,
+};
 use tokio::net::lookup_host;
 use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
@@ -99,6 +101,7 @@ async fn main() -> Result<()> {
     start_profile_listeners(&listeners, &profile).await?;
 
     let bind_addr = resolve_bind_addr(&profile).await?;
+    install_default_crypto_provider();
     let tls_config = build_tls_config(&profile).await?;
     let router = build_router(AppState {
         profile: profile.clone(),

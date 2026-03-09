@@ -73,7 +73,10 @@ fn sample_listener() -> ListenerConfig {
             cert: "server.pem".to_owned(),
             key: "server.key".to_owned(),
         }),
-        response: Some(HttpListenerResponseConfig { headers: vec!["Server: nginx".to_owned()] }),
+        response: Some(HttpListenerResponseConfig {
+            headers: vec!["Server: nginx".to_owned()],
+            body: Some("{\"status\":\"ok\"}".to_owned()),
+        }),
         proxy: Some(HttpListenerProxyConfig {
             enabled: true,
             proxy_type: Some("http".to_owned()),

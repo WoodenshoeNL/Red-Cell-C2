@@ -488,7 +488,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::{OperatorConnectionManager, routes};
-    use crate::{AuthService, Database, EventBus, ListenerManager, hash_password};
+    use crate::{AgentRegistry, AuthService, Database, EventBus, ListenerManager, hash_password};
 
     #[derive(Clone)]
     struct TestState {
@@ -524,12 +524,14 @@ mod tests {
             .expect("test profile should parse");
 
             let database = Database::connect_in_memory().await.expect("database should initialize");
+            let registry = AgentRegistry::new(database.clone());
+            let events = EventBus::default();
 
             Self {
                 auth: AuthService::from_profile(&profile),
-                events: EventBus::default(),
+                events: events.clone(),
                 connections: OperatorConnectionManager::new(),
-                listeners: ListenerManager::new(database),
+                listeners: ListenerManager::new(database, registry, events),
             }
         }
     }

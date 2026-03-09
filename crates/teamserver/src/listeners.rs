@@ -15,8 +15,9 @@ use axum_server::tls_rustls::RustlsConfig;
 use red_cell_common::config::Profile;
 use red_cell_common::demon::{DEMON_MAGIC_VALUE, DemonHeader};
 use red_cell_common::operator::{
-    EventCode, ListenerErrorInfo, ListenerInfo, ListenerMarkInfo, Message, MessageHead, NameInfo,
-    OperatorMessage,
+    AgentEncryptionInfo as OperatorAgentEncryptionInfo, AgentInfo as OperatorAgentInfo,
+    AgentPivotsInfo, EventCode, ListenerErrorInfo, ListenerInfo, ListenerMarkInfo, Message,
+    MessageHead, NameInfo, OperatorMessage,
 };
 use red_cell_common::tls::{
     TlsKeyAlgorithm, install_default_crypto_provider, resolve_tls_identity,
@@ -26,14 +27,16 @@ use red_cell_common::{
     HttpListenerResponseConfig, ListenerConfig, ListenerProtocol, SmbListenerConfig,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::{
-    Database, ListenerRepository, ListenerStatus, PersistedListener, PersistedListenerState,
-    TeamserverError,
+    AgentRegistry, Database, DemonPacketParser, ListenerRepository, ListenerStatus,
+    ParsedDemonPacket, PersistedListener, PersistedListenerState, TeamserverError, build_init_ack,
+    events::EventBus,
 };
 
 /// Runtime state for a configured listener.
@@ -212,6 +215,8 @@ impl IntoResponse for ListenerManagerError {
 #[derive(Clone, Debug)]
 pub struct ListenerManager {
     database: Database,
+    agent_registry: AgentRegistry,
+    events: EventBus,
     active_handles: Arc<RwLock<BTreeMap<String, JoinHandle<()>>>>,
     operations: Arc<Mutex<()>>,
 }
@@ -219,9 +224,11 @@ pub struct ListenerManager {
 impl ListenerManager {
     /// Build a listener manager backed by `database`.
     #[must_use]
-    pub fn new(database: Database) -> Self {
+    pub fn new(database: Database, agent_registry: AgentRegistry, events: EventBus) -> Self {
         Self {
             database,
+            agent_registry,
+            events,
             active_handles: Arc::new(RwLock::new(BTreeMap::new())),
             operations: Arc::new(Mutex::new(())),
         }
@@ -231,6 +238,12 @@ impl ListenerManager {
     #[must_use]
     pub fn repository(&self) -> ListenerRepository {
         self.database.listeners()
+    }
+
+    /// Return the in-memory agent registry used by active listeners.
+    #[must_use]
+    pub fn agent_registry(&self) -> AgentRegistry {
+        self.agent_registry.clone()
     }
 
     /// Create a persisted listener configuration in the stopped state.
@@ -360,7 +373,7 @@ impl ListenerManager {
             return Err(ListenerManagerError::ListenerAlreadyRunning { name: name.to_owned() });
         }
 
-        match spawn_listener_runtime(&listener.config).await {
+        match self.spawn_listener_runtime(&listener.config).await {
             Ok(handle) => {
                 self.active_handles.write().await.insert(name.to_owned(), handle);
                 repository.set_state(name, ListenerStatus::Running, None).await?;
@@ -409,6 +422,9 @@ const HEADER_VALIDATION_IGNORES: [&str; 2] = ["connection", "accept-encoding"];
 #[derive(Clone, Debug)]
 struct HttpListenerState {
     config: HttpListenerConfig,
+    registry: AgentRegistry,
+    parser: DemonPacketParser,
+    events: EventBus,
     method: Method,
     required_headers: Vec<ExpectedHeader>,
     response_headers: Vec<(HeaderName, HeaderValue)>,
@@ -423,7 +439,11 @@ struct ExpectedHeader {
 }
 
 impl HttpListenerState {
-    fn build(config: &HttpListenerConfig) -> Result<Self, ListenerManagerError> {
+    fn build(
+        config: &HttpListenerConfig,
+        registry: AgentRegistry,
+        events: EventBus,
+    ) -> Result<Self, ListenerManagerError> {
         let method = parse_method(config)?;
         let required_headers = config
             .headers
@@ -445,6 +465,9 @@ impl HttpListenerState {
 
         Ok(Self {
             config: config.clone(),
+            registry: registry.clone(),
+            parser: DemonPacketParser::new(registry),
+            events,
             method,
             required_headers,
             response_headers,
@@ -471,6 +494,10 @@ impl HttpListenerState {
 
     fn callback_placeholder_response(&self) -> Response {
         build_response(StatusCode::OK, self.response_body.as_ref(), &self.response_headers)
+    }
+
+    fn callback_bytes_response(&self, body: &[u8]) -> Response {
+        build_response(StatusCode::OK, body, &self.response_headers)
     }
 }
 
@@ -687,21 +714,12 @@ fn profile_listener_configs(profile: &Profile) -> Vec<ListenerConfig> {
     listeners
 }
 
-async fn spawn_listener_runtime(
-    config: &ListenerConfig,
-) -> Result<JoinHandle<()>, ListenerManagerError> {
-    match config {
-        ListenerConfig::Http(config) => spawn_http_listener_runtime(config).await,
-        ListenerConfig::Smb(_) | ListenerConfig::External(_) => Ok(tokio::spawn(async move {
-            pending::<()>().await;
-        })),
-    }
-}
-
 async fn spawn_http_listener_runtime(
     config: &HttpListenerConfig,
+    registry: AgentRegistry,
+    events: EventBus,
 ) -> Result<JoinHandle<()>, ListenerManagerError> {
-    let state = Arc::new(HttpListenerState::build(config)?);
+    let state = Arc::new(HttpListenerState::build(config, registry, events)?);
     let address = format!("{}:{}", config.host_bind, config.port_bind);
     let listener = TcpListener::bind(address.as_str()).await.map_err(|error| {
         ListenerManagerError::StartFailed {
@@ -743,6 +761,81 @@ async fn spawn_http_listener_runtime(
                 warn!(listener = %state.config.name, %error, "http listener exited");
             }
         }))
+    }
+}
+
+fn agent_new_event(
+    listener_name: &str,
+    magic_value: u32,
+    agent: &red_cell_common::AgentInfo,
+) -> OperatorMessage {
+    OperatorMessage::AgentNew(Box::new(Message {
+        head: MessageHead {
+            event: EventCode::Session,
+            user: "teamserver".to_owned(),
+            timestamp: agent.last_call_in.clone(),
+            one_time: "true".to_owned(),
+        },
+        info: OperatorAgentInfo {
+            active: agent.active.to_string(),
+            background_check: false,
+            domain_name: agent.domain_name.clone(),
+            elevated: agent.elevated,
+            encryption: OperatorAgentEncryptionInfo {
+                aes_key: agent.encryption.aes_key.clone(),
+                aes_iv: agent.encryption.aes_iv.clone(),
+            },
+            internal_ip: agent.internal_ip.clone(),
+            external_ip: agent.external_ip.clone(),
+            first_call_in: agent.first_call_in.clone(),
+            last_call_in: agent.last_call_in.clone(),
+            hostname: agent.hostname.clone(),
+            listener: listener_name.to_owned(),
+            magic_value: format!("{magic_value:08x}"),
+            name_id: agent.name_id(),
+            os_arch: agent.os_arch.clone(),
+            os_build: String::new(),
+            os_version: agent.os_version.clone(),
+            pivots: AgentPivotsInfo::default(),
+            port_fwds: Vec::new(),
+            process_arch: agent.process_arch.clone(),
+            process_name: agent.process_name.clone(),
+            process_pid: agent.process_pid.to_string(),
+            process_ppid: agent.process_ppid.to_string(),
+            process_path: agent.process_name.clone(),
+            reason: agent.reason.clone(),
+            sleep_delay: Value::from(agent.sleep_delay),
+            sleep_jitter: Value::from(agent.sleep_jitter),
+            kill_date: agent.kill_date.map_or(Value::Null, Value::from),
+            working_hours: agent.working_hours.map_or(Value::Null, Value::from),
+            socks_cli: Vec::new(),
+            socks_cli_mtx: None,
+            socks_svr: Vec::new(),
+            tasked_once: false,
+            username: agent.username.clone(),
+            pivot_parent: String::new(),
+        },
+    }))
+}
+
+impl ListenerManager {
+    async fn spawn_listener_runtime(
+        &self,
+        config: &ListenerConfig,
+    ) -> Result<JoinHandle<()>, ListenerManagerError> {
+        match config {
+            ListenerConfig::Http(config) => {
+                spawn_http_listener_runtime(
+                    config,
+                    self.agent_registry.clone(),
+                    self.events.clone(),
+                )
+                .await
+            }
+            ListenerConfig::Smb(_) | ListenerConfig::External(_) => Ok(tokio::spawn(async move {
+                pending::<()>().await;
+            })),
+        }
     }
 }
 
@@ -810,6 +903,7 @@ async fn http_listener_handler(
         return state.fake_404_response();
     }
 
+    let external_ip = extract_external_ip(&state, &request);
     let (_, body) = request.into_parts();
     let Ok(body) = to_bytes(body, usize::MAX).await else {
         return state.fake_404_response();
@@ -819,7 +913,42 @@ async fn http_listener_handler(
         return state.fake_404_response();
     }
 
-    state.callback_placeholder_response()
+    match state.parser.parse(&body, external_ip).await {
+        Ok(ParsedDemonPacket::Init(init)) => {
+            let response = match build_init_ack(init.agent.agent_id, &init.agent.encryption) {
+                Ok(response) => response,
+                Err(error) => {
+                    warn!(listener = %state.config.name, %error, "failed to build demon init ack");
+                    return state.fake_404_response();
+                }
+            };
+
+            state.events.broadcast(agent_new_event(
+                &state.config.name,
+                init.header.magic,
+                &init.agent,
+            ));
+            state.callback_bytes_response(&response)
+        }
+        Ok(ParsedDemonPacket::Reconnect { header, .. }) => {
+            let Some(agent) = state.registry.get(header.agent_id).await else {
+                return state.callback_placeholder_response();
+            };
+
+            match build_init_ack(header.agent_id, &agent.encryption) {
+                Ok(response) => state.callback_bytes_response(&response),
+                Err(error) => {
+                    warn!(listener = %state.config.name, %error, "failed to build reconnect ack");
+                    state.fake_404_response()
+                }
+            }
+        }
+        Ok(ParsedDemonPacket::Callback { .. }) => state.callback_placeholder_response(),
+        Err(error) => {
+            warn!(listener = %state.config.name, %error, "failed to parse demon callback");
+            state.fake_404_response()
+        }
+    }
 }
 
 fn http_request_matches(state: &HttpListenerState, request: &Request<Body>) -> bool {
@@ -859,6 +988,25 @@ fn headers_match(expected_headers: &[ExpectedHeader], headers: &HeaderMap) -> bo
             .and_then(|value| value.to_str().ok())
             .is_some_and(|actual| actual.eq_ignore_ascii_case(&expected.expected_value))
     })
+}
+
+fn extract_external_ip(state: &HttpListenerState, request: &Request<Body>) -> String {
+    if state.config.behind_redirector {
+        if let Some(value) =
+            request.headers().get("x-forwarded-for").and_then(|value| value.to_str().ok())
+        {
+            if let Some(ip) = value.split(',').map(str::trim).find(|value| !value.is_empty()) {
+                return ip.to_owned();
+            }
+        }
+    }
+
+    request
+        .headers()
+        .get("x-real-ip")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+        .map_or_else(|| "0.0.0.0".to_owned(), |value| value.trim().to_owned())
 }
 
 fn is_valid_demon_callback_request(body: &[u8]) -> bool {
@@ -1073,10 +1221,11 @@ mod tests {
         ListenerEventAction, ListenerManager, ListenerManagerError, ListenerStatus,
         action_from_mark, listener_config_from_operator, operator_requests_start,
     };
-    use crate::Database;
+    use crate::{AgentRegistry, Database, EventBus};
     use axum::http::StatusCode;
+    use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data};
     use red_cell_common::demon::{DemonCommand, DemonEnvelope};
-    use red_cell_common::operator::ListenerInfo;
+    use red_cell_common::operator::{ListenerInfo, OperatorMessage};
     use red_cell_common::{HttpListenerConfig, HttpListenerResponseConfig, ListenerConfig};
     use reqwest::Client;
     use tokio::time::sleep;
@@ -1105,7 +1254,9 @@ mod tests {
     }
 
     async fn manager() -> Result<ListenerManager, ListenerManagerError> {
-        Ok(ListenerManager::new(Database::connect_in_memory().await?))
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        Ok(ListenerManager::new(database, registry, EventBus::default()))
     }
 
     #[tokio::test]
@@ -1295,6 +1446,49 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn http_listener_registers_demon_init_and_broadcasts_agent_event()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let manager = ListenerManager::new(database.clone(), registry.clone(), events.clone());
+        let mut event_receiver = events.subscribe();
+        let port = available_port()?;
+
+        manager.create(http_listener("edge-http-init", port)).await?;
+        manager.start("edge-http-init").await?;
+        wait_for_listener(port, false).await?;
+
+        let key = [0x41; AGENT_KEY_LENGTH];
+        let iv = [0x24; AGENT_IV_LENGTH];
+        let response = Client::new()
+            .post(format!("http://127.0.0.1:{port}/"))
+            .body(valid_demon_init_body(0x1234_5678, key, iv))
+            .send()
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let decrypted = decrypt_agent_data(&key, &iv, &response.bytes().await?)?;
+        assert_eq!(decrypted.as_slice(), &0x1234_5678_u32.to_le_bytes());
+
+        let stored = registry.get(0x1234_5678).await.expect("agent should be registered");
+        assert_eq!(stored.hostname, "wkstn-01");
+        assert_eq!(stored.external_ip, "0.0.0.0");
+        assert_eq!(database.agents().get(0x1234_5678).await?, Some(stored.clone()));
+
+        let event = event_receiver.recv().await.expect("agent registration should broadcast");
+        let OperatorMessage::AgentNew(message) = event else {
+            panic!("unexpected operator event");
+        };
+        assert_eq!(message.info.name_id, "12345678");
+        assert_eq!(message.info.listener, "edge-http-init");
+        assert_eq!(message.info.process_name, "explorer.exe");
+        assert_eq!(message.info.sleep_delay, serde_json::json!(15));
+        manager.stop("edge-http-init").await?;
+        Ok(())
+    }
+
     #[test]
     fn operator_payload_maps_to_http_listener_config() -> Result<(), ListenerManagerError> {
         let info = ListenerInfo {
@@ -1374,5 +1568,59 @@ mod tests {
                 panic!("failed to build valid demon request body: {error}");
             })
             .to_bytes()
+    }
+
+    fn valid_demon_init_body(
+        agent_id: u32,
+        key: [u8; AGENT_KEY_LENGTH],
+        iv: [u8; AGENT_IV_LENGTH],
+    ) -> Vec<u8> {
+        let mut metadata = Vec::new();
+        metadata.extend_from_slice(&agent_id.to_be_bytes());
+        add_length_prefixed_bytes(&mut metadata, b"wkstn-01");
+        add_length_prefixed_bytes(&mut metadata, b"operator");
+        add_length_prefixed_bytes(&mut metadata, b"REDCELL");
+        add_length_prefixed_bytes(&mut metadata, b"10.0.0.25");
+        add_length_prefixed_utf16(&mut metadata, "C:\\Windows\\explorer.exe");
+        metadata.extend_from_slice(&1337_u32.to_be_bytes());
+        metadata.extend_from_slice(&1338_u32.to_be_bytes());
+        metadata.extend_from_slice(&512_u32.to_be_bytes());
+        metadata.extend_from_slice(&2_u32.to_be_bytes());
+        metadata.extend_from_slice(&1_u32.to_be_bytes());
+        metadata.extend_from_slice(&0x401000_u64.to_be_bytes());
+        metadata.extend_from_slice(&10_u32.to_be_bytes());
+        metadata.extend_from_slice(&0_u32.to_be_bytes());
+        metadata.extend_from_slice(&1_u32.to_be_bytes());
+        metadata.extend_from_slice(&0_u32.to_be_bytes());
+        metadata.extend_from_slice(&22000_u32.to_be_bytes());
+        metadata.extend_from_slice(&9_u32.to_be_bytes());
+        metadata.extend_from_slice(&15_u32.to_be_bytes());
+        metadata.extend_from_slice(&20_u32.to_be_bytes());
+        metadata.extend_from_slice(&1_893_456_000_u64.to_be_bytes());
+        metadata.extend_from_slice(&0b101010_u32.to_be_bytes());
+
+        let encrypted = red_cell_common::crypto::encrypt_agent_data(&key, &iv, &metadata);
+        let payload = [
+            u32::from(DemonCommand::DemonInit).to_be_bytes().as_slice(),
+            7_u32.to_be_bytes().as_slice(),
+            key.as_slice(),
+            iv.as_slice(),
+            encrypted.as_slice(),
+        ]
+        .concat();
+
+        DemonEnvelope::new(agent_id, payload)
+            .unwrap_or_else(|error| panic!("failed to build demon init request body: {error}"))
+            .to_bytes()
+    }
+
+    fn add_length_prefixed_bytes(buf: &mut Vec<u8>, bytes: &[u8]) {
+        buf.extend_from_slice(&u32::try_from(bytes.len()).unwrap_or_default().to_be_bytes());
+        buf.extend_from_slice(bytes);
+    }
+
+    fn add_length_prefixed_utf16(buf: &mut Vec<u8>, value: &str) {
+        let encoded: Vec<u8> = value.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        add_length_prefixed_bytes(buf, &encoded);
     }
 }

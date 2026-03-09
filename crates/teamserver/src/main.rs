@@ -14,7 +14,7 @@ use axum::{
 use axum_server::{Handle, tls_rustls::RustlsConfig};
 use clap::Parser;
 use red_cell::{
-    AuthService, Database, EventBus, ListenerManagementAccess, ListenerManager,
+    AgentRegistry, AuthService, Database, EventBus, ListenerManagementAccess, ListenerManager,
     ListenerManagerError, ListenerMarkRequest, ListenerSummary, OperatorConnectionManager,
     ReadAccess, websocket_routes,
 };
@@ -94,7 +94,9 @@ async fn main() -> Result<()> {
     let database = Database::connect(&database_path)
         .await
         .with_context(|| format!("failed to open database {}", database_path.display()))?;
-    let listeners = ListenerManager::new(database.clone());
+    let agent_registry = AgentRegistry::load(database.clone()).await?;
+    let events = EventBus::default();
+    let listeners = ListenerManager::new(database.clone(), agent_registry.clone(), events.clone());
 
     listeners.sync_profile(&profile).await?;
     listeners.restore_running().await?;
@@ -107,7 +109,7 @@ async fn main() -> Result<()> {
         profile: profile.clone(),
         database,
         auth: AuthService::from_profile(&profile),
-        events: EventBus::default(),
+        events,
         connections: OperatorConnectionManager::new(),
         listeners,
     });
@@ -401,7 +403,9 @@ mod tests {
     };
     use axum::extract::FromRef;
     use clap::Parser;
-    use red_cell::{AuthService, Database, EventBus, ListenerManager, OperatorConnectionManager};
+    use red_cell::{
+        AgentRegistry, AuthService, Database, EventBus, ListenerManager, OperatorConnectionManager,
+    };
     use red_cell_common::config::{OperatorRole, Profile};
     use tempfile::NamedTempFile;
 
@@ -508,12 +512,14 @@ mod tests {
         )
         .expect("profile should parse");
         let database = Database::connect_in_memory().await.expect("database should initialize");
+        let agent_registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
         let state = AppState {
             auth: AuthService::from_profile(&profile),
             database: database.clone(),
-            events: EventBus::default(),
+            events: events.clone(),
             connections: OperatorConnectionManager::new(),
-            listeners: ListenerManager::new(database),
+            listeners: ListenerManager::new(database, agent_registry, events),
             profile,
         };
 

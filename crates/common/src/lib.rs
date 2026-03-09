@@ -3,4 +3,5 @@
 pub mod config;
 pub mod crypto;
 pub mod demon;
+pub mod operator;
 pub mod tls;

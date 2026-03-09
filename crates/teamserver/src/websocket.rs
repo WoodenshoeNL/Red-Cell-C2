@@ -27,7 +27,7 @@ use uuid::Uuid;
 
 use crate::{
     AgentRegistry, AuthError, AuthService, AuthenticationFailure, AuthenticationResult, EventBus,
-    Job, ListenerEventAction, ListenerManager, authorize_websocket_command,
+    Job, ListenerEventAction, ListenerManager, action_from_mark, authorize_websocket_command,
     listener_config_from_operator, listener_error_event, listener_event_for_action,
     listener_removed_event, login_failure_message, login_success_message, operator_requests_start,
 };
@@ -408,18 +408,11 @@ async fn dispatch_operator_command<S>(
             }
         }
         OperatorMessage::ListenerMark(message) => {
-            let result = if message.info.mark.eq_ignore_ascii_case("online")
-                || message.info.mark.eq_ignore_ascii_case("start")
-            {
-                listeners.start(&message.info.name).await
-            } else if message.info.mark.eq_ignore_ascii_case("offline")
-                || message.info.mark.eq_ignore_ascii_case("stop")
-            {
-                listeners.stop(&message.info.name).await
-            } else {
-                Err(crate::ListenerManagerError::UnsupportedMark {
-                    mark: message.info.mark.clone(),
-                })
+            let result = match action_from_mark(&message.info.mark) {
+                Ok(ListenerEventAction::Started) => listeners.start(&message.info.name).await,
+                Ok(ListenerEventAction::Stopped) => listeners.stop(&message.info.name).await,
+                Ok(ListenerEventAction::Created | ListenerEventAction::Updated) => unreachable!(),
+                Err(error) => Err(error),
             };
 
             match result {
@@ -679,12 +672,7 @@ async fn send_session_snapshot(
     listeners: &ListenerManager,
     registry: &AgentRegistry,
 ) -> Result<(), SnapshotSyncError> {
-    for summary in listeners
-        .list()
-        .await?
-        .into_iter()
-        .filter(|summary| summary.state.status == crate::ListenerStatus::Running)
-    {
+    for summary in listeners.list().await?.into_iter() {
         send_operator_message(
             socket,
             &listener_event_for_action("teamserver", &summary, ListenerEventAction::Created),
@@ -811,8 +799,8 @@ mod tests {
         config::Profile,
         demon::DemonCommand,
         operator::{
-            AgentTaskInfo, EventCode, FlatInfo, LoginInfo, Message, MessageHead, OperatorMessage,
-            SessionCode, TeamserverLogInfo,
+            AgentTaskInfo, EventCode, FlatInfo, ListenerInfo, ListenerMarkInfo, LoginInfo, Message,
+            MessageHead, NameInfo, OperatorMessage, SessionCode, TeamserverLogInfo,
         },
     };
     use serde_json::Value;
@@ -1027,6 +1015,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn websocket_snapshot_includes_persisted_offline_listeners() {
+        let state = TestState::new().await;
+        let listeners = state.listeners.clone();
+        listeners
+            .create(sample_http_listener("offline-alpha", 0))
+            .await
+            .expect("listener should persist");
+        let (mut socket, server) = spawn_server(state).await;
+
+        login(&mut socket, "operator", "password1234").await;
+
+        let listener_event = read_operator_message(&mut socket).await;
+        let OperatorMessage::ListenerNew(message) = listener_event else {
+            panic!("expected listener snapshot event");
+        };
+        assert_eq!(message.info.name.as_deref(), Some("offline-alpha"));
+        assert_eq!(message.info.status.as_deref(), Some("Offline"));
+
+        socket.close(None).await.expect("close should send");
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn websocket_closes_when_authenticated_operator_lacks_permission() {
         let state = TestState::new().await;
         let connection_registry = state.connections.clone();
@@ -1118,6 +1129,75 @@ mod tests {
         assert_eq!(queued[0].command, u32::from(DemonCommand::CommandCheckin));
         assert_eq!(queued[0].request_id, 0x2A);
         assert_eq!(queued[0].command_line, "checkin");
+
+        sender.close(None).await.expect("close should send");
+        observer.close(None).await.expect("close should send");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_listener_commands_broadcast_and_persist_state() {
+        let state = TestState::new().await;
+        let listeners = state.listeners.clone();
+        let (mut sender, server) = spawn_server(state.clone()).await;
+        let (mut observer, _) = spawn_server(state).await;
+
+        login(&mut sender, "operator", "password1234").await;
+        login(&mut observer, "operator", "password1234").await;
+
+        sender
+            .send(ClientMessage::Text(
+                listener_new_message("operator", sample_listener_info("alpha", "Online", 0), false)
+                    .into(),
+            ))
+            .await
+            .expect("listener create should send");
+
+        let created = read_operator_message(&mut observer).await;
+        let OperatorMessage::ListenerNew(message) = created else {
+            panic!("expected listener create broadcast");
+        };
+        assert_eq!(message.head.user, "operator");
+        assert_eq!(message.info.name.as_deref(), Some("alpha"));
+
+        let started = read_operator_message(&mut observer).await;
+        let OperatorMessage::ListenerMark(message) = started else {
+            panic!("expected listener start broadcast");
+        };
+        assert_eq!(message.info.name, "alpha");
+        assert_eq!(message.info.mark, "Online");
+        assert_eq!(
+            listeners.summary("alpha").await.expect("listener should exist").state.status,
+            crate::ListenerStatus::Running
+        );
+
+        sender
+            .send(ClientMessage::Text(listener_mark_message("operator", "alpha", "stopped").into()))
+            .await
+            .expect("listener stop should send");
+
+        let stopped = read_operator_message(&mut observer).await;
+        let OperatorMessage::ListenerMark(message) = stopped else {
+            panic!("expected listener stop broadcast");
+        };
+        assert_eq!(message.info.name, "alpha");
+        assert_eq!(message.info.mark, "Offline");
+        assert_eq!(
+            listeners.summary("alpha").await.expect("listener should exist").state.status,
+            crate::ListenerStatus::Stopped
+        );
+
+        sender
+            .send(ClientMessage::Text(listener_remove_message("operator", "alpha").into()))
+            .await
+            .expect("listener delete should send");
+
+        let removed = read_operator_message(&mut observer).await;
+        let OperatorMessage::ListenerRemove(message) = removed else {
+            panic!("expected listener delete broadcast");
+        };
+        assert_eq!(message.info.name, "alpha");
+        assert!(listeners.summary("alpha").await.is_err());
 
         sender.close(None).await.expect("close should send");
         observer.close(None).await.expect("close should send");
@@ -1323,6 +1403,45 @@ mod tests {
         .expect("remove should serialize")
     }
 
+    fn listener_new_message(user: &str, info: ListenerInfo, one_time: bool) -> String {
+        serde_json::to_string(&OperatorMessage::ListenerNew(Message {
+            head: MessageHead {
+                event: EventCode::Listener,
+                user: user.to_owned(),
+                timestamp: String::new(),
+                one_time: if one_time { "true".to_owned() } else { String::new() },
+            },
+            info,
+        }))
+        .expect("listener create should serialize")
+    }
+
+    fn listener_mark_message(user: &str, name: &str, mark: &str) -> String {
+        serde_json::to_string(&OperatorMessage::ListenerMark(Message {
+            head: MessageHead {
+                event: EventCode::Listener,
+                user: user.to_owned(),
+                timestamp: String::new(),
+                one_time: String::new(),
+            },
+            info: ListenerMarkInfo { name: name.to_owned(), mark: mark.to_owned() },
+        }))
+        .expect("listener mark should serialize")
+    }
+
+    fn listener_remove_message(user: &str, name: &str) -> String {
+        serde_json::to_string(&OperatorMessage::ListenerRemove(Message {
+            head: MessageHead {
+                event: EventCode::Listener,
+                user: user.to_owned(),
+                timestamp: String::new(),
+                one_time: String::new(),
+            },
+            info: NameInfo { name: name.to_owned() },
+        }))
+        .expect("listener remove should serialize")
+    }
+
     async fn login(
         socket: &mut tokio_tungstenite::WebSocketStream<
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -1392,5 +1511,23 @@ mod tests {
             response: None,
             proxy: None,
         })
+    }
+
+    fn sample_listener_info(name: &str, status: &str, port: u16) -> ListenerInfo {
+        ListenerInfo {
+            name: Some(name.to_owned()),
+            protocol: Some("Http".to_owned()),
+            status: Some(status.to_owned()),
+            hosts: Some("c2.redcell.test".to_owned()),
+            host_bind: Some("127.0.0.1".to_owned()),
+            host_rotation: Some("round-robin".to_owned()),
+            port_bind: Some(port.to_string()),
+            port_conn: Some(port.to_string()),
+            headers: Some("X-Test: true".to_owned()),
+            uris: Some("/".to_owned()),
+            user_agent: Some("Mozilla/5.0".to_owned()),
+            secure: Some("false".to_owned()),
+            ..ListenerInfo::default()
+        }
     }
 }

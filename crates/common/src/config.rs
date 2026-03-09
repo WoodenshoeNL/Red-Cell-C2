@@ -138,6 +138,23 @@ impl Profile {
             }
         }
 
+        for listener in &self.listeners.dns {
+            if listener.name.trim().is_empty() {
+                errors.push("Listeners.Dns.Name must not be empty".to_owned());
+            }
+
+            if listener.domain.trim().is_empty() {
+                errors.push(format!("Listeners.Dns \"{}\" must define Domain", listener.name));
+            }
+
+            if listener.port_bind == 0 {
+                errors.push(format!(
+                    "Listeners.Dns \"{}\" must define a PortBind greater than zero",
+                    listener.name
+                ));
+            }
+        }
+
         if let Some(service) = &self.service {
             if service.endpoint.trim().is_empty() {
                 errors.push("Service.Endpoint must not be empty".to_owned());
@@ -257,6 +274,9 @@ pub struct ListenersConfig {
     /// External connector listeners.
     #[serde(rename = "External", default, deserialize_with = "deserialize_one_or_many")]
     pub external: Vec<ExternalListenerConfig>,
+    /// DNS C2 listeners.
+    #[serde(rename = "Dns", default, deserialize_with = "deserialize_one_or_many")]
+    pub dns: Vec<DnsListenerConfig>,
 }
 
 /// Havoc HTTP listener profile.
@@ -338,6 +358,36 @@ pub struct ExternalListenerConfig {
     /// External service endpoint.
     #[serde(rename = "Endpoint")]
     pub endpoint: String,
+}
+
+/// DNS C2 listener profile configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct DnsListenerConfig {
+    /// Display name of the listener.
+    #[serde(rename = "Name")]
+    pub name: String,
+    /// Local interface to bind (default `0.0.0.0`).
+    #[serde(rename = "HostBind", default = "default_all_interfaces")]
+    pub host_bind: String,
+    /// UDP port to listen on (default 53).
+    #[serde(rename = "PortBind")]
+    pub port_bind: u16,
+    /// C2 domain suffix handled by this listener (e.g., `c2.example.com`).
+    #[serde(rename = "Domain")]
+    pub domain: String,
+    /// Enabled DNS record types for C2 (e.g., `["TXT", "A"]`).
+    #[serde(rename = "RecordTypes", default)]
+    pub record_types: Vec<String>,
+    /// Optional kill date.
+    #[serde(rename = "KillDate", default)]
+    pub kill_date: Option<String>,
+    /// Optional working-hours restriction.
+    #[serde(rename = "WorkingHours", default)]
+    pub working_hours: Option<String>,
+}
+
+fn default_all_interfaces() -> String {
+    "0.0.0.0".to_owned()
 }
 
 /// TLS material for an HTTP listener.

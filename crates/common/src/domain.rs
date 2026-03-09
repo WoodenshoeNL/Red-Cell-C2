@@ -17,6 +17,8 @@ pub enum ListenerProtocol {
     Smb,
     /// External connector transport.
     External,
+    /// DNS C2 transport.
+    Dns,
 }
 
 impl ListenerProtocol {
@@ -28,6 +30,7 @@ impl ListenerProtocol {
             }
             value if value.eq_ignore_ascii_case("smb") => Ok(Self::Smb),
             value if value.eq_ignore_ascii_case("external") => Ok(Self::External),
+            value if value.eq_ignore_ascii_case("dns") => Ok(Self::Dns),
             _ => Err(CommonError::UnsupportedListenerProtocol { protocol: protocol.to_string() }),
         }
     }
@@ -39,6 +42,7 @@ impl ListenerProtocol {
             Self::Http => "http",
             Self::Smb => "smb",
             Self::External => "external",
+            Self::Dns => "dns",
         }
     }
 }
@@ -170,6 +174,33 @@ pub struct ExternalListenerConfig {
     pub endpoint: String,
 }
 
+/// Shared DNS C2 listener configuration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DnsListenerConfig {
+    /// Listener display name.
+    pub name: String,
+    /// Local interface to bind (e.g., `0.0.0.0`).
+    pub host_bind: String,
+    /// UDP port to listen on (default 53).
+    #[serde(deserialize_with = "deserialize_u16_from_any")]
+    pub port_bind: u16,
+    /// C2 domain suffix handled by this listener (e.g., `c2.example.com`).
+    pub domain: String,
+    /// Enabled DNS record types for C2 (e.g., `["TXT", "A"]`).
+    #[serde(default = "default_dns_record_types")]
+    pub record_types: Vec<String>,
+    /// Optional kill-date restriction from the profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kill_date: Option<String>,
+    /// Optional working-hours restriction from the profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_hours: Option<String>,
+}
+
+fn default_dns_record_types() -> Vec<String> {
+    vec!["TXT".to_owned()]
+}
+
 /// Shared listener configuration enum.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "protocol", content = "config", rename_all = "snake_case")]
@@ -180,6 +211,8 @@ pub enum ListenerConfig {
     Smb(SmbListenerConfig),
     /// External connector listener settings.
     External(ExternalListenerConfig),
+    /// DNS C2 listener settings.
+    Dns(DnsListenerConfig),
 }
 
 impl ListenerConfig {
@@ -190,6 +223,7 @@ impl ListenerConfig {
             Self::Http(config) => &config.name,
             Self::Smb(config) => &config.name,
             Self::External(config) => &config.name,
+            Self::Dns(config) => &config.name,
         }
     }
 
@@ -200,6 +234,7 @@ impl ListenerConfig {
             Self::Http(_) => ListenerProtocol::Http,
             Self::Smb(_) => ListenerProtocol::Smb,
             Self::External(_) => ListenerProtocol::External,
+            Self::Dns(_) => ListenerProtocol::Dns,
         }
     }
 }
@@ -219,6 +254,12 @@ impl From<SmbListenerConfig> for ListenerConfig {
 impl From<ExternalListenerConfig> for ListenerConfig {
     fn from(config: ExternalListenerConfig) -> Self {
         Self::External(config)
+    }
+}
+
+impl From<DnsListenerConfig> for ListenerConfig {
+    fn from(config: DnsListenerConfig) -> Self {
+        Self::Dns(config)
     }
 }
 
@@ -540,9 +581,19 @@ mod tests {
     }
 
     #[test]
+    fn listener_protocol_accepts_dns() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(ListenerProtocol::try_from_str("dns")?, ListenerProtocol::Dns);
+        assert_eq!(ListenerProtocol::try_from_str("DNS")?, ListenerProtocol::Dns);
+        Ok(())
+    }
+
+    #[test]
     fn listener_protocol_rejects_unknown_labels() {
-        let error = ListenerProtocol::try_from_str("dns").unwrap_err();
-        assert_eq!(error, CommonError::UnsupportedListenerProtocol { protocol: "dns".to_string() });
+        let error = ListenerProtocol::try_from_str("quic").unwrap_err();
+        assert_eq!(
+            error,
+            CommonError::UnsupportedListenerProtocol { protocol: "quic".to_string() }
+        );
     }
 
     #[test]

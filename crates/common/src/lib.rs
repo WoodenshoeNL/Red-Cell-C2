@@ -9,7 +9,7 @@ pub mod operator;
 pub mod tls;
 
 pub use domain::{
-    AgentEncryptionInfo, AgentInfo, ExternalListenerConfig, HttpListenerConfig,
+    AgentEncryptionInfo, AgentInfo, DnsListenerConfig, ExternalListenerConfig, HttpListenerConfig,
     HttpListenerProxyConfig, HttpListenerResponseConfig, ListenerConfig, ListenerProtocol,
     ListenerTlsConfig, OperatorInfo, SmbListenerConfig,
 };

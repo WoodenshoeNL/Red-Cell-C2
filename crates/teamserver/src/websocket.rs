@@ -892,7 +892,7 @@ pub(crate) async fn execute_agent_task(
             if plugins.invoke_registered_command(&command, actor, agent_id, args).await? {
                 0
             } else {
-                let jobs = build_jobs(&message.info)?;
+                let jobs = build_jobs(&message.info, actor)?;
                 let queued_jobs = jobs.len();
                 for job in jobs {
                     registry.enqueue_job(agent_id, job).await?;
@@ -900,7 +900,7 @@ pub(crate) async fn execute_agent_task(
                 queued_jobs
             }
         } else {
-            let jobs = build_jobs(&message.info)?;
+            let jobs = build_jobs(&message.info, actor)?;
             let queued_jobs = jobs.len();
             for job in jobs {
                 registry.enqueue_job(agent_id, job).await?;
@@ -908,7 +908,7 @@ pub(crate) async fn execute_agent_task(
             queued_jobs
         }
     } else {
-        let jobs = build_jobs(&message.info)?;
+        let jobs = build_jobs(&message.info, actor)?;
         let queued_jobs = jobs.len();
         for job in jobs {
             registry.enqueue_job(agent_id, job).await?;
@@ -959,12 +959,13 @@ fn sanitize_agent_remove(
 
 #[cfg(test)]
 fn build_job(info: &red_cell_common::operator::AgentTaskInfo) -> Result<Job, AgentCommandError> {
-    let mut jobs = build_jobs(info)?;
+    let mut jobs = build_jobs(info, "")?;
     jobs.pop().ok_or(AgentCommandError::MissingField { field: "CommandID" })
 }
 
 fn build_jobs(
     info: &red_cell_common::operator::AgentTaskInfo,
+    operator: &str,
 ) -> Result<Vec<Job>, AgentCommandError> {
     let command_id = info.command_id.trim();
     let request_id = u32::from_str_radix(info.task_id.trim(), 16).unwrap_or_default();
@@ -985,7 +986,7 @@ fn build_jobs(
     if command == u32::from(DemonCommand::CommandFs)
         && matches!(filesystem_subcommand(info)?, DemonFilesystemCommand::Upload)
     {
-        return build_upload_jobs(info, request_id, &created_at);
+        return build_upload_jobs(info, request_id, &created_at, operator);
     }
 
     let payload = task_payload(info, command)?;
@@ -996,6 +997,7 @@ fn build_jobs(
         command_line: info.command_line.clone(),
         task_id: info.task_id.clone(),
         created_at,
+        operator: operator.to_owned(),
     }])
 }
 
@@ -1046,6 +1048,7 @@ fn build_upload_jobs(
     info: &red_cell_common::operator::AgentTaskInfo,
     request_id: u32,
     created_at: &str,
+    operator: &str,
 ) -> Result<Vec<Job>, AgentCommandError> {
     let remote_path = upload_remote_path(info)?;
     let content = upload_content(info)?;
@@ -1064,6 +1067,7 @@ fn build_upload_jobs(
             command_line: info.command_line.clone(),
             task_id: info.task_id.clone(),
             created_at: created_at.to_owned(),
+            operator: operator.to_owned(),
         });
     }
 
@@ -1078,6 +1082,7 @@ fn build_upload_jobs(
         command_line: info.command_line.clone(),
         task_id: info.task_id.clone(),
         created_at: created_at.to_owned(),
+        operator: operator.to_owned(),
     });
 
     Ok(jobs)
@@ -2410,19 +2415,22 @@ mod tests {
 
     #[test]
     fn build_jobs_encodes_filesystem_copy_payload() {
-        let jobs = build_jobs(&AgentTaskInfo {
-            task_id: "2E".to_owned(),
-            command_line: "cp a b".to_owned(),
-            demon_id: "DEADBEEF".to_owned(),
-            command_id: u32::from(DemonCommand::CommandFs).to_string(),
-            sub_command: Some("cp".to_owned()),
-            arguments: Some(format!(
-                "{};{}",
-                BASE64_STANDARD.encode("C:\\temp\\a.txt"),
-                BASE64_STANDARD.encode("D:\\loot\\b.txt")
-            )),
-            ..AgentTaskInfo::default()
-        })
+        let jobs = build_jobs(
+            &AgentTaskInfo {
+                task_id: "2E".to_owned(),
+                command_line: "cp a b".to_owned(),
+                demon_id: "DEADBEEF".to_owned(),
+                command_id: u32::from(DemonCommand::CommandFs).to_string(),
+                sub_command: Some("cp".to_owned()),
+                arguments: Some(format!(
+                    "{};{}",
+                    BASE64_STANDARD.encode("C:\\temp\\a.txt"),
+                    BASE64_STANDARD.encode("D:\\loot\\b.txt")
+                )),
+                ..AgentTaskInfo::default()
+            },
+            "",
+        )
         .expect("filesystem copy should encode");
 
         assert_eq!(jobs.len(), 1);
@@ -2437,19 +2445,22 @@ mod tests {
     #[test]
     fn build_jobs_splits_upload_into_memfile_chunks_and_final_fs_job() {
         let content = vec![0x41; DEMON_MAX_RESPONSE_LENGTH + 16];
-        let jobs = build_jobs(&AgentTaskInfo {
-            task_id: "2F".to_owned(),
-            command_line: "upload local.bin remote.bin".to_owned(),
-            demon_id: "DEADBEEF".to_owned(),
-            command_id: u32::from(DemonCommand::CommandFs).to_string(),
-            sub_command: Some("upload".to_owned()),
-            arguments: Some(format!(
-                "{};{}",
-                BASE64_STANDARD.encode("C:\\Temp\\remote.bin"),
-                BASE64_STANDARD.encode(&content)
-            )),
-            ..AgentTaskInfo::default()
-        })
+        let jobs = build_jobs(
+            &AgentTaskInfo {
+                task_id: "2F".to_owned(),
+                command_line: "upload local.bin remote.bin".to_owned(),
+                demon_id: "DEADBEEF".to_owned(),
+                command_id: u32::from(DemonCommand::CommandFs).to_string(),
+                sub_command: Some("upload".to_owned()),
+                arguments: Some(format!(
+                    "{};{}",
+                    BASE64_STANDARD.encode("C:\\Temp\\remote.bin"),
+                    BASE64_STANDARD.encode(&content)
+                )),
+                ..AgentTaskInfo::default()
+            },
+            "",
+        )
         .expect("filesystem upload should encode");
 
         assert_eq!(jobs.len(), 3);

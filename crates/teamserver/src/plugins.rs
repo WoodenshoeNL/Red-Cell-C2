@@ -477,6 +477,7 @@ impl PluginRuntime {
                     command_line: format!("python:{command}"),
                     task_id: format!("{:08X}", next_request_id()),
                     created_at: OffsetDateTime::now_utc().unix_timestamp().to_string(),
+                    operator: String::new(),
                 },
             )
             .await?;

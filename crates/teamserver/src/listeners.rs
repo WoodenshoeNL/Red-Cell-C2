@@ -469,7 +469,7 @@ impl ListenerManager {
 }
 
 const DEFAULT_FAKE_404_BODY: &str =
-    include_str!("../../../src/Havoc/teamserver/pkg/handlers/404.html");
+    "<html><head><title>404 Not Found</title></head><body>404 Not Found</body></html>";
 const DEFAULT_HTTP_METHOD: &str = "POST";
 const MINIMUM_DEMON_CALLBACK_BYTES: usize = DemonHeader::SERIALIZED_LEN + 8;
 const SMB_PIPE_PREFIX: &str = r"\\.\pipe\";
@@ -2484,6 +2484,7 @@ mod tests {
                     command_line: "sleep 10".to_owned(),
                     task_id: "task-41".to_owned(),
                     created_at: "2026-03-09T20:10:00Z".to_owned(),
+                    operator: "operator".to_owned(),
                 },
             )
             .await?;
@@ -2497,6 +2498,7 @@ mod tests {
                     command_line: "checkin".to_owned(),
                     task_id: "task-42".to_owned(),
                     created_at: "2026-03-09T20:11:00Z".to_owned(),
+                    operator: "operator".to_owned(),
                 },
             )
             .await?;
@@ -2671,6 +2673,7 @@ mod tests {
                     command_line: "sleep 10".to_owned(),
                     task_id: "task-41".to_owned(),
                     created_at: "2026-03-09T20:10:00Z".to_owned(),
+                    operator: "operator".to_owned(),
                 },
             )
             .await?;
@@ -2684,6 +2687,7 @@ mod tests {
                     command_line: "checkin".to_owned(),
                     task_id: "task-42".to_owned(),
                     created_at: "2026-03-09T20:11:00Z".to_owned(),
+                    operator: "operator".to_owned(),
                 },
             )
             .await?;

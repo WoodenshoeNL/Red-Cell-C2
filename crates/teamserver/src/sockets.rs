@@ -433,6 +433,7 @@ impl SocketRelayManager {
                     command_line: command_line.to_owned(),
                     task_id: format!("relay-{socket_id:08X}"),
                     created_at: "0".to_owned(),
+                    operator: String::new(),
                 },
             )
             .await

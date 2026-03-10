@@ -28,6 +28,23 @@ pub struct Job {
     pub task_id: String,
     /// Timestamp string recording when the job was queued.
     pub created_at: String,
+    /// Operator username that queued the task, when available.
+    pub operator: String,
+}
+
+/// Task metadata retained for correlating callbacks with the originating request.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct JobContext {
+    /// Teamserver request identifier.
+    pub request_id: u32,
+    /// Operator command line associated with the task.
+    pub command_line: String,
+    /// Stable task identifier used for operator correlation.
+    pub task_id: String,
+    /// Timestamp string recording when the job was queued.
+    pub created_at: String,
+    /// Operator username that queued the task, when available.
+    pub operator: String,
 }
 
 #[derive(Debug)]
@@ -59,6 +76,7 @@ pub struct AgentRegistry {
     entries: Arc<RwLock<HashMap<u32, Arc<AgentEntry>>>>,
     parent_links: Arc<RwLock<HashMap<u32, u32>>>,
     child_links: Arc<RwLock<HashMap<u32, BTreeSet<u32>>>>,
+    request_contexts: Arc<RwLock<HashMap<(u32, u32), JobContext>>>,
 }
 
 impl AgentRegistry {
@@ -71,6 +89,7 @@ impl AgentRegistry {
             entries: Arc::new(RwLock::new(HashMap::new())),
             parent_links: Arc::new(RwLock::new(HashMap::new())),
             child_links: Arc::new(RwLock::new(HashMap::new())),
+            request_contexts: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -264,6 +283,16 @@ impl AgentRegistry {
     #[instrument(skip(self, job), fields(agent_id = format_args!("0x{:08X}", agent_id), command = job.command, request_id = job.request_id))]
     pub async fn enqueue_job(&self, agent_id: u32, job: Job) -> Result<(), TeamserverError> {
         self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
+        self.request_contexts.write().await.insert(
+            (agent_id, job.request_id),
+            JobContext {
+                request_id: job.request_id,
+                command_line: job.command_line.clone(),
+                task_id: job.task_id.clone(),
+                created_at: job.created_at.clone(),
+                operator: job.operator.clone(),
+            },
+        );
 
         if let Some(parent_agent_id) = self.parent_of(agent_id).await {
             let (queue_agent_id, pivot_job) =
@@ -309,6 +338,13 @@ impl AgentRegistry {
             self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
         let jobs = entry.jobs.lock().await;
         Ok(jobs.iter().cloned().collect())
+    }
+
+    /// Return the retained task metadata for a callback request, if known.
+    #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id), request_id))]
+    pub async fn request_context(&self, agent_id: u32, request_id: u32) -> Option<JobContext> {
+        let request_contexts = self.request_contexts.read().await;
+        request_contexts.get(&(agent_id, request_id)).cloned()
     }
 
     /// Update an agent's last callback timestamp and persist the change.
@@ -445,6 +481,7 @@ impl AgentRegistry {
             command_line: job.command_line.clone(),
             task_id: job.task_id.clone(),
             created_at: job.created_at.clone(),
+            operator: job.operator.clone(),
         };
         let mut current_parent = direct_parent_agent_id;
 
@@ -459,6 +496,7 @@ impl AgentRegistry {
                 command_line: job.command_line.clone(),
                 task_id: job.task_id.clone(),
                 created_at: job.created_at.clone(),
+                operator: job.operator.clone(),
             };
             current_parent = next_parent;
         }
@@ -672,6 +710,7 @@ mod tests {
             command_line: format!("job-{index}"),
             task_id: format!("task-{index}"),
             created_at: format!("2026-03-09T19:{index:02}:00Z"),
+            operator: "operator".to_owned(),
         }
     }
 
@@ -959,6 +998,30 @@ mod tests {
 
         assert_eq!(registry.dequeue_jobs(agent.agent_id).await?, vec![first, second]);
         assert!(registry.queued_jobs(agent.agent_id).await?.is_empty());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn enqueue_job_retains_request_context_after_dequeue() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let agent = sample_agent(0x1000_000B);
+        let job = sample_job(5);
+        registry.insert(agent.clone()).await?;
+
+        registry.enqueue_job(agent.agent_id, job.clone()).await?;
+        let queued = registry.dequeue_job(agent.agent_id).await?;
+        assert_eq!(queued, Some(job.clone()));
+
+        let context = registry
+            .request_context(agent.agent_id, job.request_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?;
+        assert_eq!(context.request_id, job.request_id);
+        assert_eq!(context.command_line, job.command_line);
+        assert_eq!(context.task_id, job.task_id);
+        assert_eq!(context.created_at, job.created_at);
+        assert_eq!(context.operator, job.operator);
 
         Ok(())
     }

@@ -713,10 +713,129 @@ where
 mod tests {
     use super::*;
 
+    const HAVOC_PROFILE: &str = r#"
+        Teamserver {
+          Host = "0.0.0.0"
+          Port = 40056
+
+          Build {
+            Nasm = "/usr/bin/nasm"
+          }
+        }
+
+        Operators {
+          user "Neo" {
+            Password = "password1234"
+            Role = "Admin"
+          }
+
+          user "Trinity" {
+            Password = "followthewhiterabbit"
+            Role = "Operator"
+          }
+        }
+
+        Demon {
+          Sleep = 2
+          Jitter = 15
+          TrustXForwardedFor = false
+
+          Injection {
+            Spawn64 = "C:\\Windows\\System32\\notepad.exe"
+          }
+        }
+
+        Service {
+          Endpoint = "service.local"
+          Password = "service-password"
+        }
+    "#;
+
+    const HTTP_SMB_PROFILE: &str = r#"
+        Teamserver {
+          Host = "127.0.0.1"
+          Port = 40056
+        }
+
+        Operators {
+          user "Neo" {
+            Password = "password1234"
+          }
+        }
+
+        Listeners {
+          Http {
+            Name = "teams profile - http"
+            Hosts = ["5pider.net"]
+            HostBind = "0.0.0.0"
+            HostRotation = "round-robin"
+            PortBind = 443
+            PortConn = 443
+            Headers = [
+              "A: 1", "B: 2", "C: 3", "D: 4", "E: 5", "F: 6", "G: 7"
+            ]
+            Uris = ["/Collector/2.0/settings/"]
+            Secure = false
+
+            Response {
+              Headers = [
+                "H1: 1", "H2: 2", "H3: 3", "H4: 4",
+                "H5: 5", "H6: 6", "H7: 7", "H8: 8"
+              ]
+            }
+          }
+
+          Smb {
+            Name = "Pivot - Smb"
+            PipeName = "demon_pipe"
+          }
+        }
+
+        Demon {}
+    "#;
+
+    const WEBHOOK_PROFILE: &str = r#"
+        Teamserver {
+          Host = "127.0.0.1"
+          Port = 40056
+        }
+
+        Operators {
+          user "Neo" {
+            Password = "password1234"
+          }
+        }
+
+        Demon {}
+
+        WebHook {
+          Discord {
+            Url = "..."
+            User = "Havoc"
+          }
+        }
+    "#;
+
+    const HAVOC_DATA_PROFILE: &str = r#"
+        Teamserver {
+          Host = "0.0.0.0"
+          Port = 40056
+        }
+
+        Operators {
+          user "Neo" {
+            Password = "password1234"
+          }
+        }
+
+        Demon {
+          Sleep = 2
+        }
+    "#;
+
     #[test]
     fn parses_base_havoc_profile() {
-        let profile = Profile::parse(include_str!("../../../src/Havoc/profiles/havoc.yaotl"))
-            .expect("sample profile should parse");
+        let profile = Profile::parse(HAVOC_PROFILE).expect("sample profile should parse");
 
         assert_eq!(profile.teamserver.host, "0.0.0.0");
         assert_eq!(profile.teamserver.port, 40056);
@@ -749,8 +868,7 @@ mod tests {
 
     #[test]
     fn parses_listener_profile() {
-        let profile = Profile::parse(include_str!("../../../src/Havoc/profiles/http_smb.yaotl"))
-            .expect("listener profile should parse");
+        let profile = Profile::parse(HTTP_SMB_PROFILE).expect("listener profile should parse");
 
         assert_eq!(profile.listeners.http.len(), 1);
         assert_eq!(profile.listeners.smb.len(), 1);
@@ -778,9 +896,7 @@ mod tests {
 
     #[test]
     fn parses_webhook_profile() {
-        let profile =
-            Profile::parse(include_str!("../../../src/Havoc/profiles/webhook_example.yaotl"))
-                .expect("webhook profile should parse");
+        let profile = Profile::parse(WEBHOOK_PROFILE).expect("webhook profile should parse");
 
         let webhook = profile.webhook.and_then(|config| config.discord);
         assert_eq!(webhook.as_ref().map(|discord| discord.url.as_str()), Some("..."));
@@ -909,9 +1025,8 @@ mod tests {
 
     #[test]
     fn parses_from_reader() {
-        let profile =
-            Profile::from_reader(include_str!("../../../src/Havoc/data/havoc.yaotl").as_bytes())
-                .expect("embedded data profile should parse");
+        let profile = Profile::from_reader(HAVOC_DATA_PROFILE.as_bytes())
+            .expect("embedded data profile should parse");
 
         assert_eq!(profile.teamserver.port, 40056);
         assert_eq!(profile.demon.sleep, Some(2));
@@ -923,8 +1038,7 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().expect("temporary directory should be created");
         let profile_path = temp_dir.path().join("profile.yaotl");
 
-        std::fs::write(&profile_path, include_str!("../../../src/Havoc/profiles/havoc.yaotl"))
-            .expect("profile fixture should be written");
+        std::fs::write(&profile_path, HAVOC_PROFILE).expect("profile fixture should be written");
 
         let profile = Profile::from_file(&profile_path).expect("profile should load from disk");
 
@@ -934,8 +1048,7 @@ mod tests {
 
     #[test]
     fn validates_sample_profile() {
-        let profile = Profile::parse(include_str!("../../../src/Havoc/profiles/havoc.yaotl"))
-            .expect("sample profile should parse");
+        let profile = Profile::parse(HAVOC_PROFILE).expect("sample profile should parse");
 
         assert!(profile.validate().is_ok());
     }

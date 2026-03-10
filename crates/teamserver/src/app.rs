@@ -1,11 +1,19 @@
 //! Shared application state for the Red Cell teamserver.
 
-use axum::extract::FromRef;
+use axum::{
+    Router,
+    body::Body,
+    extract::FromRef,
+    http::{Request, StatusCode},
+    response::IntoResponse,
+    routing::any,
+};
 use red_cell_common::config::Profile;
 
 use crate::{
     AgentRegistry, ApiRuntime, AuthService, Database, EventBus, ListenerManager,
-    OperatorConnectionManager, PayloadBuilderService, SocketRelayManager,
+    OperatorConnectionManager, PayloadBuilderService, SocketRelayManager, api_routes,
+    websocket_routes,
 };
 
 /// Shared state injected into Axum routes and middleware.
@@ -85,4 +93,35 @@ impl FromRef<TeamserverState> for SocketRelayManager {
     fn from_ref(input: &TeamserverState) -> Self {
         input.sockets.clone()
     }
+}
+
+/// Build the main teamserver router used by the binary and integration tests.
+pub fn build_router(state: TeamserverState) -> Router {
+    let api = state.api.clone();
+
+    Router::new()
+        .nest("/havoc", websocket_routes())
+        .nest("/api/v1", api_routes(api))
+        .fallback(any(agent_listener_placeholder))
+        .with_state(state)
+}
+
+async fn agent_listener_placeholder(
+    axum::extract::State(state): axum::extract::State<TeamserverState>,
+    request: Request<Body>,
+) -> impl IntoResponse {
+    tracing::debug!(
+        method = %request.method(),
+        path = %request.uri().path(),
+        secure_listener_count = state
+            .profile
+            .listeners
+            .http
+            .iter()
+            .filter(|listener| listener.secure)
+            .count(),
+        "agent listener placeholder hit"
+    );
+
+    (StatusCode::NOT_IMPLEMENTED, "agent listener endpoint not implemented yet")
 }

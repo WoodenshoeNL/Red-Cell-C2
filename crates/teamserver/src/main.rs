@@ -3,26 +3,19 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use axum::{
-    Router,
-    body::Body,
-    http::{Request, StatusCode},
-    response::IntoResponse,
-    routing::any,
-};
 use axum_server::{Handle, tls_rustls::RustlsConfig};
 use clap::Parser;
 use red_cell::{
     AgentRegistry, ApiRuntime, AuthService, Database, EventBus, ListenerManager,
     ListenerManagerError, OperatorConnectionManager, PayloadBuilderService, PluginRuntime,
-    SocketRelayManager, TeamserverState, api_routes, websocket_routes,
+    SocketRelayManager, TeamserverState, build_router,
 };
 use red_cell_common::config::{Profile, ProfileValidationError};
 use red_cell_common::tls::{
     TlsKeyAlgorithm, install_default_crypto_provider, resolve_tls_identity,
 };
 use tokio::net::lookup_host;
-use tracing::{debug, info, instrument};
+use tracing::{info, instrument};
 
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -174,38 +167,6 @@ fn tls_subject_alt_names(host: &str) -> Vec<String> {
     }
 
     names
-}
-
-#[instrument(skip(state))]
-fn build_router(state: TeamserverState) -> Router {
-    let api = state.api.clone();
-
-    Router::new()
-        .nest("/havoc", websocket_routes())
-        .nest("/api/v1", api_routes(api))
-        .fallback(any(agent_listener_placeholder))
-        .with_state(state)
-}
-
-#[instrument(skip(state, request))]
-async fn agent_listener_placeholder(
-    axum::extract::State(state): axum::extract::State<TeamserverState>,
-    request: Request<Body>,
-) -> impl IntoResponse {
-    debug!(
-        method = %request.method(),
-        path = %request.uri().path(),
-        secure_listener_count = state
-            .profile
-            .listeners
-            .http
-            .iter()
-            .filter(|listener| listener.secure)
-            .count(),
-        "agent listener placeholder hit"
-    );
-
-    (StatusCode::NOT_IMPLEMENTED, "agent listener endpoint not implemented yet")
 }
 
 #[instrument(skip(handle))]

@@ -22,7 +22,7 @@ pub use api::{
     ApiRateLimit, ApiRuntime, ListenerManagementApiAccess, ReadApiAccess, api_routes,
     json_error_response,
 };
-pub use app::TeamserverState;
+pub use app::{TeamserverState, build_router};
 pub use audit::{
     AuditDetails, AuditPage, AuditQuery, AuditRecord, AuditResultStatus, audit_details,
     login_parameters, parameter_object, query_audit_log, record_operator_action,

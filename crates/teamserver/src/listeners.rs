@@ -1367,11 +1367,21 @@ impl DnsListenerState {
         match c2_query {
             DnsC2Query::Upload { agent_id, seq, total, data } => {
                 let txt = self.handle_upload(agent_id, seq, total, data, peer_ip).await;
-                Some(build_dns_txt_response(query.id, &query.qname_raw, txt.as_bytes()))
+                Some(build_dns_txt_response(
+                    query.id,
+                    &query.qname_raw,
+                    query.qtype,
+                    txt.as_bytes(),
+                ))
             }
             DnsC2Query::Download { agent_id, seq } => {
                 let txt = self.handle_download(agent_id, seq).await;
-                Some(build_dns_txt_response(query.id, &query.qname_raw, txt.as_bytes()))
+                Some(build_dns_txt_response(
+                    query.id,
+                    &query.qname_raw,
+                    query.qtype,
+                    txt.as_bytes(),
+                ))
             }
         }
     }
@@ -1668,7 +1678,7 @@ fn chunk_response_to_b32hex(payload: &[u8]) -> Vec<String> {
 /// The question section is reconstructed from `qname_raw` (which already includes the
 /// zero-label terminator), and a single answer TXT record is appended using a pointer
 /// back to offset 12 (the start of the question QNAME).
-fn build_dns_txt_response(query_id: u16, qname_raw: &[u8], txt_data: &[u8]) -> Vec<u8> {
+fn build_dns_txt_response(query_id: u16, qname_raw: &[u8], qtype: u16, txt_data: &[u8]) -> Vec<u8> {
     // Clamp TXT data to 255 bytes (single TXT string limit per RFC 1035).
     let txt_data = &txt_data[..txt_data.len().min(255)];
     // RDLENGTH = 1 (length byte) + txt_data.len()
@@ -1690,7 +1700,7 @@ fn build_dns_txt_response(query_id: u16, qname_raw: &[u8], txt_data: &[u8]) -> V
     // Question section: QNAME (includes zero-label terminator) + QTYPE + QCLASS
     // qname_raw includes the zero-label terminator as captured by parse_dns_query.
     response.extend_from_slice(qname_raw);
-    response.extend_from_slice(&DNS_TYPE_TXT.to_be_bytes()); // QTYPE
+    response.extend_from_slice(&qtype.to_be_bytes()); // QTYPE
     response.extend_from_slice(&DNS_CLASS_IN.to_be_bytes()); // QCLASS
 
     // Answer RR
@@ -3073,9 +3083,9 @@ mod tests {
     // ── DNS C2 unit tests ─────────────────────────────────────────────────────
 
     use super::{
-        DNS_HEADER_LEN, DNS_TYPE_TXT, DnsListenerState, DnsPendingResponse, base32hex_decode,
-        base32hex_encode, build_dns_txt_response, chunk_response_to_b32hex, parse_dns_c2_query,
-        parse_dns_query,
+        DNS_HEADER_LEN, DNS_TYPE_A, DNS_TYPE_TXT, DnsListenerState, DnsPendingResponse,
+        base32hex_decode, base32hex_encode, build_dns_txt_response, chunk_response_to_b32hex,
+        parse_dns_c2_query, parse_dns_query,
     };
     use tokio::net::UdpSocket as TokioUdpSocket;
 
@@ -3098,8 +3108,8 @@ mod tests {
         })
     }
 
-    /// Build a minimal DNS TXT query packet for `qname`.
-    fn build_dns_txt_query(id: u16, qname: &str) -> Vec<u8> {
+    /// Build a minimal DNS query packet for `qname`.
+    fn build_dns_query(id: u16, qname: &str, qtype: u16) -> Vec<u8> {
         let mut buf = Vec::new();
         // Header
         buf.extend_from_slice(&id.to_be_bytes());
@@ -3114,9 +3124,13 @@ mod tests {
             buf.extend_from_slice(label.as_bytes());
         }
         buf.push(0); // zero terminator
-        buf.extend_from_slice(&DNS_TYPE_TXT.to_be_bytes()); // QTYPE
+        buf.extend_from_slice(&qtype.to_be_bytes()); // QTYPE
         buf.extend_from_slice(&1u16.to_be_bytes()); // QCLASS IN
         buf
+    }
+
+    fn build_dns_txt_query(id: u16, qname: &str) -> Vec<u8> {
+        build_dns_query(id, qname, DNS_TYPE_TXT)
     }
 
     #[test]
@@ -3213,10 +3227,10 @@ mod tests {
 
     #[test]
     fn build_dns_txt_response_produces_parseable_answer() {
-        let packet = build_dns_txt_query(0xABCD, "test.c2.example.com");
+        let packet = build_dns_query(0xABCD, "test.c2.example.com", DNS_TYPE_A);
         let parsed = parse_dns_query(&packet).expect("parse failed");
         let txt = b"ok";
-        let response = build_dns_txt_response(parsed.id, &parsed.qname_raw, txt);
+        let response = build_dns_txt_response(parsed.id, &parsed.qname_raw, parsed.qtype, txt);
 
         // Response must be at least header + question + answer
         assert!(response.len() >= DNS_HEADER_LEN);
@@ -3225,6 +3239,12 @@ mod tests {
         // ANCOUNT = 1
         let ancount = u16::from_be_bytes([response[6], response[7]]);
         assert_eq!(ancount, 1);
+        let question_qtype_offset = DNS_HEADER_LEN + parsed.qname_raw.len();
+        let echoed_qtype = u16::from_be_bytes([
+            response[question_qtype_offset],
+            response[question_qtype_offset + 1],
+        ]);
+        assert_eq!(echoed_qtype, DNS_TYPE_A);
     }
 
     #[test]

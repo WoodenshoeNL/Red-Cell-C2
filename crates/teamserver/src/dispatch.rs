@@ -64,6 +64,17 @@ struct CredentialCapture {
     pattern: &'static str,
 }
 
+#[derive(Clone, Debug)]
+struct AgentResponseEntry {
+    agent_id: u32,
+    command_id: u32,
+    request_id: u32,
+    kind: String,
+    message: String,
+    extra: BTreeMap<String, Value>,
+    output: String,
+}
+
 #[derive(Clone, Copy)]
 struct BuiltinDispatchContext<'a> {
     registry: &'a AgentRegistry,
@@ -799,6 +810,59 @@ async fn insert_loot_record(
     Ok(LootRecord { id: Some(id), ..loot })
 }
 
+async fn persist_agent_response_record(
+    database: &Database,
+    response: &AgentResponseEntry,
+    context: &LootContext,
+) -> Result<(), CommandDispatchError> {
+    let timestamp = OffsetDateTime::now_utc().format(&Rfc3339)?;
+    let final_extra = agent_response_extra(
+        response.extra.clone(),
+        response.request_id,
+        &response.kind,
+        &response.message,
+        context,
+    );
+    database
+        .agent_responses()
+        .create(&crate::AgentResponseRecord {
+            id: None,
+            agent_id: response.agent_id,
+            command_id: response.command_id,
+            request_id: response.request_id,
+            response_type: response.kind.clone(),
+            message: response.message.clone(),
+            output: response.output.clone(),
+            command_line: non_empty_option(&context.command_line),
+            task_id: non_empty_option(&context.task_id),
+            operator: non_empty_option(&context.operator),
+            received_at: timestamp,
+            extra: Some(Value::Object(final_extra.into_iter().collect())),
+        })
+        .await?;
+    Ok(())
+}
+
+async fn broadcast_and_persist_agent_response(
+    database: &Database,
+    events: &EventBus,
+    response: AgentResponseEntry,
+    context: &LootContext,
+) -> Result<(), CommandDispatchError> {
+    persist_agent_response_record(database, &response, context).await?;
+    events.broadcast(agent_response_event_with_extra_and_context(
+        response.agent_id,
+        response.command_id,
+        response.request_id,
+        &response.kind,
+        &response.message,
+        response.extra,
+        response.output,
+        Some(context),
+    )?);
+    Ok(())
+}
+
 fn loot_new_event(
     loot: &LootRecord,
     command_id: u32,
@@ -1081,15 +1145,21 @@ async fn handle_command_output_callback(
         return Ok(None);
     }
     let context = loot_context(registry, agent_id, request_id).await;
-
-    events.broadcast(agent_response_event(
-        agent_id,
-        u32::from(DemonCommand::CommandOutput),
-        request_id,
-        "Good",
-        &format!("Received Output [{} bytes]:", output.len()),
-        Some(output.clone()),
-    )?);
+    broadcast_and_persist_agent_response(
+        database,
+        events,
+        AgentResponseEntry {
+            agent_id,
+            command_id: u32::from(DemonCommand::CommandOutput),
+            request_id,
+            kind: "Good".to_owned(),
+            message: format!("Received Output [{} bytes]:", output.len()),
+            extra: BTreeMap::new(),
+            output: output.clone(),
+        },
+        &context,
+    )
+    .await?;
     persist_credentials_from_output(
         database,
         events,
@@ -1137,14 +1207,21 @@ async fn handle_beacon_output_callback(
         DemonCallback::Output => {
             let output = parser.read_string("beacon output text")?;
             if !output.is_empty() {
-                events.broadcast(agent_response_event(
-                    agent_id,
-                    u32::from(DemonCommand::BeaconOutput),
-                    request_id,
-                    "Good",
-                    &format!("Received Output [{} bytes]:", output.len()),
-                    Some(output.clone()),
-                )?);
+                broadcast_and_persist_agent_response(
+                    database,
+                    events,
+                    AgentResponseEntry {
+                        agent_id,
+                        command_id: u32::from(DemonCommand::BeaconOutput),
+                        request_id,
+                        kind: "Good".to_owned(),
+                        message: format!("Received Output [{} bytes]:", output.len()),
+                        extra: BTreeMap::new(),
+                        output: output.clone(),
+                    },
+                    &context,
+                )
+                .await?;
                 persist_credentials_from_output(
                     database,
                     events,
@@ -1160,14 +1237,21 @@ async fn handle_beacon_output_callback(
         DemonCallback::OutputOem | DemonCallback::OutputUtf8 => {
             let output = parser.read_utf16("beacon output utf16")?;
             if !output.is_empty() {
-                events.broadcast(agent_response_event(
-                    agent_id,
-                    u32::from(DemonCommand::BeaconOutput),
-                    request_id,
-                    "Good",
-                    &format!("Received Output [{} bytes]:", output.len()),
-                    Some(output.clone()),
-                )?);
+                broadcast_and_persist_agent_response(
+                    database,
+                    events,
+                    AgentResponseEntry {
+                        agent_id,
+                        command_id: u32::from(DemonCommand::BeaconOutput),
+                        request_id,
+                        kind: "Good".to_owned(),
+                        message: format!("Received Output [{} bytes]:", output.len()),
+                        extra: BTreeMap::new(),
+                        output: output.clone(),
+                    },
+                    &context,
+                )
+                .await?;
                 persist_credentials_from_output(
                     database,
                     events,
@@ -1183,14 +1267,21 @@ async fn handle_beacon_output_callback(
         DemonCallback::ErrorMessage => {
             let output = parser.read_string("beacon error text")?;
             if !output.is_empty() {
-                events.broadcast(agent_response_event(
-                    agent_id,
-                    u32::from(DemonCommand::BeaconOutput),
-                    request_id,
-                    "Error",
-                    &format!("Received Output [{} bytes]:", output.len()),
-                    Some(output.clone()),
-                )?);
+                broadcast_and_persist_agent_response(
+                    database,
+                    events,
+                    AgentResponseEntry {
+                        agent_id,
+                        command_id: u32::from(DemonCommand::BeaconOutput),
+                        request_id,
+                        kind: "Error".to_owned(),
+                        message: format!("Received Output [{} bytes]:", output.len()),
+                        extra: BTreeMap::new(),
+                        output: output.clone(),
+                    },
+                    &context,
+                )
+                .await?;
                 persist_credentials_from_output(
                     database,
                     events,
@@ -2440,7 +2531,7 @@ fn agent_response_event(
     message: &str,
     output: Option<String>,
 ) -> Result<OperatorMessage, CommandDispatchError> {
-    agent_response_event_with_extra(
+    agent_response_event_with_extra_and_context(
         agent_id,
         command_id,
         request_id,
@@ -2448,6 +2539,7 @@ fn agent_response_event(
         message,
         BTreeMap::new(),
         output.unwrap_or_default(),
+        None,
     )
 }
 
@@ -2460,10 +2552,31 @@ fn agent_response_event_with_extra(
     mut extra: BTreeMap<String, Value>,
     output: String,
 ) -> Result<OperatorMessage, CommandDispatchError> {
+    agent_response_event_with_extra_and_context(
+        agent_id,
+        command_id,
+        request_id,
+        kind,
+        message,
+        std::mem::take(&mut extra),
+        output,
+        None,
+    )
+}
+
+fn agent_response_event_with_extra_and_context(
+    agent_id: u32,
+    command_id: u32,
+    request_id: u32,
+    kind: &str,
+    message: &str,
+    extra: BTreeMap<String, Value>,
+    output: String,
+    context: Option<&LootContext>,
+) -> Result<OperatorMessage, CommandDispatchError> {
     let timestamp = OffsetDateTime::now_utc().format(&Rfc3339)?;
-    extra.insert("Type".to_owned(), Value::String(kind.to_owned()));
-    extra.insert("Message".to_owned(), Value::String(message.to_owned()));
-    extra.insert("RequestID".to_owned(), Value::String(format!("{request_id:X}")));
+    let context = context.cloned().unwrap_or_default();
+    let extra = agent_response_extra(extra, request_id, kind, message, &context);
 
     Ok(OperatorMessage::AgentResponse(Message {
         head: MessageHead {
@@ -2476,10 +2589,36 @@ fn agent_response_event_with_extra(
             demon_id: format!("{agent_id:08X}"),
             command_id: command_id.to_string(),
             output,
-            command_line: None,
+            command_line: non_empty_option(&context.command_line),
             extra,
         },
     }))
+}
+
+fn agent_response_extra(
+    mut extra: BTreeMap<String, Value>,
+    request_id: u32,
+    kind: &str,
+    message: &str,
+    context: &LootContext,
+) -> BTreeMap<String, Value> {
+    extra.insert("Type".to_owned(), Value::String(kind.to_owned()));
+    extra.insert("Message".to_owned(), Value::String(message.to_owned()));
+    extra.insert("RequestID".to_owned(), Value::String(format!("{request_id:X}")));
+    if !context.operator.is_empty() {
+        extra.insert("Operator".to_owned(), Value::String(context.operator.clone()));
+    }
+    if !context.command_line.is_empty() {
+        extra.insert("CommandLine".to_owned(), Value::String(context.command_line.clone()));
+    }
+    if !context.task_id.is_empty() {
+        extra.insert("TaskID".to_owned(), Value::String(context.task_id.clone()));
+    }
+    extra
+}
+
+fn non_empty_option(value: &str) -> Option<String> {
+    if value.is_empty() { None } else { Some(value.to_owned()) }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3421,10 +3560,16 @@ mod tests {
         let OperatorMessage::AgentResponse(output_message) = first else {
             panic!("expected command output response");
         };
+        assert_eq!(output_message.info.command_line.as_deref(), Some("sekurlsa::logonpasswords"));
         assert_eq!(
             output_message.info.extra.get("Message"),
             Some(&Value::String("Received Output [55 bytes]:".to_owned()))
         );
+        assert_eq!(
+            output_message.info.extra.get("RequestID"),
+            Some(&Value::String("66".to_owned()))
+        );
+        assert_eq!(output_message.info.extra.get("TaskID"), Some(&Value::String("66".to_owned())));
 
         let OperatorMessage::AgentResponse(loot_message) = second else {
             panic!("expected loot-new response");
@@ -3457,6 +3602,96 @@ mod tests {
         assert!(loot.iter().all(|entry| {
             entry.metadata.as_ref().and_then(|value| value.get("operator"))
                 == Some(&Value::String("operator".to_owned()))
+        }));
+        let responses = database.agent_responses().list_for_agent(0xABCD_EE01).await?;
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0].request_id, 0x66);
+        assert_eq!(responses[0].response_type, "Good");
+        assert_eq!(responses[0].command_line.as_deref(), Some("sekurlsa::logonpasswords"));
+        assert_eq!(responses[0].task_id.as_deref(), Some("66"));
+        assert_eq!(responses[0].operator.as_deref(), Some("operator"));
+        assert_eq!(
+            responses[0].output,
+            "Username : alice\nPassword : Sup3rSecret!\nDomain   : LAB"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_beacon_output_and_error_callbacks_persist_response_history()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xABCD_EE02,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        registry
+            .enqueue_job(
+                0xABCD_EE02,
+                Job {
+                    command: u32::from(DemonCommand::BeaconOutput),
+                    request_id: 0x67,
+                    payload: Vec::new(),
+                    command_line: "inline-execute seatbelt".to_owned(),
+                    task_id: "67".to_owned(),
+                    created_at: "2026-03-10T10:05:00Z".to_owned(),
+                    operator: "operator".to_owned(),
+                },
+            )
+            .await?;
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry,
+            events,
+            database.clone(),
+            sockets,
+            None,
+        );
+
+        let mut output = Vec::new();
+        add_u32(&mut output, u32::from(DemonCallback::Output));
+        add_bytes(&mut output, b"Seatbelt complete");
+        dispatcher
+            .dispatch(0xABCD_EE02, u32::from(DemonCommand::BeaconOutput), 0x67, &output)
+            .await?;
+
+        let mut error = Vec::new();
+        add_u32(&mut error, u32::from(DemonCallback::ErrorMessage));
+        add_bytes(&mut error, b"access denied");
+        dispatcher
+            .dispatch(0xABCD_EE02, u32::from(DemonCommand::BeaconOutput), 0x67, &error)
+            .await?;
+
+        let first = receiver.recv().await.ok_or("missing beacon output event")?;
+        let second = receiver.recv().await.ok_or("missing beacon error event")?;
+
+        let OperatorMessage::AgentResponse(first_message) = first else {
+            panic!("expected beacon output response");
+        };
+        assert_eq!(first_message.info.command_line.as_deref(), Some("inline-execute seatbelt"));
+        assert_eq!(first_message.info.extra.get("Type"), Some(&Value::String("Good".to_owned())));
+
+        let OperatorMessage::AgentResponse(second_message) = second else {
+            panic!("expected beacon error response");
+        };
+        assert_eq!(second_message.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
+        assert_eq!(second_message.info.extra.get("TaskID"), Some(&Value::String("67".to_owned())));
+
+        let responses = database.agent_responses().list_for_agent(0xABCD_EE02).await?;
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0].output, "Seatbelt complete");
+        assert_eq!(responses[0].response_type, "Good");
+        assert_eq!(responses[1].output, "access denied");
+        assert_eq!(responses[1].response_type, "Error");
+        assert!(responses.iter().all(|response| response.request_id == 0x67));
+        assert!(responses.iter().all(|response| {
+            response.command_line.as_deref() == Some("inline-execute seatbelt")
         }));
         Ok(())
     }

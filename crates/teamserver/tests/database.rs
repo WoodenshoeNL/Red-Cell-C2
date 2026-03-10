@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use red_cell::database::{
-    AuditLogEntry, Database, LinkRecord, ListenerStatus, LootRecord, PersistedListener,
-    PersistedListenerState, TeamserverError,
+    AgentResponseRecord, AuditLogEntry, Database, LinkRecord, ListenerStatus, LootRecord,
+    PersistedListener, PersistedListenerState, TeamserverError,
 };
 use red_cell::{
     AuditQuery, AuditResultStatus, audit_details, query_audit_log, record_operator_action,
@@ -108,6 +108,7 @@ async fn database_runs_migrations_for_all_tables() -> Result<(), TeamserverError
     assert!(tables.iter().any(|name| name == "ts_listeners"));
     assert!(tables.iter().any(|name| name == "ts_links"));
     assert!(tables.iter().any(|name| name == "ts_loot"));
+    assert!(tables.iter().any(|name| name == "ts_agent_responses"));
     assert!(tables.iter().any(|name| name == "ts_audit_log"));
 
     Ok(())
@@ -270,6 +271,44 @@ async fn audit_log_repository_supports_insert_query_and_delete() -> Result<(), T
 
     audit.delete(id).await?;
     assert!(audit.get(id).await?.is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_response_repository_supports_insert_query_and_delete() -> Result<(), TeamserverError>
+{
+    let database = test_database().await?;
+    let agents = database.agents();
+    let responses = database.agent_responses();
+    let agent = sample_agent(0x2200_0002);
+
+    agents.create(&agent).await?;
+
+    let record = AgentResponseRecord {
+        id: None,
+        agent_id: agent.agent_id,
+        command_id: 94,
+        request_id: 0x2A,
+        response_type: "Good".to_owned(),
+        message: "Received Output [5 bytes]:".to_owned(),
+        output: "whoami".to_owned(),
+        command_line: Some("shell whoami".to_owned()),
+        task_id: Some("2A".to_owned()),
+        operator: Some("neo".to_owned()),
+        received_at: "2026-03-10T12:00:00Z".to_owned(),
+        extra: Some(json!({ "RequestID": "2A", "Type": "Good" })),
+    };
+
+    let id = responses.create(&record).await?;
+    let stored = responses.get(id).await?.expect("agent response should exist");
+    assert_eq!(stored.id, Some(id));
+    assert_eq!(stored.agent_id, record.agent_id);
+    assert_eq!(responses.list_for_agent(agent.agent_id).await?, vec![stored.clone()]);
+    assert_eq!(responses.list().await?, vec![stored.clone()]);
+
+    responses.delete(id).await?;
+    assert!(responses.get(id).await?.is_none());
 
     Ok(())
 }

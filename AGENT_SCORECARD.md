@@ -19,18 +19,29 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 0 | 0 | 0 |
-| Missing tests | 0 | 0 | 0 |
+| Missing tests | 0 | 1 | 0 |
 | Clippy warnings | 0 | 0 | 0 |
-| Protocol errors | 0 | 0 | 0 |
-| Security issues | 0 | 1 | 0 |
+| Protocol errors | 1 | 1 | 0 |
+| Security issues | 0 | 4 | 0 |
 | Architecture drift | 0 | 0 | 0 |
-| Memory / resource leaks | 0 | 0 | 0 |
+| Memory / resource leaks | 0 | 1 | 0 |
 
 ---
 
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-10 16:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 1 | Protocol errors | DNS listeners omitted from profile startup (red-cell-c2-srf) |
+| Codex | 6 | Security ×4, Memory/resource ×1, Missing tests ×1 | Timing attack on auth, unbounded HTTP body, no WS brute-force protection, agent_id=0 bypass, request_contexts leak, no E2E integration test |
+| Cursor | 0 | — | No findings this run |
+
+Overall codebase health: on track
+Biggest blindspot: HTTP listener accepts arbitrarily large unauthenticated bodies — unauthenticated OOM DoS via agent-facing port
 
 ### QA Review — 2026-03-10 15:49 — cfe631..0f7d29
 

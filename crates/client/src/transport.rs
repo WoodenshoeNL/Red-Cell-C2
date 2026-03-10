@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use base64::Engine;
 use eframe::egui;
 use futures_util::{SinkExt, StreamExt};
 use red_cell_common::OperatorInfo;
@@ -10,6 +11,7 @@ use red_cell_common::operator::{
     AgentResponseInfo, ChatUserInfo, FlatInfo, ListenerInfo, ListenerMarkInfo, Message,
     OperatorMessage,
 };
+use serde::Deserialize;
 use thiserror::Error;
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 use tokio::sync::{mpsc, watch};
@@ -213,6 +215,34 @@ pub(crate) struct AgentConsoleEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FileBrowserEntry {
+    pub(crate) name: String,
+    pub(crate) path: String,
+    pub(crate) is_dir: bool,
+    pub(crate) size_label: String,
+    pub(crate) size_bytes: Option<u64>,
+    pub(crate) modified_at: String,
+    pub(crate) permissions: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DownloadProgress {
+    pub(crate) file_id: String,
+    pub(crate) remote_path: String,
+    pub(crate) current_size: u64,
+    pub(crate) expected_size: u64,
+    pub(crate) state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct AgentFileBrowserState {
+    pub(crate) current_dir: Option<String>,
+    pub(crate) directories: BTreeMap<String, Vec<FileBrowserEntry>>,
+    pub(crate) downloads: BTreeMap<String, DownloadProgress>,
+    pub(crate) status_message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentSummary {
     pub(crate) name_id: String,
     pub(crate) status: String,
@@ -248,6 +278,7 @@ pub(crate) struct AppState {
     pub(crate) operator_info: Option<OperatorInfo>,
     pub(crate) agents: Vec<AgentSummary>,
     pub(crate) agent_consoles: BTreeMap<String, Vec<AgentConsoleEntry>>,
+    pub(crate) file_browsers: BTreeMap<String, AgentFileBrowserState>,
     pub(crate) listeners: Vec<ListenerSummary>,
     pub(crate) loot: Vec<LootItem>,
     pub(crate) chat_messages: Vec<ChatMessage>,
@@ -262,6 +293,7 @@ impl AppState {
             operator_info: None,
             agents: Vec::new(),
             agent_consoles: BTreeMap::new(),
+            file_browsers: BTreeMap::new(),
             listeners: Vec::new(),
             loot: Vec::new(),
             chat_messages: Vec::new(),
@@ -502,6 +534,9 @@ impl AppState {
     }
 
     fn handle_agent_response(&mut self, message: Message<AgentResponseInfo>) {
+        let agent_id = normalize_agent_id(&message.info.demon_id);
+        self.update_file_browser_state(&agent_id, &message.info);
+
         if response_is_loot_notification(&message.info) {
             if let Some(loot_item) = loot_item_from_response(&message.info) {
                 self.upsert_loot(loot_item);
@@ -514,7 +549,6 @@ impl AppState {
             return;
         }
 
-        let agent_id = normalize_agent_id(&message.info.demon_id);
         self.agent_consoles.entry(agent_id).or_default().push(AgentConsoleEntry {
             kind: AgentConsoleEntryKind::from_command_id(&message.info.command_id),
             command_line: message.info.command_line,
@@ -543,6 +577,60 @@ impl AppState {
                     && existing.agent_id == item.agent_id
                     && existing.name == item.name)
             });
+        }
+    }
+
+    fn update_file_browser_state(&mut self, agent_id: &str, info: &AgentResponseInfo) {
+        let browser = self.file_browsers.entry(agent_id.to_owned()).or_default();
+
+        if let Some(misc_type) = extra_string(&info.extra, "MiscType") {
+            match misc_type.as_str() {
+                "FileExplorer" => {
+                    if let Some(snapshot) = file_browser_snapshot_from_response(info) {
+                        browser.current_dir = Some(snapshot.path.clone());
+                        browser.directories.insert(snapshot.path.clone(), snapshot.entries);
+                        browser.status_message = Some("Directory listing completed".to_owned());
+                    }
+                }
+                "download-progress" => {
+                    if let Some(progress) = download_progress_from_response(info) {
+                        if progress.state.eq_ignore_ascii_case("Removed") {
+                            browser.downloads.remove(&progress.file_id);
+                        } else {
+                            browser.downloads.insert(progress.file_id.clone(), progress);
+                        }
+                    }
+                }
+                "download" | "loot-new" => {
+                    if let Some(file_id) = extra_string(&info.extra, "FileID") {
+                        browser.downloads.remove(&file_id);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if info.command_id != u32::from(DemonCommand::CommandFs).to_string() {
+            return;
+        }
+
+        let output = sanitize_output(&info.output);
+        if output.is_empty() {
+            return;
+        }
+
+        if let Some(path) = output.strip_prefix("Current directory: ") {
+            browser.current_dir = Some(path.trim().to_owned());
+            browser.status_message = Some(output);
+        } else if let Some(path) = output.strip_prefix("Changed directory: ") {
+            browser.current_dir = Some(path.trim().to_owned());
+            browser.status_message = Some(output);
+        } else if output.starts_with("Created directory: ")
+            || output.starts_with("Removed ")
+            || output.starts_with("Uploaded file: ")
+            || output.starts_with("Failed to read file: ")
+        {
+            browser.status_message = Some(output);
         }
     }
 }
@@ -995,6 +1083,114 @@ fn loot_kind_from_strings(
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct FileBrowserSnapshotPayload {
+    #[serde(rename = "Path")]
+    path: String,
+    #[serde(rename = "Files", default)]
+    files: Vec<FileBrowserSnapshotRow>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FileBrowserSnapshotRow {
+    #[serde(rename = "Type", default)]
+    entry_type: String,
+    #[serde(rename = "Size", default)]
+    size: String,
+    #[serde(rename = "Modified", default)]
+    modified: String,
+    #[serde(rename = "Name", default)]
+    name: String,
+    #[serde(rename = "Permissions", default)]
+    permissions: String,
+}
+
+struct FileBrowserSnapshot {
+    path: String,
+    entries: Vec<FileBrowserEntry>,
+}
+
+fn file_browser_snapshot_from_response(
+    info: &red_cell_common::operator::AgentResponseInfo,
+) -> Option<FileBrowserSnapshot> {
+    let encoded = extra_string(&info.extra, "MiscData")?;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
+    let payload = serde_json::from_slice::<FileBrowserSnapshotPayload>(&bytes).ok()?;
+    let path = payload.path.trim().to_owned();
+    if path.is_empty() {
+        return None;
+    }
+
+    let entries = payload
+        .files
+        .into_iter()
+        .map(|row| {
+            let name = row.name.trim().to_owned();
+            let path = join_remote_path(&path, &name);
+            let size_label = row.size.trim().to_owned();
+            FileBrowserEntry {
+                name,
+                path,
+                is_dir: row.entry_type.eq_ignore_ascii_case("dir"),
+                size_bytes: parse_human_size(&size_label),
+                size_label,
+                modified_at: row.modified.trim().to_owned(),
+                permissions: row.permissions.trim().to_owned(),
+            }
+        })
+        .collect();
+
+    Some(FileBrowserSnapshot { path, entries })
+}
+
+fn download_progress_from_response(
+    info: &red_cell_common::operator::AgentResponseInfo,
+) -> Option<DownloadProgress> {
+    Some(DownloadProgress {
+        file_id: extra_string(&info.extra, "FileID")?,
+        remote_path: extra_string(&info.extra, "FileName")?,
+        current_size: extra_u64(&info.extra, "CurrentSize")?,
+        expected_size: extra_u64(&info.extra, "ExpectedSize")?,
+        state: extra_string(&info.extra, "State").unwrap_or_else(|| "InProgress".to_owned()),
+    })
+}
+
+fn join_remote_path(base: &str, name: &str) -> String {
+    if base.is_empty() {
+        return name.to_owned();
+    }
+    if name.is_empty() {
+        return base.to_owned();
+    }
+
+    let separator = if base.contains('\\') { '\\' } else { '/' };
+    if base.ends_with(['\\', '/']) {
+        format!("{base}{name}")
+    } else {
+        format!("{base}{separator}{name}")
+    }
+}
+
+fn parse_human_size(value: &str) -> Option<u64> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut parts = trimmed.split_whitespace();
+    let number = parts.next()?.parse::<f64>().ok()?;
+    let unit = parts.next().unwrap_or("B").to_ascii_uppercase();
+    let multiplier = match unit.as_str() {
+        "B" => 1_f64,
+        "KB" => 1024_f64,
+        "MB" => 1024_f64 * 1024_f64,
+        "GB" => 1024_f64 * 1024_f64 * 1024_f64,
+        _ => return None,
+    };
+
+    Some((number * multiplier).round() as u64)
+}
+
 #[derive(Debug)]
 struct DangerousCertificateVerifier {
     provider: crypto::CryptoProvider,
@@ -1276,6 +1472,110 @@ mod tests {
         assert_eq!(state.loot.len(), 1);
         assert_eq!(state.loot[0].kind, LootKind::Screenshot);
         assert_eq!(state.loot[0].size_bytes, Some(512));
+    }
+
+    #[test]
+    fn file_explorer_events_update_file_browser_state() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+        let payload = serde_json::json!({
+            "Path": "C:\\Temp",
+            "Files": [
+                {
+                    "Type": "dir",
+                    "Size": "",
+                    "Modified": "10/03/2026  12:00",
+                    "Name": "Logs",
+                    "Permissions": "rwx"
+                },
+                {
+                    "Type": "",
+                    "Size": "1.5 KB",
+                    "Modified": "10/03/2026  12:01",
+                    "Name": "report.txt"
+                }
+            ]
+        });
+        let mut extra = BTreeMap::new();
+        extra.insert("MiscType".to_owned(), serde_json::Value::String("FileExplorer".to_owned()));
+        extra.insert(
+            "MiscData".to_owned(),
+            serde_json::Value::String(
+                base64::engine::general_purpose::STANDARD
+                    .encode(serde_json::to_vec(&payload).unwrap_or_default()),
+            ),
+        );
+
+        state.apply_operator_message(OperatorMessage::AgentResponse(Message {
+            head: head(EventCode::Session),
+            info: AgentResponseInfo {
+                demon_id: "abcd1234".to_owned(),
+                command_id: u32::from(DemonCommand::CommandFs).to_string(),
+                output: "Directory listing completed".to_owned(),
+                command_line: Some("ls C:\\Temp".to_owned()),
+                extra,
+            },
+        }));
+
+        let browser =
+            state.file_browsers.get("ABCD1234").unwrap_or_else(|| panic!("browser state"));
+        assert_eq!(browser.current_dir.as_deref(), Some("C:\\Temp"));
+        assert_eq!(browser.directories["C:\\Temp"].len(), 2);
+        assert_eq!(browser.directories["C:\\Temp"][0].path, "C:\\Temp\\Logs");
+        assert_eq!(browser.directories["C:\\Temp"][1].size_bytes, Some(1536));
+    }
+
+    #[test]
+    fn download_progress_updates_file_browser_state() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+        let mut extra = BTreeMap::new();
+        extra.insert(
+            "MiscType".to_owned(),
+            serde_json::Value::String("download-progress".to_owned()),
+        );
+        extra.insert("FileID".to_owned(), serde_json::Value::String("0000002A".to_owned()));
+        extra.insert(
+            "FileName".to_owned(),
+            serde_json::Value::String("C:\\Temp\\report.txt".to_owned()),
+        );
+        extra.insert("CurrentSize".to_owned(), serde_json::Value::String("512".to_owned()));
+        extra.insert("ExpectedSize".to_owned(), serde_json::Value::String("1024".to_owned()));
+        extra.insert("State".to_owned(), serde_json::Value::String("InProgress".to_owned()));
+
+        state.apply_operator_message(OperatorMessage::AgentResponse(Message {
+            head: head(EventCode::Session),
+            info: AgentResponseInfo {
+                demon_id: "abcd1234".to_owned(),
+                command_id: u32::from(DemonCommand::CommandFs).to_string(),
+                output: String::new(),
+                command_line: Some("download C:\\Temp\\report.txt".to_owned()),
+                extra,
+            },
+        }));
+
+        let browser =
+            state.file_browsers.get("ABCD1234").unwrap_or_else(|| panic!("browser state"));
+        assert_eq!(browser.downloads.len(), 1);
+        assert_eq!(browser.downloads["0000002A"].current_size, 512);
+    }
+
+    #[test]
+    fn current_directory_output_updates_file_browser_state() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        state.apply_operator_message(OperatorMessage::AgentResponse(Message {
+            head: head(EventCode::Session),
+            info: AgentResponseInfo {
+                demon_id: "abcd1234".to_owned(),
+                command_id: u32::from(DemonCommand::CommandFs).to_string(),
+                output: "Current directory: C:\\Windows".to_owned(),
+                command_line: Some("pwd".to_owned()),
+                extra: BTreeMap::new(),
+            },
+        }));
+
+        let browser =
+            state.file_browsers.get("ABCD1234").unwrap_or_else(|| panic!("browser state"));
+        assert_eq!(browser.current_dir.as_deref(), Some("C:\\Windows"));
     }
 
     #[test]

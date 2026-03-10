@@ -4,6 +4,8 @@ mod transport;
 
 use base64::Engine;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow};
@@ -15,9 +17,10 @@ use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::{
     AgentTaskInfo, EventCode, FlatInfo, Message, MessageHead, OperatorMessage,
 };
+use rfd::FileDialog;
 use transport::{
-    AgentConsoleEntry, AgentConsoleEntryKind, AppState, ClientTransport, ConnectionStatus,
-    LootItem, LootKind, SharedAppState,
+    AgentConsoleEntry, AgentConsoleEntryKind, AgentFileBrowserState, AppState, ClientTransport,
+    ConnectionStatus, FileBrowserEntry, LootItem, LootKind, SharedAppState,
 };
 
 const WINDOW_TITLE: &str = "Red Cell Client";
@@ -118,6 +121,13 @@ struct AgentConsoleState {
     status_message: Option<String>,
 }
 
+#[derive(Debug, Default)]
+struct AgentFileBrowserUiState {
+    selected_path: Option<String>,
+    pending_dirs: BTreeSet<String>,
+    status_message: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum ConsoleLayoutMode {
     #[default]
@@ -138,6 +148,7 @@ struct SessionPanelState {
     selected_console: Option<String>,
     console_layout: ConsoleLayoutMode,
     console_state: BTreeMap<String, AgentConsoleState>,
+    file_browser_state: BTreeMap<String, AgentFileBrowserUiState>,
     note_editor: Option<NoteEditorState>,
     pending_messages: Vec<OperatorMessage>,
     status_message: Option<String>,
@@ -181,6 +192,7 @@ impl SessionPanelState {
     fn close_console(&mut self, agent_id: &str) {
         self.open_consoles.retain(|open_id| open_id != agent_id);
         self.console_state.remove(agent_id);
+        self.file_browser_state.remove(agent_id);
         if self.selected_console.as_deref() == Some(agent_id) {
             self.selected_console = self.open_consoles.first().cloned();
         }
@@ -188,6 +200,10 @@ impl SessionPanelState {
 
     fn console_state_mut(&mut self, agent_id: &str) -> &mut AgentConsoleState {
         self.console_state.entry(agent_id.to_owned()).or_default()
+    }
+
+    fn file_browser_state_mut(&mut self, agent_id: &str) -> &mut AgentFileBrowserUiState {
+        self.file_browser_state.entry(agent_id.to_owned()).or_default()
     }
 }
 
@@ -896,6 +912,7 @@ impl ClientApp {
     fn render_single_console(&mut self, ui: &mut egui::Ui, state: &AppState, agent_id: &str) {
         let agent = state.agents.iter().find(|agent| agent.name_id == agent_id);
         let entries = state.agent_consoles.get(agent_id).map(Vec::as_slice).unwrap_or(&[]);
+        let browser = state.file_browsers.get(agent_id);
         let status_message = self
             .session_panel
             .console_state
@@ -950,24 +967,228 @@ impl ClientApp {
                 ui.separator();
                 ui.add_space(8.0);
 
-                egui::ScrollArea::vertical()
-                    .id_salt(("console-output", agent_id))
-                    .stick_to_bottom(true)
-                    .max_height(360.0)
-                    .show(ui, |ui| {
-                        if entries.is_empty() {
-                            ui.label("No console output for this session yet.");
-                        } else {
-                            for entry in entries {
-                                self.render_console_entry(ui, entry);
-                                ui.add_space(4.0);
-                            }
-                        }
-                    });
+                ui.columns(2, |columns| {
+                    self.render_file_browser_panel(&mut columns[0], agent_id, browser);
+                    self.render_console_output_panel(&mut columns[1], agent_id, entries);
+                });
 
                 ui.add_space(8.0);
                 self.render_console_input(ui, agent_id);
             });
+    }
+
+    fn render_console_output_panel(
+        &self,
+        ui: &mut egui::Ui,
+        agent_id: &str,
+        entries: &[AgentConsoleEntry],
+    ) {
+        ui.heading("Console Output");
+        ui.separator();
+        egui::ScrollArea::vertical()
+            .id_salt(("console-output", agent_id))
+            .stick_to_bottom(true)
+            .max_height(360.0)
+            .show(ui, |ui| {
+                if entries.is_empty() {
+                    ui.label("No console output for this session yet.");
+                } else {
+                    for entry in entries {
+                        self.render_console_entry(ui, entry);
+                        ui.add_space(4.0);
+                    }
+                }
+            });
+    }
+
+    fn render_file_browser_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        agent_id: &str,
+        browser: Option<&AgentFileBrowserState>,
+    ) {
+        ui.heading("File Browser");
+        ui.separator();
+
+        let current_dir = browser
+            .and_then(|state| state.current_dir.clone())
+            .or_else(|| browser.and_then(|state| state.directories.keys().next().cloned()));
+        let loaded_paths = browser.map(|state| &state.directories);
+        let operator = self.current_operator_username();
+        {
+            let ui_state = self.session_panel.file_browser_state_mut(agent_id);
+            if let Some(browser) = browser {
+                ui_state.pending_dirs.retain(|path| !browser.directories.contains_key(path));
+            }
+            if let Some(root) = current_dir.clone() {
+                if loaded_paths.is_none_or(|paths| !paths.contains_key(&root))
+                    && !ui_state.pending_dirs.contains(&root)
+                {
+                    let message = build_file_browser_list_task(agent_id, &root, &operator);
+                    ui_state.pending_dirs.insert(root.clone());
+                    ui_state.status_message = Some(format!("Queued listing for {root}."));
+                    self.session_panel.pending_messages.push(message);
+                }
+            }
+        }
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Current");
+            ui.monospace(current_dir.as_deref().unwrap_or("unknown"));
+
+            if ui.button("Resolve cwd").clicked() {
+                self.queue_file_browser_pwd(agent_id);
+            }
+            if ui.button("Refresh").clicked() {
+                if let Some(path) = current_dir.as_deref() {
+                    self.queue_file_browser_list(agent_id, path);
+                }
+            }
+            if ui.button("Up").clicked() {
+                if let Some(path) = current_dir.as_deref().and_then(parent_remote_path) {
+                    self.queue_file_browser_cd(agent_id, &path);
+                    self.queue_file_browser_list(agent_id, &path);
+                }
+            }
+        });
+
+        let browser_status = browser.and_then(|state| state.status_message.as_deref());
+        let ui_status = self
+            .session_panel
+            .file_browser_state
+            .get(agent_id)
+            .and_then(|state| state.status_message.as_deref());
+        if let Some(message) = ui_status.or(browser_status) {
+            ui.add_space(4.0);
+            ui.label(RichText::new(message).weak());
+        }
+
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            let selected_path = self
+                .session_panel
+                .file_browser_state
+                .get(agent_id)
+                .and_then(|state| state.selected_path.clone());
+            let selected_entry = browser.and_then(|state| {
+                selected_path.as_deref().and_then(|path| find_file_entry(state, path))
+            });
+
+            if ui
+                .add_enabled(
+                    selected_entry.is_some_and(|entry| !entry.is_dir),
+                    egui::Button::new("Download"),
+                )
+                .clicked()
+            {
+                if let Some(path) = selected_path.as_deref() {
+                    self.queue_file_browser_download(agent_id, path);
+                }
+            }
+
+            if ui.button("Upload").clicked() {
+                self.queue_file_browser_upload(
+                    agent_id,
+                    upload_destination(browser, selected_path.as_deref()),
+                );
+            }
+
+            if ui.add_enabled(selected_path.is_some(), egui::Button::new("Delete")).clicked() {
+                if let Some(path) = selected_path.as_deref() {
+                    self.queue_file_browser_delete(agent_id, path);
+                }
+            }
+        });
+
+        ui.add_space(6.0);
+        if let Some(browser) = browser {
+            if let Some(root) = current_dir.as_deref() {
+                self.render_directory_tree(ui, agent_id, browser, root, 0);
+            } else {
+                ui.label("Request the current working directory to initialize the browser.");
+            }
+
+            if !browser.downloads.is_empty() {
+                ui.add_space(8.0);
+                ui.label(RichText::new("Downloads").strong());
+                for progress in browser.downloads.values() {
+                    let denominator = progress.expected_size.max(1) as f32;
+                    let fraction = (progress.current_size as f32 / denominator).clamp(0.0, 1.0);
+                    ui.add(egui::ProgressBar::new(fraction).text(format!(
+                        "{} [{} / {}]",
+                        progress.remote_path,
+                        human_size(progress.current_size),
+                        human_size(progress.expected_size)
+                    )));
+                }
+            }
+        } else {
+            ui.label("No filesystem state has been received for this agent yet.");
+        }
+    }
+
+    fn render_directory_tree(
+        &mut self,
+        ui: &mut egui::Ui,
+        agent_id: &str,
+        browser: &AgentFileBrowserState,
+        path: &str,
+        depth: usize,
+    ) {
+        let label = directory_label(path);
+        let response = egui::CollapsingHeader::new(label)
+            .id_salt(("file-browser-dir", agent_id, path))
+            .default_open(depth == 0)
+            .show(ui, |ui| {
+                if let Some(entries) = browser.directories.get(path) {
+                    if entries.is_empty() {
+                        ui.label("Directory is empty.");
+                    } else {
+                        for entry in entries {
+                            if entry.is_dir {
+                                self.render_directory_tree(
+                                    ui,
+                                    agent_id,
+                                    browser,
+                                    &entry.path,
+                                    depth + 1,
+                                );
+                            } else {
+                                let selected = self
+                                    .session_panel
+                                    .file_browser_state
+                                    .get(agent_id)
+                                    .and_then(|state| state.selected_path.as_deref())
+                                    == Some(entry.path.as_str());
+                                if ui.selectable_label(selected, file_entry_label(entry)).clicked()
+                                {
+                                    self.session_panel
+                                        .file_browser_state_mut(agent_id)
+                                        .selected_path = Some(entry.path.clone());
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    ui.label("Waiting for directory listing...");
+                }
+            });
+
+        if response.header_response.clicked() {
+            self.session_panel.file_browser_state_mut(agent_id).selected_path =
+                Some(path.to_owned());
+        }
+
+        if response.fully_open() && !browser.directories.contains_key(path) {
+            let operator = self.current_operator_username();
+            let ui_state = self.session_panel.file_browser_state_mut(agent_id);
+            if !ui_state.pending_dirs.contains(path) {
+                let message = build_file_browser_list_task(agent_id, path, &operator);
+                ui_state.pending_dirs.insert(path.to_owned());
+                ui_state.status_message = Some(format!("Queued listing for {path}."));
+                self.session_panel.pending_messages.push(message);
+            }
+        }
     }
 
     fn render_console_entry(&self, ui: &mut egui::Ui, entry: &AgentConsoleEntry) {
@@ -1094,13 +1315,7 @@ impl ClientApp {
     }
 
     fn submit_console_command(&mut self, agent_id: &str) {
-        let operator = match &self.phase {
-            AppPhase::Connected { app_state, .. } | AppPhase::Authenticating { app_state, .. } => {
-                let snapshot = Self::snapshot(app_state);
-                snapshot.operator_info.map(|info| info.username).unwrap_or_default()
-            }
-            AppPhase::Login(_) => String::new(),
-        };
+        let operator = self.current_operator_username();
 
         let console = self.session_panel.console_state_mut(agent_id);
         let command_line = console.input.trim().to_owned();
@@ -1117,6 +1332,97 @@ impl ClientApp {
             }
             Err(error) => {
                 console.status_message = Some(error);
+            }
+        }
+    }
+
+    fn current_operator_username(&self) -> String {
+        match &self.phase {
+            AppPhase::Connected { app_state, .. } | AppPhase::Authenticating { app_state, .. } => {
+                let snapshot = Self::snapshot(app_state);
+                snapshot.operator_info.map(|info| info.username).unwrap_or_default()
+            }
+            AppPhase::Login(_) => String::new(),
+        }
+    }
+
+    fn build_file_browser_list_message(
+        &self,
+        agent_id: &str,
+        path: &str,
+    ) -> Option<OperatorMessage> {
+        Some(build_file_browser_list_task(agent_id, path, &self.current_operator_username()))
+    }
+
+    fn queue_file_browser_pwd(&mut self, agent_id: &str) {
+        let message = build_file_browser_pwd_task(agent_id, &self.current_operator_username());
+        self.session_panel.file_browser_state_mut(agent_id).status_message =
+            Some("Queued `pwd`.".to_owned());
+        self.session_panel.pending_messages.push(message);
+    }
+
+    fn queue_file_browser_list(&mut self, agent_id: &str, path: &str) {
+        if let Some(message) = self.build_file_browser_list_message(agent_id, path) {
+            let ui_state = self.session_panel.file_browser_state_mut(agent_id);
+            ui_state.pending_dirs.insert(path.to_owned());
+            ui_state.status_message = Some(format!("Queued listing for {path}."));
+            self.session_panel.pending_messages.push(message);
+        }
+    }
+
+    fn queue_file_browser_cd(&mut self, agent_id: &str, path: &str) {
+        let message = build_file_browser_cd_task(agent_id, path, &self.current_operator_username());
+        self.session_panel.file_browser_state_mut(agent_id).status_message =
+            Some(format!("Queued directory change to {path}."));
+        self.session_panel.pending_messages.push(message);
+    }
+
+    fn queue_file_browser_download(&mut self, agent_id: &str, path: &str) {
+        let message =
+            build_file_browser_download_task(agent_id, path, &self.current_operator_username());
+        self.session_panel.file_browser_state_mut(agent_id).status_message =
+            Some(format!("Queued download for {path}."));
+        self.session_panel.pending_messages.push(message);
+    }
+
+    fn queue_file_browser_delete(&mut self, agent_id: &str, path: &str) {
+        let message =
+            build_file_browser_delete_task(agent_id, path, &self.current_operator_username());
+        self.session_panel.file_browser_state_mut(agent_id).status_message =
+            Some(format!("Queued delete for {path}."));
+        self.session_panel.pending_messages.push(message);
+    }
+
+    fn queue_file_browser_upload(&mut self, agent_id: &str, destination_dir: Option<String>) {
+        let Some(destination_dir) = destination_dir else {
+            self.session_panel.file_browser_state_mut(agent_id).status_message = Some(
+                "Select a directory or resolve the current working directory first.".to_owned(),
+            );
+            return;
+        };
+
+        let Some(local_path) = FileDialog::new().pick_file() else {
+            return;
+        };
+
+        match std::fs::read(&local_path) {
+            Ok(bytes) => {
+                let file_name =
+                    local_path.file_name().and_then(|value| value.to_str()).unwrap_or("upload.bin");
+                let remote_path = join_remote_path(&destination_dir, file_name);
+                let message = build_file_browser_upload_task(
+                    agent_id,
+                    &remote_path,
+                    &bytes,
+                    &self.current_operator_username(),
+                );
+                self.session_panel.file_browser_state_mut(agent_id).status_message =
+                    Some(format!("Queued upload to {remote_path}."));
+                self.session_panel.pending_messages.push(message);
+            }
+            Err(error) => {
+                self.session_panel.file_browser_state_mut(agent_id).status_message =
+                    Some(format!("Failed to read local file: {error}"));
             }
         }
     }
@@ -1296,6 +1602,70 @@ const CONSOLE_COMMANDS: [ConsoleCommandSpec; 11] = [
     ConsoleCommandSpec { name: "cat", aliases: &["type"], usage: "cat <path>" },
     ConsoleCommandSpec { name: "proc", aliases: &[], usage: "proc kill <pid>" },
 ];
+
+fn build_file_browser_list_task(agent_id: &str, path: &str, operator: &str) -> OperatorMessage {
+    build_agent_task(
+        operator,
+        AgentTaskInfo {
+            demon_id: agent_id.to_owned(),
+            task_id: format!("{:08X}", next_task_id()),
+            command_id: u32::from(DemonCommand::CommandFs).to_string(),
+            command_line: format!("ls {path}"),
+            command: Some("fs".to_owned()),
+            sub_command: Some("dir".to_owned()),
+            arguments: Some(format!("{path};true;false;false;false;;;")),
+            ..AgentTaskInfo::default()
+        },
+    )
+}
+
+fn build_file_browser_pwd_task(agent_id: &str, operator: &str) -> OperatorMessage {
+    build_agent_task(operator, filesystem_task(agent_id, "pwd", "pwd", None))
+}
+
+fn build_file_browser_cd_task(agent_id: &str, path: &str, operator: &str) -> OperatorMessage {
+    build_agent_task(
+        operator,
+        filesystem_task(agent_id, &format!("cd {path}"), "cd", Some(path.to_owned())),
+    )
+}
+
+fn build_file_browser_download_task(agent_id: &str, path: &str, operator: &str) -> OperatorMessage {
+    build_agent_task(
+        operator,
+        filesystem_transfer_task(agent_id, &format!("download {path}"), "download", path),
+    )
+}
+
+fn build_file_browser_delete_task(agent_id: &str, path: &str, operator: &str) -> OperatorMessage {
+    build_agent_task(
+        operator,
+        filesystem_task(agent_id, &format!("rm {path}"), "remove", Some(path.to_owned())),
+    )
+}
+
+fn build_file_browser_upload_task(
+    agent_id: &str,
+    remote_path: &str,
+    content: &[u8],
+    operator: &str,
+) -> OperatorMessage {
+    let remote = base64::engine::general_purpose::STANDARD.encode(remote_path.as_bytes());
+    let content = base64::engine::general_purpose::STANDARD.encode(content);
+    build_agent_task(
+        operator,
+        AgentTaskInfo {
+            demon_id: agent_id.to_owned(),
+            task_id: format!("{:08X}", next_task_id()),
+            command_id: u32::from(DemonCommand::CommandFs).to_string(),
+            command_line: format!("upload {remote_path}"),
+            command: Some("fs".to_owned()),
+            sub_command: Some("upload".to_owned()),
+            arguments: Some(format!("{remote};{content}")),
+            ..AgentTaskInfo::default()
+        },
+    )
+}
 
 fn build_console_task(
     agent_id: &str,
@@ -1772,6 +2142,80 @@ fn blank_if_empty<'a>(value: &'a str, fallback: &'a str) -> &'a str {
     if value.trim().is_empty() { fallback } else { value }
 }
 
+fn upload_destination(
+    browser: Option<&AgentFileBrowserState>,
+    selected_path: Option<&str>,
+) -> Option<String> {
+    selected_path
+        .and_then(|path| {
+            browser.and_then(|state| {
+                find_file_entry(state, path).map(|entry| {
+                    if entry.is_dir {
+                        entry.path.clone()
+                    } else {
+                        parent_remote_path(&entry.path).unwrap_or_else(|| entry.path.clone())
+                    }
+                })
+            })
+        })
+        .or_else(|| browser.and_then(|state| state.current_dir.clone()))
+}
+
+fn find_file_entry<'a>(
+    browser: &'a AgentFileBrowserState,
+    path: &str,
+) -> Option<&'a FileBrowserEntry> {
+    browser.directories.values().flat_map(|entries| entries.iter()).find(|entry| entry.path == path)
+}
+
+fn parent_remote_path(path: &str) -> Option<String> {
+    let trimmed = path.trim_end_matches(['\\', '/']);
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(index) = trimmed.rfind(['\\', '/']) {
+        let parent = &trimmed[..=index];
+        if parent.is_empty() { None } else { Some(parent.to_owned()) }
+    } else {
+        None
+    }
+}
+
+fn join_remote_path(base: &str, name: &str) -> String {
+    if base.is_empty() {
+        return name.to_owned();
+    }
+
+    let separator = if base.contains('\\') { '\\' } else { '/' };
+    if base.ends_with('\\') || base.ends_with('/') {
+        format!("{base}{name}")
+    } else {
+        format!("{base}{separator}{name}")
+    }
+}
+
+fn directory_label(path: &str) -> String {
+    if path.ends_with(':') || path.ends_with(":\\") || path.ends_with(":/") {
+        return path.to_owned();
+    }
+
+    let trimmed = path.trim_end_matches(['\\', '/']);
+    Path::new(trimmed)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(trimmed)
+        .to_owned()
+}
+
+fn file_entry_label(entry: &FileBrowserEntry) -> String {
+    let size = if entry.size_label.trim().is_empty() { "-" } else { entry.size_label.as_str() };
+    let modified = blank_if_empty(&entry.modified_at, "-");
+    let permissions = blank_if_empty(&entry.permissions, "-");
+    format!("{}  [{size} | {modified} | {permissions}]", entry.name)
+}
+
 fn human_size(size_bytes: u64) -> String {
     const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
 
@@ -1793,7 +2237,7 @@ fn human_size(size_bytes: u64) -> String {
 mod tests {
     use super::*;
     use clap::Parser;
-    use transport::{AgentSummary, LootItem};
+    use transport::{AgentFileBrowserState, AgentSummary, FileBrowserEntry, LootItem};
 
     #[test]
     fn cli_uses_default_server_url() {
@@ -1965,6 +2409,34 @@ mod tests {
     }
 
     #[test]
+    fn file_browser_list_task_uses_explorer_arguments() {
+        let OperatorMessage::AgentTask(message) =
+            build_file_browser_list_task("ABCD1234", "C:\\Temp", "operator")
+        else {
+            panic!("expected agent task");
+        };
+
+        assert_eq!(message.info.command_id, u32::from(DemonCommand::CommandFs).to_string());
+        assert_eq!(message.info.sub_command.as_deref(), Some("dir"));
+        assert_eq!(message.info.arguments.as_deref(), Some("C:\\Temp;true;false;false;false;;;"));
+    }
+
+    #[test]
+    fn file_browser_upload_task_encodes_remote_path_and_content() {
+        let OperatorMessage::AgentTask(message) = build_file_browser_upload_task(
+            "ABCD1234",
+            "C:\\Temp\\report.txt",
+            b"hello",
+            "operator",
+        ) else {
+            panic!("expected agent task");
+        };
+
+        assert_eq!(message.info.sub_command.as_deref(), Some("upload"));
+        assert_eq!(message.info.arguments.as_deref(), Some("QzpcVGVtcFxyZXBvcnQudHh0;aGVsbG8="));
+    }
+
+    #[test]
     fn build_console_task_rejects_missing_process_kill_pid() {
         let error = build_console_task("ABCD1234", "proc kill", "operator")
             .expect_err("missing pid should fail");
@@ -2039,5 +2511,35 @@ mod tests {
     #[test]
     fn sanitize_file_name_replaces_invalid_characters() {
         assert_eq!(sanitize_file_name("C:\\Temp\\report?.txt"), "C__Temp_report_.txt");
+    }
+
+    #[test]
+    fn parent_remote_path_returns_windows_parent() {
+        assert_eq!(parent_remote_path("C:\\Temp\\report.txt").as_deref(), Some("C:\\Temp\\"));
+    }
+
+    #[test]
+    fn upload_destination_prefers_selected_directory() {
+        let browser = AgentFileBrowserState {
+            current_dir: Some("C:\\Temp".to_owned()),
+            directories: BTreeMap::from([(
+                "C:\\Temp".to_owned(),
+                vec![FileBrowserEntry {
+                    name: "Logs".to_owned(),
+                    path: "C:\\Temp\\Logs".to_owned(),
+                    is_dir: true,
+                    size_label: String::new(),
+                    size_bytes: None,
+                    modified_at: String::new(),
+                    permissions: String::new(),
+                }],
+            )]),
+            ..AgentFileBrowserState::default()
+        };
+
+        assert_eq!(
+            upload_destination(Some(&browser), Some("C:\\Temp\\Logs")).as_deref(),
+            Some("C:\\Temp\\Logs")
+        );
     }
 }

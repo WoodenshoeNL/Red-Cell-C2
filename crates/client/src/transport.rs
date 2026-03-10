@@ -5,6 +5,7 @@ use std::time::Duration;
 use eframe::egui;
 use futures_util::{SinkExt, StreamExt};
 use red_cell_common::OperatorInfo;
+use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::{
     AgentResponseInfo, ChatUserInfo, FlatInfo, ListenerInfo, ListenerMarkInfo, Message,
     OperatorMessage,
@@ -188,9 +189,26 @@ pub(crate) struct ChatMessage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AgentConsoleEntryKind {
+    Output,
+    Error,
+}
+
+impl AgentConsoleEntryKind {
+    pub(crate) fn from_command_id(command_id: &str) -> Self {
+        match command_id.trim().parse::<u32>() {
+            Ok(id) if id == u32::from(DemonCommand::CommandError) => Self::Error,
+            _ => Self::Output,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentConsoleEntry {
     pub(crate) command_id: String,
     pub(crate) received_at: String,
+    pub(crate) command_line: Option<String>,
+    pub(crate) kind: AgentConsoleEntryKind,
     pub(crate) output: String,
 }
 
@@ -498,6 +516,8 @@ impl AppState {
 
         let agent_id = normalize_agent_id(&message.info.demon_id);
         self.agent_consoles.entry(agent_id).or_default().push(AgentConsoleEntry {
+            kind: AgentConsoleEntryKind::from_command_id(&message.info.command_id),
+            command_line: message.info.command_line,
             command_id: message.info.command_id,
             received_at: message.head.timestamp,
             output,
@@ -1141,7 +1161,31 @@ mod tests {
             .unwrap_or_else(|| panic!("console output should be stored"));
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].command_id, "42");
+        assert_eq!(entries[0].command_line.as_deref(), Some("shell whoami"));
+        assert_eq!(entries[0].kind, AgentConsoleEntryKind::Output);
         assert_eq!(entries[0].output, "whoami");
+    }
+
+    #[test]
+    fn error_response_marks_console_entry_as_error() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        state.apply_operator_message(OperatorMessage::AgentResponse(Message {
+            head: head(EventCode::Session),
+            info: AgentResponseInfo {
+                demon_id: "abcd1234".to_owned(),
+                command_id: u32::from(DemonCommand::CommandError).to_string(),
+                output: "access denied".to_owned(),
+                command_line: Some("token impersonate 4".to_owned()),
+                extra: BTreeMap::new(),
+            },
+        }));
+
+        let entries = state
+            .agent_consoles
+            .get("ABCD1234")
+            .unwrap_or_else(|| panic!("console output should be stored"));
+        assert_eq!(entries[0].kind, AgentConsoleEntryKind::Error);
     }
 
     #[test]

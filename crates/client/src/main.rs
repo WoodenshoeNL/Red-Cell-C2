@@ -3,18 +3,22 @@ mod login;
 mod transport;
 
 use base64::Engine;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow};
 use clap::Parser;
-use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, Stroke};
+use eframe::egui::{self, Align, Color32, Key, Layout, RichText, Sense, Stroke};
 use local_config::LocalConfig;
 use login::{LoginAction, LoginState, render_login_dialog};
 use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::{
     AgentTaskInfo, EventCode, FlatInfo, Message, MessageHead, OperatorMessage,
 };
-use transport::{AppState, ClientTransport, ConnectionStatus, LootItem, LootKind, SharedAppState};
+use transport::{
+    AgentConsoleEntry, AgentConsoleEntryKind, AppState, ClientTransport, ConnectionStatus,
+    LootItem, LootKind, SharedAppState,
+};
 
 const WINDOW_TITLE: &str = "Red Cell Client";
 const DEFAULT_SERVER_URL: &str = "wss://127.0.0.1:40056/havoc/";
@@ -105,11 +109,35 @@ impl LootTypeFilter {
 }
 
 #[derive(Debug, Default)]
+struct AgentConsoleState {
+    input: String,
+    history: Vec<String>,
+    history_index: Option<usize>,
+    completion_index: usize,
+    completion_seed: Option<String>,
+    status_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ConsoleLayoutMode {
+    #[default]
+    Tabs,
+    Split,
+}
+
+impl ConsoleLayoutMode {
+    const ALL: [(Self, &'static str); 2] = [(Self::Tabs, "Tabs"), (Self::Split, "Split")];
+}
+
+#[derive(Debug, Default)]
 struct SessionPanelState {
     filter: String,
     sort_column: Option<AgentSortColumn>,
     descending: bool,
     open_consoles: Vec<String>,
+    selected_console: Option<String>,
+    console_layout: ConsoleLayoutMode,
+    console_state: BTreeMap<String, AgentConsoleState>,
     note_editor: Option<NoteEditorState>,
     pending_messages: Vec<OperatorMessage>,
     status_message: Option<String>,
@@ -135,6 +163,31 @@ impl SessionPanelState {
         if !self.open_consoles.iter().any(|open_id| open_id == agent_id) {
             self.open_consoles.push(agent_id.to_owned());
         }
+        self.selected_console = Some(agent_id.to_owned());
+    }
+
+    fn ensure_selected_console(&mut self) {
+        if self
+            .selected_console
+            .as_ref()
+            .is_some_and(|selected| self.open_consoles.iter().any(|open_id| open_id == selected))
+        {
+            return;
+        }
+
+        self.selected_console = self.open_consoles.first().cloned();
+    }
+
+    fn close_console(&mut self, agent_id: &str) {
+        self.open_consoles.retain(|open_id| open_id != agent_id);
+        self.console_state.remove(agent_id);
+        if self.selected_console.as_deref() == Some(agent_id) {
+            self.selected_console = self.open_consoles.first().cloned();
+        }
+    }
+
+    fn console_state_mut(&mut self, agent_id: &str) -> &mut AgentConsoleState {
+        self.console_state.entry(agent_id.to_owned()).or_default()
     }
 }
 
@@ -675,11 +728,10 @@ impl ClientApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                self.render_overview_panel(ui, &snapshot);
+                self.render_console_workspace(ui, &snapshot);
             });
         });
 
-        self.render_agent_consoles(ctx, &snapshot);
         self.render_note_editor(ctx, app_state);
         self.flush_pending_messages();
     }
@@ -761,63 +813,236 @@ impl ClientApp {
         }
     }
 
-    fn render_agent_consoles(&mut self, ctx: &egui::Context, state: &AppState) {
-        let mut still_open = Vec::new();
-        for agent_id in self.session_panel.open_consoles.clone() {
-            let mut open = true;
-            egui::Window::new(format!("Console {agent_id}"))
-                .id(egui::Id::new(("agent-console", &agent_id)))
-                .open(&mut open)
-                .resizable(true)
-                .default_size([720.0, 420.0])
-                .show(ctx, |ui| {
-                    if let Some(agent) = state.agents.iter().find(|agent| agent.name_id == agent_id)
-                    {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(RichText::new(&agent.hostname).strong());
-                            ui.separator();
-                            ui.label(format!("{}\\{}", agent.domain_name, agent.username));
-                            ui.separator();
-                            ui.label(format!(
-                                "Process: {} ({})",
-                                agent.process_name, agent.process_pid
-                            ));
-                            ui.separator();
-                            ui.label(format!("Status: {}", agent.status));
-                        });
-                        if !agent.note.trim().is_empty() {
-                            ui.add_space(6.0);
-                            ui.label(RichText::new(format!("Note: {}", agent.note)).weak());
-                        }
-                    }
+    fn render_console_workspace(&mut self, ui: &mut egui::Ui, state: &AppState) {
+        self.session_panel.ensure_selected_console();
 
-                    ui.separator();
+        if self.session_panel.open_consoles.is_empty() {
+            self.render_overview_panel(ui, state);
+            return;
+        }
 
-                    match state.agent_consoles.get(&agent_id) {
-                        Some(entries) if !entries.is_empty() => {
-                            egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
-                                for entry in entries {
-                                    ui.group(|ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.monospace(&entry.command_id);
-                                            ui.label(RichText::new(&entry.received_at).weak());
-                                        });
-                                        ui.monospace(&entry.output);
-                                    });
-                                }
-                            });
-                        }
-                        _ => {
-                            ui.label("No console output for this session yet.");
-                        }
+        ui.heading("Command Console");
+        ui.separator();
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label("View");
+            egui::ComboBox::from_id_salt("console-layout-mode")
+                .selected_text(match self.session_panel.console_layout {
+                    ConsoleLayoutMode::Tabs => "Tabs",
+                    ConsoleLayoutMode::Split => "Split",
+                })
+                .show_ui(ui, |ui| {
+                    for (value, label) in ConsoleLayoutMode::ALL {
+                        ui.selectable_value(&mut self.session_panel.console_layout, value, label);
                     }
                 });
+        });
+        ui.add_space(8.0);
 
-            if open {
-                still_open.push(agent_id);
+        self.render_console_tabs(ui);
+        ui.add_space(8.0);
+
+        match self.session_panel.console_layout {
+            ConsoleLayoutMode::Tabs => {
+                if let Some(agent_id) = self.session_panel.selected_console.clone() {
+                    self.render_single_console(ui, state, &agent_id);
+                }
+            }
+            ConsoleLayoutMode::Split => {
+                let visible = split_console_selection(
+                    &self.session_panel.open_consoles,
+                    self.session_panel.selected_console.as_deref(),
+                )
+                .into_iter()
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
+                if visible.len() == 1 {
+                    self.render_single_console(ui, state, &visible[0]);
+                } else {
+                    ui.columns(2, |columns| {
+                        for (column, agent_id) in columns.iter_mut().zip(visible.into_iter()) {
+                            self.render_single_console(column, state, &agent_id);
+                        }
+                    });
+                }
             }
         }
-        self.session_panel.open_consoles = still_open;
+    }
+
+    fn render_console_tabs(&mut self, ui: &mut egui::Ui) {
+        let mut close_agent = None;
+
+        ui.horizontal_wrapped(|ui| {
+            for agent_id in self.session_panel.open_consoles.clone() {
+                let selected = self.session_panel.selected_console.as_deref() == Some(&agent_id);
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        if ui.selectable_label(selected, &agent_id).clicked() {
+                            self.session_panel.selected_console = Some(agent_id.clone());
+                        }
+                        if ui.small_button("x").clicked() {
+                            close_agent = Some(agent_id.clone());
+                        }
+                    });
+                });
+            }
+        });
+
+        if let Some(agent_id) = close_agent {
+            self.session_panel.close_console(&agent_id);
+        }
+    }
+
+    fn render_single_console(&mut self, ui: &mut egui::Ui, state: &AppState, agent_id: &str) {
+        let agent = state.agents.iter().find(|agent| agent.name_id == agent_id);
+        let entries = state.agent_consoles.get(agent_id).map(Vec::as_slice).unwrap_or(&[]);
+        let status_message = self
+            .session_panel
+            .console_state
+            .get(agent_id)
+            .and_then(|console| console.status_message.clone());
+
+        egui::Frame::default()
+            .fill(Color32::from_rgba_unmultiplied(255, 255, 255, 6))
+            .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 18)))
+            .inner_margin(egui::Margin::symmetric(10, 10))
+            .show(ui, |ui| {
+                if let Some(agent) = agent {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(&agent.name_id).strong().monospace());
+                        ui.separator();
+                        ui.label(RichText::new(&agent.hostname).strong());
+                        ui.separator();
+                        ui.label(format!("{}\\{}", agent.domain_name, agent.username));
+                        ui.separator();
+                        ui.label(format!("PID {}", agent.process_pid));
+                        ui.separator();
+                        ui.label(&agent.process_name);
+                        ui.separator();
+                        ui.label(format!("Status: {}", agent.status));
+                    });
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "{} | {} | {}",
+                            blank_if_empty(&agent.internal_ip, &agent.external_ip),
+                            agent_os(agent),
+                            agent_arch(agent)
+                        ))
+                        .weak(),
+                    );
+                    if !agent.note.trim().is_empty() {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(format!("Note: {}", agent.note)).weak());
+                    }
+                } else {
+                    ui.label(
+                        RichText::new(format!("Agent {agent_id} is no longer present")).weak(),
+                    );
+                }
+
+                if let Some(message) = &status_message {
+                    ui.add_space(6.0);
+                    ui.colored_label(Color32::from_rgb(232, 182, 83), message);
+                }
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                egui::ScrollArea::vertical()
+                    .id_salt(("console-output", agent_id))
+                    .stick_to_bottom(true)
+                    .max_height(360.0)
+                    .show(ui, |ui| {
+                        if entries.is_empty() {
+                            ui.label("No console output for this session yet.");
+                        } else {
+                            for entry in entries {
+                                self.render_console_entry(ui, entry);
+                                ui.add_space(4.0);
+                            }
+                        }
+                    });
+
+                ui.add_space(8.0);
+                self.render_console_input(ui, agent_id);
+            });
+    }
+
+    fn render_console_entry(&self, ui: &mut egui::Ui, entry: &AgentConsoleEntry) {
+        let accent = match entry.kind {
+            AgentConsoleEntryKind::Output => Color32::from_rgb(110, 199, 141),
+            AgentConsoleEntryKind::Error => Color32::from_rgb(215, 83, 83),
+        };
+
+        ui.group(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                let timestamp = blank_if_empty(&entry.received_at, "pending");
+                ui.label(RichText::new(timestamp).weak().monospace());
+                ui.separator();
+                ui.colored_label(accent, RichText::new(&entry.command_id).monospace());
+                if let Some(command_line) = &entry.command_line {
+                    if !command_line.trim().is_empty() {
+                        ui.separator();
+                        ui.label(RichText::new(command_line).monospace().weak());
+                    }
+                }
+            });
+            ui.add_space(2.0);
+            ui.label(RichText::new(&entry.output).monospace().color(accent));
+        });
+    }
+
+    fn render_console_input(&mut self, ui: &mut egui::Ui, agent_id: &str) {
+        let mut run_command = false;
+
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(">").strong().monospace());
+            let response = {
+                let console = self.session_panel.console_state_mut(agent_id);
+                ui.add(
+                    egui::TextEdit::singleline(&mut console.input)
+                        .id_source(("console-input", agent_id))
+                        .desired_width(f32::INFINITY)
+                        .hint_text("Enter a Demon command"),
+                )
+            };
+
+            let send_requested =
+                response.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
+            let tab_pressed = response.has_focus() && ui.input(|input| input.key_pressed(Key::Tab));
+            let up_pressed =
+                response.has_focus() && ui.input(|input| input.key_pressed(Key::ArrowUp));
+            let down_pressed =
+                response.has_focus() && ui.input(|input| input.key_pressed(Key::ArrowDown));
+
+            if up_pressed {
+                let console = self.session_panel.console_state_mut(agent_id);
+                apply_history_step(console, HistoryDirection::Older);
+                response.request_focus();
+            } else if down_pressed {
+                let console = self.session_panel.console_state_mut(agent_id);
+                apply_history_step(console, HistoryDirection::Newer);
+                response.request_focus();
+            } else if tab_pressed {
+                let console = self.session_panel.console_state_mut(agent_id);
+                apply_completion(console);
+                response.request_focus();
+            }
+
+            if response.changed() {
+                let console = self.session_panel.console_state_mut(agent_id);
+                console.completion_index = 0;
+                console.completion_seed = None;
+            }
+
+            run_command = ui.button("Run").clicked() || send_requested;
+        });
+
+        if run_command {
+            self.submit_console_command(agent_id);
+        }
     }
 
     fn render_note_editor(&mut self, ctx: &egui::Context, app_state: &SharedAppState) {
@@ -865,6 +1090,34 @@ impl ClientApp {
             ctx.request_repaint();
         } else if cancel_note || !keep_open {
             self.session_panel.note_editor = None;
+        }
+    }
+
+    fn submit_console_command(&mut self, agent_id: &str) {
+        let operator = match &self.phase {
+            AppPhase::Connected { app_state, .. } | AppPhase::Authenticating { app_state, .. } => {
+                let snapshot = Self::snapshot(app_state);
+                snapshot.operator_info.map(|info| info.username).unwrap_or_default()
+            }
+            AppPhase::Login(_) => String::new(),
+        };
+
+        let console = self.session_panel.console_state_mut(agent_id);
+        let command_line = console.input.trim().to_owned();
+        if command_line.is_empty() {
+            return;
+        }
+
+        match build_console_task(agent_id, &command_line, &operator) {
+            Ok(message) => {
+                push_history_entry(console, &command_line);
+                console.input.clear();
+                console.status_message = Some(format!("Queued `{command_line}`."));
+                self.session_panel.pending_messages.push(message);
+            }
+            Err(error) => {
+                console.status_message = Some(error);
+            }
         }
     }
 
@@ -1015,6 +1268,287 @@ fn next_task_id() -> u32 {
 
     static TASK_COUNTER: AtomicU32 = AtomicU32::new(1);
     TASK_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistoryDirection {
+    Older,
+    Newer,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ConsoleCommandSpec {
+    name: &'static str,
+    aliases: &'static [&'static str],
+    usage: &'static str,
+}
+
+const CONSOLE_COMMANDS: [ConsoleCommandSpec; 11] = [
+    ConsoleCommandSpec { name: "checkin", aliases: &[], usage: "checkin" },
+    ConsoleCommandSpec { name: "kill", aliases: &["exit"], usage: "kill [process]" },
+    ConsoleCommandSpec { name: "ps", aliases: &["proclist"], usage: "ps" },
+    ConsoleCommandSpec { name: "screenshot", aliases: &[], usage: "screenshot" },
+    ConsoleCommandSpec { name: "pwd", aliases: &[], usage: "pwd" },
+    ConsoleCommandSpec { name: "cd", aliases: &[], usage: "cd <path>" },
+    ConsoleCommandSpec { name: "mkdir", aliases: &[], usage: "mkdir <path>" },
+    ConsoleCommandSpec { name: "rm", aliases: &["del", "remove"], usage: "rm <path>" },
+    ConsoleCommandSpec { name: "download", aliases: &[], usage: "download <path>" },
+    ConsoleCommandSpec { name: "cat", aliases: &["type"], usage: "cat <path>" },
+    ConsoleCommandSpec { name: "proc", aliases: &[], usage: "proc kill <pid>" },
+];
+
+fn build_console_task(
+    agent_id: &str,
+    input: &str,
+    operator: &str,
+) -> Result<OperatorMessage, String> {
+    let trimmed = input.trim();
+    let mut parts = trimmed.split_whitespace();
+    let Some(command) = parts.next() else {
+        return Err("Command input is empty.".to_owned());
+    };
+    let command = command.to_ascii_lowercase();
+
+    let info = match command.as_str() {
+        "checkin" => AgentTaskInfo {
+            demon_id: agent_id.to_owned(),
+            task_id: format!("{:08X}", next_task_id()),
+            command_id: u32::from(DemonCommand::CommandCheckin).to_string(),
+            command_line: trimmed.to_owned(),
+            command: Some("checkin".to_owned()),
+            ..AgentTaskInfo::default()
+        },
+        "kill" | "exit" => AgentTaskInfo {
+            demon_id: agent_id.to_owned(),
+            task_id: format!("{:08X}", next_task_id()),
+            command_id: u32::from(DemonCommand::CommandExit).to_string(),
+            command_line: trimmed.to_owned(),
+            command: Some("kill".to_owned()),
+            arguments: parts.next().map(ToOwned::to_owned),
+            ..AgentTaskInfo::default()
+        },
+        "ps" | "proclist" => AgentTaskInfo {
+            demon_id: agent_id.to_owned(),
+            task_id: format!("{:08X}", next_task_id()),
+            command_id: u32::from(DemonCommand::CommandProcList).to_string(),
+            command_line: trimmed.to_owned(),
+            command: Some("ps".to_owned()),
+            ..AgentTaskInfo::default()
+        },
+        "screenshot" => AgentTaskInfo {
+            demon_id: agent_id.to_owned(),
+            task_id: format!("{:08X}", next_task_id()),
+            command_id: u32::from(DemonCommand::CommandScreenshot).to_string(),
+            command_line: trimmed.to_owned(),
+            command: Some("screenshot".to_owned()),
+            ..AgentTaskInfo::default()
+        },
+        "pwd" => filesystem_task(agent_id, trimmed, "pwd", None),
+        "cd" => filesystem_task(agent_id, trimmed, "cd", Some(rest_after_word(trimmed)?)),
+        "mkdir" => filesystem_task(agent_id, trimmed, "mkdir", Some(rest_after_word(trimmed)?)),
+        "rm" | "del" | "remove" => {
+            filesystem_task(agent_id, trimmed, "remove", Some(rest_after_word(trimmed)?))
+        }
+        "download" => {
+            filesystem_transfer_task(agent_id, trimmed, "download", &rest_after_word(trimmed)?)
+        }
+        "cat" | "type" => {
+            filesystem_transfer_task(agent_id, trimmed, "cat", &rest_after_word(trimmed)?)
+        }
+        "proc" => process_task(agent_id, trimmed)?,
+        _ => {
+            let usage = closest_command_usage(&command)
+                .unwrap_or("Supported commands: checkin, kill, ps, screenshot, pwd, cd, mkdir, rm, download, cat, proc kill");
+            return Err(format!("Unsupported console command `{command}`. {usage}"));
+        }
+    };
+
+    Ok(build_agent_task(operator, info))
+}
+
+fn filesystem_task(
+    agent_id: &str,
+    command_line: &str,
+    sub_command: &str,
+    arguments: Option<String>,
+) -> AgentTaskInfo {
+    AgentTaskInfo {
+        demon_id: agent_id.to_owned(),
+        task_id: format!("{:08X}", next_task_id()),
+        command_id: u32::from(DemonCommand::CommandFs).to_string(),
+        command_line: command_line.to_owned(),
+        command: Some("fs".to_owned()),
+        sub_command: Some(sub_command.to_owned()),
+        arguments,
+        ..AgentTaskInfo::default()
+    }
+}
+
+fn filesystem_transfer_task(
+    agent_id: &str,
+    command_line: &str,
+    sub_command: &str,
+    path: &str,
+) -> AgentTaskInfo {
+    let encoded = Some(base64::engine::general_purpose::STANDARD.encode(path.as_bytes()));
+    AgentTaskInfo {
+        demon_id: agent_id.to_owned(),
+        task_id: format!("{:08X}", next_task_id()),
+        command_id: u32::from(DemonCommand::CommandFs).to_string(),
+        command_line: command_line.to_owned(),
+        command: Some("fs".to_owned()),
+        sub_command: Some(sub_command.to_owned()),
+        arguments: encoded,
+        ..AgentTaskInfo::default()
+    }
+}
+
+fn process_task(agent_id: &str, command_line: &str) -> Result<AgentTaskInfo, String> {
+    let mut parts = command_line.split_whitespace();
+    let _ = parts.next();
+    let sub_command = parts.next().ok_or_else(|| "Usage: proc kill <pid>".to_owned())?;
+    match sub_command.to_ascii_lowercase().as_str() {
+        "kill" => {
+            let pid = parts.next().ok_or_else(|| "Usage: proc kill <pid>".to_owned())?;
+            if parts.next().is_some() {
+                return Err("Usage: proc kill <pid>".to_owned());
+            }
+            if pid.parse::<u32>().is_err() {
+                return Err(format!("Invalid PID `{pid}`."));
+            }
+            Ok(AgentTaskInfo {
+                demon_id: agent_id.to_owned(),
+                task_id: format!("{:08X}", next_task_id()),
+                command_id: u32::from(DemonCommand::CommandProc).to_string(),
+                command_line: command_line.to_owned(),
+                command: Some("proc".to_owned()),
+                sub_command: Some("kill".to_owned()),
+                arguments: Some(pid.to_owned()),
+                extra: BTreeMap::from([(
+                    "Args".to_owned(),
+                    serde_json::Value::String(pid.to_owned()),
+                )]),
+                ..AgentTaskInfo::default()
+            })
+        }
+        _ => Err("Usage: proc kill <pid>".to_owned()),
+    }
+}
+
+fn rest_after_word(input: &str) -> Result<String, String> {
+    let mut parts = input.trim().splitn(2, char::is_whitespace);
+    let _ = parts.next();
+    let rest = parts.next().map(str::trim).unwrap_or_default();
+    if rest.is_empty() {
+        Err("This command requires an argument.".to_owned())
+    } else {
+        Ok(rest.to_owned())
+    }
+}
+
+fn push_history_entry(console: &mut AgentConsoleState, command_line: &str) {
+    if console.history.last().is_some_and(|last| last == command_line) {
+        console.history_index = None;
+        console.completion_index = 0;
+        console.completion_seed = None;
+        return;
+    }
+
+    console.history.push(command_line.to_owned());
+    console.history_index = None;
+    console.completion_index = 0;
+    console.completion_seed = None;
+}
+
+fn apply_history_step(console: &mut AgentConsoleState, direction: HistoryDirection) {
+    if console.history.is_empty() {
+        return;
+    }
+
+    let next_index = match (direction, console.history_index) {
+        (HistoryDirection::Older, None) => Some(console.history.len().saturating_sub(1)),
+        (HistoryDirection::Older, Some(index)) => Some(index.saturating_sub(1)),
+        (HistoryDirection::Newer, Some(index)) if index + 1 < console.history.len() => {
+            Some(index + 1)
+        }
+        (HistoryDirection::Newer, Some(_)) => None,
+        (HistoryDirection::Newer, None) => None,
+    };
+
+    console.history_index = next_index;
+    console.input =
+        next_index.and_then(|index| console.history.get(index).cloned()).unwrap_or_default();
+    console.completion_index = 0;
+    console.completion_seed = None;
+}
+
+fn apply_completion(console: &mut AgentConsoleState) {
+    let prefix = console.input.trim();
+    if prefix.contains(char::is_whitespace) {
+        return;
+    }
+
+    let seed = console
+        .completion_seed
+        .clone()
+        .filter(|seed| !seed.is_empty())
+        .unwrap_or_else(|| prefix.to_owned());
+    let matches = console_completion_candidates(&seed);
+    if matches.is_empty() {
+        return;
+    }
+
+    if console.completion_seed.as_deref() != Some(seed.as_str()) {
+        console.completion_index = 0;
+    }
+
+    let next = console.completion_index % matches.len();
+    console.input = matches[next].to_owned();
+    console.completion_index = next + 1;
+    console.completion_seed = Some(seed);
+}
+
+fn console_completion_candidates(prefix: &str) -> Vec<&'static str> {
+    let needle = prefix.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return CONSOLE_COMMANDS.iter().map(|spec| spec.name).collect();
+    }
+
+    CONSOLE_COMMANDS
+        .iter()
+        .filter(|spec| {
+            spec.name.starts_with(&needle)
+                || spec.aliases.iter().any(|alias| alias.starts_with(&needle))
+        })
+        .map(|spec| spec.name)
+        .collect()
+}
+
+fn closest_command_usage(command: &str) -> Option<&'static str> {
+    CONSOLE_COMMANDS.iter().find_map(|spec| {
+        (spec.name == command || spec.aliases.contains(&command)).then_some(spec.usage)
+    })
+}
+
+fn split_console_selection<'a>(
+    open_consoles: &'a [String],
+    selected_console: Option<&'a str>,
+) -> Vec<&'a str> {
+    if open_consoles.is_empty() {
+        return Vec::new();
+    }
+
+    let selected = selected_console.unwrap_or(open_consoles[0].as_str());
+    let mut visible = vec![selected];
+    for agent_id in open_consoles {
+        if agent_id != selected {
+            visible.push(agent_id.as_str());
+        }
+        if visible.len() == 2 {
+            break;
+        }
+    }
+    visible
 }
 
 fn agent_ip(agent: &transport::AgentSummary) -> String {
@@ -1414,6 +1948,68 @@ mod tests {
             message.info.fields.get("Message"),
             Some(&serde_json::Value::String("hello team".to_owned()))
         );
+    }
+
+    #[test]
+    fn build_console_task_encodes_filesystem_download() {
+        let OperatorMessage::AgentTask(message) =
+            build_console_task("ABCD1234", "download C:\\Temp\\report.txt", "operator")
+                .unwrap_or_else(|error| panic!("console task should build: {error}"))
+        else {
+            panic!("expected agent task");
+        };
+
+        assert_eq!(message.info.command_id, u32::from(DemonCommand::CommandFs).to_string());
+        assert_eq!(message.info.sub_command.as_deref(), Some("download"));
+        assert_eq!(message.info.arguments.as_deref(), Some("QzpcVGVtcFxyZXBvcnQudHh0"));
+    }
+
+    #[test]
+    fn build_console_task_rejects_missing_process_kill_pid() {
+        let error = build_console_task("ABCD1234", "proc kill", "operator")
+            .expect_err("missing pid should fail");
+        assert_eq!(error, "Usage: proc kill <pid>");
+    }
+
+    #[test]
+    fn history_navigation_walks_commands_and_resets() {
+        let mut console = AgentConsoleState::default();
+        push_history_entry(&mut console, "ps");
+        push_history_entry(&mut console, "pwd");
+
+        apply_history_step(&mut console, HistoryDirection::Older);
+        assert_eq!(console.input, "pwd");
+
+        apply_history_step(&mut console, HistoryDirection::Older);
+        assert_eq!(console.input, "ps");
+
+        apply_history_step(&mut console, HistoryDirection::Newer);
+        assert_eq!(console.input, "pwd");
+
+        apply_history_step(&mut console, HistoryDirection::Newer);
+        assert!(console.input.is_empty());
+    }
+
+    #[test]
+    fn completion_cycles_supported_commands() {
+        let mut console =
+            AgentConsoleState { input: "p".to_owned(), ..AgentConsoleState::default() };
+
+        apply_completion(&mut console);
+        assert_eq!(console.input, "ps");
+
+        apply_completion(&mut console);
+        assert_eq!(console.input, "pwd");
+
+        apply_completion(&mut console);
+        assert_eq!(console.input, "proc");
+    }
+
+    #[test]
+    fn split_console_selection_prefers_selected_agent() {
+        let open = vec!["A".to_owned(), "B".to_owned(), "C".to_owned()];
+        let visible = split_console_selection(&open, Some("C"));
+        assert_eq!(visible, vec!["C", "A"]);
     }
 
     #[test]

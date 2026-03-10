@@ -101,7 +101,11 @@ try:
 except Exception: pass
 " 2>/dev/null)
     if [ "$pre_status" = "in_progress" ]; then
-        log "CLAIM SKIP: $task_id already in_progress in JSONL (stale DB) — refreshing and skipping"
+        log "CLAIM SKIP: $task_id already in_progress in JSONL (stale DB) — forcing DB rebuild"
+        # br sync --import-only skips when the JSONL hash is cached as current,
+        # leaving the DB/JSONL mismatch intact. Delete and rebuild to fix it.
+        local db_path="$SCRIPT_DIR/.beads/beads.db"
+        rm -f "$db_path" "$db_path-wal" "$db_path-shm" 2>/dev/null
         br sync --import-only --quiet 2>/dev/null || true
         return 1
     fi

@@ -582,6 +582,8 @@ pub(crate) enum AgentCommandError {
     #[error(transparent)]
     Teamserver(#[from] crate::TeamserverError),
     #[error(transparent)]
+    Plugin(#[from] crate::PluginError),
+    #[error(transparent)]
     SocketRelay(#[from] crate::SocketRelayError),
 }
 
@@ -623,6 +625,26 @@ pub(crate) async fn execute_agent_task(
     {
         events.broadcast(teamserver_log_event(actor, &result));
         0
+    } else if let Some(plugins) = crate::PluginRuntime::current() {
+        if let Some((command, args)) = plugins.match_registered_command(&message.info).await {
+            if plugins.invoke_registered_command(&command, actor, agent_id, args).await? {
+                0
+            } else {
+                let jobs = build_jobs(&message.info)?;
+                let queued_jobs = jobs.len();
+                for job in jobs {
+                    registry.enqueue_job(agent_id, job).await?;
+                }
+                queued_jobs
+            }
+        } else {
+            let jobs = build_jobs(&message.info)?;
+            let queued_jobs = jobs.len();
+            for job in jobs {
+                registry.enqueue_job(agent_id, job).await?;
+            }
+            queued_jobs
+        }
     } else {
         let jobs = build_jobs(&message.info)?;
         let queued_jobs = jobs.len();

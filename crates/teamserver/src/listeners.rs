@@ -1386,7 +1386,9 @@ impl DnsListenerState {
             return Some(build_dns_refused_response(query.id));
         }
 
-        let c2_query = parse_dns_c2_query(&query.labels, &self.config.domain)?;
+        let Some(c2_query) = parse_dns_c2_query(&query.labels, &self.config.domain) else {
+            return Some(build_dns_refused_response(query.id));
+        };
 
         match c2_query {
             DnsC2Query::Upload { agent_id, seq, total, data } => {
@@ -3021,15 +3023,15 @@ mod tests {
     // ── DNS C2 unit tests ─────────────────────────────────────────────────────
 
     use super::{
-        base32hex_decode, base32hex_encode, build_dns_txt_response, chunk_response_to_b32hex,
-        parse_dns_c2_query, parse_dns_query, DNS_HEADER_LEN, DNS_TYPE_TXT,
+        DNS_HEADER_LEN, DNS_TYPE_TXT, base32hex_decode, base32hex_encode, build_dns_txt_response,
+        chunk_response_to_b32hex, parse_dns_c2_query, parse_dns_query,
     };
     use tokio::net::UdpSocket as TokioUdpSocket;
 
     fn free_udp_port() -> u16 {
         // Bind on :0 to let the OS pick an ephemeral port, then return it.
-        let sock = std::net::UdpSocket::bind("127.0.0.1:0")
-            .expect("failed to bind ephemeral UDP socket");
+        let sock =
+            std::net::UdpSocket::bind("127.0.0.1:0").expect("failed to bind ephemeral UDP socket");
         sock.local_addr().expect("failed to read local addr").port()
     }
 
@@ -3068,12 +3070,8 @@ mod tests {
 
     #[test]
     fn base32hex_encode_and_decode_round_trip() {
-        let cases: &[&[u8]] = &[
-            b"hello",
-            b"",
-            b"\x00\xff\xaa",
-            b"The quick brown fox jumps over the lazy dog",
-        ];
+        let cases: &[&[u8]] =
+            &[b"hello", b"", b"\x00\xff\xaa", b"The quick brown fox jumps over the lazy dog"];
         for &data in cases {
             let encoded = base32hex_encode(data);
             let decoded = base32hex_decode(&encoded).expect("decode failed");
@@ -3101,10 +3099,7 @@ mod tests {
         let parsed = parse_dns_query(&packet).expect("parse failed");
         assert_eq!(parsed.id, 0x1234);
         assert_eq!(parsed.qtype, DNS_TYPE_TXT);
-        assert_eq!(
-            parsed.labels,
-            &["data", "0-1-deadbeef", "up", "c2", "example", "com"]
-        );
+        assert_eq!(parsed.labels, &["data", "0-1-deadbeef", "up", "c2", "example", "com"]);
         // qname_raw includes zero terminator
         assert_eq!(*parsed.qname_raw.last().unwrap(), 0);
     }
@@ -3132,8 +3127,7 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         let result = parse_dns_c2_query(&labels, "c2.example.com");
-        let Some(super::DnsC2Query::Upload { agent_id, seq, total, data: decoded }) = result
-        else {
+        let Some(super::DnsC2Query::Upload { agent_id, seq, total, data: decoded }) = result else {
             panic!("expected Upload variant");
         };
         assert_eq!(agent_id, 0xDEAD_BEEF);
@@ -3156,11 +3150,10 @@ mod tests {
 
     #[test]
     fn parse_dns_c2_query_rejects_wrong_domain() {
-        let labels: Vec<String> =
-            ["data", "0-1-deadbeef", "up", "other", "domain", "com"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
+        let labels: Vec<String> = ["data", "0-1-deadbeef", "up", "other", "domain", "com"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert!(parse_dns_c2_query(&labels, "c2.example.com").is_none());
     }
 

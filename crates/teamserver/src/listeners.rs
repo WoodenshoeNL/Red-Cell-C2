@@ -1244,6 +1244,8 @@ const DNS_HEADER_LEN: usize = 12;
 const DNS_TYPE_TXT: u16 = 16;
 /// DNS record type for A records.
 const DNS_TYPE_A: u16 = 1;
+/// DNS record type for CNAME records.
+const DNS_TYPE_CNAME: u16 = 5;
 /// DNS record class IN.
 const DNS_CLASS_IN: u16 = 1;
 /// DNS flag: Query/Response bit.
@@ -1367,9 +1369,16 @@ impl DnsListenerState {
 
     async fn handle_dns_packet(&self, buf: &[u8], peer_ip: &str) -> Option<Vec<u8>> {
         let query = parse_dns_query(buf)?;
+        let Some(allowed_qtypes) = dns_allowed_query_types(&self.config.record_types) else {
+            warn!(
+                listener = %self.config.name,
+                record_types = %self.config.record_types.join(","),
+                "dns listener has unsupported record type configuration"
+            );
+            return Some(build_dns_refused_response(query.id));
+        };
 
-        // Only handle A and TXT queries
-        if query.qtype != DNS_TYPE_A && query.qtype != DNS_TYPE_TXT {
+        if !allowed_qtypes.contains(&query.qtype) {
             return Some(build_dns_refused_response(query.id));
         }
 
@@ -1567,6 +1576,27 @@ impl DnsListenerState {
         uploads.remove(&agent_id);
         DnsUploadAssembly::Complete(assembled)
     }
+}
+
+fn dns_allowed_query_types(record_types: &[String]) -> Option<Vec<u16>> {
+    let configured =
+        if record_types.is_empty() { vec!["TXT".to_owned()] } else { record_types.to_vec() };
+
+    let mut allowed = Vec::new();
+    for record_type in configured {
+        let qtype = match record_type.trim().to_ascii_uppercase().as_str() {
+            "A" => DNS_TYPE_A,
+            "TXT" => DNS_TYPE_TXT,
+            "CNAME" => DNS_TYPE_CNAME,
+            _ => return None,
+        };
+
+        if !allowed.contains(&qtype) {
+            allowed.push(qtype);
+        }
+    }
+
+    Some(allowed)
 }
 
 /// A parsed DNS C2 query from a Demon agent.
@@ -1805,6 +1835,16 @@ async fn spawn_dns_listener_runtime(
     sockets: SocketRelayManager,
     plugins: Option<PluginRuntime>,
 ) -> Result<JoinHandle<()>, ListenerManagerError> {
+    if dns_allowed_query_types(&config.record_types).is_none() {
+        return Err(ListenerManagerError::StartFailed {
+            name: config.name.clone(),
+            message: format!(
+                "unsupported DNS record type configuration: {}",
+                config.record_types.join(",")
+            ),
+        });
+    }
+
     let state =
         Arc::new(DnsListenerState::new(config, registry, events, database, sockets, plugins));
     let addr = format!("{}:{}", config.host_bind, config.port_bind);
@@ -3163,10 +3203,11 @@ mod tests {
     // ── DNS C2 unit tests ─────────────────────────────────────────────────────
 
     use super::{
-        DNS_HEADER_LEN, DNS_MAX_PENDING_UPLOADS, DNS_MAX_UPLOAD_CHUNKS, DNS_TYPE_A, DNS_TYPE_TXT,
-        DNS_UPLOAD_TIMEOUT_SECS, DnsListenerState, DnsPendingResponse, DnsPendingUpload,
-        DnsUploadAssembly, base32hex_decode, base32hex_encode, build_dns_txt_response,
-        chunk_response_to_b32hex, parse_dns_c2_query, parse_dns_query,
+        DNS_HEADER_LEN, DNS_MAX_PENDING_UPLOADS, DNS_MAX_UPLOAD_CHUNKS, DNS_TYPE_A, DNS_TYPE_CNAME,
+        DNS_TYPE_TXT, DNS_UPLOAD_TIMEOUT_SECS, DnsListenerState, DnsPendingResponse,
+        DnsPendingUpload, DnsUploadAssembly, base32hex_decode, base32hex_encode,
+        build_dns_txt_response, chunk_response_to_b32hex, dns_allowed_query_types,
+        parse_dns_c2_query, parse_dns_query,
     };
     use tokio::net::UdpSocket as TokioUdpSocket;
 
@@ -3230,6 +3271,10 @@ mod tests {
 
     fn build_dns_txt_query(id: u16, qname: &str) -> Vec<u8> {
         build_dns_query(id, qname, DNS_TYPE_TXT)
+    }
+
+    fn build_dns_cname_query(id: u16, qname: &str) -> Vec<u8> {
+        build_dns_query(id, qname, DNS_TYPE_CNAME)
     }
 
     #[test]
@@ -3354,6 +3399,16 @@ mod tests {
     }
 
     #[test]
+    fn dns_allowed_query_types_defaults_to_txt_and_supports_cname() {
+        assert_eq!(dns_allowed_query_types(&[]), Some(vec![DNS_TYPE_TXT]));
+        assert_eq!(
+            dns_allowed_query_types(&["txt".to_owned(), "CNAME".to_owned(), "A".to_owned()]),
+            Some(vec![DNS_TYPE_TXT, DNS_TYPE_CNAME, DNS_TYPE_A])
+        );
+        assert!(dns_allowed_query_types(&["MX".to_owned()]).is_none());
+    }
+
+    #[test]
     fn chunk_response_splits_payload_into_base32hex_chunks() {
         let payload = vec![0xABu8; 300]; // 300 bytes > 1 chunk (125 bytes each)
         let chunks = chunk_response_to_b32hex(&payload);
@@ -3427,6 +3482,91 @@ mod tests {
         // ANCOUNT = 1
         let ancount = u16::from_be_bytes([buf[6], buf[7]]);
         assert_eq!(ancount, 1);
+    }
+
+    #[tokio::test]
+    async fn dns_listener_refuses_query_types_not_enabled_by_config() {
+        let port = free_udp_port();
+        let manager = manager().await.expect("manager creation failed");
+        let mut config = dns_listener_config("dns-txt-only", port, "c2.example.com");
+        let ListenerConfig::Dns(dns_config) = &mut config else {
+            panic!("expected DNS config");
+        };
+        dns_config.record_types = vec!["TXT".to_owned()];
+
+        manager.create(config).await.expect("create failed");
+        manager.start("dns-txt-only").await.expect("start failed");
+
+        sleep(Duration::from_millis(50)).await;
+
+        let client = TokioUdpSocket::bind("127.0.0.1:0").await.expect("client bind failed");
+        client.connect(format!("127.0.0.1:{port}")).await.expect("connect failed");
+
+        let packet = build_dns_query(0x3333, "0-deadbeef.dn.c2.example.com", DNS_TYPE_A);
+        client.send(&packet).await.expect("send failed");
+
+        let mut buf = vec![0u8; 512];
+        tokio::time::timeout(Duration::from_secs(2), client.recv(&mut buf))
+            .await
+            .expect("no response received")
+            .expect("recv failed");
+
+        assert_eq!(buf[3] & 0x0F, 5, "expected REFUSED RCODE");
+    }
+
+    #[tokio::test]
+    async fn dns_listener_accepts_cname_queries_when_enabled() {
+        let port = free_udp_port();
+        let manager = manager().await.expect("manager creation failed");
+        let mut config = dns_listener_config("dns-cname", port, "c2.example.com");
+        let ListenerConfig::Dns(dns_config) = &mut config else {
+            panic!("expected DNS config");
+        };
+        dns_config.record_types = vec!["CNAME".to_owned()];
+
+        manager.create(config).await.expect("create failed");
+        manager.start("dns-cname").await.expect("start failed");
+
+        sleep(Duration::from_millis(50)).await;
+
+        let client = TokioUdpSocket::bind("127.0.0.1:0").await.expect("client bind failed");
+        client.connect(format!("127.0.0.1:{port}")).await.expect("connect failed");
+
+        let packet = build_dns_cname_query(0x4444, "0-deadbeef.dn.c2.example.com");
+        client.send(&packet).await.expect("send failed");
+
+        let mut buf = vec![0u8; 512];
+        tokio::time::timeout(Duration::from_secs(2), client.recv(&mut buf))
+            .await
+            .expect("no response received")
+            .expect("recv failed");
+
+        assert_eq!(buf[3] & 0x0F, 0, "expected NOERROR");
+        let ancount = u16::from_be_bytes([buf[6], buf[7]]);
+        assert_eq!(ancount, 1);
+        let parsed = parse_dns_query(&packet).expect("query should parse");
+        let question_qtype_offset = DNS_HEADER_LEN + parsed.qname_raw.len();
+        let echoed_qtype =
+            u16::from_be_bytes([buf[question_qtype_offset], buf[question_qtype_offset + 1]]);
+        assert_eq!(echoed_qtype, DNS_TYPE_CNAME);
+    }
+
+    #[tokio::test]
+    async fn dns_listener_start_rejects_unsupported_record_types() {
+        let port = free_udp_port();
+        let manager = manager().await.expect("manager creation failed");
+        let mut config = dns_listener_config("dns-invalid-type", port, "c2.example.com");
+        let ListenerConfig::Dns(dns_config) = &mut config else {
+            panic!("expected DNS config");
+        };
+        dns_config.record_types = vec!["MX".to_owned()];
+
+        manager.create(config).await.expect("create failed");
+        let error = manager.start("dns-invalid-type").await.expect_err("start should fail");
+        assert!(
+            error.to_string().contains("unsupported DNS record type configuration"),
+            "unexpected error: {error}"
+        );
     }
 
     #[tokio::test]

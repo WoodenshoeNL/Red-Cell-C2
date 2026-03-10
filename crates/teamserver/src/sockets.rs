@@ -100,7 +100,7 @@ impl SocketRelayManager {
         port: &str,
     ) -> Result<String, SocketRelayError> {
         let port = parse_port(port)?;
-        let bind_addr = format!("0.0.0.0:{port}");
+        let bind_addr = format!("127.0.0.1:{port}");
         let listener =
             TcpListener::bind(&bind_addr).await.map_err(|error| SocketRelayError::BindFailed {
                 bind_addr: bind_addr.clone(),
@@ -691,6 +691,7 @@ mod tests {
 
         let start = manager.add_socks_server(0xDEAD_BEEF, "0").await;
         assert!(start.is_ok());
+        assert!(start.as_deref().is_ok_and(|message| message.contains("127.0.0.1:")));
         assert!(manager.list_socks_servers(0xDEAD_BEEF).await.contains("SOCKS5 servers"));
         let cleared = manager.clear_socks_servers(0xDEAD_BEEF).await;
         assert!(cleared.is_ok());

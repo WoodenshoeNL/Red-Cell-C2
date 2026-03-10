@@ -45,7 +45,7 @@ use tracing::{info, warn};
 use crate::{
     AgentRegistry, CommandDispatchError, CommandDispatcher, Database, DemonPacketParser,
     ListenerRepository, ListenerStatus, ParsedDemonPacket, PersistedListener,
-    PersistedListenerState, TeamserverError, build_init_ack, events::EventBus,
+    PersistedListenerState, SocketRelayManager, TeamserverError, build_init_ack, events::EventBus,
 };
 
 /// Runtime state for a configured listener.
@@ -251,6 +251,7 @@ pub struct ListenerManager {
     database: Database,
     agent_registry: AgentRegistry,
     events: EventBus,
+    sockets: SocketRelayManager,
     active_handles: Arc<RwLock<BTreeMap<String, JoinHandle<()>>>>,
     operations: Arc<Mutex<()>>,
 }
@@ -258,11 +259,17 @@ pub struct ListenerManager {
 impl ListenerManager {
     /// Build a listener manager backed by `database`.
     #[must_use]
-    pub fn new(database: Database, agent_registry: AgentRegistry, events: EventBus) -> Self {
+    pub fn new(
+        database: Database,
+        agent_registry: AgentRegistry,
+        events: EventBus,
+        sockets: SocketRelayManager,
+    ) -> Self {
         Self {
             database,
             agent_registry,
             events,
+            sockets,
             active_handles: Arc::new(RwLock::new(BTreeMap::new())),
             operations: Arc::new(Mutex::new(())),
         }
@@ -495,6 +502,8 @@ impl HttpListenerState {
         config: &HttpListenerConfig,
         registry: AgentRegistry,
         events: EventBus,
+        database: Database,
+        sockets: SocketRelayManager,
     ) -> Result<Self, ListenerManagerError> {
         let method = parse_method(config)?;
         let required_headers = config
@@ -519,7 +528,12 @@ impl HttpListenerState {
             config: config.clone(),
             registry: registry.clone(),
             parser: DemonPacketParser::new(registry.clone()),
-            dispatcher: CommandDispatcher::with_builtin_handlers(registry.clone(), events.clone()),
+            dispatcher: CommandDispatcher::with_builtin_handlers(
+                registry.clone(),
+                events.clone(),
+                database.clone(),
+                sockets,
+            ),
             events,
             method,
             required_headers,
@@ -555,13 +569,24 @@ impl HttpListenerState {
 }
 
 impl SmbListenerState {
-    fn build(config: &SmbListenerConfig, registry: AgentRegistry, events: EventBus) -> Self {
+    fn build(
+        config: &SmbListenerConfig,
+        registry: AgentRegistry,
+        events: EventBus,
+        database: Database,
+        sockets: SocketRelayManager,
+    ) -> Self {
         Self {
             config: config.clone(),
             registry: registry.clone(),
             parser: DemonPacketParser::new(registry.clone()),
             events: events.clone(),
-            dispatcher: CommandDispatcher::with_builtin_handlers(registry.clone(), events.clone()),
+            dispatcher: CommandDispatcher::with_builtin_handlers(
+                registry.clone(),
+                events.clone(),
+                database,
+                sockets,
+            ),
         }
     }
 }
@@ -810,8 +835,10 @@ async fn spawn_http_listener_runtime(
     config: &HttpListenerConfig,
     registry: AgentRegistry,
     events: EventBus,
+    database: Database,
+    sockets: SocketRelayManager,
 ) -> Result<JoinHandle<()>, ListenerManagerError> {
-    let state = Arc::new(HttpListenerState::build(config, registry, events)?);
+    let state = Arc::new(HttpListenerState::build(config, registry, events, database, sockets)?);
     let address = format!("{}:{}", config.host_bind, config.port_bind);
     let listener = TcpListener::bind(address.as_str()).await.map_err(|error| {
         ListenerManagerError::StartFailed {
@@ -972,8 +999,10 @@ async fn spawn_smb_listener_runtime(
     config: &SmbListenerConfig,
     registry: AgentRegistry,
     events: EventBus,
+    database: Database,
+    sockets: SocketRelayManager,
 ) -> Result<JoinHandle<()>, ListenerManagerError> {
-    let state = Arc::new(SmbListenerState::build(config, registry, events));
+    let state = Arc::new(SmbListenerState::build(config, registry, events, database, sockets));
     let listener_name = normalized_smb_pipe_name(&config.pipe_name);
     let socket_name = smb_local_socket_name(&config.pipe_name).map_err(|error| {
         ListenerManagerError::StartFailed {
@@ -1149,19 +1178,33 @@ impl ListenerManager {
                     config,
                     self.agent_registry.clone(),
                     self.events.clone(),
+                    self.database.clone(),
+                    self.sockets.clone(),
                 )
                 .await
             }
             ListenerConfig::Smb(config) => {
-                spawn_smb_listener_runtime(config, self.agent_registry.clone(), self.events.clone())
-                    .await
+                spawn_smb_listener_runtime(
+                    config,
+                    self.agent_registry.clone(),
+                    self.events.clone(),
+                    self.database.clone(),
+                    self.sockets.clone(),
+                )
+                .await
             }
             ListenerConfig::External(_) => Ok(tokio::spawn(async move {
                 std::future::pending::<()>().await;
             })),
             ListenerConfig::Dns(config) => {
-                spawn_dns_listener_runtime(config, self.agent_registry.clone(), self.events.clone())
-                    .await
+                spawn_dns_listener_runtime(
+                    config,
+                    self.agent_registry.clone(),
+                    self.events.clone(),
+                    self.database.clone(),
+                    self.sockets.clone(),
+                )
+                .await
             }
         }
     }
@@ -1258,13 +1301,24 @@ struct DnsListenerState {
 }
 
 impl DnsListenerState {
-    fn new(config: &DnsListenerConfig, registry: AgentRegistry, events: EventBus) -> Self {
+    fn new(
+        config: &DnsListenerConfig,
+        registry: AgentRegistry,
+        events: EventBus,
+        database: Database,
+        sockets: SocketRelayManager,
+    ) -> Self {
         Self {
             config: config.clone(),
             registry: registry.clone(),
             parser: DemonPacketParser::new(registry.clone()),
             events: events.clone(),
-            dispatcher: CommandDispatcher::with_builtin_handlers(registry.clone(), events.clone()),
+            dispatcher: CommandDispatcher::with_builtin_handlers(
+                registry.clone(),
+                events.clone(),
+                database,
+                sockets,
+            ),
             uploads: Mutex::new(HashMap::new()),
             responses: Mutex::new(HashMap::new()),
         }
@@ -1639,8 +1693,10 @@ async fn spawn_dns_listener_runtime(
     config: &DnsListenerConfig,
     registry: AgentRegistry,
     events: EventBus,
+    database: Database,
+    sockets: SocketRelayManager,
 ) -> Result<JoinHandle<()>, ListenerManagerError> {
-    let state = Arc::new(DnsListenerState::new(config, registry, events));
+    let state = Arc::new(DnsListenerState::new(config, registry, events, database, sockets));
     let addr = format!("{}:{}", config.host_bind, config.port_bind);
 
     let socket =
@@ -2044,7 +2100,7 @@ mod tests {
         MAX_SMB_FRAME_PAYLOAD_LEN, action_from_mark, listener_config_from_operator,
         operator_requests_start, read_smb_frame, smb_local_socket_name,
     };
-    use crate::{AgentRegistry, Database, EventBus, Job};
+    use crate::{AgentRegistry, Database, EventBus, Job, SocketRelayManager};
     use axum::http::StatusCode;
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -2100,7 +2156,9 @@ mod tests {
     async fn manager() -> Result<ListenerManager, ListenerManagerError> {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());
-        Ok(ListenerManager::new(database, registry, EventBus::default()))
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        Ok(ListenerManager::new(database, registry, events, sockets))
     }
 
     #[tokio::test]
@@ -2296,7 +2354,9 @@ mod tests {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
-        let manager = ListenerManager::new(database.clone(), registry.clone(), events.clone());
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager =
+            ListenerManager::new(database.clone(), registry.clone(), events.clone(), sockets);
         let mut event_receiver = events.subscribe();
         let port = available_port()?;
 
@@ -2338,7 +2398,9 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());
-        let manager = ListenerManager::new(database, registry.clone(), EventBus::default());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::new(database, registry.clone(), events, sockets);
         let port = available_port()?;
         let key = [0x51; AGENT_KEY_LENGTH];
         let iv = [0x19; AGENT_IV_LENGTH];
@@ -2374,7 +2436,9 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());
-        let manager = ListenerManager::new(database, registry.clone(), EventBus::default());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::new(database, registry.clone(), events, sockets);
         let port = available_port()?;
         let key = [0x61; AGENT_KEY_LENGTH];
         let iv = [0x27; AGENT_IV_LENGTH];
@@ -2446,7 +2510,9 @@ mod tests {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
-        let manager = ListenerManager::new(database.clone(), registry.clone(), events.clone());
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager =
+            ListenerManager::new(database.clone(), registry.clone(), events.clone(), sockets);
         let mut event_receiver = events.subscribe();
         let port = available_port()?;
         let key = [0x71; AGENT_KEY_LENGTH];
@@ -2512,7 +2578,9 @@ mod tests {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
-        let manager = ListenerManager::new(database.clone(), registry.clone(), events.clone());
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager =
+            ListenerManager::new(database.clone(), registry.clone(), events.clone(), sockets);
         let mut event_receiver = events.subscribe();
         let pipe_name = unique_smb_pipe_name("init");
 
@@ -2555,7 +2623,9 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());
-        let manager = ListenerManager::new(database, registry.clone(), EventBus::default());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::new(database, registry.clone(), events, sockets);
         let pipe_name = unique_smb_pipe_name("jobs");
         let key = [0x61; AGENT_KEY_LENGTH];
         let iv = [0x27; AGENT_IV_LENGTH];

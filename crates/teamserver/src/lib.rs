@@ -8,6 +8,7 @@ pub mod dispatch;
 pub mod events;
 pub mod listeners;
 pub mod rbac;
+pub mod sockets;
 pub mod websocket;
 
 pub use agents::{AgentRegistry, Job};
@@ -35,4 +36,5 @@ pub use rbac::{
     AdminAccess, AuthenticatedOperator, AuthorizationError, ListenerManagementAccess, Permission,
     ReadAccess, TaskAgentAccess, authorize_permission, authorize_websocket_command,
 };
+pub use sockets::{SocketRelayError, SocketRelayManager};
 pub use websocket::{OperatorConnectionManager, routes as websocket_routes, websocket_handler};

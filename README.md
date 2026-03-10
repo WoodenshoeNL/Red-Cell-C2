@@ -92,6 +92,7 @@ This project uses autonomous AI agent loops for development. Three loops are ava
 | `./codex_loop.sh` | Codex | Development | Continuous |
 | `./claude_dev_loop.sh` | Claude | Development | Continuous |
 | `./claude_loop.sh` | Claude | QA review | Every 10 min |
+| `./claude_arch_loop.sh` | Claude | Architecture review | Every 45–90 min |
 
 ### Development loops (`codex_loop.sh`, `claude_dev_loop.sh`)
 
@@ -111,7 +112,7 @@ Logs: `logs/codex_dev.log`, `logs/claude_dev.log`
 
 ### QA review loop (`claude_loop.sh`)
 
-Runs every 10 minutes. Reviews recent commits, checks build health, verifies architecture compliance, and creates beads issues for any problems found. Does not write code.
+Runs every 10 minutes. Reviews commits since the last QA checkpoint, checks build health, verifies architecture compliance, and creates beads issues for any problems found. Does not write code.
 
 ```bash
 ./claude_loop.sh
@@ -119,23 +120,53 @@ Runs every 10 minutes. Reviews recent commits, checks build health, verifies arc
 
 Log: `logs/claude_qa.log`
 
+### Architecture review loop (`claude_arch_loop.sh`)
+
+Runs every 45–90 minutes (randomised interval). Reads the **entire codebase from scratch** — not just recent commits. Looks for security issues, architectural drift, missing test coverage, protocol correctness, and stubbed-out code that silently does nothing. Files beads issues for all findings. Does not write code.
+
+```bash
+# Run forever
+./claude_arch_loop.sh
+
+# Run exactly N reviews then exit
+./claude_arch_loop.sh 3
+```
+
+Logs: `logs/claude_arch.log` (loop control), `logs/arch_review_YYYYMMDD_HHMMSS.log` (per run)
+
+### Stopping a loop
+
+Create a `.stop` file in the repo root. Each loop checks for it before starting the next pass:
+
+```bash
+touch .stop          # stop local loops after the current pass
+rm .stop             # resume
+```
+
+To stop a remote agent (e.g. Codex running in the cloud):
+
+```bash
+touch .stop && git add .stop && git commit -m "chore: stop dev loop" && git push
+```
+
 ### Typical multi-agent setup
 
 ```bash
-./codex_loop.sh &          # Codex doing dev work in background
-./claude_dev_loop.sh 2 &   # Claude doing 2 dev tasks in background
-./claude_loop.sh           # Claude QA in foreground
+./codex_loop.sh &           # Codex doing dev work
+./claude_loop.sh &          # Claude QA running every 10 min
+./claude_arch_loop.sh       # Claude deep architecture review in foreground
 ```
 
 ### Prompt files
 
-Each loop has a corresponding prompt file that controls agent behavior:
+Each loop has a corresponding prompt file that controls agent behaviour:
 
 | Prompt | Used by |
 |---|---|
 | `CODEX_PROMPT.md` | `codex_loop.sh` |
 | `CLAUDE_DEV_PROMPT.md` | `claude_dev_loop.sh` |
 | `CLAUDE_PROMPT.md` | `claude_loop.sh` |
+| `CLAUDE_ARCH_PROMPT.md` | `claude_arch_loop.sh` |
 
 ---
 
@@ -190,9 +221,11 @@ Red-Cell-C2/
 ├── AGENTS.md                # Agent instructions and architecture decisions
 ├── CLAUDE_PROMPT.md         # QA reviewer prompt
 ├── CLAUDE_DEV_PROMPT.md     # Claude developer prompt
+├── CLAUDE_ARCH_PROMPT.md    # Architecture reviewer prompt
 ├── CODEX_PROMPT.md          # Codex developer prompt
-├── claude_loop.sh           # QA review loop
+├── claude_loop.sh           # QA review loop (every 10 min)
 ├── claude_dev_loop.sh       # Claude development loop
+├── claude_arch_loop.sh      # Architecture review loop (every 45–90 min)
 └── codex_loop.sh            # Codex development loop
 ```
 

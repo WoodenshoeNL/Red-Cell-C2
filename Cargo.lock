@@ -3879,6 +3879,7 @@ dependencies = [
  "dirs",
  "eframe",
  "futures-util",
+ "pyo3",
  "red-cell-common",
  "rfd",
  "serde",
@@ -3889,6 +3890,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite 0.26.2",
  "toml",
+ "tracing",
  "url",
 ]
 

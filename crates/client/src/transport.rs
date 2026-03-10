@@ -31,7 +31,10 @@ use tokio_tungstenite::{
         protocol::{CloseFrame, Message as WebSocketMessage, frame::coding::CloseCode},
     },
 };
+use tracing::warn;
 use url::Url;
+
+use crate::python::PythonRuntime;
 
 const MAX_CHAT_MESSAGES: usize = 200;
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
@@ -52,6 +55,7 @@ impl ClientTransport {
         server_url: String,
         app_state: SharedAppState,
         repaint: egui::Context,
+        python_runtime: Option<PythonRuntime>,
     ) -> Result<Self, TransportError> {
         red_cell_common::tls::install_default_crypto_provider();
 
@@ -78,6 +82,7 @@ impl ClientTransport {
                 shared_outgoing_rx,
                 shutdown_rx,
                 repaint,
+                python_runtime,
             )
             .await;
         });
@@ -102,6 +107,11 @@ impl Drop for ClientTransport {
             runtime.shutdown_timeout(Duration::from_millis(250));
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AppEvent {
+    AgentCheckin(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -322,7 +332,8 @@ impl AppState {
         }
     }
 
-    pub(crate) fn apply_operator_message(&mut self, message: OperatorMessage) {
+    pub(crate) fn apply_operator_message(&mut self, message: OperatorMessage) -> Vec<AppEvent> {
+        let mut events = Vec::new();
         match message {
             OperatorMessage::InitConnectionSuccess(message) => {
                 self.connection_status = ConnectionStatus::Connected;
@@ -399,6 +410,7 @@ impl AppState {
                 self.remove_loot_matching(&message.info, LootKind::File);
             }
             OperatorMessage::AgentNew(message) => {
+                events.push(AppEvent::AgentCheckin(normalize_agent_id(&message.info.name_id)));
                 self.upsert_agent(agent_summary_from_message(&message.info));
             }
             OperatorMessage::AgentRemove(message) => {
@@ -408,6 +420,7 @@ impl AppState {
             }
             OperatorMessage::AgentUpdate(message) => {
                 let agent_id = normalize_agent_id(&message.info.agent_id);
+                events.push(AppEvent::AgentCheckin(agent_id.clone()));
                 if let Some(agent) = self.agents.iter_mut().find(|agent| agent.name_id == agent_id)
                 {
                     agent.status = message.info.marked;
@@ -468,6 +481,7 @@ impl AppState {
             | OperatorMessage::ServiceListenerRegister(_)
             | OperatorMessage::TeamserverProfile(_) => {}
         }
+        events
     }
 
     fn push_chat_message(
@@ -707,6 +721,7 @@ async fn run_connection_manager(
     outgoing_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<OperatorMessage>>>,
     mut shutdown_rx: watch::Receiver<bool>,
     repaint: egui::Context,
+    python_runtime: Option<PythonRuntime>,
 ) {
     let mut reconnect_delay = INITIAL_RECONNECT_DELAY;
     loop {
@@ -723,8 +738,12 @@ async fn run_connection_manager(
                 set_connection_status(&app_state, &repaint, ConnectionStatus::Connected);
 
                 let (write, read) = socket.split();
-                let mut receive_task =
-                    tokio::spawn(run_receive_loop(read, app_state.clone(), repaint.clone()));
+                let mut receive_task = tokio::spawn(run_receive_loop(
+                    read,
+                    app_state.clone(),
+                    repaint.clone(),
+                    python_runtime.clone(),
+                ));
                 let mut send_task = tokio::spawn(run_send_loop(write, outgoing_rx.clone()));
 
                 let reason = tokio::select! {
@@ -799,15 +818,27 @@ async fn run_receive_loop(
     mut read: futures_util::stream::SplitStream<ClientWebSocket>,
     app_state: SharedAppState,
     repaint: egui::Context,
+    python_runtime: Option<PythonRuntime>,
 ) -> Result<(), String> {
     while let Some(frame) = read.next().await {
         match frame {
             Ok(WebSocketMessage::Text(payload)) => {
                 match serde_json::from_str::<OperatorMessage>(&payload) {
                     Ok(message) => {
-                        {
+                        let events = {
                             let mut state = lock_app_state(&app_state);
-                            state.apply_operator_message(message);
+                            state.apply_operator_message(message)
+                        };
+                        if let Some(runtime) = &python_runtime {
+                            for event in events {
+                                match event {
+                                    AppEvent::AgentCheckin(agent_id) => {
+                                        if let Err(error) = runtime.emit_agent_checkin(agent_id) {
+                                            warn!(error = %error, "failed to deliver python agent checkin event");
+                                        }
+                                    }
+                                }
+                            }
                         }
                         repaint.request_repaint();
                     }
@@ -1358,7 +1389,7 @@ mod tests {
     fn app_state_applies_listener_and_agent_updates() {
         let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
 
-        state.apply_operator_message(OperatorMessage::ListenerNew(Message {
+        let listener_events = state.apply_operator_message(OperatorMessage::ListenerNew(Message {
             head: head(EventCode::Listener),
             info: ListenerInfo {
                 name: Some("http".to_owned()),
@@ -1367,47 +1398,48 @@ mod tests {
                 ..ListenerInfo::default()
             },
         }));
-        state.apply_operator_message(OperatorMessage::AgentNew(Box::new(Message {
-            head: head(EventCode::Session),
-            info: OperatorAgentInfo {
-                active: "true".to_owned(),
-                background_check: false,
-                domain_name: "LAB".to_owned(),
-                elevated: true,
-                encryption: Default::default(),
-                internal_ip: "10.0.0.10".to_owned(),
-                external_ip: "203.0.113.10".to_owned(),
-                first_call_in: "10/03/2026 11:59:00".to_owned(),
-                last_call_in: "10/03/2026 12:00:00".to_owned(),
-                hostname: "wkstn-1".to_owned(),
-                listener: "http".to_owned(),
-                magic_value: "deadbeef".to_owned(),
-                name_id: "abcd1234".to_owned(),
-                os_arch: "x64".to_owned(),
-                os_build: "19045".to_owned(),
-                os_version: "Windows 11".to_owned(),
-                pivots: AgentPivotsInfo::default(),
-                port_fwds: Vec::new(),
-                process_arch: "x64".to_owned(),
-                process_name: "explorer.exe".to_owned(),
-                process_pid: "1234".to_owned(),
-                process_ppid: "1111".to_owned(),
-                process_path: "C:\\Windows\\explorer.exe".to_owned(),
-                reason: "manual".to_owned(),
-                note: String::new(),
-                sleep_delay: serde_json::Value::from(5),
-                sleep_jitter: serde_json::Value::from(10),
-                kill_date: serde_json::Value::Null,
-                working_hours: serde_json::Value::Null,
-                socks_cli: Vec::new(),
-                socks_cli_mtx: None,
-                socks_svr: Vec::new(),
-                tasked_once: false,
-                username: "operator".to_owned(),
-                pivot_parent: String::new(),
-            },
-        })));
-        state.apply_operator_message(OperatorMessage::AgentUpdate(Message {
+        let new_events =
+            state.apply_operator_message(OperatorMessage::AgentNew(Box::new(Message {
+                head: head(EventCode::Session),
+                info: OperatorAgentInfo {
+                    active: "true".to_owned(),
+                    background_check: false,
+                    domain_name: "LAB".to_owned(),
+                    elevated: true,
+                    encryption: Default::default(),
+                    internal_ip: "10.0.0.10".to_owned(),
+                    external_ip: "203.0.113.10".to_owned(),
+                    first_call_in: "10/03/2026 11:59:00".to_owned(),
+                    last_call_in: "10/03/2026 12:00:00".to_owned(),
+                    hostname: "wkstn-1".to_owned(),
+                    listener: "http".to_owned(),
+                    magic_value: "deadbeef".to_owned(),
+                    name_id: "abcd1234".to_owned(),
+                    os_arch: "x64".to_owned(),
+                    os_build: "19045".to_owned(),
+                    os_version: "Windows 11".to_owned(),
+                    pivots: AgentPivotsInfo::default(),
+                    port_fwds: Vec::new(),
+                    process_arch: "x64".to_owned(),
+                    process_name: "explorer.exe".to_owned(),
+                    process_pid: "1234".to_owned(),
+                    process_ppid: "1111".to_owned(),
+                    process_path: "C:\\Windows\\explorer.exe".to_owned(),
+                    reason: "manual".to_owned(),
+                    note: String::new(),
+                    sleep_delay: serde_json::Value::from(5),
+                    sleep_jitter: serde_json::Value::from(10),
+                    kill_date: serde_json::Value::Null,
+                    working_hours: serde_json::Value::Null,
+                    socks_cli: Vec::new(),
+                    socks_cli_mtx: None,
+                    socks_svr: Vec::new(),
+                    tasked_once: false,
+                    username: "operator".to_owned(),
+                    pivot_parent: String::new(),
+                },
+            })));
+        let update_events = state.apply_operator_message(OperatorMessage::AgentUpdate(Message {
             head: head(EventCode::Session),
             info: AgentUpdateInfo { agent_id: "ABCD1234".to_owned(), marked: "Alive".to_owned() },
         }));
@@ -1419,13 +1451,16 @@ mod tests {
         assert_eq!(state.agents[0].status, "Alive");
         assert!(state.agents[0].pivot_parent.is_none());
         assert!(state.agents[0].pivot_links.is_empty());
+        assert!(listener_events.is_empty());
+        assert_eq!(new_events, vec![AppEvent::AgentCheckin("ABCD1234".to_owned())]);
+        assert_eq!(update_events, vec![AppEvent::AgentCheckin("ABCD1234".to_owned())]);
     }
 
     #[test]
     fn agent_new_normalizes_pivot_relationships() {
         let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
 
-        state.apply_operator_message(OperatorMessage::AgentNew(Box::new(Message {
+        let events = state.apply_operator_message(OperatorMessage::AgentNew(Box::new(Message {
             head: head(EventCode::Session),
             info: OperatorAgentInfo {
                 active: "true".to_owned(),
@@ -1471,6 +1506,7 @@ mod tests {
 
         assert_eq!(state.agents[0].pivot_parent.as_deref(), Some("ABCD1234"));
         assert_eq!(state.agents[0].pivot_links, vec!["C0FFEE01"]);
+        assert_eq!(events, vec![AppEvent::AgentCheckin("BEEF5678".to_owned())]);
     }
 
     #[test]

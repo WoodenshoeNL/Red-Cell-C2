@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 const APP_DIR_NAME: &str = "red-cell-client";
 const CONFIG_FILE_NAME: &str = "client.toml";
+const SCRIPTS_DIR_NAME: &str = "scripts";
 
 /// Persisted client preferences loaded between sessions.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -15,6 +16,9 @@ pub(crate) struct LocalConfig {
     /// Last-used operator username.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
+    /// Directory containing client-side Python scripts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scripts_dir: Option<PathBuf>,
 }
 
 impl LocalConfig {
@@ -48,10 +52,19 @@ impl LocalConfig {
             let _ = fs::write(&path, contents);
         }
     }
+
+    /// Resolve the configured scripts directory, falling back to the default location.
+    pub fn resolved_scripts_dir(&self) -> Option<PathBuf> {
+        self.scripts_dir.clone().or_else(default_scripts_dir)
+    }
 }
 
 fn config_file_path() -> Option<PathBuf> {
     dirs::config_dir().map(|dir| dir.join(APP_DIR_NAME).join(CONFIG_FILE_NAME))
+}
+
+pub(crate) fn default_scripts_dir() -> Option<PathBuf> {
+    dirs::config_dir().map(|dir| dir.join(APP_DIR_NAME).join(SCRIPTS_DIR_NAME))
 }
 
 #[cfg(test)]
@@ -63,6 +76,7 @@ mod tests {
         let config = LocalConfig::default();
         assert_eq!(config.server_url, None);
         assert_eq!(config.username, None);
+        assert_eq!(config.scripts_dir, None);
     }
 
     #[test]
@@ -70,6 +84,7 @@ mod tests {
         let config = LocalConfig {
             server_url: Some("wss://10.0.0.1:40056/havoc/".to_owned()),
             username: Some("operator".to_owned()),
+            scripts_dir: Some(PathBuf::from("/tmp/red-cell-client/scripts")),
         };
 
         let serialized = toml::to_string_pretty(&config)
@@ -88,6 +103,7 @@ mod tests {
 
         assert_eq!(config.server_url.as_deref(), Some("wss://example.com/havoc/"));
         assert_eq!(config.username, None);
+        assert_eq!(config.scripts_dir, None);
     }
 
     #[test]
@@ -107,6 +123,7 @@ mod tests {
         let config = LocalConfig {
             server_url: Some("wss://10.0.0.5:9999/havoc/".to_owned()),
             username: Some("admin".to_owned()),
+            scripts_dir: Some(dir.path().join("scripts")),
         };
 
         let contents = toml::to_string_pretty(&config)
@@ -119,5 +136,15 @@ mod tests {
             .unwrap_or_else(|error| panic!("deserialization should succeed: {error}"));
 
         assert_eq!(loaded, config);
+    }
+
+    #[test]
+    fn resolved_scripts_dir_prefers_explicit_value() {
+        let config = LocalConfig {
+            scripts_dir: Some(PathBuf::from("/tmp/client-scripts")),
+            ..LocalConfig::default()
+        };
+
+        assert_eq!(config.resolved_scripts_dir(), Some(PathBuf::from("/tmp/client-scripts")));
     }
 }

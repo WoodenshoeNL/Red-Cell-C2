@@ -208,6 +208,7 @@ mod tests {
         let config = LocalConfig {
             server_url: Some("wss://saved.example:9999/havoc/".to_owned()),
             username: Some("saved-user".to_owned()),
+            scripts_dir: None,
         };
         let state = LoginState::new("wss://cli-default/havoc/", &config);
 

@@ -1,11 +1,12 @@
 mod local_config;
 mod login;
+mod python;
 mod transport;
 
 use base64::Engine;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow};
@@ -15,6 +16,7 @@ use eframe::egui::{
 };
 use local_config::LocalConfig;
 use login::{LoginAction, LoginState, render_login_dialog};
+use python::PythonRuntime;
 use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::{
     AgentTaskInfo, EventCode, FlatInfo, Message, MessageHead, OperatorMessage,
@@ -41,6 +43,9 @@ struct Cli {
     /// Teamserver WebSocket URL.
     #[arg(long, default_value = DEFAULT_SERVER_URL)]
     server: String,
+    /// Directory containing client-side Python scripts.
+    #[arg(long)]
+    scripts_dir: Option<PathBuf>,
 }
 
 /// Application lifecycle phase.
@@ -335,8 +340,10 @@ struct ClientApp {
     phase: AppPhase,
     local_config: LocalConfig,
     cli_server_url: String,
+    scripts_dir: Option<PathBuf>,
     session_panel: SessionPanelState,
     outgoing_tx: Option<tokio::sync::mpsc::UnboundedSender<OperatorMessage>>,
+    python_runtime: Option<PythonRuntime>,
 }
 
 impl ClientApp {
@@ -348,12 +355,14 @@ impl ClientApp {
             phase: AppPhase::Login(login_state),
             local_config,
             cli_server_url: cli.server,
+            scripts_dir: cli.scripts_dir,
             session_panel: SessionPanelState {
                 sort_column: Some(AgentSortColumn::LastCheckin),
                 descending: true,
                 ..SessionPanelState::default()
             },
             outgoing_tx: None,
+            python_runtime: None,
         }
     }
 
@@ -373,8 +382,25 @@ impl ClientApp {
 
         let server_url = login_state.server_url.trim().to_owned();
         let app_state = Arc::new(Mutex::new(AppState::new(server_url.clone())));
+        let scripts_dir =
+            self.scripts_dir.clone().or_else(|| self.local_config.resolved_scripts_dir());
+        let python_runtime = scripts_dir.as_ref().and_then(|path| match PythonRuntime::initialize(
+            app_state.clone(),
+            path.clone(),
+        ) {
+            Ok(runtime) => Some(runtime),
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to initialize client python runtime");
+                None
+            }
+        });
 
-        match ClientTransport::spawn(server_url.clone(), app_state.clone(), ctx.clone()) {
+        match ClientTransport::spawn(
+            server_url.clone(),
+            app_state.clone(),
+            ctx.clone(),
+            python_runtime.clone(),
+        ) {
             Ok(transport) => {
                 let login_message = login_state.build_login_message();
                 if let Err(error) = transport.queue_message(login_message) {
@@ -385,7 +411,11 @@ impl ClientApp {
 
                 self.local_config.server_url = Some(server_url);
                 self.local_config.username = Some(login_state.username.trim().to_owned());
+                if self.local_config.scripts_dir.is_none() {
+                    self.local_config.scripts_dir = scripts_dir.clone();
+                }
                 self.local_config.save();
+                self.python_runtime = python_runtime;
 
                 let login_state_clone = login_state.clone();
                 self.phase = AppPhase::Authenticating {
@@ -3135,6 +3165,13 @@ mod tests {
     }
 
     #[test]
+    fn cli_accepts_scripts_dir() {
+        let cli =
+            Cli::parse_from(["red-cell-client", "--scripts-dir", "/tmp/red-cell-client-scripts"]);
+        assert_eq!(cli.scripts_dir, Some(PathBuf::from("/tmp/red-cell-client-scripts")));
+    }
+
+    #[test]
     fn client_app_state_initializes_placeholder_state() {
         let app_state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
 
@@ -3152,14 +3189,14 @@ mod tests {
 
     #[test]
     fn client_app_starts_in_login_phase() {
-        let cli = Cli { server: DEFAULT_SERVER_URL.to_owned() };
+        let cli = Cli { server: DEFAULT_SERVER_URL.to_owned(), scripts_dir: None };
         let app = ClientApp::new(cli);
         assert!(matches!(app.phase, AppPhase::Login(_)));
     }
 
     #[test]
     fn client_app_login_state_uses_cli_default() {
-        let cli = Cli { server: "wss://custom:1234/havoc/".to_owned() };
+        let cli = Cli { server: "wss://custom:1234/havoc/".to_owned(), scripts_dir: None };
         let app = ClientApp::new(cli);
         match &app.phase {
             AppPhase::Login(state) => {

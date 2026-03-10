@@ -1324,10 +1324,62 @@ fn encode_token_payload(
             let token_id = required_u32(info, &["Arguments"], "Arguments")?;
             write_u32(&mut payload, token_id);
         }
-        other => {
-            return Err(AgentCommandError::UnsupportedTokenSubcommand {
-                subcommand: u32::from(other).to_string(),
-            });
+        DemonTokenCommand::Steal => {
+            let args = required_string(info, &["Arguments"], "Arguments")?;
+            let parts: Vec<&str> = args.split(';').collect();
+            if parts.len() < 2 {
+                return Err(AgentCommandError::MissingField { field: "Arguments" });
+            }
+            let pid = parse_u32_field("PID", parts[0])?;
+            let handle = parse_hex_u32(parts[1])?;
+            write_u32(&mut payload, pid);
+            write_u32(&mut payload, handle);
+        }
+        DemonTokenCommand::List
+        | DemonTokenCommand::GetUid
+        | DemonTokenCommand::Revert
+        | DemonTokenCommand::Clear
+        | DemonTokenCommand::FindTokens => {}
+        DemonTokenCommand::PrivsGetOrList => {
+            let sub = info
+                .sub_command
+                .as_deref()
+                .or_else(|| {
+                    flat_info_string_from_extra(&info.extra, &["SubCommand"]).as_deref().map(|_| "")
+                })
+                .unwrap_or("");
+            if sub.eq_ignore_ascii_case("privs-list") || sub == "4" {
+                write_u32(&mut payload, 1);
+            } else {
+                write_u32(&mut payload, 0);
+                let priv_name = required_string(info, &["Arguments"], "Arguments")?;
+                write_len_prefixed_bytes(&mut payload, priv_name.as_bytes());
+            }
+        }
+        DemonTokenCommand::Make => {
+            let args = required_string(info, &["Arguments"], "Arguments")?;
+            let parts: Vec<&str> = args.split(';').collect();
+            if parts.len() < 4 {
+                return Err(AgentCommandError::MissingField { field: "Arguments" });
+            }
+            let domain = decode_base64_field("Domain", parts[0])?;
+            let user = decode_base64_field("User", parts[1])?;
+            let password = decode_base64_field("Password", parts[2])?;
+            let logon_type = parse_u32_field("LogonType", parts[3])?;
+            write_len_prefixed_bytes(
+                &mut payload,
+                &encode_utf16(&String::from_utf8_lossy(&domain)),
+            );
+            write_len_prefixed_bytes(&mut payload, &encode_utf16(&String::from_utf8_lossy(&user)));
+            write_len_prefixed_bytes(
+                &mut payload,
+                &encode_utf16(&String::from_utf8_lossy(&password)),
+            );
+            write_u32(&mut payload, logon_type);
+        }
+        DemonTokenCommand::Remove => {
+            let token_id = required_u32(info, &["Arguments"], "Arguments")?;
+            write_u32(&mut payload, token_id);
         }
     }
 
@@ -1448,6 +1500,15 @@ fn token_subcommand(
         .ok_or(AgentCommandError::MissingField { field: "SubCommand" })?;
     match raw.trim().to_ascii_lowercase().as_str() {
         "1" | "impersonate" => Ok(DemonTokenCommand::Impersonate),
+        "2" | "steal" => Ok(DemonTokenCommand::Steal),
+        "3" | "list" => Ok(DemonTokenCommand::List),
+        "4" | "privs-list" | "privs-get" | "privs" => Ok(DemonTokenCommand::PrivsGetOrList),
+        "5" | "make" => Ok(DemonTokenCommand::Make),
+        "6" | "getuid" => Ok(DemonTokenCommand::GetUid),
+        "7" | "revert" => Ok(DemonTokenCommand::Revert),
+        "8" | "remove" => Ok(DemonTokenCommand::Remove),
+        "9" | "clear" => Ok(DemonTokenCommand::Clear),
+        "10" | "find" => Ok(DemonTokenCommand::FindTokens),
         _ => Err(AgentCommandError::UnsupportedTokenSubcommand { subcommand: raw }),
     }
 }

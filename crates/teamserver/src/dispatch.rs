@@ -2038,12 +2038,10 @@ async fn handle_token_callback(
 ) -> Result<Option<Vec<u8>>, CommandDispatchError> {
     let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::CommandToken));
     let subcommand = parser.read_u32("token subcommand")?;
+    let cmd = u32::from(DemonCommand::CommandToken);
 
     match DemonTokenCommand::try_from(subcommand).map_err(|error| {
-        CommandDispatchError::InvalidCallbackPayload {
-            command_id: u32::from(DemonCommand::CommandToken),
-            message: error.to_string(),
-        }
+        CommandDispatchError::InvalidCallbackPayload { command_id: cmd, message: error.to_string() }
     })? {
         DemonTokenCommand::Impersonate => {
             let success = parser.read_u32("token impersonation success")?;
@@ -2053,24 +2051,384 @@ async fn handle_token_callback(
             } else {
                 ("Error", format!("Failed to impersonate {user}"))
             };
+            events
+                .broadcast(agent_response_event(agent_id, cmd, request_id, kind, &message, None)?);
+        }
+
+        DemonTokenCommand::Steal => {
+            let user = parser.read_utf16("token steal user")?;
+            let token_id = parser.read_u32("token steal token id")?;
+            let target_pid = parser.read_u32("token steal target pid")?;
             events.broadcast(agent_response_event(
                 agent_id,
-                u32::from(DemonCommand::CommandToken),
+                cmd,
                 request_id,
-                kind,
-                &message,
+                "Good",
+                &format!(
+                    "Successful stole and impersonated token from {target_pid} User:[{user}] TokenID:[{token_id}]"
+                ),
                 None,
             )?);
         }
-        other => {
-            return Err(CommandDispatchError::InvalidCallbackPayload {
-                command_id: u32::from(DemonCommand::CommandToken),
-                message: format!("unsupported token callback subcommand {other:?}"),
-            });
+
+        DemonTokenCommand::List => {
+            let output = format_token_list(&mut parser)?;
+            let message = "Token Vault:";
+            events.broadcast(agent_response_event(
+                agent_id,
+                cmd,
+                request_id,
+                "Info",
+                message,
+                Some(output),
+            )?);
+        }
+
+        DemonTokenCommand::PrivsGetOrList => {
+            let priv_list = parser.read_u32("token privs list flag")?;
+            if priv_list != 0 {
+                let output = format_token_privs_list(&mut parser)?;
+                events.broadcast(agent_response_event(
+                    agent_id,
+                    cmd,
+                    request_id,
+                    "Good",
+                    "List Privileges for current Token:",
+                    Some(output),
+                )?);
+            } else {
+                let success = parser.read_u32("token privs get success")?;
+                let priv_name = parser.read_string("token privs get name")?;
+                let (kind, message) = if success != 0 {
+                    ("Good", format!("The privilege {priv_name} was successfully enabled"))
+                } else {
+                    ("Error", format!("Failed to enable the {priv_name} privilege"))
+                };
+                events.broadcast(agent_response_event(
+                    agent_id, cmd, request_id, kind, &message, None,
+                )?);
+            }
+        }
+
+        DemonTokenCommand::Make => {
+            if parser.is_empty() {
+                events.broadcast(agent_response_event(
+                    agent_id,
+                    cmd,
+                    request_id,
+                    "Error",
+                    "Failed to create token",
+                    None,
+                )?);
+            } else {
+                let user_domain = parser.read_utf16("token make user domain")?;
+                events.broadcast(agent_response_event(
+                    agent_id,
+                    cmd,
+                    request_id,
+                    "Good",
+                    &format!("Successfully created and impersonated token: {user_domain}"),
+                    None,
+                )?);
+            }
+        }
+
+        DemonTokenCommand::GetUid => {
+            let elevated = parser.read_u32("token getuid elevated")?;
+            let user = parser.read_utf16("token getuid user")?;
+            let message = if elevated != 0 {
+                format!("Token User: {user} (Admin)")
+            } else {
+                format!("Token User: {user}")
+            };
+            events.broadcast(agent_response_event(
+                agent_id, cmd, request_id, "Good", &message, None,
+            )?);
+        }
+
+        DemonTokenCommand::Revert => {
+            let success = parser.read_u32("token revert success")?;
+            let (kind, message) = if success != 0 {
+                ("Good", "Successful reverted token to itself")
+            } else {
+                ("Error", "Failed to revert token to itself")
+            };
+            events.broadcast(agent_response_event(agent_id, cmd, request_id, kind, message, None)?);
+        }
+
+        DemonTokenCommand::Remove => {
+            let success = parser.read_u32("token remove success")?;
+            let token_id = parser.read_u32("token remove id")?;
+            let (kind, message) = if success != 0 {
+                ("Good", format!("Successful removed token [{token_id}] from vault"))
+            } else {
+                ("Error", format!("Failed to remove token [{token_id}] from vault"))
+            };
+            events
+                .broadcast(agent_response_event(agent_id, cmd, request_id, kind, &message, None)?);
+        }
+
+        DemonTokenCommand::Clear => {
+            events.broadcast(agent_response_event(
+                agent_id,
+                cmd,
+                request_id,
+                "Good",
+                "Token vault has been cleared",
+                None,
+            )?);
+        }
+
+        DemonTokenCommand::FindTokens => {
+            let success = parser.read_u32("token find success")?;
+            if success == 0 {
+                events.broadcast(agent_response_event(
+                    agent_id,
+                    cmd,
+                    request_id,
+                    "Error",
+                    "Failed to list existing tokens",
+                    None,
+                )?);
+            } else {
+                let output = format_found_tokens(&mut parser)?;
+                events.broadcast(agent_response_event(
+                    agent_id,
+                    cmd,
+                    request_id,
+                    "Info",
+                    "Tokens available:",
+                    Some(output),
+                )?);
+            }
         }
     }
 
     Ok(None)
+}
+
+fn format_token_list(parser: &mut CallbackParser<'_>) -> Result<String, CommandDispatchError> {
+    struct TokenEntry {
+        index: u32,
+        handle: u32,
+        domain_user: String,
+        process_id: u32,
+        token_type: u32,
+        impersonating: u32,
+    }
+
+    let mut entries = Vec::new();
+    while !parser.is_empty() {
+        let index = parser.read_u32("token list index")?;
+        let handle = parser.read_u32("token list handle")?;
+        let domain_user = parser.read_utf16("token list domain user")?;
+        let process_id = parser.read_u32("token list process id")?;
+        let token_type = parser.read_u32("token list type")?;
+        let impersonating = parser.read_u32("token list impersonating")?;
+        entries.push(TokenEntry {
+            index,
+            handle,
+            domain_user,
+            process_id,
+            token_type,
+            impersonating,
+        });
+    }
+
+    if entries.is_empty() {
+        return Ok("\nThe token vault is empty".to_owned());
+    }
+
+    let max_user = entries.iter().map(|e| e.domain_user.len()).max().unwrap_or(11).max(11);
+
+    let mut output = format!(
+        "\n {:<4}  {:<6}  {:<width$}  {:<4}  {:<14} {:<4}\n",
+        " ID ",
+        "Handle",
+        "Domain\\User",
+        "PID",
+        "Type",
+        "Impersonating",
+        width = max_user
+    );
+    output.push_str(&format!(
+        " {:<4}  {:<6}  {:<width$}  {:<4}  {:<14} {:<4}\n",
+        "----",
+        "------",
+        "-----------",
+        "---",
+        "--------------",
+        "-------------",
+        width = max_user
+    ));
+
+    for entry in &entries {
+        let type_str = match entry.token_type {
+            1 => "stolen",
+            2 => "make (local)",
+            3 => "make (network)",
+            _ => "unknown",
+        };
+        let imp_str = if entry.impersonating != 0 { "Yes" } else { "No" };
+        output.push_str(&format!(
+            " {:<4}  0x{:<4x}  {:<width$}  {:<4}  {:<14} {:<4}\n",
+            entry.index,
+            entry.handle,
+            entry.domain_user,
+            entry.process_id,
+            type_str,
+            imp_str,
+            width = max_user
+        ));
+    }
+
+    Ok(output)
+}
+
+fn format_token_privs_list(
+    parser: &mut CallbackParser<'_>,
+) -> Result<String, CommandDispatchError> {
+    let mut output = String::from("\n");
+    while !parser.is_empty() {
+        let privilege = parser.read_string("token privilege name")?;
+        let state = parser.read_u32("token privilege state")?;
+        let state_str = match state {
+            3 => "Enabled",
+            2 => "Adjusted",
+            0 => "Disabled",
+            _ => "Unknown",
+        };
+        output.push_str(&format!(" {privilege} :: {state_str}\n"));
+    }
+    Ok(output)
+}
+
+fn format_found_tokens(parser: &mut CallbackParser<'_>) -> Result<String, CommandDispatchError> {
+    const SECURITY_MANDATORY_LOW_RID: u32 = 0x0000_1000;
+    const SECURITY_MANDATORY_MEDIUM_RID: u32 = 0x0000_2000;
+    const SECURITY_MANDATORY_HIGH_RID: u32 = 0x0000_3000;
+    const SECURITY_MANDATORY_SYSTEM_RID: u32 = 0x0000_4000;
+
+    struct FoundToken {
+        domain_user: String,
+        integrity: String,
+        token_type: String,
+        impersonation: String,
+        remote_auth: String,
+        process_id: u32,
+        handle: u32,
+    }
+
+    let num_tokens = parser.read_u32("token find count")?;
+    if num_tokens == 0 {
+        return Ok("\nNo tokens found".to_owned());
+    }
+
+    let mut tokens = Vec::new();
+    for _ in 0..num_tokens {
+        if parser.is_empty() {
+            break;
+        }
+        let domain_user = parser.read_utf16("found token user")?;
+        let process_id = parser.read_u32("found token pid")?;
+        let handle = parser.read_u32("found token handle")?;
+        let integrity_level = parser.read_u32("found token integrity")?;
+        let impersonation_level = parser.read_u32("found token impersonation")?;
+        let token_type_raw = parser.read_u32("found token type")?;
+
+        let integrity = if integrity_level <= SECURITY_MANDATORY_LOW_RID {
+            "Low"
+        } else if (SECURITY_MANDATORY_MEDIUM_RID..SECURITY_MANDATORY_HIGH_RID)
+            .contains(&integrity_level)
+        {
+            "Medium"
+        } else if (SECURITY_MANDATORY_HIGH_RID..SECURITY_MANDATORY_SYSTEM_RID)
+            .contains(&integrity_level)
+        {
+            "High"
+        } else if integrity_level >= SECURITY_MANDATORY_SYSTEM_RID {
+            "System"
+        } else {
+            "Low"
+        };
+
+        let (token_type, impersonation, remote_auth) = if token_type_raw == 2 {
+            let imp = match impersonation_level {
+                0 => "Anonymous",
+                1 => "Identification",
+                2 => "Impersonation",
+                3 => "Delegation",
+                _ => "Unknown",
+            };
+            let remote = if impersonation_level == 3 { "Yes" } else { "No" };
+            ("Impersonation", imp, remote)
+        } else if token_type_raw == 1 {
+            ("Primary", "N/A", "Yes")
+        } else {
+            ("?", "Unknown", "No")
+        };
+
+        tokens.push(FoundToken {
+            domain_user,
+            integrity: integrity.to_owned(),
+            token_type: token_type.to_owned(),
+            impersonation: impersonation.to_owned(),
+            remote_auth: remote_auth.to_owned(),
+            process_id,
+            handle,
+        });
+    }
+
+    if tokens.is_empty() {
+        return Ok("\nNo tokens found".to_owned());
+    }
+
+    let max_user = tokens.iter().map(|t| t.domain_user.len()).max().unwrap_or(13).max(13);
+
+    let mut output = format!(
+        "\n {:<width$}  {:<9}  {:<13}  {:<16}  {:<9} {:<10} {:<9} {:<9}\n",
+        " Domain\\User",
+        "Integrity",
+        "TokenType",
+        "Impersonation LV",
+        "LocalAuth",
+        "RemoteAuth",
+        "ProcessID",
+        "Handle",
+        width = max_user,
+    );
+    output.push_str(&format!(
+        " {:<width$}  {:<9}  {:<13}  {:<16}  {:<9} {:<10} {:<9} {:<9}\n",
+        "-".repeat(max_user),
+        "---------",
+        "-------------",
+        "----------------",
+        "---------",
+        "----------",
+        "---------",
+        "------",
+        width = max_user,
+    ));
+
+    for token in &tokens {
+        let handle_str =
+            if token.handle == 0 { String::new() } else { format!("{:x}", token.handle) };
+        output.push_str(&format!(
+            " {:<width$}  {:<9}  {:<13}  {:<16}  {:<9} {:<10} {:<9} {:<9}\n",
+            token.domain_user,
+            token.integrity,
+            token.token_type,
+            token.impersonation,
+            "Yes",
+            token.remote_auth,
+            token.process_id,
+            handle_str,
+            width = max_user,
+        ));
+    }
+
+    output.push_str("\nTo impersonate a user, run: token steal [process id] (handle)");
+    Ok(output)
 }
 
 async fn handle_screenshot_callback(
@@ -4023,6 +4381,424 @@ mod tests {
         assert!(message.info.output.contains("UserName                : alice"));
         assert!(message.info.output.contains("Encryption type : AES256_CTS_HMAC_SHA1"));
         assert!(message.info.output.contains("Ticket          : dGlja2V0"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_steal_callback_broadcasts_success_event()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::Steal));
+        add_utf16(&mut payload, "LAB\\admin");
+        add_u32(&mut payload, 3);
+        add_u32(&mut payload, 1234);
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 10, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("token steal response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        let msg = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(msg.contains("stole and impersonated token from 1234"));
+        assert!(msg.contains("LAB\\admin"));
+        assert!(msg.contains("TokenID:[3]"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_list_callback_formats_vault_table() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::List));
+        add_u32(&mut payload, 0);
+        add_u32(&mut payload, 0xAB);
+        add_utf16(&mut payload, "LAB\\svc");
+        add_u32(&mut payload, 4444);
+        add_u32(&mut payload, 1);
+        add_u32(&mut payload, 1);
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 11, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("token list response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert!(message.info.output.contains("LAB\\svc"));
+        assert!(message.info.output.contains("stolen"));
+        assert!(message.info.output.contains("Yes"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_list_callback_empty_vault() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::List));
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 12, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("token list empty response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert!(message.info.output.contains("token vault is empty"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_privs_list_callback_formats_privilege_table()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::PrivsGetOrList));
+        add_u32(&mut payload, 1);
+        add_bytes(&mut payload, b"SeDebugPrivilege\0");
+        add_u32(&mut payload, 3);
+        add_bytes(&mut payload, b"SeShutdownPrivilege\0");
+        add_u32(&mut payload, 0);
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 13, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("token privs list response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert!(message.info.output.contains("SeDebugPrivilege"));
+        assert!(message.info.output.contains("Enabled"));
+        assert!(message.info.output.contains("SeShutdownPrivilege"));
+        assert!(message.info.output.contains("Disabled"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_privs_get_callback_success_and_failure() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::PrivsGetOrList));
+        add_u32(&mut payload, 0);
+        add_u32(&mut payload, 1);
+        add_bytes(&mut payload, b"SeDebugPrivilege\0");
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 14, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("token privs get response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        let msg = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(msg.contains("successfully enabled"));
+        assert!(msg.contains("SeDebugPrivilege"));
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::PrivsGetOrList));
+        add_u32(&mut payload, 0);
+        add_u32(&mut payload, 0);
+        add_bytes(&mut payload, b"SeDebugPrivilege\0");
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 15, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("token privs get failure response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        let msg = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(msg.contains("Failed to enable"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_make_callback_success_and_empty() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::Make));
+        add_utf16(&mut payload, "LAB\\admin");
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 16, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("token make response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        let msg = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(msg.contains("Successfully created and impersonated token"));
+        assert!(msg.contains("LAB\\admin"));
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::Make));
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 17, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("token make failure response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        let msg = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(msg.contains("Failed to create token"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_getuid_callback_elevated_and_normal() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::GetUid));
+        add_u32(&mut payload, 1);
+        add_utf16(&mut payload, "LAB\\admin");
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 18, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("token getuid response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        let msg = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(msg.contains("LAB\\admin"));
+        assert!(msg.contains("(Admin)"));
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::GetUid));
+        add_u32(&mut payload, 0);
+        add_utf16(&mut payload, "LAB\\user");
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 19, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("token getuid normal response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        let msg = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(msg.contains("LAB\\user"));
+        assert!(!msg.contains("(Admin)"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_revert_callback_success_and_failure() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::Revert));
+        add_u32(&mut payload, 1);
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 20, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("token revert response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        let msg = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(msg.contains("reverted token to itself"));
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::Revert));
+        add_u32(&mut payload, 0);
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 21, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("token revert failure response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        let msg = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(msg.contains("Failed to revert"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_remove_callback_success_and_failure() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::Remove));
+        add_u32(&mut payload, 1);
+        add_u32(&mut payload, 5);
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 22, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("token remove response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        let msg = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(msg.contains("removed token [5]"));
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::Remove));
+        add_u32(&mut payload, 0);
+        add_u32(&mut payload, 5);
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 23, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("token remove failure response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        let msg = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(msg.contains("Failed to remove token [5]"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_clear_callback_broadcasts_success() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::Clear));
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 24, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("token clear response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        let msg = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(msg.contains("Token vault has been cleared"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_find_tokens_callback_formats_table() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::FindTokens));
+        add_u32(&mut payload, 1);
+        add_u32(&mut payload, 1);
+        add_utf16(&mut payload, "LAB\\admin");
+        add_u32(&mut payload, 5678);
+        add_u32(&mut payload, 0x10);
+        add_u32(&mut payload, 0x3000);
+        add_u32(&mut payload, 2);
+        add_u32(&mut payload, 1);
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 25, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("token find response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert!(message.info.output.contains("LAB\\admin"));
+        assert!(message.info.output.contains("High"));
+        assert!(message.info.output.contains("Primary"));
+        assert!(message.info.output.contains("token steal"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_find_tokens_callback_failure() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::FindTokens));
+        add_u32(&mut payload, 0);
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 26, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("token find failure response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        let msg = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(msg.contains("Failed to list existing tokens"));
         Ok(())
     }
 

@@ -231,13 +231,6 @@ Red-Cell-C2/
 
 ---
 
-## Contributing
+## Status
 
-This project is primarily developed by autonomous AI agents. Human contributions are welcome — use the issue tracker to coordinate:
-
-1. Check `br ready` for available work
-2. Claim a task: `br update <id> --status=in_progress`
-3. Implement, test, commit, push
-4. Close: `br close <id>`
-
-See `AGENTS.md` for full workflow details and architecture decisions.
+This is a personal hobby project and is not open for contributions. Feel free to follow along or use it as inspiration, but please do not open pull requests.

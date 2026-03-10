@@ -1596,6 +1596,10 @@ fn parse_dns_query(buf: &[u8]) -> Option<ParsedDnsQuery> {
     }
 
     let id = u16::from_be_bytes([buf[0], buf[1]]);
+    let flags = u16::from_be_bytes([buf[2], buf[3]]);
+    if flags & DNS_FLAG_QR != 0 {
+        return None;
+    }
     let qdcount = u16::from_be_bytes([buf[4], buf[5]]);
 
     if qdcount != 1 {
@@ -3278,6 +3282,13 @@ mod tests {
         // Set qdcount = 2
         packet[4] = 0;
         packet[5] = 2;
+        assert!(parse_dns_query(&packet).is_none());
+    }
+
+    #[test]
+    fn parse_dns_query_rejects_response_packets() {
+        let mut packet = build_dns_txt_query(0x1234, "foo.bar");
+        packet[2] |= 0x80;
         assert!(parse_dns_query(&packet).is_none());
     }
 

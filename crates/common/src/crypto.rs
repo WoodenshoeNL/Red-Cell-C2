@@ -3,6 +3,7 @@
 use aes::Aes256;
 use cipher::{InvalidLength, KeyIvInit, StreamCipher};
 use ctr::Ctr128BE;
+use sha3::{Digest, Sha3_256};
 use thiserror::Error;
 
 /// Agent communication key length in bytes.
@@ -71,6 +72,23 @@ pub fn generate_agent_crypto_material() -> Result<AgentCryptoMaterial, CryptoErr
     Ok(AgentCryptoMaterial { key, iv })
 }
 
+/// Hash a password with SHA3-256 and return the lowercase hex digest.
+///
+/// This matches the Havoc operator protocol which sends `Password` as a SHA3-256 hex string.
+#[must_use]
+pub fn hash_password_sha3(password: &str) -> String {
+    use std::fmt::Write;
+
+    let mut hasher = Sha3_256::new();
+    hasher.update(password.as_bytes());
+    let result = hasher.finalize();
+    let mut hex_string = String::with_capacity(result.len() * 2);
+    for byte in result {
+        let _ = write!(hex_string, "{byte:02x}");
+    }
+    hex_string
+}
+
 fn apply_agent_keystream(key: &[u8], iv: &[u8], input: &[u8]) -> Result<Vec<u8>, CryptoError> {
     validate_key_and_iv(key, iv)?;
 
@@ -102,7 +120,7 @@ mod tests {
 
     use super::{
         AGENT_IV_LENGTH, AGENT_KEY_LENGTH, CryptoError, decrypt_agent_data, encrypt_agent_data,
-        generate_agent_crypto_material,
+        generate_agent_crypto_material, hash_password_sha3,
     };
 
     #[test]
@@ -185,5 +203,26 @@ mod tests {
         assert_eq!(material.key.len(), AGENT_KEY_LENGTH);
         assert_eq!(material.iv.len(), AGENT_IV_LENGTH);
         assert_ne!(material.key, [0_u8; AGENT_KEY_LENGTH]);
+    }
+
+    #[test]
+    fn hash_password_sha3_produces_known_digest() {
+        let digest = hash_password_sha3("password1234");
+        assert_eq!(digest.len(), 64);
+        assert_eq!(digest, "2f7d3e77d0786c5d305c0afadd4c1a2a6869a3210956c963ad2420c52e797022");
+    }
+
+    #[test]
+    fn hash_password_sha3_empty_input() {
+        let digest = hash_password_sha3("");
+        assert_eq!(digest.len(), 64);
+        assert_eq!(digest, "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a");
+    }
+
+    #[test]
+    fn hash_password_sha3_is_deterministic() {
+        let first = hash_password_sha3("test-password");
+        let second = hash_password_sha3("test-password");
+        assert_eq!(first, second);
     }
 }

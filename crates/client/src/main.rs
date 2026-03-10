@@ -1,3 +1,5 @@
+mod local_config;
+mod login;
 mod transport;
 
 use std::sync::{Arc, Mutex};
@@ -5,6 +7,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Result, anyhow};
 use clap::Parser;
 use eframe::egui::{self, Align, Layout, RichText};
+use local_config::LocalConfig;
+use login::{LoginAction, LoginState, render_login_dialog};
 use transport::{AppState, ClientTransport, ConnectionStatus, SharedAppState};
 
 const WINDOW_TITLE: &str = "Red Cell Client";
@@ -20,24 +24,111 @@ struct Cli {
     server: String,
 }
 
-#[derive(Debug)]
+/// Application lifecycle phase.
+enum AppPhase {
+    /// Showing the login dialog, no active transport.
+    Login(LoginState),
+    /// Transport is active and login message has been sent.
+    Authenticating {
+        app_state: SharedAppState,
+        transport: ClientTransport,
+        login_state: LoginState,
+    },
+    /// Authenticated and showing the main operator UI.
+    Connected {
+        app_state: SharedAppState,
+        #[allow(dead_code)]
+        transport: ClientTransport,
+    },
+}
+
 struct ClientApp {
-    app_state: SharedAppState,
-    transport: ClientTransport,
+    phase: AppPhase,
+    local_config: LocalConfig,
+    cli_server_url: String,
 }
 
 impl ClientApp {
-    fn new(server_url: String, repaint: egui::Context) -> Result<Self, transport::TransportError> {
-        let app_state = Arc::new(Mutex::new(AppState::new(server_url.clone())));
-        let transport = ClientTransport::spawn(server_url, app_state.clone(), repaint)?;
+    fn new(cli: Cli) -> Self {
+        let local_config = LocalConfig::load();
+        let login_state = LoginState::new(&cli.server, &local_config);
 
-        Ok(Self { app_state, transport })
+        Self { phase: AppPhase::Login(login_state), local_config, cli_server_url: cli.server }
     }
 
-    fn snapshot(&self) -> AppState {
-        match self.app_state.lock() {
+    fn snapshot(app_state: &SharedAppState) -> AppState {
+        match app_state.lock() {
             Ok(state) => state.clone(),
             Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    fn handle_login_submit(&mut self, ctx: &egui::Context) {
+        let AppPhase::Login(login_state) = &mut self.phase else {
+            return;
+        };
+
+        login_state.set_connecting();
+
+        let server_url = login_state.server_url.trim().to_owned();
+        let app_state = Arc::new(Mutex::new(AppState::new(server_url.clone())));
+
+        match ClientTransport::spawn(server_url.clone(), app_state.clone(), ctx.clone()) {
+            Ok(transport) => {
+                let login_message = login_state.build_login_message();
+                if let Err(error) = transport.queue_message(login_message) {
+                    login_state.set_error(format!("Failed to send login: {error}"));
+                    return;
+                }
+
+                self.local_config.server_url = Some(server_url);
+                self.local_config.username = Some(login_state.username.trim().to_owned());
+                self.local_config.save();
+
+                let login_state_clone = login_state.clone();
+                self.phase = AppPhase::Authenticating {
+                    app_state,
+                    transport,
+                    login_state: login_state_clone,
+                };
+            }
+            Err(error) => {
+                login_state.set_error(format!("Connection failed: {error}"));
+            }
+        }
+    }
+
+    fn check_auth_response(&mut self) {
+        let (snapshot, error_message) = match &self.phase {
+            AppPhase::Authenticating { app_state, .. } => {
+                let snap = Self::snapshot(app_state);
+                let error = match &snap.connection_status {
+                    ConnectionStatus::Error(msg) => Some(msg.clone()),
+                    _ => None,
+                };
+                (snap, error)
+            }
+            _ => return,
+        };
+
+        if snapshot.operator_info.is_some() {
+            let placeholder =
+                AppPhase::Login(LoginState::new(&self.cli_server_url, &self.local_config));
+            let old_phase = std::mem::replace(&mut self.phase, placeholder);
+            if let AppPhase::Authenticating { app_state, transport, .. } = old_phase {
+                self.phase = AppPhase::Connected { app_state, transport };
+            }
+            return;
+        }
+
+        if let Some(error_msg) = error_message {
+            let placeholder =
+                AppPhase::Login(LoginState::new(&self.cli_server_url, &self.local_config));
+            let old_phase = std::mem::replace(&mut self.phase, placeholder);
+            if let AppPhase::Authenticating { mut login_state, .. } = old_phase {
+                login_state.set_error(error_msg);
+                self.phase = AppPhase::Login(login_state);
+            }
         }
     }
 
@@ -168,9 +259,7 @@ impl ClientApp {
     fn render_overview_panel(&self, ui: &mut egui::Ui, state: &AppState) {
         ui.heading("Overview");
         ui.separator();
-        ui.label(
-            "This client skeleton now maintains a live WebSocket transport and shared connection state.",
-        );
+        ui.label("Connected to teamserver. Live WebSocket transport is active.");
         ui.add_space(8.0);
 
         egui::Grid::new("overview-stats").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
@@ -180,10 +269,7 @@ impl ClientApp {
 
             ui.label("Operator");
             ui.label(
-                state
-                    .operator_info
-                    .as_ref()
-                    .map_or("Not authenticated", |operator| operator.username.as_str()),
+                state.operator_info.as_ref().map_or("Not authenticated", |op| op.username.as_str()),
             );
             ui.end_row();
 
@@ -212,12 +298,44 @@ impl ClientApp {
             }
         });
     }
-}
 
-impl eframe::App for ClientApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let _ = &self.transport;
-        let snapshot = self.snapshot();
+    fn render_current_phase(
+        &mut self,
+        ctx: &egui::Context,
+        fallback_app_state: Option<SharedAppState>,
+    ) {
+        match &mut self.phase {
+            AppPhase::Login(login_state) => {
+                let action = render_login_dialog(ctx, login_state);
+                if action == LoginAction::Submit {
+                    self.handle_login_submit(ctx);
+                }
+            }
+            AppPhase::Authenticating { .. } => {
+                if let Some(app_state_ref) = fallback_app_state {
+                    let snapshot = Self::snapshot(&app_state_ref);
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        ui.with_layout(Layout::top_down(Align::Center), |ui| {
+                            ui.add_space(ui.available_height() * 0.35);
+                            ui.heading("Authenticating...");
+                            ui.add_space(8.0);
+                            ui.colored_label(
+                                snapshot.connection_status.color(),
+                                snapshot.connection_status.label(),
+                            );
+                        });
+                    });
+                }
+            }
+            AppPhase::Connected { app_state, .. } => {
+                let app_state_ref = app_state.clone();
+                self.render_main_ui(ctx, &app_state_ref);
+            }
+        }
+    }
+
+    fn render_main_ui(&self, ctx: &egui::Context, app_state: &SharedAppState) {
+        let snapshot = Self::snapshot(app_state);
 
         egui::TopBottomPanel::top("connection_bar").show(ctx, |ui| {
             self.render_connection_bar(ui, &snapshot);
@@ -256,6 +374,31 @@ impl eframe::App for ClientApp {
     }
 }
 
+impl eframe::App for ClientApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        match &self.phase {
+            AppPhase::Login(_) => {
+                let AppPhase::Login(login_state) = &mut self.phase else {
+                    return;
+                };
+                let action = render_login_dialog(ctx, login_state);
+                if action == LoginAction::Submit {
+                    self.handle_login_submit(ctx);
+                }
+            }
+            AppPhase::Authenticating { app_state, .. } => {
+                let app_state_ref = app_state.clone();
+                self.check_auth_response();
+                self.render_current_phase(ctx, Some(app_state_ref));
+            }
+            AppPhase::Connected { app_state, .. } => {
+                let app_state_ref = app_state.clone();
+                self.render_main_ui(ctx, &app_state_ref);
+            }
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     launch_client(cli)
@@ -274,14 +417,7 @@ fn launch_client(cli: Cli) -> Result<()> {
         options,
         Box::new(move |creation_context| {
             creation_context.egui_ctx.set_visuals(egui::Visuals::dark());
-
-            ClientApp::new(cli.server.clone(), creation_context.egui_ctx.clone())
-                .map(|app| Box::new(app) as Box<dyn eframe::App>)
-                .map_err(|error| {
-                    Box::new(std::io::Error::other(format!(
-                        "failed to initialize client transport: {error}"
-                    ))) as Box<dyn std::error::Error + Send + Sync>
-                })
+            Ok(Box::new(ClientApp::new(cli)) as Box<dyn eframe::App>)
         }),
     )
     .map_err(|error| anyhow!("failed to start egui application: {error}"))
@@ -324,5 +460,26 @@ mod tests {
         assert!(app_state.listeners.is_empty());
         assert!(app_state.loot.is_empty());
         assert!(app_state.chat_messages.is_empty());
+    }
+
+    #[test]
+    fn client_app_starts_in_login_phase() {
+        let cli = Cli { server: DEFAULT_SERVER_URL.to_owned() };
+        let app = ClientApp::new(cli);
+        assert!(matches!(app.phase, AppPhase::Login(_)));
+    }
+
+    #[test]
+    fn client_app_login_state_uses_cli_default() {
+        let cli = Cli { server: "wss://custom:1234/havoc/".to_owned() };
+        let app = ClientApp::new(cli);
+        match &app.phase {
+            AppPhase::Login(state) => {
+                if app.local_config.server_url.is_none() {
+                    assert_eq!(state.server_url, "wss://custom:1234/havoc/");
+                }
+            }
+            _ => panic!("expected Login phase"),
+        }
     }
 }

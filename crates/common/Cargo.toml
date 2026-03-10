@@ -14,6 +14,7 @@ aes = "0.8"
 cipher = "0.4"
 ctr = "0.9"
 getrandom = "0.3"
+sha3 = "0.10"
 hcl = { package = "hcl-rs", version = "0.19.4" }
 rcgen = { version = "0.14.7", default-features = false, features = ["pem", "crypto", "aws_lc_rs"] }
 rustls-pemfile = "2.2"

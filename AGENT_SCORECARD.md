@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 17 | 0 |
+| Tasks closed | 0 | 19 | 0 |
 | Bugs filed against | 0 | 2 | 0 |
-| Bug rate (bugs/task) | N/A | 0.12 | N/A |
-| Quality score | N/A | 88% | N/A |
+| Bug rate (bugs/task) | N/A | 0.11 | N/A |
+| Quality score | N/A | 89% | N/A |
 
 ## Violation Breakdown
 
@@ -115,3 +115,13 @@ Build: passed (cargo check + clippy -D warnings + cargo test: 279 passed)
 | Cursor | 0 | 0 | No activity this run |
 
 Build: passed (cargo check + clippy -D warnings + cargo test: all passed)
+
+### QA Review — 2026-03-10 21:13 — 09f5a07..d112826
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA loop only |
+| Codex | 2 | 0 | Closed red-cell-c2-80m (common crate unit tests) and red-cell-c2-8ri (mock Demon agent checkin integration test). Full E2E checkin/get-job/output flow covered. build_router refactored to app.rs for testability. No unwrap in production paths, no clippy warnings. red-cell-c2-dgn (E2E mock agent + operator client) now claimed, in_progress. |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (cargo check + clippy -D warnings + cargo test: 74 passed)

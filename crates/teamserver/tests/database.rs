@@ -1,6 +1,3 @@
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use red_cell::database::{
     AgentResponseRecord, AuditLogEntry, Database, LinkRecord, ListenerStatus, LootRecord,
     PersistedListener, PersistedListenerState, TeamserverError,
@@ -13,14 +10,11 @@ use red_cell_common::{
     HttpListenerResponseConfig, ListenerConfig, ListenerTlsConfig,
 };
 use serde_json::json;
+use std::path::PathBuf;
+use uuid::Uuid;
 
 fn temp_db_path() -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-
-    std::env::temp_dir().join(format!("red-cell-teamserver-db-{unique}.sqlite"))
+    std::env::temp_dir().join(format!("red-cell-teamserver-db-{}.sqlite", Uuid::new_v4()))
 }
 
 fn sample_agent(agent_id: u32) -> AgentInfo {

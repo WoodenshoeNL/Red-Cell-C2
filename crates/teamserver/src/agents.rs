@@ -636,20 +636,15 @@ mod tests {
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
     use std::sync::Arc;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     use red_cell_common::AgentEncryptionInfo;
+    use uuid::Uuid;
 
     use super::{AgentRegistry, Job};
     use crate::database::{Database, LinkRecord, TeamserverError};
 
     fn temp_db_path() -> std::path::PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_nanos())
-            .unwrap_or_default();
-
-        std::env::temp_dir().join(format!("red-cell-agent-registry-{unique}.sqlite"))
+        std::env::temp_dir().join(format!("red-cell-agent-registry-{}.sqlite", Uuid::new_v4()))
     }
 
     fn sample_agent(agent_id: u32) -> red_cell_common::AgentInfo {
@@ -1090,6 +1085,92 @@ mod tests {
                 .last_call_in,
             "2026-03-09T21:00:00Z"
         );
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_insert_get_and_update_are_safe() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = Arc::new(AgentRegistry::new(database.clone()));
+
+        let mut insert_tasks = Vec::new();
+        for index in 0..16_u32 {
+            let registry = Arc::clone(&registry);
+            insert_tasks.push(tokio::spawn(async move {
+                let agent_id = 0x2100_0000 + index;
+                let agent = sample_agent(agent_id);
+                registry.insert(agent.clone()).await?;
+
+                let stored = registry
+                    .get(agent_id)
+                    .await
+                    .ok_or(TeamserverError::AgentNotFound { agent_id })?;
+                if stored != agent {
+                    return Err(TeamserverError::InvalidPersistedValue {
+                        field: "agent_snapshot",
+                        message: format!("unexpected snapshot for agent 0x{agent_id:08X}"),
+                    });
+                }
+
+                Ok::<(), TeamserverError>(())
+            }));
+        }
+
+        for task in insert_tasks {
+            task.await.map_err(|error| TeamserverError::InvalidPersistedValue {
+                field: "task_join",
+                message: error.to_string(),
+            })??;
+        }
+
+        assert_eq!(registry.list().await.len(), 16);
+
+        let mut update_tasks = Vec::new();
+        for index in 0..16_u32 {
+            let registry = Arc::clone(&registry);
+            update_tasks.push(tokio::spawn(async move {
+                let agent_id = 0x2100_0000 + index;
+                let mut agent = registry
+                    .get(agent_id)
+                    .await
+                    .ok_or(TeamserverError::AgentNotFound { agent_id })?;
+                agent.sleep_delay = 60 + index;
+                agent.last_call_in = format!("2026-03-10T12:{index:02}:00Z");
+                registry.update_agent(agent.clone()).await?;
+
+                let persisted = registry
+                    .get(agent_id)
+                    .await
+                    .ok_or(TeamserverError::AgentNotFound { agent_id })?;
+                if persisted.sleep_delay != 60 + index {
+                    return Err(TeamserverError::InvalidPersistedValue {
+                        field: "sleep_delay",
+                        message: format!("agent 0x{agent_id:08X} did not persist its update"),
+                    });
+                }
+
+                Ok::<(), TeamserverError>(())
+            }));
+        }
+
+        for task in update_tasks {
+            task.await.map_err(|error| TeamserverError::InvalidPersistedValue {
+                field: "task_join",
+                message: error.to_string(),
+            })??;
+        }
+
+        for index in 0..16_u32 {
+            let agent_id = 0x2100_0000 + index;
+            let persisted = database
+                .agents()
+                .get(agent_id)
+                .await?
+                .ok_or(TeamserverError::AgentNotFound { agent_id })?;
+            assert_eq!(persisted.sleep_delay, 60 + index);
+            assert_eq!(persisted.last_call_in, format!("2026-03-10T12:{index:02}:00Z"));
+        }
 
         Ok(())
     }

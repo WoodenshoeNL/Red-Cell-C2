@@ -369,30 +369,42 @@ mod tests {
 
     #[test]
     fn permissions_enforce_role_boundaries() {
-        assert!(authorize_permission(&session(OperatorRole::Admin), Permission::Admin).is_ok());
-        assert!(authorize_permission(&session(OperatorRole::Operator), Permission::Read).is_ok());
-        assert!(
-            authorize_permission(&session(OperatorRole::Operator), Permission::TaskAgents).is_ok()
-        );
-        assert!(
-            authorize_permission(&session(OperatorRole::Operator), Permission::ManageListeners)
-                .is_ok()
-        );
-        assert_eq!(
-            authorize_permission(&session(OperatorRole::Operator), Permission::Admin),
-            Err(AuthorizationError::PermissionDenied {
-                role: OperatorRole::Operator,
-                required: Permission::Admin.as_str(),
-            })
-        );
-        assert!(authorize_permission(&session(OperatorRole::Analyst), Permission::Read).is_ok());
-        assert_eq!(
-            authorize_permission(&session(OperatorRole::Analyst), Permission::TaskAgents),
-            Err(AuthorizationError::PermissionDenied {
-                role: OperatorRole::Analyst,
-                required: Permission::TaskAgents.as_str(),
-            })
-        );
+        let cases = [
+            (OperatorRole::Admin, Permission::Read, true),
+            (OperatorRole::Admin, Permission::TaskAgents, true),
+            (OperatorRole::Admin, Permission::ManageListeners, true),
+            (OperatorRole::Admin, Permission::Admin, true),
+            (OperatorRole::Operator, Permission::Read, true),
+            (OperatorRole::Operator, Permission::TaskAgents, true),
+            (OperatorRole::Operator, Permission::ManageListeners, true),
+            (OperatorRole::Operator, Permission::Admin, false),
+            (OperatorRole::Analyst, Permission::Read, true),
+            (OperatorRole::Analyst, Permission::TaskAgents, false),
+            (OperatorRole::Analyst, Permission::ManageListeners, false),
+            (OperatorRole::Analyst, Permission::Admin, false),
+        ];
+
+        for (role, permission, allowed) in cases {
+            let result = authorize_permission(&session(role), permission);
+            if allowed {
+                assert_eq!(
+                    result,
+                    Ok(()),
+                    "expected {role:?} to be allowed {}",
+                    permission.as_str()
+                );
+            } else {
+                assert_eq!(
+                    result,
+                    Err(AuthorizationError::PermissionDenied {
+                        role,
+                        required: permission.as_str(),
+                    }),
+                    "expected {role:?} to be denied {}",
+                    permission.as_str()
+                );
+            }
+        }
     }
 
     #[test]

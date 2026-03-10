@@ -13,11 +13,13 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
+use hmac::{Hmac, Mac};
 use red_cell_common::config::{OperatorRole, Profile};
 use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::{AgentTaskInfo, EventCode, Message, MessageHead};
 use red_cell_common::{AgentInfo, ListenerConfig};
 use serde::Serialize;
+use sha2::Sha256;
 use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::debug;
@@ -39,6 +41,12 @@ const DOCS_ROUTE: &str = "/docs";
 const API_KEY_HEADER: &str = "x-api-key";
 const BEARER_PREFIX: &str = "Bearer ";
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+const API_KEY_HASH_SECRET_SIZE: usize = 32;
+
+type ApiKeyMac = Hmac<Sha256>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ApiKeyDigest([u8; 32]);
 
 /// Fixed REST API rate-limiting configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,7 +85,8 @@ pub struct ApiIdentity {
 /// Shared REST API authentication and rate-limiting runtime state.
 #[derive(Debug, Clone)]
 pub struct ApiRuntime {
-    keys: Arc<BTreeMap<String, ApiIdentity>>,
+    key_hash_secret: Arc<[u8; API_KEY_HASH_SECRET_SIZE]>,
+    keys: Arc<BTreeMap<ApiKeyDigest, ApiIdentity>>,
     rate_limit: ApiRateLimit,
     windows: Arc<Mutex<BTreeMap<String, RateLimitWindow>>>,
 }
@@ -86,6 +95,7 @@ impl ApiRuntime {
     /// Build REST API runtime state from a validated profile.
     #[must_use]
     pub fn from_profile(profile: &Profile) -> Self {
+        let key_hash_secret = Arc::new(Self::generate_key_hash_secret());
         let (keys, requests_per_minute) = profile
             .api
             .as_ref()
@@ -94,7 +104,10 @@ impl ApiRuntime {
                     .keys
                     .iter()
                     .map(|(name, key)| {
-                        (key.value.clone(), ApiIdentity { key_id: name.clone(), role: key.role })
+                        (
+                            Self::hash_api_key(&key_hash_secret, &key.value),
+                            ApiIdentity { key_id: name.clone(), role: key.role },
+                        )
                     })
                     .collect::<BTreeMap<_, _>>();
 
@@ -103,6 +116,7 @@ impl ApiRuntime {
             .unwrap_or_else(|| (BTreeMap::new(), 0));
 
         Self {
+            key_hash_secret,
             keys: Arc::new(keys),
             rate_limit: ApiRateLimit { requests_per_minute },
             windows: Arc::new(Mutex::new(BTreeMap::new())),
@@ -127,12 +141,33 @@ impl ApiRuntime {
         }
 
         let presented_key = extract_api_key(headers)?;
+        let presented_key_digest = Self::hash_api_key(&self.key_hash_secret, &presented_key);
         let identity =
-            self.keys.get(presented_key.as_str()).cloned().ok_or(ApiAuthError::InvalidApiKey)?;
+            self.keys.get(&presented_key_digest).cloned().ok_or(ApiAuthError::InvalidApiKey)?;
 
         self.check_rate_limit(&identity.key_id).await?;
 
         Ok(identity)
+    }
+
+    fn hash_api_key(secret: &[u8; API_KEY_HASH_SECRET_SIZE], api_key: &str) -> ApiKeyDigest {
+        let mut mac = ApiKeyMac::new_from_slice(secret)
+            .unwrap_or_else(|_| unreachable!("hmac accepts arbitrary secret lengths"));
+        mac.update(api_key.as_bytes());
+        let digest = mac.finalize().into_bytes();
+        let mut bytes = [0_u8; 32];
+        bytes.copy_from_slice(&digest);
+        ApiKeyDigest(bytes)
+    }
+
+    fn generate_key_hash_secret() -> [u8; API_KEY_HASH_SECRET_SIZE] {
+        let mut bytes = [0_u8; API_KEY_HASH_SECRET_SIZE];
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+
+        bytes[..16].copy_from_slice(first.as_bytes());
+        bytes[16..].copy_from_slice(second.as_bytes());
+        bytes
     }
 
     async fn check_rate_limit(&self, key_id: &str) -> Result<(), ApiAuthError> {
@@ -963,6 +998,45 @@ mod tests {
 
         let body = read_json(response).await;
         assert_eq!(body["error"]["code"], "missing_api_key");
+    }
+
+    #[tokio::test]
+    async fn bearer_token_authenticates_protected_routes() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/listeners")
+                    .header(AUTHORIZATION, "Bearer secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn protected_routes_reject_unknown_api_key() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/listeners")
+                    .header(API_KEY_HEADER, "secret-admio")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_api_key");
     }
 
     #[tokio::test]

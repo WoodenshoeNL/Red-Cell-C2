@@ -246,6 +246,28 @@ impl CommandDispatcher {
             },
         );
 
+        let inject_dll_events = events.clone();
+        dispatcher.register_handler(
+            u32::from(DemonCommand::CommandInjectDll),
+            move |agent_id, request_id, payload| {
+                let events = inject_dll_events.clone();
+                Box::pin(async move {
+                    handle_inject_dll_callback(&events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let spawn_dll_events = events.clone();
+        dispatcher.register_handler(
+            u32::from(DemonCommand::CommandSpawnDll),
+            move |agent_id, request_id, payload| {
+                let events = spawn_dll_events.clone();
+                Box::pin(async move {
+                    handle_spawn_dll_callback(&events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
         let command_output_events = events.clone();
         let command_output_plugins = plugins.clone();
         let command_output_database = database.clone();
@@ -2147,6 +2169,74 @@ async fn handle_inject_shellcode_callback(
         message,
         None,
     )?);
+    Ok(None)
+}
+
+async fn handle_inject_dll_callback(
+    events: &EventBus,
+    agent_id: u32,
+    request_id: u32,
+    payload: &[u8],
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let cmd = u32::from(DemonCommand::CommandInjectDll);
+    let mut parser = CallbackParser::new(payload, cmd);
+    let status = parser.read_u32("dll inject status")?;
+    let (kind, message) = match status {
+        x if x == u32::from(DemonInjectError::Success) => {
+            ("Good", "Successfully injected DLL into remote process")
+        }
+        x if x == u32::from(DemonInjectError::Failed) => {
+            ("Error", "Failed to inject DLL into remote process")
+        }
+        x if x == u32::from(DemonInjectError::InvalidParam) => {
+            ("Error", "DLL injection failed: invalid parameter")
+        }
+        x if x == u32::from(DemonInjectError::ProcessArchMismatch) => {
+            ("Error", "DLL injection failed: process architecture mismatch")
+        }
+        other => {
+            return Err(CommandDispatchError::InvalidCallbackPayload {
+                command_id: cmd,
+                message: format!("unknown DLL injection status {other}"),
+            });
+        }
+    };
+
+    events.broadcast(agent_response_event(agent_id, cmd, request_id, kind, message, None)?);
+    Ok(None)
+}
+
+async fn handle_spawn_dll_callback(
+    events: &EventBus,
+    agent_id: u32,
+    request_id: u32,
+    payload: &[u8],
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let cmd = u32::from(DemonCommand::CommandSpawnDll);
+    let mut parser = CallbackParser::new(payload, cmd);
+    let status = parser.read_u32("spawn dll status")?;
+    let (kind, message) = match status {
+        x if x == u32::from(DemonInjectError::Success) => {
+            ("Good", "Successfully spawned DLL in new process")
+        }
+        x if x == u32::from(DemonInjectError::Failed) => {
+            ("Error", "Failed to spawn DLL in new process")
+        }
+        x if x == u32::from(DemonInjectError::InvalidParam) => {
+            ("Error", "DLL spawn failed: invalid parameter")
+        }
+        x if x == u32::from(DemonInjectError::ProcessArchMismatch) => {
+            ("Error", "DLL spawn failed: process architecture mismatch")
+        }
+        other => {
+            return Err(CommandDispatchError::InvalidCallbackPayload {
+                command_id: cmd,
+                message: format!("unknown DLL spawn status {other}"),
+            });
+        }
+    };
+
+    events.broadcast(agent_response_event(agent_id, cmd, request_id, kind, message, None)?);
     Ok(None)
 }
 
@@ -5229,6 +5319,165 @@ mod tests {
             .and_then(Value::as_array)
             .ok_or_else(|| "module rows should be present even if empty".to_owned())?;
         assert!(rows.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_inject_dll_handler_broadcasts_success()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        dispatcher
+            .dispatch(
+                0xBEEF_0001,
+                u32::from(DemonCommand::CommandInjectDll),
+                20,
+                &u32::from(DemonInjectError::Success).to_le_bytes(),
+            )
+            .await?;
+
+        let event = receiver.recv().await.ok_or("inject dll response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Successfully injected DLL into remote process".to_owned()))
+        );
+        assert_eq!(message.info.extra.get("Type"), Some(&Value::String("Good".to_owned())));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_inject_dll_handler_broadcasts_error() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        dispatcher
+            .dispatch(
+                0xBEEF_0002,
+                u32::from(DemonCommand::CommandInjectDll),
+                21,
+                &u32::from(DemonInjectError::Failed).to_le_bytes(),
+            )
+            .await?;
+
+        let event = receiver.recv().await.ok_or("inject dll error missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Failed to inject DLL into remote process".to_owned()))
+        );
+        assert_eq!(message.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_inject_dll_handler_broadcasts_arch_mismatch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        dispatcher
+            .dispatch(
+                0xBEEF_0003,
+                u32::from(DemonCommand::CommandInjectDll),
+                22,
+                &u32::from(DemonInjectError::ProcessArchMismatch).to_le_bytes(),
+            )
+            .await?;
+
+        let event = receiver.recv().await.ok_or("inject dll arch mismatch missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("DLL injection failed: process architecture mismatch".to_owned()))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_spawn_dll_handler_broadcasts_success() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        dispatcher
+            .dispatch(
+                0xBEEF_0010,
+                u32::from(DemonCommand::CommandSpawnDll),
+                30,
+                &u32::from(DemonInjectError::Success).to_le_bytes(),
+            )
+            .await?;
+
+        let event = receiver.recv().await.ok_or("spawn dll response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Successfully spawned DLL in new process".to_owned()))
+        );
+        assert_eq!(message.info.extra.get("Type"), Some(&Value::String("Good".to_owned())));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_spawn_dll_handler_broadcasts_error() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        dispatcher
+            .dispatch(
+                0xBEEF_0011,
+                u32::from(DemonCommand::CommandSpawnDll),
+                31,
+                &u32::from(DemonInjectError::Failed).to_le_bytes(),
+            )
+            .await?;
+
+        let event = receiver.recv().await.ok_or("spawn dll error missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Failed to spawn DLL in new process".to_owned()))
+        );
+        assert_eq!(message.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
         Ok(())
     }
 

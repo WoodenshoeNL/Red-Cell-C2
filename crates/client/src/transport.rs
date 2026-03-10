@@ -86,6 +86,10 @@ impl ClientTransport {
     pub(crate) fn queue_message(&self, message: OperatorMessage) -> Result<(), TransportError> {
         self.outgoing_tx.send(message).map_err(|_| TransportError::OutgoingQueueClosed)
     }
+
+    pub(crate) fn outgoing_sender(&self) -> mpsc::UnboundedSender<OperatorMessage> {
+        self.outgoing_tx.clone()
+    }
 }
 
 impl Drop for ClientTransport {
@@ -171,10 +175,20 @@ pub(crate) struct AgentSummary {
     pub(crate) status: String,
     pub(crate) domain_name: String,
     pub(crate) username: String,
+    pub(crate) internal_ip: String,
+    pub(crate) external_ip: String,
     pub(crate) hostname: String,
+    pub(crate) process_arch: String,
     pub(crate) process_name: String,
     pub(crate) process_pid: String,
+    pub(crate) elevated: bool,
+    pub(crate) os_version: String,
+    pub(crate) os_build: String,
+    pub(crate) os_arch: String,
+    pub(crate) sleep_delay: String,
+    pub(crate) sleep_jitter: String,
     pub(crate) last_call_in: String,
+    pub(crate) note: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,10 +302,20 @@ impl AppState {
                         status: message.info.marked,
                         domain_name: String::new(),
                         username: String::new(),
+                        internal_ip: String::new(),
+                        external_ip: String::new(),
                         hostname: String::new(),
+                        process_arch: String::new(),
                         process_name: String::new(),
                         process_pid: String::new(),
+                        elevated: false,
+                        os_version: String::new(),
+                        os_build: String::new(),
+                        os_arch: String::new(),
+                        sleep_delay: String::new(),
+                        sleep_jitter: String::new(),
                         last_call_in: message.head.timestamp,
+                        note: String::new(),
                     });
                 }
             }
@@ -355,6 +379,12 @@ impl AppState {
         match self.agents.iter_mut().find(|existing| existing.name_id == agent.name_id) {
             Some(existing) => *existing = agent,
             None => self.agents.push(agent),
+        }
+    }
+
+    pub(crate) fn update_agent_note(&mut self, agent_id: &str, note: String) {
+        if let Some(agent) = self.agents.iter_mut().find(|agent| agent.name_id == agent_id) {
+            agent.note = note;
         }
     }
 
@@ -712,10 +742,20 @@ fn agent_summary_from_message(info: &red_cell_common::operator::AgentInfo) -> Ag
         },
         domain_name: info.domain_name.clone(),
         username: info.username.clone(),
+        internal_ip: info.internal_ip.clone(),
+        external_ip: info.external_ip.clone(),
         hostname: info.hostname.clone(),
+        process_arch: info.process_arch.clone(),
         process_name: info.process_name.clone(),
         process_pid: info.process_pid.clone(),
+        elevated: info.elevated,
+        os_version: info.os_version.clone(),
+        os_build: info.os_build.clone(),
+        os_arch: info.os_arch.clone(),
+        sleep_delay: info.sleep_delay.to_string(),
+        sleep_jitter: info.sleep_jitter.to_string(),
         last_call_in: info.last_call_in.clone(),
+        note: info.note.clone(),
     }
 }
 

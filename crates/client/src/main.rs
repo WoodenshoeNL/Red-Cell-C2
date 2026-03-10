@@ -6,9 +6,11 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow};
 use clap::Parser;
-use eframe::egui::{self, Align, Layout, RichText};
+use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, Stroke};
 use local_config::LocalConfig;
 use login::{LoginAction, LoginState, render_login_dialog};
+use red_cell_common::demon::DemonCommand;
+use red_cell_common::operator::{AgentTaskInfo, Message, MessageHead, OperatorMessage};
 use transport::{AppState, ClientTransport, ConnectionStatus, SharedAppState};
 
 const WINDOW_TITLE: &str = "Red Cell Client";
@@ -42,10 +44,86 @@ enum AppPhase {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentSortColumn {
+    Id,
+    Hostname,
+    Username,
+    Domain,
+    Ip,
+    Pid,
+    Process,
+    Arch,
+    Elevated,
+    Os,
+    SleepJitter,
+    LastCheckin,
+}
+
+impl AgentSortColumn {
+    const ALL: [(Self, &'static str); 12] = [
+        (Self::Id, "ID"),
+        (Self::Hostname, "Hostname"),
+        (Self::Username, "Username"),
+        (Self::Domain, "Domain"),
+        (Self::Ip, "IP"),
+        (Self::Pid, "PID"),
+        (Self::Process, "Process"),
+        (Self::Arch, "Arch"),
+        (Self::Elevated, "Elevated"),
+        (Self::Os, "OS"),
+        (Self::SleepJitter, "Sleep/Jitter"),
+        (Self::LastCheckin, "Last Checkin"),
+    ];
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NoteEditorState {
+    agent_id: String,
+    note: String,
+}
+
+#[derive(Debug, Default)]
+struct SessionPanelState {
+    filter: String,
+    sort_column: Option<AgentSortColumn>,
+    descending: bool,
+    open_consoles: Vec<String>,
+    note_editor: Option<NoteEditorState>,
+    pending_messages: Vec<OperatorMessage>,
+    status_message: Option<String>,
+}
+
+impl SessionPanelState {
+    fn toggle_sort(&mut self, column: AgentSortColumn) {
+        if self.sort_column == Some(column) {
+            self.descending = !self.descending;
+        } else {
+            self.sort_column = Some(column);
+            self.descending = false;
+        }
+    }
+
+    fn ensure_console_open(&mut self, agent_id: &str) {
+        if !self.open_consoles.iter().any(|open_id| open_id == agent_id) {
+            self.open_consoles.push(agent_id.to_owned());
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionAction {
+    OpenConsole(String),
+    RequestKill(String),
+    EditNote { agent_id: String, current_note: String },
+}
+
 struct ClientApp {
     phase: AppPhase,
     local_config: LocalConfig,
     cli_server_url: String,
+    session_panel: SessionPanelState,
+    outgoing_tx: Option<tokio::sync::mpsc::UnboundedSender<OperatorMessage>>,
 }
 
 impl ClientApp {
@@ -53,7 +131,17 @@ impl ClientApp {
         let local_config = LocalConfig::load();
         let login_state = LoginState::new(&cli.server, &local_config);
 
-        Self { phase: AppPhase::Login(login_state), local_config, cli_server_url: cli.server }
+        Self {
+            phase: AppPhase::Login(login_state),
+            local_config,
+            cli_server_url: cli.server,
+            session_panel: SessionPanelState {
+                sort_column: Some(AgentSortColumn::LastCheckin),
+                descending: true,
+                ..SessionPanelState::default()
+            },
+            outgoing_tx: None,
+        }
     }
 
     fn snapshot(app_state: &SharedAppState) -> AppState {
@@ -80,6 +168,7 @@ impl ClientApp {
                     login_state.set_error(format!("Failed to send login: {error}"));
                     return;
                 }
+                self.outgoing_tx = Some(transport.outgoing_sender());
 
                 self.local_config.server_url = Some(server_url);
                 self.local_config.username = Some(login_state.username.trim().to_owned());
@@ -127,6 +216,7 @@ impl ClientApp {
             let old_phase = std::mem::replace(&mut self.phase, placeholder);
             if let AppPhase::Authenticating { mut login_state, .. } = old_phase {
                 login_state.set_error(error_msg);
+                self.outgoing_tx = None;
                 self.phase = AppPhase::Login(login_state);
             }
         }
@@ -165,27 +255,110 @@ impl ClientApp {
         }
     }
 
-    fn render_agents_panel(&self, ui: &mut egui::Ui, state: &AppState) {
-        ui.heading("Agents");
+    fn render_agents_panel(&mut self, ui: &mut egui::Ui, state: &AppState) {
+        ui.heading("Sessions");
         ui.separator();
+
+        ui.horizontal(|ui| {
+            ui.label("Filter");
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.session_panel.filter)
+                    .hint_text("Search ID, host, user, process, note"),
+            );
+            if response.changed() {
+                ui.ctx().request_repaint();
+            }
+        });
+        ui.add_space(6.0);
 
         if state.agents.is_empty() {
             ui.label("No agents are registered yet.");
             return;
         }
 
+        let agents = self.filtered_and_sorted_agents(&state.agents);
+        if agents.is_empty() {
+            ui.label("No agents match the current filter.");
+            return;
+        }
+
+        if let Some(message) = &self.session_panel.status_message {
+            ui.label(RichText::new(message).weak());
+            ui.add_space(6.0);
+        }
+
+        self.render_session_table_header(ui);
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for agent in &state.agents {
-                ui.group(|ui| {
+            for agent in &agents {
+                let fill = if agent.elevated {
+                    Color32::from_rgba_unmultiplied(120, 28, 28, 110)
+                } else {
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 8)
+                };
+                let frame = egui::Frame::default()
+                    .fill(fill)
+                    .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 18)))
+                    .inner_margin(egui::Margin::symmetric(8, 6));
+                let inner = frame.show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.monospace(&agent.name_id);
-                        ui.label(format!("[{}]", agent.status));
-                        ui.label(format!("{}\\{}", agent.domain_name, agent.username));
+                        self.render_session_row_cell(ui, 86.0, &agent.name_id, true);
+                        self.render_session_row_cell(ui, 116.0, &agent.hostname, false);
+                        self.render_session_row_cell(ui, 108.0, &agent.username, false);
+                        self.render_session_row_cell(ui, 86.0, &agent.domain_name, false);
+                        self.render_session_row_cell(ui, 108.0, &agent_ip(agent), false);
+                        self.render_session_row_cell(ui, 72.0, &agent.process_pid, false);
+                        self.render_session_row_cell(ui, 132.0, &agent.process_name, false);
+                        self.render_session_row_cell(ui, 72.0, &agent_arch(agent), false);
+                        self.render_session_row_cell(
+                            ui,
+                            82.0,
+                            if agent.elevated { "Yes" } else { "No" },
+                            false,
+                        );
+                        self.render_session_row_cell(ui, 170.0, &agent_os(agent), false);
+                        self.render_session_row_cell(ui, 110.0, &agent_sleep_jitter(agent), false);
+                        self.render_session_row_cell(ui, 136.0, &agent.last_call_in, false);
                     });
-                    ui.label(format!("Host: {}", agent.hostname));
-                    ui.label(format!("Process: {} ({})", agent.process_name, agent.process_pid));
-                    ui.label(format!("Last check-in: {}", agent.last_call_in));
                 });
+
+                let row_response = ui.interact(
+                    inner.response.rect,
+                    ui.make_persistent_id(("agent-row", &agent.name_id)),
+                    Sense::click(),
+                );
+
+                if row_response.double_clicked() {
+                    self.session_panel.ensure_console_open(&agent.name_id);
+                }
+
+                row_response.context_menu(|ui| {
+                    if ui.button("Interact").clicked() {
+                        self.handle_session_action(
+                            SessionAction::OpenConsole(agent.name_id.clone()),
+                            state.operator_info.as_ref().map(|operator| operator.username.as_str()),
+                        );
+                        ui.close();
+                    }
+                    if ui.button("Kill").clicked() {
+                        self.handle_session_action(
+                            SessionAction::RequestKill(agent.name_id.clone()),
+                            state.operator_info.as_ref().map(|operator| operator.username.as_str()),
+                        );
+                        ui.close();
+                    }
+                    if ui.button("Add note").clicked() {
+                        self.handle_session_action(
+                            SessionAction::EditNote {
+                                agent_id: agent.name_id.clone(),
+                                current_note: agent.note.clone(),
+                            },
+                            state.operator_info.as_ref().map(|operator| operator.username.as_str()),
+                        );
+                        ui.close();
+                    }
+                });
+
+                ui.add_space(4.0);
             }
         });
     }
@@ -334,7 +507,7 @@ impl ClientApp {
         }
     }
 
-    fn render_main_ui(&self, ctx: &egui::Context, app_state: &SharedAppState) {
+    fn render_main_ui(&mut self, ctx: &egui::Context, app_state: &SharedAppState) {
         let snapshot = Self::snapshot(app_state);
 
         egui::TopBottomPanel::top("connection_bar").show(ctx, |ui| {
@@ -371,6 +544,216 @@ impl ClientApp {
                 self.render_overview_panel(ui, &snapshot);
             });
         });
+
+        self.render_agent_consoles(ctx, &snapshot);
+        self.render_note_editor(ctx, app_state);
+        self.flush_pending_messages();
+    }
+
+    fn render_session_table_header(&mut self, ui: &mut egui::Ui) {
+        let widths = [
+            (AgentSortColumn::Id, 86.0),
+            (AgentSortColumn::Hostname, 116.0),
+            (AgentSortColumn::Username, 108.0),
+            (AgentSortColumn::Domain, 86.0),
+            (AgentSortColumn::Ip, 108.0),
+            (AgentSortColumn::Pid, 72.0),
+            (AgentSortColumn::Process, 132.0),
+            (AgentSortColumn::Arch, 72.0),
+            (AgentSortColumn::Elevated, 82.0),
+            (AgentSortColumn::Os, 170.0),
+            (AgentSortColumn::SleepJitter, 110.0),
+            (AgentSortColumn::LastCheckin, 136.0),
+        ];
+        ui.horizontal(|ui| {
+            for (column, width) in widths {
+                let label = sort_button_label(
+                    self.session_panel.sort_column,
+                    self.session_panel.descending,
+                    column,
+                );
+                let button =
+                    egui::Button::new(label).frame(false).wrap_mode(egui::TextWrapMode::Truncate);
+                if ui.add_sized([width, 24.0], button).clicked() {
+                    self.session_panel.toggle_sort(column);
+                }
+            }
+        });
+        ui.separator();
+    }
+
+    fn render_session_row_cell(&self, ui: &mut egui::Ui, width: f32, value: &str, monospace: bool) {
+        let text = ellipsize(value, 24);
+        if monospace {
+            ui.add_sized([width, 20.0], egui::Label::new(RichText::new(text).monospace()));
+        } else {
+            ui.add_sized([width, 20.0], egui::Label::new(text));
+        }
+    }
+
+    fn filtered_and_sorted_agents(
+        &self,
+        agents: &[transport::AgentSummary],
+    ) -> Vec<transport::AgentSummary> {
+        let mut filtered: Vec<_> = agents
+            .iter()
+            .filter(|agent| agent_matches_filter(agent, &self.session_panel.filter))
+            .cloned()
+            .collect();
+        sort_agents(
+            &mut filtered,
+            self.session_panel.sort_column.unwrap_or(AgentSortColumn::LastCheckin),
+            self.session_panel.descending,
+        );
+        filtered
+    }
+
+    fn handle_session_action(&mut self, action: SessionAction, operator: Option<&str>) {
+        match action {
+            SessionAction::OpenConsole(agent_id) => {
+                self.session_panel.ensure_console_open(&agent_id);
+            }
+            SessionAction::RequestKill(agent_id) => {
+                self.session_panel
+                    .pending_messages
+                    .push(build_kill_task(&agent_id, operator.unwrap_or("")));
+                self.session_panel.status_message =
+                    Some(format!("Queued kill task for {agent_id}."));
+            }
+            SessionAction::EditNote { agent_id, current_note } => {
+                self.session_panel.note_editor =
+                    Some(NoteEditorState { agent_id, note: current_note });
+            }
+        }
+    }
+
+    fn render_agent_consoles(&mut self, ctx: &egui::Context, state: &AppState) {
+        let mut still_open = Vec::new();
+        for agent_id in self.session_panel.open_consoles.clone() {
+            let mut open = true;
+            egui::Window::new(format!("Console {agent_id}"))
+                .id(egui::Id::new(("agent-console", &agent_id)))
+                .open(&mut open)
+                .resizable(true)
+                .default_size([720.0, 420.0])
+                .show(ctx, |ui| {
+                    if let Some(agent) = state.agents.iter().find(|agent| agent.name_id == agent_id)
+                    {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new(&agent.hostname).strong());
+                            ui.separator();
+                            ui.label(format!("{}\\{}", agent.domain_name, agent.username));
+                            ui.separator();
+                            ui.label(format!(
+                                "Process: {} ({})",
+                                agent.process_name, agent.process_pid
+                            ));
+                            ui.separator();
+                            ui.label(format!("Status: {}", agent.status));
+                        });
+                        if !agent.note.trim().is_empty() {
+                            ui.add_space(6.0);
+                            ui.label(RichText::new(format!("Note: {}", agent.note)).weak());
+                        }
+                    }
+
+                    ui.separator();
+
+                    match state.agent_consoles.get(&agent_id) {
+                        Some(entries) if !entries.is_empty() => {
+                            egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
+                                for entry in entries {
+                                    ui.group(|ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.monospace(&entry.command_id);
+                                            ui.label(RichText::new(&entry.received_at).weak());
+                                        });
+                                        ui.monospace(&entry.output);
+                                    });
+                                }
+                            });
+                        }
+                        _ => {
+                            ui.label("No console output for this session yet.");
+                        }
+                    }
+                });
+
+            if open {
+                still_open.push(agent_id);
+            }
+        }
+        self.session_panel.open_consoles = still_open;
+    }
+
+    fn render_note_editor(&mut self, ctx: &egui::Context, app_state: &SharedAppState) {
+        let Some(editor) = &mut self.session_panel.note_editor else {
+            return;
+        };
+
+        let mut keep_open = true;
+        let mut save_note = false;
+        let mut cancel_note = false;
+        let title = format!("Agent Note {}", editor.agent_id);
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(true)
+            .default_size([420.0, 220.0])
+            .open(&mut keep_open)
+            .show(ctx, |ui| {
+                ui.label("Operator note");
+                ui.add(
+                    egui::TextEdit::multiline(&mut editor.note)
+                        .desired_rows(8)
+                        .hint_text("Add operator context for this agent"),
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        save_note = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel_note = true;
+                    }
+                });
+            });
+
+        if save_note {
+            let agent_id = editor.agent_id.clone();
+            let note = editor.note.trim().to_owned();
+            match app_state.lock() {
+                Ok(mut state) => state.update_agent_note(&agent_id, note.clone()),
+                Err(poisoned) => poisoned.into_inner().update_agent_note(&agent_id, note.clone()),
+            }
+            self.session_panel.pending_messages.push(build_note_task(&agent_id, &note, ""));
+            self.session_panel.status_message = Some(format!("Updated note for {agent_id}."));
+            self.session_panel.note_editor = None;
+            ctx.request_repaint();
+        } else if cancel_note || !keep_open {
+            self.session_panel.note_editor = None;
+        }
+    }
+
+    fn flush_pending_messages(&mut self) {
+        if self.session_panel.pending_messages.is_empty() {
+            return;
+        }
+
+        let Some(outgoing_tx) = &self.outgoing_tx else {
+            self.session_panel.status_message = Some(
+                "Session action could not be sent because the transport is unavailable.".to_owned(),
+            );
+            self.session_panel.pending_messages.clear();
+            return;
+        };
+
+        for message in self.session_panel.pending_messages.drain(..) {
+            if outgoing_tx.send(message).is_err() {
+                self.session_panel.status_message =
+                    Some("Session action could not be queued for delivery.".to_owned());
+                break;
+            }
+        }
     }
 }
 
@@ -427,10 +810,177 @@ fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
 
+fn build_kill_task(agent_id: &str, operator: &str) -> OperatorMessage {
+    build_agent_task(
+        operator,
+        AgentTaskInfo {
+            demon_id: agent_id.to_owned(),
+            task_id: format!("{:08X}", next_task_id()),
+            command_id: u32::from(DemonCommand::CommandExit).to_string(),
+            command_line: "kill".to_owned(),
+            command: Some("kill".to_owned()),
+            ..AgentTaskInfo::default()
+        },
+    )
+}
+
+fn build_note_task(agent_id: &str, note: &str, operator: &str) -> OperatorMessage {
+    build_agent_task(
+        operator,
+        AgentTaskInfo {
+            demon_id: agent_id.to_owned(),
+            task_id: format!("{:08X}", next_task_id()),
+            command_id: "Teamserver".to_owned(),
+            command_line: "note".to_owned(),
+            command: Some("note".to_owned()),
+            arguments: Some(note.to_owned()),
+            ..AgentTaskInfo::default()
+        },
+    )
+}
+
+fn build_agent_task(operator: &str, info: AgentTaskInfo) -> OperatorMessage {
+    OperatorMessage::AgentTask(Message {
+        head: MessageHead {
+            event: red_cell_common::operator::EventCode::Session,
+            user: operator.to_owned(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info,
+    })
+}
+
+fn next_task_id() -> u32 {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static TASK_COUNTER: AtomicU32 = AtomicU32::new(1);
+    TASK_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+fn agent_ip(agent: &transport::AgentSummary) -> String {
+    if agent.internal_ip.trim().is_empty() {
+        agent.external_ip.clone()
+    } else {
+        agent.internal_ip.clone()
+    }
+}
+
+fn agent_arch(agent: &transport::AgentSummary) -> String {
+    if agent.process_arch.trim().is_empty() {
+        agent.os_arch.clone()
+    } else {
+        agent.process_arch.clone()
+    }
+}
+
+fn agent_os(agent: &transport::AgentSummary) -> String {
+    if agent.os_build.trim().is_empty() {
+        agent.os_version.clone()
+    } else {
+        format!("{} ({})", agent.os_version, agent.os_build)
+    }
+}
+
+fn agent_sleep_jitter(agent: &transport::AgentSummary) -> String {
+    match (agent.sleep_delay.trim(), agent.sleep_jitter.trim()) {
+        ("", "") => String::new(),
+        (delay, "") => delay.to_owned(),
+        ("", jitter) => format!("j{jitter}%"),
+        (delay, jitter) => format!("{delay}s / {jitter}%"),
+    }
+}
+
+fn agent_matches_filter(agent: &transport::AgentSummary, filter: &str) -> bool {
+    let filter = filter.trim();
+    if filter.is_empty() {
+        return true;
+    }
+
+    let needle = filter.to_ascii_lowercase();
+    [
+        agent.name_id.as_str(),
+        agent.hostname.as_str(),
+        agent.username.as_str(),
+        agent.domain_name.as_str(),
+        agent.internal_ip.as_str(),
+        agent.external_ip.as_str(),
+        agent.process_pid.as_str(),
+        agent.process_name.as_str(),
+        agent.process_arch.as_str(),
+        agent.os_version.as_str(),
+        agent.os_build.as_str(),
+        agent.note.as_str(),
+    ]
+    .into_iter()
+    .any(|field| field.to_ascii_lowercase().contains(&needle))
+}
+
+fn sort_agents(agents: &mut [transport::AgentSummary], column: AgentSortColumn, descending: bool) {
+    agents.sort_by(|left, right| {
+        let ordering = match column {
+            AgentSortColumn::Id => left.name_id.cmp(&right.name_id),
+            AgentSortColumn::Hostname => left.hostname.cmp(&right.hostname),
+            AgentSortColumn::Username => left.username.cmp(&right.username),
+            AgentSortColumn::Domain => left.domain_name.cmp(&right.domain_name),
+            AgentSortColumn::Ip => agent_ip(left).cmp(&agent_ip(right)),
+            AgentSortColumn::Pid => left.process_pid.cmp(&right.process_pid),
+            AgentSortColumn::Process => left.process_name.cmp(&right.process_name),
+            AgentSortColumn::Arch => agent_arch(left).cmp(&agent_arch(right)),
+            AgentSortColumn::Elevated => left.elevated.cmp(&right.elevated),
+            AgentSortColumn::Os => agent_os(left).cmp(&agent_os(right)),
+            AgentSortColumn::SleepJitter => {
+                agent_sleep_jitter(left).cmp(&agent_sleep_jitter(right))
+            }
+            AgentSortColumn::LastCheckin => left.last_call_in.cmp(&right.last_call_in),
+        };
+        let normalized = if ordering == std::cmp::Ordering::Equal {
+            left.name_id.cmp(&right.name_id)
+        } else {
+            ordering
+        };
+        if descending { normalized.reverse() } else { normalized }
+    });
+}
+
+fn sort_button_label(
+    current_column: Option<AgentSortColumn>,
+    descending: bool,
+    button_column: AgentSortColumn,
+) -> String {
+    let name = AgentSortColumn::ALL
+        .iter()
+        .find_map(|(column, label)| (*column == button_column).then_some(*label))
+        .unwrap_or("Column");
+    if current_column == Some(button_column) {
+        let arrow = if descending { "v" } else { "^" };
+        format!("{name} {arrow}")
+    } else {
+        name.to_owned()
+    }
+}
+
+fn ellipsize(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_owned();
+    }
+
+    let mut output = String::new();
+    for (index, ch) in value.chars().enumerate() {
+        if index + 1 >= max_chars {
+            break;
+        }
+        output.push(ch);
+    }
+    output.push_str("...");
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::Parser;
+    use transport::AgentSummary;
 
     #[test]
     fn cli_uses_default_server_url() {
@@ -481,5 +1031,93 @@ mod tests {
             }
             _ => panic!("expected Login phase"),
         }
+    }
+
+    fn sample_agent(
+        name_id: &str,
+        hostname: &str,
+        username: &str,
+        elevated: bool,
+        last_call_in: &str,
+    ) -> AgentSummary {
+        AgentSummary {
+            name_id: name_id.to_owned(),
+            status: "Alive".to_owned(),
+            domain_name: "LAB".to_owned(),
+            username: username.to_owned(),
+            internal_ip: "10.0.0.10".to_owned(),
+            external_ip: "203.0.113.10".to_owned(),
+            hostname: hostname.to_owned(),
+            process_arch: "x64".to_owned(),
+            process_name: "explorer.exe".to_owned(),
+            process_pid: "1234".to_owned(),
+            elevated,
+            os_version: "Windows 11".to_owned(),
+            os_build: "22631".to_owned(),
+            os_arch: "x64".to_owned(),
+            sleep_delay: "5".to_owned(),
+            sleep_jitter: "10".to_owned(),
+            last_call_in: last_call_in.to_owned(),
+            note: "primary workstation".to_owned(),
+        }
+    }
+
+    #[test]
+    fn agent_filter_matches_multiple_columns() {
+        let agent = sample_agent("ABCD1234", "wkstn-1", "operator", true, "10/03/2026 12:00:00");
+        assert!(agent_matches_filter(&agent, "wkstn"));
+        assert!(agent_matches_filter(&agent, "primary"));
+        assert!(agent_matches_filter(&agent, "10.0.0.10"));
+        assert!(!agent_matches_filter(&agent, "sqlservr"));
+    }
+
+    #[test]
+    fn sort_agents_orders_by_last_checkin_descending() {
+        let mut agents = vec![
+            sample_agent("AAAA0001", "wkstn-1", "alice", false, "10/03/2026 11:00:00"),
+            sample_agent("BBBB0002", "wkstn-2", "bob", true, "10/03/2026 12:00:00"),
+        ];
+
+        sort_agents(&mut agents, AgentSortColumn::LastCheckin, true);
+
+        assert_eq!(agents[0].name_id, "BBBB0002");
+        assert_eq!(agents[1].name_id, "AAAA0001");
+    }
+
+    #[test]
+    fn sort_button_label_marks_active_column() {
+        assert_eq!(
+            sort_button_label(Some(AgentSortColumn::Hostname), false, AgentSortColumn::Hostname),
+            "Hostname ^"
+        );
+        assert_eq!(
+            sort_button_label(Some(AgentSortColumn::Hostname), true, AgentSortColumn::Id),
+            "ID"
+        );
+    }
+
+    #[test]
+    fn build_kill_task_uses_exit_command_shape() {
+        let OperatorMessage::AgentTask(message) = build_kill_task("ABCD1234", "operator") else {
+            panic!("expected agent task");
+        };
+
+        assert_eq!(message.info.demon_id, "ABCD1234");
+        assert_eq!(message.info.command_id, u32::from(DemonCommand::CommandExit).to_string());
+        assert_eq!(message.info.command.as_deref(), Some("kill"));
+    }
+
+    #[test]
+    fn build_note_task_uses_teamserver_note_shape() {
+        let OperatorMessage::AgentTask(message) =
+            build_note_task("ABCD1234", "triaged", "operator")
+        else {
+            panic!("expected agent task");
+        };
+
+        assert_eq!(message.info.demon_id, "ABCD1234");
+        assert_eq!(message.info.command_id, "Teamserver");
+        assert_eq!(message.info.command.as_deref(), Some("note"));
+        assert_eq!(message.info.arguments.as_deref(), Some("triaged"));
     }
 }

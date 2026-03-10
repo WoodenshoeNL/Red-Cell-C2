@@ -51,6 +51,7 @@ The original Havoc source lives at `./src/Havoc` and serves as the reference imp
 
 - **Claude Code CLI** — for the Claude dev and QA loops
 - **Codex CLI** — for the Codex dev loop
+- **Cursor Agent CLI** (`agent`) — for the Cursor dev loop
 
 ---
 
@@ -91,10 +92,11 @@ This project uses autonomous AI agent loops for development. Three loops are ava
 |---|---|---|---|
 | `./codex_loop.sh` | Codex | Development | Continuous |
 | `./claude_dev_loop.sh` | Claude | Development | Continuous |
+| `./cursor_loop.sh` | Cursor Agent | Development | Continuous |
 | `./claude_loop.sh` | Claude | QA review | Every 10 min |
 | `./claude_arch_loop.sh` | Claude | Architecture review | Every 45–90 min |
 
-### Development loops (`codex_loop.sh`, `claude_dev_loop.sh`)
+### Development loops (`codex_loop.sh`, `claude_dev_loop.sh`, `cursor_loop.sh`)
 
 Pick the highest-priority unblocked task from the issue tracker, implement it, run tests, commit, push, and close the issue — then repeat.
 
@@ -102,13 +104,15 @@ Pick the highest-priority unblocked task from the issue tracker, implement it, r
 # Run forever
 ./codex_loop.sh
 ./claude_dev_loop.sh
+./cursor_loop.sh
 
 # Run exactly N loops then exit
 ./codex_loop.sh 5
 ./claude_dev_loop.sh 3
+./cursor_loop.sh 3
 ```
 
-Logs: `logs/codex_dev.log`, `logs/claude_dev.log`
+Logs: `logs/codex_dev.log`, `logs/claude_dev.log`, `logs/cursor_dev.log`
 
 ### QA review loop (`claude_loop.sh`)
 
@@ -153,6 +157,7 @@ touch .stop && git add .stop && git commit -m "chore: stop dev loop" && git push
 
 ```bash
 ./codex_loop.sh &           # Codex doing dev work
+./cursor_loop.sh &          # Cursor Agent doing dev work
 ./claude_loop.sh &          # Claude QA running every 10 min
 ./claude_arch_loop.sh       # Claude deep architecture review in foreground
 ```
@@ -161,7 +166,7 @@ touch .stop && git add .stop && git commit -m "chore: stop dev loop" && git push
 
 Both dev loops are safe to run simultaneously across machines. Each loop claims a task by immediately pushing a git commit — if two agents select the same task at the same moment, the one whose push lands second detects the conflict, releases the claim, and picks a different task.
 
-Each agent identifies itself as `<hostname>-claude` or `<hostname>-codex` in git commit messages and log lines, so it is always clear which machine did what.
+Each agent identifies itself as `<hostname>-claude`, `<hostname>-codex`, or `<hostname>-cursor` in git commit messages and log lines, so it is always clear which machine did what.
 
 **VM 1:**
 ```bash
@@ -185,6 +190,7 @@ Each loop has a corresponding prompt file that controls agent behaviour:
 |---|---|
 | `CODEX_PROMPT.md` | `codex_loop.sh` |
 | `CLAUDE_DEV_PROMPT.md` | `claude_dev_loop.sh` |
+| `CURSOR_PROMPT.md` | `cursor_loop.sh` |
 | `CLAUDE_PROMPT.md` | `claude_loop.sh` |
 | `CLAUDE_ARCH_PROMPT.md` | `claude_arch_loop.sh` |
 
@@ -243,10 +249,12 @@ Red-Cell-C2/
 ├── CLAUDE_DEV_PROMPT.md     # Claude developer prompt
 ├── CLAUDE_ARCH_PROMPT.md    # Architecture reviewer prompt
 ├── CODEX_PROMPT.md          # Codex developer prompt
+├── CURSOR_PROMPT.md         # Cursor Agent developer prompt
 ├── claude_loop.sh           # QA review loop (every 10 min)
 ├── claude_dev_loop.sh       # Claude development loop
 ├── claude_arch_loop.sh      # Architecture review loop (every 45–90 min)
-└── codex_loop.sh            # Codex development loop
+├── codex_loop.sh            # Codex development loop
+└── cursor_loop.sh           # Cursor Agent development loop
 ```
 
 ---

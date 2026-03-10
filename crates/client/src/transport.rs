@@ -226,6 +226,23 @@ pub(crate) struct FileBrowserEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProcessEntry {
+    pub(crate) pid: u32,
+    pub(crate) ppid: u32,
+    pub(crate) name: String,
+    pub(crate) arch: String,
+    pub(crate) user: String,
+    pub(crate) session: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct AgentProcessListState {
+    pub(crate) rows: Vec<ProcessEntry>,
+    pub(crate) status_message: Option<String>,
+    pub(crate) updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DownloadProgress {
     pub(crate) file_id: String,
     pub(crate) remote_path: String,
@@ -279,6 +296,7 @@ pub(crate) struct AppState {
     pub(crate) agents: Vec<AgentSummary>,
     pub(crate) agent_consoles: BTreeMap<String, Vec<AgentConsoleEntry>>,
     pub(crate) file_browsers: BTreeMap<String, AgentFileBrowserState>,
+    pub(crate) process_lists: BTreeMap<String, AgentProcessListState>,
     pub(crate) listeners: Vec<ListenerSummary>,
     pub(crate) loot: Vec<LootItem>,
     pub(crate) chat_messages: Vec<ChatMessage>,
@@ -294,6 +312,7 @@ impl AppState {
             agents: Vec::new(),
             agent_consoles: BTreeMap::new(),
             file_browsers: BTreeMap::new(),
+            process_lists: BTreeMap::new(),
             listeners: Vec::new(),
             loot: Vec::new(),
             chat_messages: Vec::new(),
@@ -536,6 +555,7 @@ impl AppState {
     fn handle_agent_response(&mut self, message: Message<AgentResponseInfo>) {
         let agent_id = normalize_agent_id(&message.info.demon_id);
         self.update_file_browser_state(&agent_id, &message.info);
+        self.update_process_list_state(&agent_id, &message);
 
         if response_is_loot_notification(&message.info) {
             if let Some(loot_item) = loot_item_from_response(&message.info) {
@@ -556,6 +576,25 @@ impl AppState {
             received_at: message.head.timestamp,
             output,
         });
+    }
+
+    fn update_process_list_state(&mut self, agent_id: &str, message: &Message<AgentResponseInfo>) {
+        if message.info.command_id != u32::from(DemonCommand::CommandProcList).to_string() {
+            return;
+        }
+
+        let Some(rows) = process_list_rows_from_response(&message.info) else {
+            return;
+        };
+
+        let process_list = self.process_lists.entry(agent_id.to_owned()).or_default();
+        process_list.rows = rows;
+        process_list.updated_at = Some(message.head.timestamp.clone());
+        process_list.status_message = Some(format!(
+            "Loaded {} process{}",
+            process_list.rows.len(),
+            if process_list.rows.len() == 1 { "" } else { "es" }
+        ));
     }
 
     fn upsert_loot(&mut self, loot_item: LootItem) {
@@ -992,6 +1031,29 @@ fn loot_item_from_response(
     })
 }
 
+fn process_list_rows_from_response(
+    info: &red_cell_common::operator::AgentResponseInfo,
+) -> Option<Vec<ProcessEntry>> {
+    let rows = info.extra.get("ProcessListRows")?.as_array()?;
+    Some(
+        rows.iter()
+            .filter_map(|row| {
+                let pid = row.get("PID")?.as_u64()?;
+                let ppid = row.get("PPID")?.as_u64()?;
+                let session = row.get("Session")?.as_u64()?;
+                Some(ProcessEntry {
+                    pid: u32::try_from(pid).ok()?,
+                    ppid: u32::try_from(ppid).ok()?,
+                    name: row.get("Name")?.as_str()?.to_owned(),
+                    arch: row.get("Arch")?.as_str()?.to_owned(),
+                    user: row.get("User")?.as_str()?.to_owned(),
+                    session: u32::try_from(session).ok()?,
+                })
+            })
+            .collect(),
+    )
+}
+
 fn extra_string(extra: &BTreeMap<String, serde_json::Value>, key: &str) -> Option<String> {
     extra.get(key).and_then(|value| match value {
         serde_json::Value::String(string) => Some(string.clone()),
@@ -1382,6 +1444,45 @@ mod tests {
             .get("ABCD1234")
             .unwrap_or_else(|| panic!("console output should be stored"));
         assert_eq!(entries[0].kind, AgentConsoleEntryKind::Error);
+    }
+
+    #[test]
+    fn process_list_response_updates_process_panel_state() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+        let mut extra = BTreeMap::new();
+        extra.insert(
+            "ProcessListRows".to_owned(),
+            serde_json::json!([
+                {
+                    "Name": "explorer.exe",
+                    "PID": 1234,
+                    "PPID": 1111,
+                    "Session": 1,
+                    "Arch": "x64",
+                    "User": "LAB\\operator"
+                }
+            ]),
+        );
+
+        state.apply_operator_message(OperatorMessage::AgentResponse(Message {
+            head: head(EventCode::Session),
+            info: AgentResponseInfo {
+                demon_id: "abcd1234".to_owned(),
+                command_id: u32::from(DemonCommand::CommandProcList).to_string(),
+                output: "process table".to_owned(),
+                command_line: Some("ps".to_owned()),
+                extra,
+            },
+        }));
+
+        let processes = state
+            .process_lists
+            .get("ABCD1234")
+            .unwrap_or_else(|| panic!("process list should be stored"));
+        assert_eq!(processes.rows.len(), 1);
+        assert_eq!(processes.rows[0].pid, 1234);
+        assert_eq!(processes.rows[0].name, "explorer.exe");
+        assert_eq!(processes.updated_at.as_deref(), Some("10/03/2026 12:00:00"));
     }
 
     #[test]

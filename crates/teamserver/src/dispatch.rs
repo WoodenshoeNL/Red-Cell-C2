@@ -19,7 +19,7 @@ use red_cell_common::operator::{
     AgentPivotsInfo, AgentResponseInfo, AgentUpdateInfo, EventCode, Message, MessageHead,
     OperatorMessage,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -1902,13 +1902,17 @@ async fn handle_process_list_callback(
         return Ok(None);
     }
 
-    events.broadcast(agent_response_event(
+    let mut extra = BTreeMap::new();
+    extra.insert("ProcessListRows".to_owned(), process_rows_json(&rows));
+
+    events.broadcast(agent_response_event_with_extra(
         agent_id,
         u32::from(DemonCommand::CommandProcList),
         request_id,
         "Info",
         "Process List:",
-        Some(output),
+        extra,
+        output,
     )?);
     Ok(None)
 }
@@ -2663,6 +2667,24 @@ fn format_process_table(rows: &[ProcessRow]) -> String {
     }
 
     output
+}
+
+fn process_rows_json(rows: &[ProcessRow]) -> Value {
+    Value::Array(
+        rows.iter()
+            .map(|row| {
+                json!({
+                    "Name": row.name,
+                    "PID": row.pid,
+                    "PPID": row.ppid,
+                    "Session": row.session,
+                    "Arch": row.arch,
+                    "Threads": row.threads,
+                    "User": row.user,
+                })
+            })
+            .collect(),
+    )
 }
 
 fn format_process_row(
@@ -3426,6 +3448,15 @@ mod tests {
             message.info.extra.get("Message"),
             Some(&Value::String("Process List:".to_owned()))
         );
+        let rows = message
+            .info
+            .extra
+            .get("ProcessListRows")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "structured process rows missing".to_owned())?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("PID"), Some(&Value::from(1337)));
+        assert_eq!(rows[0].get("Name"), Some(&Value::String("explorer.exe".to_owned())));
         Ok(())
     }
 

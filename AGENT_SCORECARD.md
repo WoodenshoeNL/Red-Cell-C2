@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 6 | 0 |
+| Tasks closed | 0 | 9 | 0 |
 | Bugs filed against | 0 | 1 | 0 |
-| Bug rate (bugs/task) | N/A | 0.17 | N/A |
-| Quality score | N/A | 83% | N/A |
+| Bug rate (bugs/task) | N/A | 0.11 | N/A |
+| Quality score | N/A | 89% | N/A |
 
 ## Violation Breakdown
 
@@ -62,3 +62,14 @@ Build: passed (cargo check + clippy -D warnings + cargo test: 54/54 passed)
 | Cursor | 0 | 0 | No activity this run |
 
 Build: passed (cargo check + clippy -D warnings + cargo test: 57/57 passed)
+
+### QA Review — 2026-03-10 — 34d6bd..d19780
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA loop maintenance only |
+| Codex | 3 | 0 | Closed red-cell-c2-8w5 (constant-time auth), red-cell-c2-1n4 (HTTP body size cap), red-cell-c2-srf (DNS listeners from profile). All fixes include tests. |
+| Cursor | 0 | 0 | No activity this run (claimed red-cell-c2-1n4 but Codex landed the fix) |
+
+Build: passed (cargo check + clippy -D warnings + cargo test: 57/57 passed)
+Minor observation: `password_hashes_match` calls `to_ascii_lowercase()` before `ct_eq`; subtle's `ct_eq` short-circuits on length mismatch. Not exploitable in practice for SHA3-256 hex hashes (always 64 chars), but worth noting.

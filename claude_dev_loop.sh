@@ -34,6 +34,23 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$AGENT_ID] $*" | tee -a "$LOG_FILE"
 }
 
+# Detect DB schema drift (e.g. missing columns added in newer br versions)
+# and rebuild from JSONL if needed.
+repair_db_if_needed() {
+    local test_output
+    test_output=$(br stats --json 2>&1)
+    if echo "$test_output" | grep -q '"code": "DATABASE_ERROR"'; then
+        log "DB schema error detected — rebuilding from JSONL"
+        local db_path="$SCRIPT_DIR/.beads/beads.db"
+        rm -f "$db_path" "$db_path-wal" "$db_path-shm" 2>/dev/null
+        if br sync --import-only --quiet 2>/dev/null; then
+            log "DB rebuilt successfully"
+        else
+            log "WARNING: DB rebuild failed"
+        fi
+    fi
+}
+
 issue_status() {
     local task_id="$1"
 
@@ -237,6 +254,9 @@ while true; do
     br sync --import-only --quiet 2>/dev/null \
         && log "br sync import: ok" \
         || log "WARNING: br sync import failed, continuing"
+
+    # Heal DB schema drift (new br version may require columns not yet in DB)
+    repair_db_if_needed
 
     # ── Reset stuck tasks ──────────────────────────────────────────────────────
     reset_stuck_tasks

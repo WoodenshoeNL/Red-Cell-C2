@@ -1,6 +1,9 @@
 #!/bin/bash
 # Codex development loop — picks up beads tasks and implements them
 #
+# Safe to run on multiple VMs simultaneously. Uses optimistic git locking to
+# prevent two agents from claiming the same task.
+#
 # Usage:
 #   ./codex_loop.sh          # run forever
 #   ./codex_loop.sh 5        # run exactly 5 loops then exit
@@ -16,13 +19,43 @@ SLEEP_ON_NO_WORK=60   # seconds to wait when no tasks are ready
 SLEEP_BETWEEN_TASKS=15 # seconds between task iterations
 STALE_THRESHOLD=7200  # seconds before an in_progress task is considered stuck (2h)
 
+# Unique identity for this agent instance — used in git commit messages and logs
+# so it is always clear which machine/agent did what.
+AGENT_ID="${HOSTNAME:-unknown}-codex"
+
 MAX_LOOPS="${1:-0}"   # 0 = run forever
 LOOP_COUNT=0
 
 mkdir -p "$LOG_DIR"
 
 log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$AGENT_ID] $*" | tee -a "$LOG_FILE"
+}
+
+# Claim a task with optimistic git locking.
+# Immediately pushes the claim commit so other agents see it.
+# Returns 0 on success, 1 if another agent beat us to it.
+claim_task() {
+    local task_id="$1"
+
+    br update "$task_id" --status=in_progress 2>/dev/null || return 1
+    br sync --flush-only 2>/dev/null || return 1
+
+    git -C "$SCRIPT_DIR" add .beads/issues.jsonl
+    git -C "$SCRIPT_DIR" commit -m "chore: claim $task_id [$AGENT_ID]" --quiet
+
+    if git -C "$SCRIPT_DIR" push --quiet 2>/dev/null; then
+        return 0
+    fi
+
+    # Push failed — another agent pushed first. Undo our commit and restore
+    # the remote state so the next iteration starts clean.
+    log "CLAIM CONFLICT: another agent claimed $task_id first — releasing"
+    git -C "$SCRIPT_DIR" reset HEAD~1 --mixed --quiet
+    git -C "$SCRIPT_DIR" checkout -- .beads/issues.jsonl
+    git -C "$SCRIPT_DIR" pull --rebase --quiet 2>/dev/null || true
+    br sync --import-only --quiet 2>/dev/null || true
+    return 1
 }
 
 # Reset any tasks that have been stuck in_progress longer than STALE_THRESHOLD
@@ -52,8 +85,7 @@ except Exception:
     if [ -n "$stuck" ]; then
         for stuck_id in $stuck; do
             log "SAFEGUARD: $stuck_id stuck in_progress for >${STALE_THRESHOLD}s — resetting to open"
-            br reopen "$stuck_id" \
-                --reason="Reset by loop safeguard: stuck in_progress for >${STALE_THRESHOLD}s" \
+            br update "$stuck_id" --status=open \
                 2>/dev/null \
                 && log "SAFEGUARD: $stuck_id reset to open" \
                 || log "WARNING: failed to reset $stuck_id"
@@ -69,19 +101,27 @@ fi
 if [ "$MAX_LOOPS" -gt 0 ] 2>/dev/null; then
     log "========================================================"
     log "  Codex development loop starting (max $MAX_LOOPS loops)"
+    log "  Agent ID: $AGENT_ID"
     log "  Prompt template: $CODEX_PROMPT_FILE"
     log "  Log: $LOG_FILE"
     log "========================================================"
 else
     log "========================================================"
     log "  Codex development loop starting (unlimited)"
+    log "  Agent ID: $AGENT_ID"
     log "  Prompt template: $CODEX_PROMPT_FILE"
     log "  Log: $LOG_FILE"
     log "========================================================"
 fi
 
 while true; do
-    # Check loop limit
+    # ── Stop signal ────────────────────────────────────────────────────────────
+    if [ -f "$SCRIPT_DIR/.stop" ]; then
+        log "STOP signal detected (.stop file exists). Exiting."
+        exit 0
+    fi
+
+    # ── Loop limit ─────────────────────────────────────────────────────────────
     if [ "$MAX_LOOPS" -gt 0 ] 2>/dev/null; then
         if [ "$LOOP_COUNT" -ge "$MAX_LOOPS" ]; then
             log "Reached max loops ($MAX_LOOPS). Exiting."
@@ -92,25 +132,24 @@ while true; do
         log "=== Starting Codex loop iteration $((LOOP_COUNT + 1)) ==="
     fi
 
-    # Pull latest before picking up work
+    # ── Pull latest ────────────────────────────────────────────────────────────
     git -C "$SCRIPT_DIR" pull --rebase --quiet 2>/dev/null \
         && log "git pull: ok" \
         || log "WARNING: git pull failed, continuing with local state"
 
-    # Import any new issues from JSONL (in case another agent pushed changes)
+    # Import any new issues from JSONL (picks up claims by other agents)
     br sync --import-only --quiet 2>/dev/null \
         && log "br sync import: ok" \
         || log "WARNING: br sync import failed, continuing"
 
-    # Reset any tasks stuck in_progress longer than STALE_THRESHOLD
+    # ── Reset stuck tasks ──────────────────────────────────────────────────────
     reset_stuck_tasks
 
-    # Find the next task: prefer non-epic tasks, highest priority first
+    # ── Pick next task ─────────────────────────────────────────────────────────
     NEXT_ID=$(br ready --json 2>/dev/null | python3 -c "
 import sys, json
 try:
     issues = json.load(sys.stdin)
-    # Prefer actionable task types over epics
     tasks = [i for i in issues if i.get('issue_type', 'task') not in ('epic',)]
     pool = tasks if tasks else issues
     if pool:
@@ -125,18 +164,26 @@ except Exception:
         continue
     fi
 
-    log "Next task: $NEXT_ID"
+    log "Selected task: $NEXT_ID"
 
-    # Get full task details
+    # ── Claim with optimistic locking ──────────────────────────────────────────
+    # Random jitter (0-15s) reduces the chance of two agents selecting and
+    # claiming the same task at exactly the same moment.
+    sleep $((RANDOM % 15))
+
+    if ! claim_task "$NEXT_ID"; then
+        log "Could not claim $NEXT_ID — retrying with a different task"
+        sleep $((5 + RANDOM % 20))
+        continue
+    fi
+
+    log "Claimed $NEXT_ID"
+
+    # ── Build runtime prompt ───────────────────────────────────────────────────
     TASK_DETAILS=$(br show "$NEXT_ID" 2>/dev/null || echo "See issue ID: $NEXT_ID")
-
-    # Get ready list for context (top 15)
     READY_LIST=$(br ready 2>/dev/null | head -15 || echo "Unable to fetch ready list")
-
-    # Get in-progress list
     IN_PROGRESS=$(br list --status=in_progress 2>/dev/null || echo "None")
 
-    # Build runtime prompt
     RUNTIME_PROMPT="$RUNTIME_PROMPT_DIR/red_cell_codex_$(date +%s)_$$.md"
 
     cat > "$RUNTIME_PROMPT" << HEREDOC
@@ -147,6 +194,7 @@ $(cat "$CODEX_PROMPT_FILE")
 ## Your Current Task
 
 **Issue ID**: \`$NEXT_ID\`
+**Agent**: \`$AGENT_ID\`
 
 $TASK_DETAILS
 
@@ -162,13 +210,9 @@ $IN_PROGRESS
 
 ---
 
-Start by claiming this task:
-
-\`\`\`bash
-br update $NEXT_ID --status=in_progress
-\`\`\`
-
-Then implement it fully following the workflow in this prompt.
+**IMPORTANT**: This task has already been claimed by the loop script.
+Do NOT run \`br update $NEXT_ID --status=in_progress\` — it is already \`in_progress\`.
+Start directly with understanding the task and implementing it.
 HEREDOC
 
     log "Running Codex on task $NEXT_ID..."
@@ -185,7 +229,6 @@ HEREDOC
         log "Codex completed task $NEXT_ID"
     fi
 
-    # Clean up runtime prompt
     rm -f "$RUNTIME_PROMPT"
 
     LOOP_COUNT=$((LOOP_COUNT + 1))

@@ -149,13 +149,33 @@ To stop a remote agent (e.g. Codex running in the cloud):
 touch .stop && git add .stop && git commit -m "chore: stop dev loop" && git push
 ```
 
-### Typical multi-agent setup
+### Typical multi-agent setup (single machine)
 
 ```bash
 ./codex_loop.sh &           # Codex doing dev work
 ./claude_loop.sh &          # Claude QA running every 10 min
 ./claude_arch_loop.sh       # Claude deep architecture review in foreground
 ```
+
+### Running on multiple VMs in parallel
+
+Both dev loops are safe to run simultaneously across machines. Each loop claims a task by immediately pushing a git commit — if two agents select the same task at the same moment, the one whose push lands second detects the conflict, releases the claim, and picks a different task.
+
+Each agent identifies itself as `<hostname>-claude` or `<hostname>-codex` in git commit messages and log lines, so it is always clear which machine did what.
+
+**VM 1:**
+```bash
+./codex_loop.sh &
+./claude_dev_loop.sh
+```
+
+**VM 2:**
+```bash
+./codex_loop.sh &
+./claude_dev_loop.sh
+```
+
+The QA loop (`claude_loop.sh`) and architecture loop (`claude_arch_loop.sh`) only need to run on one machine.
 
 ### Prompt files
 

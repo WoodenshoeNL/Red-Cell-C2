@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use tokio::runtime::Handle;
 use tokio::sync::RwLock;
-use tracing::warn;
+use tracing::{instrument, warn};
 
 use crate::{
     AgentRegistry, Database, EventBus, Job, ListenerManager, ListenerManagerError,
@@ -127,6 +127,7 @@ pub struct PluginRuntime {
 
 impl PluginRuntime {
     /// Initialize the embedded Python runtime and install the `red_cell` and `havoc` API modules.
+    #[instrument(skip(database, agents, events, sockets))]
     pub async fn initialize(
         database: Database,
         agents: AgentRegistry,
@@ -165,6 +166,7 @@ impl PluginRuntime {
     }
 
     /// Load all `.py` modules from the configured plugins directory.
+    #[instrument(skip(self))]
     pub async fn load_plugins(&self) -> Result<Vec<String>, PluginError> {
         let Some(directory) = self.inner.plugins_dir.clone() else {
             return Ok(Vec::new());
@@ -185,16 +187,19 @@ impl PluginRuntime {
     }
 
     /// Attach the listener manager once the application has finished bootstrapping.
+    #[instrument(skip(self, listeners))]
     pub async fn attach_listener_manager(&self, listeners: ListenerManager) {
         *self.inner.listeners.write().await = Some(listeners);
     }
 
     /// Return the registered Python command names in sorted order.
+    #[instrument(skip(self))]
     pub async fn command_names(&self) -> Vec<String> {
         self.inner.commands.read().await.keys().cloned().collect()
     }
 
     /// Return the registered Python command descriptions keyed by command name.
+    #[instrument(skip(self))]
     pub async fn command_descriptions(&self) -> BTreeMap<String, String> {
         self.inner
             .commands
@@ -206,6 +211,7 @@ impl PluginRuntime {
     }
 
     /// Dispatch an agent check-in event to subscribed Python callbacks.
+    #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id)))]
     pub async fn emit_agent_checkin(&self, agent_id: u32) -> Result<(), PluginError> {
         let Some(agent) = self.inner.agents.get(agent_id).await else {
             return Ok(());
@@ -215,6 +221,7 @@ impl PluginRuntime {
     }
 
     /// Dispatch a command output event to subscribed Python callbacks.
+    #[instrument(skip(self, output), fields(agent_id = format_args!("0x{:08X}", agent_id), command_id, request_id))]
     pub async fn emit_command_output(
         &self,
         agent_id: u32,

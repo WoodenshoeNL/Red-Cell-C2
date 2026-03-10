@@ -9,6 +9,7 @@ use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, encrypt_agent_d
 use red_cell_common::demon::{DemonCommand, DemonMessage, DemonPackage};
 use red_cell_common::{AgentEncryptionInfo, AgentInfo};
 use tokio::sync::{Mutex, RwLock};
+use tracing::instrument;
 
 use crate::database::{Database, LinkRecord, TeamserverError};
 
@@ -74,6 +75,7 @@ impl AgentRegistry {
     }
 
     /// Load all persisted agents from SQLite into a new registry.
+    #[instrument(skip(database))]
     pub async fn load(database: Database) -> Result<Self, TeamserverError> {
         let registry = Self::new(database.clone());
         let agents = database.agents().list().await?;
@@ -98,6 +100,7 @@ impl AgentRegistry {
     }
 
     /// Insert a newly registered agent and persist it to SQLite.
+    #[instrument(skip(self, agent), fields(agent_id = format_args!("0x{:08X}", agent.agent_id)))]
     pub async fn insert(&self, agent: AgentInfo) -> Result<(), TeamserverError> {
         let mut entries = self.entries.write().await;
 
@@ -111,6 +114,7 @@ impl AgentRegistry {
     }
 
     /// Fetch a cloned snapshot of an agent by identifier.
+    #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id)))]
     pub async fn get(&self, agent_id: u32) -> Option<AgentInfo> {
         let entry = self.entry(agent_id).await?;
         let info = entry.info.read().await;
@@ -118,6 +122,7 @@ impl AgentRegistry {
     }
 
     /// Return all agents that are still marked active.
+    #[instrument(skip(self))]
     pub async fn list_active(&self) -> Vec<AgentInfo> {
         let entries = self.entries.read().await;
         let handles: Vec<_> = entries.values().cloned().collect();
@@ -135,6 +140,7 @@ impl AgentRegistry {
     }
 
     /// Return all tracked agents, including inactive historical entries.
+    #[instrument(skip(self))]
     pub async fn list(&self) -> Vec<AgentInfo> {
         let entries = self.entries.read().await;
         let handles: Vec<_> = entries.values().cloned().collect();
@@ -151,6 +157,7 @@ impl AgentRegistry {
     }
 
     /// Replace the stored metadata for an existing agent and persist the change.
+    #[instrument(skip(self, agent), fields(agent_id = format_args!("0x{:08X}", agent.agent_id)))]
     pub async fn update_agent(&self, agent: AgentInfo) -> Result<(), TeamserverError> {
         let entry = self
             .entry(agent.agent_id)
@@ -164,6 +171,7 @@ impl AgentRegistry {
     }
 
     /// Mark an agent inactive with the supplied reason and persist the status change.
+    #[instrument(skip(self, reason), fields(agent_id = format_args!("0x{:08X}", agent_id)))]
     pub async fn mark_dead(
         &self,
         agent_id: u32,
@@ -191,6 +199,7 @@ impl AgentRegistry {
     }
 
     /// Update an operator-authored note for an agent and persist the change.
+    #[instrument(skip(self, note), fields(agent_id = format_args!("0x{:08X}", agent_id)))]
     pub async fn set_note(
         &self,
         agent_id: u32,
@@ -208,6 +217,7 @@ impl AgentRegistry {
     }
 
     /// Remove an agent from memory and SQLite.
+    #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id)))]
     pub async fn remove(&self, agent_id: u32) -> Result<AgentInfo, TeamserverError> {
         self.clear_links_for_agent(agent_id).await?;
         let entry = {
@@ -222,6 +232,7 @@ impl AgentRegistry {
     }
 
     /// Return the current AES key and IV for an agent.
+    #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id)))]
     pub async fn encryption(&self, agent_id: u32) -> Result<AgentEncryptionInfo, TeamserverError> {
         let entry =
             self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
@@ -230,6 +241,7 @@ impl AgentRegistry {
     }
 
     /// Update the AES key and IV for an agent and persist the new values.
+    #[instrument(skip(self, encryption), fields(agent_id = format_args!("0x{:08X}", agent_id)))]
     pub async fn set_encryption(
         &self,
         agent_id: u32,
@@ -249,6 +261,7 @@ impl AgentRegistry {
     }
 
     /// Append a job to an agent's task queue.
+    #[instrument(skip(self, job), fields(agent_id = format_args!("0x{:08X}", agent_id), command = job.command, request_id = job.request_id))]
     pub async fn enqueue_job(&self, agent_id: u32, job: Job) -> Result<(), TeamserverError> {
         self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
 
@@ -272,6 +285,7 @@ impl AgentRegistry {
     }
 
     /// Pop the next queued job for an agent, if one exists.
+    #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id)))]
     pub async fn dequeue_job(&self, agent_id: u32) -> Result<Option<Job>, TeamserverError> {
         let entry =
             self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
@@ -280,6 +294,7 @@ impl AgentRegistry {
     }
 
     /// Drain all queued jobs for an agent in FIFO order.
+    #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id)))]
     pub async fn dequeue_jobs(&self, agent_id: u32) -> Result<Vec<Job>, TeamserverError> {
         let entry =
             self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
@@ -288,6 +303,7 @@ impl AgentRegistry {
     }
 
     /// Return a snapshot of the current queued jobs for an agent.
+    #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id)))]
     pub async fn queued_jobs(&self, agent_id: u32) -> Result<Vec<Job>, TeamserverError> {
         let entry =
             self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
@@ -296,6 +312,7 @@ impl AgentRegistry {
     }
 
     /// Update an agent's last callback timestamp and persist the change.
+    #[instrument(skip(self, last_call_in), fields(agent_id = format_args!("0x{:08X}", agent_id)))]
     pub async fn set_last_call_in(
         &self,
         agent_id: u32,
@@ -314,12 +331,14 @@ impl AgentRegistry {
     }
 
     /// Return the direct parent of `agent_id`, if this agent is linked through SMB.
+    #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id)))]
     pub async fn parent_of(&self, agent_id: u32) -> Option<u32> {
         let parent_links = self.parent_links.read().await;
         parent_links.get(&agent_id).copied()
     }
 
     /// Return all directly linked child agents for `agent_id`.
+    #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id)))]
     pub async fn children_of(&self, agent_id: u32) -> Vec<u32> {
         let child_links = self.child_links.read().await;
         child_links
@@ -329,6 +348,7 @@ impl AgentRegistry {
     }
 
     /// Return the current pivot parent and child links for `agent_id`.
+    #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id)))]
     pub async fn pivots(&self, agent_id: u32) -> PivotInfo {
         PivotInfo {
             parent: self.parent_of(agent_id).await,
@@ -337,6 +357,7 @@ impl AgentRegistry {
     }
 
     /// Persist and register a parent/child SMB pivot relationship.
+    #[instrument(skip(self), fields(parent_agent_id = format_args!("0x{:08X}", parent_agent_id), link_agent_id = format_args!("0x{:08X}", link_agent_id)))]
     pub async fn add_link(
         &self,
         parent_agent_id: u32,
@@ -379,6 +400,7 @@ impl AgentRegistry {
     }
 
     /// Remove a specific pivot relationship and mark the downstream subtree inactive.
+    #[instrument(skip(self, reason), fields(parent_agent_id = format_args!("0x{:08X}", parent_agent_id), link_agent_id = format_args!("0x{:08X}", link_agent_id)))]
     pub async fn disconnect_link(
         &self,
         parent_agent_id: u32,

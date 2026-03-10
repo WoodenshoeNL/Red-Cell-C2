@@ -40,7 +40,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::{info, instrument, warn};
 use utoipa::ToSchema;
 
 use crate::{
@@ -293,6 +293,7 @@ impl ListenerManager {
     }
 
     /// Create a persisted listener configuration in the stopped state.
+    #[instrument(skip(self, config), fields(listener_name = %config.name(), protocol = ?config.protocol()))]
     pub async fn create(
         &self,
         config: ListenerConfig,
@@ -309,6 +310,7 @@ impl ListenerManager {
     }
 
     /// Replace an existing listener configuration.
+    #[instrument(skip(self, config), fields(listener_name = %config.name(), protocol = ?config.protocol()))]
     pub async fn update(
         &self,
         config: ListenerConfig,
@@ -338,18 +340,21 @@ impl ListenerManager {
     }
 
     /// Start the named listener runtime.
+    #[instrument(skip(self), fields(listener_name = %name))]
     pub async fn start(&self, name: &str) -> Result<ListenerSummary, ListenerManagerError> {
         let _guard = self.operations.lock().await;
         self.start_locked(name).await
     }
 
     /// Stop the named listener runtime.
+    #[instrument(skip(self), fields(listener_name = %name))]
     pub async fn stop(&self, name: &str) -> Result<ListenerSummary, ListenerManagerError> {
         let _guard = self.operations.lock().await;
         self.stop_locked(name).await
     }
 
     /// Delete the named listener, stopping it first if needed.
+    #[instrument(skip(self), fields(listener_name = %name))]
     pub async fn delete(&self, name: &str) -> Result<(), ListenerManagerError> {
         let _guard = self.operations.lock().await;
         let repository = self.repository();
@@ -367,6 +372,7 @@ impl ListenerManager {
     }
 
     /// Return the current persisted summary for `name`.
+    #[instrument(skip(self), fields(listener_name = %name))]
     pub async fn summary(&self, name: &str) -> Result<ListenerSummary, ListenerManagerError> {
         self.repository()
             .get(name)
@@ -376,11 +382,13 @@ impl ListenerManager {
     }
 
     /// Return every persisted listener summary.
+    #[instrument(skip(self))]
     pub async fn list(&self) -> Result<Vec<ListenerSummary>, ListenerManagerError> {
         Ok(self.repository().list().await?.into_iter().map(Into::into).collect())
     }
 
     /// Ensure listeners declared in the YAOTL profile exist in the database.
+    #[instrument(skip(self, profile))]
     pub async fn sync_profile(&self, profile: &Profile) -> Result<(), ListenerManagerError> {
         for config in profile_listener_configs(profile) {
             match self.create(config.clone()).await {
@@ -396,6 +404,7 @@ impl ListenerManager {
     }
 
     /// Start listeners that were last persisted in the running state.
+    #[instrument(skip(self))]
     pub async fn restore_running(&self) -> Result<(), ListenerManagerError> {
         let listeners = self.repository().list().await?;
 

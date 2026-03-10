@@ -28,7 +28,7 @@ use serde_json::Value;
 use thiserror::Error;
 use time::OffsetDateTime;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -56,11 +56,13 @@ impl OperatorConnectionManager {
     }
 
     /// Return the number of currently open WebSocket connections.
+    #[instrument(skip(self))]
     pub async fn connection_count(&self) -> usize {
         self.connections.read().await.len()
     }
 
     /// Return the number of authenticated WebSocket connections.
+    #[instrument(skip(self))]
     pub async fn authenticated_count(&self) -> usize {
         self.connections
             .read()
@@ -107,6 +109,7 @@ where
 }
 
 /// Upgrade a `/havoc/` HTTP request to the operator WebSocket protocol.
+#[instrument(skip(state, websocket))]
 pub async fn websocket_handler<S>(
     State(state): State<S>,
     websocket: WebSocketUpgrade,

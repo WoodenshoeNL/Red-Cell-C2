@@ -23,7 +23,7 @@ use serde_json::Value;
 use sha2::Sha256;
 use thiserror::Error;
 use tokio::sync::Mutex;
-use tracing::debug;
+use tracing::{debug, instrument};
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
 use utoipa::{Modify, OpenApi, ToSchema};
 use utoipa_swagger_ui::SwaggerUi;
@@ -410,6 +410,7 @@ pub fn api_routes(api: ApiRuntime) -> Router<TeamserverState> {
         .fallback(api_not_found)
 }
 
+#[instrument(skip(api, request, next))]
 async fn api_auth_middleware(
     State(api): State<ApiRuntime>,
     mut request: Request,

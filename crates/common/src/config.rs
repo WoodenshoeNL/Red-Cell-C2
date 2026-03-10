@@ -75,6 +75,22 @@ impl Profile {
             errors.push("Teamserver.PluginsDir must not be empty when specified".to_owned());
         }
 
+        if let Some(logging) = &self.teamserver.logging {
+            if logging.level.as_deref().is_some_and(|level| level.trim().is_empty()) {
+                errors.push("Teamserver.Logging.Level must not be empty when specified".to_owned());
+            }
+
+            if let Some(file) = &logging.file {
+                if file.directory.trim().is_empty() {
+                    errors.push("Teamserver.Logging.File.Directory must not be empty".to_owned());
+                }
+
+                if file.prefix.trim().is_empty() {
+                    errors.push("Teamserver.Logging.File.Prefix must not be empty".to_owned());
+                }
+            }
+        }
+
         if self.operators.users.is_empty() {
             errors.push("Operators must define at least one user".to_owned());
         }
@@ -244,9 +260,68 @@ pub struct TeamserverConfig {
     /// Optional directory containing Python plugin modules.
     #[serde(rename = "PluginsDir", default)]
     pub plugins_dir: Option<String>,
+    /// Optional structured logging settings for the teamserver runtime.
+    #[serde(rename = "Logging", default)]
+    pub logging: Option<LoggingConfig>,
     /// Optional build toolchain settings.
     #[serde(rename = "Build", default)]
     pub build: Option<BuildConfig>,
+}
+
+/// Teamserver tracing configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct LoggingConfig {
+    /// Default log filter used when `RUST_LOG` is not set.
+    #[serde(rename = "Level", default)]
+    pub level: Option<String>,
+    /// Formatter style used for stdout and optional file output.
+    #[serde(rename = "Format", default)]
+    pub format: Option<LogFormat>,
+    /// Optional rolling-file output configuration.
+    #[serde(rename = "File", default)]
+    pub file: Option<LogFileConfig>,
+}
+
+/// Supported tracing output formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub enum LogFormat {
+    /// Human-readable, developer-oriented output.
+    #[serde(rename = "Pretty", alias = "pretty")]
+    Pretty,
+    /// Structured JSON output for production ingestion.
+    #[serde(rename = "Json", alias = "json")]
+    Json,
+}
+
+/// Optional rolling-file tracing output configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct LogFileConfig {
+    /// Directory where rotated log files are written.
+    #[serde(rename = "Directory")]
+    pub directory: String,
+    /// Stable filename prefix used by the rolling appender.
+    #[serde(rename = "Prefix")]
+    pub prefix: String,
+    /// Rotation cadence for the log file.
+    #[serde(rename = "Rotation", default)]
+    pub rotation: Option<LogRotation>,
+}
+
+/// Supported file rotation cadences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub enum LogRotation {
+    /// Never rotate the file.
+    #[serde(rename = "Never", alias = "never")]
+    Never,
+    /// Rotate files hourly.
+    #[serde(rename = "Hourly", alias = "hourly")]
+    Hourly,
+    /// Rotate files daily.
+    #[serde(rename = "Daily", alias = "daily")]
+    Daily,
+    /// Rotate files minutely.
+    #[serde(rename = "Minutely", alias = "minutely")]
+    Minutely,
 }
 
 /// Cross-compilation toolchain settings used for Demon builds.
@@ -994,6 +1069,45 @@ mod tests {
     }
 
     #[test]
+    fn parses_teamserver_logging_configuration() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+              Logging {
+                Level = "red_cell=debug,tower_http=info"
+                Format = "Json"
+
+                File {
+                  Directory = "logs"
+                  Prefix = "teamserver.log"
+                  Rotation = "Hourly"
+                }
+              }
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let logging = profile.teamserver.logging.expect("logging config should exist");
+        assert_eq!(logging.level.as_deref(), Some("red_cell=debug,tower_http=info"));
+        assert_eq!(logging.format, Some(LogFormat::Json));
+        let file = logging.file.expect("file logging config should exist");
+        assert_eq!(file.directory, "logs");
+        assert_eq!(file.prefix, "teamserver.log");
+        assert_eq!(file.rotation, Some(LogRotation::Hourly));
+    }
+
+    #[test]
     fn rejects_empty_teamserver_plugins_dir() {
         let profile = Profile::parse(
             r#"
@@ -1016,5 +1130,39 @@ mod tests {
 
         let error = profile.validate().expect_err("profile should be invalid");
         assert!(error.errors.iter().any(|message| message.contains("PluginsDir")));
+    }
+
+    #[test]
+    fn rejects_invalid_teamserver_logging_configuration() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+              Logging {
+                Level = "   "
+
+                File {
+                  Directory = " "
+                  Prefix = ""
+                }
+              }
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("profile should be invalid");
+        assert!(error.errors.iter().any(|message| message.contains("Logging.Level")));
+        assert!(error.errors.iter().any(|message| message.contains("Logging.File.Directory")));
+        assert!(error.errors.iter().any(|message| message.contains("Logging.File.Prefix")));
     }
 }

@@ -9,6 +9,7 @@ use serde_json::Value;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{FromRow, Row, SqlitePool};
 use thiserror::Error;
+use tracing::instrument;
 use utoipa::ToSchema;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
@@ -73,6 +74,7 @@ pub struct Database {
 
 impl Database {
     /// Open a SQLite database at `path`, creating it if needed, and apply migrations.
+    #[instrument(fields(path = %path.as_ref().display()))]
     pub async fn connect(path: impl AsRef<Path>) -> Result<Self, TeamserverError> {
         let path = path.as_ref();
         let options =
@@ -82,6 +84,7 @@ impl Database {
     }
 
     /// Open an in-memory SQLite database and apply migrations.
+    #[instrument]
     pub async fn connect_in_memory() -> Result<Self, TeamserverError> {
         let options = SqliteConnectOptions::new().filename(":memory:").foreign_keys(true);
 
@@ -89,6 +92,7 @@ impl Database {
     }
 
     /// Build a database pool from fully-specified SQLite connection options.
+    #[instrument(skip(options))]
     pub async fn connect_with_options(
         options: SqliteConnectOptions,
     ) -> Result<Self, TeamserverError> {

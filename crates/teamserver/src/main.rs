@@ -22,10 +22,11 @@ use red_cell_common::tls::{
     TlsKeyAlgorithm, install_default_crypto_provider, resolve_tls_identity,
 };
 use tokio::net::lookup_host;
-use tracing::{debug, info};
-use tracing_subscriber::EnvFilter;
+use tracing::{debug, info, instrument};
 
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+
+mod logging;
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "red-cell", about = "Red Cell teamserver")]
@@ -44,10 +45,11 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    init_tracing(cli.debug)?;
-
     let profile = load_profile(&cli.profile)
         .with_context(|| format!("failed to load profile from {}", cli.profile.display()))?;
+    let _logging_guard = logging::init_tracing(Some(&profile), cli.debug)
+        .map_err(|error| anyhow!("failed to initialize tracing: {error}"))?;
+
     let database_path = resolve_database_path(&cli.profile, cli.database.as_ref());
     let database = Database::connect(&database_path)
         .await
@@ -113,22 +115,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn init_tracing(debug_logging: bool) -> Result<()> {
-    let filter = if debug_logging {
-        EnvFilter::try_new("debug")
-    } else {
-        EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new("info"))
-    }
-    .context("failed to configure tracing filter")?;
-
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .compact()
-        .try_init()
-        .map_err(|error| anyhow!("failed to initialize tracing subscriber: {error}"))
-}
-
+#[instrument(skip(configured), fields(profile_path = %profile.display(), configured_database = configured.as_ref().map(|path| path.display().to_string())))]
 fn resolve_database_path(profile: &Path, configured: Option<&PathBuf>) -> PathBuf {
     configured.cloned().unwrap_or_else(|| {
         let mut path = profile.to_path_buf();
@@ -137,6 +124,7 @@ fn resolve_database_path(profile: &Path, configured: Option<&PathBuf>) -> PathBu
     })
 }
 
+#[instrument(skip(path), fields(profile_path = %path.display()))]
 fn load_profile(path: &PathBuf) -> Result<Profile> {
     let profile = Profile::from_file(path)?;
     profile.validate().map_err(invalid_profile)?;
@@ -166,6 +154,7 @@ async fn resolve_bind_addr(profile: &Profile) -> Result<SocketAddr> {
     })
 }
 
+#[instrument(skip(profile), fields(bind_host = %profile.teamserver.host))]
 async fn build_tls_config(profile: &Profile) -> Result<RustlsConfig> {
     let subject_alt_names = tls_subject_alt_names(&profile.teamserver.host);
     let identity = resolve_tls_identity(&subject_alt_names, None, TlsKeyAlgorithm::EcdsaP256)
@@ -187,6 +176,7 @@ fn tls_subject_alt_names(host: &str) -> Vec<String> {
     names
 }
 
+#[instrument(skip(state))]
 fn build_router(state: TeamserverState) -> Router {
     let api = state.api.clone();
 
@@ -197,6 +187,7 @@ fn build_router(state: TeamserverState) -> Router {
         .with_state(state)
 }
 
+#[instrument(skip(state, request))]
 async fn agent_listener_placeholder(
     axum::extract::State(state): axum::extract::State<TeamserverState>,
     request: Request<Body>,
@@ -217,6 +208,7 @@ async fn agent_listener_placeholder(
     (StatusCode::NOT_IMPLEMENTED, "agent listener endpoint not implemented yet")
 }
 
+#[instrument(skip(handle))]
 async fn wait_for_shutdown_signal(handle: Handle<SocketAddr>) {
     let signal = async {
         let ctrl_c = async {
@@ -250,6 +242,7 @@ async fn wait_for_shutdown_signal(handle: Handle<SocketAddr>) {
     handle.graceful_shutdown(Some(GRACEFUL_SHUTDOWN_TIMEOUT));
 }
 
+#[instrument(skip(listeners, profile), fields(listener_count = profile_listener_names(profile).len()))]
 async fn start_profile_listeners(
     listeners: &ListenerManager,
     profile: &Profile,

@@ -11,6 +11,7 @@ use red_cell_common::operator::{
 use sha3::{Digest, Sha3_256};
 use thiserror::Error;
 use tokio::sync::RwLock;
+use tracing::instrument;
 use uuid::Uuid;
 
 /// Errors returned while preparing or validating operator authentication state.
@@ -108,6 +109,7 @@ impl AuthService {
     }
 
     /// Authenticate a parsed login payload and create a session on success.
+    #[instrument(skip(self, login), fields(connection_id = %connection_id, username = %login.user))]
     pub async fn authenticate_login(
         &self,
         connection_id: Uuid,
@@ -135,6 +137,7 @@ impl AuthService {
     }
 
     /// Parse and authenticate a raw JSON operator message.
+    #[instrument(skip(self, payload), fields(connection_id = %connection_id))]
     pub async fn authenticate_message(
         &self,
         connection_id: Uuid,
@@ -152,21 +155,25 @@ impl AuthService {
     }
 
     /// Remove any active session associated with the given connection id.
+    #[instrument(skip(self), fields(connection_id = %connection_id))]
     pub async fn remove_connection(&self, connection_id: Uuid) -> Option<OperatorSession> {
         self.sessions.write().await.remove_by_connection(connection_id)
     }
 
     /// Return the session currently bound to `connection_id`, if any.
+    #[instrument(skip(self), fields(connection_id = %connection_id))]
     pub async fn session_for_connection(&self, connection_id: Uuid) -> Option<OperatorSession> {
         self.sessions.read().await.get_by_connection(connection_id).cloned()
     }
 
     /// Return the session currently bound to `token`, if any.
+    #[instrument(skip(self, token))]
     pub async fn session_for_token(&self, token: &str) -> Option<OperatorSession> {
         self.sessions.read().await.get_by_token(token).cloned()
     }
 
     /// Return the number of active authenticated sessions.
+    #[instrument(skip(self))]
     pub async fn session_count(&self) -> usize {
         self.sessions.read().await.len()
     }

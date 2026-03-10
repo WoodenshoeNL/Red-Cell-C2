@@ -1,6 +1,6 @@
 //! Embedded Python runtime for client-side automation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
@@ -16,50 +16,172 @@ use tracing::warn;
 use crate::transport::{AgentSummary, AppState, SharedAppState};
 
 static ACTIVE_RUNTIME: OnceLock<Mutex<Option<Arc<PythonApiState>>>> = OnceLock::new();
+const MAX_SCRIPT_OUTPUT_ENTRIES: usize = 512;
 
 fn active_runtime_slot() -> &'static Mutex<Option<Arc<PythonApiState>>> {
     ACTIVE_RUNTIME.get_or_init(|| Mutex::new(None))
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct RegisteredCommand {
+    script_name: String,
     _callback: Arc<Py<PyAny>>,
+}
+
+#[derive(Clone, Debug)]
+struct RegisteredAgentCheckinCallback {
+    script_name: String,
+    callback: Arc<Py<PyAny>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ScriptRecord {
+    path: PathBuf,
+    status: ScriptLoadStatus,
+    error: Option<String>,
+    registered_commands: BTreeSet<String>,
 }
 
 #[derive(Debug)]
 struct PythonApiState {
     app_state: SharedAppState,
     commands: Mutex<BTreeMap<String, RegisteredCommand>>,
-    agent_checkin_callbacks: Mutex<Vec<Arc<Py<PyAny>>>>,
-    script_errors: Mutex<BTreeMap<String, String>>,
+    agent_checkin_callbacks: Mutex<Vec<RegisteredAgentCheckinCallback>>,
+    current_script: Mutex<Option<String>>,
+    output_entries: Mutex<Vec<ScriptOutputEntry>>,
+    script_records: Mutex<BTreeMap<String, ScriptRecord>>,
 }
 
 impl PythonApiState {
-    fn register_command(&self, name: String, callback: Py<PyAny>) {
-        let mut commands = lock_mutex(&self.commands);
-        commands.insert(name, RegisteredCommand { _callback: Arc::new(callback) });
+    fn begin_script_execution(&self, script_name: &str) {
+        *lock_mutex(&self.current_script) = Some(script_name.to_owned());
     }
 
-    fn register_agent_checkin_callback(&self, callback: Py<PyAny>) {
-        lock_mutex(&self.agent_checkin_callbacks).push(Arc::new(callback));
+    fn end_script_execution(&self) {
+        *lock_mutex(&self.current_script) = None;
+    }
+
+    fn current_script_name(&self) -> Option<String> {
+        lock_mutex(&self.current_script).clone()
+    }
+
+    fn ensure_script_record(&self, script_name: &str, path: PathBuf) {
+        lock_mutex(&self.script_records)
+            .entry(script_name.to_owned())
+            .and_modify(|record| record.path = path.clone())
+            .or_insert(ScriptRecord {
+                path,
+                status: ScriptLoadStatus::Unloaded,
+                error: None,
+                registered_commands: BTreeSet::new(),
+            });
+    }
+
+    fn mark_script_loaded(&self, script_name: &str) {
+        if let Some(record) = lock_mutex(&self.script_records).get_mut(script_name) {
+            record.status = ScriptLoadStatus::Loaded;
+            record.error = None;
+        }
+    }
+
+    fn mark_script_error(&self, script_name: &str, error: String) {
+        if let Some(record) = lock_mutex(&self.script_records).get_mut(script_name) {
+            record.status = ScriptLoadStatus::Error;
+            record.error = Some(error);
+        }
+    }
+
+    fn mark_script_unloaded(&self, script_name: &str) {
+        if let Some(record) = lock_mutex(&self.script_records).get_mut(script_name) {
+            record.status = ScriptLoadStatus::Unloaded;
+            record.error = None;
+            record.registered_commands.clear();
+        }
+    }
+
+    fn register_command(&self, name: String, callback: Py<PyAny>) -> PyResult<()> {
+        let script_name = self.current_script_name().ok_or_else(|| {
+            PyRuntimeError::new_err("red_cell.register_command must be called while a script loads")
+        })?;
+
+        lock_mutex(&self.commands).insert(
+            name.clone(),
+            RegisteredCommand { script_name: script_name.clone(), _callback: Arc::new(callback) },
+        );
+        if let Some(record) = lock_mutex(&self.script_records).get_mut(&script_name) {
+            record.registered_commands.insert(name);
+        }
+        Ok(())
+    }
+
+    fn register_agent_checkin_callback(&self, callback: Py<PyAny>) -> PyResult<()> {
+        let script_name = self.current_script_name().ok_or_else(|| {
+            PyRuntimeError::new_err("red_cell.on_agent_checkin must be called while a script loads")
+        })?;
+        lock_mutex(&self.agent_checkin_callbacks)
+            .push(RegisteredAgentCheckinCallback { script_name, callback: Arc::new(callback) });
+        Ok(())
+    }
+
+    fn clear_script_bindings(&self, script_name: &str) {
+        lock_mutex(&self.commands).retain(|_, command| command.script_name != script_name);
+        lock_mutex(&self.agent_checkin_callbacks)
+            .retain(|callback| callback.script_name != script_name);
+        if let Some(record) = lock_mutex(&self.script_records).get_mut(script_name) {
+            record.registered_commands.clear();
+        }
+    }
+
+    fn script_descriptors(&self) -> Vec<ScriptDescriptor> {
+        lock_mutex(&self.script_records)
+            .iter()
+            .map(|(name, record)| ScriptDescriptor {
+                name: name.clone(),
+                path: record.path.clone(),
+                status: record.status,
+                error: record.error.clone(),
+                registered_command_count: record.registered_commands.len(),
+            })
+            .collect()
+    }
+
+    fn output_entries(&self) -> Vec<ScriptOutputEntry> {
+        lock_mutex(&self.output_entries).clone()
+    }
+
+    fn push_output(
+        &self,
+        script_name: Option<&str>,
+        stream: ScriptOutputStream,
+        text: &str,
+    ) -> PyResult<usize> {
+        if text.is_empty() {
+            return Ok(0);
+        }
+
+        let script_name = script_name
+            .map(ToOwned::to_owned)
+            .or_else(|| self.current_script_name())
+            .unwrap_or_else(|| "runtime".to_owned());
+        let mut output_entries = lock_mutex(&self.output_entries);
+        if let Some(last) = output_entries.last_mut()
+            && last.script_name == script_name
+            && last.stream == stream
+        {
+            last.text.push_str(text);
+        } else {
+            output_entries.push(ScriptOutputEntry { script_name, stream, text: text.to_owned() });
+        }
+        if output_entries.len() > MAX_SCRIPT_OUTPUT_ENTRIES {
+            let overflow = output_entries.len() - MAX_SCRIPT_OUTPUT_ENTRIES;
+            output_entries.drain(0..overflow);
+        }
+        Ok(text.len())
     }
 
     #[cfg(test)]
     fn command_names(&self) -> Vec<String> {
         lock_mutex(&self.commands).keys().cloned().collect()
-    }
-
-    #[cfg(test)]
-    fn script_errors(&self) -> BTreeMap<String, String> {
-        lock_mutex(&self.script_errors).clone()
-    }
-
-    fn record_script_error(&self, script_name: String, error: impl Into<String>) {
-        lock_mutex(&self.script_errors).insert(script_name, error.into());
-    }
-
-    fn clear_script_error(&self, script_name: &str) {
-        lock_mutex(&self.script_errors).remove(script_name);
     }
 
     fn agent_snapshot(&self, agent_id: &str) -> Option<AgentSummary> {
@@ -77,10 +199,18 @@ impl PythonApiState {
         match Py::new(py, PyAgent { agent_id: normalize_agent_id(agent_id) }) {
             Ok(agent) => {
                 for callback in callbacks {
-                    let bound = callback.bind(py);
+                    self.begin_script_execution(&callback.script_name);
+                    let bound = callback.callback.bind(py);
                     if let Err(error) = bound.call1((agent.clone_ref(py),)) {
+                        let message = format!("agent checkin callback failed: {error}\n");
+                        let _ = self.push_output(
+                            Some(&callback.script_name),
+                            ScriptOutputStream::Stderr,
+                            &message,
+                        );
                         warn!(agent_id, error = %error, "python agent checkin callback failed");
                     }
+                    self.end_script_execution();
                 }
             }
             Err(error) => {
@@ -93,6 +223,9 @@ impl PythonApiState {
 #[derive(Debug)]
 enum PythonThreadCommand {
     EmitAgentCheckin(String),
+    LoadScript(PathBuf, SyncSender<Result<(), String>>),
+    ReloadScript(String, SyncSender<Result<(), String>>),
+    UnloadScript(String, SyncSender<Result<(), String>>),
     Shutdown,
 }
 
@@ -107,6 +240,39 @@ pub(crate) enum PythonRuntimeError {
     Initialization(String),
     #[error("python runtime thread is not available")]
     ThreadUnavailable,
+    #[error("python runtime command failed: {0}")]
+    CommandFailed(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScriptLoadStatus {
+    Loaded,
+    Error,
+    Unloaded,
+}
+
+/// Snapshot of a client script known to the runtime.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ScriptDescriptor {
+    pub(crate) name: String,
+    pub(crate) path: PathBuf,
+    pub(crate) status: ScriptLoadStatus,
+    pub(crate) error: Option<String>,
+    pub(crate) registered_command_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScriptOutputStream {
+    Stdout,
+    Stderr,
+}
+
+/// Captured stdout/stderr emitted by client-side Python scripts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ScriptOutputEntry {
+    pub(crate) script_name: String,
+    pub(crate) stream: ScriptOutputStream,
+    pub(crate) text: String,
 }
 
 /// Handle to the embedded client-side Python runtime.
@@ -117,7 +283,6 @@ pub(crate) struct PythonRuntime {
 
 #[derive(Debug)]
 struct PythonRuntimeInner {
-    #[cfg_attr(not(test), allow(dead_code))]
     api_state: Arc<PythonApiState>,
     command_tx: Sender<PythonThreadCommand>,
     join_handle: Mutex<Option<JoinHandle<()>>>,
@@ -127,10 +292,10 @@ impl Drop for PythonRuntimeInner {
     fn drop(&mut self) {
         let _ = self.command_tx.send(PythonThreadCommand::Shutdown);
 
-        if let Some(handle) = lock_mutex(&self.join_handle).take() {
-            if handle.join().is_err() {
-                warn!("python runtime thread panicked during shutdown");
-            }
+        if let Some(handle) = lock_mutex(&self.join_handle).take()
+            && handle.join().is_err()
+        {
+            warn!("python runtime thread panicked during shutdown");
         }
 
         *lock_mutex(active_runtime_slot()) = None;
@@ -147,7 +312,9 @@ impl PythonRuntime {
             app_state,
             commands: Mutex::new(BTreeMap::new()),
             agent_checkin_callbacks: Mutex::new(Vec::new()),
-            script_errors: Mutex::new(BTreeMap::new()),
+            current_script: Mutex::new(None),
+            output_entries: Mutex::new(Vec::new()),
+            script_records: Mutex::new(BTreeMap::new()),
         });
         *lock_mutex(active_runtime_slot()) = Some(api_state.clone());
 
@@ -178,6 +345,35 @@ impl PythonRuntime {
         }
     }
 
+    /// Return a snapshot of the scripts known to the runtime.
+    pub(crate) fn script_descriptors(&self) -> Vec<ScriptDescriptor> {
+        self.inner.api_state.script_descriptors()
+    }
+
+    /// Return captured stdout/stderr from Python scripts.
+    pub(crate) fn script_output(&self) -> Vec<ScriptOutputEntry> {
+        self.inner.api_state.output_entries()
+    }
+
+    /// Load a Python script from the provided path.
+    pub(crate) fn load_script(&self, path: PathBuf) -> Result<(), PythonRuntimeError> {
+        self.send_script_command(|response| PythonThreadCommand::LoadScript(path, response))
+    }
+
+    /// Reload a previously known script by its module name.
+    pub(crate) fn reload_script(&self, script_name: &str) -> Result<(), PythonRuntimeError> {
+        self.send_script_command(|response| {
+            PythonThreadCommand::ReloadScript(script_name.to_owned(), response)
+        })
+    }
+
+    /// Unload a previously known script by its module name.
+    pub(crate) fn unload_script(&self, script_name: &str) -> Result<(), PythonRuntimeError> {
+        self.send_script_command(|response| {
+            PythonThreadCommand::UnloadScript(script_name.to_owned(), response)
+        })
+    }
+
     /// Queue an agent check-in callback dispatch on the Python thread.
     pub(crate) fn emit_agent_checkin(&self, agent_id: String) -> Result<(), PythonRuntimeError> {
         self.inner
@@ -186,14 +382,25 @@ impl PythonRuntime {
             .map_err(|_| PythonRuntimeError::ThreadUnavailable)
     }
 
-    #[cfg(test)]
-    fn command_names(&self) -> Vec<String> {
-        self.inner.api_state.command_names()
+    fn send_script_command<F>(&self, build: F) -> Result<(), PythonRuntimeError>
+    where
+        F: FnOnce(SyncSender<Result<(), String>>) -> PythonThreadCommand,
+    {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        self.inner
+            .command_tx
+            .send(build(response_tx))
+            .map_err(|_| PythonRuntimeError::ThreadUnavailable)?;
+        match response_rx.recv() {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(PythonRuntimeError::CommandFailed(error)),
+            Err(_) => Err(PythonRuntimeError::ThreadUnavailable),
+        }
     }
 
     #[cfg(test)]
-    fn script_errors(&self) -> BTreeMap<String, String> {
-        self.inner.api_state.script_errors()
+    fn command_names(&self) -> Vec<String> {
+        self.inner.api_state.command_names()
     }
 }
 
@@ -213,6 +420,7 @@ fn python_thread_main(
 
     let init_result = Python::with_gil(|py| -> PyResult<()> {
         install_api_module(py)?;
+        install_output_capture(py)?;
         load_scripts(py, api_state.as_ref(), &scripts_dir);
         Ok(())
     })
@@ -232,6 +440,23 @@ fn python_thread_main(
             PythonThreadCommand::EmitAgentCheckin(agent_id) => {
                 Python::with_gil(|py| api_state.invoke_agent_checkin_callbacks(py, &agent_id));
             }
+            PythonThreadCommand::LoadScript(path, response_tx) => {
+                let result =
+                    Python::with_gil(|py| load_script_at_path(py, api_state.as_ref(), &path));
+                let _ = response_tx.send(result);
+            }
+            PythonThreadCommand::ReloadScript(script_name, response_tx) => {
+                let result = Python::with_gil(|py| {
+                    reload_script_by_name(py, api_state.as_ref(), &script_name)
+                });
+                let _ = response_tx.send(result);
+            }
+            PythonThreadCommand::UnloadScript(script_name, response_tx) => {
+                let result = Python::with_gil(|py| {
+                    unload_script_by_name(py, api_state.as_ref(), &script_name)
+                });
+                let _ = response_tx.send(result);
+            }
             PythonThreadCommand::Shutdown => break,
         }
     }
@@ -248,11 +473,22 @@ fn install_api_module(py: Python<'_>) -> PyResult<()> {
     Ok(())
 }
 
+fn install_output_capture(py: Python<'_>) -> PyResult<()> {
+    let sys = py.import("sys")?;
+    sys.setattr("stdout", Py::new(py, PyOutputSink { stream: ScriptOutputStream::Stdout })?)?;
+    sys.setattr("stderr", Py::new(py, PyOutputSink { stream: ScriptOutputStream::Stderr })?)?;
+    Ok(())
+}
+
 fn load_scripts(py: Python<'_>, api_state: &PythonApiState, scripts_dir: &Path) {
     let mut entries = match std::fs::read_dir(scripts_dir) {
         Ok(entries) => entries.filter_map(Result::ok).collect::<Vec<_>>(),
         Err(error) => {
-            warn!(path = %scripts_dir.display(), error = %error, "failed to enumerate client python scripts");
+            warn!(
+                path = %scripts_dir.display(),
+                error = %error,
+                "failed to enumerate client python scripts"
+            );
             return;
         }
     };
@@ -270,20 +506,85 @@ fn load_scripts(py: Python<'_>, api_state: &PythonApiState, scripts_dir: &Path) 
             continue;
         }
 
-        let script_name = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .map(str::to_owned)
-            .unwrap_or_else(|| path.display().to_string());
-
-        match load_script(py, &path, &script_name) {
-            Ok(()) => api_state.clear_script_error(&script_name),
-            Err(error) => {
-                warn!(script = %path.display(), error = %error, "failed to load client python script");
-                api_state.record_script_error(script_name, error.to_string());
-            }
+        if let Err(error) = load_script_at_path(py, api_state, &path) {
+            warn!(script = %path.display(), error = %error, "failed to load client python script");
         }
     }
+}
+
+fn load_script_at_path(
+    py: Python<'_>,
+    api_state: &PythonApiState,
+    path: &Path,
+) -> Result<(), String> {
+    let script_name = script_name_from_path(path)?;
+    api_state.ensure_script_record(&script_name, path.to_path_buf());
+    unload_script_bindings(py, api_state, &script_name)?;
+
+    api_state.begin_script_execution(&script_name);
+    let result = load_script(py, path, &script_name).map_err(|error| error.to_string());
+    api_state.end_script_execution();
+
+    match result {
+        Ok(()) => {
+            api_state.mark_script_loaded(&script_name);
+            Ok(())
+        }
+        Err(error) => {
+            api_state.mark_script_error(&script_name, error.clone());
+            Err(error)
+        }
+    }
+}
+
+fn reload_script_by_name(
+    py: Python<'_>,
+    api_state: &PythonApiState,
+    script_name: &str,
+) -> Result<(), String> {
+    let path = lock_mutex(&api_state.script_records)
+        .get(script_name)
+        .map(|record| record.path.clone())
+        .ok_or_else(|| format!("script `{script_name}` is not known to the runtime"))?;
+    load_script_at_path(py, api_state, &path)
+}
+
+fn unload_script_by_name(
+    py: Python<'_>,
+    api_state: &PythonApiState,
+    script_name: &str,
+) -> Result<(), String> {
+    if !lock_mutex(&api_state.script_records).contains_key(script_name) {
+        return Err(format!("script `{script_name}` is not known to the runtime"));
+    }
+    unload_script_bindings(py, api_state, script_name)?;
+    api_state.mark_script_unloaded(script_name);
+    Ok(())
+}
+
+fn unload_script_bindings(
+    py: Python<'_>,
+    api_state: &PythonApiState,
+    script_name: &str,
+) -> Result<(), String> {
+    api_state.clear_script_bindings(script_name);
+    let sys = py.import("sys").map_err(|error| error.to_string())?;
+    let modules = sys.getattr("modules").map_err(|error| error.to_string())?;
+    if modules.contains(script_name).map_err(|error| error.to_string())? {
+        modules.del_item(script_name).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn script_name_from_path(path: &Path) -> Result<String, String> {
+    if path.extension().and_then(|extension| extension.to_str()) != Some("py") {
+        return Err(format!("script path must end with .py: {}", path.display()));
+    }
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| format!("unable to derive script name from {}", path.display()))
 }
 
 fn load_script(py: Python<'_>, path: &Path, script_name: &str) -> PyResult<()> {
@@ -403,20 +704,32 @@ impl PyAgent {
     }
 }
 
+#[pyclass]
+struct PyOutputSink {
+    stream: ScriptOutputStream,
+}
+
+#[pymethods]
+impl PyOutputSink {
+    fn write(&self, text: &str) -> PyResult<usize> {
+        active_api_state()?.push_output(None, self.stream, text)
+    }
+
+    fn flush(&self) {}
+}
+
 #[pyfunction]
 fn register_command(name: String, callback: Bound<'_, PyAny>) -> PyResult<()> {
     ensure_callable(&callback)?;
     let api_state = active_api_state()?;
-    api_state.register_command(name, callback.unbind());
-    Ok(())
+    api_state.register_command(name, callback.unbind())
 }
 
 #[pyfunction]
 fn on_agent_checkin(callback: Bound<'_, PyAny>) -> PyResult<()> {
     ensure_callable(&callback)?;
     let api_state = active_api_state()?;
-    api_state.register_agent_checkin_callback(callback.unbind());
-    Ok(())
+    api_state.register_agent_checkin_callback(callback.unbind())
 }
 
 #[pyfunction]
@@ -490,6 +803,17 @@ mod tests {
         None
     }
 
+    fn wait_for_output(runtime: &PythonRuntime, needle: &str) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if runtime.script_output().iter().any(|entry| entry.text.contains(needle)) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        false
+    }
+
     #[test]
     fn runtime_loads_scripts_and_registers_commands() {
         let _guard = lock_mutex(&TEST_GUARD);
@@ -506,7 +830,16 @@ mod tests {
             .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
 
         assert_eq!(runtime.command_names(), vec!["demo".to_owned()]);
-        assert!(runtime.script_errors().is_empty());
+        assert_eq!(
+            runtime.script_descriptors(),
+            vec![ScriptDescriptor {
+                name: "sample".to_owned(),
+                path: temp_dir.path().join("sample.py"),
+                status: ScriptLoadStatus::Loaded,
+                error: None,
+                registered_command_count: 1,
+            }]
+        );
     }
 
     #[test]
@@ -526,7 +859,73 @@ mod tests {
             .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
 
         assert_eq!(runtime.command_names(), vec!["good".to_owned()]);
-        assert!(runtime.script_errors().get("bad").is_some_and(|error| error.contains("boom")));
+        assert_eq!(runtime.script_descriptors().len(), 2);
+        assert!(
+            runtime
+                .script_descriptors()
+                .iter()
+                .find(|script| script.name == "bad")
+                .and_then(|script| script.error.as_ref())
+                .is_some_and(|error| error.contains("boom"))
+        );
+    }
+
+    #[test]
+    fn runtime_can_reload_and_unload_scripts() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let script_path = temp_dir.path().join("sample.py");
+        write_script(
+            &script_path,
+            "import red_cell\nred_cell.register_command('demo', lambda: None)\n",
+        );
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+        assert_eq!(runtime.command_names(), vec!["demo".to_owned()]);
+
+        write_script(
+            &script_path,
+            "import red_cell\nred_cell.register_command('updated', lambda: None)\n",
+        );
+        runtime
+            .reload_script("sample")
+            .unwrap_or_else(|error| panic!("reload should succeed: {error}"));
+        assert_eq!(runtime.command_names(), vec!["updated".to_owned()]);
+
+        runtime
+            .unload_script("sample")
+            .unwrap_or_else(|error| panic!("unload should succeed: {error}"));
+        assert!(runtime.command_names().is_empty());
+        assert!(
+            runtime
+                .script_descriptors()
+                .iter()
+                .find(|script| script.name == "sample")
+                .is_some_and(|script| script.status == ScriptLoadStatus::Unloaded)
+        );
+    }
+
+    #[test]
+    fn runtime_captures_script_output() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        write_script(
+            &temp_dir.path().join("chatty.py"),
+            "import sys\nprint('hello from stdout')\nprint('hello from stderr', file=sys.stderr)\n",
+        );
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        assert!(wait_for_output(&runtime, "hello from stdout"));
+        assert!(wait_for_output(&runtime, "hello from stderr"));
     }
 
     #[test]

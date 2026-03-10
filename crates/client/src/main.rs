@@ -16,7 +16,9 @@ use eframe::egui::{
 };
 use local_config::LocalConfig;
 use login::{LoginAction, LoginState, render_login_dialog};
-use python::PythonRuntime;
+use python::{
+    PythonRuntime, ScriptDescriptor, ScriptLoadStatus, ScriptOutputEntry, ScriptOutputStream,
+};
 use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::{
     AgentTaskInfo, EventCode, FlatInfo, Message, MessageHead, OperatorMessage,
@@ -146,6 +148,12 @@ struct AgentProcessPanelState {
     status_message: Option<String>,
 }
 
+#[derive(Debug, Default)]
+struct ScriptManagerState {
+    selected_script: Option<String>,
+    status_message: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct SessionGraphState {
     pan: egui::Vec2,
@@ -238,6 +246,7 @@ struct SessionPanelState {
     process_state: BTreeMap<String, AgentProcessPanelState>,
     note_editor: Option<NoteEditorState>,
     process_injection: Option<ProcessInjectionDialogState>,
+    script_manager: ScriptManagerState,
     graph_state: SessionGraphState,
     pending_messages: Vec<OperatorMessage>,
     status_message: Option<String>,
@@ -305,6 +314,13 @@ enum SessionAction {
     OpenConsole(String),
     RequestKill(String),
     EditNote { agent_id: String, current_note: String },
+}
+
+#[derive(Debug, Clone)]
+enum ScriptManagerAction {
+    Load(PathBuf),
+    Reload(String),
+    Unload(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -981,6 +997,8 @@ impl ClientApp {
         self.session_panel.ensure_selected_console();
         self.render_session_graph_panel(ui, state);
         ui.add_space(12.0);
+        self.render_script_manager_panel(ui);
+        ui.add_space(12.0);
 
         if self.session_panel.open_consoles.is_empty() {
             self.render_overview_panel(ui, state);
@@ -1033,6 +1051,276 @@ impl ClientApp {
                 }
             }
         }
+    }
+
+    fn render_script_manager_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Python Scripts");
+        ui.separator();
+
+        let Some(runtime) = self.python_runtime.clone() else {
+            ui.label("Client Python runtime is not initialized.");
+            return;
+        };
+
+        let scripts = runtime.script_descriptors();
+        let output = runtime.script_output();
+        self.prune_selected_script(&scripts);
+
+        let loaded_count =
+            scripts.iter().filter(|script| script.status == ScriptLoadStatus::Loaded).count();
+        let error_count =
+            scripts.iter().filter(|script| script.status == ScriptLoadStatus::Error).count();
+        let command_count =
+            scripts.iter().map(|script| script.registered_command_count).sum::<usize>();
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("Loaded: {loaded_count}"));
+            ui.separator();
+            ui.label(format!("Errors: {error_count}"));
+            ui.separator();
+            ui.label(format!("Commands: {command_count}"));
+            if let Some(path) =
+                self.scripts_dir.clone().or_else(|| self.local_config.resolved_scripts_dir())
+            {
+                ui.separator();
+                ui.monospace(path.display().to_string());
+            }
+        });
+        ui.add_space(6.0);
+
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Load Script").clicked()
+                && let Some(path) = FileDialog::new().add_filter("Python", &["py"]).pick_file()
+            {
+                match runtime.load_script(path.clone()) {
+                    Ok(()) => {
+                        if let Some(script_name) = script_name_for_display(&path) {
+                            self.session_panel.script_manager.selected_script = Some(script_name);
+                        }
+                        self.session_panel.script_manager.status_message =
+                            Some(format!("Loaded {}.", path.display()));
+                    }
+                    Err(error) => {
+                        self.session_panel.script_manager.status_message =
+                            Some(format!("Failed to load {}: {error}", path.display()));
+                    }
+                }
+            }
+
+            let selected_script = self.session_panel.script_manager.selected_script.clone();
+            if ui
+                .add_enabled(selected_script.is_some(), egui::Button::new("Reload Selected"))
+                .clicked()
+                && let Some(script_name) = selected_script.as_deref()
+            {
+                self.apply_script_action(
+                    &runtime,
+                    ScriptManagerAction::Reload(script_name.to_owned()),
+                );
+            }
+
+            if ui
+                .add_enabled(selected_script.is_some(), egui::Button::new("Unload Selected"))
+                .clicked()
+                && let Some(script_name) = selected_script.as_deref()
+            {
+                self.apply_script_action(
+                    &runtime,
+                    ScriptManagerAction::Unload(script_name.to_owned()),
+                );
+            }
+        });
+
+        if let Some(message) = &self.session_panel.script_manager.status_message {
+            ui.add_space(4.0);
+            ui.label(RichText::new(message).weak());
+        }
+
+        ui.add_space(8.0);
+        ui.columns(2, |columns| {
+            self.render_script_list_panel(&mut columns[0], &runtime, &scripts);
+            self.render_script_output_panel(&mut columns[1], &output);
+        });
+    }
+
+    fn render_script_list_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        runtime: &PythonRuntime,
+        scripts: &[ScriptDescriptor],
+    ) {
+        ui.heading("Loaded Scripts");
+        ui.separator();
+
+        if scripts.is_empty() {
+            ui.label("No Python scripts are loaded yet.");
+            return;
+        }
+
+        egui::ScrollArea::vertical().id_salt("python-script-list").max_height(300.0).show(
+            ui,
+            |ui| {
+                for script in scripts {
+                    let selected = self.session_panel.script_manager.selected_script.as_deref()
+                        == Some(script.name.as_str());
+                    egui::Frame::default()
+                        .fill(if selected {
+                            Color32::from_rgba_unmultiplied(110, 199, 141, 28)
+                        } else {
+                            Color32::from_rgba_unmultiplied(255, 255, 255, 6)
+                        })
+                        .stroke(Stroke::new(
+                            1.0,
+                            Color32::from_rgba_unmultiplied(255, 255, 255, 18),
+                        ))
+                        .inner_margin(egui::Margin::symmetric(8, 8))
+                        .show(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                if ui.selectable_label(selected, &script.name).clicked() {
+                                    self.session_panel.script_manager.selected_script =
+                                        Some(script.name.clone());
+                                }
+                                ui.separator();
+                                ui.colored_label(
+                                    script_status_color(script.status),
+                                    script_status_label(script.status),
+                                );
+                                ui.separator();
+                                ui.label(format!("{} cmds", script.registered_command_count));
+                            });
+                            ui.add_space(2.0);
+                            ui.monospace(script.path.display().to_string());
+                            if let Some(error) = &script.error {
+                                ui.add_space(4.0);
+                                ui.colored_label(Color32::from_rgb(215, 83, 83), error);
+                            }
+                            ui.add_space(6.0);
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add_enabled(
+                                        script.status != ScriptLoadStatus::Loaded,
+                                        egui::Button::new("Load"),
+                                    )
+                                    .clicked()
+                                {
+                                    self.apply_script_action(
+                                        runtime,
+                                        ScriptManagerAction::Load(script.path.clone()),
+                                    );
+                                }
+                                if ui.small_button("Reload").clicked() {
+                                    self.apply_script_action(
+                                        runtime,
+                                        ScriptManagerAction::Reload(script.name.clone()),
+                                    );
+                                }
+                                if ui
+                                    .add_enabled(
+                                        script.status != ScriptLoadStatus::Unloaded,
+                                        egui::Button::new("Unload"),
+                                    )
+                                    .clicked()
+                                {
+                                    self.apply_script_action(
+                                        runtime,
+                                        ScriptManagerAction::Unload(script.name.clone()),
+                                    );
+                                }
+                            });
+                        });
+                    ui.add_space(6.0);
+                }
+            },
+        );
+    }
+
+    fn render_script_output_panel(&self, ui: &mut egui::Ui, output: &[ScriptOutputEntry]) {
+        ui.heading("Script Output");
+        ui.separator();
+
+        egui::ScrollArea::vertical()
+            .id_salt("python-script-output")
+            .stick_to_bottom(true)
+            .max_height(300.0)
+            .show(ui, |ui| {
+                if output.is_empty() {
+                    ui.label("No script output captured yet.");
+                    return;
+                }
+
+                for entry in output {
+                    ui.group(|ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.monospace(&entry.script_name);
+                            ui.separator();
+                            ui.colored_label(
+                                script_output_color(entry.stream),
+                                RichText::new(script_output_label(entry.stream)).monospace(),
+                            );
+                        });
+                        ui.add_space(2.0);
+                        ui.label(
+                            RichText::new(entry.text.trim_end_matches('\n'))
+                                .monospace()
+                                .color(script_output_color(entry.stream)),
+                        );
+                    });
+                    ui.add_space(4.0);
+                }
+            });
+    }
+
+    fn apply_script_action(&mut self, runtime: &PythonRuntime, action: ScriptManagerAction) {
+        let result = match &action {
+            ScriptManagerAction::Load(path) => runtime.load_script(path.clone()),
+            ScriptManagerAction::Reload(script_name) => runtime.reload_script(script_name),
+            ScriptManagerAction::Unload(script_name) => runtime.unload_script(script_name),
+        };
+
+        self.session_panel.script_manager.status_message = Some(match result {
+            Ok(()) => match action {
+                ScriptManagerAction::Load(path) => {
+                    if let Some(script_name) = script_name_for_display(&path) {
+                        self.session_panel.script_manager.selected_script = Some(script_name);
+                    }
+                    format!("Loaded {}.", path.display())
+                }
+                ScriptManagerAction::Reload(script_name) => {
+                    self.session_panel.script_manager.selected_script = Some(script_name.clone());
+                    format!("Reloaded {script_name}.")
+                }
+                ScriptManagerAction::Unload(script_name) => {
+                    self.session_panel.script_manager.selected_script = Some(script_name.clone());
+                    format!("Unloaded {script_name}.")
+                }
+            },
+            Err(error) => match action {
+                ScriptManagerAction::Load(path) => {
+                    format!("Failed to load {}: {error}", path.display())
+                }
+                ScriptManagerAction::Reload(script_name) => {
+                    format!("Failed to reload {script_name}: {error}")
+                }
+                ScriptManagerAction::Unload(script_name) => {
+                    format!("Failed to unload {script_name}: {error}")
+                }
+            },
+        });
+    }
+
+    fn prune_selected_script(&mut self, scripts: &[ScriptDescriptor]) {
+        if self
+            .session_panel
+            .script_manager
+            .selected_script
+            .as_ref()
+            .is_some_and(|selected| scripts.iter().any(|script| &script.name == selected))
+        {
+            return;
+        }
+
+        self.session_panel.script_manager.selected_script =
+            scripts.first().map(|script| script.name.clone());
     }
 
     fn render_session_graph_panel(&mut self, ui: &mut egui::Ui, state: &AppState) {
@@ -2161,6 +2449,40 @@ fn launch_client(cli: Cli) -> Result<()> {
 
 fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
+}
+
+fn script_status_label(status: ScriptLoadStatus) -> &'static str {
+    match status {
+        ScriptLoadStatus::Loaded => "loaded",
+        ScriptLoadStatus::Error => "error",
+        ScriptLoadStatus::Unloaded => "unloaded",
+    }
+}
+
+fn script_status_color(status: ScriptLoadStatus) -> Color32 {
+    match status {
+        ScriptLoadStatus::Loaded => Color32::from_rgb(110, 199, 141),
+        ScriptLoadStatus::Error => Color32::from_rgb(215, 83, 83),
+        ScriptLoadStatus::Unloaded => Color32::from_rgb(232, 182, 83),
+    }
+}
+
+fn script_output_label(stream: ScriptOutputStream) -> &'static str {
+    match stream {
+        ScriptOutputStream::Stdout => "stdout",
+        ScriptOutputStream::Stderr => "stderr",
+    }
+}
+
+fn script_output_color(stream: ScriptOutputStream) -> Color32 {
+    match stream {
+        ScriptOutputStream::Stdout => Color32::from_rgb(110, 199, 141),
+        ScriptOutputStream::Stderr => Color32::from_rgb(215, 83, 83),
+    }
+}
+
+fn script_name_for_display(path: &Path) -> Option<String> {
+    path.file_stem().and_then(|stem| stem.to_str()).map(str::to_owned)
 }
 
 fn build_kill_task(agent_id: &str, operator: &str) -> OperatorMessage {

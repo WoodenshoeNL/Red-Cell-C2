@@ -15,6 +15,7 @@ LOG_DIR="$SCRIPT_DIR/logs"
 LOG_FILE="$LOG_DIR/cursor_dev.log"
 CURSOR_PROMPT_FILE="$SCRIPT_DIR/CURSOR_PROMPT.md"
 RUNTIME_PROMPT_DIR="/tmp"
+CLAIM_LOCK_FILE="$SCRIPT_DIR/.agent-claim.lock"
 SLEEP_ON_NO_WORK=60   # seconds to wait when no tasks are ready
 SLEEP_BETWEEN_TASKS=15 # seconds between task iterations
 STALE_THRESHOLD=7200  # seconds before an in_progress task is considered stuck (2h)
@@ -25,9 +26,26 @@ MAX_LOOPS="${1:-0}"   # 0 = run forever
 LOOP_COUNT=0
 
 mkdir -p "$LOG_DIR"
+exec 9>"$CLAIM_LOCK_FILE"
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$AGENT_ID] $*" | tee -a "$LOG_FILE"
+}
+
+issue_status() {
+    local task_id="$1"
+
+    br show "$task_id" --json 2>/dev/null | python3 -c '
+import json
+import sys
+
+try:
+    issues = json.load(sys.stdin)
+    if issues:
+        print(issues[0].get("status", ""))
+except Exception:
+    pass
+'
 }
 
 # Claim a task with optimistic git locking.
@@ -35,23 +53,59 @@ log() {
 # Returns 0 on success, 1 if another agent beat us to it.
 claim_task() {
     local task_id="$1"
+    local head_before
+    local claim_commit
+    local claim_status
+
+    head_before=$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null) || return 1
 
     br update "$task_id" --status=in_progress 2>/dev/null || return 1
     br sync --flush-only 2>/dev/null || return 1
 
+    if git -C "$SCRIPT_DIR" diff --quiet -- .beads/issues.jsonl; then
+        log "CLAIM SKIP: $task_id produced no issue change locally; refreshing issue state"
+        br sync --import-only --quiet 2>/dev/null || true
+        return 1
+    fi
+
     git -C "$SCRIPT_DIR" add .beads/issues.jsonl
-    git -C "$SCRIPT_DIR" commit -m "chore: claim $task_id [$AGENT_ID]" --quiet
+    if ! git -C "$SCRIPT_DIR" commit -m "chore: claim $task_id [$AGENT_ID]" --quiet; then
+        log "CLAIM SKIP: failed to create claim commit for $task_id"
+        git -C "$SCRIPT_DIR" restore --staged .beads/issues.jsonl 2>/dev/null || true
+        git -C "$SCRIPT_DIR" checkout -- .beads/issues.jsonl 2>/dev/null || true
+        br sync --import-only --quiet 2>/dev/null || true
+        return 1
+    fi
+    claim_commit=$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null) || return 1
 
     if git -C "$SCRIPT_DIR" push --quiet 2>/dev/null; then
+        if ! git -C "$SCRIPT_DIR" pull --ff-only --quiet 2>/dev/null; then
+            log "CLAIM VERIFY FAILED: could not refresh git state after claiming $task_id"
+            return 1
+        fi
+
+        br sync --import-only --quiet 2>/dev/null || true
+
+        if ! git -C "$SCRIPT_DIR" merge-base --is-ancestor "$claim_commit" HEAD 2>/dev/null; then
+            log "CLAIM VERIFY FAILED: claim commit for $task_id is no longer on the current branch"
+            return 1
+        fi
+
+        claim_status=$(issue_status "$task_id")
+        if [ "$claim_status" != "in_progress" ]; then
+            log "CLAIM VERIFY FAILED: expected $task_id to be in_progress after claim, found '${claim_status:-unknown}'"
+            return 1
+        fi
+
         return 0
     fi
 
     # Push failed — another agent pushed first. Undo our commit and restore
     # the remote state so the next iteration starts clean.
     log "CLAIM CONFLICT: another agent claimed $task_id first — releasing"
-    git -C "$SCRIPT_DIR" reset HEAD~1 --mixed --quiet
+    git -C "$SCRIPT_DIR" reset "$head_before" --mixed --quiet
     git -C "$SCRIPT_DIR" checkout -- .beads/issues.jsonl
-    git -C "$SCRIPT_DIR" pull --rebase --quiet 2>/dev/null || true
+    git -C "$SCRIPT_DIR" pull --ff-only --quiet 2>/dev/null || true
     br sync --import-only --quiet 2>/dev/null || true
     return 1
 }
@@ -129,11 +183,23 @@ while true; do
     else
         log "=== Starting Cursor Agent loop iteration $((LOOP_COUNT + 1)) ==="
     fi
+    LOOP_COUNT=$((LOOP_COUNT + 1))
+
+    if ! flock -x 9; then
+        log "WARNING: failed to acquire local claim lock"
+        sleep "$SLEEP_ON_NO_WORK"
+        continue
+    fi
 
     # ── Pull latest ────────────────────────────────────────────────────────────
-    git -C "$SCRIPT_DIR" pull --rebase --quiet 2>/dev/null \
-        && log "git pull: ok" \
-        || log "WARNING: git pull failed, continuing with local state"
+    if git -C "$SCRIPT_DIR" pull --ff-only --quiet 2>/dev/null; then
+        log "git pull --ff-only: ok"
+    else
+        log "WARNING: git pull --ff-only failed; skipping iteration until repo state is synced"
+        flock -u 9
+        sleep "$SLEEP_ON_NO_WORK"
+        continue
+    fi
 
     # Import any new issues from JSONL (picks up claims by other agents)
     br sync --import-only --quiet 2>/dev/null \
@@ -158,6 +224,7 @@ except Exception:
 
     if [ -z "$NEXT_ID" ]; then
         log "No ready work found. Sleeping ${SLEEP_ON_NO_WORK}s..."
+        flock -u 9
         sleep "$SLEEP_ON_NO_WORK"
         continue
     fi
@@ -165,15 +232,13 @@ except Exception:
     log "Selected task: $NEXT_ID"
 
     # ── Claim with optimistic locking ──────────────────────────────────────────
-    # Random jitter (0-15s) reduces the chance of two agents selecting and
-    # claiming the same task at exactly the same moment.
-    sleep $((RANDOM % 15))
-
     if ! claim_task "$NEXT_ID"; then
+        flock -u 9
         log "Could not claim $NEXT_ID — retrying with a different task"
         sleep $((5 + RANDOM % 20))
         continue
     fi
+    flock -u 9
 
     log "Claimed $NEXT_ID"
 
@@ -232,8 +297,6 @@ HEREDOC
     fi
 
     rm -f "$RUNTIME_PROMPT"
-
-    LOOP_COUNT=$((LOOP_COUNT + 1))
     log "========================LOOP========================="
     sleep "$SLEEP_BETWEEN_TASKS"
 done

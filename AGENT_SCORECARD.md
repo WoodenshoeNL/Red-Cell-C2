@@ -22,9 +22,9 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests | 0 | 1 | 0 |
 | Clippy warnings | 0 | 0 | 0 |
 | Protocol errors | 1 | 1 | 0 |
-| Security issues | 0 | 4 | 0 |
-| Architecture drift | 0 | 0 | 0 |
-| Memory / resource leaks | 0 | 1 | 0 |
+| Security issues | 0 | 5 | 0 |
+| Architecture drift | 0 | 1 | 0 |
+| Memory / resource leaks | 0 | 3 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
 
 ---
@@ -145,3 +145,14 @@ Build: passed (cargo check + clippy -D warnings + cargo test: 74 unit + 1 e2e = 
 | Cursor | 0 | 0 | No activity this run |
 
 Build: passed (cargo check + clippy -D warnings + cargo test: 74 passed)
+
+### Arch Review — 2026-03-10 23:15
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 0 | — | No findings this run |
+| Codex | 5 | Security ×1, Architecture ×1, Memory/resource ×3 | SOCKS5 exposed on 0.0.0.0, agent_new_event duplicated (pivot chain dropped), AgentSocketState never pruned, SocksServerHandle graceful shutdown unused, DNS responses not expired on mid-download abandon |
+| Cursor | 0 | — | No activity |
+
+Overall codebase health: on track
+Biggest blindspot: SOCKS5 SOCKS relay bound to 0.0.0.0 — any host on the network can use it as an open proxy through the agent without authentication

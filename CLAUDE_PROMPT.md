@@ -18,17 +18,37 @@ cat AGENTS.md
 
 ---
 
-## Step 2 — Check Recent Activity
+## Step 2 — Determine Review Range
+
+The checkpoint file `.beads/qa_checkpoint` stores the last commit hash you fully reviewed.
+Use it as the base of your diff so no commits are ever skipped or re-reviewed.
 
 ```bash
-git log --oneline -20
-git diff HEAD~3..HEAD --stat
+# Pull latest before reviewing
+git pull --rebase
+
+LAST_QA=$(cat .beads/qa_checkpoint 2>/dev/null || echo "")
+if [ -z "$LAST_QA" ]; then
+  # No checkpoint yet — review the last 50 commits as a bootstrap
+  BASE=$(git rev-list --max-count=50 HEAD | tail -1)
+else
+  BASE=$LAST_QA
+fi
+
+HEAD_SHA=$(git rev-parse HEAD)
+
+echo "Reviewing commits from $BASE to $HEAD_SHA"
+git log --oneline $BASE..$HEAD_SHA
 ```
 
-Then review the actual diff of recent changes:
+If `git log` shows no output (HEAD == BASE), the codebase is fully reviewed — skip to Step 7
+and report "no new commits since last review".
+
+Then review the actual diff:
 
 ```bash
-git diff HEAD~3..HEAD -- '*.rs' '*.toml' '*.md'
+git diff $BASE..$HEAD_SHA --stat
+git diff $BASE..$HEAD_SHA -- '*.rs' '*.toml' '*.md'
 ```
 
 ---
@@ -119,11 +139,30 @@ br dep add <existing-issue-id> <new-bug-id>
 
 ---
 
-## Step 7 — Report
+## Step 7 — Update Checkpoint
+
+After completing your review (even if no issues were found), advance the checkpoint to HEAD
+so the next QA run starts from where you left off:
+
+```bash
+git pull --rebase   # re-sync in case dev agent pushed while you were reviewing
+HEAD_SHA=$(git rev-parse HEAD)
+echo $HEAD_SHA > .beads/qa_checkpoint
+br sync --flush-only
+git add .beads/qa_checkpoint .beads/issues.jsonl
+git commit -m "chore(qa): checkpoint review at $HEAD_SHA"
+git push
+```
+
+If `git push` fails due to a concurrent push, run `git pull --rebase && git push` to retry.
+
+---
+
+## Step 8 — Report
 
 Summarize your findings:
 
-1. **Commits reviewed**: list the commit hashes and titles
+1. **Review range**: `<BASE_SHA>..<HEAD_SHA>` — N commits
 2. **Build status**: passed / failed / not applicable
 3. **Issues found**: list any new beads issues you created
 4. **Issues updated**: any existing issues you modified

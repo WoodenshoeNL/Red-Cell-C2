@@ -18,8 +18,9 @@ pub mod websocket;
 
 pub use agents::{AgentRegistry, Job, PivotInfo};
 pub use api::{
-    ApiAuthError, ApiErrorBody, ApiErrorDetail, ApiIdentity, ApiPermissionGuard, ApiRateLimit,
-    ApiRuntime, ListenerManagementApiAccess, ReadApiAccess, api_routes, json_error_response,
+    AdminApiAccess, ApiAuthError, ApiErrorBody, ApiErrorDetail, ApiIdentity, ApiPermissionGuard,
+    ApiRateLimit, ApiRuntime, ListenerManagementApiAccess, ReadApiAccess, api_routes,
+    json_error_response,
 };
 pub use app::TeamserverState;
 pub use audit::{

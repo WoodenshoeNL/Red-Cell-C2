@@ -23,6 +23,18 @@ pub enum AuthError {
     /// The WebSocket client sent a text frame that was not valid operator JSON.
     #[error("invalid operator message json: {0}")]
     InvalidMessageJson(String),
+    /// An operator username already exists.
+    #[error("operator `{username}` already exists")]
+    DuplicateUser {
+        /// Duplicate operator username.
+        username: String,
+    },
+    /// The submitted username was blank.
+    #[error("operator username must not be empty")]
+    EmptyUsername,
+    /// The submitted password was blank.
+    #[error("operator password must not be empty")]
+    EmptyPassword,
 }
 
 /// Successful login result with a newly issued session token.
@@ -79,7 +91,7 @@ pub struct OperatorSession {
 /// In-memory operator credential store and active session registry.
 #[derive(Debug, Clone)]
 pub struct AuthService {
-    credentials: Arc<BTreeMap<String, OperatorAccount>>,
+    credentials: Arc<RwLock<BTreeMap<String, OperatorAccount>>>,
     sessions: Arc<RwLock<SessionRegistry>>,
 }
 
@@ -103,7 +115,7 @@ impl AuthService {
             .collect();
 
         Self {
-            credentials: Arc::new(credentials),
+            credentials: Arc::new(RwLock::new(credentials)),
             sessions: Arc::new(RwLock::new(SessionRegistry::default())),
         }
     }
@@ -115,7 +127,8 @@ impl AuthService {
         connection_id: Uuid,
         login: &LoginInfo,
     ) -> AuthenticationResult {
-        let Some(account) = self.credentials.get(&login.user) else {
+        let credentials = self.credentials.read().await;
+        let Some(account) = credentials.get(&login.user) else {
             return AuthenticationResult::Failure(AuthenticationFailure::UnknownUser);
         };
 
@@ -134,6 +147,39 @@ impl AuthService {
         self.sessions.write().await.insert(session);
 
         AuthenticationResult::Success(AuthenticationSuccess { username: login.user.clone(), token })
+    }
+
+    /// Create a new runtime operator account.
+    pub async fn create_operator(
+        &self,
+        username: &str,
+        password: &str,
+        role: OperatorRole,
+    ) -> Result<(), AuthError> {
+        let username = username.trim();
+        if username.is_empty() {
+            return Err(AuthError::EmptyUsername);
+        }
+
+        if password.trim().is_empty() {
+            return Err(AuthError::EmptyPassword);
+        }
+
+        let mut credentials = self.credentials.write().await;
+        if credentials.contains_key(username) {
+            return Err(AuthError::DuplicateUser { username: username.to_owned() });
+        }
+
+        credentials.insert(
+            username.to_owned(),
+            OperatorAccount { password_hash: hash_password(password), role },
+        );
+        Ok(())
+    }
+
+    /// Return all currently authenticated operator sessions.
+    pub async fn active_sessions(&self) -> Vec<OperatorSession> {
+        self.sessions.read().await.list()
     }
 
     /// Parse and authenticate a raw JSON operator message.
@@ -218,6 +264,10 @@ impl SessionRegistry {
 
     fn len(&self) -> usize {
         self.by_token.len()
+    }
+
+    fn list(&self) -> Vec<OperatorSession> {
+        self.by_token.values().cloned().collect()
     }
 }
 
@@ -472,6 +522,42 @@ mod tests {
         let session =
             service.session_for_connection(connection_id).await.expect("session should be stored");
         assert_eq!(session.role, red_cell_common::config::OperatorRole::Analyst);
+    }
+
+    #[tokio::test]
+    async fn create_operator_adds_runtime_credentials() {
+        let service = AuthService::from_profile(&profile());
+        service
+            .create_operator("trinity", "zion", red_cell_common::config::OperatorRole::Operator)
+            .await
+            .expect("operator should be created");
+
+        let result = service
+            .authenticate_login(
+                Uuid::new_v4(),
+                &LoginInfo { user: "trinity".to_owned(), password: hash_password("zion") },
+            )
+            .await;
+
+        assert!(matches!(result, AuthenticationResult::Success(_)));
+    }
+
+    #[tokio::test]
+    async fn active_sessions_returns_authenticated_operators() {
+        let service = AuthService::from_profile(&profile());
+        let connection_id = Uuid::new_v4();
+        let result = service
+            .authenticate_login(
+                connection_id,
+                &LoginInfo { user: "operator".to_owned(), password: hash_password("password1234") },
+            )
+            .await;
+        assert!(matches!(result, AuthenticationResult::Success(_)));
+
+        let sessions = service.active_sessions().await;
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].connection_id, connection_id);
+        assert_eq!(sessions[0].username, "operator");
     }
 
     #[test]

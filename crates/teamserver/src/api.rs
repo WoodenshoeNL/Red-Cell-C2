@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use axum::extract::{FromRequestParts, Path, Query, Request, State};
 use axum::http::header::AUTHORIZATION;
+use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 use axum::http::{HeaderMap, StatusCode, request::Parts};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -18,24 +19,28 @@ use red_cell_common::config::{OperatorRole, Profile};
 use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::{AgentTaskInfo, EventCode, Message, MessageHead};
 use red_cell_common::{AgentInfo, ListenerConfig};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::Sha256;
 use thiserror::Error;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use tokio::sync::Mutex;
 use tracing::{debug, instrument};
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
-use utoipa::{Modify, OpenApi, ToSchema};
+use utoipa::{IntoParams, Modify, OpenApi, ToSchema};
 use utoipa_swagger_ui::SwaggerUi;
 use uuid::Uuid;
 
 use crate::app::TeamserverState;
 use crate::listeners::{ListenerManagerError, ListenerMarkRequest, ListenerSummary};
-use crate::rbac::{CanManageListeners, CanRead, CanTaskAgents, Permission, PermissionMarker};
+use crate::rbac::{
+    CanAdminister, CanManageListeners, CanRead, CanTaskAgents, Permission, PermissionMarker,
+};
 use crate::websocket::{AgentCommandError, execute_agent_task};
 use crate::{
-    AuditPage, AuditQuery, AuditResultStatus, Database, audit_details, parameter_object,
-    query_audit_log, record_operator_action,
+    AuditPage, AuditQuery, AuditResultStatus, AuthError, Database, LootRecord, audit_details,
+    parameter_object, query_audit_log, record_operator_action,
 };
 const API_VERSION: &str = "v1";
 const API_PREFIX: &str = "/api/v1";
@@ -323,12 +328,85 @@ pub type ReadApiAccess = ApiPermissionGuard<CanRead>;
 pub type ListenerManagementApiAccess = ApiPermissionGuard<CanManageListeners>;
 /// Agent-tasking access to protected REST API routes.
 pub type TaskAgentApiAccess = ApiPermissionGuard<CanTaskAgents>;
+/// Administrative access to protected REST API routes.
+pub type AdminApiAccess = ApiPermissionGuard<CanAdminister>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
 struct AgentTaskQueuedResponse {
     agent_id: String,
     task_id: String,
     queued_jobs: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+struct LootSummary {
+    id: i64,
+    agent_id: String,
+    kind: String,
+    name: String,
+    file_path: Option<String>,
+    size_bytes: Option<i64>,
+    captured_at: String,
+    has_data: bool,
+    operator: Option<String>,
+    command_line: Option<String>,
+    task_id: Option<String>,
+    metadata: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+struct OperatorSummary {
+    username: String,
+    role: OperatorRole,
+    connection_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, ToSchema)]
+struct CreateOperatorRequest {
+    username: String,
+    password: String,
+    role: OperatorRole,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+struct CreatedOperatorResponse {
+    username: String,
+    role: OperatorRole,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+struct LootPage {
+    total: usize,
+    limit: usize,
+    offset: usize,
+    items: Vec<LootSummary>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, IntoParams)]
+struct LootQuery {
+    kind: Option<String>,
+    agent_id: Option<String>,
+    operator: Option<String>,
+    command: Option<String>,
+    name: Option<String>,
+    file_path: Option<String>,
+    since: Option<String>,
+    until: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+impl LootQuery {
+    const DEFAULT_LIMIT: usize = 50;
+    const MAX_LIMIT: usize = 200;
+
+    fn limit(&self) -> usize {
+        self.limit.unwrap_or(Self::DEFAULT_LIMIT).clamp(1, Self::MAX_LIMIT)
+    }
+
+    fn offset(&self) -> usize {
+        self.offset.unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Error)]
@@ -383,6 +461,56 @@ enum AuditApiError {
     Teamserver(#[from] crate::TeamserverError),
 }
 
+#[derive(Debug, Error)]
+enum LootApiError {
+    #[error("{0}")]
+    Teamserver(#[from] crate::TeamserverError),
+    #[error("invalid loot id `{value}`")]
+    InvalidLootId { value: String },
+    #[error("invalid agent id `{value}`")]
+    InvalidAgentId { value: String },
+    #[error("loot item `{id}` not found")]
+    NotFound { id: i64 },
+    #[error("loot item `{id}` does not contain downloadable data")]
+    MissingData { id: i64 },
+}
+
+impl IntoResponse for LootApiError {
+    fn into_response(self) -> Response {
+        let (status, code) = match &self {
+            Self::InvalidLootId { .. } => (StatusCode::BAD_REQUEST, "invalid_loot_id"),
+            Self::InvalidAgentId { .. } => (StatusCode::BAD_REQUEST, "invalid_agent_id"),
+            Self::NotFound { .. } => (StatusCode::NOT_FOUND, "loot_not_found"),
+            Self::MissingData { .. } => (StatusCode::CONFLICT, "loot_missing_data"),
+            Self::Teamserver(_) => (StatusCode::INTERNAL_SERVER_ERROR, "loot_api_error"),
+        };
+
+        json_error_response(status, code, self.to_string())
+    }
+}
+
+#[derive(Debug, Error)]
+enum OperatorApiError {
+    #[error("{0}")]
+    Auth(#[from] AuthError),
+}
+
+impl IntoResponse for OperatorApiError {
+    fn into_response(self) -> Response {
+        let (status, code) = match &self {
+            Self::Auth(AuthError::DuplicateUser { .. }) => {
+                (StatusCode::CONFLICT, "operator_exists")
+            }
+            Self::Auth(AuthError::EmptyUsername | AuthError::EmptyPassword) => {
+                (StatusCode::BAD_REQUEST, "invalid_operator")
+            }
+            Self::Auth(_) => (StatusCode::INTERNAL_SERVER_ERROR, "operator_api_error"),
+        };
+
+        json_error_response(status, code, self.to_string())
+    }
+}
+
 impl IntoResponse for AuditApiError {
     fn into_response(self) -> Response {
         json_error_response(StatusCode::INTERNAL_SERVER_ERROR, "audit_api_error", self.to_string())
@@ -396,6 +524,9 @@ pub fn api_routes(api: ApiRuntime) -> Router<TeamserverState> {
         .route("/agents/{id}", get(get_agent).delete(kill_agent))
         .route("/agents/{id}/task", post(queue_agent_task))
         .route("/audit", get(list_audit))
+        .route("/loot", get(list_loot))
+        .route("/loot/{id}", get(get_loot))
+        .route("/operators", get(list_operators).post(create_operator))
         .route("/listeners", get(list_listeners).post(create_listener))
         .route("/listeners/{name}", get(get_listener).put(update_listener).delete(delete_listener))
         .route("/listeners/{name}/start", put(start_listener))
@@ -457,6 +588,10 @@ struct ApiInfoResponse {
         kill_agent,
         queue_agent_task,
         list_audit,
+        list_loot,
+        get_loot,
+        list_operators,
+        create_operator,
         list_listeners,
         create_listener,
         get_listener,
@@ -473,6 +608,11 @@ struct ApiInfoResponse {
             ApiInfoResponse,
             AgentTaskQueuedResponse,
             AuditPage,
+            LootPage,
+            LootSummary,
+            OperatorSummary,
+            CreateOperatorRequest,
+            CreatedOperatorResponse,
             crate::AuditRecord,
             crate::AuditResultStatus,
             AgentInfo,
@@ -498,6 +638,8 @@ struct ApiInfoResponse {
         (name = "rest", description = "Versioned REST API for Red Cell automation clients"),
         (name = "audit", description = "Operator audit trail endpoints"),
         (name = "agents", description = "Agent inventory and tasking endpoints"),
+        (name = "loot", description = "Captured loot listing and download endpoints"),
+        (name = "operators", description = "Administrative operator-management endpoints"),
         (name = "listeners", description = "Listener lifecycle management endpoints")
     )
 )]
@@ -804,6 +946,213 @@ async fn list_audit(
     Query(query): Query<AuditQuery>,
 ) -> Result<Json<AuditPage>, AuditApiError> {
     Ok(Json(query_audit_log(&state.database, &query).await?))
+}
+
+#[utoipa::path(
+    get,
+    path = "/loot",
+    context_path = "/api/v1",
+    tag = "loot",
+    security(("api_key" = [])),
+    params(LootQuery),
+    responses(
+        (status = 200, description = "Filtered and paginated captured loot", body = LootPage),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
+        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody)
+    )
+)]
+async fn list_loot(
+    State(state): State<TeamserverState>,
+    _identity: ReadApiAccess,
+    Query(query): Query<LootQuery>,
+) -> Result<Json<LootPage>, LootApiError> {
+    let normalized_agent_id = normalize_loot_agent_filter(query.agent_id.as_deref())?;
+    let since = query.since.as_deref().and_then(parse_rfc3339);
+    let until = query.until.as_deref().and_then(parse_rfc3339);
+
+    let mut items = state
+        .database
+        .loot()
+        .list()
+        .await?
+        .into_iter()
+        .rev()
+        .filter_map(|record| {
+            loot_matches(&record, &query, normalized_agent_id.as_deref(), since, until)
+                .then(|| loot_summary(record))
+        })
+        .collect::<Vec<_>>();
+
+    let total = items.len();
+    let offset = query.offset();
+    let limit = query.limit();
+    items = items.into_iter().skip(offset).take(limit).collect();
+
+    Ok(Json(LootPage { total, limit, offset, items }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/loot/{id}",
+    context_path = "/api/v1",
+    tag = "loot",
+    security(("api_key" = [])),
+    params(("id" = String, Path, description = "Numeric loot identifier")),
+    responses(
+        (status = 200, description = "Loot item binary content"),
+        (status = 400, description = "Invalid loot id", body = ApiErrorBody),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
+        (status = 404, description = "Loot item not found", body = ApiErrorBody),
+        (status = 409, description = "Loot item has no stored binary content", body = ApiErrorBody)
+    )
+)]
+async fn get_loot(
+    State(state): State<TeamserverState>,
+    _identity: ReadApiAccess,
+    Path(id): Path<String>,
+) -> Result<Response, LootApiError> {
+    let loot_id =
+        id.parse::<i64>().map_err(|_| LootApiError::InvalidLootId { value: id.clone() })?;
+    let record =
+        state.database.loot().get(loot_id).await?.ok_or(LootApiError::NotFound { id: loot_id })?;
+    let data = record.data.ok_or(LootApiError::MissingData { id: loot_id })?;
+    let filename = sanitize_filename(record.name.as_str());
+    let content_type = loot_content_type(record.kind.as_str(), filename.as_str());
+
+    let mut response = Response::new(axum::body::Body::from(data));
+    let headers = response.headers_mut();
+    headers.insert(
+        CONTENT_TYPE,
+        content_type.parse().map_err(|error: axum::http::header::InvalidHeaderValue| {
+            LootApiError::Teamserver(crate::TeamserverError::InvalidPersistedValue {
+                field: "content_type",
+                message: error.to_string(),
+            })
+        })?,
+    );
+    headers.insert(
+        CONTENT_DISPOSITION,
+        format!("attachment; filename=\"{filename}\"").parse().map_err(
+            |error: axum::http::header::InvalidHeaderValue| {
+                LootApiError::Teamserver(crate::TeamserverError::InvalidPersistedValue {
+                    field: "content_disposition",
+                    message: error.to_string(),
+                })
+            },
+        )?,
+    );
+
+    Ok(response)
+}
+
+#[utoipa::path(
+    get,
+    path = "/operators",
+    context_path = "/api/v1",
+    tag = "operators",
+    security(("api_key" = [])),
+    responses(
+        (status = 200, description = "List active operator sessions", body = [OperatorSummary]),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
+        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody)
+    )
+)]
+async fn list_operators(
+    State(state): State<TeamserverState>,
+    _identity: AdminApiAccess,
+) -> Json<Vec<OperatorSummary>> {
+    let mut sessions = state
+        .auth
+        .active_sessions()
+        .await
+        .into_iter()
+        .map(|session| OperatorSummary {
+            username: session.username,
+            role: session.role,
+            connection_id: session.connection_id.to_string(),
+        })
+        .collect::<Vec<_>>();
+    sessions.sort_by(|left, right| {
+        left.username.cmp(&right.username).then(left.connection_id.cmp(&right.connection_id))
+    });
+    Json(sessions)
+}
+
+#[utoipa::path(
+    post,
+    path = "/operators",
+    context_path = "/api/v1",
+    tag = "operators",
+    security(("api_key" = [])),
+    request_body = CreateOperatorRequest,
+    responses(
+        (status = 201, description = "Operator account created", body = CreatedOperatorResponse),
+        (status = 400, description = "Invalid operator payload", body = ApiErrorBody),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
+        (status = 409, description = "Operator already exists", body = ApiErrorBody)
+    )
+)]
+async fn create_operator(
+    State(state): State<TeamserverState>,
+    identity: AdminApiAccess,
+    Json(request): Json<CreateOperatorRequest>,
+) -> Result<(StatusCode, Json<CreatedOperatorResponse>), OperatorApiError> {
+    let username = request.username.trim().to_owned();
+    match state
+        .auth
+        .create_operator(username.as_str(), request.password.as_str(), request.role)
+        .await
+    {
+        Ok(()) => {
+            record_audit_entry(
+                &state.database,
+                &identity.key_id,
+                "operator.create",
+                "operator",
+                Some(username.clone()),
+                audit_details(
+                    AuditResultStatus::Success,
+                    None,
+                    Some("create"),
+                    Some(parameter_object([
+                        ("username", Value::String(username.clone())),
+                        ("role", Value::String(format!("{:?}", request.role))),
+                    ])),
+                ),
+            )
+            .await;
+
+            Ok((
+                StatusCode::CREATED,
+                Json(CreatedOperatorResponse { username, role: request.role }),
+            ))
+        }
+        Err(error) => {
+            record_audit_entry(
+                &state.database,
+                &identity.key_id,
+                "operator.create",
+                "operator",
+                Some(username.clone()),
+                audit_details(
+                    AuditResultStatus::Failure,
+                    None,
+                    Some("create"),
+                    Some(parameter_object([
+                        ("username", Value::String(username)),
+                        ("role", Value::String(format!("{:?}", request.role))),
+                        ("error", Value::String(error.to_string())),
+                    ])),
+                ),
+            )
+            .await;
+            Err(error.into())
+        }
+    }
 }
 
 #[utoipa::path(
@@ -1241,6 +1590,109 @@ fn parse_api_agent_id(value: &str) -> Result<u32, AgentApiError> {
         .map_err(|_| AgentCommandError::InvalidAgentId { agent_id: trimmed.to_owned() }.into())
 }
 
+fn loot_summary(record: LootRecord) -> LootSummary {
+    let (operator, command_line, task_id) = loot_context_fields(record.metadata.as_ref());
+    LootSummary {
+        id: record.id.unwrap_or_default(),
+        agent_id: format!("{:08X}", record.agent_id),
+        kind: record.kind,
+        name: record.name,
+        file_path: record.file_path,
+        size_bytes: record.size_bytes,
+        captured_at: record.captured_at,
+        has_data: record.data.is_some(),
+        operator,
+        command_line,
+        task_id,
+        metadata: record.metadata,
+    }
+}
+
+fn normalize_loot_agent_filter(value: Option<&str>) -> Result<Option<String>, LootApiError> {
+    value
+        .map(|value| match parse_api_agent_id(value) {
+            Ok(agent_id) => Ok(format!("{agent_id:08X}")),
+            Err(_) => Err(LootApiError::InvalidAgentId { value: value.to_owned() }),
+        })
+        .transpose()
+}
+
+fn loot_matches(
+    record: &LootRecord,
+    query: &LootQuery,
+    normalized_agent_id: Option<&str>,
+    since: Option<OffsetDateTime>,
+    until: Option<OffsetDateTime>,
+) -> bool {
+    let (operator, command_line, _) = loot_context_fields(record.metadata.as_ref());
+    contains_filter(record.kind.as_str(), query.kind.as_deref())
+        && contains_filter(record.name.as_str(), query.name.as_deref())
+        && optional_contains_filter(record.file_path.as_deref(), query.file_path.as_deref())
+        && optional_contains_filter(operator.as_deref(), query.operator.as_deref())
+        && optional_contains_filter(command_line.as_deref(), query.command.as_deref())
+        && normalized_agent_id.is_none_or(|agent_id| format!("{:08X}", record.agent_id) == agent_id)
+        && matches_optional_timestamp(record.captured_at.as_str(), since, until)
+}
+
+fn loot_context_fields(
+    metadata: Option<&Value>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let object = metadata.and_then(Value::as_object);
+    let operator = object
+        .and_then(|value| value.get("operator"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let command_line = object
+        .and_then(|value| value.get("command_line"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let task_id = object
+        .and_then(|value| value.get("task_id"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    (operator, command_line, task_id)
+}
+
+fn matches_optional_timestamp(
+    occurred_at: &str,
+    since: Option<OffsetDateTime>,
+    until: Option<OffsetDateTime>,
+) -> bool {
+    let Some(timestamp) = parse_rfc3339(occurred_at) else {
+        return false;
+    };
+
+    since.is_none_or(|boundary| timestamp >= boundary)
+        && until.is_none_or(|boundary| timestamp <= boundary)
+}
+
+fn parse_rfc3339(value: &str) -> Option<OffsetDateTime> {
+    OffsetDateTime::parse(value, &Rfc3339).ok()
+}
+
+fn contains_filter(value: &str, filter: Option<&str>) -> bool {
+    filter.is_none_or(|filter| value.contains(filter))
+}
+
+fn optional_contains_filter(value: Option<&str>, filter: Option<&str>) -> bool {
+    filter.is_none_or(|filter| value.is_some_and(|value| value.contains(filter)))
+}
+
+fn sanitize_filename(filename: &str) -> String {
+    let sanitized = filename.replace(['"', '\n', '\r'], "_");
+    if sanitized.is_empty() { "loot.bin".to_owned() } else { sanitized }
+}
+
+fn loot_content_type(kind: &str, filename: &str) -> &'static str {
+    if kind.eq_ignore_ascii_case("screenshot") || filename.ends_with(".png") {
+        "image/png"
+    } else if kind.eq_ignore_ascii_case("credential") || filename.ends_with(".txt") {
+        "text/plain; charset=utf-8"
+    } else {
+        "application/octet-stream"
+    }
+}
+
 fn next_task_id() -> String {
     let bytes = *Uuid::new_v4().as_bytes();
     format!("{:08X}", u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
@@ -1284,7 +1736,7 @@ mod tests {
     use super::*;
     use crate::{
         AgentRegistry, AuthService, Database, EventBus, ListenerManager, OperatorConnectionManager,
-        SocketRelayManager,
+        SocketRelayManager, hash_password,
     };
 
     #[tokio::test]
@@ -1402,7 +1854,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_agents_returns_registered_entries() {
-        let (app, registry) = test_router_with_registry(Some((
+        let (app, registry, _) = test_router_with_registry(Some((
             60,
             "rest-admin",
             "secret-admin",
@@ -1430,7 +1882,7 @@ mod tests {
 
     #[tokio::test]
     async fn queue_agent_task_enqueues_job() {
-        let (app, registry) = test_router_with_registry(Some((
+        let (app, registry, _) = test_router_with_registry(Some((
             60,
             "rest-admin",
             "secret-admin",
@@ -1468,7 +1920,7 @@ mod tests {
 
     #[tokio::test]
     async fn audit_endpoint_returns_filtered_paginated_results() {
-        let (app, registry) = test_router_with_registry(Some((
+        let (app, registry, _) = test_router_with_registry(Some((
             60,
             "rest-admin",
             "secret-admin",
@@ -1515,7 +1967,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_agent_queues_kill_job() {
-        let (app, registry) = test_router_with_registry(Some((
+        let (app, registry, _) = test_router_with_registry(Some((
             60,
             "rest-admin",
             "secret-admin",
@@ -1548,7 +2000,7 @@ mod tests {
 
     #[tokio::test]
     async fn analyst_key_cannot_task_agents() {
-        let (app, registry) = test_router_with_registry(Some((
+        let (app, registry, _) = test_router_with_registry(Some((
             60,
             "rest-analyst",
             "secret-analyst",
@@ -1573,6 +2025,235 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn audit_endpoint_filters_by_operator_and_time_window() {
+        let (app, registry, _) = test_router_with_registry(Some((
+            60,
+            "rest-admin",
+            "secret-admin",
+            OperatorRole::Admin,
+        )))
+        .await;
+        registry.insert(sample_agent(0xDEAD_BEEF)).await.expect("agent should insert");
+
+        let _ = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/agents/DEADBEEF/task")
+                    .method("POST")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"TaskID":"2A","CommandLine":"checkin","DemonID":"DEADBEEF","CommandID":"100"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/audit?operator=rest-admin&since=2026-03-01T00:00:00Z&until=2026-03-31T23:59:59Z")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["total"], 1);
+        assert_eq!(body["items"][0]["actor"], "rest-admin");
+    }
+
+    #[tokio::test]
+    async fn loot_endpoint_lists_filtered_records() {
+        let database = Database::connect_in_memory().await.expect("database");
+        database.agents().create(&sample_agent(0xDEAD_BEEF)).await.expect("agent should insert");
+        database
+            .loot()
+            .create(&LootRecord {
+                id: None,
+                agent_id: 0xDEAD_BEEF,
+                kind: "credential".to_owned(),
+                name: "credential-1".to_owned(),
+                file_path: None,
+                size_bytes: Some(12),
+                captured_at: "2026-03-10T10:00:00Z".to_owned(),
+                data: Some(b"Password: test".to_vec()),
+                metadata: Some(parameter_object([
+                    ("operator", Value::String("neo".to_owned())),
+                    ("command_line", Value::String("sekurlsa::logonpasswords".to_owned())),
+                ])),
+            })
+            .await
+            .expect("loot should insert");
+
+        let (router, _, _) = test_router_with_database(
+            database,
+            Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)),
+        )
+        .await;
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/loot?kind=credential&operator=neo")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["total"], 1);
+        assert_eq!(body["items"][0]["kind"], "credential");
+        assert_eq!(body["items"][0]["operator"], "neo");
+    }
+
+    #[tokio::test]
+    async fn loot_download_returns_stored_bytes() {
+        let profile = test_profile(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)));
+        let database = Database::connect_in_memory().await.expect("database");
+        database.agents().create(&sample_agent(0xDEAD_BEEF)).await.expect("agent should insert");
+        let loot_id = database
+            .loot()
+            .create(&LootRecord {
+                id: None,
+                agent_id: 0xDEAD_BEEF,
+                kind: "download".to_owned(),
+                name: "secret.bin".to_owned(),
+                file_path: Some("C:/temp/secret.bin".to_owned()),
+                size_bytes: Some(4),
+                captured_at: "2026-03-10T10:00:00Z".to_owned(),
+                data: Some(vec![1, 2, 3, 4]),
+                metadata: None,
+            })
+            .await
+            .expect("loot should insert");
+        let agent_registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(agent_registry.clone(), events.clone());
+        let listeners = ListenerManager::new(
+            database.clone(),
+            agent_registry.clone(),
+            events.clone(),
+            sockets.clone(),
+            None,
+        );
+        let api = ApiRuntime::from_profile(&profile);
+        let app = api_routes(api.clone()).with_state(TeamserverState {
+            profile: profile.clone(),
+            database,
+            auth: AuthService::from_profile(&profile),
+            api,
+            events,
+            connections: OperatorConnectionManager::new(),
+            agent_registry,
+            listeners,
+            payload_builder: crate::PayloadBuilderService::disabled_for_tests(),
+            sockets,
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/loot/{loot_id}"))
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.expect("bytes");
+        assert_eq!(bytes.as_ref(), [1, 2, 3, 4]);
+    }
+
+    #[tokio::test]
+    async fn operators_endpoint_is_admin_only_and_lists_active_sessions() {
+        let (app, _, auth) = test_router_with_registry(Some((
+            60,
+            "rest-admin",
+            "secret-admin",
+            OperatorRole::Admin,
+        )))
+        .await;
+        auth.authenticate_login(
+            Uuid::new_v4(),
+            &red_cell_common::operator::LoginInfo {
+                user: "Neo".to_owned(),
+                password: hash_password("password1234"),
+            },
+        )
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/operators")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body.as_array().expect("array").len(), 1);
+        assert_eq!(body[0]["username"], "Neo");
+    }
+
+    #[tokio::test]
+    async fn create_operator_endpoint_creates_runtime_account() {
+        let (app, _, auth) = test_router_with_registry(Some((
+            60,
+            "rest-admin",
+            "secret-admin",
+            OperatorRole::Admin,
+        )))
+        .await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/operators")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"username":"trinity","password":"zion","role":"Operator"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = read_json(response).await;
+        assert_eq!(body["username"], "trinity");
+        assert_eq!(body["role"], "Operator");
+
+        let result = auth
+            .authenticate_login(
+                Uuid::new_v4(),
+                &red_cell_common::operator::LoginInfo {
+                    user: "trinity".to_owned(),
+                    password: hash_password("zion"),
+                },
+            )
+            .await;
+        assert!(matches!(result, crate::auth::AuthenticationResult::Success(_)));
     }
 
     #[tokio::test]
@@ -1645,11 +2326,11 @@ mod tests {
         test_router_with_registry(api_key).await.0
     }
 
-    async fn test_router_with_registry(
+    async fn test_router_with_database(
+        database: Database,
         api_key: Option<(u32, &str, &str, OperatorRole)>,
-    ) -> (Router, AgentRegistry) {
+    ) -> (Router, AgentRegistry, AuthService) {
         let profile = test_profile(api_key);
-        let database = Database::connect_in_memory().await.expect("database");
         let agent_registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(agent_registry.clone(), events.clone());
@@ -1662,12 +2343,13 @@ mod tests {
         );
 
         let api = ApiRuntime::from_profile(&profile);
+        let auth = AuthService::from_profile(&profile);
 
         (
             api_routes(api.clone()).with_state(TeamserverState {
                 profile: profile.clone(),
                 database,
-                auth: AuthService::from_profile(&profile),
+                auth: auth.clone(),
                 api,
                 events,
                 connections: OperatorConnectionManager::new(),
@@ -1677,7 +2359,15 @@ mod tests {
                 sockets,
             }),
             agent_registry,
+            auth,
         )
+    }
+
+    async fn test_router_with_registry(
+        api_key: Option<(u32, &str, &str, OperatorRole)>,
+    ) -> (Router, AgentRegistry, AuthService) {
+        let database = Database::connect_in_memory().await.expect("database");
+        test_router_with_database(database, api_key).await
     }
 
     fn test_profile(api_key: Option<(u32, &str, &str, OperatorRole)>) -> Profile {

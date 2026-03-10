@@ -342,6 +342,12 @@ async fn handle_authentication(
             send_login_error(socket, "", AuthenticationFailure::WrongPassword, connection_id).await;
             return Err(());
         }
+        Err(
+            AuthError::DuplicateUser { .. } | AuthError::EmptyUsername | AuthError::EmptyPassword,
+        ) => {
+            send_login_error(socket, "", AuthenticationFailure::WrongPassword, connection_id).await;
+            return Err(());
+        }
     };
 
     if send_operator_message(socket, &response).await.is_err() {

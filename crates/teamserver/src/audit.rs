@@ -102,6 +102,8 @@ impl TryFrom<AuditLogEntry> for AuditRecord {
 /// Query parameters supported by `GET /audit`.
 #[derive(Clone, Debug, Default, Deserialize, IntoParams)]
 pub struct AuditQuery {
+    /// Filter by operator username or API key id.
+    pub operator: Option<String>,
     /// Filter by actor username or API key id.
     pub actor: Option<String>,
     /// Filter by stable action label.
@@ -116,6 +118,10 @@ pub struct AuditQuery {
     pub command: Option<String>,
     /// Filter by action result.
     pub result_status: Option<AuditResultStatus>,
+    /// Include records at or after this RFC 3339 timestamp.
+    pub since: Option<String>,
+    /// Include records at or before this RFC 3339 timestamp.
+    pub until: Option<String>,
     /// Maximum number of records to return. Defaults to `50`.
     pub limit: Option<usize>,
     /// Number of matching records to skip. Defaults to `0`.
@@ -140,6 +146,18 @@ impl AuditQuery {
 
     fn normalized_agent_id(&self) -> Option<String> {
         self.agent_id.as_deref().and_then(parse_agent_id_filter)
+    }
+
+    fn actor_filter(&self) -> Option<&str> {
+        self.operator.as_deref().or(self.actor.as_deref())
+    }
+
+    fn since_timestamp(&self) -> Option<OffsetDateTime> {
+        self.since.as_deref().and_then(parse_timestamp_filter)
+    }
+
+    fn until_timestamp(&self) -> Option<OffsetDateTime> {
+        self.until.as_deref().and_then(parse_timestamp_filter)
     }
 }
 
@@ -239,13 +257,18 @@ fn matches_query(
     query: &AuditQuery,
     normalized_agent_id: Option<&str>,
 ) -> bool {
-    contains_filter(&entry.actor, query.actor.as_deref())
+    contains_filter(&entry.actor, query.actor_filter())
         && contains_filter(&entry.action, query.action.as_deref())
         && contains_filter(&entry.target_kind, query.target_kind.as_deref())
         && optional_contains_filter(entry.target_id.as_deref(), query.target_id.as_deref())
         && optional_contains_filter(entry.command.as_deref(), query.command.as_deref())
         && matches_agent_id(entry.agent_id.as_deref(), normalized_agent_id)
         && query.result_status.is_none_or(|status| entry.result_status == status)
+        && matches_timestamp(
+            entry.occurred_at.as_str(),
+            query.since_timestamp(),
+            query.until_timestamp(),
+        )
 }
 
 fn contains_filter(value: &str, filter: Option<&str>) -> bool {
@@ -258,6 +281,23 @@ fn optional_contains_filter(value: Option<&str>, filter: Option<&str>) -> bool {
 
 fn matches_agent_id(value: Option<&str>, filter: Option<&str>) -> bool {
     filter.is_none_or(|filter| value == Some(filter))
+}
+
+fn matches_timestamp(
+    occurred_at: &str,
+    since: Option<OffsetDateTime>,
+    until: Option<OffsetDateTime>,
+) -> bool {
+    let Some(timestamp) = parse_timestamp_filter(occurred_at) else {
+        return false;
+    };
+
+    since.is_none_or(|boundary| timestamp >= boundary)
+        && until.is_none_or(|boundary| timestamp <= boundary)
+}
+
+fn parse_timestamp_filter(value: &str) -> Option<OffsetDateTime> {
+    OffsetDateTime::parse(value, &Rfc3339).ok()
 }
 
 fn parse_agent_id_filter(value: &str) -> Option<String> {

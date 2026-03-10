@@ -5,8 +5,9 @@ use std::fs;
 use std::io::Read;
 use std::path::Path;
 
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
+use utoipa::ToSchema;
 
 /// A full Havoc/Red Cell YAOTL profile.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -358,7 +359,7 @@ pub struct OperatorConfig {
 }
 
 /// Role assigned to an operator account.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, ToSchema)]
 pub enum OperatorRole {
     /// Full teamserver access.
     #[default]

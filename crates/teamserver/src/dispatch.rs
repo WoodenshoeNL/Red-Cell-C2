@@ -1968,7 +1968,7 @@ async fn handle_process_command_callback(
             let success = parser.read_u32("process kill success")?;
             let pid = parser.read_u32("process kill pid")?;
             let (kind, message) = if success != 0 {
-                ("Good", format!("Successful killed process: {pid}"))
+                ("Good", format!("Successfully killed process: {pid}"))
             } else {
                 ("Error", "Failed to kill process".to_owned())
             };
@@ -2001,7 +2001,9 @@ async fn handle_inject_shellcode_callback(
     let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::CommandInjectShellcode));
     let status = parser.read_u32("shellcode inject status")?;
     let (kind, message) = match status {
-        x if x == u32::from(DemonInjectError::Success) => ("Good", "Successful injected shellcode"),
+        x if x == u32::from(DemonInjectError::Success) => {
+            ("Good", "Successfully injected shellcode")
+        }
         x if x == u32::from(DemonInjectError::Failed) => ("Error", "Failed to inject shellcode"),
         x if x == u32::from(DemonInjectError::InvalidParam) => {
             ("Error", "Invalid parameter specified")
@@ -2047,9 +2049,9 @@ async fn handle_token_callback(
             let success = parser.read_u32("token impersonation success")?;
             let user = parser.read_string("token impersonation user")?;
             let (kind, message) = if success != 0 {
-                ("Good", format!("Successful impersonated {user}"))
+                ("Good", format!("Successfully impersonated {user}"))
             } else {
-                ("Error", format!("Failed to impersonat {user}"))
+                ("Error", format!("Failed to impersonate {user}"))
             };
             events.broadcast(agent_response_event(
                 agent_id,
@@ -3487,7 +3489,7 @@ mod tests {
         };
         assert_eq!(
             message.info.extra.get("Message"),
-            Some(&Value::String("Successful killed process: 4040".to_owned()))
+            Some(&Value::String("Successfully killed process: 4040".to_owned()))
         );
 
         let token_payload =
@@ -3504,7 +3506,7 @@ mod tests {
         };
         assert_eq!(
             message.info.extra.get("Message"),
-            Some(&Value::String("Successful impersonated LAB\\svc".to_owned()))
+            Some(&Value::String("Successfully impersonated LAB\\svc".to_owned()))
         );
         Ok(())
     }

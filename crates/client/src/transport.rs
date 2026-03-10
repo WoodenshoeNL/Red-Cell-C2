@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -149,10 +149,35 @@ impl ConnectionStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LootKind {
+    Credential,
+    File,
+    Screenshot,
+    Other,
+}
+
+impl LootKind {
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            Self::Credential => "Credential",
+            Self::File => "File",
+            Self::Screenshot => "Screenshot",
+            Self::Other => "Other",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LootItem {
+    pub(crate) kind: LootKind,
     pub(crate) name: String,
+    pub(crate) agent_id: String,
     pub(crate) source: String,
     pub(crate) collected_at: String,
+    pub(crate) file_path: Option<String>,
+    pub(crate) size_bytes: Option<u64>,
+    pub(crate) content_base64: Option<String>,
+    pub(crate) preview: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,6 +233,7 @@ pub(crate) struct AppState {
     pub(crate) listeners: Vec<ListenerSummary>,
     pub(crate) loot: Vec<LootItem>,
     pub(crate) chat_messages: Vec<ChatMessage>,
+    pub(crate) online_operators: BTreeSet<String>,
 }
 
 impl AppState {
@@ -221,6 +247,7 @@ impl AppState {
             listeners: Vec::new(),
             loot: Vec::new(),
             chat_messages: Vec::new(),
+            online_operators: BTreeSet::new(),
         }
     }
 
@@ -229,6 +256,7 @@ impl AppState {
             OperatorMessage::InitConnectionSuccess(message) => {
                 self.connection_status = ConnectionStatus::Connected;
                 if !message.head.user.is_empty() {
+                    self.online_operators.insert(message.head.user.clone());
                     self.operator_info = Some(OperatorInfo {
                         username: message.head.user.clone(),
                         password_hash: None,
@@ -281,6 +309,23 @@ impl AppState {
             }
             OperatorMessage::ChatUserDisconnected(message) => {
                 self.handle_chat_user_presence(message.info, false, message.head.timestamp);
+            }
+            OperatorMessage::CredentialsAdd(message)
+            | OperatorMessage::CredentialsEdit(message) => {
+                if let Some(item) = loot_item_from_flat_info(&message.info, LootKind::Credential) {
+                    self.upsert_loot(item);
+                }
+            }
+            OperatorMessage::CredentialsRemove(message) => {
+                self.remove_loot_matching(&message.info, LootKind::Credential);
+            }
+            OperatorMessage::HostFileAdd(message) => {
+                if let Some(item) = loot_item_from_flat_info(&message.info, LootKind::File) {
+                    self.upsert_loot(item);
+                }
+            }
+            OperatorMessage::HostFileRemove(message) => {
+                self.remove_loot_matching(&message.info, LootKind::File);
             }
             OperatorMessage::AgentNew(message) => {
                 self.upsert_agent(agent_summary_from_message(&message.info));
@@ -342,14 +387,9 @@ impl AppState {
             OperatorMessage::Login(_)
             | OperatorMessage::InitConnectionInfo(_)
             | OperatorMessage::InitConnectionProfile(_)
-            | OperatorMessage::CredentialsAdd(_)
-            | OperatorMessage::CredentialsEdit(_)
-            | OperatorMessage::CredentialsRemove(_)
             | OperatorMessage::BuildPayloadStaged(_)
             | OperatorMessage::BuildPayloadRequest(_)
             | OperatorMessage::BuildPayloadMsOffice(_)
-            | OperatorMessage::HostFileAdd(_)
-            | OperatorMessage::HostFileRemove(_)
             | OperatorMessage::AgentTask(_)
             | OperatorMessage::ServiceAgentRegister(_)
             | OperatorMessage::ServiceListenerRegister(_)
@@ -414,6 +454,11 @@ impl AppState {
         timestamp: String,
     ) {
         let action = if online { "connected" } else { "disconnected" };
+        if online {
+            self.online_operators.insert(chat_user.user.clone());
+        } else {
+            self.online_operators.remove(&chat_user.user);
+        }
         self.push_chat_message(
             "teamserver",
             timestamp.clone(),
@@ -461,10 +506,23 @@ impl AppState {
 
     fn upsert_loot(&mut self, loot_item: LootItem) {
         match self.loot.iter_mut().find(|existing| {
-            existing.name == loot_item.name && existing.collected_at == loot_item.collected_at
+            existing.kind == loot_item.kind
+                && existing.agent_id == loot_item.agent_id
+                && existing.name == loot_item.name
+                && existing.collected_at == loot_item.collected_at
         }) {
             Some(existing) => *existing = loot_item,
             None => self.loot.push(loot_item),
+        }
+    }
+
+    fn remove_loot_matching(&mut self, info: &FlatInfo, fallback_kind: LootKind) {
+        if let Some(item) = loot_item_from_flat_info(info, fallback_kind) {
+            self.loot.retain(|existing| {
+                !(existing.kind == item.kind
+                    && existing.agent_id == item.agent_id
+                    && existing.name == item.name)
+            });
         }
     }
 }
@@ -804,8 +862,26 @@ fn loot_item_from_response(
         .or_else(|| extra_string(&info.extra, "Operator"))
         .unwrap_or_else(|| "unknown".to_owned());
     let collected_at = extra_string(&info.extra, "CapturedAt").unwrap_or_default();
+    let file_path = extra_string(&info.extra, "FilePath");
+    let kind = loot_kind_from_strings(
+        extra_string(&info.extra, "LootKind").as_deref(),
+        Some(name.as_str()),
+        file_path.as_deref(),
+    );
 
-    Some(LootItem { name, source, collected_at })
+    Some(LootItem {
+        kind,
+        name,
+        agent_id: normalize_agent_id(&info.demon_id),
+        source,
+        collected_at,
+        file_path,
+        size_bytes: extra_u64(&info.extra, "SizeBytes"),
+        content_base64: extra_string(&info.extra, "ContentBase64")
+            .or_else(|| extra_string(&info.extra, "Data")),
+        preview: extra_string(&info.extra, "Preview")
+            .or_else(|| extra_string(&info.extra, "Message")),
+    })
 }
 
 fn extra_string(extra: &BTreeMap<String, serde_json::Value>, key: &str) -> Option<String> {
@@ -814,6 +890,89 @@ fn extra_string(extra: &BTreeMap<String, serde_json::Value>, key: &str) -> Optio
         serde_json::Value::Number(number) => Some(number.to_string()),
         _ => None,
     })
+}
+
+fn extra_u64(extra: &BTreeMap<String, serde_json::Value>, key: &str) -> Option<u64> {
+    extra.get(key).and_then(|value| match value {
+        serde_json::Value::Number(number) => number.as_u64(),
+        serde_json::Value::String(string) => string.parse::<u64>().ok(),
+        _ => None,
+    })
+}
+
+fn loot_item_from_flat_info(info: &FlatInfo, fallback_kind: LootKind) -> Option<LootItem> {
+    let name = flat_info_string(info, &["Name", "FileName", "LootName"])?;
+    let agent_id = flat_info_string(info, &["DemonID", "AgentID"])
+        .map(|id| normalize_agent_id(&id))
+        .unwrap_or_default();
+    let file_path = flat_info_string(info, &["FilePath", "Path"]);
+    let source = flat_info_string(info, &["Operator", "Pattern", "Kind", "Type"])
+        .unwrap_or_else(|| fallback_kind.label().to_ascii_lowercase());
+    let kind = loot_kind_from_strings(
+        flat_info_string(info, &["Kind", "Type", "LootKind"]).as_deref(),
+        Some(name.as_str()),
+        file_path.as_deref(),
+    );
+
+    Some(LootItem {
+        kind: if matches!(kind, LootKind::Other) { fallback_kind } else { kind },
+        name,
+        agent_id,
+        source,
+        collected_at: flat_info_string(info, &["CapturedAt", "Time", "Timestamp"])
+            .unwrap_or_default(),
+        file_path,
+        size_bytes: flat_info_u64(info, &["SizeBytes", "Size"]),
+        content_base64: flat_info_string(info, &["ContentBase64", "Data", "Payload"]),
+        preview: flat_info_string(info, &["Credential", "Preview", "Message"]),
+    })
+}
+
+fn flat_info_u64(info: &FlatInfo, keys: &[&str]) -> Option<u64> {
+    keys.iter().find_map(|key| {
+        info.fields.get(*key).and_then(|value| match value {
+            serde_json::Value::Number(number) => number.as_u64(),
+            serde_json::Value::String(string) => string.parse::<u64>().ok(),
+            _ => None,
+        })
+    })
+}
+
+fn loot_kind_from_strings(
+    kind: Option<&str>,
+    name: Option<&str>,
+    file_path: Option<&str>,
+) -> LootKind {
+    let mut haystacks = Vec::new();
+    if let Some(kind) = kind {
+        haystacks.push(kind.to_ascii_lowercase());
+    }
+    if let Some(name) = name {
+        haystacks.push(name.to_ascii_lowercase());
+    }
+    if let Some(path) = file_path {
+        haystacks.push(path.to_ascii_lowercase());
+    }
+
+    if haystacks.iter().any(|value| value.contains("credential") || value.contains("password")) {
+        LootKind::Credential
+    } else if haystacks.iter().any(|value| {
+        value.contains("screenshot")
+            || value.ends_with(".png")
+            || value.ends_with(".jpg")
+            || value.ends_with(".jpeg")
+    }) {
+        LootKind::Screenshot
+    } else if haystacks.iter().any(|value| {
+        value.contains("file")
+            || value.contains("download")
+            || value.contains('\\')
+            || value.contains('/')
+    }) {
+        LootKind::File
+    } else {
+        LootKind::Other
+    }
 }
 
 #[derive(Debug)]
@@ -1010,9 +1169,69 @@ mod tests {
 
         assert_eq!(state.loot.len(), 1);
         assert_eq!(state.loot[0].name, "passwords.txt");
+        assert_eq!(state.loot[0].agent_id, "ABCD1234");
         assert_eq!(state.loot[0].source, "download");
         assert_eq!(state.loot[0].collected_at, "2026-03-10T12:00:00Z");
         assert!(!state.agent_consoles.contains_key("ABCD1234"));
+    }
+
+    #[test]
+    fn credential_events_update_loot_state() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+        let info = FlatInfo {
+            fields: BTreeMap::from([
+                ("DemonID".to_owned(), serde_json::Value::String("abcd1234".to_owned())),
+                ("Name".to_owned(), serde_json::Value::String("password-hash".to_owned())),
+                ("Credential".to_owned(), serde_json::Value::String("alice:hash".to_owned())),
+                ("Pattern".to_owned(), serde_json::Value::String("pwdump-hash".to_owned())),
+                (
+                    "Timestamp".to_owned(),
+                    serde_json::Value::String("2026-03-10T12:00:00Z".to_owned()),
+                ),
+            ]),
+        };
+
+        state.apply_operator_message(OperatorMessage::CredentialsAdd(Message {
+            head: head(EventCode::Credentials),
+            info: info.clone(),
+        }));
+        assert_eq!(state.loot.len(), 1);
+        assert_eq!(state.loot[0].kind, LootKind::Credential);
+        assert_eq!(state.loot[0].preview.as_deref(), Some("alice:hash"));
+
+        state.apply_operator_message(OperatorMessage::CredentialsRemove(Message {
+            head: head(EventCode::Credentials),
+            info,
+        }));
+        assert!(state.loot.is_empty());
+    }
+
+    #[test]
+    fn host_file_events_capture_screenshot_loot() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+        state.apply_operator_message(OperatorMessage::HostFileAdd(Message {
+            head: head(EventCode::HostFile),
+            info: FlatInfo {
+                fields: BTreeMap::from([
+                    ("DemonID".to_owned(), serde_json::Value::String("abcd1234".to_owned())),
+                    ("FileName".to_owned(), serde_json::Value::String("desktop.png".to_owned())),
+                    (
+                        "FilePath".to_owned(),
+                        serde_json::Value::String("C:/Temp/desktop.png".to_owned()),
+                    ),
+                    ("Type".to_owned(), serde_json::Value::String("screenshot".to_owned())),
+                    ("SizeBytes".to_owned(), serde_json::Value::from(512_u64)),
+                    (
+                        "Timestamp".to_owned(),
+                        serde_json::Value::String("2026-03-10T12:00:00Z".to_owned()),
+                    ),
+                ]),
+            },
+        }));
+
+        assert_eq!(state.loot.len(), 1);
+        assert_eq!(state.loot[0].kind, LootKind::Screenshot);
+        assert_eq!(state.loot[0].size_bytes, Some(512));
     }
 
     #[test]

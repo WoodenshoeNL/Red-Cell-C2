@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow = "1.0"
+base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
 dirs = "6"
 eframe = "0.32.3"

@@ -2,6 +2,7 @@ mod local_config;
 mod login;
 mod transport;
 
+use base64::Engine;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow};
@@ -10,8 +11,10 @@ use eframe::egui::{self, Align, Color32, Layout, RichText, Sense, Stroke};
 use local_config::LocalConfig;
 use login::{LoginAction, LoginState, render_login_dialog};
 use red_cell_common::demon::DemonCommand;
-use red_cell_common::operator::{AgentTaskInfo, Message, MessageHead, OperatorMessage};
-use transport::{AppState, ClientTransport, ConnectionStatus, SharedAppState};
+use red_cell_common::operator::{
+    AgentTaskInfo, EventCode, FlatInfo, Message, MessageHead, OperatorMessage,
+};
+use transport::{AppState, ClientTransport, ConnectionStatus, LootItem, LootKind, SharedAppState};
 
 const WINDOW_TITLE: &str = "Red Cell Client";
 const DEFAULT_SERVER_URL: &str = "wss://127.0.0.1:40056/havoc/";
@@ -83,6 +86,24 @@ struct NoteEditorState {
     note: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum LootTypeFilter {
+    #[default]
+    All,
+    Credentials,
+    Files,
+    Screenshots,
+}
+
+impl LootTypeFilter {
+    const ALL: [(Self, &'static str); 4] = [
+        (Self::All, "All"),
+        (Self::Credentials, "Credentials"),
+        (Self::Files, "Files"),
+        (Self::Screenshots, "Screenshots"),
+    ];
+}
+
 #[derive(Debug, Default)]
 struct SessionPanelState {
     filter: String,
@@ -92,6 +113,12 @@ struct SessionPanelState {
     note_editor: Option<NoteEditorState>,
     pending_messages: Vec<OperatorMessage>,
     status_message: Option<String>,
+    loot_type_filter: LootTypeFilter,
+    loot_agent_filter: String,
+    loot_time_filter: String,
+    loot_text_filter: String,
+    loot_status_message: Option<String>,
+    chat_input: String,
 }
 
 impl SessionPanelState {
@@ -383,50 +410,157 @@ impl ClientApp {
         });
     }
 
-    fn render_loot_panel(&self, ui: &mut egui::Ui, state: &AppState) {
+    fn render_loot_panel(&mut self, ui: &mut egui::Ui, state: &AppState) {
         ui.heading("Loot");
         ui.separator();
 
-        if state.loot.is_empty() {
-            ui.label("No loot has been collected yet.");
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Type");
+            egui::ComboBox::from_id_salt("loot-type-filter")
+                .selected_text(match self.session_panel.loot_type_filter {
+                    LootTypeFilter::All => "All",
+                    LootTypeFilter::Credentials => "Credentials",
+                    LootTypeFilter::Files => "Files",
+                    LootTypeFilter::Screenshots => "Screenshots",
+                })
+                .show_ui(ui, |ui| {
+                    for (value, label) in LootTypeFilter::ALL {
+                        ui.selectable_value(&mut self.session_panel.loot_type_filter, value, label);
+                    }
+                });
+            ui.label("Agent");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.session_panel.loot_agent_filter)
+                    .desired_width(84.0)
+                    .hint_text("ABCD1234"),
+            );
+            ui.label("Time");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.session_panel.loot_time_filter)
+                    .desired_width(100.0)
+                    .hint_text("2026-03-10"),
+            );
+        });
+        ui.add(
+            egui::TextEdit::singleline(&mut self.session_panel.loot_text_filter)
+                .hint_text("Search name, path, source, preview"),
+        );
+        if let Some(message) = &self.session_panel.loot_status_message {
+            ui.add_space(6.0);
+            ui.label(RichText::new(message).weak());
+        }
+        ui.add_space(6.0);
+
+        let filtered_loot: Vec<_> = state
+            .loot
+            .iter()
+            .filter(|item| {
+                loot_matches_filters(
+                    item,
+                    self.session_panel.loot_type_filter,
+                    &self.session_panel.loot_agent_filter,
+                    &self.session_panel.loot_time_filter,
+                    &self.session_panel.loot_text_filter,
+                )
+            })
+            .collect();
+
+        if filtered_loot.is_empty() {
+            ui.label(if state.loot.is_empty() {
+                "No loot has been collected yet."
+            } else {
+                "No loot matches the current filters."
+            });
             return;
         }
 
-        egui::Grid::new("loot-grid").striped(true).show(ui, |ui| {
-            ui.strong("Item");
-            ui.strong("Source");
-            ui.strong("Collected");
-            ui.end_row();
-
-            for item in &state.loot {
-                ui.label(&item.name);
-                ui.label(&item.source);
-                ui.label(&item.collected_at);
-                ui.end_row();
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for item in filtered_loot {
+                ui.group(|ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(item.kind.label()).strong());
+                        ui.separator();
+                        ui.label(RichText::new(&item.name).strong());
+                        if !item.agent_id.is_empty() {
+                            ui.separator();
+                            ui.monospace(&item.agent_id);
+                        }
+                    });
+                    ui.label(format!("Source: {}", item.source));
+                    ui.label(format!(
+                        "Collected: {}",
+                        blank_if_empty(&item.collected_at, "unknown")
+                    ));
+                    if let Some(path) = &item.file_path {
+                        ui.label(format!("Path: {path}"));
+                    }
+                    if let Some(size) = item.size_bytes {
+                        ui.label(format!("Size: {}", human_size(size)));
+                    }
+                    if let Some(preview) = &item.preview {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(preview).monospace());
+                    }
+                    if loot_is_downloadable(item) {
+                        ui.add_space(6.0);
+                        if ui.button("Download").clicked() {
+                            self.session_panel.loot_status_message =
+                                Some(download_loot_item(item).unwrap_or_else(|error| error));
+                        }
+                    }
+                });
+                ui.add_space(6.0);
             }
         });
     }
 
-    fn render_chat_panel(&self, ui: &mut egui::Ui, state: &AppState) {
+    fn render_chat_panel(&mut self, ui: &mut egui::Ui, state: &AppState) {
         ui.heading("Team Chat");
         ui.separator();
 
-        if state.chat_messages.is_empty() {
-            ui.label("No chat messages yet.");
-            return;
-        }
+        let online_users = if state.online_operators.is_empty() {
+            "No presence data".to_owned()
+        } else {
+            state.online_operators.iter().cloned().collect::<Vec<_>>().join(", ")
+        };
+        ui.label(format!("Online: {online_users}"));
+        ui.add_space(6.0);
 
-        egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
-            for message in &state.chat_messages {
-                ui.group(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.strong(&message.author);
-                        ui.label(RichText::new(&message.sent_at).weak());
-                    });
-                    ui.label(&message.message);
-                });
+        ui.horizontal(|ui| {
+            let input = ui.add(
+                egui::TextEdit::singleline(&mut self.session_panel.chat_input)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("Send a message to all operators"),
+            );
+            let send_requested =
+                input.lost_focus() && ui.input(|state| state.key_pressed(egui::Key::Enter));
+            if ui.button("Send").clicked() || send_requested {
+                if let Some(message) = build_chat_message(
+                    state.operator_info.as_ref().map(|operator| operator.username.as_str()),
+                    &self.session_panel.chat_input,
+                ) {
+                    self.session_panel.pending_messages.push(message);
+                    self.session_panel.chat_input.clear();
+                }
             }
         });
+        ui.add_space(8.0);
+
+        if state.chat_messages.is_empty() {
+            ui.label("No chat messages yet.");
+        } else {
+            egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
+                for message in &state.chat_messages {
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.strong(&message.author);
+                            ui.label(RichText::new(&message.sent_at).weak());
+                        });
+                        ui.label(&message.message);
+                    });
+                }
+            });
+        }
     }
 
     fn render_overview_panel(&self, ui: &mut egui::Ui, state: &AppState) {
@@ -839,6 +973,31 @@ fn build_note_task(agent_id: &str, note: &str, operator: &str) -> OperatorMessag
     )
 }
 
+fn build_chat_message(operator: Option<&str>, message: &str) -> Option<OperatorMessage> {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    Some(OperatorMessage::ChatMessage(Message {
+        head: MessageHead {
+            event: EventCode::Chat,
+            user: operator.unwrap_or_default().to_owned(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info: FlatInfo {
+            fields: std::collections::BTreeMap::from([
+                (
+                    "User".to_owned(),
+                    serde_json::Value::String(operator.unwrap_or_default().to_owned()),
+                ),
+                ("Message".to_owned(), serde_json::Value::String(trimmed.to_owned())),
+            ]),
+        },
+    }))
+}
+
 fn build_agent_task(operator: &str, info: AgentTaskInfo) -> OperatorMessage {
     OperatorMessage::AgentTask(Message {
         head: MessageHead {
@@ -976,11 +1135,131 @@ fn ellipsize(value: &str, max_chars: usize) -> String {
     output
 }
 
+fn loot_matches_filters(
+    item: &LootItem,
+    type_filter: LootTypeFilter,
+    agent_filter: &str,
+    time_filter: &str,
+    text_filter: &str,
+) -> bool {
+    if !matches_loot_type_filter(item, type_filter) {
+        return false;
+    }
+
+    contains_ascii_case_insensitive(&item.agent_id, agent_filter)
+        && contains_ascii_case_insensitive(&item.collected_at, time_filter)
+        && [
+            item.name.as_str(),
+            item.source.as_str(),
+            item.agent_id.as_str(),
+            item.file_path.as_deref().unwrap_or_default(),
+            item.preview.as_deref().unwrap_or_default(),
+        ]
+        .into_iter()
+        .any(|field| contains_ascii_case_insensitive(field, text_filter))
+}
+
+fn matches_loot_type_filter(item: &LootItem, type_filter: LootTypeFilter) -> bool {
+    match type_filter {
+        LootTypeFilter::All => true,
+        LootTypeFilter::Credentials => matches!(item.kind, LootKind::Credential),
+        LootTypeFilter::Files => matches!(item.kind, LootKind::File),
+        LootTypeFilter::Screenshots => matches!(item.kind, LootKind::Screenshot),
+    }
+}
+
+fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    let trimmed = needle.trim();
+    trimmed.is_empty() || haystack.to_ascii_lowercase().contains(&trimmed.to_ascii_lowercase())
+}
+
+fn loot_is_downloadable(item: &LootItem) -> bool {
+    matches!(item.kind, LootKind::File | LootKind::Screenshot) && item.content_base64.is_some()
+}
+
+fn download_loot_item(item: &LootItem) -> std::result::Result<String, String> {
+    let Some(encoded) = &item.content_base64 else {
+        return Err("This loot item does not include downloadable content.".to_owned());
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|error| format!("Failed to decode loot payload: {error}"))?;
+    let file_name = derive_download_file_name(item);
+    let output_dir = dirs::download_dir().unwrap_or_else(std::env::temp_dir);
+    let output_path = next_available_path(&output_dir.join(file_name));
+    std::fs::write(&output_path, bytes)
+        .map_err(|error| format!("Failed to save loot file: {error}"))?;
+    Ok(format!("Saved {}", output_path.display()))
+}
+
+fn derive_download_file_name(item: &LootItem) -> String {
+    let candidate = item
+        .file_path
+        .as_deref()
+        .and_then(|path| std::path::Path::new(path).file_name())
+        .and_then(|value| value.to_str())
+        .unwrap_or(item.name.as_str());
+    sanitize_file_name(candidate)
+}
+
+fn sanitize_file_name(name: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .map(|ch| match ch {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            _ => ch,
+        })
+        .collect();
+    if sanitized.trim().is_empty() { "loot.bin".to_owned() } else { sanitized }
+}
+
+fn next_available_path(path: &std::path::Path) -> std::path::PathBuf {
+    if !path.exists() {
+        return path.to_path_buf();
+    }
+
+    let stem = path.file_stem().and_then(|value| value.to_str()).unwrap_or("loot");
+    let extension = path.extension().and_then(|value| value.to_str()).unwrap_or_default();
+    for index in 1..1000 {
+        let candidate = if extension.is_empty() {
+            path.with_file_name(format!("{stem}-{index}"))
+        } else {
+            path.with_file_name(format!("{stem}-{index}.{extension}"))
+        };
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+
+    path.to_path_buf()
+}
+
+fn blank_if_empty<'a>(value: &'a str, fallback: &'a str) -> &'a str {
+    if value.trim().is_empty() { fallback } else { value }
+}
+
+fn human_size(size_bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+
+    let mut size = size_bytes as f64;
+    let mut unit = 0_usize;
+    while size >= 1024.0 && unit + 1 < UNITS.len() {
+        size /= 1024.0;
+        unit += 1;
+    }
+
+    if unit == 0 {
+        format!("{size_bytes} {}", UNITS[unit])
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::Parser;
-    use transport::AgentSummary;
+    use transport::{AgentSummary, LootItem};
 
     #[test]
     fn cli_uses_default_server_url() {
@@ -1010,6 +1289,7 @@ mod tests {
         assert!(app_state.listeners.is_empty());
         assert!(app_state.loot.is_empty());
         assert!(app_state.chat_messages.is_empty());
+        assert!(app_state.online_operators.is_empty());
     }
 
     #[test]
@@ -1119,5 +1399,49 @@ mod tests {
         assert_eq!(message.info.command_id, "Teamserver");
         assert_eq!(message.info.command.as_deref(), Some("note"));
         assert_eq!(message.info.arguments.as_deref(), Some("triaged"));
+    }
+
+    #[test]
+    fn build_chat_message_uses_chat_wire_shape() {
+        let Some(OperatorMessage::ChatMessage(message)) =
+            build_chat_message(Some("operator"), " hello team ")
+        else {
+            panic!("expected chat message");
+        };
+
+        assert_eq!(message.head.event, EventCode::Chat);
+        assert_eq!(
+            message.info.fields.get("Message"),
+            Some(&serde_json::Value::String("hello team".to_owned()))
+        );
+    }
+
+    #[test]
+    fn loot_filter_matches_type_agent_and_text() {
+        let item = LootItem {
+            kind: LootKind::Screenshot,
+            name: "desktop.png".to_owned(),
+            agent_id: "ABCD1234".to_owned(),
+            source: "download".to_owned(),
+            collected_at: "2026-03-10T12:00:00Z".to_owned(),
+            file_path: Some("C:/Temp/desktop.png".to_owned()),
+            size_bytes: Some(1024),
+            content_base64: None,
+            preview: Some("primary desktop".to_owned()),
+        };
+
+        assert!(loot_matches_filters(
+            &item,
+            LootTypeFilter::Screenshots,
+            "abcd",
+            "2026-03-10",
+            "desktop"
+        ));
+        assert!(!loot_matches_filters(&item, LootTypeFilter::Credentials, "", "", ""));
+    }
+
+    #[test]
+    fn sanitize_file_name_replaces_invalid_characters() {
+        assert_eq!(sanitize_file_name("C:\\Temp\\report?.txt"), "C__Temp_report_.txt");
     }
 }

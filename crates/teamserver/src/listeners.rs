@@ -460,6 +460,7 @@ const DEFAULT_FAKE_404_BODY: &str =
 const DEFAULT_HTTP_METHOD: &str = "POST";
 const MINIMUM_DEMON_CALLBACK_BYTES: usize = DemonHeader::SERIALIZED_LEN + 8;
 const SMB_PIPE_PREFIX: &str = r"\\.\pipe\";
+const MAX_SMB_FRAME_PAYLOAD_LEN: usize = 16 * 1024 * 1024;
 const HEADER_VALIDATION_IGNORES: [&str; 2] = ["connection", "accept-encoding"];
 
 #[derive(Clone, Debug)]
@@ -1184,6 +1185,14 @@ async fn read_smb_frame(stream: &mut LocalSocketStream) -> io::Result<Option<Smb
     let payload_len = usize::try_from(payload_len).map_err(|_| {
         io::Error::new(io::ErrorKind::InvalidData, "smb frame payload length overflowed usize")
     })?;
+    if payload_len > MAX_SMB_FRAME_PAYLOAD_LEN {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "smb frame payload length {payload_len} exceeds maximum of {MAX_SMB_FRAME_PAYLOAD_LEN} bytes"
+            ),
+        ));
+    }
     let mut payload = vec![0_u8; payload_len];
     stream.read_exact(&mut payload).await?;
     Ok(Some(SmbFrame { agent_id, payload }))
@@ -2140,20 +2149,23 @@ fn proxy_from_operator(
 
 #[cfg(test)]
 mod tests {
+    use std::io;
     use std::net::TcpListener as StdTcpListener;
     use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
         ListenerEventAction, ListenerManager, ListenerManagerError, ListenerStatus,
-        action_from_mark, listener_config_from_operator, operator_requests_start,
-        smb_local_socket_name,
+        MAX_SMB_FRAME_PAYLOAD_LEN, action_from_mark, listener_config_from_operator,
+        operator_requests_start, read_smb_frame, smb_local_socket_name,
     };
     use crate::{AgentRegistry, Database, EventBus, Job};
     use axum::http::StatusCode;
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use interprocess::local_socket::ListenerOptions;
     use interprocess::local_socket::tokio::Stream as LocalSocketStream;
+    use interprocess::local_socket::traits::tokio::Listener as _;
     use interprocess::local_socket::traits::tokio::Stream as _;
     use red_cell_common::AgentEncryptionInfo;
     use red_cell_common::crypto::{
@@ -2835,6 +2847,17 @@ mod tests {
         Ok(LocalSocketStream::connect(socket_name).await?)
     }
 
+    async fn connected_smb_stream_pair(
+        pipe_name: &str,
+    ) -> Result<(LocalSocketStream, LocalSocketStream), Box<dyn std::error::Error>> {
+        let socket_name = smb_local_socket_name(pipe_name)?;
+        let listener = ListenerOptions::new().name(socket_name).create_tokio()?;
+        let server = tokio::spawn(async move { listener.accept().await });
+        let client = connect_smb_stream(pipe_name).await?;
+        let server = server.await??;
+        Ok((client, server))
+    }
+
     async fn write_test_smb_frame(
         stream: &mut LocalSocketStream,
         agent_id: u32,
@@ -2855,6 +2878,25 @@ mod tests {
         let mut payload = vec![0_u8; payload_len];
         stream.read_exact(&mut payload).await?;
         Ok((agent_id, payload))
+    }
+
+    #[tokio::test]
+    async fn read_smb_frame_rejects_payloads_over_limit() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let pipe_name = unique_smb_pipe_name("oversize");
+        let (mut client, mut server) = connected_smb_stream_pair(&pipe_name).await?;
+        let oversized_len = u32::try_from(MAX_SMB_FRAME_PAYLOAD_LEN + 1)?;
+
+        client.write_u32_le(0x1234_5678).await?;
+        client.write_u32_le(oversized_len).await?;
+        client.flush().await?;
+
+        let error =
+            read_smb_frame(&mut server).await.expect_err("oversized frame should be rejected");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("exceeds maximum"), "unexpected error message: {error}");
+
+        Ok(())
     }
 
     fn unique_smb_pipe_name(suffix: &str) -> String {

@@ -58,6 +58,8 @@ async fn main() -> Result<()> {
     let plugins = PluginRuntime::initialize(
         database.clone(),
         agent_registry.clone(),
+        events.clone(),
+        sockets.clone(),
         profile.teamserver.plugins_dir.as_ref().map(PathBuf::from),
     )
     .await
@@ -69,6 +71,7 @@ async fn main() -> Result<()> {
         sockets.clone(),
         Some(plugins.clone()),
     );
+    plugins.attach_listener_manager(listeners.clone()).await;
     let payload_builder = PayloadBuilderService::from_profile(&profile)
         .context("failed to validate Demon build toolchain")?;
 

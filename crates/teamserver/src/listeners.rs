@@ -1428,18 +1428,18 @@ impl DnsListenerState {
     }
 
     async fn handle_download(&self, agent_id: u32, seq: u16) -> String {
-        let responses = self.responses.lock().await;
-        match responses.get(&agent_id) {
-            None => "wait".to_owned(),
-            Some(pending) => {
-                let idx = usize::from(seq);
-                let total = pending.chunks.len();
-                if idx >= total {
-                    "done".to_owned()
-                } else {
-                    format!("{} {}", total, pending.chunks[idx])
-                }
-            }
+        let mut responses = self.responses.lock().await;
+        let Some(pending) = responses.get(&agent_id) else {
+            return "wait".to_owned();
+        };
+
+        let idx = usize::from(seq);
+        let total = pending.chunks.len();
+        if idx >= total {
+            responses.remove(&agent_id);
+            "done".to_owned()
+        } else {
+            format!("{} {}", total, pending.chunks[idx])
         }
     }
 
@@ -3073,8 +3073,9 @@ mod tests {
     // ── DNS C2 unit tests ─────────────────────────────────────────────────────
 
     use super::{
-        DNS_HEADER_LEN, DNS_TYPE_TXT, base32hex_decode, base32hex_encode, build_dns_txt_response,
-        chunk_response_to_b32hex, parse_dns_c2_query, parse_dns_query,
+        DNS_HEADER_LEN, DNS_TYPE_TXT, DnsListenerState, DnsPendingResponse, base32hex_decode,
+        base32hex_encode, build_dns_txt_response, chunk_response_to_b32hex, parse_dns_c2_query,
+        parse_dns_query,
     };
     use tokio::net::UdpSocket as TokioUdpSocket;
 
@@ -3300,5 +3301,36 @@ mod tests {
         // ANCOUNT = 1
         let ancount = u16::from_be_bytes([buf[6], buf[7]]);
         assert_eq!(ancount, 1);
+    }
+
+    #[tokio::test]
+    async fn dns_listener_download_done_removes_pending_response() {
+        let database = Database::connect_in_memory().await.expect("database creation failed");
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let config = red_cell_common::DnsListenerConfig {
+            name: "dns-cleanup".to_owned(),
+            host_bind: "127.0.0.1".to_owned(),
+            port_bind: 0,
+            domain: "c2.example.com".to_owned(),
+            record_types: vec!["TXT".to_owned()],
+            kill_date: None,
+            working_hours: None,
+        };
+        let state = DnsListenerState::new(&config, registry, events, database, sockets, None);
+        let agent_id = 0xDEAD_BEEF;
+
+        state.responses.lock().await.insert(
+            agent_id,
+            DnsPendingResponse { chunks: vec!["AAA".to_owned(), "BBB".to_owned()] },
+        );
+
+        assert_eq!(state.handle_download(agent_id, 0).await, "2 AAA");
+        assert!(state.responses.lock().await.contains_key(&agent_id));
+
+        assert_eq!(state.handle_download(agent_id, 2).await, "done");
+        assert!(!state.responses.lock().await.contains_key(&agent_id));
+        assert_eq!(state.handle_download(agent_id, 0).await, "wait");
     }
 }

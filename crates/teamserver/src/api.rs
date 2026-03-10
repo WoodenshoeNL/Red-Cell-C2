@@ -1304,6 +1304,7 @@ mod tests {
                 connections: OperatorConnectionManager::new(),
                 agent_registry: agent_registry.clone(),
                 listeners,
+                payload_builder: crate::PayloadBuilderService::disabled_for_tests(),
                 sockets,
             }),
             agent_registry,

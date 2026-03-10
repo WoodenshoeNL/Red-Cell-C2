@@ -21,7 +21,8 @@ use red_cell_common::demon::{
 };
 use red_cell_common::operator::{
     AgentEncryptionInfo as OperatorAgentEncryptionInfo, AgentInfo as OperatorAgentInfo,
-    AgentPivotsInfo, EventCode, FlatInfo, Message, MessageHead, OperatorMessage, TeamserverLogInfo,
+    AgentPivotsInfo, BuildPayloadMessageInfo, BuildPayloadResponseInfo, EventCode, FlatInfo,
+    Message, MessageHead, OperatorMessage, TeamserverLogInfo,
 };
 use serde_json::Value;
 use thiserror::Error;
@@ -32,9 +33,9 @@ use uuid::Uuid;
 
 use crate::{
     AgentRegistry, AuthError, AuthService, AuthenticationFailure, AuthenticationResult, EventBus,
-    Job, ListenerEventAction, ListenerManager, SocketRelayManager, action_from_mark,
-    authorize_websocket_command, listener_config_from_operator, listener_error_event,
-    listener_event_for_action, listener_removed_event, login_failure_message,
+    Job, ListenerEventAction, ListenerManager, PayloadBuilderService, SocketRelayManager,
+    action_from_mark, authorize_websocket_command, listener_config_from_operator,
+    listener_error_event, listener_event_for_action, listener_removed_event, login_failure_message,
     login_success_message, operator_requests_start,
 };
 
@@ -97,6 +98,7 @@ where
     ListenerManager: FromRef<S>,
     AgentRegistry: FromRef<S>,
     SocketRelayManager: FromRef<S>,
+    PayloadBuilderService: FromRef<S>,
     OperatorConnectionManager: FromRef<S>,
 {
     Router::new().route("/", get(websocket_handler::<S>))
@@ -114,6 +116,7 @@ where
     ListenerManager: FromRef<S>,
     AgentRegistry: FromRef<S>,
     SocketRelayManager: FromRef<S>,
+    PayloadBuilderService: FromRef<S>,
     OperatorConnectionManager: FromRef<S>,
 {
     websocket.on_upgrade(move |socket| handle_operator_socket(state, socket))
@@ -127,6 +130,7 @@ where
     ListenerManager: FromRef<S>,
     AgentRegistry: FromRef<S>,
     SocketRelayManager: FromRef<S>,
+    PayloadBuilderService: FromRef<S>,
     OperatorConnectionManager: FromRef<S>,
 {
     let connection_id = Uuid::new_v4();
@@ -265,6 +269,7 @@ where
     ListenerManager: FromRef<S>,
     AgentRegistry: FromRef<S>,
     SocketRelayManager: FromRef<S>,
+    PayloadBuilderService: FromRef<S>,
 {
     let Some(frame) = incoming else {
         return Ok(SocketLoopControl::Break);
@@ -344,11 +349,13 @@ async fn dispatch_operator_command<S>(
     ListenerManager: FromRef<S>,
     AgentRegistry: FromRef<S>,
     SocketRelayManager: FromRef<S>,
+    PayloadBuilderService: FromRef<S>,
 {
     let events = EventBus::from_ref(state);
     let listeners = ListenerManager::from_ref(state);
     let registry = AgentRegistry::from_ref(state);
     let sockets = SocketRelayManager::from_ref(state);
+    let payload_builder = PayloadBuilderService::from_ref(state);
 
     match message {
         OperatorMessage::ListenerNew(message) => {
@@ -475,6 +482,53 @@ async fn dispatch_operator_command<S>(
             {
                 events.broadcast(teamserver_log_event(&session.username, &error.to_string()));
             }
+        }
+        OperatorMessage::BuildPayloadRequest(message) => {
+            let actor = session.username.clone();
+            let events = events.clone();
+            let listeners = listeners.clone();
+            let payload_builder = payload_builder.clone();
+
+            tokio::spawn(async move {
+                let summary = match listeners.summary(&message.info.listener).await {
+                    Ok(summary) => summary,
+                    Err(error) => {
+                        events.broadcast(build_payload_message_event(
+                            &actor,
+                            "Error",
+                            &error.to_string(),
+                        ));
+                        return;
+                    }
+                };
+
+                match payload_builder
+                    .build_payload(&summary.config, &message.info, |entry| {
+                        events.broadcast(build_payload_message_event(
+                            &actor,
+                            &entry.level,
+                            &entry.message,
+                        ));
+                    })
+                    .await
+                {
+                    Ok(artifact) => {
+                        events.broadcast(build_payload_response_event(
+                            &actor,
+                            &artifact.file_name,
+                            &artifact.format,
+                            artifact.bytes.as_slice(),
+                        ));
+                    }
+                    Err(error) => {
+                        events.broadcast(build_payload_message_event(
+                            &actor,
+                            "Error",
+                            &error.to_string(),
+                        ));
+                    }
+                }
+            });
         }
         other => {
             debug!(
@@ -1385,6 +1439,39 @@ fn teamserver_log_event(user: &str, text: &str) -> OperatorMessage {
     })
 }
 
+fn build_payload_message_event(user: &str, level: &str, text: &str) -> OperatorMessage {
+    OperatorMessage::BuildPayloadMessage(Message {
+        head: MessageHead {
+            event: EventCode::Gate,
+            user: user.to_owned(),
+            timestamp: OffsetDateTime::now_utc().unix_timestamp().to_string(),
+            one_time: String::new(),
+        },
+        info: BuildPayloadMessageInfo { message_type: level.to_owned(), message: text.to_owned() },
+    })
+}
+
+fn build_payload_response_event(
+    user: &str,
+    file_name: &str,
+    format: &str,
+    bytes: &[u8],
+) -> OperatorMessage {
+    OperatorMessage::BuildPayloadResponse(Message {
+        head: MessageHead {
+            event: EventCode::Gate,
+            user: user.to_owned(),
+            timestamp: OffsetDateTime::now_utc().unix_timestamp().to_string(),
+            one_time: String::new(),
+        },
+        info: BuildPayloadResponseInfo {
+            payload_array: BASE64_STANDARD.encode(bytes),
+            format: format.to_owned(),
+            file_name: file_name.to_owned(),
+        },
+    })
+}
+
 #[derive(Debug, Error)]
 enum SnapshotSyncError {
     #[error(transparent)]
@@ -1551,8 +1638,8 @@ mod tests {
         routes, teamserver_log_event, write_len_prefixed_bytes, write_u32,
     };
     use crate::{
-        AgentRegistry, AuthService, Database, EventBus, ListenerManager, SocketRelayManager,
-        hash_password,
+        AgentRegistry, AuthService, Database, EventBus, ListenerManager, PayloadBuilderService,
+        SocketRelayManager, hash_password,
     };
 
     #[derive(Clone)]
@@ -1562,6 +1649,7 @@ mod tests {
         connections: OperatorConnectionManager,
         registry: AgentRegistry,
         listeners: ListenerManager,
+        payload_builder: PayloadBuilderService,
         sockets: SocketRelayManager,
     }
 
@@ -1605,6 +1693,7 @@ mod tests {
                 connections: OperatorConnectionManager::new(),
                 registry: registry.clone(),
                 listeners: ListenerManager::new(database, registry, events, sockets.clone()),
+                payload_builder: PayloadBuilderService::disabled_for_tests(),
                 sockets,
             }
         }
@@ -1643,6 +1732,12 @@ mod tests {
     impl FromRef<TestState> for SocketRelayManager {
         fn from_ref(input: &TestState) -> Self {
             input.sockets.clone()
+        }
+    }
+
+    impl FromRef<TestState> for PayloadBuilderService {
+        fn from_ref(input: &TestState) -> Self {
+            input.payload_builder.clone()
         }
     }
 

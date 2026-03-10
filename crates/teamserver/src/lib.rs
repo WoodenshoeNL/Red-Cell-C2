@@ -9,6 +9,7 @@ pub mod demon;
 pub mod dispatch;
 pub mod events;
 pub mod listeners;
+pub mod payload_builder;
 pub mod rbac;
 pub mod sockets;
 pub mod websocket;
@@ -38,6 +39,9 @@ pub use listeners::{
     ListenerEventAction, ListenerManager, ListenerManagerError, ListenerMarkRequest,
     ListenerSummary, action_from_mark, listener_config_from_operator, listener_error_event,
     listener_event_for_action, listener_removed_event, operator_requests_start,
+};
+pub use payload_builder::{
+    BuildProgress, PayloadArtifact, PayloadBuildError, PayloadBuilderService,
 };
 pub use rbac::{
     AdminAccess, AuthenticatedOperator, AuthorizationError, ListenerManagementAccess, Permission,

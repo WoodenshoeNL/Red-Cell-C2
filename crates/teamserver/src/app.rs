@@ -5,7 +5,7 @@ use red_cell_common::config::Profile;
 
 use crate::{
     AgentRegistry, ApiRuntime, AuthService, Database, EventBus, ListenerManager,
-    OperatorConnectionManager, SocketRelayManager,
+    OperatorConnectionManager, PayloadBuilderService, SocketRelayManager,
 };
 
 /// Shared state injected into Axum routes and middleware.
@@ -27,6 +27,8 @@ pub struct TeamserverState {
     pub agent_registry: AgentRegistry,
     /// Listener lifecycle management.
     pub listeners: ListenerManager,
+    /// Demon payload compilation service.
+    pub payload_builder: PayloadBuilderService,
     /// Pivot socket relay manager.
     pub sockets: SocketRelayManager,
 }
@@ -64,6 +66,12 @@ impl FromRef<TeamserverState> for OperatorConnectionManager {
 impl FromRef<TeamserverState> for ListenerManager {
     fn from_ref(input: &TeamserverState) -> Self {
         input.listeners.clone()
+    }
+}
+
+impl FromRef<TeamserverState> for PayloadBuilderService {
+    fn from_ref(input: &TeamserverState) -> Self {
+        input.payload_builder.clone()
     }
 }
 

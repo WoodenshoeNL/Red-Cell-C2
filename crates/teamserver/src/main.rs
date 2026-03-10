@@ -14,8 +14,8 @@ use axum_server::{Handle, tls_rustls::RustlsConfig};
 use clap::Parser;
 use red_cell::{
     AgentRegistry, ApiRuntime, AuthService, Database, EventBus, ListenerManager,
-    ListenerManagerError, OperatorConnectionManager, SocketRelayManager, TeamserverState,
-    api_routes, websocket_routes,
+    ListenerManagerError, OperatorConnectionManager, PayloadBuilderService, SocketRelayManager,
+    TeamserverState, api_routes, websocket_routes,
 };
 use red_cell_common::config::{Profile, ProfileValidationError};
 use red_cell_common::tls::{
@@ -61,6 +61,8 @@ async fn main() -> Result<()> {
         events.clone(),
         sockets.clone(),
     );
+    let payload_builder = PayloadBuilderService::from_profile(&profile)
+        .context("failed to validate Demon build toolchain")?;
 
     listeners.sync_profile(&profile).await?;
     listeners.restore_running().await?;
@@ -79,6 +81,7 @@ async fn main() -> Result<()> {
         agent_registry,
         sockets,
         listeners,
+        payload_builder,
     });
     let handle = Handle::new();
 
@@ -266,7 +269,7 @@ mod tests {
     use clap::Parser;
     use red_cell::{
         AgentRegistry, ApiRuntime, AuthService, Database, EventBus, ListenerManager,
-        OperatorConnectionManager, SocketRelayManager, TeamserverState,
+        OperatorConnectionManager, PayloadBuilderService, SocketRelayManager, TeamserverState,
     };
     use red_cell_common::config::{OperatorRole, Profile};
     use tempfile::NamedTempFile;
@@ -385,6 +388,7 @@ mod tests {
             connections: OperatorConnectionManager::new(),
             agent_registry: agent_registry.clone(),
             listeners: ListenerManager::new(database, agent_registry, events, sockets.clone()),
+            payload_builder: PayloadBuilderService::disabled_for_tests(),
             sockets,
             profile,
         };
@@ -397,6 +401,7 @@ mod tests {
         let _ = AgentRegistry::from_ref(&state);
         let _ = SocketRelayManager::from_ref(&state);
         let _ = ListenerManager::from_ref(&state);
+        let _ = PayloadBuilderService::from_ref(&state);
     }
 
     #[test]

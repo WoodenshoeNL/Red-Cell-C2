@@ -1981,11 +1981,131 @@ async fn handle_process_command_callback(
                 None,
             )?);
         }
-        other => {
-            return Err(CommandDispatchError::InvalidCallbackPayload {
-                command_id: u32::from(DemonCommand::CommandProc),
-                message: format!("unsupported process callback subcommand {other:?}"),
-            });
+        DemonProcessCommand::Modules => {
+            let pid = parser.read_u32("proc modules pid")?;
+            let mut rows = Vec::new();
+            while !parser.is_empty() {
+                let name = parser.read_string("module name")?;
+                let base = parser.read_u64("module base address")?;
+                rows.push(ModuleRow { name, base });
+            }
+
+            let output = format_module_table(&rows);
+            let mut extra = BTreeMap::new();
+            extra.insert(
+                "ModuleRows".to_owned(),
+                Value::Array(
+                    rows.iter()
+                        .map(|r| {
+                            json!({
+                                "Name": r.name,
+                                "Base": format!("0x{:016X}", r.base),
+                            })
+                        })
+                        .collect(),
+                ),
+            );
+
+            events.broadcast(agent_response_event_with_extra(
+                agent_id,
+                u32::from(DemonCommand::CommandProc),
+                request_id,
+                "Info",
+                &format!("Process Modules (PID: {pid}):"),
+                extra,
+                output,
+            )?);
+        }
+        DemonProcessCommand::Grep => {
+            let mut rows = Vec::new();
+            while !parser.is_empty() {
+                let name = parser.read_utf16("proc grep name")?;
+                let pid = parser.read_u32("proc grep pid")?;
+                let ppid = parser.read_u32("proc grep ppid")?;
+                let user_raw = parser.read_bytes("proc grep user")?;
+                let user = String::from_utf8_lossy(&user_raw).trim_end_matches('\0').to_owned();
+                let arch_val = parser.read_u32("proc grep arch")?;
+                let arch = if arch_val == 86 { "x86" } else { "x64" };
+                rows.push(GrepRow { name, pid, ppid, user, arch: arch.to_owned() });
+            }
+
+            let output = format_grep_table(&rows);
+            let mut extra = BTreeMap::new();
+            extra.insert(
+                "GrepRows".to_owned(),
+                Value::Array(
+                    rows.iter()
+                        .map(|r| {
+                            json!({
+                                "Name": r.name,
+                                "PID": r.pid,
+                                "PPID": r.ppid,
+                                "User": r.user,
+                                "Arch": r.arch,
+                            })
+                        })
+                        .collect(),
+                ),
+            );
+
+            events.broadcast(agent_response_event_with_extra(
+                agent_id,
+                u32::from(DemonCommand::CommandProc),
+                request_id,
+                "Info",
+                "Process Grep:",
+                extra,
+                output,
+            )?);
+        }
+        DemonProcessCommand::Memory => {
+            let pid = parser.read_u32("proc memory pid")?;
+            let query_protect = parser.read_u32("proc memory query protect")?;
+            let mut rows = Vec::new();
+            while !parser.is_empty() {
+                let base = parser.read_u64("memory region base")?;
+                let size = parser.read_u32("memory region size")?;
+                let protect = parser.read_u32("memory region protect")?;
+                let state = parser.read_u32("memory region state")?;
+                let mem_type = parser.read_u32("memory region type")?;
+                rows.push(MemoryRow { base, size, protect, state, mem_type });
+            }
+
+            let output = format_memory_table(&rows);
+            let mut extra = BTreeMap::new();
+            extra.insert(
+                "MemoryRows".to_owned(),
+                Value::Array(
+                    rows.iter()
+                        .map(|r| {
+                            json!({
+                                "Base": format!("0x{:016X}", r.base),
+                                "Size": format!("0x{:X}", r.size),
+                                "Protect": format_memory_protect(r.protect),
+                                "State": format_memory_state(r.state),
+                                "Type": format_memory_type(r.mem_type),
+                            })
+                        })
+                        .collect(),
+                ),
+            );
+
+            events.broadcast(agent_response_event_with_extra(
+                agent_id,
+                u32::from(DemonCommand::CommandProc),
+                request_id,
+                "Info",
+                &format!(
+                    "Process Memory (PID: {pid}, Filter: {}):",
+                    if query_protect == 0 {
+                        "All".to_owned()
+                    } else {
+                        format_memory_protect(query_protect)
+                    }
+                ),
+                extra,
+                output,
+            )?);
         }
     }
 
@@ -2996,6 +3116,30 @@ struct ProcessRow {
     user: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModuleRow {
+    name: String,
+    base: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GrepRow {
+    name: String,
+    pid: u32,
+    ppid: u32,
+    user: String,
+    arch: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MemoryRow {
+    base: u64,
+    size: u32,
+    protect: u32,
+    state: u32,
+    mem_type: u32,
+}
+
 fn format_process_table(rows: &[ProcessRow]) -> String {
     if rows.is_empty() {
         return String::new();
@@ -3068,6 +3212,109 @@ fn format_process_row(
         user = user,
         name_width = name_width,
     )
+}
+
+fn format_module_table(rows: &[ModuleRow]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+
+    let name_width = rows.iter().map(|r| r.name.len()).max().unwrap_or(6).max(6);
+    let mut output = format!("\n {:<name_width$}   {:>18}\n", "Module", "Base Address");
+    output.push_str(&format!(" {:<name_width$}   {:>18}\n", "------", "------------"));
+
+    for row in rows {
+        output.push_str(&format!(" {:<name_width$}   0x{:016X}\n", row.name, row.base));
+    }
+
+    output
+}
+
+fn format_grep_table(rows: &[GrepRow]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+
+    let name_width = rows.iter().map(|r| r.name.len()).max().unwrap_or(4).max(4);
+    let user_width = rows.iter().map(|r| r.user.len()).max().unwrap_or(4).max(4);
+    let mut output = format!(
+        "\n {:<name_width$}   {:<8}   {:<8}   {:<user_width$}   {}\n",
+        "Name", "PID", "PPID", "User", "Arch"
+    );
+    output.push_str(&format!(
+        " {:<name_width$}   {:<8}   {:<8}   {:<user_width$}   {}\n",
+        "----", "---", "----", "----", "----"
+    ));
+
+    for row in rows {
+        output.push_str(&format!(
+            " {:<name_width$}   {:<8}   {:<8}   {:<user_width$}   {}\n",
+            row.name, row.pid, row.ppid, row.user, row.arch
+        ));
+    }
+
+    output
+}
+
+fn format_memory_table(rows: &[MemoryRow]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+
+    let mut output = format!(
+        "\n {:>18}   {:>12}   {:<24}   {:<12}   {}\n",
+        "Base Address", "Size", "Protection", "State", "Type"
+    );
+    output.push_str(&format!(
+        " {:>18}   {:>12}   {:<24}   {:<12}   {}\n",
+        "------------", "----", "----------", "-----", "----"
+    ));
+
+    for row in rows {
+        output.push_str(&format!(
+            " 0x{:016X}   0x{:>10X}   {:<24}   {:<12}   {}\n",
+            row.base,
+            row.size,
+            format_memory_protect(row.protect),
+            format_memory_state(row.state),
+            format_memory_type(row.mem_type),
+        ));
+    }
+
+    output
+}
+
+fn format_memory_protect(protect: u32) -> String {
+    match protect {
+        0x01 => "PAGE_NOACCESS".to_owned(),
+        0x02 => "PAGE_READONLY".to_owned(),
+        0x04 => "PAGE_READWRITE".to_owned(),
+        0x08 => "PAGE_WRITECOPY".to_owned(),
+        0x10 => "PAGE_EXECUTE".to_owned(),
+        0x20 => "PAGE_EXECUTE_READ".to_owned(),
+        0x40 => "PAGE_EXECUTE_READWRITE".to_owned(),
+        0x80 => "PAGE_EXECUTE_WRITECOPY".to_owned(),
+        0x100 => "PAGE_GUARD".to_owned(),
+        other => format!("0x{other:X}"),
+    }
+}
+
+fn format_memory_state(state: u32) -> String {
+    match state {
+        0x1000 => "MEM_COMMIT".to_owned(),
+        0x2000 => "MEM_RESERVE".to_owned(),
+        0x10000 => "MEM_FREE".to_owned(),
+        other => format!("0x{other:X}"),
+    }
+}
+
+fn format_memory_type(mem_type: u32) -> String {
+    match mem_type {
+        0x20000 => "MEM_PRIVATE".to_owned(),
+        0x40000 => "MEM_MAPPED".to_owned(),
+        0x1000000 => "MEM_IMAGE".to_owned(),
+        other => format!("0x{other:X}"),
+    }
 }
 
 fn format_rportfwd_list(parser: &mut CallbackParser<'_>) -> Result<String, CommandDispatchError> {
@@ -4799,6 +5046,189 @@ mod tests {
         };
         let msg = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
         assert!(msg.contains("Failed to list existing tokens"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_process_modules_handler_broadcasts_module_list()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonProcessCommand::Modules));
+        add_u32(&mut payload, 1234);
+        add_bytes(&mut payload, b"ntdll.dll");
+        add_u64(&mut payload, 0x7FFA_0000_0000);
+        add_bytes(&mut payload, b"kernel32.dll");
+        add_u64(&mut payload, 0x7FFA_1000_0000);
+
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandProc), 10, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or_else(|| "modules response missing".to_owned())?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Process Modules (PID: 1234):".to_owned()))
+        );
+        assert_eq!(message.info.extra.get("Type"), Some(&Value::String("Info".to_owned())));
+        let rows = message
+            .info
+            .extra
+            .get("ModuleRows")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "structured module rows missing".to_owned())?;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].get("Name"), Some(&Value::String("ntdll.dll".to_owned())));
+        assert_eq!(rows[0].get("Base"), Some(&Value::String("0x00007FFA00000000".to_owned())));
+        assert_eq!(rows[1].get("Name"), Some(&Value::String("kernel32.dll".to_owned())));
+        assert!(message.info.output.contains("ntdll.dll"));
+        assert!(message.info.output.contains("kernel32.dll"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_process_grep_handler_broadcasts_matching_processes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonProcessCommand::Grep));
+        add_utf16(&mut payload, "svchost.exe");
+        add_u32(&mut payload, 800);
+        add_u32(&mut payload, 4);
+        add_bytes(&mut payload, b"NT AUTHORITY\\SYSTEM");
+        add_u32(&mut payload, 64);
+
+        dispatcher
+            .dispatch(0x1122_3344, u32::from(DemonCommand::CommandProc), 11, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or_else(|| "grep response missing".to_owned())?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Process Grep:".to_owned()))
+        );
+        let rows = message
+            .info
+            .extra
+            .get("GrepRows")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "structured grep rows missing".to_owned())?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("Name"), Some(&Value::String("svchost.exe".to_owned())));
+        assert_eq!(rows[0].get("PID"), Some(&Value::from(800)));
+        assert_eq!(rows[0].get("PPID"), Some(&Value::from(4)));
+        assert_eq!(rows[0].get("Arch"), Some(&Value::String("x64".to_owned())));
+        assert!(message.info.output.contains("svchost.exe"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_process_memory_handler_broadcasts_memory_regions()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonProcessCommand::Memory));
+        add_u32(&mut payload, 5678);
+        add_u32(&mut payload, 0x40); // PAGE_EXECUTE_READWRITE
+        add_u64(&mut payload, 0x0000_0140_0000_0000);
+        add_u32(&mut payload, 0x1000);
+        add_u32(&mut payload, 0x40); // PAGE_EXECUTE_READWRITE
+        add_u32(&mut payload, 0x1000); // MEM_COMMIT
+        add_u32(&mut payload, 0x1000000); // MEM_IMAGE
+
+        dispatcher
+            .dispatch(0xDEAD_BEEF, u32::from(DemonCommand::CommandProc), 12, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or_else(|| "memory response missing".to_owned())?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert!(
+            message
+                .info
+                .extra
+                .get("Message")
+                .and_then(Value::as_str)
+                .is_some_and(|m| m.contains("PID: 5678"))
+        );
+        let rows = message
+            .info
+            .extra
+            .get("MemoryRows")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "structured memory rows missing".to_owned())?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("Base"), Some(&Value::String("0x0000014000000000".to_owned())));
+        assert_eq!(rows[0].get("Size"), Some(&Value::String("0x1000".to_owned())));
+        assert_eq!(
+            rows[0].get("Protect"),
+            Some(&Value::String("PAGE_EXECUTE_READWRITE".to_owned()))
+        );
+        assert_eq!(rows[0].get("State"), Some(&Value::String("MEM_COMMIT".to_owned())));
+        assert_eq!(rows[0].get("Type"), Some(&Value::String("MEM_IMAGE".to_owned())));
+        assert!(message.info.output.contains("PAGE_EXECUTE_READWRITE"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_process_modules_handler_handles_empty_module_list()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonProcessCommand::Modules));
+        add_u32(&mut payload, 9999);
+
+        dispatcher
+            .dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandProc), 13, &payload)
+            .await?;
+
+        let event =
+            receiver.recv().await.ok_or_else(|| "empty modules response missing".to_owned())?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        let rows = message
+            .info
+            .extra
+            .get("ModuleRows")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "module rows should be present even if empty".to_owned())?;
+        assert!(rows.is_empty());
         Ok(())
     }
 

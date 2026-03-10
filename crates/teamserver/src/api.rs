@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use axum::extract::{FromRequestParts, Path, Query, Request, State};
 use axum::http::header::AUTHORIZATION;
-use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
+use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{HeaderMap, StatusCode, request::Parts};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -276,8 +276,16 @@ impl IntoResponse for ApiAuthError {
             Self::PermissionDenied { .. } => {
                 json_error_response(StatusCode::FORBIDDEN, "forbidden", self.to_string())
             }
-            Self::RateLimited { .. } => {
-                json_error_response(StatusCode::TOO_MANY_REQUESTS, "rate_limited", self.to_string())
+            Self::RateLimited { retry_after_seconds } => {
+                let mut response = json_error_response(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "rate_limited",
+                    self.to_string(),
+                );
+                if let Ok(value) = retry_after_seconds.to_string().parse() {
+                    response.headers_mut().insert(RETRY_AFTER, value);
+                }
+                response
             }
             Self::MissingIdentity => json_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -2286,6 +2294,7 @@ mod tests {
             .expect("response");
 
         assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(second.headers().get(RETRY_AFTER).and_then(|v| v.to_str().ok()), Some("60"),);
 
         let body = read_json(second).await;
         assert_eq!(body["error"]["code"], "rate_limited");

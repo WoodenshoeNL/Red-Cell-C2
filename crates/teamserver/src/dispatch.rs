@@ -1703,7 +1703,7 @@ async fn handle_filesystem_callback(
             let (kind, message) = if success {
                 ("Info", format!("File content of {path} ({}):", output.len()))
             } else {
-                ("Erro", format!("Failed to read file: {path}"))
+                ("Error", format!("Failed to read file: {path}"))
             };
             events.broadcast(agent_response_event(
                 agent_id,
@@ -2760,7 +2760,7 @@ async fn handle_kerberos_callback(
                     agent_id,
                     u32::from(DemonCommand::CommandKerberos),
                     request_id,
-                    "Erro",
+                    "Error",
                     "Failed to obtain the current logon ID",
                     None,
                 )?);
@@ -2785,7 +2785,7 @@ async fn handle_kerberos_callback(
                     agent_id,
                     u32::from(DemonCommand::CommandKerberos),
                     request_id,
-                    "Erro",
+                    "Error",
                     "Failed to list all kerberos tickets",
                     None,
                 )?);
@@ -2807,7 +2807,7 @@ async fn handle_kerberos_callback(
             let (kind, message) = if success != 0 {
                 ("Good", "Successfully purged the Kerberos ticket")
             } else {
-                ("Erro", "Failed to purge the kerberos ticket")
+                ("Error", "Failed to purge the kerberos ticket")
             };
             events.broadcast(agent_response_event(
                 agent_id,
@@ -2823,7 +2823,7 @@ async fn handle_kerberos_callback(
             let (kind, message) = if success != 0 {
                 ("Good", "Successfully imported the Kerberos ticket")
             } else {
-                ("Erro", "Failed to import the kerberos ticket")
+                ("Error", "Failed to import the kerberos ticket")
             };
             events.broadcast(agent_response_event(
                 agent_id,
@@ -2871,7 +2871,7 @@ async fn handle_socket_callback(
                 )
             } else {
                 (
-                    "Erro",
+                    "Error",
                     format!(
                         "Failed to start reverse port forward on {local_addr}:{local_port} to {forward_addr}:{forward_port}"
                     ),
@@ -2922,7 +2922,7 @@ async fn handle_socket_callback(
             let (kind, message) = if success != 0 {
                 ("Good", "Successful closed and removed all rportfwds")
             } else {
-                ("Erro", "Failed to closed and remove all rportfwds")
+                ("Error", "Failed to closed and remove all rportfwds")
             };
             events.broadcast(agent_response_event(
                 agent_id,
@@ -2943,7 +2943,7 @@ async fn handle_socket_callback(
                     agent_id,
                     u32::from(DemonCommand::CommandSocket),
                     request_id,
-                    "Erro",
+                    "Error",
                     &format!("Failed to read from socks target {socket_id}: {error_code}"),
                     None,
                 )?);
@@ -2965,7 +2965,7 @@ async fn handle_socket_callback(
                     agent_id,
                     u32::from(DemonCommand::CommandSocket),
                     request_id,
-                    "Erro",
+                    "Error",
                     &format!("Failed to write to socks target {socket_id}: {error_code}"),
                     None,
                 )?);

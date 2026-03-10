@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 21 | 0 |
+| Tasks closed | 0 | 25 | 0 |
 | Bugs filed against | 0 | 2 | 0 |
-| Bug rate (bugs/task) | N/A | 0.10 | N/A |
-| Quality score | N/A | 90% | N/A |
+| Bug rate (bugs/task) | N/A | 0.08 | N/A |
+| Quality score | N/A | 92% | N/A |
 
 ## Violation Breakdown
 
@@ -135,3 +135,13 @@ Build: passed (cargo check + clippy -D warnings + cargo test: 74 passed)
 | Cursor | 0 | 0 | No activity this run |
 
 Build: passed (cargo check + clippy -D warnings + cargo test: 74 unit + 1 e2e = 75 tests)
+
+### QA Review — 2026-03-10 22:00 — 5b4e5ec..f4df7a7
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA loop only |
+| Codex | 4 | 0 | Closed red-cell-c2-2jw (DNS upload expiry moved to background timer via tokio::select!), red-cell-c2-2g6 (echo original qtype in DNS question section), red-cell-c2-uos (DNS upload hardening: chunk total cap 256, session cap 1000, inconsistent-total rejection), red-cell-c2-1am (reject DNS response packets via QR-bit check). All fixes include unit tests. red-cell-c2-1c0 (responses map leak) newly claimed. |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (cargo check + clippy -D warnings + cargo test: 74 passed)

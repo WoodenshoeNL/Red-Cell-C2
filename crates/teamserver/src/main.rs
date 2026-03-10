@@ -262,6 +262,7 @@ fn profile_listener_names(profile: &Profile) -> Vec<String> {
     names.extend(profile.listeners.http.iter().map(|listener| listener.name.clone()));
     names.extend(profile.listeners.smb.iter().map(|listener| listener.name.clone()));
     names.extend(profile.listeners.external.iter().map(|listener| listener.name.clone()));
+    names.extend(profile.listeners.dns.iter().map(|listener| listener.name.clone()));
     names
 }
 
@@ -483,6 +484,13 @@ mod tests {
                 Name = "ext"
                 Endpoint = "svc"
               }]
+              Dns = [{
+                Name = "dns"
+                HostBind = "127.0.0.1"
+                PortBind = 5353
+                Domain = "c2.example.com"
+                RecordTypes = ["TXT"]
+              }]
             }
 
             Demon {}
@@ -490,6 +498,6 @@ mod tests {
         )
         .expect("profile should parse");
 
-        assert_eq!(profile_listener_names(&profile), vec!["http", "smb", "ext"]);
+        assert_eq!(profile_listener_names(&profile), vec!["http", "smb", "ext", "dns"]);
     }
 }

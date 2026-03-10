@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 15 | 0 |
+| Tasks closed | 0 | 17 | 0 |
 | Bugs filed against | 0 | 2 | 0 |
-| Bug rate (bugs/task) | N/A | 0.13 | N/A |
-| Quality score | N/A | 87% | N/A |
+| Bug rate (bugs/task) | N/A | 0.12 | N/A |
+| Quality score | N/A | 88% | N/A |
 
 ## Violation Breakdown
 
@@ -105,3 +105,13 @@ Note: red-cell-c2-pmq (process list panel) still in_progress — dependency on s
 | Cursor | 0 | 0 | No activity this run |
 
 Build: passed (cargo check + clippy -D warnings + cargo test: 279 passed)
+
+### QA Review — 2026-03-10 20:42 — d61818c..4c15400
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA loop only |
+| Codex | 2 | 0 | Closed red-cell-c2-t9k (PyO3 client embed) and red-cell-c2-vm2 (Python script manager UI). Both features well-implemented: thiserror errors, no unwrap in production paths, 6 unit tests in python.rs, test coverage for local_config changes. |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (cargo check + clippy -D warnings + cargo test: all passed)

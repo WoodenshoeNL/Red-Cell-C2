@@ -163,15 +163,35 @@ Look for features that are partially stubbed but silently do nothing:
 
 ---
 
-## Step 6 — File Issues for Everything Found
+## Step 6 — Attribute Findings to Agents
 
-For each real finding, create a beads issue. Be precise — include the file path, line number,
-and what the correct behavior should be.
+Before filing issues, determine which agent wrote the problematic code. Use `git log` to
+find the commit that introduced each finding, then check its `Co-Authored-By` line.
+
+```bash
+# Find which agent last touched a specific file
+git log --format="%H %s" -- path/to/file.rs | head -5 | while read hash title; do
+  agent=$(git show "$hash" --no-patch --format="%b" \
+    | grep "Co-Authored-By:" | sed 's/Co-Authored-By: //' | head -1)
+  echo "$hash | ${agent:-unknown} | $title"
+done
+```
+
+Keep a mental tally per agent: how many findings, and of what category.
+
+---
+
+## Step 7 — File Issues for Everything Found
+
+For each real finding, create a beads issue. **Always include the responsible agent** so the
+scorecard can be updated accurately.
 
 ```bash
 br create \
   --title="<short, specific title>" \
-  --description="<file:line — what is wrong, why it matters, what the fix should be>" \
+  --description="Introduced by: <agent name>
+
+<file:line — what is wrong, why it matters, what the fix should be>" \
   --type=bug \
   --priority=<1 for security/crash, 2 for correctness, 3 for quality, 4 for polish>
 ```
@@ -182,25 +202,66 @@ If the finding blocks existing work:
 br dep add <existing-issue-id> <new-issue-id>
 ```
 
-After filing all issues, sync:
+---
+
+## Step 8 — Update Agent Scorecard
+
+Read the current scorecard:
 
 ```bash
-br sync --flush-only
-git add .beads/issues.jsonl
-git commit -m "chore(arch-review): file findings from architecture review"
-git push
+cat AGENT_SCORECARD.md
 ```
+
+Update `AGENT_SCORECARD.md` with:
+
+1. **Violation breakdown** — increment each agent's counts by category for findings from
+   this review (unwrap/expect, missing tests, clippy, protocol errors, security, architecture
+   drift, memory/resource leaks).
+
+2. **Append a review log entry** at the bottom (after the `<!-- ... -->` marker):
+
+```markdown
+### Arch Review — YYYY-MM-DD HH:MM
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | N | ... | ... |
+| Codex | N | ... | ... |
+| Cursor | N | ... | ... |
+
+Overall codebase health: on track / drifting / concerning
+Biggest blindspot: ...
+```
+
+Note: the arch review does not update *Tasks closed* or *Bug rate* — those are owned by the
+QA loop which has the full commit history. Only update the violation breakdown counts and
+append the log entry.
 
 ---
 
-## Step 7 — Report
+## Step 9 — Commit Everything
+
+```bash
+git pull --rebase
+br sync --flush-only
+git add .beads/issues.jsonl AGENT_SCORECARD.md
+git commit -m "chore(arch-review): file findings and update agent scorecard"
+git push
+```
+
+If `git push` fails: `git pull --rebase && git push`.
+
+---
+
+## Step 10 — Report
 
 Write a concise summary covering:
 
 1. **Codebase health**: overall impression (on track / drifting / concerning)
 2. **Security posture**: anything that could be exploited in a real engagement
 3. **Biggest blindspot**: the single most dangerous gap you found
-4. **Issues filed**: list each new beads ID with a one-line description
-5. **Recommendation**: what the dev agents should prioritize next
+4. **Issues filed**: list each new beads ID with responsible agent and one-line description
+5. **Agent quality**: based on findings this run, which agent is writing the best code?
+6. **Recommendation**: what the dev agents should prioritize next
 
 Do not pad the report. If nothing serious was found, say so and explain why you're confident.

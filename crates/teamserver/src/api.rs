@@ -6,7 +6,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::extract::{FromRequestParts, Path, Request, State};
+use axum::extract::{FromRequestParts, Path, Query, Request, State};
 use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, StatusCode, request::Parts};
 use axum::middleware::{self, Next};
@@ -19,6 +19,7 @@ use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::{AgentTaskInfo, EventCode, Message, MessageHead};
 use red_cell_common::{AgentInfo, ListenerConfig};
 use serde::Serialize;
+use serde_json::Value;
 use sha2::Sha256;
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -32,6 +33,10 @@ use crate::app::TeamserverState;
 use crate::listeners::{ListenerManagerError, ListenerMarkRequest, ListenerSummary};
 use crate::rbac::{CanManageListeners, CanRead, CanTaskAgents, Permission, PermissionMarker};
 use crate::websocket::{AgentCommandError, execute_agent_task};
+use crate::{
+    AuditPage, AuditQuery, AuditResultStatus, Database, audit_details, parameter_object,
+    query_audit_log, record_operator_action,
+};
 const API_VERSION: &str = "v1";
 const API_PREFIX: &str = "/api/v1";
 const OPENAPI_PATH: &str = "/api/v1/openapi.json";
@@ -372,12 +377,25 @@ impl IntoResponse for AgentApiError {
     }
 }
 
+#[derive(Debug, Error)]
+enum AuditApiError {
+    #[error("{0}")]
+    Teamserver(#[from] crate::TeamserverError),
+}
+
+impl IntoResponse for AuditApiError {
+    fn into_response(self) -> Response {
+        json_error_response(StatusCode::INTERNAL_SERVER_ERROR, "audit_api_error", self.to_string())
+    }
+}
+
 /// Build the `/api/v1` router, including version metadata and OpenAPI docs.
 pub fn api_routes(api: ApiRuntime) -> Router<TeamserverState> {
     let protected = Router::new()
         .route("/agents", get(list_agents))
         .route("/agents/{id}", get(get_agent).delete(kill_agent))
         .route("/agents/{id}/task", post(queue_agent_task))
+        .route("/audit", get(list_audit))
         .route("/listeners", get(list_listeners).post(create_listener))
         .route("/listeners/{name}", get(get_listener).put(update_listener).delete(delete_listener))
         .route("/listeners/{name}/start", put(start_listener))
@@ -437,6 +455,7 @@ struct ApiInfoResponse {
         get_agent,
         kill_agent,
         queue_agent_task,
+        list_audit,
         list_listeners,
         create_listener,
         get_listener,
@@ -452,6 +471,9 @@ struct ApiInfoResponse {
             ApiErrorDetail,
             ApiInfoResponse,
             AgentTaskQueuedResponse,
+            AuditPage,
+            crate::AuditRecord,
+            crate::AuditResultStatus,
             AgentInfo,
             red_cell_common::AgentEncryptionInfo,
             AgentTaskInfo,
@@ -473,6 +495,7 @@ struct ApiInfoResponse {
     modifiers(&ApiSecurity),
     tags(
         (name = "rest", description = "Versioned REST API for Red Cell automation clients"),
+        (name = "audit", description = "Operator audit trail endpoints"),
         (name = "agents", description = "Agent inventory and tasking endpoints"),
         (name = "listeners", description = "Listener lifecycle management endpoints")
     )
@@ -601,14 +624,57 @@ async fn kill_agent(
             ..AgentTaskInfo::default()
         },
     };
-    let queued_jobs = execute_agent_task(
+    let queued_jobs = match execute_agent_task(
         &state.agent_registry,
         &state.sockets,
         &state.events,
         &identity.key_id,
         message,
     )
-    .await?;
+    .await
+    {
+        Ok(queued_jobs) => {
+            record_audit_entry(
+                &state.database,
+                &identity.key_id,
+                "agent.task",
+                "agent",
+                Some(format!("{agent_id:08X}")),
+                audit_details(
+                    AuditResultStatus::Success,
+                    Some(agent_id),
+                    Some("kill"),
+                    Some(parameter_object([
+                        ("task_id", Value::String(task_id.clone())),
+                        ("command", Value::String("kill".to_owned())),
+                    ])),
+                ),
+            )
+            .await;
+            queued_jobs
+        }
+        Err(error) => {
+            record_audit_entry(
+                &state.database,
+                &identity.key_id,
+                "agent.task",
+                "agent",
+                Some(format!("{agent_id:08X}")),
+                audit_details(
+                    AuditResultStatus::Failure,
+                    Some(agent_id),
+                    Some("kill"),
+                    Some(parameter_object([
+                        ("task_id", Value::String(task_id.clone())),
+                        ("command", Value::String("kill".to_owned())),
+                        ("error", Value::String(error.to_string())),
+                    ])),
+                ),
+            )
+            .await;
+            return Err(error.into());
+        }
+    };
 
     Ok((
         StatusCode::ACCEPTED,
@@ -649,7 +715,9 @@ async fn queue_agent_task(
     }
     task.demon_id = canonical_id.clone();
 
-    let queued_jobs = execute_agent_task(
+    let audit_parameters = serde_json::to_value(&task).ok();
+    let command = task.command.clone().unwrap_or_else(|| task.command_line.clone());
+    let queued_jobs = match execute_agent_task(
         &state.agent_registry,
         &state.sockets,
         &state.events,
@@ -664,7 +732,46 @@ async fn queue_agent_task(
             info: task.clone(),
         },
     )
-    .await?;
+    .await
+    {
+        Ok(queued_jobs) => {
+            record_audit_entry(
+                &state.database,
+                &identity.key_id,
+                "agent.task",
+                "agent",
+                Some(canonical_id.clone()),
+                audit_details(
+                    AuditResultStatus::Success,
+                    Some(agent_id),
+                    Some(command.as_str()),
+                    audit_parameters.clone(),
+                ),
+            )
+            .await;
+            queued_jobs
+        }
+        Err(error) => {
+            record_audit_entry(
+                &state.database,
+                &identity.key_id,
+                "agent.task",
+                "agent",
+                Some(canonical_id.clone()),
+                audit_details(
+                    AuditResultStatus::Failure,
+                    Some(agent_id),
+                    Some(command.as_str()),
+                    Some(parameter_object([
+                        ("task", audit_parameters.unwrap_or(Value::Null)),
+                        ("error", Value::String(error.to_string())),
+                    ])),
+                ),
+            )
+            .await;
+            return Err(error.into());
+        }
+    };
 
     Ok((
         StatusCode::ACCEPTED,
@@ -674,6 +781,28 @@ async fn queue_agent_task(
             queued_jobs,
         }),
     ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/audit",
+    context_path = "/api/v1",
+    tag = "audit",
+    security(("api_key" = [])),
+    params(AuditQuery),
+    responses(
+        (status = 200, description = "Filtered and paginated audit trail", body = AuditPage),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
+        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody)
+    )
+)]
+async fn list_audit(
+    State(state): State<TeamserverState>,
+    _identity: ReadApiAccess,
+    Query(query): Query<AuditQuery>,
+) -> Result<Json<AuditPage>, AuditApiError> {
+    Ok(Json(query_audit_log(&state.database, &query).await?))
 }
 
 #[utoipa::path(
@@ -714,10 +843,48 @@ async fn list_listeners(
 )]
 async fn create_listener(
     State(state): State<TeamserverState>,
-    _identity: ListenerManagementApiAccess,
+    identity: ListenerManagementApiAccess,
     Json(config): Json<ListenerConfig>,
 ) -> Result<(StatusCode, Json<ListenerSummary>), ListenerManagerError> {
-    let summary = state.listeners.create(config).await?;
+    let parameters = serde_json::to_value(&config).ok();
+    let listener_name = config.name().to_owned();
+    let summary = match state.listeners.create(config).await {
+        Ok(summary) => summary,
+        Err(error) => {
+            record_audit_entry(
+                &state.database,
+                &identity.key_id,
+                "listener.create",
+                "listener",
+                Some(listener_name),
+                audit_details(
+                    AuditResultStatus::Failure,
+                    None,
+                    Some("create"),
+                    Some(parameter_object([
+                        ("config", parameters.unwrap_or(Value::Null)),
+                        ("error", Value::String(error.to_string())),
+                    ])),
+                ),
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    record_audit_entry(
+        &state.database,
+        &identity.key_id,
+        "listener.create",
+        "listener",
+        Some(summary.name.clone()),
+        audit_details(
+            AuditResultStatus::Success,
+            None,
+            Some("create"),
+            serde_json::to_value(&summary.config).ok(),
+        ),
+    )
+    .await;
     Ok((StatusCode::CREATED, Json(summary)))
 }
 
@@ -815,10 +982,47 @@ async fn delete_listener(
 )]
 async fn start_listener(
     State(state): State<TeamserverState>,
-    _identity: ListenerManagementApiAccess,
+    identity: ListenerManagementApiAccess,
     Path(name): Path<String>,
 ) -> Result<Json<ListenerSummary>, ListenerManagerError> {
-    Ok(Json(state.listeners.start(&name).await?))
+    let summary = match state.listeners.start(&name).await {
+        Ok(summary) => summary,
+        Err(error) => {
+            record_audit_entry(
+                &state.database,
+                &identity.key_id,
+                "listener.start",
+                "listener",
+                Some(name.clone()),
+                audit_details(
+                    AuditResultStatus::Failure,
+                    None,
+                    Some("start"),
+                    Some(parameter_object([
+                        ("listener", Value::String(name.clone())),
+                        ("error", Value::String(error.to_string())),
+                    ])),
+                ),
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    record_audit_entry(
+        &state.database,
+        &identity.key_id,
+        "listener.start",
+        "listener",
+        Some(summary.name.clone()),
+        audit_details(
+            AuditResultStatus::Success,
+            None,
+            Some("start"),
+            Some(parameter_object([("listener", Value::String(summary.name.clone()))])),
+        ),
+    )
+    .await;
+    Ok(Json(summary))
 }
 
 #[utoipa::path(
@@ -838,10 +1042,47 @@ async fn start_listener(
 )]
 async fn stop_listener(
     State(state): State<TeamserverState>,
-    _identity: ListenerManagementApiAccess,
+    identity: ListenerManagementApiAccess,
     Path(name): Path<String>,
 ) -> Result<Json<ListenerSummary>, ListenerManagerError> {
-    Ok(Json(state.listeners.stop(&name).await?))
+    let summary = match state.listeners.stop(&name).await {
+        Ok(summary) => summary,
+        Err(error) => {
+            record_audit_entry(
+                &state.database,
+                &identity.key_id,
+                "listener.stop",
+                "listener",
+                Some(name.clone()),
+                audit_details(
+                    AuditResultStatus::Failure,
+                    None,
+                    Some("stop"),
+                    Some(parameter_object([
+                        ("listener", Value::String(name.clone())),
+                        ("error", Value::String(error.to_string())),
+                    ])),
+                ),
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    record_audit_entry(
+        &state.database,
+        &identity.key_id,
+        "listener.stop",
+        "listener",
+        Some(summary.name.clone()),
+        audit_details(
+            AuditResultStatus::Success,
+            None,
+            Some("stop"),
+            Some(parameter_object([("listener", Value::String(summary.name.clone()))])),
+        ),
+    )
+    .await;
+    Ok(Json(summary))
 }
 
 #[utoipa::path(
@@ -862,21 +1103,85 @@ async fn stop_listener(
 )]
 async fn mark_listener(
     State(state): State<TeamserverState>,
-    _identity: ListenerManagementApiAccess,
+    identity: ListenerManagementApiAccess,
     Path(name): Path<String>,
     Json(request): Json<ListenerMarkRequest>,
 ) -> Result<Json<ListenerSummary>, ListenerManagerError> {
     let summary = match request.mark.as_str() {
         mark if mark.eq_ignore_ascii_case("start") || mark.eq_ignore_ascii_case("online") => {
-            state.listeners.start(&name).await?
+            match state.listeners.start(&name).await {
+                Ok(summary) => summary,
+                Err(error) => {
+                    record_audit_entry(
+                        &state.database,
+                        &identity.key_id,
+                        "listener.start",
+                        "listener",
+                        Some(name.clone()),
+                        audit_details(
+                            AuditResultStatus::Failure,
+                            None,
+                            Some(request.mark.as_str()),
+                            Some(parameter_object([
+                                ("mark", Value::String(request.mark.clone())),
+                                ("error", Value::String(error.to_string())),
+                            ])),
+                        ),
+                    )
+                    .await;
+                    return Err(error);
+                }
+            }
         }
         mark if mark.eq_ignore_ascii_case("stop") || mark.eq_ignore_ascii_case("offline") => {
-            state.listeners.stop(&name).await?
+            match state.listeners.stop(&name).await {
+                Ok(summary) => summary,
+                Err(error) => {
+                    record_audit_entry(
+                        &state.database,
+                        &identity.key_id,
+                        "listener.stop",
+                        "listener",
+                        Some(name.clone()),
+                        audit_details(
+                            AuditResultStatus::Failure,
+                            None,
+                            Some(request.mark.as_str()),
+                            Some(parameter_object([
+                                ("mark", Value::String(request.mark.clone())),
+                                ("error", Value::String(error.to_string())),
+                            ])),
+                        ),
+                    )
+                    .await;
+                    return Err(error);
+                }
+            }
         }
         _ => {
             return Err(ListenerManagerError::UnsupportedMark { mark: request.mark });
         }
     };
+
+    let action = if summary.state.status == crate::ListenerStatus::Running {
+        "listener.start"
+    } else {
+        "listener.stop"
+    };
+    record_audit_entry(
+        &state.database,
+        &identity.key_id,
+        action,
+        "listener",
+        Some(summary.name.clone()),
+        audit_details(
+            AuditResultStatus::Success,
+            None,
+            Some(request.mark.as_str()),
+            Some(parameter_object([("mark", Value::String(request.mark.clone()))])),
+        ),
+    )
+    .await;
 
     Ok(Json(summary))
 }
@@ -938,6 +1243,21 @@ fn parse_api_agent_id(value: &str) -> Result<u32, AgentApiError> {
 fn next_task_id() -> String {
     let bytes = *Uuid::new_v4().as_bytes();
     format!("{:08X}", u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+async fn record_audit_entry(
+    database: &Database,
+    actor: &str,
+    action: &str,
+    target_kind: &str,
+    target_id: Option<String>,
+    details: crate::AuditDetails,
+) {
+    if let Err(error) =
+        record_operator_action(database, actor, action, target_kind, target_id, details).await
+    {
+        debug!(actor, action, %error, "failed to persist audit log entry");
+    }
 }
 
 const fn api_role_allows(role: OperatorRole, permission: Permission) -> bool {
@@ -1143,6 +1463,53 @@ mod tests {
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].command, u32::from(DemonCommand::CommandCheckin));
         assert_eq!(queued[0].request_id, 0x2A);
+    }
+
+    #[tokio::test]
+    async fn audit_endpoint_returns_filtered_paginated_results() {
+        let (app, registry) = test_router_with_registry(Some((
+            60,
+            "rest-admin",
+            "secret-admin",
+            OperatorRole::Admin,
+        )))
+        .await;
+        registry.insert(sample_agent(0xDEAD_BEEF)).await.expect("agent should insert");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/agents/DEADBEEF/task")
+                    .method("POST")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"TaskID":"2A","CommandLine":"checkin","DemonID":"DEADBEEF","CommandID":"100"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await;
+        assert!(response.is_ok());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/audit?action=agent.task&agent_id=DEADBEEF&limit=1")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["total"], 1);
+        assert_eq!(body["limit"], 1);
+        assert_eq!(body["items"][0]["action"], "agent.task");
+        assert_eq!(body["items"][0]["agent_id"], "DEADBEEF");
+        assert_eq!(body["items"][0]["result_status"], "success");
     }
 
     #[tokio::test]

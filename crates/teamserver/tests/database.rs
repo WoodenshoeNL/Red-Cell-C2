@@ -5,6 +5,9 @@ use red_cell::database::{
     AuditLogEntry, Database, LinkRecord, ListenerStatus, LootRecord, PersistedListener,
     PersistedListenerState, TeamserverError,
 };
+use red_cell::{
+    AuditQuery, AuditResultStatus, audit_details, query_audit_log, record_operator_action,
+};
 use red_cell_common::{
     AgentEncryptionInfo, AgentInfo, HttpListenerConfig, HttpListenerProxyConfig,
     HttpListenerResponseConfig, ListenerConfig, ListenerTlsConfig,
@@ -267,6 +270,62 @@ async fn audit_log_repository_supports_insert_query_and_delete() -> Result<(), T
 
     audit.delete(id).await?;
     assert!(audit.get(id).await?.is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn audit_helpers_persist_and_filter_structured_records() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+
+    record_operator_action(
+        &database,
+        "neo",
+        "agent.task",
+        "agent",
+        Some("DEADBEEF".to_owned()),
+        audit_details(
+            AuditResultStatus::Success,
+            Some(0xDEAD_BEEF),
+            Some("checkin"),
+            Some(json!({ "task_id": "2A" })),
+        ),
+    )
+    .await?;
+    record_operator_action(
+        &database,
+        "neo",
+        "listener.start",
+        "listener",
+        Some("http-main".to_owned()),
+        audit_details(
+            AuditResultStatus::Failure,
+            None,
+            Some("start"),
+            Some(json!({ "error": "bind failed" })),
+        ),
+    )
+    .await?;
+
+    let page = query_audit_log(
+        &database,
+        &AuditQuery {
+            action: Some("agent.task".to_owned()),
+            agent_id: Some("DEADBEEF".to_owned()),
+            result_status: Some(AuditResultStatus::Success),
+            limit: Some(10),
+            offset: Some(0),
+            ..AuditQuery::default()
+        },
+    )
+    .await?;
+
+    assert_eq!(page.total, 1);
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].actor, "neo");
+    assert_eq!(page.items[0].command.as_deref(), Some("checkin"));
+    assert_eq!(page.items[0].agent_id.as_deref(), Some("DEADBEEF"));
+    assert_eq!(page.items[0].result_status, AuditResultStatus::Success);
 
     Ok(())
 }

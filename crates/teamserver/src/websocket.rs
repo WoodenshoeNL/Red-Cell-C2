@@ -32,11 +32,12 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::{
-    AgentRegistry, AuthError, AuthService, AuthenticationFailure, AuthenticationResult, EventBus,
-    Job, ListenerEventAction, ListenerManager, PayloadBuilderService, SocketRelayManager,
-    action_from_mark, authorize_websocket_command, listener_config_from_operator,
-    listener_error_event, listener_event_for_action, listener_removed_event, login_failure_message,
-    login_success_message, operator_requests_start,
+    AgentRegistry, AuditResultStatus, AuthError, AuthService, AuthenticationFailure,
+    AuthenticationResult, Database, EventBus, Job, ListenerEventAction, ListenerManager,
+    PayloadBuilderService, SocketRelayManager, action_from_mark, audit_details,
+    authorize_websocket_command, listener_config_from_operator, listener_error_event,
+    listener_event_for_action, listener_removed_event, login_failure_message, login_parameters,
+    login_success_message, operator_requests_start, parameter_object, record_operator_action,
 };
 
 const DEMON_MAX_RESPONSE_LENGTH: usize = 0x01E0_0000;
@@ -100,6 +101,7 @@ where
     SocketRelayManager: FromRef<S>,
     PayloadBuilderService: FromRef<S>,
     OperatorConnectionManager: FromRef<S>,
+    Database: FromRef<S>,
 {
     Router::new().route("/", get(websocket_handler::<S>))
 }
@@ -118,6 +120,7 @@ where
     SocketRelayManager: FromRef<S>,
     PayloadBuilderService: FromRef<S>,
     OperatorConnectionManager: FromRef<S>,
+    Database: FromRef<S>,
 {
     websocket.on_upgrade(move |socket| handle_operator_socket(state, socket))
 }
@@ -132,23 +135,43 @@ where
     SocketRelayManager: FromRef<S>,
     PayloadBuilderService: FromRef<S>,
     OperatorConnectionManager: FromRef<S>,
+    Database: FromRef<S>,
 {
     let connection_id = Uuid::new_v4();
     let auth = AuthService::from_ref(&state);
     let connections = OperatorConnectionManager::from_ref(&state);
+    let database = Database::from_ref(&state);
 
     connections.register(connection_id).await;
 
-    if handle_authentication(&auth, &connections, connection_id, &mut socket).await.is_err() {
-        cleanup_connection(&auth, &connections, connection_id).await;
+    if handle_authentication(&auth, &connections, &database, connection_id, &mut socket)
+        .await
+        .is_err()
+    {
+        cleanup_connection(&auth, &connections, &database, connection_id).await;
         return;
     }
 
     let Some(session) = auth.session_for_connection(connection_id).await else {
         let _ = socket.send(WsMessage::Close(None)).await;
-        cleanup_connection(&auth, &connections, connection_id).await;
+        cleanup_connection(&auth, &connections, &database, connection_id).await;
         return;
     };
+
+    log_operator_action(
+        &database,
+        &session.username,
+        "operator.connect",
+        "operator",
+        Some(session.username.clone()),
+        audit_details(
+            AuditResultStatus::Success,
+            None,
+            Some("connect"),
+            Some(parameter_object([("connection_id", Value::String(connection_id.to_string()))])),
+        ),
+    )
+    .await;
 
     info!(
         %connection_id,
@@ -173,7 +196,7 @@ where
             %error,
             "failed to synchronize operator session state"
         );
-        cleanup_connection(&auth, &connections, connection_id).await;
+        cleanup_connection(&auth, &connections, &database, connection_id).await;
         return;
     }
 
@@ -197,12 +220,13 @@ where
         }
     }
 
-    cleanup_connection(&auth, &connections, connection_id).await;
+    cleanup_connection(&auth, &connections, &database, connection_id).await;
 }
 
 async fn handle_authentication(
     auth: &AuthService,
     connections: &OperatorConnectionManager,
+    database: &Database,
     connection_id: Uuid,
     socket: &mut WebSocket,
 ) -> Result<(), ()> {
@@ -230,21 +254,88 @@ async fn handle_authentication(
         }
     };
 
+    let login_user = serde_json::from_str::<OperatorMessage>(message.as_str())
+        .ok()
+        .and_then(|message| match message {
+            OperatorMessage::Login(message) => Some(message.info.user),
+            _ => None,
+        })
+        .unwrap_or_default();
+
     let response = match auth.authenticate_message(connection_id, message.as_str()).await {
         Ok(AuthenticationResult::Success(success)) => {
             connections.authenticate(connection_id, success.username.clone()).await;
+            log_operator_action(
+                database,
+                &success.username,
+                "operator.login",
+                "operator",
+                Some(success.username.clone()),
+                audit_details(
+                    AuditResultStatus::Success,
+                    None,
+                    Some("login"),
+                    Some(login_parameters(&success.username, &connection_id)),
+                ),
+            )
+            .await;
             login_success_message(&success.username, &success.token)
         }
         Ok(AuthenticationResult::Failure(failure)) => {
+            log_operator_action(
+                database,
+                &login_user,
+                "operator.login",
+                "operator",
+                (!login_user.is_empty()).then_some(login_user.clone()),
+                audit_details(
+                    AuditResultStatus::Failure,
+                    None,
+                    Some("login"),
+                    Some(login_parameters(&login_user, &connection_id)),
+                ),
+            )
+            .await;
             send_login_error(socket, "", failure, connection_id).await;
             return Err(());
         }
         Err(AuthError::InvalidLoginMessage) => {
+            log_operator_action(
+                database,
+                &login_user,
+                "operator.login",
+                "operator",
+                (!login_user.is_empty()).then_some(login_user.clone()),
+                audit_details(
+                    AuditResultStatus::Failure,
+                    None,
+                    Some("login"),
+                    Some(login_parameters(&login_user, &connection_id)),
+                ),
+            )
+            .await;
             send_login_error(socket, "", AuthenticationFailure::WrongPassword, connection_id).await;
             return Err(());
         }
         Err(AuthError::InvalidMessageJson(error)) => {
             warn!(%connection_id, %error, "failed to parse operator login message");
+            log_operator_action(
+                database,
+                "",
+                "operator.login",
+                "operator",
+                None,
+                audit_details(
+                    AuditResultStatus::Failure,
+                    None,
+                    Some("login"),
+                    Some(parameter_object([
+                        ("connection_id", Value::String(connection_id.to_string())),
+                        ("error", Value::String(error)),
+                    ])),
+                ),
+            )
+            .await;
             send_login_error(socket, "", AuthenticationFailure::WrongPassword, connection_id).await;
             return Err(());
         }
@@ -270,6 +361,7 @@ where
     AgentRegistry: FromRef<S>,
     SocketRelayManager: FromRef<S>,
     PayloadBuilderService: FromRef<S>,
+    Database: FromRef<S>,
 {
     let Some(frame) = incoming else {
         return Ok(SocketLoopControl::Break);
@@ -350,19 +442,36 @@ async fn dispatch_operator_command<S>(
     AgentRegistry: FromRef<S>,
     SocketRelayManager: FromRef<S>,
     PayloadBuilderService: FromRef<S>,
+    Database: FromRef<S>,
 {
     let events = EventBus::from_ref(state);
     let listeners = ListenerManager::from_ref(state);
     let registry = AgentRegistry::from_ref(state);
     let sockets = SocketRelayManager::from_ref(state);
     let payload_builder = PayloadBuilderService::from_ref(state);
+    let database = Database::from_ref(state);
 
     match message {
         OperatorMessage::ListenerNew(message) => {
             let name = message.info.name.clone().unwrap_or_default();
+            let parameters = serde_json::to_value(&message.info).ok();
             match listener_config_from_operator(&message.info) {
                 Ok(config) => match listeners.create(config).await {
                     Ok(summary) => {
+                        log_operator_action(
+                            &database,
+                            &session.username,
+                            "listener.create",
+                            "listener",
+                            Some(summary.name.clone()),
+                            audit_details(
+                                AuditResultStatus::Success,
+                                None,
+                                Some("create"),
+                                parameters.clone(),
+                            ),
+                        )
+                        .await;
                         events.broadcast(listener_event_for_action(
                             &session.username,
                             &summary,
@@ -372,6 +481,23 @@ async fn dispatch_operator_command<S>(
                         if operator_requests_start(&message.info) {
                             match listeners.start(&summary.name).await {
                                 Ok(started) => {
+                                    log_operator_action(
+                                        &database,
+                                        &session.username,
+                                        "listener.start",
+                                        "listener",
+                                        Some(started.name.clone()),
+                                        audit_details(
+                                            AuditResultStatus::Success,
+                                            None,
+                                            Some("start"),
+                                            Some(parameter_object([(
+                                                "listener",
+                                                Value::String(started.name.clone()),
+                                            )])),
+                                        ),
+                                    )
+                                    .await;
                                     events.broadcast(listener_event_for_action(
                                         &session.username,
                                         &started,
@@ -379,6 +505,23 @@ async fn dispatch_operator_command<S>(
                                     ));
                                 }
                                 Err(error) => {
+                                    log_operator_action(
+                                        &database,
+                                        &session.username,
+                                        "listener.start",
+                                        "listener",
+                                        Some(summary.name.clone()),
+                                        audit_details(
+                                            AuditResultStatus::Failure,
+                                            None,
+                                            Some("start"),
+                                            Some(parameter_object([
+                                                ("listener", Value::String(summary.name.clone())),
+                                                ("error", Value::String(error.to_string())),
+                                            ])),
+                                        ),
+                                    )
+                                    .await;
                                     events.broadcast(listener_error_event(
                                         &session.username,
                                         &summary.name,
@@ -389,10 +532,44 @@ async fn dispatch_operator_command<S>(
                         }
                     }
                     Err(error) => {
+                        log_operator_action(
+                            &database,
+                            &session.username,
+                            "listener.create",
+                            "listener",
+                            (!name.is_empty()).then_some(name.clone()),
+                            audit_details(
+                                AuditResultStatus::Failure,
+                                None,
+                                Some("create"),
+                                Some(parameter_object([
+                                    ("name", Value::String(name.clone())),
+                                    ("error", Value::String(error.to_string())),
+                                ])),
+                            ),
+                        )
+                        .await;
                         events.broadcast(listener_error_event(&session.username, &name, &error));
                     }
                 },
                 Err(error) => {
+                    log_operator_action(
+                        &database,
+                        &session.username,
+                        "listener.create",
+                        "listener",
+                        (!name.is_empty()).then_some(name.clone()),
+                        audit_details(
+                            AuditResultStatus::Failure,
+                            None,
+                            Some("create"),
+                            Some(parameter_object([
+                                ("name", Value::String(name.clone())),
+                                ("error", Value::String(error.to_string())),
+                            ])),
+                        ),
+                    )
+                    .await;
                     events.broadcast(listener_error_event(&session.username, &name, &error));
                 }
             }
@@ -429,6 +606,8 @@ async fn dispatch_operator_command<S>(
             }
         }
         OperatorMessage::ListenerMark(message) => {
+            let name = message.info.name.clone();
+            let mark = message.info.mark.clone();
             let result = match action_from_mark(&message.info.mark) {
                 Ok(ListenerEventAction::Started) => listeners.start(&message.info.name).await,
                 Ok(ListenerEventAction::Stopped) => listeners.stop(&message.info.name).await,
@@ -443,6 +622,25 @@ async fn dispatch_operator_command<S>(
                     } else {
                         ListenerEventAction::Stopped
                     };
+                    let audit_action = if summary.state.status == crate::ListenerStatus::Running {
+                        "listener.start"
+                    } else {
+                        "listener.stop"
+                    };
+                    log_operator_action(
+                        &database,
+                        &session.username,
+                        audit_action,
+                        "listener",
+                        Some(summary.name.clone()),
+                        audit_details(
+                            AuditResultStatus::Success,
+                            None,
+                            Some(mark.as_str()),
+                            Some(parameter_object([("mark", Value::String(mark.clone()))])),
+                        ),
+                    )
+                    .await;
                     events.broadcast(listener_event_for_action(
                         &session.username,
                         &summary,
@@ -450,11 +648,31 @@ async fn dispatch_operator_command<S>(
                     ));
                 }
                 Err(error) => {
-                    events.broadcast(listener_error_event(
+                    let audit_action = if mark.eq_ignore_ascii_case("start")
+                        || mark.eq_ignore_ascii_case("online")
+                    {
+                        "listener.start"
+                    } else {
+                        "listener.stop"
+                    };
+                    log_operator_action(
+                        &database,
                         &session.username,
-                        &message.info.name,
-                        &error,
-                    ));
+                        audit_action,
+                        "listener",
+                        Some(name.clone()),
+                        audit_details(
+                            AuditResultStatus::Failure,
+                            None,
+                            Some(mark.as_str()),
+                            Some(parameter_object([
+                                ("mark", Value::String(mark.clone())),
+                                ("error", Value::String(error.to_string())),
+                            ])),
+                        ),
+                    )
+                    .await;
+                    events.broadcast(listener_error_event(&session.username, &name, &error));
                 }
             }
         }
@@ -463,6 +681,7 @@ async fn dispatch_operator_command<S>(
                 &registry,
                 &sockets,
                 &events,
+                &database,
                 session,
                 sanitize_agent_task(session, message),
             )
@@ -591,11 +810,51 @@ async fn handle_agent_task(
     registry: &AgentRegistry,
     sockets: &SocketRelayManager,
     events: &EventBus,
+    database: &Database,
     session: &crate::OperatorSession,
     message: Message<red_cell_common::operator::AgentTaskInfo>,
 ) -> Result<(), AgentCommandError> {
     let agent_id = parse_agent_id(&message.info.demon_id)?;
-    execute_agent_task(registry, sockets, events, &session.username, message).await?;
+    let command = message.info.command.clone().unwrap_or_else(|| message.info.command_line.clone());
+    let parameters = serde_json::to_value(&message.info).ok();
+    match execute_agent_task(registry, sockets, events, &session.username, message).await {
+        Ok(_) => {
+            log_operator_action(
+                database,
+                &session.username,
+                "agent.task",
+                "agent",
+                Some(format!("{agent_id:08X}")),
+                audit_details(
+                    AuditResultStatus::Success,
+                    Some(agent_id),
+                    Some(command.as_str()),
+                    parameters,
+                ),
+            )
+            .await;
+        }
+        Err(error) => {
+            log_operator_action(
+                database,
+                &session.username,
+                "agent.task",
+                "agent",
+                Some(format!("{agent_id:08X}")),
+                audit_details(
+                    AuditResultStatus::Failure,
+                    Some(agent_id),
+                    Some(command.as_str()),
+                    Some(parameter_object([
+                        ("task", parameters.unwrap_or(Value::Null)),
+                        ("error", Value::String(error.to_string())),
+                    ])),
+                ),
+            )
+            .await;
+            return Err(error);
+        }
+    }
     debug!(
         connection_id = %session.connection_id,
         username = %session.username,
@@ -1586,10 +1845,44 @@ fn agent_snapshot_event(agent: &AgentInfo, pivots: &crate::PivotInfo) -> Operato
 async fn cleanup_connection(
     auth: &AuthService,
     connections: &OperatorConnectionManager,
+    database: &Database,
     connection_id: Uuid,
 ) {
-    let _ = auth.remove_connection(connection_id).await;
+    if let Some(session) = auth.remove_connection(connection_id).await {
+        log_operator_action(
+            database,
+            &session.username,
+            "operator.disconnect",
+            "operator",
+            Some(session.username.clone()),
+            audit_details(
+                AuditResultStatus::Success,
+                None,
+                Some("disconnect"),
+                Some(parameter_object([(
+                    "connection_id",
+                    Value::String(connection_id.to_string()),
+                )])),
+            ),
+        )
+        .await;
+    }
     connections.unregister(connection_id).await;
+}
+
+async fn log_operator_action(
+    database: &Database,
+    actor: &str,
+    action: &str,
+    target_kind: &str,
+    target_id: Option<String>,
+    details: crate::AuditDetails,
+) {
+    if let Err(error) =
+        record_operator_action(database, actor, action, target_kind, target_id, details).await
+    {
+        warn!(actor, action, %error, "failed to persist audit log entry");
+    }
 }
 
 async fn send_operator_message(
@@ -1667,6 +1960,7 @@ mod tests {
     #[derive(Clone)]
     struct TestState {
         auth: AuthService,
+        database: Database,
         events: EventBus,
         connections: OperatorConnectionManager,
         registry: AgentRegistry,
@@ -1711,6 +2005,7 @@ mod tests {
 
             Self {
                 auth: AuthService::from_profile(&profile),
+                database: database.clone(),
                 events: events.clone(),
                 connections: OperatorConnectionManager::new(),
                 registry: registry.clone(),
@@ -1724,6 +2019,12 @@ mod tests {
     impl FromRef<TestState> for AuthService {
         fn from_ref(input: &TestState) -> Self {
             input.auth.clone()
+        }
+    }
+
+    impl FromRef<TestState> for Database {
+        fn from_ref(input: &TestState) -> Self {
+            input.database.clone()
         }
     }
 
@@ -1838,6 +2139,7 @@ mod tests {
             info: TeamserverLogInfo { text: "broadcast".to_owned() },
         });
 
+        tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(event_bus.broadcast(event.clone()), 1);
         assert_eq!(read_operator_message(&mut socket).await, event);
 

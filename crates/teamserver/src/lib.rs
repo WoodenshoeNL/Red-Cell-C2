@@ -3,6 +3,7 @@
 pub mod agents;
 pub mod api;
 pub mod app;
+pub mod audit;
 pub mod auth;
 pub mod database;
 pub mod demon;
@@ -21,6 +22,10 @@ pub use api::{
     ApiRuntime, ListenerManagementApiAccess, ReadApiAccess, api_routes, json_error_response,
 };
 pub use app::TeamserverState;
+pub use audit::{
+    AuditDetails, AuditPage, AuditQuery, AuditRecord, AuditResultStatus, audit_details,
+    login_parameters, parameter_object, query_audit_log, record_operator_action,
+};
 pub use auth::{
     AuthError, AuthService, AuthenticationFailure, AuthenticationResult, AuthenticationSuccess,
     OperatorSession, hash_password, login_failure_message, login_success_message,

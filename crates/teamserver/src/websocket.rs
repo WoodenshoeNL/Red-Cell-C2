@@ -12,8 +12,12 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use red_cell_common::AgentInfo;
-use red_cell_common::demon::DemonCommand;
+use red_cell_common::demon::{
+    DemonCommand, DemonInjectWay, DemonProcessCommand, DemonTokenCommand,
+};
 use red_cell_common::operator::{
     AgentEncryptionInfo as OperatorAgentEncryptionInfo, AgentInfo as OperatorAgentInfo,
     AgentPivotsInfo, EventCode, FlatInfo, Message, MessageHead, OperatorMessage, TeamserverLogInfo,
@@ -484,6 +488,26 @@ enum AgentCommandError {
     InvalidRemovePayload,
     #[error("invalid numeric command id `{command_id}`")]
     InvalidCommandId { command_id: String },
+    #[error("missing required field `{field}`")]
+    MissingField { field: &'static str },
+    #[error("invalid boolean field `{field}`: `{value}`")]
+    InvalidBooleanField { field: String, value: String },
+    #[error("invalid numeric field `{field}`: `{value}`")]
+    InvalidNumericField { field: String, value: String },
+    #[error("invalid base64 field `{field}`: {message}")]
+    InvalidBase64Field { field: String, message: String },
+    #[error("unsupported process subcommand `{subcommand}`")]
+    UnsupportedProcessSubcommand { subcommand: String },
+    #[error("unsupported token subcommand `{subcommand}`")]
+    UnsupportedTokenSubcommand { subcommand: String },
+    #[error("unsupported injection way `{way}`")]
+    UnsupportedInjectionWay { way: String },
+    #[error("unsupported injection technique `{technique}`")]
+    UnsupportedInjectionTechnique { technique: String },
+    #[error("unsupported process architecture `{arch}`")]
+    UnsupportedArchitecture { arch: String },
+    #[error("invalid process create arguments: expected `state;verbose;piped;program;base64_args`")]
+    InvalidProcessCreateArguments,
     #[error(transparent)]
     Teamserver(#[from] crate::TeamserverError),
 }
@@ -554,7 +578,6 @@ fn sanitize_agent_remove(
 fn build_job(info: &red_cell_common::operator::AgentTaskInfo) -> Result<Job, AgentCommandError> {
     let command_id = info.command_id.trim();
     let request_id = u32::from_str_radix(info.task_id.trim(), 16).unwrap_or_default();
-    let payload = task_payload(info);
 
     if is_teamserver_note_command(info) {
         return Err(AgentCommandError::MissingNote);
@@ -567,6 +590,7 @@ fn build_job(info: &red_cell_common::operator::AgentTaskInfo) -> Result<Job, Age
             command_id: command_id.to_owned(),
         })?
     };
+    let payload = task_payload(info, command)?;
 
     Ok(Job {
         command,
@@ -578,14 +602,35 @@ fn build_job(info: &red_cell_common::operator::AgentTaskInfo) -> Result<Job, Age
     })
 }
 
-fn task_payload(info: &red_cell_common::operator::AgentTaskInfo) -> Vec<u8> {
+fn task_payload(
+    info: &red_cell_common::operator::AgentTaskInfo,
+    command: u32,
+) -> Result<Vec<u8>, AgentCommandError> {
     if is_exit_command(info) {
-        return exit_method(info).to_be_bytes().to_vec();
+        return Ok(exit_method(info).to_be_bytes().to_vec());
     }
 
-    flat_info_string_from_extra(&info.extra, &["PayloadBase64", "Payload"])
-        .map(|payload| payload.into_bytes())
-        .unwrap_or_default()
+    if let Some(payload) = raw_task_payload(info)? {
+        return Ok(payload);
+    }
+
+    if command == u32::from(DemonCommand::CommandProcList) {
+        return Ok(encode_proc_list_payload(info));
+    }
+
+    if command == u32::from(DemonCommand::CommandProc) {
+        return encode_proc_command_payload(info);
+    }
+
+    if command == u32::from(DemonCommand::CommandInjectShellcode) {
+        return encode_inject_shellcode_payload(info);
+    }
+
+    if command == u32::from(DemonCommand::CommandToken) {
+        return encode_token_payload(info);
+    }
+
+    Ok(Vec::new())
 }
 
 fn note_from_task(
@@ -644,6 +689,303 @@ fn flat_info_string(info: &FlatInfo, keys: &[&str]) -> Option<String> {
 
 fn flat_info_string_from_extra(extra: &BTreeMap<String, Value>, keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|key| extra.get(*key)).and_then(Value::as_str).map(ToOwned::to_owned)
+}
+
+fn raw_task_payload(
+    info: &red_cell_common::operator::AgentTaskInfo,
+) -> Result<Option<Vec<u8>>, AgentCommandError> {
+    if let Some(payload) = flat_info_string_from_extra(&info.extra, &["PayloadBase64"]) {
+        let decoded = BASE64_STANDARD.decode(payload.trim()).map_err(|error| {
+            AgentCommandError::InvalidBase64Field {
+                field: "PayloadBase64".to_owned(),
+                message: error.to_string(),
+            }
+        })?;
+        return Ok(Some(decoded));
+    }
+
+    Ok(flat_info_string_from_extra(&info.extra, &["Payload"]).map(|payload| payload.into_bytes()))
+}
+
+fn encode_proc_list_payload(info: &red_cell_common::operator::AgentTaskInfo) -> Vec<u8> {
+    let from_process_manager = extra_bool(info, &["FromProcessManager"]).unwrap_or(false);
+    u32::from(from_process_manager).to_le_bytes().to_vec()
+}
+
+fn encode_proc_command_payload(
+    info: &red_cell_common::operator::AgentTaskInfo,
+) -> Result<Vec<u8>, AgentCommandError> {
+    let subcommand = proc_subcommand(info)?;
+    let mut payload = Vec::new();
+    write_u32(&mut payload, subcommand.into());
+
+    match subcommand {
+        DemonProcessCommand::Kill => {
+            let pid = required_u32(info, &["Args", "Arguments"], "Args")?;
+            write_u32(&mut payload, pid);
+        }
+        DemonProcessCommand::Create => {
+            let arguments = required_string(info, &["Args", "Arguments"], "Args")?;
+            let parts = arguments.splitn(5, ';').collect::<Vec<_>>();
+            if parts.len() != 5 {
+                return Err(AgentCommandError::InvalidProcessCreateArguments);
+            }
+
+            let state = parse_u32_field("Args[0]", parts[0])?;
+            let verbose = parse_bool_field("Args[1]", parts[1])?;
+            let piped = parse_bool_field("Args[2]", parts[2])?;
+            let program = parts[3];
+            let process_args = decode_base64_field("Args[4]", parts[4])?;
+            let process_args = String::from_utf8_lossy(&process_args).into_owned();
+
+            write_u32(&mut payload, state);
+            write_len_prefixed_bytes(&mut payload, &encode_utf16(program));
+            write_len_prefixed_bytes(&mut payload, &encode_utf16(&process_args));
+            write_u32(&mut payload, u32::from(piped));
+            write_u32(&mut payload, u32::from(verbose));
+        }
+        other => {
+            return Err(AgentCommandError::UnsupportedProcessSubcommand {
+                subcommand: u32::from(other).to_string(),
+            });
+        }
+    }
+
+    Ok(payload)
+}
+
+fn encode_inject_shellcode_payload(
+    info: &red_cell_common::operator::AgentTaskInfo,
+) -> Result<Vec<u8>, AgentCommandError> {
+    let way = required_string(info, &["Way"], "Way")?;
+    let technique = required_string(info, &["Technique"], "Technique")?;
+    let arch = required_string(info, &["Arch"], "Arch")?;
+    let binary = decode_base64_required(info, &["Binary"], "Binary")?;
+    let arguments = optional_base64(info, &["Argument", "Arguments"])?.unwrap_or_default();
+
+    let mut payload = Vec::new();
+    match parse_injection_way(&way)? {
+        DemonInjectWay::Inject => {
+            write_u32(&mut payload, u32::from(DemonInjectWay::Inject));
+            write_u32(&mut payload, parse_injection_technique(&technique)?);
+            write_u32(&mut payload, arch_to_flag(&arch)?);
+            write_len_prefixed_bytes(&mut payload, &binary);
+            write_len_prefixed_bytes(&mut payload, &arguments);
+            let pid = required_u32(info, &["PID"], "PID")?;
+            write_u32(&mut payload, pid);
+        }
+        DemonInjectWay::Spawn => {
+            write_u32(&mut payload, u32::from(DemonInjectWay::Spawn));
+            write_u32(&mut payload, parse_injection_technique(&technique)?);
+            write_u32(&mut payload, arch_to_flag(&arch)?);
+            write_len_prefixed_bytes(&mut payload, &binary);
+            write_len_prefixed_bytes(&mut payload, &arguments);
+        }
+        other => {
+            return Err(AgentCommandError::UnsupportedInjectionWay {
+                way: u32::from(other).to_string(),
+            });
+        }
+    }
+
+    Ok(payload)
+}
+
+fn encode_token_payload(
+    info: &red_cell_common::operator::AgentTaskInfo,
+) -> Result<Vec<u8>, AgentCommandError> {
+    let subcommand = token_subcommand(info)?;
+    let mut payload = Vec::new();
+    write_u32(&mut payload, subcommand.into());
+
+    match subcommand {
+        DemonTokenCommand::Impersonate => {
+            let token_id = required_u32(info, &["Arguments"], "Arguments")?;
+            write_u32(&mut payload, token_id);
+        }
+        other => {
+            return Err(AgentCommandError::UnsupportedTokenSubcommand {
+                subcommand: u32::from(other).to_string(),
+            });
+        }
+    }
+
+    Ok(payload)
+}
+
+fn proc_subcommand(
+    info: &red_cell_common::operator::AgentTaskInfo,
+) -> Result<DemonProcessCommand, AgentCommandError> {
+    let raw = flat_info_string_from_extra(&info.extra, &["ProcCommand"])
+        .or_else(|| info.sub_command.clone())
+        .ok_or(AgentCommandError::MissingField { field: "ProcCommand" })?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "4" | "create" => Ok(DemonProcessCommand::Create),
+        "7" | "kill" => Ok(DemonProcessCommand::Kill),
+        _ => Err(AgentCommandError::UnsupportedProcessSubcommand { subcommand: raw }),
+    }
+}
+
+fn token_subcommand(
+    info: &red_cell_common::operator::AgentTaskInfo,
+) -> Result<DemonTokenCommand, AgentCommandError> {
+    let raw = info
+        .sub_command
+        .clone()
+        .or_else(|| flat_info_string_from_extra(&info.extra, &["SubCommand"]))
+        .ok_or(AgentCommandError::MissingField { field: "SubCommand" })?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "impersonate" => Ok(DemonTokenCommand::Impersonate),
+        _ => Err(AgentCommandError::UnsupportedTokenSubcommand { subcommand: raw }),
+    }
+}
+
+fn parse_injection_way(value: &str) -> Result<DemonInjectWay, AgentCommandError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "inject" => Ok(DemonInjectWay::Inject),
+        "spawn" => Ok(DemonInjectWay::Spawn),
+        _ => Err(AgentCommandError::UnsupportedInjectionWay { way: value.to_owned() }),
+    }
+}
+
+fn parse_injection_technique(value: &str) -> Result<u32, AgentCommandError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "default" => Ok(0),
+        "createremotethread" => Ok(1),
+        "ntcreatethreadex" => Ok(2),
+        "ntqueueapcthread" => Ok(3),
+        _ => Err(AgentCommandError::UnsupportedInjectionTechnique { technique: value.to_owned() }),
+    }
+}
+
+fn arch_to_flag(value: &str) -> Result<u32, AgentCommandError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "x86" => Ok(0),
+        "x64" => Ok(1),
+        _ => Err(AgentCommandError::UnsupportedArchitecture { arch: value.to_owned() }),
+    }
+}
+
+fn required_string(
+    info: &red_cell_common::operator::AgentTaskInfo,
+    keys: &[&str],
+    field: &'static str,
+) -> Result<String, AgentCommandError> {
+    string_field(info, keys).ok_or(AgentCommandError::MissingField { field })
+}
+
+fn required_u32(
+    info: &red_cell_common::operator::AgentTaskInfo,
+    keys: &[&str],
+    field: &'static str,
+) -> Result<u32, AgentCommandError> {
+    let value = required_string(info, keys, field)?;
+    parse_u32_field(field, &value)
+}
+
+fn optional_base64(
+    info: &red_cell_common::operator::AgentTaskInfo,
+    keys: &[&str],
+) -> Result<Option<Vec<u8>>, AgentCommandError> {
+    string_field(info, keys).map(|value| decode_base64_field(keys[0], &value)).transpose()
+}
+
+fn decode_base64_required(
+    info: &red_cell_common::operator::AgentTaskInfo,
+    keys: &[&str],
+    field: &'static str,
+) -> Result<Vec<u8>, AgentCommandError> {
+    let value = required_string(info, keys, field)?;
+    decode_base64_field(field, &value)
+}
+
+fn decode_base64_field(field: &str, value: &str) -> Result<Vec<u8>, AgentCommandError> {
+    BASE64_STANDARD.decode(value.trim()).map_err(|error| AgentCommandError::InvalidBase64Field {
+        field: field.to_owned(),
+        message: error.to_string(),
+    })
+}
+
+fn string_field(info: &red_cell_common::operator::AgentTaskInfo, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        match *key {
+            "Arguments" => {
+                if let Some(value) = info.arguments.clone() {
+                    return Some(value);
+                }
+            }
+            "SubCommand" => {
+                if let Some(value) = info.sub_command.clone() {
+                    return Some(value);
+                }
+            }
+            _ => {}
+        }
+
+        if let Some(value) = info.extra.get(*key) {
+            match value {
+                Value::String(text) => return Some(text.clone()),
+                Value::Bool(flag) => return Some(flag.to_string()),
+                Value::Number(number) => return Some(number.to_string()),
+                _ => {}
+            }
+        }
+    }
+
+    None
+}
+
+fn extra_bool(info: &red_cell_common::operator::AgentTaskInfo, keys: &[&str]) -> Option<bool> {
+    for key in keys {
+        let Some(value) = info.extra.get(*key) else {
+            continue;
+        };
+        match value {
+            Value::Bool(flag) => return Some(*flag),
+            Value::String(text) => {
+                if let Ok(flag) = parse_bool_field(key, text) {
+                    return Some(flag);
+                }
+            }
+            Value::Number(number) => return Some(number.as_u64().unwrap_or_default() != 0),
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn parse_bool_field(field: &str, value: &str) -> Result<bool, AgentCommandError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" => Ok(true),
+        "0" | "false" => Ok(false),
+        _ => Err(AgentCommandError::InvalidBooleanField {
+            field: field.to_owned(),
+            value: value.to_owned(),
+        }),
+    }
+}
+
+fn parse_u32_field(field: &str, value: &str) -> Result<u32, AgentCommandError> {
+    value.trim().parse::<u32>().map_err(|_| AgentCommandError::InvalidNumericField {
+        field: field.to_owned(),
+        value: value.to_owned(),
+    })
+}
+
+fn write_u32(buf: &mut Vec<u8>, value: u32) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+fn write_len_prefixed_bytes(buf: &mut Vec<u8>, value: &[u8]) {
+    write_u32(buf, u32::try_from(value.len()).unwrap_or_default());
+    buf.extend_from_slice(value);
+}
+
+fn encode_utf16(value: &str) -> Vec<u8> {
+    let mut encoded: Vec<u8> = value.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    encoded.extend_from_slice(&[0, 0]);
+    encoded
 }
 
 fn teamserver_log_event(user: &str, text: &str) -> OperatorMessage {
@@ -793,11 +1135,13 @@ mod tests {
     use std::time::Duration;
 
     use axum::extract::FromRef;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use futures_util::{SinkExt, StreamExt};
     use red_cell_common::{
         AgentEncryptionInfo,
         config::Profile,
-        demon::DemonCommand,
+        demon::{DemonCommand, DemonInjectWay, DemonProcessCommand, DemonTokenCommand},
         operator::{
             AgentTaskInfo, EventCode, FlatInfo, ListenerInfo, ListenerMarkInfo, LoginInfo, Message,
             MessageHead, NameInfo, OperatorMessage, SessionCode, TeamserverLogInfo,
@@ -809,7 +1153,7 @@ mod tests {
     use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
     use uuid::Uuid;
 
-    use super::{OperatorConnectionManager, routes, teamserver_log_event};
+    use super::{OperatorConnectionManager, build_job, routes, teamserver_log_event};
     use crate::{AgentRegistry, AuthService, Database, EventBus, ListenerManager, hash_password};
 
     #[derive(Clone)]
@@ -1135,6 +1479,105 @@ mod tests {
         server.abort();
     }
 
+    #[test]
+    fn build_job_encodes_process_list_payload() {
+        let job = build_job(&AgentTaskInfo {
+            task_id: "2A".to_owned(),
+            command_line: "ps".to_owned(),
+            demon_id: "DEADBEEF".to_owned(),
+            command_id: u32::from(DemonCommand::CommandProcList).to_string(),
+            extra: BTreeMap::from([(String::from("FromProcessManager"), Value::Bool(true))]),
+            ..AgentTaskInfo::default()
+        })
+        .expect("process list job should build");
+
+        assert_eq!(job.command, u32::from(DemonCommand::CommandProcList));
+        assert_eq!(job.payload, 1_u32.to_le_bytes());
+    }
+
+    #[test]
+    fn build_job_encodes_process_create_payload() {
+        let encoded_args = BASE64_STANDARD.encode("\"C:\\Windows\\System32\\cmd.exe\" /c whoami");
+        let job = build_job(&AgentTaskInfo {
+            task_id: "2B".to_owned(),
+            command_line: "proc create normal cmd.exe /c whoami".to_owned(),
+            demon_id: "DEADBEEF".to_owned(),
+            command_id: u32::from(DemonCommand::CommandProc).to_string(),
+            sub_command: Some("create".to_owned()),
+            extra: BTreeMap::from([(
+                String::from("Args"),
+                Value::String(format!(
+                    "0;TRUE;FALSE;C:\\Windows\\System32\\cmd.exe;{encoded_args}"
+                )),
+            )]),
+            ..AgentTaskInfo::default()
+        })
+        .expect("process create job should build");
+
+        let mut offset = 0usize;
+        assert_eq!(read_u32_le(&job.payload, &mut offset), u32::from(DemonProcessCommand::Create));
+        assert_eq!(read_u32_le(&job.payload, &mut offset), 0);
+        assert_eq!(
+            decode_utf16(read_len_prefixed_bytes(&job.payload, &mut offset)),
+            "C:\\Windows\\System32\\cmd.exe"
+        );
+        assert_eq!(
+            decode_utf16(read_len_prefixed_bytes(&job.payload, &mut offset)),
+            "\"C:\\Windows\\System32\\cmd.exe\" /c whoami"
+        );
+        assert_eq!(read_u32_le(&job.payload, &mut offset), 0);
+        assert_eq!(read_u32_le(&job.payload, &mut offset), 1);
+    }
+
+    #[test]
+    fn build_job_encodes_shellcode_inject_and_token_impersonation() {
+        let shellcode = BASE64_STANDARD.encode([0x90_u8, 0x90, 0xCC]);
+        let shellcode_job = build_job(&AgentTaskInfo {
+            task_id: "2C".to_owned(),
+            command_line: "shellcode inject x64 4444 /tmp/payload.bin".to_owned(),
+            demon_id: "DEADBEEF".to_owned(),
+            command_id: u32::from(DemonCommand::CommandInjectShellcode).to_string(),
+            extra: BTreeMap::from([
+                (String::from("Way"), Value::String("Inject".to_owned())),
+                (String::from("Technique"), Value::String("default".to_owned())),
+                (String::from("Arch"), Value::String("x64".to_owned())),
+                (String::from("Binary"), Value::String(shellcode)),
+                (String::from("PID"), Value::String("4444".to_owned())),
+            ]),
+            ..AgentTaskInfo::default()
+        })
+        .expect("shellcode inject job should build");
+
+        let mut offset = 0usize;
+        assert_eq!(
+            read_u32_le(&shellcode_job.payload, &mut offset),
+            u32::from(DemonInjectWay::Inject)
+        );
+        assert_eq!(read_u32_le(&shellcode_job.payload, &mut offset), 0);
+        assert_eq!(read_u32_le(&shellcode_job.payload, &mut offset), 1);
+        assert_eq!(
+            read_len_prefixed_bytes(&shellcode_job.payload, &mut offset),
+            vec![0x90, 0x90, 0xCC]
+        );
+        assert_eq!(read_len_prefixed_bytes(&shellcode_job.payload, &mut offset), Vec::<u8>::new());
+        assert_eq!(read_u32_le(&shellcode_job.payload, &mut offset), 4444);
+
+        let token_job = build_job(&AgentTaskInfo {
+            task_id: "2D".to_owned(),
+            command_line: "token impersonate 7".to_owned(),
+            demon_id: "DEADBEEF".to_owned(),
+            command_id: u32::from(DemonCommand::CommandToken).to_string(),
+            sub_command: Some("impersonate".to_owned()),
+            arguments: Some("7".to_owned()),
+            ..AgentTaskInfo::default()
+        })
+        .expect("token impersonation job should build");
+        assert_eq!(
+            token_job.payload,
+            [u32::from(DemonTokenCommand::Impersonate).to_le_bytes(), 7_u32.to_le_bytes()].concat()
+        );
+    }
+
     #[tokio::test]
     async fn websocket_listener_commands_broadcast_and_persist_state() {
         let state = TestState::new().await;
@@ -1401,6 +1844,28 @@ mod tests {
             info: FlatInfo { fields },
         }))
         .expect("remove should serialize")
+    }
+
+    fn read_u32_le(bytes: &[u8], offset: &mut usize) -> u32 {
+        let value =
+            u32::from_le_bytes(bytes[*offset..*offset + 4].try_into().expect("u32 should fit"));
+        *offset += 4;
+        value
+    }
+
+    fn read_len_prefixed_bytes(bytes: &[u8], offset: &mut usize) -> Vec<u8> {
+        let len = read_u32_le(bytes, offset) as usize;
+        let value = bytes[*offset..*offset + len].to_vec();
+        *offset += len;
+        value
+    }
+
+    fn decode_utf16(bytes: Vec<u8>) -> String {
+        let words = bytes
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect::<Vec<_>>();
+        String::from_utf16_lossy(&words).trim_end_matches('\0').to_owned()
     }
 
     fn listener_new_message(user: &str, info: ListenerInfo, one_time: bool) -> String {

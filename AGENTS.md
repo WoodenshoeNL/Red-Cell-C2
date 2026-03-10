@@ -30,7 +30,7 @@ Rewrite of the [Havoc C2 framework](./src/Havoc) in Rust — teamserver and oper
 | **New features** | RBAC, REST API, DNS listener, structured audit logging |
 | **Testing** | Full suite: unit + integration (mock Demon agent) + E2E |
 
-The original Havoc source lives in `./src/Havoc` as reference only — do not modify it.
+The original Havoc source lives in `./src/Havoc` as reference only — **do not modify it, do not stage it, do not commit it**. It is intentionally excluded from git via `.gitignore`. Agents must never `git add src/` or include any path under `src/` in a commit.
 
 <!-- br-agent-instructions-v1 -->
 

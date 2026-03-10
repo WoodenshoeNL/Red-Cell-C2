@@ -474,6 +474,7 @@ const DEFAULT_HTTP_METHOD: &str = "POST";
 const MINIMUM_DEMON_CALLBACK_BYTES: usize = DemonHeader::SERIALIZED_LEN + 8;
 const SMB_PIPE_PREFIX: &str = r"\\.\pipe\";
 const MAX_SMB_FRAME_PAYLOAD_LEN: usize = 16 * 1024 * 1024;
+const MAX_AGENT_REQUEST_BODY_LEN: usize = 0x01E0_0000; // ~30 MiB — matches DEMON_MAX_RESPONSE_LENGTH
 const HEADER_VALIDATION_IGNORES: [&str; 2] = ["connection", "accept-encoding"];
 
 #[derive(Clone, Debug)]
@@ -1828,7 +1829,7 @@ async fn http_listener_handler(
 
     let external_ip = extract_external_ip(&state, &request);
     let (_, body) = request.into_parts();
-    let Ok(body) = to_bytes(body, usize::MAX).await else {
+    let Ok(body) = to_bytes(body, MAX_AGENT_REQUEST_BODY_LEN).await else {
         return state.fake_404_response();
     };
 
@@ -2126,8 +2127,9 @@ mod tests {
 
     use super::{
         ListenerEventAction, ListenerManager, ListenerManagerError, ListenerStatus,
-        MAX_SMB_FRAME_PAYLOAD_LEN, action_from_mark, listener_config_from_operator,
-        operator_requests_start, read_smb_frame, smb_local_socket_name,
+        MAX_AGENT_REQUEST_BODY_LEN, MAX_SMB_FRAME_PAYLOAD_LEN, action_from_mark,
+        listener_config_from_operator, operator_requests_start, read_smb_frame,
+        smb_local_socket_name,
     };
     use crate::{AgentRegistry, Database, EventBus, Job, SocketRelayManager};
     use axum::http::StatusCode;
@@ -2374,6 +2376,24 @@ mod tests {
         assert_eq!(invalid_magic.status(), StatusCode::NOT_FOUND);
 
         manager.stop("edge-http-invalid").await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn http_listener_rejects_oversized_request_body() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let manager = manager().await?;
+        let port = available_port()?;
+        manager.create(http_listener("edge-http-oversize", port)).await?;
+        manager.start("edge-http-oversize").await?;
+        wait_for_listener(port, false).await?;
+
+        let oversized = vec![0xAA_u8; MAX_AGENT_REQUEST_BODY_LEN + 1];
+        let response =
+            Client::new().post(format!("http://127.0.0.1:{port}/")).body(oversized).send().await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        manager.stop("edge-http-oversize").await?;
         Ok(())
     }
 

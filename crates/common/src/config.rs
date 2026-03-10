@@ -66,6 +66,15 @@ impl Profile {
             errors.push("Teamserver.Port must be greater than zero".to_owned());
         }
 
+        if self
+            .teamserver
+            .plugins_dir
+            .as_deref()
+            .is_some_and(|plugins_dir| plugins_dir.trim().is_empty())
+        {
+            errors.push("Teamserver.PluginsDir must not be empty when specified".to_owned());
+        }
+
         if self.operators.users.is_empty() {
             errors.push("Operators must define at least one user".to_owned());
         }
@@ -232,6 +241,9 @@ pub struct TeamserverConfig {
     /// TCP port for the teamserver listener.
     #[serde(rename = "Port")]
     pub port: u16,
+    /// Optional directory containing Python plugin modules.
+    #[serde(rename = "PluginsDir", default)]
+    pub plugins_dir: Option<String>,
     /// Optional build toolchain settings.
     #[serde(rename = "Build", default)]
     pub build: Option<BuildConfig>,
@@ -955,5 +967,54 @@ mod tests {
         let error = profile.validate().expect_err("profile should be invalid");
         assert!(error.errors.iter().any(|message| message.contains("RateLimitPerMinute")));
         assert!(error.errors.iter().any(|message| message.contains("non-empty Value")));
+    }
+
+    #[test]
+    fn parses_teamserver_plugins_dir() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+              PluginsDir = "plugins"
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        assert_eq!(profile.teamserver.plugins_dir.as_deref(), Some("plugins"));
+    }
+
+    #[test]
+    fn rejects_empty_teamserver_plugins_dir() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+              PluginsDir = "   "
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("profile should be invalid");
+        assert!(error.errors.iter().any(|message| message.contains("PluginsDir")));
     }
 }

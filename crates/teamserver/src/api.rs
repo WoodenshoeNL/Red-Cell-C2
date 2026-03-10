@@ -1290,6 +1290,7 @@ mod tests {
             agent_registry.clone(),
             events.clone(),
             sockets.clone(),
+            None,
         );
 
         let api = ApiRuntime::from_profile(&profile);

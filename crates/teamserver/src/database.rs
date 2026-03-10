@@ -319,7 +319,7 @@ impl AgentRepository {
 }
 
 /// Persisted listener record stored in SQLite.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct PersistedListener {
     /// Unique listener name.
     pub name: String,

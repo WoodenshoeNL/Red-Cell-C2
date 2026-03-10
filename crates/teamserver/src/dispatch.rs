@@ -24,10 +24,11 @@ use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::sync::RwLock;
+use tracing::warn;
 
 use crate::{
     AgentRegistry, Database, DemonCallbackPackage, DemonPacketParser, EventBus, LootRecord,
-    PivotInfo, SocketRelayManager, TeamserverError,
+    PivotInfo, PluginRuntime, SocketRelayManager, TeamserverError,
 };
 
 type HandlerFuture =
@@ -55,6 +56,7 @@ struct BuiltinDispatchContext<'a> {
     database: &'a Database,
     sockets: &'a SocketRelayManager,
     downloads: &'a DownloadTracker,
+    plugins: Option<&'a PluginRuntime>,
 }
 
 /// Error returned while routing or executing a Demon command handler.
@@ -136,6 +138,7 @@ impl CommandDispatcher {
         events: EventBus,
         database: Database,
         sockets: SocketRelayManager,
+        plugins: Option<PluginRuntime>,
     ) -> Self {
         let mut dispatcher = Self::new();
         let downloads = dispatcher.downloads.clone();
@@ -151,12 +154,16 @@ impl CommandDispatcher {
 
         let checkin_registry = registry.clone();
         let checkin_events = events.clone();
+        let checkin_plugins = plugins.clone();
         dispatcher.register_handler(
             u32::from(DemonCommand::CommandCheckin),
             move |agent_id, _, _| {
                 let registry = checkin_registry.clone();
                 let events = checkin_events.clone();
-                Box::pin(async move { handle_checkin(&registry, &events, agent_id).await })
+                let plugins = checkin_plugins.clone();
+                Box::pin(async move {
+                    handle_checkin(&registry, &events, plugins.as_ref(), agent_id).await
+                })
             },
         );
 
@@ -212,12 +219,21 @@ impl CommandDispatcher {
         );
 
         let command_output_events = events.clone();
+        let command_output_plugins = plugins.clone();
         dispatcher.register_handler(
             u32::from(DemonCommand::CommandOutput),
             move |agent_id, request_id, payload| {
                 let events = command_output_events.clone();
+                let plugins = command_output_plugins.clone();
                 Box::pin(async move {
-                    handle_command_output_callback(&events, agent_id, request_id, &payload).await
+                    handle_command_output_callback(
+                        &events,
+                        plugins.as_ref(),
+                        agent_id,
+                        request_id,
+                        &payload,
+                    )
+                    .await
                 })
             },
         );
@@ -294,6 +310,7 @@ impl CommandDispatcher {
         let pivot_database = database.clone();
         let pivot_sockets = sockets.clone();
         let pivot_downloads = downloads.clone();
+        let pivot_plugins = plugins.clone();
         dispatcher.register_handler(
             u32::from(DemonCommand::CommandPivot),
             move |agent_id, request_id, payload| {
@@ -302,12 +319,17 @@ impl CommandDispatcher {
                 let database = pivot_database.clone();
                 let sockets = pivot_sockets.clone();
                 let downloads = pivot_downloads.clone();
+                let plugins = pivot_plugins.clone();
                 Box::pin(async move {
-                    handle_pivot_callback(
-                        &registry, &events, &database, &sockets, &downloads, agent_id, request_id,
-                        &payload,
-                    )
-                    .await
+                    let context = BuiltinDispatchContext {
+                        registry: &registry,
+                        events: &events,
+                        database: &database,
+                        sockets: &sockets,
+                        downloads: &downloads,
+                        plugins: plugins.as_ref(),
+                    };
+                    handle_pivot_callback(context, agent_id, request_id, &payload).await
                 })
             },
         );
@@ -398,20 +420,22 @@ async fn handle_get_job(
 async fn handle_checkin(
     registry: &AgentRegistry,
     events: &EventBus,
+    plugins: Option<&PluginRuntime>,
     agent_id: u32,
 ) -> Result<Option<Vec<u8>>, CommandDispatchError> {
     let timestamp = OffsetDateTime::now_utc().format(&Rfc3339)?;
     let agent = registry.set_last_call_in(agent_id, timestamp).await?;
     events.broadcast(agent_update_event(&agent));
+    if let Some(plugins) = plugins
+        && let Err(error) = plugins.emit_agent_checkin(agent_id).await
+    {
+        warn!(agent_id = format_args!("{agent_id:08X}"), %error, "failed to emit python agent_checkin event");
+    }
     Ok(None)
 }
 
 async fn handle_pivot_callback(
-    registry: &AgentRegistry,
-    events: &EventBus,
-    database: &Database,
-    sockets: &SocketRelayManager,
-    downloads: &DownloadTracker,
+    context: BuiltinDispatchContext<'_>,
     agent_id: u32,
     request_id: u32,
     payload: &[u8],
@@ -421,23 +445,27 @@ async fn handle_pivot_callback(
 
     match subcommand.try_into() {
         Ok(red_cell_common::demon::DemonPivotCommand::SmbConnect) => {
-            handle_pivot_connect_callback(registry, events, agent_id, request_id, &mut parser).await
-        }
-        Ok(red_cell_common::demon::DemonPivotCommand::SmbDisconnect) => {
-            handle_pivot_disconnect_callback(registry, events, agent_id, request_id, &mut parser)
-                .await
-        }
-        Ok(red_cell_common::demon::DemonPivotCommand::SmbCommand) => {
-            handle_pivot_command_callback(
-                registry,
-                events,
-                database,
-                sockets,
-                downloads,
+            handle_pivot_connect_callback(
+                context.registry,
+                context.events,
                 agent_id,
+                request_id,
                 &mut parser,
             )
             .await
+        }
+        Ok(red_cell_common::demon::DemonPivotCommand::SmbDisconnect) => {
+            handle_pivot_disconnect_callback(
+                context.registry,
+                context.events,
+                agent_id,
+                request_id,
+                &mut parser,
+            )
+            .await
+        }
+        Ok(red_cell_common::demon::DemonPivotCommand::SmbCommand) => {
+            handle_pivot_command_callback(context, agent_id, &mut parser).await
         }
         Ok(red_cell_common::demon::DemonPivotCommand::List) => Ok(None),
         Err(error) => Err(CommandDispatchError::InvalidCallbackPayload {
@@ -544,16 +572,13 @@ async fn handle_pivot_disconnect_callback(
 }
 
 async fn handle_pivot_command_callback(
-    registry: &AgentRegistry,
-    events: &EventBus,
-    database: &Database,
-    sockets: &SocketRelayManager,
-    downloads: &DownloadTracker,
+    context: BuiltinDispatchContext<'_>,
     _parent_agent_id: u32,
     parser: &mut CallbackParser<'_>,
 ) -> Result<Option<Vec<u8>>, CommandDispatchError> {
     let package = parser.read_bytes("pivot command package")?;
-    let parsed = DemonPacketParser::new(registry.clone()).parse(&package, String::new()).await;
+    let parsed =
+        DemonPacketParser::new(context.registry.clone()).parse(&package, String::new()).await;
     let (child_agent_id, packages) = match parsed {
         Ok(crate::ParsedDemonPacket::Callback { header, packages }) => (header.agent_id, packages),
         Ok(_) => {
@@ -571,9 +596,8 @@ async fn handle_pivot_command_callback(
     };
 
     let timestamp = OffsetDateTime::now_utc().format(&Rfc3339)?;
-    let updated = registry.set_last_call_in(child_agent_id, timestamp).await?;
-    events.broadcast(agent_update_event(&updated));
-    let context = BuiltinDispatchContext { registry, events, database, sockets, downloads };
+    let updated = context.registry.set_last_call_in(child_agent_id, timestamp).await?;
+    context.events.broadcast(agent_update_event(&updated));
     dispatch_builtin_packages(context, child_agent_id, &packages).await
 }
 
@@ -612,7 +636,7 @@ async fn dispatch_builtin_package(
         return Ok(None);
     }
     if command_id == u32::from(DemonCommand::CommandCheckin) {
-        return handle_checkin(context.registry, context.events, agent_id).await;
+        return handle_checkin(context.registry, context.events, context.plugins, agent_id).await;
     }
     if command_id == u32::from(DemonCommand::CommandFs) {
         return handle_filesystem_callback(
@@ -633,7 +657,14 @@ async fn dispatch_builtin_package(
             .await;
     }
     if command_id == u32::from(DemonCommand::CommandOutput) {
-        return handle_command_output_callback(context.events, agent_id, request_id, payload).await;
+        return handle_command_output_callback(
+            context.events,
+            context.plugins,
+            agent_id,
+            request_id,
+            payload,
+        )
+        .await;
     }
     if command_id == u32::from(DemonCommand::BeaconOutput) {
         return handle_beacon_output_callback(
@@ -677,17 +708,7 @@ async fn dispatch_builtin_package(
         .await;
     }
     if command_id == u32::from(DemonCommand::CommandPivot) {
-        return Box::pin(handle_pivot_callback(
-            context.registry,
-            context.events,
-            context.database,
-            context.sockets,
-            context.downloads,
-            agent_id,
-            request_id,
-            payload,
-        ))
-        .await;
+        return Box::pin(handle_pivot_callback(context, agent_id, request_id, payload)).await;
     }
     Ok(None)
 }
@@ -725,6 +746,7 @@ impl DownloadTracker {
 
 async fn handle_command_output_callback(
     events: &EventBus,
+    plugins: Option<&PluginRuntime>,
     agent_id: u32,
     request_id: u32,
     payload: &[u8],
@@ -741,8 +763,20 @@ async fn handle_command_output_callback(
         request_id,
         "Good",
         &format!("Received Output [{} bytes]:", output.len()),
-        Some(output),
+        Some(output.clone()),
     )?);
+    if let Some(plugins) = plugins
+        && let Err(error) = plugins
+            .emit_command_output(
+                agent_id,
+                u32::from(DemonCommand::CommandOutput),
+                request_id,
+                &output,
+            )
+            .await
+    {
+        warn!(agent_id = format_args!("{agent_id:08X}"), %error, "failed to emit python command_output event");
+    }
     Ok(None)
 }
 
@@ -2616,8 +2650,13 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let dispatcher =
-            CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets);
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database,
+            sockets,
+            None,
+        );
         let key = [0x55; AGENT_KEY_LENGTH];
         let iv = [0x22; AGENT_IV_LENGTH];
         let agent_id = 0x5566_7788;
@@ -2658,8 +2697,13 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let dispatcher =
-            CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets);
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database,
+            sockets,
+            None,
+        );
         let root_id = 0x0102_0304;
         let pivot_id = 0x1112_1314;
         let child_id = 0x2122_2324;
@@ -2726,8 +2770,13 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let dispatcher =
-            CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets);
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database,
+            sockets,
+            None,
+        );
         let parent_id = 0x4546_4748;
         let parent_key = [0x21; AGENT_KEY_LENGTH];
         let parent_iv = [0x31; AGENT_IV_LENGTH];
@@ -2761,8 +2810,13 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let dispatcher =
-            CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets);
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database,
+            sockets,
+            None,
+        );
         let key = [0x77; AGENT_KEY_LENGTH];
         let iv = [0x44; AGENT_IV_LENGTH];
         let agent_id = 0x1020_3040;
@@ -2807,7 +2861,7 @@ mod tests {
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
         let dispatcher =
-            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets);
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
 
         let mut payload = Vec::new();
         add_u32(&mut payload, 0);
@@ -2848,7 +2902,7 @@ mod tests {
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
         let dispatcher =
-            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets);
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
 
         let kill_payload = [
             u32::from(DemonProcessCommand::Kill).to_le_bytes(),
@@ -2897,7 +2951,7 @@ mod tests {
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
         let dispatcher =
-            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets);
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
 
         dispatcher
             .dispatch(
@@ -2935,8 +2989,13 @@ mod tests {
                 [0x22; AGENT_IV_LENGTH],
             ))
             .await?;
-        let dispatcher =
-            CommandDispatcher::with_builtin_handlers(registry, events, database.clone(), sockets);
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry,
+            events,
+            database.clone(),
+            sockets,
+            None,
+        );
 
         let png = vec![0x89, b'P', b'N', b'G'];
         let payload = [1_u32.to_le_bytes().to_vec(), {
@@ -2986,8 +3045,13 @@ mod tests {
                 [0x22; AGENT_IV_LENGTH],
             ))
             .await?;
-        let dispatcher =
-            CommandDispatcher::with_builtin_handlers(registry, events, database.clone(), sockets);
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry,
+            events,
+            database.clone(),
+            sockets,
+            None,
+        );
 
         let file_id = 0x33_u32;
         let remote_path = "C:\\Temp\\sam.dump";
@@ -3070,8 +3134,13 @@ mod tests {
                 [0x22; AGENT_IV_LENGTH],
             ))
             .await?;
-        let dispatcher =
-            CommandDispatcher::with_builtin_handlers(registry, events, database.clone(), sockets);
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry,
+            events,
+            database.clone(),
+            sockets,
+            None,
+        );
 
         let file_id = 0x55_u32;
         let remote_path = "C:\\Windows\\Temp\\note.txt";
@@ -3129,7 +3198,7 @@ mod tests {
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
         let dispatcher =
-            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets);
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
 
         let mut payload = Vec::new();
         add_u32(&mut payload, u32::from(DemonKerberosCommand::Klist));

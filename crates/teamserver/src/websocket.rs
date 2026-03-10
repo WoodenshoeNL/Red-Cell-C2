@@ -1692,7 +1692,7 @@ mod tests {
                 events: events.clone(),
                 connections: OperatorConnectionManager::new(),
                 registry: registry.clone(),
-                listeners: ListenerManager::new(database, registry, events, sockets.clone()),
+                listeners: ListenerManager::new(database, registry, events, sockets.clone(), None),
                 payload_builder: PayloadBuilderService::disabled_for_tests(),
                 sockets,
             }

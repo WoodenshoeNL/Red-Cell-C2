@@ -10,6 +10,7 @@ pub mod dispatch;
 pub mod events;
 pub mod listeners;
 pub mod payload_builder;
+pub mod plugins;
 pub mod rbac;
 pub mod sockets;
 pub mod websocket;
@@ -43,6 +44,7 @@ pub use listeners::{
 pub use payload_builder::{
     BuildProgress, PayloadArtifact, PayloadBuildError, PayloadBuilderService,
 };
+pub use plugins::{PluginError, PluginEvent, PluginRuntime};
 pub use rbac::{
     AdminAccess, AuthenticatedOperator, AuthorizationError, ListenerManagementAccess, Permission,
     ReadAccess, TaskAgentAccess, authorize_permission, authorize_websocket_command,

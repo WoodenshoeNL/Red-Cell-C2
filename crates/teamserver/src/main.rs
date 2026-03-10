@@ -14,8 +14,8 @@ use axum_server::{Handle, tls_rustls::RustlsConfig};
 use clap::Parser;
 use red_cell::{
     AgentRegistry, ApiRuntime, AuthService, Database, EventBus, ListenerManager,
-    ListenerManagerError, OperatorConnectionManager, PayloadBuilderService, SocketRelayManager,
-    TeamserverState, api_routes, websocket_routes,
+    ListenerManagerError, OperatorConnectionManager, PayloadBuilderService, PluginRuntime,
+    SocketRelayManager, TeamserverState, api_routes, websocket_routes,
 };
 use red_cell_common::config::{Profile, ProfileValidationError};
 use red_cell_common::tls::{
@@ -55,11 +55,19 @@ async fn main() -> Result<()> {
     let agent_registry = AgentRegistry::load(database.clone()).await?;
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(agent_registry.clone(), events.clone());
+    let plugins = PluginRuntime::initialize(
+        database.clone(),
+        agent_registry.clone(),
+        profile.teamserver.plugins_dir.as_ref().map(PathBuf::from),
+    )
+    .await
+    .context("failed to initialize embedded Python runtime")?;
     let listeners = ListenerManager::new(
         database.clone(),
         agent_registry.clone(),
         events.clone(),
         sockets.clone(),
+        Some(plugins.clone()),
     );
     let payload_builder = PayloadBuilderService::from_profile(&profile)
         .context("failed to validate Demon build toolchain")?;
@@ -67,6 +75,10 @@ async fn main() -> Result<()> {
     listeners.sync_profile(&profile).await?;
     listeners.restore_running().await?;
     start_profile_listeners(&listeners, &profile).await?;
+    let loaded_plugins = plugins.load_plugins().await.context("failed to load Python plugins")?;
+    if !loaded_plugins.is_empty() {
+        info!(count = loaded_plugins.len(), plugins = ?loaded_plugins, "loaded Python plugins");
+    }
 
     let bind_addr = resolve_bind_addr(&profile).await?;
     install_default_crypto_provider();
@@ -387,7 +399,13 @@ mod tests {
             events: events.clone(),
             connections: OperatorConnectionManager::new(),
             agent_registry: agent_registry.clone(),
-            listeners: ListenerManager::new(database, agent_registry, events, sockets.clone()),
+            listeners: ListenerManager::new(
+                database,
+                agent_registry,
+                events,
+                sockets.clone(),
+                None,
+            ),
             payload_builder: PayloadBuilderService::disabled_for_tests(),
             sockets,
             profile,

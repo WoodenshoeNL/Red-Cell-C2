@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
@@ -1256,6 +1256,12 @@ const DNS_RCODE_NOERROR: u16 = 0;
 const DNS_RCODE_REFUSED: u16 = 5;
 /// Maximum age in seconds before a pending DNS upload is discarded.
 const DNS_UPLOAD_TIMEOUT_SECS: u64 = 120;
+/// How often the DNS listener prunes expired upload sessions.
+const DNS_UPLOAD_CLEANUP_INTERVAL_SECS: u64 = 30;
+/// Maximum number of chunks accepted for a single DNS upload.
+const DNS_MAX_UPLOAD_CHUNKS: u16 = 256;
+/// Maximum number of concurrent DNS upload sessions retained in memory.
+const DNS_MAX_PENDING_UPLOADS: usize = 1000;
 /// Maximum response chunk size in bytes (encoded as base32hex in a TXT string).
 /// 200 base32hex chars × 5 bits ÷ 8 = 125 bytes.
 const DNS_RESPONSE_CHUNK_BYTES: usize = 125;
@@ -1278,6 +1284,13 @@ struct DnsPendingUpload {
 struct DnsPendingResponse {
     /// Base32hex-encoded response chunks.
     chunks: Vec<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DnsUploadAssembly {
+    Pending,
+    Complete(Vec<u8>),
+    Rejected,
 }
 
 /// Shared runtime state for the DNS C2 listener.
@@ -1394,8 +1407,10 @@ impl DnsListenerState {
         data: Vec<u8>,
         peer_ip: &str,
     ) -> &'static str {
-        let Some(assembled) = self.try_assemble_upload(agent_id, seq, total, data).await else {
-            return "ok";
+        let assembled = match self.try_assemble_upload(agent_id, seq, total, data).await {
+            DnsUploadAssembly::Pending => return "ok",
+            DnsUploadAssembly::Rejected => return "err",
+            DnsUploadAssembly::Complete(assembled) => assembled,
         };
 
         if !is_valid_demon_callback_request(&assembled) {
@@ -1437,6 +1452,12 @@ impl DnsListenerState {
         }
     }
 
+    async fn cleanup_expired_uploads(&self) {
+        let mut uploads = self.uploads.lock().await;
+        uploads
+            .retain(|_, pending| pending.received_at.elapsed().as_secs() < DNS_UPLOAD_TIMEOUT_SECS);
+    }
+
     async fn handle_download(&self, agent_id: u32, seq: u16) -> String {
         let mut responses = self.responses.lock().await;
         let Some(pending) = responses.get(&agent_id) else {
@@ -1455,20 +1476,65 @@ impl DnsListenerState {
 
     /// Try to assemble a complete upload from buffered chunks.
     ///
-    /// Returns `Some(bytes)` when all `total` chunks are present, `None` when more chunks
-    /// are still expected.
+    /// Returns [`DnsUploadAssembly::Complete`] when all chunks are present,
+    /// [`DnsUploadAssembly::Pending`] while more chunks are still expected,
+    /// and [`DnsUploadAssembly::Rejected`] when the upload metadata or state is invalid.
     async fn try_assemble_upload(
         &self,
         agent_id: u32,
         seq: u16,
         total: u16,
         data: Vec<u8>,
-    ) -> Option<Vec<u8>> {
+    ) -> DnsUploadAssembly {
+        if total == 0 || total > DNS_MAX_UPLOAD_CHUNKS {
+            warn!(
+                listener = %self.config.name,
+                agent_id = format_args!("{agent_id:08X}"),
+                seq,
+                total,
+                max_total = DNS_MAX_UPLOAD_CHUNKS,
+                "dns upload rejected due to invalid total chunk count"
+            );
+            return DnsUploadAssembly::Rejected;
+        }
+
+        if seq >= total {
+            warn!(
+                listener = %self.config.name,
+                agent_id = format_args!("{agent_id:08X}"),
+                seq,
+                total,
+                "dns upload rejected because chunk sequence exceeds declared total"
+            );
+            return DnsUploadAssembly::Rejected;
+        }
+
         let mut uploads = self.uploads.lock().await;
 
-        // Expire stale entries
-        uploads
-            .retain(|_, pending| pending.received_at.elapsed().as_secs() < DNS_UPLOAD_TIMEOUT_SECS);
+        if let Some(existing) = uploads.get(&agent_id)
+            && existing.total != total
+        {
+            warn!(
+                listener = %self.config.name,
+                agent_id = format_args!("{agent_id:08X}"),
+                received_total = total,
+                expected_total = existing.total,
+                "dns upload rejected due to inconsistent chunk total"
+            );
+            uploads.remove(&agent_id);
+            return DnsUploadAssembly::Rejected;
+        }
+
+        if !uploads.contains_key(&agent_id) && uploads.len() >= DNS_MAX_PENDING_UPLOADS {
+            warn!(
+                listener = %self.config.name,
+                agent_id = format_args!("{agent_id:08X}"),
+                active_uploads = uploads.len(),
+                max_uploads = DNS_MAX_PENDING_UPLOADS,
+                "dns upload rejected because pending upload capacity has been reached"
+            );
+            return DnsUploadAssembly::Rejected;
+        }
 
         let entry = uploads.entry(agent_id).or_insert_with(|| DnsPendingUpload {
             chunks: HashMap::new(),
@@ -1479,7 +1545,7 @@ impl DnsListenerState {
 
         let expected = entry.total;
         if entry.chunks.len() < usize::from(expected) {
-            return None;
+            return DnsUploadAssembly::Pending;
         }
 
         // All chunks present — assemble in order
@@ -1494,12 +1560,12 @@ impl DnsListenerState {
                         "dns upload missing chunk {i}/{expected}; discarding"
                     );
                     uploads.remove(&agent_id);
-                    return None;
+                    return DnsUploadAssembly::Rejected;
                 }
             }
         }
         uploads.remove(&agent_id);
-        Some(assembled)
+        DnsUploadAssembly::Complete(assembled)
     }
 }
 
@@ -1748,27 +1814,36 @@ async fn spawn_dns_listener_runtime(
 
     Ok(tokio::spawn(async move {
         let mut buf = vec![0u8; 4096];
+        let mut cleanup_interval =
+            tokio::time::interval(Duration::from_secs(DNS_UPLOAD_CLEANUP_INTERVAL_SECS));
         loop {
-            let (len, peer) = match socket.recv_from(&mut buf).await {
-                Ok(result) => result,
-                Err(error) => {
-                    warn!(listener = %state.config.name, %error, "dns listener recv error");
-                    break;
+            tokio::select! {
+                _ = cleanup_interval.tick() => {
+                    state.cleanup_expired_uploads().await;
                 }
-            };
+                recv = socket.recv_from(&mut buf) => {
+                    let (len, peer) = match recv {
+                        Ok(result) => result,
+                        Err(error) => {
+                            warn!(listener = %state.config.name, %error, "dns listener recv error");
+                            break;
+                        }
+                    };
 
-            let packet = buf[..len].to_vec();
-            let state = state.clone();
-            let socket = socket.clone();
-            let peer_ip = peer.ip().to_string();
+                    let packet = buf[..len].to_vec();
+                    let state = state.clone();
+                    let socket = socket.clone();
+                    let peer_ip = peer.ip().to_string();
 
-            tokio::spawn(async move {
-                if let Some(response) = state.handle_dns_packet(&packet, &peer_ip).await {
-                    if let Err(error) = socket.send_to(&response, peer).await {
-                        warn!(listener = %state.config.name, %error, "dns listener send error");
-                    }
+                    tokio::spawn(async move {
+                        if let Some(response) = state.handle_dns_packet(&packet, &peer_ip).await {
+                            if let Err(error) = socket.send_to(&response, peer).await {
+                                warn!(listener = %state.config.name, %error, "dns listener send error");
+                            }
+                        }
+                    });
                 }
-            });
+            }
         }
     }))
 }
@@ -2130,10 +2205,11 @@ fn proxy_from_operator(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::io;
     use std::net::TcpListener as StdTcpListener;
     use std::time::Duration;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     use super::{
         ListenerEventAction, ListenerManager, ListenerManagerError, ListenerStatus,
@@ -3083,9 +3159,10 @@ mod tests {
     // ── DNS C2 unit tests ─────────────────────────────────────────────────────
 
     use super::{
-        DNS_HEADER_LEN, DNS_TYPE_A, DNS_TYPE_TXT, DnsListenerState, DnsPendingResponse,
-        base32hex_decode, base32hex_encode, build_dns_txt_response, chunk_response_to_b32hex,
-        parse_dns_c2_query, parse_dns_query,
+        DNS_HEADER_LEN, DNS_MAX_PENDING_UPLOADS, DNS_MAX_UPLOAD_CHUNKS, DNS_TYPE_A, DNS_TYPE_TXT,
+        DNS_UPLOAD_TIMEOUT_SECS, DnsListenerState, DnsPendingResponse, DnsPendingUpload,
+        DnsUploadAssembly, base32hex_decode, base32hex_encode, build_dns_txt_response,
+        chunk_response_to_b32hex, parse_dns_c2_query, parse_dns_query,
     };
     use tokio::net::UdpSocket as TokioUdpSocket;
 
@@ -3106,6 +3183,24 @@ mod tests {
             kill_date: None,
             working_hours: None,
         })
+    }
+
+    async fn dns_state(name: &str) -> DnsListenerState {
+        let database = Database::connect_in_memory().await.expect("database creation failed");
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let config = red_cell_common::DnsListenerConfig {
+            name: name.to_owned(),
+            host_bind: "127.0.0.1".to_owned(),
+            port_bind: 0,
+            domain: "c2.example.com".to_owned(),
+            record_types: vec!["TXT".to_owned()],
+            kill_date: None,
+            working_hours: None,
+        };
+
+        DnsListenerState::new(&config, registry, events, database, sockets, None)
     }
 
     /// Build a minimal DNS query packet for `qname`.
@@ -3325,20 +3420,7 @@ mod tests {
 
     #[tokio::test]
     async fn dns_listener_download_done_removes_pending_response() {
-        let database = Database::connect_in_memory().await.expect("database creation failed");
-        let registry = AgentRegistry::new(database.clone());
-        let events = EventBus::default();
-        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let config = red_cell_common::DnsListenerConfig {
-            name: "dns-cleanup".to_owned(),
-            host_bind: "127.0.0.1".to_owned(),
-            port_bind: 0,
-            domain: "c2.example.com".to_owned(),
-            record_types: vec!["TXT".to_owned()],
-            kill_date: None,
-            working_hours: None,
-        };
-        let state = DnsListenerState::new(&config, registry, events, database, sockets, None);
+        let state = dns_state("dns-cleanup").await;
         let agent_id = 0xDEAD_BEEF;
 
         state.responses.lock().await.insert(
@@ -3352,5 +3434,81 @@ mod tests {
         assert_eq!(state.handle_download(agent_id, 2).await, "done");
         assert!(!state.responses.lock().await.contains_key(&agent_id));
         assert_eq!(state.handle_download(agent_id, 0).await, "wait");
+    }
+
+    #[tokio::test]
+    async fn dns_upload_rejects_total_over_limit() {
+        let state = dns_state("dns-total-cap").await;
+
+        let result =
+            state.try_assemble_upload(0xDEAD_BEEF, 0, DNS_MAX_UPLOAD_CHUNKS + 1, vec![0x41]).await;
+
+        assert_eq!(result, DnsUploadAssembly::Rejected);
+        assert!(state.uploads.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dns_upload_rejects_inconsistent_total_and_clears_session() {
+        let state = dns_state("dns-total-mismatch").await;
+        let agent_id = 0xDEAD_BEEF;
+
+        let first = state.try_assemble_upload(agent_id, 0, 2, vec![0x41]).await;
+        assert_eq!(first, DnsUploadAssembly::Pending);
+
+        let second = state.try_assemble_upload(agent_id, 1, 3, vec![0x42]).await;
+        assert_eq!(second, DnsUploadAssembly::Rejected);
+        assert!(!state.uploads.lock().await.contains_key(&agent_id));
+    }
+
+    #[tokio::test]
+    async fn dns_upload_rejects_new_session_when_capacity_reached() {
+        let state = dns_state("dns-capacity").await;
+
+        {
+            let mut uploads = state.uploads.lock().await;
+            for agent_id in 0..DNS_MAX_PENDING_UPLOADS {
+                uploads.insert(
+                    agent_id as u32,
+                    DnsPendingUpload {
+                        chunks: HashMap::new(),
+                        total: 1,
+                        received_at: Instant::now(),
+                    },
+                );
+            }
+        }
+
+        let result = state.try_assemble_upload(0xDEAD_BEEF, 0, 1, vec![0x41]).await;
+
+        assert_eq!(result, DnsUploadAssembly::Rejected);
+        assert_eq!(state.uploads.lock().await.len(), DNS_MAX_PENDING_UPLOADS);
+    }
+
+    #[tokio::test]
+    async fn dns_upload_cleanup_removes_expired_sessions() {
+        let state = dns_state("dns-expiry").await;
+        let stale_age = Duration::from_secs(DNS_UPLOAD_TIMEOUT_SECS + 1);
+
+        {
+            let mut uploads = state.uploads.lock().await;
+            uploads.insert(
+                1,
+                DnsPendingUpload {
+                    chunks: HashMap::new(),
+                    total: 1,
+                    received_at: Instant::now() - stale_age,
+                },
+            );
+            uploads.insert(
+                2,
+                DnsPendingUpload { chunks: HashMap::new(), total: 1, received_at: Instant::now() },
+            );
+        }
+
+        state.cleanup_expired_uploads().await;
+
+        let uploads = state.uploads.lock().await;
+        assert!(!uploads.contains_key(&1));
+        assert!(uploads.contains_key(&2));
     }
 }

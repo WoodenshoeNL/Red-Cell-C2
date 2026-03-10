@@ -477,7 +477,7 @@ impl AgentRegistry {
         let mut wrapped_job = Job {
             command: u32::from(DemonCommand::CommandPivot),
             request_id: job.request_id,
-            payload: encode_pivot_job_payload(wrapped_target, &wrapped_payload),
+            payload: encode_pivot_job_payload(wrapped_target, &wrapped_payload)?,
             command_line: job.command_line.clone(),
             task_id: job.task_id.clone(),
             created_at: job.created_at.clone(),
@@ -492,7 +492,7 @@ impl AgentRegistry {
             wrapped_job = Job {
                 command: u32::from(DemonCommand::CommandPivot),
                 request_id: job.request_id,
-                payload: encode_pivot_job_payload(wrapped_target, &wrapped_payload),
+                payload: encode_pivot_job_payload(wrapped_target, &wrapped_payload)?,
                 command_line: job.command_line.clone(),
                 task_id: job.task_id.clone(),
                 created_at: job.created_at.clone(),
@@ -614,20 +614,29 @@ fn decode_fixed<const N: usize>(
     })
 }
 
-fn encode_pivot_job_payload(target_agent_id: u32, payload: &[u8]) -> Vec<u8> {
+fn encode_pivot_job_payload(
+    target_agent_id: u32,
+    payload: &[u8],
+) -> Result<Vec<u8>, TeamserverError> {
+    let payload_len = u32::try_from(payload.len())
+        .map_err(|_| TeamserverError::PayloadTooLarge { length: payload.len() })?;
+
     let mut inner = Vec::new();
     inner.extend_from_slice(&target_agent_id.to_le_bytes());
-    inner.extend_from_slice(&u32::try_from(payload.len()).unwrap_or_default().to_le_bytes());
+    inner.extend_from_slice(&payload_len.to_le_bytes());
     inner.extend_from_slice(payload);
+
+    let inner_len = u32::try_from(inner.len())
+        .map_err(|_| TeamserverError::PayloadTooLarge { length: inner.len() })?;
 
     let mut outer = Vec::new();
     outer.extend_from_slice(
         &u32::from(red_cell_common::demon::DemonPivotCommand::SmbCommand).to_le_bytes(),
     );
     outer.extend_from_slice(&target_agent_id.to_le_bytes());
-    outer.extend_from_slice(&u32::try_from(inner.len()).unwrap_or_default().to_le_bytes());
+    outer.extend_from_slice(&inner_len.to_le_bytes());
     outer.extend_from_slice(&inner);
-    outer
+    Ok(outer)
 }
 
 #[cfg(test)]
@@ -1215,5 +1224,20 @@ mod tests {
         assert!((30..=45).contains(&persisted.sleep_delay));
 
         Ok(())
+    }
+
+    #[test]
+    fn encode_pivot_job_payload_normal_input() {
+        let payload = b"hello";
+        let result = super::encode_pivot_job_payload(0xDEAD_BEEF, payload);
+        assert!(result.is_ok());
+        let outer = result.unwrap();
+        assert!(outer.len() > payload.len());
+    }
+
+    #[test]
+    fn encode_pivot_job_payload_empty_input() {
+        let result = super::encode_pivot_job_payload(0x1234, &[]);
+        assert!(result.is_ok());
     }
 }

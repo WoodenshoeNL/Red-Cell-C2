@@ -64,6 +64,12 @@ pub enum TeamserverError {
         /// Human-readable validation failure.
         message: String,
     },
+    /// Returned when a buffer exceeds the 4 GiB length-prefix limit of the Demon wire format.
+    #[error("payload too large: {length} bytes exceeds u32::MAX")]
+    PayloadTooLarge {
+        /// Actual buffer length in bytes.
+        length: usize,
+    },
 }
 
 /// Connection pool and repository factory for the teamserver database.

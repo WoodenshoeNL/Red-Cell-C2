@@ -387,7 +387,7 @@ impl SocketRelayManager {
         payload.extend_from_slice(&u32::from(DemonSocketCommand::Connect).to_le_bytes());
         payload.extend_from_slice(&socket_id.to_le_bytes());
         payload.push(request.atyp);
-        write_len_prefixed_bytes(&mut payload, &request.address);
+        write_len_prefixed_bytes(&mut payload, &request.address)?;
         payload.extend_from_slice(&request.port.to_le_bytes());
         self.enqueue_socket_job(agent_id, socket_id, payload, "socket connect").await
     }
@@ -401,7 +401,7 @@ impl SocketRelayManager {
         let mut payload = Vec::new();
         payload.extend_from_slice(&u32::from(DemonSocketCommand::Write).to_le_bytes());
         payload.extend_from_slice(&socket_id.to_le_bytes());
-        write_len_prefixed_bytes(&mut payload, data);
+        write_len_prefixed_bytes(&mut payload, data)?;
         self.enqueue_socket_job(agent_id, socket_id, payload, "socket write").await
     }
 
@@ -637,9 +637,12 @@ async fn read_exact_vec(stream: &mut TcpStream, len: usize) -> Result<Vec<u8>, i
     Ok(bytes)
 }
 
-fn write_len_prefixed_bytes(buf: &mut Vec<u8>, value: &[u8]) {
-    buf.extend_from_slice(&u32::try_from(value.len()).unwrap_or_default().to_le_bytes());
+fn write_len_prefixed_bytes(buf: &mut Vec<u8>, value: &[u8]) -> Result<(), TeamserverError> {
+    let len = u32::try_from(value.len())
+        .map_err(|_| TeamserverError::PayloadTooLarge { length: value.len() })?;
+    buf.extend_from_slice(&len.to_le_bytes());
     buf.extend_from_slice(value);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -698,5 +701,20 @@ mod tests {
         assert_eq!(manager.list_socks_servers(0xDEAD_BEEF).await, "No active SOCKS5 servers");
 
         Ok(())
+    }
+
+    #[test]
+    fn write_len_prefixed_bytes_normal_input() {
+        let mut buf = Vec::new();
+        super::write_len_prefixed_bytes(&mut buf, b"data").unwrap();
+        assert_eq!(buf[..4], 4_u32.to_le_bytes());
+        assert_eq!(&buf[4..], b"data");
+    }
+
+    #[test]
+    fn write_len_prefixed_bytes_empty_input() {
+        let mut buf = Vec::new();
+        super::write_len_prefixed_bytes(&mut buf, &[]).unwrap();
+        assert_eq!(buf, 0_u32.to_le_bytes());
     }
 }

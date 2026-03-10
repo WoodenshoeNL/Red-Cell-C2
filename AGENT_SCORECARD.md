@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 13 | 0 |
+| Tasks closed | 0 | 15 | 0 |
 | Bugs filed against | 0 | 2 | 0 |
-| Bug rate (bugs/task) | N/A | 0.15 | N/A |
-| Quality score | N/A | 85% | N/A |
+| Bug rate (bugs/task) | N/A | 0.13 | N/A |
+| Quality score | N/A | 87% | N/A |
 
 ## Violation Breakdown
 
@@ -95,3 +95,13 @@ Build: passed (cargo check + clippy -D warnings + cargo test: 257 passed)
 
 Build: passed (cargo check + clippy -D warnings + cargo test: 270 passed)
 Note: red-cell-c2-pmq (process list panel) still in_progress — dependency on stk now resolved, should proceed.
+
+### QA Review — 2026-03-10 20:30 — b059817..d61818c
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA loop only |
+| Codex | 2 | 0 | Closed red-cell-c2-pmq (process list panel) and red-cell-c2-wnq (session graph). Both features well-implemented with full test coverage. red-cell-c2-t9k (PyO3 client embed) just claimed, in_progress. |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (cargo check + clippy -D warnings + cargo test: 279 passed)

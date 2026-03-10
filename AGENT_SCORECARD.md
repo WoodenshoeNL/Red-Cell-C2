@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 19 | 0 |
+| Tasks closed | 0 | 21 | 0 |
 | Bugs filed against | 0 | 2 | 0 |
-| Bug rate (bugs/task) | N/A | 0.11 | N/A |
-| Quality score | N/A | 89% | N/A |
+| Bug rate (bugs/task) | N/A | 0.10 | N/A |
+| Quality score | N/A | 90% | N/A |
 
 ## Violation Breakdown
 
@@ -125,3 +125,13 @@ Build: passed (cargo check + clippy -D warnings + cargo test: all passed)
 | Cursor | 0 | 0 | No activity this run |
 
 Build: passed (cargo check + clippy -D warnings + cargo test: 74 passed)
+
+### QA Review — 2026-03-10 21:34 — d112826..19e8f0a
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA loop only |
+| Codex | 2 | 0 | Closed red-cell-c2-n3n (concurrent AgentRegistry unit tests) and red-cell-c2-dgn (full E2E operator+demon session: listener create → DEMON_INIT → GET_JOB → CommandCheckin job dispatch → CommandOutput → WebSocket broadcast). Protocol constants verified correct. No unwrap in production paths. RBAC tests refactored to table-driven style. red-cell-c2-2jw (DNS response map expiry) now claimed and fix in-progress. |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (cargo check + clippy -D warnings + cargo test: 74 unit + 1 e2e = 75 tests)

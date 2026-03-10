@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use red_cell_common::demon::DemonProtocolError;
 use red_cell_common::{AgentInfo, ListenerConfig, ListenerProtocol};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,6 +24,9 @@ pub enum TeamserverError {
     /// Returned when JSON fields cannot be encoded or decoded.
     #[error("json serialization error: {0}")]
     Json(#[from] serde_json::Error),
+    /// Returned when Demon wire-format serialization fails.
+    #[error("demon protocol error: {0}")]
+    DemonProtocol(#[from] DemonProtocolError),
     /// Returned when a path cannot be represented as a valid SQLite filename.
     #[error("invalid sqlite database path `{path}`")]
     InvalidDatabasePath { path: PathBuf },
@@ -51,6 +55,12 @@ pub enum TeamserverError {
     InvalidListenerState {
         /// Invalid state string.
         state: String,
+    },
+    /// Returned when a requested pivot relationship is invalid.
+    #[error("invalid pivot link: {message}")]
+    InvalidPivotLink {
+        /// Human-readable validation failure.
+        message: String,
     },
 }
 

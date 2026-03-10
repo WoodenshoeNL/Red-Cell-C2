@@ -1195,6 +1195,8 @@ enum SnapshotSyncError {
     Send(#[from] SendMessageError),
     #[error(transparent)]
     Listener(#[from] crate::ListenerManagerError),
+    #[error(transparent)]
+    Teamserver(#[from] crate::TeamserverError),
 }
 
 async fn send_session_snapshot(
@@ -1216,13 +1218,16 @@ async fn send_session_snapshot(
     }
 
     for agent in registry.list_active().await {
-        send_operator_message(socket, &agent_snapshot_event(&agent)).await?;
+        let pivots = registry.pivots(agent.agent_id).await;
+        send_operator_message(socket, &agent_snapshot_event(&agent, &pivots)).await?;
     }
 
     Ok(())
 }
 
-fn agent_snapshot_event(agent: &AgentInfo) -> OperatorMessage {
+fn agent_snapshot_event(agent: &AgentInfo, pivots: &crate::PivotInfo) -> OperatorMessage {
+    let parent = pivots.parent.map(|agent_id| format!("{agent_id:08X}"));
+    let links = pivots.children.iter().map(|agent_id| format!("{agent_id:08X}")).collect();
     OperatorMessage::AgentNew(Box::new(Message {
         head: MessageHead {
             event: EventCode::Session,
@@ -1250,7 +1255,7 @@ fn agent_snapshot_event(agent: &AgentInfo) -> OperatorMessage {
             os_arch: agent.os_arch.clone(),
             os_build: String::new(),
             os_version: agent.os_version.clone(),
-            pivots: AgentPivotsInfo::default(),
+            pivots: AgentPivotsInfo { parent: parent.clone(), links },
             port_fwds: Vec::new(),
             process_arch: agent.process_arch.clone(),
             process_name: agent.process_name.clone(),
@@ -1268,7 +1273,7 @@ fn agent_snapshot_event(agent: &AgentInfo) -> OperatorMessage {
             socks_svr: Vec::new(),
             tasked_once: false,
             username: agent.username.clone(),
-            pivot_parent: String::new(),
+            pivot_parent: parent.unwrap_or_default(),
         },
     }))
 }

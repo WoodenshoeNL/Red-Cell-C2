@@ -11,7 +11,7 @@ pub mod rbac;
 pub mod sockets;
 pub mod websocket;
 
-pub use agents::{AgentRegistry, Job};
+pub use agents::{AgentRegistry, Job, PivotInfo};
 pub use auth::{
     AuthError, AuthService, AuthenticationFailure, AuthenticationResult, AuthenticationSuccess,
     OperatorSession, hash_password, login_failure_message, login_success_message,

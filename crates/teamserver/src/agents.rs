@@ -1,12 +1,16 @@
 //! In-memory agent registry with SQLite synchronization.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, encrypt_agent_data};
+use red_cell_common::demon::{DemonCommand, DemonMessage, DemonPackage};
 use red_cell_common::{AgentEncryptionInfo, AgentInfo};
 use tokio::sync::{Mutex, RwLock};
 
-use crate::database::{Database, TeamserverError};
+use crate::database::{Database, LinkRecord, TeamserverError};
 
 /// Queued agent task payload.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -37,31 +41,59 @@ impl AgentEntry {
     }
 }
 
+/// Parent and child pivot metadata associated with an agent.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PivotInfo {
+    /// Upstream parent agent identifier, if one exists.
+    pub parent: Option<u32>,
+    /// Downstream linked child agent identifiers.
+    pub children: Vec<u32>,
+}
+
 /// Thread-safe in-memory registry of active and historical agents.
 #[derive(Clone, Debug)]
 pub struct AgentRegistry {
     repository: crate::database::AgentRepository,
+    link_repository: crate::database::LinkRepository,
     entries: Arc<RwLock<HashMap<u32, Arc<AgentEntry>>>>,
+    parent_links: Arc<RwLock<HashMap<u32, u32>>>,
+    child_links: Arc<RwLock<HashMap<u32, BTreeSet<u32>>>>,
 }
 
 impl AgentRegistry {
     /// Create an empty registry backed by the provided database.
     #[must_use]
     pub fn new(database: Database) -> Self {
-        Self { repository: database.agents(), entries: Arc::new(RwLock::new(HashMap::new())) }
+        Self {
+            repository: database.agents(),
+            link_repository: database.links(),
+            entries: Arc::new(RwLock::new(HashMap::new())),
+            parent_links: Arc::new(RwLock::new(HashMap::new())),
+            child_links: Arc::new(RwLock::new(HashMap::new())),
+        }
     }
 
     /// Load all persisted agents from SQLite into a new registry.
     pub async fn load(database: Database) -> Result<Self, TeamserverError> {
         let registry = Self::new(database.clone());
         let agents = database.agents().list().await?;
+        let links = database.links().list().await?;
         let mut entries = registry.entries.write().await;
+        let mut parent_links = registry.parent_links.write().await;
+        let mut child_links = registry.child_links.write().await;
 
         for agent in agents {
             entries.insert(agent.agent_id, Arc::new(AgentEntry::new(agent)));
         }
 
+        for link in links {
+            parent_links.insert(link.link_agent_id, link.parent_agent_id);
+            child_links.entry(link.parent_agent_id).or_default().insert(link.link_agent_id);
+        }
+
         drop(entries);
+        drop(parent_links);
+        drop(child_links);
         Ok(registry)
     }
 
@@ -130,6 +162,15 @@ impl AgentRegistry {
         let mut info = entry.info.write().await;
         info.active = false;
         info.reason = reason;
+        drop(info);
+
+        let descendants = self.child_subtree(agent_id).await;
+        for child_id in descendants {
+            self.mark_subtree_member_dead(child_id, "pivot parent disconnected").await?;
+            self.clear_links_for_agent(child_id).await?;
+        }
+
+        self.clear_links_for_agent(agent_id).await?;
         Ok(())
     }
 
@@ -152,6 +193,7 @@ impl AgentRegistry {
 
     /// Remove an agent from memory and SQLite.
     pub async fn remove(&self, agent_id: u32) -> Result<AgentInfo, TeamserverError> {
+        self.clear_links_for_agent(agent_id).await?;
         let entry = {
             let mut entries = self.entries.write().await;
             entries.remove(&agent_id).ok_or(TeamserverError::AgentNotFound { agent_id })?
@@ -192,6 +234,20 @@ impl AgentRegistry {
 
     /// Append a job to an agent's task queue.
     pub async fn enqueue_job(&self, agent_id: u32, job: Job) -> Result<(), TeamserverError> {
+        self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
+
+        if let Some(parent_agent_id) = self.parent_of(agent_id).await {
+            let (queue_agent_id, pivot_job) =
+                self.build_pivot_job(parent_agent_id, agent_id, job).await?;
+            let parent_entry = self
+                .entry(queue_agent_id)
+                .await
+                .ok_or(TeamserverError::AgentNotFound { agent_id: queue_agent_id })?;
+            let mut jobs = parent_entry.jobs.lock().await;
+            jobs.push_back(pivot_job);
+            return Ok(());
+        }
+
         let entry =
             self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
         let mut jobs = entry.jobs.lock().await;
@@ -241,21 +297,275 @@ impl AgentRegistry {
         Ok(updated)
     }
 
+    /// Return the direct parent of `agent_id`, if this agent is linked through SMB.
+    pub async fn parent_of(&self, agent_id: u32) -> Option<u32> {
+        let parent_links = self.parent_links.read().await;
+        parent_links.get(&agent_id).copied()
+    }
+
+    /// Return all directly linked child agents for `agent_id`.
+    pub async fn children_of(&self, agent_id: u32) -> Vec<u32> {
+        let child_links = self.child_links.read().await;
+        child_links
+            .get(&agent_id)
+            .map(|children| children.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Return the current pivot parent and child links for `agent_id`.
+    pub async fn pivots(&self, agent_id: u32) -> PivotInfo {
+        PivotInfo {
+            parent: self.parent_of(agent_id).await,
+            children: self.children_of(agent_id).await,
+        }
+    }
+
+    /// Persist and register a parent/child SMB pivot relationship.
+    pub async fn add_link(
+        &self,
+        parent_agent_id: u32,
+        link_agent_id: u32,
+    ) -> Result<(), TeamserverError> {
+        self.entry(parent_agent_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: parent_agent_id })?;
+        self.entry(link_agent_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: link_agent_id })?;
+
+        if parent_agent_id == link_agent_id {
+            return Err(TeamserverError::InvalidPivotLink {
+                message: "agent cannot pivot to itself".to_owned(),
+            });
+        }
+        if self.path_contains(link_agent_id, parent_agent_id).await {
+            return Err(TeamserverError::InvalidPivotLink {
+                message: format!(
+                    "linking 0x{parent_agent_id:08X} -> 0x{link_agent_id:08X} would create a cycle"
+                ),
+            });
+        }
+
+        let existing_parent = self.parent_of(link_agent_id).await;
+        if existing_parent == Some(parent_agent_id) {
+            return Ok(());
+        }
+
+        if let Some(previous_parent) = existing_parent {
+            self.link_repository.delete(previous_parent, link_agent_id).await?;
+            self.remove_link_from_memory(previous_parent, link_agent_id).await;
+        }
+
+        self.link_repository.create(LinkRecord { parent_agent_id, link_agent_id }).await?;
+        self.parent_links.write().await.insert(link_agent_id, parent_agent_id);
+        self.child_links.write().await.entry(parent_agent_id).or_default().insert(link_agent_id);
+        Ok(())
+    }
+
+    /// Remove a specific pivot relationship and mark the downstream subtree inactive.
+    pub async fn disconnect_link(
+        &self,
+        parent_agent_id: u32,
+        link_agent_id: u32,
+        reason: impl Into<String>,
+    ) -> Result<Vec<u32>, TeamserverError> {
+        let reason = reason.into();
+        if self.parent_of(link_agent_id).await != Some(parent_agent_id) {
+            return Ok(Vec::new());
+        }
+
+        let mut affected = vec![link_agent_id];
+        affected.extend(self.child_subtree(link_agent_id).await);
+        for agent_id in &affected {
+            self.mark_subtree_member_dead(*agent_id, &reason).await?;
+        }
+
+        self.clear_links_for_agent(link_agent_id).await?;
+        self.link_repository.delete(parent_agent_id, link_agent_id).await?;
+        self.remove_link_from_memory(parent_agent_id, link_agent_id).await;
+        Ok(affected)
+    }
+
     async fn entry(&self, agent_id: u32) -> Option<Arc<AgentEntry>> {
         let entries = self.entries.read().await;
         entries.get(&agent_id).cloned()
     }
+
+    async fn build_pivot_job(
+        &self,
+        direct_parent_agent_id: u32,
+        target_agent_id: u32,
+        job: Job,
+    ) -> Result<(u32, Job), TeamserverError> {
+        let mut wrapped_target = target_agent_id;
+        let mut wrapped_payload =
+            self.serialize_jobs_for_agent(target_agent_id, std::slice::from_ref(&job)).await?;
+        let mut wrapped_job = Job {
+            command: u32::from(DemonCommand::CommandPivot),
+            request_id: job.request_id,
+            payload: encode_pivot_job_payload(wrapped_target, &wrapped_payload),
+            command_line: job.command_line.clone(),
+            task_id: job.task_id.clone(),
+            created_at: job.created_at.clone(),
+        };
+        let mut current_parent = direct_parent_agent_id;
+
+        while let Some(next_parent) = self.parent_of(current_parent).await {
+            wrapped_payload =
+                self.serialize_jobs_for_agent(current_parent, &[wrapped_job.clone()]).await?;
+            wrapped_target = current_parent;
+            wrapped_job = Job {
+                command: u32::from(DemonCommand::CommandPivot),
+                request_id: job.request_id,
+                payload: encode_pivot_job_payload(wrapped_target, &wrapped_payload),
+                command_line: job.command_line.clone(),
+                task_id: job.task_id.clone(),
+                created_at: job.created_at.clone(),
+            };
+            current_parent = next_parent;
+        }
+
+        Ok((current_parent, wrapped_job))
+    }
+
+    async fn serialize_jobs_for_agent(
+        &self,
+        agent_id: u32,
+        jobs: &[Job],
+    ) -> Result<Vec<u8>, TeamserverError> {
+        let encryption = self.encryption(agent_id).await?;
+        let key =
+            decode_fixed::<AGENT_KEY_LENGTH>(agent_id, "aes_key", encryption.aes_key.as_bytes())?;
+        let iv = decode_fixed::<AGENT_IV_LENGTH>(agent_id, "aes_iv", encryption.aes_iv.as_bytes())?;
+        let mut packages = Vec::with_capacity(jobs.len());
+
+        for job in jobs {
+            let payload = if job.payload.is_empty() {
+                Vec::new()
+            } else {
+                encrypt_agent_data(&key, &iv, &job.payload)
+            };
+            packages.push(DemonPackage {
+                command_id: job.command,
+                request_id: job.request_id,
+                payload,
+            });
+        }
+
+        DemonMessage::new(packages).to_bytes().map_err(Into::into)
+    }
+
+    async fn path_contains(&self, start_agent_id: u32, sought_agent_id: u32) -> bool {
+        let mut current = Some(start_agent_id);
+        while let Some(agent_id) = current {
+            if agent_id == sought_agent_id {
+                return true;
+            }
+            current = self.parent_of(agent_id).await;
+        }
+        false
+    }
+
+    async fn child_subtree(&self, agent_id: u32) -> Vec<u32> {
+        let mut descendants = Vec::new();
+        let mut stack = self.children_of(agent_id).await;
+
+        while let Some(child_id) = stack.pop() {
+            descendants.push(child_id);
+            stack.extend(self.children_of(child_id).await);
+        }
+
+        descendants.sort_unstable();
+        descendants
+    }
+
+    async fn clear_links_for_agent(&self, agent_id: u32) -> Result<(), TeamserverError> {
+        if let Some(parent_agent_id) = self.parent_of(agent_id).await {
+            self.link_repository.delete(parent_agent_id, agent_id).await?;
+            self.remove_link_from_memory(parent_agent_id, agent_id).await;
+        }
+
+        let children = self.children_of(agent_id).await;
+        for child_id in children {
+            self.link_repository.delete(agent_id, child_id).await?;
+            self.remove_link_from_memory(agent_id, child_id).await;
+        }
+
+        Ok(())
+    }
+
+    async fn remove_link_from_memory(&self, parent_agent_id: u32, link_agent_id: u32) {
+        self.parent_links.write().await.remove(&link_agent_id);
+        let mut child_links = self.child_links.write().await;
+        if let Some(children) = child_links.get_mut(&parent_agent_id) {
+            children.remove(&link_agent_id);
+            if children.is_empty() {
+                child_links.remove(&parent_agent_id);
+            }
+        }
+    }
+
+    async fn mark_subtree_member_dead(
+        &self,
+        agent_id: u32,
+        reason: &str,
+    ) -> Result<(), TeamserverError> {
+        self.repository.set_status(agent_id, false, reason).await?;
+        let entry =
+            self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
+        let mut info = entry.info.write().await;
+        info.active = false;
+        info.reason = reason.to_owned();
+        Ok(())
+    }
+}
+
+fn decode_fixed<const N: usize>(
+    agent_id: u32,
+    field: &'static str,
+    encoded: &[u8],
+) -> Result<[u8; N], TeamserverError> {
+    let decoded = BASE64_STANDARD.decode(encoded).map_err(|error| {
+        TeamserverError::InvalidPersistedValue {
+            field,
+            message: format!("agent 0x{agent_id:08X}: {error}"),
+        }
+    })?;
+    let actual = decoded.len();
+    decoded.try_into().map_err(|_| TeamserverError::InvalidPersistedValue {
+        field,
+        message: format!("agent 0x{agent_id:08X}: expected {N} bytes, got {actual}"),
+    })
+}
+
+fn encode_pivot_job_payload(target_agent_id: u32, payload: &[u8]) -> Vec<u8> {
+    let mut inner = Vec::new();
+    inner.extend_from_slice(&target_agent_id.to_le_bytes());
+    inner.extend_from_slice(&u32::try_from(payload.len()).unwrap_or_default().to_le_bytes());
+    inner.extend_from_slice(payload);
+
+    let mut outer = Vec::new();
+    outer.extend_from_slice(
+        &u32::from(red_cell_common::demon::DemonPivotCommand::SmbCommand).to_le_bytes(),
+    );
+    outer.extend_from_slice(&target_agent_id.to_le_bytes());
+    outer.extend_from_slice(&u32::try_from(inner.len()).unwrap_or_default().to_le_bytes());
+    outer.extend_from_slice(&inner);
+    outer
 }
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use red_cell_common::AgentEncryptionInfo;
 
     use super::{AgentRegistry, Job};
-    use crate::database::{Database, TeamserverError};
+    use crate::database::{Database, LinkRecord, TeamserverError};
 
     fn temp_db_path() -> std::path::PathBuf {
         let unique = SystemTime::now()
@@ -299,6 +609,19 @@ mod tests {
         }
     }
 
+    fn sample_agent_with_crypto(
+        agent_id: u32,
+        key: [u8; AGENT_KEY_LENGTH],
+        iv: [u8; AGENT_IV_LENGTH],
+    ) -> red_cell_common::AgentInfo {
+        let mut agent = sample_agent(agent_id);
+        agent.encryption = AgentEncryptionInfo {
+            aes_key: BASE64_STANDARD.encode(key),
+            aes_iv: BASE64_STANDARD.encode(iv),
+        };
+        agent
+    }
+
     async fn test_database() -> Result<Database, TeamserverError> {
         Database::connect(temp_db_path()).await
     }
@@ -333,6 +656,29 @@ mod tests {
         let registry = AgentRegistry::load(database).await?;
 
         assert_eq!(registry.get(agent.agent_id).await, Some(agent));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn load_restores_persisted_pivot_links() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let parent = sample_agent(0x1000_1010);
+        let child = sample_agent(0x1000_2020);
+        database.agents().create(&parent).await?;
+        database.agents().create(&child).await?;
+        database
+            .links()
+            .create(LinkRecord { parent_agent_id: parent.agent_id, link_agent_id: child.agent_id })
+            .await?;
+
+        let registry = AgentRegistry::load(database).await?;
+
+        assert_eq!(registry.parent_of(child.agent_id).await, Some(parent.agent_id));
+        assert_eq!(registry.children_of(parent.agent_id).await, vec![child.agent_id]);
+        assert_eq!(
+            registry.pivots(child.agent_id).await,
+            super::PivotInfo { parent: Some(parent.agent_id), children: Vec::new() }
+        );
         Ok(())
     }
 
@@ -462,6 +808,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mark_dead_tears_down_pivot_subtree() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let parent = sample_agent(0x1000_000D);
+        let child = sample_agent(0x1000_000E);
+        let grandchild = sample_agent(0x1000_000F);
+        registry.insert(parent.clone()).await?;
+        registry.insert(child.clone()).await?;
+        registry.insert(grandchild.clone()).await?;
+        registry.add_link(parent.agent_id, child.agent_id).await?;
+        registry.add_link(child.agent_id, grandchild.agent_id).await?;
+
+        registry.mark_dead(parent.agent_id, "lost contact").await?;
+
+        assert_eq!(registry.parent_of(child.agent_id).await, None);
+        assert_eq!(registry.parent_of(grandchild.agent_id).await, None);
+        assert!(registry.children_of(parent.agent_id).await.is_empty());
+        assert!(
+            !registry
+                .get(child.agent_id)
+                .await
+                .ok_or(TeamserverError::AgentNotFound { agent_id: child.agent_id })?
+                .active
+        );
+        assert_eq!(
+            registry
+                .get(grandchild.agent_id)
+                .await
+                .ok_or(TeamserverError::AgentNotFound { agent_id: grandchild.agent_id })?
+                .reason,
+            "pivot parent disconnected"
+        );
+        assert!(database.links().list().await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn encryption_round_trips() -> Result<(), TeamserverError> {
         let database = test_database().await?;
         let registry = AgentRegistry::new(database.clone());
@@ -524,6 +907,43 @@ mod tests {
         assert_eq!(registry.dequeue_jobs(agent.agent_id).await?, vec![first, second]);
         assert!(registry.queued_jobs(agent.agent_id).await?.is_empty());
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn enqueue_job_routes_linked_child_to_root_parent_queue() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let root = sample_agent_with_crypto(
+            0x1000_0010,
+            [0x11; AGENT_KEY_LENGTH],
+            [0x22; AGENT_IV_LENGTH],
+        );
+        let pivot = sample_agent_with_crypto(
+            0x1000_0011,
+            [0x33; AGENT_KEY_LENGTH],
+            [0x44; AGENT_IV_LENGTH],
+        );
+        let child = sample_agent_with_crypto(
+            0x1000_0012,
+            [0x55; AGENT_KEY_LENGTH],
+            [0x66; AGENT_IV_LENGTH],
+        );
+        registry.insert(root.clone()).await?;
+        registry.insert(pivot.clone()).await?;
+        registry.insert(child.clone()).await?;
+        registry.add_link(root.agent_id, pivot.agent_id).await?;
+        registry.add_link(pivot.agent_id, child.agent_id).await?;
+
+        registry.enqueue_job(child.agent_id, sample_job(7)).await?;
+
+        assert!(registry.queued_jobs(child.agent_id).await?.is_empty());
+        assert!(registry.queued_jobs(pivot.agent_id).await?.is_empty());
+        let queued = registry.queued_jobs(root.agent_id).await?;
+        assert_eq!(queued.len(), 1);
+        assert_eq!(
+            queued[0].command,
+            u32::from(red_cell_common::demon::DemonCommand::CommandPivot)
+        );
         Ok(())
     }
 

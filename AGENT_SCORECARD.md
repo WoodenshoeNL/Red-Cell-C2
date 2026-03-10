@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 9 | 0 |
-| Bugs filed against | 0 | 1 | 0 |
-| Bug rate (bugs/task) | N/A | 0.11 | N/A |
-| Quality score | N/A | 89% | N/A |
+| Tasks closed | 0 | 11 | 0 |
+| Bugs filed against | 0 | 2 | 0 |
+| Bug rate (bugs/task) | N/A | 0.18 | N/A |
+| Quality score | N/A | 82% | N/A |
 
 ## Violation Breakdown
 
@@ -25,6 +25,7 @@ Each loop run updates the running totals and appends a review entry.
 | Security issues | 0 | 4 | 0 |
 | Architecture drift | 0 | 0 | 0 |
 | Memory / resource leaks | 0 | 1 | 0 |
+| Audit attribution errors | 0 | 1 | 0 |
 
 ---
 
@@ -73,3 +74,13 @@ Build: passed (cargo check + clippy -D warnings + cargo test: 57/57 passed)
 
 Build: passed (cargo check + clippy -D warnings + cargo test: 57/57 passed)
 Minor observation: `password_hashes_match` calls `to_ascii_lowercase()` before `ct_eq`; subtle's `ct_eq` short-circuits on length mismatch. Not exploitable in practice for SHA3-256 hex hashes (always 64 chars), but worth noting.
+
+### QA Review — 2026-03-10 19:42 — 105138b..73fae9e
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA loop only |
+| Codex | 2 | 1 | Closed red-cell-c2-7td (session table), red-cell-c2-7yl (loot/chat panels). Bug: red-3c6 (note task sent with empty operator username — audit attribution broken in render_note_editor). |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (cargo check + clippy -D warnings + cargo test: 257 passed)

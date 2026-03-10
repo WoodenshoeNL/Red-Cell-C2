@@ -9,6 +9,7 @@ use red_cell_common::operator::{
     EventCode, LoginInfo, Message, MessageHead, MessageInfo, OperatorMessage,
 };
 use sha3::{Digest, Sha3_256};
+use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tracing::instrument;
@@ -132,7 +133,7 @@ impl AuthService {
             return AuthenticationResult::Failure(AuthenticationFailure::UnknownUser);
         };
 
-        if !login.password.eq_ignore_ascii_case(&account.password_hash) {
+        if !password_hashes_match(&login.password, &account.password_hash) {
             return AuthenticationResult::Failure(AuthenticationFailure::WrongPassword);
         }
 
@@ -311,6 +312,13 @@ fn login_response_head(user: &str) -> MessageHead {
     }
 }
 
+fn password_hashes_match(submitted: &str, expected: &str) -> bool {
+    let submitted = submitted.to_ascii_lowercase();
+    let expected = expected.to_ascii_lowercase();
+
+    submitted.as_bytes().ct_eq(expected.as_bytes()).into()
+}
+
 #[cfg(test)]
 mod tests {
     use red_cell_common::config::Profile;
@@ -438,6 +446,23 @@ mod tests {
 
         assert_eq!(result, AuthenticationResult::Failure(AuthenticationFailure::WrongPassword));
         assert_eq!(service.session_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn authenticate_login_accepts_uppercase_password_hash() {
+        let service = AuthService::from_profile(&profile());
+
+        let result = service
+            .authenticate_login(
+                Uuid::new_v4(),
+                &LoginInfo {
+                    user: "operator".to_owned(),
+                    password: hash_password("password1234").to_ascii_uppercase(),
+                },
+            )
+            .await;
+
+        assert!(matches!(result, AuthenticationResult::Success(_)));
     }
 
     #[tokio::test]

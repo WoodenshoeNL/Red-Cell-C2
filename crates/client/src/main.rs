@@ -88,6 +88,7 @@ impl ClientApp {
                 ui.group(|ui| {
                     ui.horizontal(|ui| {
                         ui.monospace(&agent.name_id);
+                        ui.label(format!("[{}]", agent.status));
                         ui.label(format!("{}\\{}", agent.domain_name, agent.username));
                     });
                     ui.label(format!("Host: {}", agent.hostname));
@@ -319,6 +320,7 @@ mod tests {
         assert_eq!(app_state.connection_status, ConnectionStatus::Disconnected);
         assert!(app_state.operator_info.is_none());
         assert!(app_state.agents.is_empty());
+        assert!(app_state.agent_consoles.is_empty());
         assert!(app_state.listeners.is_empty());
         assert!(app_state.loot.is_empty());
         assert!(app_state.chat_messages.is_empty());

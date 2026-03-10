@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -5,7 +6,8 @@ use eframe::egui;
 use futures_util::{SinkExt, StreamExt};
 use red_cell_common::OperatorInfo;
 use red_cell_common::operator::{
-    ChatUserInfo, FlatInfo, ListenerInfo, ListenerMarkInfo, OperatorMessage,
+    AgentResponseInfo, ChatUserInfo, FlatInfo, ListenerInfo, ListenerMarkInfo, Message,
+    OperatorMessage,
 };
 use thiserror::Error;
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
@@ -157,8 +159,16 @@ pub(crate) struct ChatMessage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentConsoleEntry {
+    pub(crate) command_id: String,
+    pub(crate) received_at: String,
+    pub(crate) output: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentSummary {
     pub(crate) name_id: String,
+    pub(crate) status: String,
     pub(crate) domain_name: String,
     pub(crate) username: String,
     pub(crate) hostname: String,
@@ -180,6 +190,7 @@ pub(crate) struct AppState {
     pub(crate) connection_status: ConnectionStatus,
     pub(crate) operator_info: Option<OperatorInfo>,
     pub(crate) agents: Vec<AgentSummary>,
+    pub(crate) agent_consoles: BTreeMap<String, Vec<AgentConsoleEntry>>,
     pub(crate) listeners: Vec<ListenerSummary>,
     pub(crate) loot: Vec<LootItem>,
     pub(crate) chat_messages: Vec<ChatMessage>,
@@ -192,6 +203,7 @@ impl AppState {
             connection_status: ConnectionStatus::Disconnected,
             operator_info: None,
             agents: Vec::new(),
+            agent_consoles: BTreeMap::new(),
             listeners: Vec::new(),
             loot: Vec::new(),
             chat_messages: Vec::new(),
@@ -265,10 +277,26 @@ impl AppState {
                 }
             }
             OperatorMessage::AgentUpdate(message) => {
-                let normalized_agent_id = normalize_agent_id(&message.info.agent_id);
-                if message.info.marked.eq_ignore_ascii_case("dead") {
-                    self.agents.retain(|agent| agent.name_id != normalized_agent_id);
+                let agent_id = normalize_agent_id(&message.info.agent_id);
+                if let Some(agent) = self.agents.iter_mut().find(|agent| agent.name_id == agent_id)
+                {
+                    agent.status = message.info.marked;
+                    agent.last_call_in = message.head.timestamp;
+                } else {
+                    self.agents.push(AgentSummary {
+                        name_id: agent_id,
+                        status: message.info.marked,
+                        domain_name: String::new(),
+                        username: String::new(),
+                        hostname: String::new(),
+                        process_name: String::new(),
+                        process_pid: String::new(),
+                        last_call_in: message.head.timestamp,
+                    });
                 }
+            }
+            OperatorMessage::AgentResponse(message) => {
+                self.handle_agent_response(message);
             }
             OperatorMessage::TeamserverLog(message) => {
                 self.push_chat_message("teamserver", message.head.timestamp, message.info.text);
@@ -299,7 +327,6 @@ impl AppState {
             | OperatorMessage::HostFileAdd(_)
             | OperatorMessage::HostFileRemove(_)
             | OperatorMessage::AgentTask(_)
-            | OperatorMessage::AgentResponse(_)
             | OperatorMessage::ServiceAgentRegister(_)
             | OperatorMessage::ServiceListenerRegister(_)
             | OperatorMessage::TeamserverProfile(_) => {}
@@ -378,6 +405,36 @@ impl AppState {
                 });
             }
             _ => {}
+        }
+    }
+
+    fn handle_agent_response(&mut self, message: Message<AgentResponseInfo>) {
+        if response_is_loot_notification(&message.info) {
+            if let Some(loot_item) = loot_item_from_response(&message.info) {
+                self.upsert_loot(loot_item);
+            }
+            return;
+        }
+
+        let output = sanitize_output(&message.info.output);
+        if output.is_empty() {
+            return;
+        }
+
+        let agent_id = normalize_agent_id(&message.info.demon_id);
+        self.agent_consoles.entry(agent_id).or_default().push(AgentConsoleEntry {
+            command_id: message.info.command_id,
+            received_at: message.head.timestamp,
+            output,
+        });
+    }
+
+    fn upsert_loot(&mut self, loot_item: LootItem) {
+        match self.loot.iter_mut().find(|existing| {
+            existing.name == loot_item.name && existing.collected_at == loot_item.collected_at
+        }) {
+            Some(existing) => *existing = loot_item,
+            None => self.loot.push(loot_item),
         }
     }
 }
@@ -648,6 +705,11 @@ fn listener_summary_from_info(info: &ListenerInfo) -> ListenerSummary {
 fn agent_summary_from_message(info: &red_cell_common::operator::AgentInfo) -> AgentSummary {
     AgentSummary {
         name_id: normalize_agent_id(&info.name_id),
+        status: if info.active.eq_ignore_ascii_case("true") {
+            "Alive".to_owned()
+        } else {
+            info.active.clone()
+        },
         domain_name: info.domain_name.clone(),
         username: info.username.clone(),
         hostname: info.hostname.clone(),
@@ -681,6 +743,37 @@ fn flat_info_string(info: &FlatInfo, keys: &[&str]) -> Option<String> {
 fn sanitize_text(message: &str) -> String {
     let trimmed = message.trim();
     if trimmed.is_empty() { "Connected".to_owned() } else { trimmed.to_owned() }
+}
+
+fn sanitize_output(output: &str) -> String {
+    output.trim().to_owned()
+}
+
+fn response_is_loot_notification(info: &red_cell_common::operator::AgentResponseInfo) -> bool {
+    matches!(
+        info.extra.get("MiscType"),
+        Some(serde_json::Value::String(kind)) if kind == "loot-new"
+    )
+}
+
+fn loot_item_from_response(
+    info: &red_cell_common::operator::AgentResponseInfo,
+) -> Option<LootItem> {
+    let name = extra_string(&info.extra, "LootName")?;
+    let source = extra_string(&info.extra, "LootKind")
+        .or_else(|| extra_string(&info.extra, "Operator"))
+        .unwrap_or_else(|| "unknown".to_owned());
+    let collected_at = extra_string(&info.extra, "CapturedAt").unwrap_or_default();
+
+    Some(LootItem { name, source, collected_at })
+}
+
+fn extra_string(extra: &BTreeMap<String, serde_json::Value>, key: &str) -> Option<String> {
+    extra.get(key).and_then(|value| match value {
+        serde_json::Value::String(string) => Some(string.clone()),
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    })
 }
 
 #[derive(Debug)]
@@ -737,9 +830,10 @@ impl ServerCertVerifier for DangerousCertificateVerifier {
 mod tests {
     use super::*;
     use red_cell_common::operator::{
-        AgentInfo as OperatorAgentInfo, AgentPivotsInfo, AgentUpdateInfo, BuildPayloadMessageInfo,
-        ChatCode, EventCode, InitConnectionCode, ListenerCode, ListenerErrorInfo, LoginInfo,
-        Message, MessageHead, MessageInfo, SessionCode, TeamserverLogInfo,
+        AgentInfo as OperatorAgentInfo, AgentPivotsInfo, AgentResponseInfo, AgentUpdateInfo,
+        BuildPayloadMessageInfo, ChatCode, EventCode, InitConnectionCode, ListenerCode,
+        ListenerErrorInfo, LoginInfo, Message, MessageHead, MessageInfo, SessionCode,
+        TeamserverLogInfo,
     };
     use red_cell_common::tls::{TlsKeyAlgorithm, generate_self_signed_tls_identity};
     use tokio::net::TcpListener;
@@ -824,6 +918,61 @@ mod tests {
         assert_eq!(state.listeners[0].name, "http");
         assert_eq!(state.agents.len(), 1);
         assert_eq!(state.agents[0].name_id, "ABCD1234");
+        assert_eq!(state.agents[0].status, "Alive");
+    }
+
+    #[test]
+    fn agent_response_appends_console_output() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        state.apply_operator_message(OperatorMessage::AgentResponse(Message {
+            head: head(EventCode::Session),
+            info: AgentResponseInfo {
+                demon_id: "abcd1234".to_owned(),
+                command_id: "42".to_owned(),
+                output: "whoami".to_owned(),
+                command_line: Some("shell whoami".to_owned()),
+                extra: BTreeMap::new(),
+            },
+        }));
+
+        let entries = state
+            .agent_consoles
+            .get("ABCD1234")
+            .unwrap_or_else(|| panic!("console output should be stored"));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].command_id, "42");
+        assert_eq!(entries[0].output, "whoami");
+    }
+
+    #[test]
+    fn loot_notifications_update_loot_panel_state() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+        let mut extra = BTreeMap::new();
+        extra.insert("MiscType".to_owned(), serde_json::Value::String("loot-new".to_owned()));
+        extra.insert("LootName".to_owned(), serde_json::Value::String("passwords.txt".to_owned()));
+        extra.insert("LootKind".to_owned(), serde_json::Value::String("download".to_owned()));
+        extra.insert(
+            "CapturedAt".to_owned(),
+            serde_json::Value::String("2026-03-10T12:00:00Z".to_owned()),
+        );
+
+        state.apply_operator_message(OperatorMessage::AgentResponse(Message {
+            head: head(EventCode::Session),
+            info: AgentResponseInfo {
+                demon_id: "abcd1234".to_owned(),
+                command_id: "99".to_owned(),
+                output: String::new(),
+                command_line: None,
+                extra,
+            },
+        }));
+
+        assert_eq!(state.loot.len(), 1);
+        assert_eq!(state.loot[0].name, "passwords.txt");
+        assert_eq!(state.loot[0].source, "download");
+        assert_eq!(state.loot[0].collected_at, "2026-03-10T12:00:00Z");
+        assert!(!state.agent_consoles.contains_key("ABCD1234"));
     }
 
     #[test]

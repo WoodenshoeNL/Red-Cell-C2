@@ -59,6 +59,36 @@ claim_task() {
 
     head_before=$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null) || return 1
 
+    # Pre-claim check: read the raw JSONL directly to detect stale beads DB.
+    # br sync --import-only can miss another agent's claim (their in_progress
+    # entry is in issues.jsonl after git pull, but the local SQLite DB still
+    # shows open). br update would then write a new entry with a fresh
+    # updated_at timestamp, making git diff --quiet pass despite no real
+    # status change — causing a double-claim. Bypass the DB entirely here.
+    local pre_status
+    pre_status=$(CLAIM_TASK_ID="$task_id" CLAIM_JSONL="$SCRIPT_DIR/.beads/issues.jsonl" \
+        python3 -c "
+import json, os
+tid = os.environ['CLAIM_TASK_ID']
+last = None
+try:
+    with open(os.environ['CLAIM_JSONL']) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    e = json.loads(line)
+                    if e.get('id') == tid: last = e
+                except Exception: pass
+    print((last or {}).get('status', ''))
+except Exception: pass
+" 2>/dev/null)
+    if [ "$pre_status" = "in_progress" ]; then
+        log "CLAIM SKIP: $task_id already in_progress in JSONL (stale DB) — refreshing and skipping"
+        br sync --import-only --quiet 2>/dev/null || true
+        return 1
+    fi
+
     br update "$task_id" --status=in_progress 2>/dev/null || return 1
     br sync --flush-only 2>/dev/null || return 1
 

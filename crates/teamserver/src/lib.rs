@@ -4,6 +4,7 @@ pub mod agents;
 pub mod auth;
 pub mod database;
 pub mod demon;
+pub mod dispatch;
 pub mod events;
 pub mod listeners;
 pub mod rbac;
@@ -23,6 +24,7 @@ pub use demon::{
     DemonCallbackPackage, DemonPacketParser, DemonParserError, ParsedDemonInit, ParsedDemonPacket,
     build_init_ack,
 };
+pub use dispatch::{CommandDispatchError, CommandDispatcher};
 pub use events::{EventBus, EventReceiver};
 pub use listeners::{
     ListenerEventAction, ListenerManager, ListenerManagerError, ListenerMarkRequest,

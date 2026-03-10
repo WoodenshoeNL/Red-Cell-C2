@@ -13,8 +13,6 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::{Json, Router};
 use axum_server::tls_rustls::RustlsConfig;
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use interprocess::local_socket::tokio::Stream as LocalSocketStream;
 use interprocess::local_socket::traits::tokio::Listener as _;
 use interprocess::local_socket::{ListenerOptions, ToFsName as _, ToNsName as _};
@@ -23,14 +21,11 @@ use interprocess::os::unix::local_socket::{AbstractNsUdSocket, FilesystemUdSocke
 #[cfg(windows)]
 use interprocess::os::windows::local_socket::NamedPipe;
 use red_cell_common::config::Profile;
-use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, encrypt_agent_data};
-use red_cell_common::demon::{
-    DEMON_MAGIC_VALUE, DemonCommand, DemonHeader, DemonMessage, DemonPackage, DemonProtocolError,
-};
+use red_cell_common::demon::{DEMON_MAGIC_VALUE, DemonHeader};
 use red_cell_common::operator::{
     AgentEncryptionInfo as OperatorAgentEncryptionInfo, AgentInfo as OperatorAgentInfo,
-    AgentPivotsInfo, AgentUpdateInfo, EventCode, ListenerErrorInfo, ListenerInfo, ListenerMarkInfo,
-    Message, MessageHead, NameInfo, OperatorMessage,
+    AgentPivotsInfo, EventCode, ListenerErrorInfo, ListenerInfo, ListenerMarkInfo, Message,
+    MessageHead, NameInfo, OperatorMessage,
 };
 use red_cell_common::tls::{
     TlsKeyAlgorithm, install_default_crypto_provider, resolve_tls_identity,
@@ -41,19 +36,16 @@ use red_cell_common::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
-use tracing::debug;
 use tracing::{info, warn};
 
 use crate::{
-    AgentRegistry, Database, DemonPacketParser, ListenerRepository, ListenerStatus,
-    ParsedDemonPacket, PersistedListener, PersistedListenerState, TeamserverError, build_init_ack,
-    events::EventBus,
+    AgentRegistry, CommandDispatchError, CommandDispatcher, Database, DemonPacketParser,
+    ListenerRepository, ListenerStatus, ParsedDemonPacket, PersistedListener,
+    PersistedListenerState, TeamserverError, build_init_ack, events::EventBus,
 };
 
 /// Runtime state for a configured listener.
@@ -469,6 +461,7 @@ struct HttpListenerState {
     registry: AgentRegistry,
     parser: DemonPacketParser,
     events: EventBus,
+    dispatcher: CommandDispatcher,
     method: Method,
     required_headers: Vec<ExpectedHeader>,
     response_headers: Vec<(HeaderName, HeaderValue)>,
@@ -488,6 +481,7 @@ struct SmbListenerState {
     registry: AgentRegistry,
     parser: DemonPacketParser,
     events: EventBus,
+    dispatcher: CommandDispatcher,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -524,7 +518,8 @@ impl HttpListenerState {
         Ok(Self {
             config: config.clone(),
             registry: registry.clone(),
-            parser: DemonPacketParser::new(registry),
+            parser: DemonPacketParser::new(registry.clone()),
+            dispatcher: CommandDispatcher::with_builtin_handlers(registry.clone(), events.clone()),
             events,
             method,
             required_headers,
@@ -564,8 +559,9 @@ impl SmbListenerState {
         Self {
             config: config.clone(),
             registry: registry.clone(),
-            parser: DemonPacketParser::new(registry),
-            events,
+            parser: DemonPacketParser::new(registry.clone()),
+            events: events.clone(),
+            dispatcher: CommandDispatcher::with_builtin_handlers(registry.clone(), events.clone()),
         }
     }
 }
@@ -915,111 +911,12 @@ fn agent_new_event(
     }))
 }
 
-fn agent_update_event(agent: &red_cell_common::AgentInfo) -> OperatorMessage {
-    OperatorMessage::AgentUpdate(Message {
-        head: MessageHead {
-            event: EventCode::Session,
-            user: "teamserver".to_owned(),
-            timestamp: agent.last_call_in.clone(),
-            one_time: String::new(),
-        },
-        info: AgentUpdateInfo { agent_id: agent.name_id(), marked: "Alive".to_owned() },
-    })
-}
-
-async fn serialize_job_packages(
-    registry: &AgentRegistry,
-    agent_id: u32,
-    jobs: Vec<crate::Job>,
-) -> Result<Vec<u8>, ListenerManagerError> {
-    let (key, iv) = decode_agent_crypto(registry, agent_id).await?;
-    let mut packages = Vec::with_capacity(jobs.len());
-
-    for job in jobs {
-        let payload = if job.payload.is_empty() {
-            Vec::new()
-        } else {
-            encrypt_agent_data(&key, &iv, &job.payload)
-        };
-        packages.push(DemonPackage {
-            command_id: job.command,
-            request_id: job.request_id,
-            payload,
-        });
-    }
-
-    DemonMessage::new(packages).to_bytes().map_err(callback_protocol_error)
-}
-
-async fn decode_agent_crypto(
-    registry: &AgentRegistry,
-    agent_id: u32,
-) -> Result<([u8; AGENT_KEY_LENGTH], [u8; AGENT_IV_LENGTH]), ListenerManagerError> {
-    let encryption = registry.encryption(agent_id).await?;
-    let key = decode_fixed(agent_id, "aes_key", encryption.aes_key.as_bytes(), AGENT_KEY_LENGTH)?;
-    let iv = decode_fixed(agent_id, "aes_iv", encryption.aes_iv.as_bytes(), AGENT_IV_LENGTH)?;
-    Ok((key, iv))
-}
-
-fn callback_protocol_error(error: DemonProtocolError) -> ListenerManagerError {
-    ListenerManagerError::InvalidConfig {
-        message: format!("failed to serialize queued job payload: {error}"),
-    }
-}
-
 async fn build_callback_response(
-    listener_name: &str,
-    registry: &AgentRegistry,
-    events: &EventBus,
+    dispatcher: &CommandDispatcher,
     agent_id: u32,
-    packages: Vec<crate::DemonCallbackPackage>,
+    packages: &[crate::DemonCallbackPackage],
 ) -> Result<Vec<u8>, ListenerManagerError> {
-    let mut requested_jobs = false;
-
-    for package in packages {
-        match package.command() {
-            Ok(DemonCommand::CommandGetJob) => {
-                requested_jobs = true;
-            }
-            Ok(DemonCommand::CommandCheckin) => {
-                let timestamp = OffsetDateTime::now_utc().format(&Rfc3339).map_err(|error| {
-                    ListenerManagerError::InvalidConfig {
-                        message: format!("failed to format callback timestamp: {error}"),
-                    }
-                })?;
-                let agent = registry.set_last_call_in(agent_id, timestamp).await?;
-                events.broadcast(agent_update_event(&agent));
-            }
-            Ok(command) => {
-                debug!(
-                    listener = listener_name,
-                    agent_id = format_args!("{agent_id:08X}"),
-                    ?command,
-                    "ignoring unhandled demon callback command"
-                );
-            }
-            Err(error) => {
-                warn!(
-                    listener = listener_name,
-                    agent_id = format_args!("{agent_id:08X}"),
-                    %error,
-                    command_id = package.command_id,
-                    "ignoring unknown demon callback command"
-                );
-            }
-        }
-    }
-
-    if !requested_jobs {
-        return Ok(Vec::new());
-    }
-
-    let jobs = registry.dequeue_jobs(agent_id).await?;
-    if jobs.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    serialize_job_packages(registry, agent_id, jobs).await
+    dispatcher.dispatch_packages(agent_id, packages).await.map_err(map_command_dispatch_error)
 }
 
 async fn process_demon_transport(
@@ -1027,6 +924,7 @@ async fn process_demon_transport(
     registry: &AgentRegistry,
     parser: &DemonPacketParser,
     events: &EventBus,
+    dispatcher: &CommandDispatcher,
     body: &[u8],
     external_ip: String,
 ) -> Result<ProcessedDemonResponse, ListenerManagerError> {
@@ -1056,9 +954,7 @@ async fn process_demon_transport(
             Ok(ProcessedDemonResponse { agent_id: header.agent_id, payload })
         }
         Ok(ParsedDemonPacket::Callback { header, packages }) => {
-            let payload =
-                build_callback_response(listener_name, registry, events, header.agent_id, packages)
-                    .await?;
+            let payload = build_callback_response(dispatcher, header.agent_id, &packages).await?;
 
             Ok(ProcessedDemonResponse { agent_id: header.agent_id, payload })
         }
@@ -1066,6 +962,10 @@ async fn process_demon_transport(
             message: format!("failed to parse demon callback: {error}"),
         }),
     }
+}
+
+fn map_command_dispatch_error(error: CommandDispatchError) -> ListenerManagerError {
+    ListenerManagerError::InvalidConfig { message: error.to_string() }
 }
 
 async fn spawn_smb_listener_runtime(
@@ -1131,6 +1031,7 @@ async fn handle_smb_connection(state: Arc<SmbListenerState>, mut stream: LocalSo
             &state.registry,
             &state.parser,
             &state.events,
+            &state.dispatcher,
             &frame.payload,
             "127.0.0.1".to_owned(),
         )
@@ -1235,26 +1136,6 @@ fn smb_local_socket_name(pipe_name: &str) -> io::Result<interprocess::local_sock
 #[cfg(windows)]
 fn smb_local_socket_name(pipe_name: &str) -> io::Result<interprocess::local_socket::Name<'static>> {
     normalized_smb_pipe_name(pipe_name).to_fs_name::<NamedPipe>().map(|name| name.into_owned())
-}
-
-fn decode_fixed<const N: usize>(
-    agent_id: u32,
-    field: &'static str,
-    encoded: &[u8],
-    expected_len: usize,
-) -> Result<[u8; N], ListenerManagerError> {
-    let decoded =
-        BASE64_STANDARD.decode(encoded).map_err(|error| ListenerManagerError::InvalidConfig {
-            message: format!(
-                "invalid base64 in stored {field} for agent 0x{agent_id:08X}: {error}"
-            ),
-        })?;
-    let actual = decoded.len();
-    decoded.try_into().map_err(|_| ListenerManagerError::InvalidConfig {
-        message: format!(
-            "stored {field} for agent 0x{agent_id:08X} had length {actual}, expected {expected_len}"
-        ),
-    })
 }
 
 impl ListenerManager {
@@ -1369,6 +1250,7 @@ struct DnsListenerState {
     registry: AgentRegistry,
     parser: DemonPacketParser,
     events: EventBus,
+    dispatcher: CommandDispatcher,
     /// Pending uploads keyed by agent ID.
     uploads: Mutex<HashMap<u32, DnsPendingUpload>>,
     /// Pending responses keyed by agent ID.
@@ -1380,8 +1262,9 @@ impl DnsListenerState {
         Self {
             config: config.clone(),
             registry: registry.clone(),
-            parser: DemonPacketParser::new(registry),
-            events,
+            parser: DemonPacketParser::new(registry.clone()),
+            events: events.clone(),
+            dispatcher: CommandDispatcher::with_builtin_handlers(registry.clone(), events.clone()),
             uploads: Mutex::new(HashMap::new()),
             responses: Mutex::new(HashMap::new()),
         }
@@ -1437,6 +1320,7 @@ impl DnsListenerState {
             &self.registry,
             &self.parser,
             &self.events,
+            &self.dispatcher,
             &assembled,
             peer_ip.to_owned(),
         )
@@ -1872,6 +1756,7 @@ async fn http_listener_handler(
         &state.registry,
         &state.parser,
         &state.events,
+        &state.dispatcher,
         &body,
         external_ip,
     )

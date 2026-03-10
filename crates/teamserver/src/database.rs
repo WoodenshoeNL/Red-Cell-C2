@@ -9,6 +9,7 @@ use serde_json::Value;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{FromRow, Row, SqlitePool};
 use thiserror::Error;
+use utoipa::ToSchema;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
@@ -331,7 +332,7 @@ pub struct PersistedListener {
 }
 
 /// Persisted listener runtime state stored in SQLite.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct PersistedListenerState {
     /// Lifecycle status.
     pub status: ListenerStatus,
@@ -340,7 +341,7 @@ pub struct PersistedListenerState {
 }
 
 /// Listener lifecycle status persisted in SQLite.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub enum ListenerStatus {
     /// Listener is configured but has never been started in this database.
     Created,

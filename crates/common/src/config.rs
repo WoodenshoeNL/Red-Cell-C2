@@ -26,6 +26,9 @@ pub struct Profile {
     /// Optional service API configuration.
     #[serde(rename = "Service", default)]
     pub service: Option<ServiceConfig>,
+    /// Optional REST API configuration.
+    #[serde(rename = "Api", default)]
+    pub api: Option<ApiConfig>,
     /// Optional outbound webhook configuration.
     #[serde(rename = "WebHook", default)]
     pub webhook: Option<WebHookConfig>,
@@ -162,6 +165,26 @@ impl Profile {
 
             if service.password.trim().is_empty() {
                 errors.push("Service.Password must not be empty".to_owned());
+            }
+        }
+
+        if let Some(api) = &self.api {
+            if api.keys.is_empty() {
+                errors.push("Api must define at least one key".to_owned());
+            }
+
+            if api.rate_limit_per_minute == 0 {
+                errors.push("Api.RateLimitPerMinute must be greater than zero".to_owned());
+            }
+
+            for (name, key) in &api.keys {
+                if name.trim().is_empty() {
+                    errors.push("Api.key labels must not be empty".to_owned());
+                }
+
+                if key.value.trim().is_empty() {
+                    errors.push(format!("Api.key \"{name}\" must define a non-empty Value"));
+                }
             }
         }
 
@@ -523,6 +546,38 @@ pub struct ServiceConfig {
     pub password: String,
 }
 
+/// Optional REST API configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ApiConfig {
+    /// API keys keyed by a stable identifier.
+    #[serde(rename = "key", default)]
+    pub keys: BTreeMap<String, ApiKeyConfig>,
+    /// Maximum accepted requests per API key, per minute.
+    #[serde(rename = "RateLimitPerMinute", default = "default_api_rate_limit_per_minute")]
+    pub rate_limit_per_minute: u32,
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self { keys: BTreeMap::new(), rate_limit_per_minute: default_api_rate_limit_per_minute() }
+    }
+}
+
+/// A single REST API key definition.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ApiKeyConfig {
+    /// The secret value accepted by the REST API.
+    #[serde(rename = "Value")]
+    pub value: String,
+    /// RBAC role granted to requests using this key.
+    #[serde(rename = "Role", default)]
+    pub role: OperatorRole,
+}
+
+const fn default_api_rate_limit_per_minute() -> u32 {
+    60
+}
+
 /// Outbound webhook settings.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct WebHookConfig {
@@ -830,5 +885,75 @@ mod tests {
         assert!(error.errors.iter().any(|entry| entry.contains("Teamserver.Port")));
         assert!(error.errors.iter().any(|entry| entry.contains("Operators must define")));
         assert!(error.errors.iter().any(|entry| entry.contains("PortBind")));
+    }
+
+    #[test]
+    fn parses_rest_api_configuration() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Api {
+              RateLimitPerMinute = 120
+              key "automation" {
+                Value = "secret-admin"
+              }
+              key "reporting" {
+                Value = "secret-analyst"
+                Role = "Analyst"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let api = profile.api.expect("api config should exist");
+        assert_eq!(api.rate_limit_per_minute, 120);
+        assert_eq!(api.keys["automation"].value, "secret-admin");
+        assert_eq!(api.keys["automation"].role, OperatorRole::Admin);
+        assert_eq!(api.keys["reporting"].role, OperatorRole::Analyst);
+    }
+
+    #[test]
+    fn validates_rest_api_configuration() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Api {
+              RateLimitPerMinute = 0
+              key "automation" {
+                Value = ""
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("profile should be invalid");
+        assert!(error.errors.iter().any(|message| message.contains("RateLimitPerMinute")));
+        assert!(error.errors.iter().any(|message| message.contains("non-empty Value")));
     }
 }

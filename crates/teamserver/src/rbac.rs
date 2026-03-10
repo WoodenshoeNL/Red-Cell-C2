@@ -7,13 +7,13 @@ use axum::extract::{FromRef, FromRequestParts};
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
-use axum::{Json, http::HeaderMap, http::StatusCode};
+use axum::{http::HeaderMap, http::StatusCode};
 use red_cell_common::config::OperatorRole;
 use red_cell_common::operator::OperatorMessage;
-use serde_json::json;
 use thiserror::Error;
 
 use crate::auth::{AuthService, OperatorSession};
+use crate::json_error_response;
 
 const SESSION_TOKEN_HEADER: &str = "x-session-token";
 
@@ -78,8 +78,7 @@ impl IntoResponse for AuthorizationError {
             Self::UnsupportedWebSocketCommand => StatusCode::BAD_REQUEST,
         };
 
-        let body = Json(json!({ "error": self.to_string() }));
-        (status, body).into_response()
+        json_error_response(status, "authorization_error", self.to_string())
     }
 }
 

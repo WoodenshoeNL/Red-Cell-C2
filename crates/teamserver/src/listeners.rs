@@ -6,12 +6,12 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
+use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
-use axum::{Json, Router};
 use axum_server::tls_rustls::RustlsConfig;
 use interprocess::local_socket::tokio::Stream as LocalSocketStream;
 use interprocess::local_socket::traits::tokio::Listener as _;
@@ -41,15 +41,17 @@ use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
+use utoipa::ToSchema;
 
 use crate::{
     AgentRegistry, CommandDispatchError, CommandDispatcher, Database, DemonPacketParser,
     ListenerRepository, ListenerStatus, ParsedDemonPacket, PersistedListener,
     PersistedListenerState, SocketRelayManager, TeamserverError, build_init_ack, events::EventBus,
+    json_error_response,
 };
 
 /// Runtime state for a configured listener.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ListenerSummary {
     /// Unique listener name.
     pub name: String,
@@ -193,7 +195,7 @@ impl ListenerSummary {
 }
 
 /// Request body used by REST listener mark operations.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ListenerMarkRequest {
     /// Requested mark value such as `start` or `stop`.
     pub mark: String,
@@ -241,7 +243,7 @@ impl IntoResponse for ListenerManagerError {
             Self::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
-        (status, Json(serde_json::json!({ "error": self.to_string() }))).into_response()
+        json_error_response(status, "listener_error", self.to_string())
     }
 }
 

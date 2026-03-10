@@ -4,11 +4,12 @@ use std::fmt;
 
 use serde::de::{self};
 use serde::{Deserialize, Deserializer, Serialize};
+use utoipa::ToSchema;
 
 use crate::error::CommonError;
 
 /// Supported listener transport families.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ListenerProtocol {
     /// HTTP or HTTPS transport.
@@ -54,7 +55,7 @@ impl fmt::Display for ListenerProtocol {
 }
 
 /// TLS certificate and key file paths for an HTTP listener.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ListenerTlsConfig {
     /// PEM certificate path.
     pub cert: String,
@@ -63,7 +64,7 @@ pub struct ListenerTlsConfig {
 }
 
 /// Static response headers returned by an HTTP listener.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct HttpListenerResponseConfig {
     /// Headers added to every listener response.
     pub headers: Vec<String>,
@@ -73,7 +74,7 @@ pub struct HttpListenerResponseConfig {
 }
 
 /// Upstream proxy configuration for an HTTP listener.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct HttpListenerProxyConfig {
     /// Whether the proxy is enabled.
     #[serde(default)]
@@ -95,7 +96,7 @@ pub struct HttpListenerProxyConfig {
 }
 
 /// Shared HTTP listener configuration.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct HttpListenerConfig {
     /// Listener display name.
     pub name: String,
@@ -151,7 +152,7 @@ pub struct HttpListenerConfig {
 }
 
 /// Shared SMB listener configuration.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct SmbListenerConfig {
     /// Listener display name.
     pub name: String,
@@ -166,7 +167,7 @@ pub struct SmbListenerConfig {
 }
 
 /// Shared external connector listener configuration.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ExternalListenerConfig {
     /// Listener display name.
     pub name: String,
@@ -175,7 +176,7 @@ pub struct ExternalListenerConfig {
 }
 
 /// Shared DNS C2 listener configuration.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct DnsListenerConfig {
     /// Listener display name.
     pub name: String,
@@ -202,7 +203,7 @@ fn default_dns_record_types() -> Vec<String> {
 }
 
 /// Shared listener configuration enum.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "protocol", content = "config", rename_all = "snake_case")]
 pub enum ListenerConfig {
     /// HTTP or HTTPS listener settings.

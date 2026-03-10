@@ -1,6 +1,8 @@
 //! Red Cell teamserver library components.
 
 pub mod agents;
+pub mod api;
+pub mod app;
 pub mod auth;
 pub mod database;
 pub mod demon;
@@ -12,6 +14,11 @@ pub mod sockets;
 pub mod websocket;
 
 pub use agents::{AgentRegistry, Job, PivotInfo};
+pub use api::{
+    ApiAuthError, ApiErrorBody, ApiErrorDetail, ApiIdentity, ApiPermissionGuard, ApiRateLimit,
+    ApiRuntime, ListenerManagementApiAccess, ReadApiAccess, api_routes, json_error_response,
+};
+pub use app::TeamserverState;
 pub use auth::{
     AuthError, AuthService, AuthenticationFailure, AuthenticationResult, AuthenticationSuccess,
     OperatorSession, hash_password, login_failure_message, login_success_message,

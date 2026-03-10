@@ -4,21 +4,19 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use axum::{
-    Json, Router,
+    Router,
     body::Body,
-    extract::{FromRef, Path as AxumPath, State},
     http::{Request, StatusCode},
     response::IntoResponse,
-    routing::{any, get, post},
+    routing::any,
 };
 use axum_server::{Handle, tls_rustls::RustlsConfig};
 use clap::Parser;
 use red_cell::{
-    AgentRegistry, AuthService, Database, EventBus, ListenerManagementAccess, ListenerManager,
-    ListenerManagerError, ListenerMarkRequest, ListenerSummary, OperatorConnectionManager,
-    ReadAccess, SocketRelayManager, websocket_routes,
+    AgentRegistry, ApiRuntime, AuthService, Database, EventBus, ListenerManager,
+    ListenerManagerError, OperatorConnectionManager, SocketRelayManager, TeamserverState,
+    api_routes, websocket_routes,
 };
-use red_cell_common::ListenerConfig;
 use red_cell_common::config::{Profile, ProfileValidationError};
 use red_cell_common::tls::{
     TlsKeyAlgorithm, install_default_crypto_provider, resolve_tls_identity,
@@ -41,60 +39,6 @@ struct Cli {
     /// Enable debug-level logging.
     #[arg(long, default_value_t = false)]
     debug: bool,
-}
-
-#[derive(Debug, Clone)]
-struct AppState {
-    profile: Profile,
-    database: Database,
-    auth: AuthService,
-    events: EventBus,
-    connections: OperatorConnectionManager,
-    agent_registry: AgentRegistry,
-    listeners: ListenerManager,
-    sockets: SocketRelayManager,
-}
-
-impl FromRef<AppState> for AuthService {
-    fn from_ref(input: &AppState) -> Self {
-        input.auth.clone()
-    }
-}
-
-impl FromRef<AppState> for Database {
-    fn from_ref(input: &AppState) -> Self {
-        input.database.clone()
-    }
-}
-
-impl FromRef<AppState> for EventBus {
-    fn from_ref(input: &AppState) -> Self {
-        input.events.clone()
-    }
-}
-
-impl FromRef<AppState> for OperatorConnectionManager {
-    fn from_ref(input: &AppState) -> Self {
-        input.connections.clone()
-    }
-}
-
-impl FromRef<AppState> for ListenerManager {
-    fn from_ref(input: &AppState) -> Self {
-        input.listeners.clone()
-    }
-}
-
-impl FromRef<AppState> for AgentRegistry {
-    fn from_ref(input: &AppState) -> Self {
-        input.agent_registry.clone()
-    }
-}
-
-impl FromRef<AppState> for SocketRelayManager {
-    fn from_ref(input: &AppState) -> Self {
-        input.sockets.clone()
-    }
 }
 
 #[tokio::main]
@@ -125,10 +69,11 @@ async fn main() -> Result<()> {
     let bind_addr = resolve_bind_addr(&profile).await?;
     install_default_crypto_provider();
     let tls_config = build_tls_config(&profile).await?;
-    let router = build_router(AppState {
+    let router = build_router(TeamserverState {
         profile: profile.clone(),
         database,
         auth: AuthService::from_profile(&profile),
+        api: ApiRuntime::from_profile(&profile),
         events,
         connections: OperatorConnectionManager::new(),
         agent_registry,
@@ -224,124 +169,18 @@ fn tls_subject_alt_names(host: &str) -> Vec<String> {
     names
 }
 
-fn build_router(state: AppState) -> Router {
+fn build_router(state: TeamserverState) -> Router {
+    let api = state.api.clone();
+
     Router::new()
         .nest("/havoc", websocket_routes())
-        .nest("/api/v1", api_routes())
+        .nest("/api/v1", api_routes(api))
         .fallback(any(agent_listener_placeholder))
         .with_state(state)
 }
 
-fn api_routes() -> Router<AppState> {
-    Router::new()
-        .route("/", get(api_placeholder))
-        .route("/listeners", get(list_listeners).post(create_listener))
-        .route("/listeners/{name}", get(get_listener).put(update_listener).delete(delete_listener))
-        .route("/listeners/{name}/start", post(start_listener))
-        .route("/listeners/{name}/stop", post(stop_listener))
-        .route("/listeners/{name}/mark", post(mark_listener))
-}
-
-async fn api_placeholder(State(state): State<AppState>, operator: ReadAccess) -> impl IntoResponse {
-    debug!(
-        username = %operator.username,
-        role = ?operator.role,
-        listener_count = state.profile.listeners.http.len()
-            + state.profile.listeners.smb.len()
-            + state.profile.listeners.external.len(),
-        "rest api placeholder hit"
-    );
-
-    (StatusCode::NOT_IMPLEMENTED, "rest api endpoint not implemented yet")
-}
-
-async fn list_listeners(
-    State(state): State<AppState>,
-    _operator: ReadAccess,
-) -> Result<Json<Vec<ListenerSummary>>, ListenerManagerError> {
-    Ok(Json(state.listeners.list().await?))
-}
-
-async fn get_listener(
-    State(state): State<AppState>,
-    _operator: ReadAccess,
-    AxumPath(name): AxumPath<String>,
-) -> Result<Json<ListenerSummary>, ListenerManagerError> {
-    Ok(Json(state.listeners.summary(&name).await?))
-}
-
-async fn create_listener(
-    State(state): State<AppState>,
-    _operator: ListenerManagementAccess,
-    Json(config): Json<ListenerConfig>,
-) -> Result<(StatusCode, Json<ListenerSummary>), ListenerManagerError> {
-    let summary = state.listeners.create(config).await?;
-    Ok((StatusCode::CREATED, Json(summary)))
-}
-
-async fn update_listener(
-    State(state): State<AppState>,
-    _operator: ListenerManagementAccess,
-    AxumPath(name): AxumPath<String>,
-    Json(config): Json<ListenerConfig>,
-) -> Result<Json<ListenerSummary>, ListenerManagerError> {
-    if config.name() != name {
-        return Err(ListenerManagerError::InvalidConfig {
-            message: "path name must match listener configuration name".to_owned(),
-        });
-    }
-
-    Ok(Json(state.listeners.update(config).await?))
-}
-
-async fn delete_listener(
-    State(state): State<AppState>,
-    _operator: ListenerManagementAccess,
-    AxumPath(name): AxumPath<String>,
-) -> Result<StatusCode, ListenerManagerError> {
-    state.listeners.delete(&name).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn start_listener(
-    State(state): State<AppState>,
-    _operator: ListenerManagementAccess,
-    AxumPath(name): AxumPath<String>,
-) -> Result<Json<ListenerSummary>, ListenerManagerError> {
-    Ok(Json(state.listeners.start(&name).await?))
-}
-
-async fn stop_listener(
-    State(state): State<AppState>,
-    _operator: ListenerManagementAccess,
-    AxumPath(name): AxumPath<String>,
-) -> Result<Json<ListenerSummary>, ListenerManagerError> {
-    Ok(Json(state.listeners.stop(&name).await?))
-}
-
-async fn mark_listener(
-    State(state): State<AppState>,
-    _operator: ListenerManagementAccess,
-    AxumPath(name): AxumPath<String>,
-    Json(request): Json<ListenerMarkRequest>,
-) -> Result<Json<ListenerSummary>, ListenerManagerError> {
-    let summary = match request.mark.as_str() {
-        mark if mark.eq_ignore_ascii_case("start") || mark.eq_ignore_ascii_case("online") => {
-            state.listeners.start(&name).await?
-        }
-        mark if mark.eq_ignore_ascii_case("stop") || mark.eq_ignore_ascii_case("offline") => {
-            state.listeners.stop(&name).await?
-        }
-        _ => {
-            return Err(ListenerManagerError::UnsupportedMark { mark: request.mark });
-        }
-    };
-
-    Ok(Json(summary))
-}
-
 async fn agent_listener_placeholder(
-    State(state): State<AppState>,
+    axum::extract::State(state): axum::extract::State<TeamserverState>,
     request: Request<Body>,
 ) -> impl IntoResponse {
     debug!(
@@ -420,14 +259,14 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        AppState, Cli, load_profile, profile_listener_names, resolve_bind_addr,
-        resolve_database_path, tls_subject_alt_names,
+        Cli, load_profile, profile_listener_names, resolve_bind_addr, resolve_database_path,
+        tls_subject_alt_names,
     };
     use axum::extract::FromRef;
     use clap::Parser;
     use red_cell::{
-        AgentRegistry, AuthService, Database, EventBus, ListenerManager, OperatorConnectionManager,
-        SocketRelayManager,
+        AgentRegistry, ApiRuntime, AuthService, Database, EventBus, ListenerManager,
+        OperatorConnectionManager, SocketRelayManager, TeamserverState,
     };
     use red_cell_common::config::{OperatorRole, Profile};
     use tempfile::NamedTempFile;
@@ -538,8 +377,9 @@ mod tests {
         let agent_registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(agent_registry.clone(), events.clone());
-        let state = AppState {
+        let state = TeamserverState {
             auth: AuthService::from_profile(&profile),
+            api: ApiRuntime::from_profile(&profile),
             database: database.clone(),
             events: events.clone(),
             connections: OperatorConnectionManager::new(),
@@ -550,6 +390,7 @@ mod tests {
         };
 
         let _ = AuthService::from_ref(&state);
+        let _ = ApiRuntime::from_ref(&state);
         let _ = Database::from_ref(&state);
         let _ = EventBus::from_ref(&state);
         let _ = OperatorConnectionManager::from_ref(&state);

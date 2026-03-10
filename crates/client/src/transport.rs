@@ -279,6 +279,8 @@ pub(crate) struct AgentSummary {
     pub(crate) sleep_jitter: String,
     pub(crate) last_call_in: String,
     pub(crate) note: String,
+    pub(crate) pivot_parent: Option<String>,
+    pub(crate) pivot_links: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -430,6 +432,8 @@ impl AppState {
                         sleep_jitter: String::new(),
                         last_call_in: message.head.timestamp,
                         note: String::new(),
+                        pivot_parent: None,
+                        pivot_links: Vec::new(),
                     });
                 }
             }
@@ -938,6 +942,21 @@ fn listener_summary_from_info(info: &ListenerInfo) -> ListenerSummary {
 }
 
 fn agent_summary_from_message(info: &red_cell_common::operator::AgentInfo) -> AgentSummary {
+    let pivot_parent = info
+        .pivots
+        .parent
+        .as_deref()
+        .filter(|parent| !parent.trim().is_empty())
+        .or_else(|| (!info.pivot_parent.trim().is_empty()).then_some(info.pivot_parent.as_str()))
+        .map(normalize_agent_id);
+    let pivot_links = info
+        .pivots
+        .links
+        .iter()
+        .filter(|link| !link.trim().is_empty())
+        .map(|link| normalize_agent_id(link))
+        .collect();
+
     AgentSummary {
         name_id: normalize_agent_id(&info.name_id),
         status: if info.active.eq_ignore_ascii_case("true") {
@@ -961,6 +980,8 @@ fn agent_summary_from_message(info: &red_cell_common::operator::AgentInfo) -> Ag
         sleep_jitter: info.sleep_jitter.to_string(),
         last_call_in: info.last_call_in.clone(),
         note: info.note.clone(),
+        pivot_parent,
+        pivot_links,
     }
 }
 
@@ -1396,6 +1417,60 @@ mod tests {
         assert_eq!(state.agents.len(), 1);
         assert_eq!(state.agents[0].name_id, "ABCD1234");
         assert_eq!(state.agents[0].status, "Alive");
+        assert!(state.agents[0].pivot_parent.is_none());
+        assert!(state.agents[0].pivot_links.is_empty());
+    }
+
+    #[test]
+    fn agent_new_normalizes_pivot_relationships() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        state.apply_operator_message(OperatorMessage::AgentNew(Box::new(Message {
+            head: head(EventCode::Session),
+            info: OperatorAgentInfo {
+                active: "true".to_owned(),
+                background_check: false,
+                domain_name: "LAB".to_owned(),
+                elevated: false,
+                encryption: Default::default(),
+                internal_ip: "10.0.0.11".to_owned(),
+                external_ip: "203.0.113.11".to_owned(),
+                first_call_in: "10/03/2026 11:59:00".to_owned(),
+                last_call_in: "10/03/2026 12:00:00".to_owned(),
+                hostname: "wkstn-2".to_owned(),
+                listener: "smb".to_owned(),
+                magic_value: "deadbeef".to_owned(),
+                name_id: "beef5678".to_owned(),
+                os_arch: "x64".to_owned(),
+                os_build: "19045".to_owned(),
+                os_version: "Windows 11".to_owned(),
+                pivots: AgentPivotsInfo {
+                    parent: Some("abcd1234".to_owned()),
+                    links: vec!["0xC0FFEE01".to_owned()],
+                },
+                port_fwds: Vec::new(),
+                process_arch: "x64".to_owned(),
+                process_name: "cmd.exe".to_owned(),
+                process_pid: "2222".to_owned(),
+                process_ppid: "1234".to_owned(),
+                process_path: "C:\\Windows\\System32\\cmd.exe".to_owned(),
+                reason: "pivot".to_owned(),
+                note: String::new(),
+                sleep_delay: serde_json::Value::from(5),
+                sleep_jitter: serde_json::Value::from(10),
+                kill_date: serde_json::Value::Null,
+                working_hours: serde_json::Value::Null,
+                socks_cli: Vec::new(),
+                socks_cli_mtx: None,
+                socks_svr: Vec::new(),
+                tasked_once: false,
+                username: "operator".to_owned(),
+                pivot_parent: String::new(),
+            },
+        })));
+
+        assert_eq!(state.agents[0].pivot_parent.as_deref(), Some("ABCD1234"));
+        assert_eq!(state.agents[0].pivot_links, vec!["C0FFEE01"]);
     }
 
     #[test]

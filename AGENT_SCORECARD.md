@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 11 | 0 |
+| Tasks closed | 0 | 13 | 0 |
 | Bugs filed against | 0 | 2 | 0 |
-| Bug rate (bugs/task) | N/A | 0.18 | N/A |
-| Quality score | N/A | 82% | N/A |
+| Bug rate (bugs/task) | N/A | 0.15 | N/A |
+| Quality score | N/A | 85% | N/A |
 
 ## Violation Breakdown
 
@@ -84,3 +84,14 @@ Minor observation: `password_hashes_match` calls `to_ascii_lowercase()` before `
 | Cursor | 0 | 0 | No activity this run |
 
 Build: passed (cargo check + clippy -D warnings + cargo test: 257 passed)
+
+### QA Review — 2026-03-10 20:05 — 73fae9e..1e17ffc
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA loop only |
+| Codex | 2 | 0 | Closed red-cell-c2-stk (command console), red-cell-c2-8r7 (file browser panel). Clean implementation, full test coverage. |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (cargo check + clippy -D warnings + cargo test: 270 passed)
+Note: red-cell-c2-pmq (process list panel) still in_progress — dependency on stk now resolved, should proceed.

@@ -590,7 +590,8 @@ mod tests {
 
     #[test]
     fn listener_protocol_rejects_unknown_labels() {
-        let error = ListenerProtocol::try_from_str("quic").unwrap_err();
+        let error =
+            ListenerProtocol::try_from_str("quic").expect_err("unknown protocol should fail");
         assert_eq!(
             error,
             CommonError::UnsupportedListenerProtocol { protocol: "quic".to_string() }
@@ -721,7 +722,8 @@ mod tests {
             "LastCallIn": "09/03/2026 19:05:00"
         });
 
-        let error = serde_json::from_value::<AgentInfo>(payload).unwrap_err();
+        let error =
+            serde_json::from_value::<AgentInfo>(payload).expect_err("invalid agent id must fail");
         assert!(error.to_string().contains("invalid agent identifier"));
     }
 

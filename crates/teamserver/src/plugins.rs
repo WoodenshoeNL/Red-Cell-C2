@@ -987,6 +987,7 @@ mod tests {
         Ok((database, registry, events, sockets, runtime))
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "multi_thread")]
     async fn initialize_exposes_agent_and_listener_accessors()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1023,6 +1024,7 @@ mod tests {
         Ok(())
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "multi_thread")]
     async fn load_plugins_registers_callbacks_and_commands()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1073,6 +1075,7 @@ havoc.RegisterCommand("demo", "demo command", run)
         Ok(())
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "multi_thread")]
     async fn registered_command_callbacks_can_queue_agent_jobs()
     -> Result<(), Box<dyn std::error::Error>> {

@@ -978,7 +978,7 @@ red_cell.on_agent_checkin(on_checkin)\n",
             install_api_module(py)?;
             let module = py.import("red_cell")?;
             let agent = module.call_method1("agent", ("00ABCDEF",))?;
-            Ok(agent.getattr("info")?.get_item("hostname")?.extract::<String>()?)
+            agent.getattr("info")?.get_item("hostname")?.extract::<String>()
         })
         .unwrap_or_else(|error| panic!("python agent lookup should succeed: {error}"));
 

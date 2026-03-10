@@ -641,8 +641,9 @@ fn read_vec(
 #[cfg(test)]
 mod tests {
     use super::{
-        DEMON_MAGIC_VALUE, DemonCallback, DemonCommand, DemonEnvelope, DemonHeader, DemonMessage,
-        DemonPackage, DemonProtocolError,
+        DEMON_MAGIC_VALUE, DemonCallback, DemonCommand, DemonEnvelope, DemonHeader,
+        DemonInjectError, DemonMessage, DemonPackage, DemonProtocolError, DemonSocketCommand,
+        DemonSocketType, DemonTransferCommand,
     };
 
     #[test]
@@ -709,6 +710,93 @@ mod tests {
     }
 
     #[test]
+    fn demon_message_round_trip_preserves_empty_stream() {
+        let message = DemonMessage::new(Vec::new());
+
+        let bytes = message.to_bytes().expect("empty message should encode");
+        let parsed = DemonMessage::from_bytes(&bytes).expect("empty message should decode");
+
+        assert!(bytes.is_empty());
+        assert_eq!(parsed, message);
+    }
+
+    #[test]
+    fn demon_header_accepts_maximum_wire_payload_length() {
+        let header = DemonHeader::new(0xface_cafe, u32::MAX as usize - 8)
+            .expect("largest wire-representable payload should fit");
+
+        assert_eq!(header.size, u32::MAX);
+        assert_eq!(header.agent_id, 0xface_cafe);
+    }
+
+    #[test]
+    fn demon_header_rejects_payload_length_overflow() {
+        let error = DemonHeader::new(7, u32::MAX as usize - 7)
+            .expect_err("payload larger than wire format must fail");
+
+        assert_eq!(
+            error,
+            DemonProtocolError::LengthOverflow {
+                context: "Demon header payload",
+                length: u32::MAX as usize - 7,
+            }
+        );
+    }
+
+    #[test]
+    fn demon_envelope_rejects_declared_size_mismatch() {
+        let error = DemonEnvelope::from_bytes(&[
+            0x00, 0x00, 0x00, 0x08, 0xde, 0xad, 0xbe, 0xef, 0x12, 0x34, 0x56, 0x78, 0xaa,
+        ])
+        .expect_err("mismatched transport size must fail");
+
+        assert_eq!(error, DemonProtocolError::SizeMismatch { declared: 8, actual: 9 });
+    }
+
+    #[test]
+    fn demon_package_round_trip_supports_empty_payload() {
+        let package = DemonPackage::new(DemonCommand::CommandNoJob, 99, Vec::new());
+
+        let bytes = package.to_bytes().expect("package should encode");
+        let parsed = DemonPackage::from_bytes(&bytes).expect("package should decode");
+
+        assert_eq!(bytes.len(), 12);
+        assert_eq!(parsed, package);
+    }
+
+    #[test]
+    fn demon_package_rejects_trailing_bytes() {
+        let bytes =
+            [0x5c, 0x00, 0x00, 0x00, 0x78, 0x56, 0x34, 0x12, 0x01, 0x00, 0x00, 0x00, 0xaa, 0xbb];
+
+        let error = DemonPackage::from_bytes(&bytes).expect_err("trailing bytes must be rejected");
+
+        assert_eq!(error, DemonProtocolError::SizeMismatch { declared: 13, actual: 14 });
+    }
+
+    #[test]
+    fn demon_message_rejects_truncated_second_package() {
+        let first = DemonPackage::new(DemonCommand::CommandNoJob, 1, Vec::new())
+            .to_bytes()
+            .expect("first package should encode");
+        let second = [0x64, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0xaa];
+        let mut bytes = first;
+        bytes.extend_from_slice(&second);
+
+        let error =
+            DemonMessage::from_bytes(&bytes).expect_err("truncated package stream must fail");
+
+        assert_eq!(
+            error,
+            DemonProtocolError::BufferTooShort {
+                context: "Demon package payload",
+                expected: 2,
+                actual: 1,
+            }
+        );
+    }
+
+    #[test]
     fn rejects_invalid_magic_value() {
         let bytes = [0x00, 0x00, 0x00, 0x08, 0xde, 0xad, 0xbe, 0xee, 0x00, 0x00, 0x00, 0x01];
 
@@ -742,5 +830,20 @@ mod tests {
         assert_eq!(u32::from(DemonCommand::DemonInit), 99);
         assert_eq!(u32::from(DemonCommand::CommandKerberos), 2550);
         assert_eq!(u32::from(DemonCallback::File), 0x02);
+        assert_eq!(u32::from(DemonTransferCommand::Remove), 3);
+        assert_eq!(u32::from(DemonSocketCommand::Connect), 0x14);
+        assert_eq!(u32::from(DemonSocketType::Client), 0x3);
+        assert_eq!(u32::from(DemonInjectError::ProcessArchMismatch), 3);
+    }
+
+    #[test]
+    fn enum_try_from_rejects_unknown_values() {
+        let error =
+            DemonCommand::try_from(0xffff_ffff).expect_err("unknown command should be rejected");
+
+        assert_eq!(
+            error,
+            DemonProtocolError::UnknownEnumValue { kind: "DemonCommand", value: 0xffff_ffff }
+        );
     }
 }

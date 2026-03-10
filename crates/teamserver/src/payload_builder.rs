@@ -1219,7 +1219,10 @@ mod tests {
             working_hours: None,
         });
 
-        let error = service.build_payload(&listener, &request, |_| {}).await.unwrap_err();
+        let error = service
+            .build_payload(&listener, &request, |_| {})
+            .await
+            .expect_err("invalid request should be rejected");
         assert!(matches!(error, PayloadBuildError::InvalidRequest { .. }));
         Ok(())
     }

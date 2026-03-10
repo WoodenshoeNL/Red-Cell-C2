@@ -196,6 +196,27 @@ mod tests {
     }
 
     #[test]
+    fn decrypt_agent_data_rejects_invalid_key_length() {
+        let error =
+            decrypt_agent_data(&[0x11; AGENT_KEY_LENGTH - 1], &[0x22; AGENT_IV_LENGTH], b"")
+                .expect_err("invalid key length must fail decryption");
+
+        assert!(matches!(
+            error,
+            CryptoError::InvalidKeyLength { expected, actual }
+                if expected == AGENT_KEY_LENGTH && actual == AGENT_KEY_LENGTH - 1
+        ));
+    }
+
+    #[test]
+    fn encrypt_agent_data_preserves_empty_plaintext() {
+        let ciphertext =
+            encrypt_agent_data(&[0x41; AGENT_KEY_LENGTH], &[0x24; AGENT_IV_LENGTH], b"");
+
+        assert!(ciphertext.is_empty());
+    }
+
+    #[test]
     fn generate_agent_crypto_material_returns_expected_sizes() {
         let material =
             generate_agent_crypto_material().expect("OS randomness should be available for tests");

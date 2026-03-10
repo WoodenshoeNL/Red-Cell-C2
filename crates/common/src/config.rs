@@ -1048,6 +1048,24 @@ mod tests {
     }
 
     #[test]
+    fn loads_all_embedded_profile_fixtures_from_disk() {
+        let temp_dir = tempfile::TempDir::new().expect("temporary directory should be created");
+        let fixtures = [
+            ("havoc.yaotl", HAVOC_PROFILE),
+            ("http-smb.yaotl", HTTP_SMB_PROFILE),
+            ("webhook.yaotl", WEBHOOK_PROFILE),
+        ];
+
+        for (name, fixture) in fixtures {
+            let path = temp_dir.path().join(name);
+            std::fs::write(&path, fixture).expect("profile fixture should be written");
+
+            let profile = Profile::from_file(&path).expect("profile fixture should load");
+            assert!(profile.validate().is_ok(), "fixture {name} should validate");
+        }
+    }
+
+    #[test]
     fn validates_sample_profile() {
         let profile = Profile::parse(HAVOC_PROFILE).expect("sample profile should parse");
 

@@ -3151,7 +3151,10 @@ mod tests {
         assert_eq!(parsed.qtype, DNS_TYPE_TXT);
         assert_eq!(parsed.labels, &["data", "0-1-deadbeef", "up", "c2", "example", "com"]);
         // qname_raw includes zero terminator
-        assert_eq!(*parsed.qname_raw.last().unwrap(), 0);
+        assert_eq!(
+            *parsed.qname_raw.last().expect("DNS qname should end with a zero-length label"),
+            0
+        );
     }
 
     #[test]

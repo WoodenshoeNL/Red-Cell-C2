@@ -1220,4 +1220,218 @@ mod tests {
         assert!(matches!(decoded, OperatorMessage::ChatUserConnected(_)));
         Ok(())
     }
+
+    #[test]
+    fn message_head_skips_empty_optional_fields() -> Result<(), Box<dyn std::error::Error>> {
+        let value = serde_json::to_value(MessageHead {
+            event: EventCode::Chat,
+            user: String::new(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        })?;
+
+        assert_eq!(value, json!({ "Event": 4 }));
+        Ok(())
+    }
+
+    #[test]
+    fn numeric_codes_reject_unknown_values() {
+        let error = serde_json::from_value::<EventCode>(json!(0xff))
+            .expect_err("unknown event code must fail");
+
+        assert!(error.to_string().contains("unsupported EventCode code"));
+    }
+
+    #[test]
+    fn operator_message_exposes_expected_event_codes() {
+        let messages = [
+            (
+                OperatorMessage::InitConnectionSuccess(Message {
+                    head: head(EventCode::InitConnection),
+                    info: MessageInfo { message: "ok".to_string() },
+                }),
+                EventCode::InitConnection,
+            ),
+            (
+                OperatorMessage::ListenerMark(Message {
+                    head: head(EventCode::Listener),
+                    info: ListenerMarkInfo { name: "http".to_string(), mark: "good".to_string() },
+                }),
+                EventCode::Listener,
+            ),
+            (
+                OperatorMessage::CredentialsRemove(Message {
+                    head: head(EventCode::Credentials),
+                    info: FlatInfo { fields: BTreeMap::new() },
+                }),
+                EventCode::Credentials,
+            ),
+            (
+                OperatorMessage::ChatAgent(Message {
+                    head: head(EventCode::Chat),
+                    info: FlatInfo { fields: BTreeMap::new() },
+                }),
+                EventCode::Chat,
+            ),
+            (
+                OperatorMessage::BuildPayloadMsOffice(Message {
+                    head: head(EventCode::Gate),
+                    info: FlatInfo { fields: BTreeMap::new() },
+                }),
+                EventCode::Gate,
+            ),
+            (
+                OperatorMessage::HostFileRemove(Message {
+                    head: head(EventCode::HostFile),
+                    info: FlatInfo { fields: BTreeMap::new() },
+                }),
+                EventCode::HostFile,
+            ),
+            (
+                OperatorMessage::AgentUpdate(Message {
+                    head: head(EventCode::Session),
+                    info: AgentUpdateInfo {
+                        agent_id: "ABCD1234".to_string(),
+                        marked: "Alive".to_string(),
+                    },
+                }),
+                EventCode::Session,
+            ),
+            (
+                OperatorMessage::ServiceListenerRegister(Message {
+                    head: head(EventCode::Service),
+                    info: ServiceListenerRegistrationInfo { listener: "{}".to_string() },
+                }),
+                EventCode::Service,
+            ),
+            (
+                OperatorMessage::TeamserverLog(Message {
+                    head: head(EventCode::Teamserver),
+                    info: TeamserverLogInfo { text: "log".to_string() },
+                }),
+                EventCode::Teamserver,
+            ),
+        ];
+
+        for (message, expected) in messages {
+            assert_eq!(message.event_code(), expected);
+        }
+    }
+
+    #[test]
+    fn flat_info_variants_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+        let cases = [
+            json!({
+                "Head": { "Event": 1, "Time": "09/03/2026 19:00:00" },
+                "Body": { "SubEvent": 4, "Info": { "Version": "0.1.0", "Motd": "hello" } }
+            }),
+            json!({
+                "Head": { "Event": 3, "User": "operator", "Time": "09/03/2026 19:00:00" },
+                "Body": { "SubEvent": 1, "Info": { "Realm": "LAB", "Username": "neo" } }
+            }),
+            json!({
+                "Head": { "Event": 4, "User": "operator", "Time": "09/03/2026 19:00:00" },
+                "Body": { "SubEvent": 2, "Info": { "Name": "http", "Text": "listener online" } }
+            }),
+            json!({
+                "Head": { "Event": 5, "User": "operator", "Time": "09/03/2026 19:00:00" },
+                "Body": { "SubEvent": 1, "Info": { "Listener": "http" } }
+            }),
+            json!({
+                "Head": { "Event": 6, "User": "operator", "Time": "09/03/2026 19:00:00" },
+                "Body": { "SubEvent": 2, "Info": { "Path": "tmp.txt" } }
+            }),
+            json!({
+                "Head": { "Event": 7, "User": "operator", "Time": "09/03/2026 19:00:00" },
+                "Body": { "SubEvent": 2, "Info": { "AgentID": "ABCD1234" } }
+            }),
+        ];
+
+        for value in cases {
+            let message: OperatorMessage = serde_json::from_value(value.clone())?;
+            let encoded = serde_json::to_value(&message)?;
+            let reparsed: OperatorMessage = serde_json::from_value(encoded.clone())?;
+            assert_eq!(reparsed, message);
+            assert_eq!(encoded["Head"]["Event"], value["Head"]["Event"]);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn remaining_typed_variants_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+        let cases = [
+            OperatorMessage::InitConnectionError(Message {
+                head: head(EventCode::InitConnection),
+                info: MessageInfo { message: "denied".to_string() },
+            }),
+            OperatorMessage::InitConnectionProfile(Message {
+                head: head(EventCode::InitConnection),
+                info: InitProfileInfo {
+                    demon: "{\"Sleep\":5}".to_string(),
+                    teamserver_ips: "127.0.0.1".to_string(),
+                },
+            }),
+            OperatorMessage::ListenerRemove(Message {
+                head: head(EventCode::Listener),
+                info: NameInfo { name: "http".to_string() },
+            }),
+            OperatorMessage::ListenerError(Message {
+                head: head(EventCode::Listener),
+                info: ListenerErrorInfo {
+                    error: "bind failed".to_string(),
+                    name: "http".to_string(),
+                },
+            }),
+            OperatorMessage::ChatUserDisconnected(Message {
+                head: head(EventCode::Chat),
+                info: ChatUserInfo { user: "alice".to_string() },
+            }),
+            OperatorMessage::BuildPayloadMessage(Message {
+                head: head(EventCode::Gate),
+                info: BuildPayloadMessageInfo {
+                    message_type: "Info".to_string(),
+                    message: "staging".to_string(),
+                },
+            }),
+            OperatorMessage::AgentResponse(Message {
+                head: head(EventCode::Session),
+                info: AgentResponseInfo {
+                    demon_id: "ABCD1234".to_string(),
+                    command_id: "94".to_string(),
+                    output: "hello".to_string(),
+                    command_line: Some("whoami".to_string()),
+                    extra: BTreeMap::from([(String::from("Type"), json!("stdout"))]),
+                },
+            }),
+            OperatorMessage::ServiceAgentRegister(Message {
+                head: head(EventCode::Service),
+                info: ServiceAgentRegistrationInfo { agent: "{}".to_string() },
+            }),
+            OperatorMessage::TeamserverLog(Message {
+                head: head(EventCode::Teamserver),
+                info: TeamserverLogInfo { text: "started".to_string() },
+            }),
+        ];
+
+        for message in cases {
+            let decoded: OperatorMessage = serde_json::from_value(serde_json::to_value(&message)?)?;
+            assert_eq!(decoded, message);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_unknown_operator_sub_event() {
+        let value = json!({
+            "Head": { "Event": 7, "Time": "09/03/2026 19:00:00" },
+            "Body": { "SubEvent": 255, "Info": {} }
+        });
+
+        let error = serde_json::from_value::<OperatorMessage>(value)
+            .expect_err("unsupported subevent must fail");
+
+        assert!(error.to_string().contains("unsupported operator message"));
+    }
 }

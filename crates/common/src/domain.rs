@@ -265,7 +265,7 @@ impl From<DnsListenerConfig> for ListenerConfig {
 }
 
 /// Agent transport crypto material persisted by the teamserver.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct AgentEncryptionInfo {
     /// Base64-encoded AES-256 key.
     #[serde(rename = "AESKey")]
@@ -276,7 +276,7 @@ pub struct AgentEncryptionInfo {
 }
 
 /// Shared persisted agent/session metadata.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct AgentInfo {
     /// Numeric agent identifier.
     #[serde(rename = "AgentID", alias = "NameID", deserialize_with = "deserialize_agent_id")]

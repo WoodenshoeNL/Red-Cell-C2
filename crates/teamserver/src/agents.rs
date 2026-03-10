@@ -134,6 +134,22 @@ impl AgentRegistry {
         agents
     }
 
+    /// Return all tracked agents, including inactive historical entries.
+    pub async fn list(&self) -> Vec<AgentInfo> {
+        let entries = self.entries.read().await;
+        let handles: Vec<_> = entries.values().cloned().collect();
+        drop(entries);
+
+        let mut agents = Vec::with_capacity(handles.len());
+        for handle in handles {
+            let info = handle.info.read().await;
+            agents.push(info.clone());
+        }
+
+        agents.sort_by_key(|agent| agent.agent_id);
+        agents
+    }
+
     /// Replace the stored metadata for an existing agent and persist the change.
     pub async fn update_agent(&self, agent: AgentInfo) -> Result<(), TeamserverError> {
         let entry = self
@@ -713,6 +729,21 @@ mod tests {
         registry.insert(dead).await?;
 
         assert_eq!(registry.list_active().await, vec![alive]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_returns_active_and_inactive_agents() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let alive = sample_agent(0x1000_0001);
+        let mut dead = sample_agent(0x1000_0002);
+        dead.active = false;
+        dead.reason = "operator requested exit".to_owned();
+
+        registry.insert(dead.clone()).await?;
+        registry.insert(alive.clone()).await?;
+
+        assert_eq!(registry.list().await, vec![alive, dead]);
         Ok(())
     }
 

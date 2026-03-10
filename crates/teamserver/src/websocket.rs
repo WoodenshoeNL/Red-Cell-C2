@@ -488,7 +488,7 @@ async fn dispatch_operator_command<S>(
 }
 
 #[derive(Debug, Error)]
-enum AgentCommandError {
+pub(crate) enum AgentCommandError {
     #[error("invalid agent id `{agent_id}`")]
     InvalidAgentId { agent_id: String },
     #[error("agent id is required")]
@@ -539,22 +539,7 @@ async fn handle_agent_task(
     message: Message<red_cell_common::operator::AgentTaskInfo>,
 ) -> Result<(), AgentCommandError> {
     let agent_id = parse_agent_id(&message.info.demon_id)?;
-    let _agent =
-        registry.get(agent_id).await.ok_or(crate::TeamserverError::AgentNotFound { agent_id })?;
-
-    if let Some(note) = note_from_task(&message.info)? {
-        registry.set_note(agent_id, note).await?;
-    } else if let Some(result) =
-        handle_teamserver_socket_task(sockets, agent_id, &message.info).await?
-    {
-        events.broadcast(teamserver_log_event(&session.username, &result));
-    } else {
-        for job in build_jobs(&message.info)? {
-            registry.enqueue_job(agent_id, job).await?;
-        }
-    }
-
-    events.broadcast(OperatorMessage::AgentTask(message));
+    execute_agent_task(registry, sockets, events, &session.username, message).await?;
     debug!(
         connection_id = %session.connection_id,
         username = %session.username,
@@ -562,6 +547,39 @@ async fn handle_agent_task(
         "handled operator agent task command"
     );
     Ok(())
+}
+
+pub(crate) async fn execute_agent_task(
+    registry: &AgentRegistry,
+    sockets: &SocketRelayManager,
+    events: &EventBus,
+    actor: &str,
+    mut message: Message<red_cell_common::operator::AgentTaskInfo>,
+) -> Result<usize, AgentCommandError> {
+    message.head.user = actor.to_owned();
+    let agent_id = parse_agent_id(&message.info.demon_id)?;
+    let _agent =
+        registry.get(agent_id).await.ok_or(crate::TeamserverError::AgentNotFound { agent_id })?;
+
+    let queued_jobs = if let Some(note) = note_from_task(&message.info)? {
+        registry.set_note(agent_id, note).await?;
+        0
+    } else if let Some(result) =
+        handle_teamserver_socket_task(sockets, agent_id, &message.info).await?
+    {
+        events.broadcast(teamserver_log_event(actor, &result));
+        0
+    } else {
+        let jobs = build_jobs(&message.info)?;
+        let queued_jobs = jobs.len();
+        for job in jobs {
+            registry.enqueue_job(agent_id, job).await?;
+        }
+        queued_jobs
+    };
+
+    events.broadcast(OperatorMessage::AgentTask(message));
+    Ok(queued_jobs)
 }
 
 async fn handle_agent_remove(

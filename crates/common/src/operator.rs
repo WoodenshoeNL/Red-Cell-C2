@@ -6,6 +6,7 @@ use std::fmt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
+use utoipa::ToSchema;
 
 macro_rules! numeric_code {
     (
@@ -421,7 +422,7 @@ pub struct AgentInfo {
 }
 
 /// Agent task request payload.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct AgentTaskInfo {
     #[serde(rename = "TaskID")]
     pub task_id: String,

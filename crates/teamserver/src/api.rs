@@ -11,10 +11,12 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, StatusCode, request::Parts};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
-use red_cell_common::ListenerConfig;
 use red_cell_common::config::{OperatorRole, Profile};
+use red_cell_common::demon::DemonCommand;
+use red_cell_common::operator::{AgentTaskInfo, EventCode, Message, MessageHead};
+use red_cell_common::{AgentInfo, ListenerConfig};
 use serde::Serialize;
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -22,10 +24,12 @@ use tracing::debug;
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
 use utoipa::{Modify, OpenApi, ToSchema};
 use utoipa_swagger_ui::SwaggerUi;
+use uuid::Uuid;
 
 use crate::app::TeamserverState;
 use crate::listeners::{ListenerManagerError, ListenerMarkRequest, ListenerSummary};
-use crate::rbac::{CanManageListeners, CanRead, Permission, PermissionMarker};
+use crate::rbac::{CanManageListeners, CanRead, CanTaskAgents, Permission, PermissionMarker};
+use crate::websocket::{AgentCommandError, execute_agent_task};
 const API_VERSION: &str = "v1";
 const API_PREFIX: &str = "/api/v1";
 const OPENAPI_PATH: &str = "/api/v1/openapi.json";
@@ -277,14 +281,72 @@ where
 pub type ReadApiAccess = ApiPermissionGuard<CanRead>;
 /// Listener-management access to protected REST API routes.
 pub type ListenerManagementApiAccess = ApiPermissionGuard<CanManageListeners>;
+/// Agent-tasking access to protected REST API routes.
+pub type TaskAgentApiAccess = ApiPermissionGuard<CanTaskAgents>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+struct AgentTaskQueuedResponse {
+    agent_id: String,
+    task_id: String,
+    queued_jobs: usize,
+}
+
+#[derive(Debug, Error)]
+enum AgentApiError {
+    #[error("{0}")]
+    Teamserver(#[from] crate::TeamserverError),
+    #[error("{0}")]
+    Task(#[from] AgentCommandError),
+}
+
+impl IntoResponse for AgentApiError {
+    fn into_response(self) -> Response {
+        let (status, code) = match &self {
+            Self::Teamserver(crate::TeamserverError::AgentNotFound { .. }) => {
+                (StatusCode::NOT_FOUND, "agent_not_found")
+            }
+            Self::Task(
+                AgentCommandError::InvalidAgentId { .. }
+                | AgentCommandError::MissingAgentId
+                | AgentCommandError::MissingNote
+                | AgentCommandError::InvalidCommandId { .. }
+                | AgentCommandError::MissingField { .. }
+                | AgentCommandError::InvalidBooleanField { .. }
+                | AgentCommandError::InvalidNumericField { .. }
+                | AgentCommandError::InvalidBase64Field { .. }
+                | AgentCommandError::UnsupportedProcessSubcommand { .. }
+                | AgentCommandError::UnsupportedFilesystemSubcommand { .. }
+                | AgentCommandError::UnsupportedTokenSubcommand { .. }
+                | AgentCommandError::UnsupportedSocketSubcommand { .. }
+                | AgentCommandError::UnsupportedKerberosSubcommand { .. }
+                | AgentCommandError::UnsupportedInjectionWay { .. }
+                | AgentCommandError::UnsupportedInjectionTechnique { .. }
+                | AgentCommandError::UnsupportedArchitecture { .. }
+                | AgentCommandError::InvalidProcessCreateArguments
+                | AgentCommandError::InvalidRemovePayload,
+            ) => (StatusCode::BAD_REQUEST, "invalid_agent_task"),
+            Self::Task(AgentCommandError::Teamserver(crate::TeamserverError::AgentNotFound {
+                ..
+            })) => (StatusCode::NOT_FOUND, "agent_not_found"),
+            Self::Teamserver(_) | Self::Task(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "agent_api_error")
+            }
+        };
+
+        json_error_response(status, code, self.to_string())
+    }
+}
 
 /// Build the `/api/v1` router, including version metadata and OpenAPI docs.
 pub fn api_routes(api: ApiRuntime) -> Router<TeamserverState> {
     let protected = Router::new()
+        .route("/agents", get(list_agents))
+        .route("/agents/{id}", get(get_agent).delete(kill_agent))
+        .route("/agents/{id}/task", post(queue_agent_task))
         .route("/listeners", get(list_listeners).post(create_listener))
         .route("/listeners/{name}", get(get_listener).put(update_listener).delete(delete_listener))
-        .route("/listeners/{name}/start", post(start_listener))
-        .route("/listeners/{name}/stop", post(stop_listener))
+        .route("/listeners/{name}/start", put(start_listener))
+        .route("/listeners/{name}/stop", put(stop_listener))
         .route("/listeners/{name}/mark", post(mark_listener))
         .route_layer(middleware::from_fn_with_state(api, api_auth_middleware));
 
@@ -336,6 +398,10 @@ struct ApiInfoResponse {
 #[openapi(
     paths(
         api_root,
+        list_agents,
+        get_agent,
+        kill_agent,
+        queue_agent_task,
         list_listeners,
         create_listener,
         get_listener,
@@ -350,6 +416,10 @@ struct ApiInfoResponse {
             ApiErrorBody,
             ApiErrorDetail,
             ApiInfoResponse,
+            AgentTaskQueuedResponse,
+            AgentInfo,
+            red_cell_common::AgentEncryptionInfo,
+            AgentTaskInfo,
             ListenerConfig,
             ListenerSummary,
             ListenerMarkRequest,
@@ -368,6 +438,7 @@ struct ApiInfoResponse {
     modifiers(&ApiSecurity),
     tags(
         (name = "rest", description = "Versioned REST API for Red Cell automation clients"),
+        (name = "agents", description = "Agent inventory and tasking endpoints"),
         (name = "listeners", description = "Listener lifecycle management endpoints")
     )
 )]
@@ -406,6 +477,168 @@ async fn api_root(State(api): State<ApiRuntime>) -> Json<ApiInfoResponse> {
         enabled: api.enabled(),
         rate_limit_per_minute: (!rate_limit.disabled()).then_some(rate_limit.requests_per_minute),
     })
+}
+
+#[utoipa::path(
+    get,
+    path = "/agents",
+    context_path = "/api/v1",
+    tag = "agents",
+    security(("api_key" = [])),
+    responses(
+        (status = 200, description = "List all tracked agents", body = [AgentInfo]),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
+        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody)
+    )
+)]
+async fn list_agents(
+    State(state): State<TeamserverState>,
+    _identity: ReadApiAccess,
+) -> Json<Vec<AgentInfo>> {
+    Json(state.agent_registry.list().await)
+}
+
+#[utoipa::path(
+    get,
+    path = "/agents/{id}",
+    context_path = "/api/v1",
+    tag = "agents",
+    security(("api_key" = [])),
+    params(("id" = String, Path, description = "Agent id in hex or decimal form")),
+    responses(
+        (status = 200, description = "Agent details", body = AgentInfo),
+        (status = 400, description = "Invalid agent id", body = ApiErrorBody),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
+        (status = 404, description = "Agent not found", body = ApiErrorBody)
+    )
+)]
+async fn get_agent(
+    State(state): State<TeamserverState>,
+    _identity: ReadApiAccess,
+    Path(id): Path<String>,
+) -> Result<Json<AgentInfo>, AgentApiError> {
+    let agent_id = parse_api_agent_id(&id)?;
+    let agent = state
+        .agent_registry
+        .get(agent_id)
+        .await
+        .ok_or(crate::TeamserverError::AgentNotFound { agent_id })?;
+    Ok(Json(agent))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/agents/{id}",
+    context_path = "/api/v1",
+    tag = "agents",
+    security(("api_key" = [])),
+    params(("id" = String, Path, description = "Agent id in hex or decimal form")),
+    responses(
+        (status = 202, description = "Agent kill task queued", body = AgentTaskQueuedResponse),
+        (status = 400, description = "Invalid agent id", body = ApiErrorBody),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
+        (status = 404, description = "Agent not found", body = ApiErrorBody)
+    )
+)]
+async fn kill_agent(
+    State(state): State<TeamserverState>,
+    identity: TaskAgentApiAccess,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<AgentTaskQueuedResponse>), AgentApiError> {
+    let agent_id = parse_api_agent_id(&id)?;
+    let task_id = next_task_id();
+    let message = Message {
+        head: MessageHead {
+            event: EventCode::Session,
+            user: identity.key_id.clone(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info: AgentTaskInfo {
+            task_id: task_id.clone(),
+            command_line: "kill".to_owned(),
+            demon_id: format!("{agent_id:08X}"),
+            command_id: u32::from(DemonCommand::CommandExit).to_string(),
+            command: Some("kill".to_owned()),
+            ..AgentTaskInfo::default()
+        },
+    };
+    let queued_jobs = execute_agent_task(
+        &state.agent_registry,
+        &state.sockets,
+        &state.events,
+        &identity.key_id,
+        message,
+    )
+    .await?;
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(AgentTaskQueuedResponse { agent_id: format!("{agent_id:08X}"), task_id, queued_jobs }),
+    ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/agents/{id}/task",
+    context_path = "/api/v1",
+    tag = "agents",
+    security(("api_key" = [])),
+    params(("id" = String, Path, description = "Agent id in hex or decimal form")),
+    request_body = AgentTaskInfo,
+    responses(
+        (status = 202, description = "Agent task queued", body = AgentTaskQueuedResponse),
+        (status = 400, description = "Invalid task payload", body = ApiErrorBody),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
+        (status = 404, description = "Agent not found", body = ApiErrorBody)
+    )
+)]
+async fn queue_agent_task(
+    State(state): State<TeamserverState>,
+    identity: TaskAgentApiAccess,
+    Path(id): Path<String>,
+    Json(mut task): Json<AgentTaskInfo>,
+) -> Result<(StatusCode, Json<AgentTaskQueuedResponse>), AgentApiError> {
+    let agent_id = parse_api_agent_id(&id)?;
+    let canonical_id = format!("{agent_id:08X}");
+
+    if !task.demon_id.is_empty() && !task.demon_id.eq_ignore_ascii_case(&canonical_id) {
+        return Err(AgentCommandError::InvalidAgentId { agent_id: task.demon_id }.into());
+    }
+    if task.task_id.trim().is_empty() {
+        task.task_id = next_task_id();
+    }
+    task.demon_id = canonical_id.clone();
+
+    let queued_jobs = execute_agent_task(
+        &state.agent_registry,
+        &state.sockets,
+        &state.events,
+        &identity.key_id,
+        Message {
+            head: MessageHead {
+                event: EventCode::Session,
+                user: identity.key_id.clone(),
+                timestamp: String::new(),
+                one_time: String::new(),
+            },
+            info: task.clone(),
+        },
+    )
+    .await?;
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(AgentTaskQueuedResponse {
+            agent_id: canonical_id,
+            task_id: task.task_id,
+            queued_jobs,
+        }),
+    ))
 }
 
 #[utoipa::path(
@@ -530,7 +763,7 @@ async fn delete_listener(
 }
 
 #[utoipa::path(
-    post,
+    put,
     path = "/listeners/{name}/start",
     context_path = "/api/v1",
     tag = "listeners",
@@ -554,7 +787,7 @@ async fn start_listener(
 }
 
 #[utoipa::path(
-    post,
+    put,
     path = "/listeners/{name}/stop",
     context_path = "/api/v1",
     tag = "listeners",
@@ -648,6 +881,28 @@ fn authorize_api_role(role: OperatorRole, permission: Permission) -> Result<(), 
     } else {
         Err(ApiAuthError::PermissionDenied { role, required: permission.as_str() })
     }
+}
+
+fn parse_api_agent_id(value: &str) -> Result<u32, AgentApiError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(AgentCommandError::MissingAgentId.into());
+    }
+
+    let maybe_prefixed =
+        trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")).unwrap_or(trimmed);
+    let parse_hex = trimmed.starts_with("0x")
+        || trimmed.starts_with("0X")
+        || maybe_prefixed.chars().any(|character| character.is_ascii_alphabetic());
+    let radix = if parse_hex { 16 } else { 10 };
+
+    u32::from_str_radix(maybe_prefixed, radix)
+        .map_err(|_| AgentCommandError::InvalidAgentId { agent_id: trimmed.to_owned() }.into())
+}
+
+fn next_task_id() -> String {
+    let bytes = *Uuid::new_v4().as_bytes();
+    format!("{:08X}", u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
 const fn api_role_allows(role: OperatorRole, permission: Permission) -> bool {
@@ -751,6 +1006,134 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_agents_returns_registered_entries() {
+        let (app, registry) = test_router_with_registry(Some((
+            60,
+            "rest-admin",
+            "secret-admin",
+            OperatorRole::Admin,
+        )))
+        .await;
+        registry.insert(sample_agent(0xDEAD_BEEF)).await.expect("agent should insert");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/agents")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body.as_array().expect("agents array").len(), 1);
+        assert_eq!(body[0]["AgentID"], 0xDEAD_BEEF_u32);
+    }
+
+    #[tokio::test]
+    async fn queue_agent_task_enqueues_job() {
+        let (app, registry) = test_router_with_registry(Some((
+            60,
+            "rest-admin",
+            "secret-admin",
+            OperatorRole::Admin,
+        )))
+        .await;
+        registry.insert(sample_agent(0xDEAD_BEEF)).await.expect("agent should insert");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/agents/DEADBEEF/task")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"TaskID":"2A","CommandLine":"checkin","DemonID":"DEADBEEF","CommandID":"100"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = read_json(response).await;
+        assert_eq!(body["agent_id"], "DEADBEEF");
+        assert_eq!(body["task_id"], "2A");
+        assert_eq!(body["queued_jobs"], 1);
+
+        let queued = registry.queued_jobs(0xDEAD_BEEF).await.expect("queue should load");
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].command, u32::from(DemonCommand::CommandCheckin));
+        assert_eq!(queued[0].request_id, 0x2A);
+    }
+
+    #[tokio::test]
+    async fn delete_agent_queues_kill_job() {
+        let (app, registry) = test_router_with_registry(Some((
+            60,
+            "rest-admin",
+            "secret-admin",
+            OperatorRole::Admin,
+        )))
+        .await;
+        registry.insert(sample_agent(0xDEAD_BEEF)).await.expect("agent should insert");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/agents/DEADBEEF")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = read_json(response).await;
+        assert_eq!(body["agent_id"], "DEADBEEF");
+        assert_eq!(body["queued_jobs"], 1);
+
+        let queued = registry.queued_jobs(0xDEAD_BEEF).await.expect("queue should load");
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].command, u32::from(DemonCommand::CommandExit));
+    }
+
+    #[tokio::test]
+    async fn analyst_key_cannot_task_agents() {
+        let (app, registry) = test_router_with_registry(Some((
+            60,
+            "rest-analyst",
+            "secret-analyst",
+            OperatorRole::Analyst,
+        )))
+        .await;
+        registry.insert(sample_agent(0xDEAD_BEEF)).await.expect("agent should insert");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/agents/DEADBEEF/task")
+                    .header(API_KEY_HEADER, "secret-analyst")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"TaskID":"2A","CommandLine":"checkin","DemonID":"DEADBEEF","CommandID":"100"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
     async fn rate_limiting_rejects_excess_requests() {
         let app = test_router(Some((1, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
 
@@ -817,6 +1200,12 @@ mod tests {
     }
 
     async fn test_router(api_key: Option<(u32, &str, &str, OperatorRole)>) -> Router {
+        test_router_with_registry(api_key).await.0
+    }
+
+    async fn test_router_with_registry(
+        api_key: Option<(u32, &str, &str, OperatorRole)>,
+    ) -> (Router, AgentRegistry) {
         let profile = test_profile(api_key);
         let database = Database::connect_in_memory().await.expect("database");
         let agent_registry = AgentRegistry::new(database.clone());
@@ -831,17 +1220,20 @@ mod tests {
 
         let api = ApiRuntime::from_profile(&profile);
 
-        api_routes(api.clone()).with_state(TeamserverState {
-            profile: profile.clone(),
-            database,
-            auth: AuthService::from_profile(&profile),
-            api,
-            events,
-            connections: OperatorConnectionManager::new(),
+        (
+            api_routes(api.clone()).with_state(TeamserverState {
+                profile: profile.clone(),
+                database,
+                auth: AuthService::from_profile(&profile),
+                api,
+                events,
+                connections: OperatorConnectionManager::new(),
+                agent_registry: agent_registry.clone(),
+                listeners,
+                sockets,
+            }),
             agent_registry,
-            listeners,
-            sockets,
-        })
+        )
     }
 
     fn test_profile(api_key: Option<(u32, &str, &str, OperatorRole)>) -> Profile {
@@ -883,5 +1275,38 @@ mod tests {
     async fn read_json(response: Response) -> Value {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.expect("response body bytes");
         serde_json::from_slice(&bytes).expect("json body")
+    }
+
+    fn sample_agent(agent_id: u32) -> AgentInfo {
+        AgentInfo {
+            agent_id,
+            active: true,
+            reason: "http".to_owned(),
+            note: String::new(),
+            encryption: red_cell_common::AgentEncryptionInfo {
+                aes_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_owned(),
+                aes_iv: "AAAAAAAAAAAAAAAAAAAAAA==".to_owned(),
+            },
+            hostname: "workstation".to_owned(),
+            username: "neo".to_owned(),
+            domain_name: "LAB".to_owned(),
+            external_ip: "203.0.113.10".to_owned(),
+            internal_ip: "10.0.0.10".to_owned(),
+            process_name: "demon.exe".to_owned(),
+            base_address: 0x140000000,
+            process_pid: 4444,
+            process_tid: 4445,
+            process_ppid: 1000,
+            process_arch: "x64".to_owned(),
+            elevated: true,
+            os_version: "Windows 11".to_owned(),
+            os_arch: "x64".to_owned(),
+            sleep_delay: 5,
+            sleep_jitter: 10,
+            kill_date: None,
+            working_hours: None,
+            first_call_in: "2026-03-09T20:00:00Z".to_owned(),
+            last_call_in: "2026-03-09T20:05:00Z".to_owned(),
+        }
     }
 }

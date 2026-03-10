@@ -799,6 +799,8 @@ pub(crate) enum AgentCommandError {
     UnsupportedSocketSubcommand { subcommand: String },
     #[error("unsupported kerberos subcommand `{subcommand}`")]
     UnsupportedKerberosSubcommand { subcommand: String },
+    #[error("invalid hex task id `{task_id}`")]
+    InvalidTaskId { task_id: String },
     #[error("unsupported injection way `{way}`")]
     UnsupportedInjectionWay { way: String },
     #[error("unsupported injection technique `{technique}`")]
@@ -974,7 +976,9 @@ fn build_jobs(
     operator: &str,
 ) -> Result<Vec<Job>, AgentCommandError> {
     let command_id = info.command_id.trim();
-    let request_id = u32::from_str_radix(info.task_id.trim(), 16).unwrap_or_default();
+    let task_id_trimmed = info.task_id.trim();
+    let request_id = u32::from_str_radix(task_id_trimmed, 16)
+        .map_err(|_| AgentCommandError::InvalidTaskId { task_id: info.task_id.clone() })?;
 
     if is_teamserver_note_command(info) {
         return Err(AgentCommandError::MissingNote);
@@ -2103,8 +2107,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        DEMON_MAX_RESPONSE_LENGTH, OperatorConnectionManager, build_job, build_jobs, encode_utf16,
-        routes, teamserver_log_event, write_len_prefixed_bytes, write_u32,
+        AgentCommandError, DEMON_MAX_RESPONSE_LENGTH, OperatorConnectionManager, build_job,
+        build_jobs, encode_utf16, routes, teamserver_log_event, write_len_prefixed_bytes,
+        write_u32,
     };
     use crate::{
         AgentRegistry, AuthService, Database, EventBus, ListenerManager, PayloadBuilderService,
@@ -2779,6 +2784,58 @@ mod tests {
         assert_eq!(read_u32_le(&job.payload, &mut offset), u32::from(DemonProcessCommand::Memory));
         assert_eq!(read_u32_le(&job.payload, &mut offset), 4321);
         assert_eq!(read_u32_le(&job.payload, &mut offset), 0x40);
+    }
+
+    #[test]
+    fn build_job_rejects_empty_task_id() {
+        let result = build_job(&AgentTaskInfo {
+            task_id: String::new(),
+            command_line: "checkin".to_owned(),
+            demon_id: "DEADBEEF".to_owned(),
+            command_id: u32::from(DemonCommand::CommandCheckin).to_string(),
+            ..AgentTaskInfo::default()
+        });
+        let err = result.expect_err("empty task_id should fail");
+        assert!(matches!(err, AgentCommandError::InvalidTaskId { .. }));
+    }
+
+    #[test]
+    fn build_job_rejects_non_hex_task_id() {
+        let result = build_job(&AgentTaskInfo {
+            task_id: "not-hex".to_owned(),
+            command_line: "checkin".to_owned(),
+            demon_id: "DEADBEEF".to_owned(),
+            command_id: u32::from(DemonCommand::CommandCheckin).to_string(),
+            ..AgentTaskInfo::default()
+        });
+        let err = result.expect_err("non-hex task_id should fail");
+        assert!(matches!(err, AgentCommandError::InvalidTaskId { .. }));
+    }
+
+    #[test]
+    fn build_job_rejects_overflowing_task_id() {
+        let result = build_job(&AgentTaskInfo {
+            task_id: "FFFFFFFFFF".to_owned(),
+            command_line: "checkin".to_owned(),
+            demon_id: "DEADBEEF".to_owned(),
+            command_id: u32::from(DemonCommand::CommandCheckin).to_string(),
+            ..AgentTaskInfo::default()
+        });
+        let err = result.expect_err("overflowing task_id should fail");
+        assert!(matches!(err, AgentCommandError::InvalidTaskId { .. }));
+    }
+
+    #[test]
+    fn build_job_accepts_valid_hex_task_id() {
+        let job = build_job(&AgentTaskInfo {
+            task_id: "FF".to_owned(),
+            command_line: "checkin".to_owned(),
+            demon_id: "DEADBEEF".to_owned(),
+            command_id: u32::from(DemonCommand::CommandCheckin).to_string(),
+            ..AgentTaskInfo::default()
+        })
+        .expect("valid hex task_id should succeed");
+        assert_eq!(job.request_id, 0xFF);
     }
 
     #[tokio::test]

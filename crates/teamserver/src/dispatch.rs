@@ -48,6 +48,15 @@ struct DownloadState {
     started_at: String,
 }
 
+#[derive(Clone, Copy)]
+struct BuiltinDispatchContext<'a> {
+    registry: &'a AgentRegistry,
+    events: &'a EventBus,
+    database: &'a Database,
+    sockets: &'a SocketRelayManager,
+    downloads: &'a DownloadTracker,
+}
+
 /// Error returned while routing or executing a Demon command handler.
 #[derive(Debug, Error)]
 pub enum CommandDispatchError {
@@ -96,6 +105,7 @@ pub enum CommandDispatchError {
 #[derive(Clone)]
 pub struct CommandDispatcher {
     handlers: Arc<HashMap<u32, Arc<Handler>>>,
+    downloads: DownloadTracker,
 }
 
 impl std::fmt::Debug for CommandDispatcher {
@@ -116,7 +126,7 @@ impl CommandDispatcher {
     /// Create an empty dispatcher with no registered handlers.
     #[must_use]
     pub fn new() -> Self {
-        Self { handlers: Arc::new(HashMap::new()) }
+        Self { handlers: Arc::new(HashMap::new()), downloads: DownloadTracker::default() }
     }
 
     /// Create a dispatcher with the built-in Demon command handlers.
@@ -128,7 +138,7 @@ impl CommandDispatcher {
         sockets: SocketRelayManager,
     ) -> Self {
         let mut dispatcher = Self::new();
-        let downloads = DownloadTracker::default();
+        let downloads = dispatcher.downloads.clone();
 
         let get_job_registry = registry.clone();
         dispatcher.register_handler(
@@ -283,6 +293,7 @@ impl CommandDispatcher {
         let pivot_events = events.clone();
         let pivot_database = database.clone();
         let pivot_sockets = sockets.clone();
+        let pivot_downloads = downloads.clone();
         dispatcher.register_handler(
             u32::from(DemonCommand::CommandPivot),
             move |agent_id, request_id, payload| {
@@ -290,9 +301,11 @@ impl CommandDispatcher {
                 let events = pivot_events.clone();
                 let database = pivot_database.clone();
                 let sockets = pivot_sockets.clone();
+                let downloads = pivot_downloads.clone();
                 Box::pin(async move {
                     handle_pivot_callback(
-                        &registry, &events, &database, &sockets, agent_id, request_id, &payload,
+                        &registry, &events, &database, &sockets, &downloads, agent_id, request_id,
+                        &payload,
                     )
                     .await
                 })
@@ -398,6 +411,7 @@ async fn handle_pivot_callback(
     events: &EventBus,
     database: &Database,
     sockets: &SocketRelayManager,
+    downloads: &DownloadTracker,
     agent_id: u32,
     request_id: u32,
     payload: &[u8],
@@ -419,6 +433,7 @@ async fn handle_pivot_callback(
                 events,
                 database,
                 sockets,
+                downloads,
                 agent_id,
                 &mut parser,
             )
@@ -533,6 +548,7 @@ async fn handle_pivot_command_callback(
     events: &EventBus,
     database: &Database,
     sockets: &SocketRelayManager,
+    downloads: &DownloadTracker,
     _parent_agent_id: u32,
     parser: &mut CallbackParser<'_>,
 ) -> Result<Option<Vec<u8>>, CommandDispatchError> {
@@ -557,14 +573,12 @@ async fn handle_pivot_command_callback(
     let timestamp = OffsetDateTime::now_utc().format(&Rfc3339)?;
     let updated = registry.set_last_call_in(child_agent_id, timestamp).await?;
     events.broadcast(agent_update_event(&updated));
-    dispatch_builtin_packages(registry, events, database, sockets, child_agent_id, &packages).await
+    let context = BuiltinDispatchContext { registry, events, database, sockets, downloads };
+    dispatch_builtin_packages(context, child_agent_id, &packages).await
 }
 
 async fn dispatch_builtin_packages(
-    registry: &AgentRegistry,
-    events: &EventBus,
-    database: &Database,
-    sockets: &SocketRelayManager,
+    context: BuiltinDispatchContext<'_>,
     agent_id: u32,
     packages: &[DemonCallbackPackage],
 ) -> Result<Option<Vec<u8>>, CommandDispatchError> {
@@ -572,10 +586,7 @@ async fn dispatch_builtin_packages(
 
     for package in packages {
         let next = dispatch_builtin_package(
-            registry,
-            events,
-            database,
-            sockets,
+            context,
             agent_id,
             package.command_id,
             package.request_id,
@@ -591,61 +602,90 @@ async fn dispatch_builtin_packages(
 }
 
 async fn dispatch_builtin_package(
-    registry: &AgentRegistry,
-    events: &EventBus,
-    database: &Database,
-    sockets: &SocketRelayManager,
+    context: BuiltinDispatchContext<'_>,
     agent_id: u32,
     command_id: u32,
     request_id: u32,
     payload: &[u8],
 ) -> Result<Option<Vec<u8>>, CommandDispatchError> {
-    let downloads = DownloadTracker::default();
     if command_id == u32::from(DemonCommand::CommandGetJob) {
         return Ok(None);
     }
     if command_id == u32::from(DemonCommand::CommandCheckin) {
-        return handle_checkin(registry, events, agent_id).await;
+        return handle_checkin(context.registry, context.events, agent_id).await;
     }
     if command_id == u32::from(DemonCommand::CommandFs) {
         return handle_filesystem_callback(
-            database, events, &downloads, agent_id, request_id, payload,
+            context.database,
+            context.events,
+            context.downloads,
+            agent_id,
+            request_id,
+            payload,
         )
         .await;
     }
     if command_id == u32::from(DemonCommand::CommandProcList) {
-        return handle_process_list_callback(events, agent_id, request_id, payload).await;
+        return handle_process_list_callback(context.events, agent_id, request_id, payload).await;
     }
     if command_id == u32::from(DemonCommand::CommandProc) {
-        return handle_process_command_callback(events, agent_id, request_id, payload).await;
+        return handle_process_command_callback(context.events, agent_id, request_id, payload)
+            .await;
     }
     if command_id == u32::from(DemonCommand::CommandOutput) {
-        return handle_command_output_callback(events, agent_id, request_id, payload).await;
+        return handle_command_output_callback(context.events, agent_id, request_id, payload).await;
     }
     if command_id == u32::from(DemonCommand::BeaconOutput) {
         return handle_beacon_output_callback(
-            database, events, &downloads, agent_id, request_id, payload,
+            context.database,
+            context.events,
+            context.downloads,
+            agent_id,
+            request_id,
+            payload,
         )
         .await;
     }
     if command_id == u32::from(DemonCommand::CommandInjectShellcode) {
-        return handle_inject_shellcode_callback(events, agent_id, request_id, payload).await;
+        return handle_inject_shellcode_callback(context.events, agent_id, request_id, payload)
+            .await;
     }
     if command_id == u32::from(DemonCommand::CommandToken) {
-        return handle_token_callback(events, agent_id, request_id, payload).await;
+        return handle_token_callback(context.events, agent_id, request_id, payload).await;
     }
     if command_id == u32::from(DemonCommand::CommandScreenshot) {
-        return handle_screenshot_callback(database, events, agent_id, request_id, payload).await;
+        return handle_screenshot_callback(
+            context.database,
+            context.events,
+            agent_id,
+            request_id,
+            payload,
+        )
+        .await;
     }
     if command_id == u32::from(DemonCommand::CommandKerberos) {
-        return handle_kerberos_callback(events, agent_id, request_id, payload).await;
+        return handle_kerberos_callback(context.events, agent_id, request_id, payload).await;
     }
     if command_id == u32::from(DemonCommand::CommandSocket) {
-        return handle_socket_callback(events, sockets, agent_id, request_id, payload).await;
+        return handle_socket_callback(
+            context.events,
+            context.sockets,
+            agent_id,
+            request_id,
+            payload,
+        )
+        .await;
     }
     if command_id == u32::from(DemonCommand::CommandPivot) {
         return Box::pin(handle_pivot_callback(
-            registry, events, database, sockets, agent_id, request_id, payload,
+            context.registry,
+            context.events,
+            context.database,
+            context.sockets,
+            context.downloads,
+            agent_id,
+            request_id,
+            payload,
         ))
         .await;
     }

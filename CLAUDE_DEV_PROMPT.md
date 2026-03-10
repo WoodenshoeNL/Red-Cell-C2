@@ -6,6 +6,21 @@ implementing it completely, and pushing it before moving on.
 
 ---
 
+## Step 0 — Check for Stop Signal
+
+Before doing anything else, check for the stop signal file:
+
+```bash
+if [ -f .stop ]; then
+  echo "STOP signal detected — halting dev loop. Remove .stop to resume."
+  exit 0
+fi
+```
+
+If the file exists, stop immediately. Do not claim a task, do not pull, do not commit.
+
+---
+
 ## Project Context
 
 Read the full context before starting:

@@ -32,6 +32,30 @@ Rewrite of the [Havoc C2 framework](./src/Havoc) in Rust — teamserver and oper
 
 The original Havoc source lives in `./src/Havoc` as reference only — **do not modify it, do not stage it, do not commit it**. It is intentionally excluded from git via `.gitignore`. Agents must never `git add src/` or include any path under `src/` in a commit.
 
+## Stopping a Dev Loop
+
+Both the Claude and Codex dev loops check for a `.stop` file at the repo root before each
+pass. If the file exists the agent halts cleanly without claiming new work.
+
+**To stop a locally running loop:**
+```bash
+touch .stop
+```
+
+**To stop a remote/cloud loop (e.g. Codex):**
+```bash
+touch .stop && git add .stop && git commit -m "chore: stop dev loop" && git push
+```
+
+**To resume after stopping:**
+```bash
+rm .stop && git add .stop && git commit -m "chore: resume dev loop" && git push
+# or locally:
+rm .stop
+```
+
+The `.stop` file is intentionally not gitignored so it can be pushed to stop remote agents.
+
 <!-- br-agent-instructions-v1 -->
 
 ---

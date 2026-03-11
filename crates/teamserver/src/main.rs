@@ -77,7 +77,7 @@ async fn main() -> Result<()> {
 
     listeners.sync_profile(&profile).await?;
     listeners.restore_running().await?;
-    start_profile_listeners(&listeners, &profile).await?;
+    start_new_profile_listeners(&listeners, &profile).await?;
     let loaded_plugins = plugins.load_plugins().await.context("failed to load Python plugins")?;
     if !loaded_plugins.is_empty() {
         info!(count = loaded_plugins.len(), plugins = ?loaded_plugins, "loaded Python plugins");
@@ -210,11 +210,22 @@ async fn wait_for_shutdown_signal(handle: Handle<SocketAddr>) {
 }
 
 #[instrument(skip(listeners, profile), fields(listener_count = profile_listener_names(profile).len()))]
-async fn start_profile_listeners(
+async fn start_new_profile_listeners(
     listeners: &ListenerManager,
     profile: &Profile,
 ) -> Result<(), ListenerManagerError> {
-    for listener in profile_listener_names(profile) {
+    let profile_listener_names = profile_listener_names(profile);
+    let summaries = listeners.list().await?;
+    let new_profile_listener_names: Vec<String> = summaries
+        .into_iter()
+        .filter(|summary| {
+            summary.state.status == red_cell::ListenerStatus::Created
+                && profile_listener_names.iter().any(|name| name == &summary.name)
+        })
+        .map(|summary| summary.name)
+        .collect();
+
+    for listener in new_profile_listener_names {
         match listeners.start(listener.as_str()).await {
             Ok(_) | Err(ListenerManagerError::ListenerAlreadyRunning { .. }) => {}
             Err(error) => return Err(error),
@@ -239,14 +250,14 @@ mod tests {
 
     use super::{
         Cli, load_profile, profile_listener_names, resolve_bind_addr, resolve_database_path,
-        tls_subject_alt_names,
+        start_new_profile_listeners, tls_subject_alt_names,
     };
     use axum::extract::FromRef;
     use clap::Parser;
     use red_cell::{
         AgentRegistry, ApiRuntime, AuthService, Database, EventBus, ListenerManager,
-        LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService, SocketRelayManager,
-        TeamserverState,
+        ListenerStatus, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
+        SocketRelayManager, TeamserverState,
     };
     use red_cell_common::config::{OperatorRole, Profile};
     use tempfile::NamedTempFile;
@@ -468,5 +479,70 @@ mod tests {
         .expect("profile should parse");
 
         assert_eq!(profile_listener_names(&profile), vec!["http", "smb", "ext", "dns"]);
+    }
+
+    #[tokio::test]
+    async fn startup_only_auto_starts_new_profile_listeners() {
+        let port = available_port().expect("ephemeral port should be available");
+        let profile = Profile::parse(&format!(
+            r#"
+            Teamserver {{
+              Host = "127.0.0.1"
+              Port = 40056
+            }}
+
+            Operators {{
+              user "operator" {{
+                Password = "password1234"
+              }}
+            }}
+
+            Listeners {{
+              Http = [{{
+                Name = "http"
+                Hosts = ["127.0.0.1"]
+                HostBind = "127.0.0.1"
+                HostRotation = "round-robin"
+                PortBind = {port}
+                Secure = false
+              }}]
+            }}
+
+            Demon {{}}
+            "#
+        ))
+        .expect("profile should parse");
+
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let listeners = ListenerManager::new(database, registry, events, sockets, None);
+
+        listeners.sync_profile(&profile).await.expect("profile listeners should sync");
+        start_new_profile_listeners(&listeners, &profile)
+            .await
+            .expect("new profile listeners should auto-start");
+        assert_eq!(
+            listeners.summary("http").await.expect("listener should exist").state.status,
+            ListenerStatus::Running
+        );
+
+        listeners.stop("http").await.expect("listener should stop cleanly");
+        listeners.sync_profile(&profile).await.expect("profile listeners should re-sync");
+        listeners.restore_running().await.expect("restore should succeed");
+        start_new_profile_listeners(&listeners, &profile)
+            .await
+            .expect("startup should ignore explicitly stopped listeners");
+
+        assert_eq!(
+            listeners.summary("http").await.expect("listener should exist").state.status,
+            ListenerStatus::Stopped
+        );
+    }
+
+    fn available_port() -> std::io::Result<u16> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        Ok(listener.local_addr()?.port())
     }
 }

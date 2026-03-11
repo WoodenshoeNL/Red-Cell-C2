@@ -1509,13 +1509,8 @@ fn encode_token_payload(
         | DemonTokenCommand::Clear
         | DemonTokenCommand::FindTokens => {}
         DemonTokenCommand::PrivsGetOrList => {
-            let sub = info
-                .sub_command
-                .as_deref()
-                .or_else(|| {
-                    flat_info_string_from_extra(&info.extra, &["SubCommand"]).as_deref().map(|_| "")
-                })
-                .unwrap_or("");
+            let sub_from_extra = flat_info_string_from_extra(&info.extra, &["SubCommand"]);
+            let sub = info.sub_command.as_deref().or(sub_from_extra.as_deref()).unwrap_or("");
             if sub.eq_ignore_ascii_case("privs-list") || sub == "4" {
                 write_u32(&mut payload, 1);
             } else {
@@ -2728,6 +2723,47 @@ mod tests {
         write_len_prefixed_bytes(&mut expected, &encode_utf16("D:\\loot\\b.txt")).unwrap();
         assert_eq!(jobs[0].command, u32::from(DemonCommand::CommandFs));
         assert_eq!(jobs[0].payload, expected);
+    }
+
+    #[test]
+    fn build_job_encodes_token_privs_list_payload_from_extra_subcommand_string() {
+        let job = build_job(&AgentTaskInfo {
+            task_id: "2F".to_owned(),
+            command_line: "token privs-list".to_owned(),
+            demon_id: "DEADBEEF".to_owned(),
+            command_id: u32::from(DemonCommand::CommandToken).to_string(),
+            extra: BTreeMap::from([(
+                String::from("SubCommand"),
+                Value::String("privs-list".to_owned()),
+            )]),
+            ..AgentTaskInfo::default()
+        })
+        .expect("token privs-list job should build from extras");
+
+        assert_eq!(
+            job.payload,
+            [u32::from(DemonTokenCommand::PrivsGetOrList).to_le_bytes(), 1_u32.to_le_bytes(),]
+                .concat()
+        );
+    }
+
+    #[test]
+    fn build_job_encodes_token_privs_list_payload_from_extra_subcommand_numeric() {
+        let job = build_job(&AgentTaskInfo {
+            task_id: "30".to_owned(),
+            command_line: "token 4".to_owned(),
+            demon_id: "DEADBEEF".to_owned(),
+            command_id: u32::from(DemonCommand::CommandToken).to_string(),
+            extra: BTreeMap::from([(String::from("SubCommand"), Value::String("4".to_owned()))]),
+            ..AgentTaskInfo::default()
+        })
+        .expect("token privs-list job should build from numeric extra");
+
+        assert_eq!(
+            job.payload,
+            [u32::from(DemonTokenCommand::PrivsGetOrList).to_le_bytes(), 1_u32.to_le_bytes(),]
+                .concat()
+        );
     }
 
     #[test]

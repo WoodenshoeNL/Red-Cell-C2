@@ -100,6 +100,9 @@ const MAX_FAILED_LOGIN_ATTEMPTS: u32 = 5;
 /// Duration of the sliding window for tracking failed login attempts.
 const LOGIN_WINDOW_DURATION: Duration = Duration::from_secs(60);
 
+/// Maximum number of IP windows retained before oldest entries are evicted.
+const MAX_LOGIN_ATTEMPT_WINDOWS: usize = 10_000;
+
 /// Delay applied before responding to a failed login attempt to slow brute-force attacks.
 const FAILED_LOGIN_DELAY: Duration = Duration::from_secs(2);
 
@@ -150,11 +153,18 @@ impl LoginRateLimiter {
     /// Record a failed login attempt from the given IP.
     async fn record_failure(&self, ip: IpAddr) {
         let mut windows = self.windows.lock().await;
+        let now = Instant::now();
+
+        prune_expired_login_windows(&mut windows, now);
+        if !windows.contains_key(&ip) && windows.len() >= MAX_LOGIN_ATTEMPT_WINDOWS {
+            evict_oldest_login_windows(&mut windows, MAX_LOGIN_ATTEMPT_WINDOWS / 2);
+        }
+
         let window = windows.entry(ip).or_default();
 
-        if window.window_start.elapsed() >= LOGIN_WINDOW_DURATION {
+        if now.duration_since(window.window_start) >= LOGIN_WINDOW_DURATION {
             window.failed_attempts = 1;
-            window.window_start = Instant::now();
+            window.window_start = now;
         } else {
             window.failed_attempts += 1;
         }
@@ -169,6 +179,27 @@ impl LoginRateLimiter {
     #[cfg(test)]
     async fn tracked_ip_count(&self) -> usize {
         self.windows.lock().await.len()
+    }
+}
+
+fn prune_expired_login_windows(windows: &mut HashMap<IpAddr, LoginAttemptWindow>, now: Instant) {
+    windows.retain(|_, window| now.duration_since(window.window_start) < LOGIN_WINDOW_DURATION);
+}
+
+fn evict_oldest_login_windows(
+    windows: &mut HashMap<IpAddr, LoginAttemptWindow>,
+    target_size: usize,
+) {
+    if windows.len() <= target_size {
+        return;
+    }
+
+    let to_remove = windows.len() - target_size;
+    let mut entries: Vec<_> =
+        windows.iter().map(|(ip, window)| (*ip, window.window_start)).collect();
+    entries.sort_unstable_by_key(|(_, window_start)| *window_start);
+    for (ip, _) in entries.into_iter().take(to_remove) {
+        windows.remove(&ip);
     }
 }
 
@@ -2173,7 +2204,7 @@ enum SendMessageError {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use axum::extract::FromRef;
     use base64::Engine as _;
@@ -3553,6 +3584,61 @@ mod tests {
         limiter.record_success(ip).await;
         assert!(limiter.is_allowed(ip).await);
         assert_eq!(limiter.tracked_ip_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn login_rate_limiter_prunes_expired_windows_for_one_shot_ips() {
+        let limiter = LoginRateLimiter::new();
+        let expired_ip: IpAddr = "192.168.10.10".parse().expect("valid IP");
+        let fresh_ip: IpAddr = "192.168.10.11".parse().expect("valid IP");
+
+        {
+            let mut windows = limiter.windows.lock().await;
+            windows.insert(
+                expired_ip,
+                super::LoginAttemptWindow {
+                    failed_attempts: 3,
+                    window_start: Instant::now()
+                        - super::LOGIN_WINDOW_DURATION
+                        - Duration::from_secs(1),
+                },
+            );
+        }
+
+        limiter.record_failure(fresh_ip).await;
+
+        let windows = limiter.windows.lock().await;
+        assert!(!windows.contains_key(&expired_ip));
+        assert!(windows.contains_key(&fresh_ip));
+        assert_eq!(windows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn login_rate_limiter_caps_total_tracked_windows() {
+        let limiter = LoginRateLimiter::new();
+        let now = Instant::now();
+
+        {
+            let mut windows = limiter.windows.lock().await;
+            for i in 0..super::MAX_LOGIN_ATTEMPT_WINDOWS {
+                windows.insert(
+                    IpAddr::from(std::net::Ipv4Addr::from(i as u32)),
+                    super::LoginAttemptWindow {
+                        failed_attempts: 1,
+                        window_start: now
+                            - Duration::from_secs((super::MAX_LOGIN_ATTEMPT_WINDOWS - i) as u64),
+                    },
+                );
+            }
+        }
+
+        let new_ip = IpAddr::from(std::net::Ipv4Addr::new(10, 0, 0, 1));
+        limiter.record_failure(new_ip).await;
+
+        let windows = limiter.windows.lock().await;
+        assert!(windows.len() <= (super::MAX_LOGIN_ATTEMPT_WINDOWS / 2) + 1);
+        assert!(windows.contains_key(&new_ip));
+        assert!(!windows.contains_key(&IpAddr::from(std::net::Ipv4Addr::from(0_u32))));
     }
 
     #[tokio::test]

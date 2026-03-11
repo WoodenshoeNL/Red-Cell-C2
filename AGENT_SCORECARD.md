@@ -21,9 +21,9 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 0 | 0 | 0 |
 | Missing tests | 0 | 2 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
-| Protocol errors | 1 | 5 | 2 |
+| Protocol errors | 1 | 6 | 2 |
 | Security issues | 0 | 13 | 0 |
-| Architecture drift | 0 | 4 | 0 |
+| Architecture drift | 0 | 7 | 0 |
 | Memory / resource leaks | 0 | 6 | 1 |
 | Audit attribution errors | 0 | 1 | 0 |
 
@@ -32,6 +32,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-11 19:08
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 0 | — | No findings this run |
+| Codex | 4 | Architecture drift ×3, Protocol ×1 | red-cell-c2-36v7 (external/service bridge is a stub), red-cell-c2-1tfr (listener operator round-trip drops advanced fields), red-cell-c2-6gn9 (DNS listeners unsupported by payload builder), red-cell-c2-3djm (Discord webhook config is dead) |
+| Cursor | 0 | — | No findings this run |
+
+Overall codebase health: drifting
+Biggest blindspot: feature surfaces are landing in config and listener state before the end-to-end workflows exist, so operators can start or edit transports that silently degrade or do nothing.
 
 ### Arch Review — 2026-03-11 16:58
 

@@ -1,5 +1,6 @@
 //! SQLite-backed persistence for the Red Cell teamserver.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use red_cell_common::config::OperatorRole;
@@ -1077,6 +1078,33 @@ impl AuditLogRepository {
         let row = builder.build().fetch_one(&self.pool).await?;
         Ok(row.get::<i64, _>(0))
     }
+
+    /// Return the latest timestamp for each actor across the supplied actions.
+    pub async fn latest_timestamps_by_actor_for_actions(
+        &self,
+        actions: &[&str],
+    ) -> Result<BTreeMap<String, String>, TeamserverError> {
+        if actions.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+
+        let mut builder = QueryBuilder::new(
+            "SELECT actor, MAX(occurred_at) AS occurred_at FROM ts_audit_log WHERE action IN (",
+        );
+        let mut separated = builder.separated(", ");
+        for action in actions {
+            separated.push_bind(*action);
+        }
+        separated.push_unseparated(") GROUP BY actor");
+
+        let rows = builder.build().fetch_all(&self.pool).await?;
+        let mut latest = BTreeMap::new();
+        for row in rows {
+            latest.insert(row.get::<String, _>("actor"), row.get::<String, _>("occurred_at"));
+        }
+
+        Ok(latest)
+    }
 }
 
 /// Filter criteria for paginated audit-log queries pushed down to SQL.
@@ -1104,6 +1132,8 @@ pub struct AuditLogFilter {
     pub since: Option<String>,
     /// Inclusive upper bound on `occurred_at` (UTC RFC 3339 string).
     pub until: Option<String>,
+    /// Exact action labels allowed by the query.
+    pub action_in: Option<Vec<String>>,
 }
 
 fn append_audit_filters(builder: &mut QueryBuilder<'_, Sqlite>, filter: &AuditLogFilter) {
@@ -1136,6 +1166,16 @@ fn append_audit_filters(builder: &mut QueryBuilder<'_, Sqlite>, filter: &AuditLo
     }
     if let Some(ref value) = filter.until {
         builder.push(" AND occurred_at <= ").push_bind(value.clone());
+    }
+    if let Some(ref actions) = filter.action_in {
+        if !actions.is_empty() {
+            builder.push(" AND action IN (");
+            let mut separated = builder.separated(", ");
+            for action in actions {
+                separated.push_bind(action.clone());
+            }
+            separated.push_unseparated(")");
+        }
     }
 }
 

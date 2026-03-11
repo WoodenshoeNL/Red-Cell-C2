@@ -3,7 +3,8 @@ use red_cell::database::{
     LootRecord, PersistedListener, PersistedListenerState, PersistedOperator, TeamserverError,
 };
 use red_cell::{
-    AuditQuery, AuditResultStatus, audit_details, query_audit_log, record_operator_action,
+    AuditQuery, AuditResultStatus, SessionActivityQuery, audit_details, query_audit_log,
+    query_session_activity, record_operator_action,
 };
 use red_cell_common::config::OperatorRole;
 use red_cell_common::{
@@ -559,6 +560,118 @@ async fn audit_query_filtered_supports_json_field_filters() -> Result<(), Teamse
     .await?;
     assert_eq!(page.total, 1);
     assert_eq!(page.items[0].result_status, AuditResultStatus::Failure);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_activity_query_returns_only_operator_session_events() -> Result<(), TeamserverError>
+{
+    let database = test_database().await?;
+
+    record_operator_action(
+        &database,
+        "neo",
+        "operator.connect",
+        "operator",
+        Some("neo".to_owned()),
+        audit_details(AuditResultStatus::Success, None, Some("connect"), None),
+    )
+    .await?;
+    record_operator_action(
+        &database,
+        "neo",
+        "operator.chat",
+        "operator",
+        Some("neo".to_owned()),
+        audit_details(
+            AuditResultStatus::Success,
+            None,
+            Some("chat"),
+            Some(json!({"message":"hello team"})),
+        ),
+    )
+    .await?;
+    record_operator_action(
+        &database,
+        "neo",
+        "operator.create",
+        "operator",
+        Some("trinity".to_owned()),
+        audit_details(AuditResultStatus::Success, None, Some("create"), None),
+    )
+    .await?;
+
+    let page = query_session_activity(
+        &database,
+        &SessionActivityQuery {
+            operator: Some("neo".to_owned()),
+            ..SessionActivityQuery::default()
+        },
+    )
+    .await?;
+
+    assert_eq!(page.total, 2);
+    assert_eq!(page.items.len(), 2);
+    assert_eq!(page.items[0].activity, "chat");
+    assert_eq!(page.items[1].activity, "connect");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn audit_repository_tracks_latest_session_activity_per_operator()
+-> Result<(), TeamserverError> {
+    let database = test_database().await?;
+
+    database
+        .audit_log()
+        .create(&AuditLogEntry {
+            id: None,
+            actor: "neo".to_owned(),
+            action: "operator.connect".to_owned(),
+            target_kind: "operator".to_owned(),
+            target_id: Some("neo".to_owned()),
+            details: None,
+            occurred_at: "2026-03-10T08:00:00Z".to_owned(),
+        })
+        .await?;
+    database
+        .audit_log()
+        .create(&AuditLogEntry {
+            id: None,
+            actor: "neo".to_owned(),
+            action: "operator.chat".to_owned(),
+            target_kind: "operator".to_owned(),
+            target_id: Some("neo".to_owned()),
+            details: None,
+            occurred_at: "2026-03-10T09:00:00Z".to_owned(),
+        })
+        .await?;
+    database
+        .audit_log()
+        .create(&AuditLogEntry {
+            id: None,
+            actor: "trinity".to_owned(),
+            action: "operator.disconnect".to_owned(),
+            target_kind: "operator".to_owned(),
+            target_id: Some("trinity".to_owned()),
+            details: None,
+            occurred_at: "2026-03-10T10:00:00Z".to_owned(),
+        })
+        .await?;
+
+    let latest = database
+        .audit_log()
+        .latest_timestamps_by_actor_for_actions(&[
+            "operator.connect",
+            "operator.disconnect",
+            "operator.chat",
+        ])
+        .await?;
+
+    assert_eq!(latest.get("neo").map(String::as_str), Some("2026-03-10T09:00:00Z"));
+    assert_eq!(latest.get("trinity").map(String::as_str), Some("2026-03-10T10:00:00Z"));
 
     Ok(())
 }

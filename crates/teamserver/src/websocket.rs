@@ -964,7 +964,22 @@ async fn dispatch_operator_command<S>(
         OperatorMessage::ChatMessage(message) => {
             let text = flat_info_string(&message.info, &["Message", "Text"]).unwrap_or_default();
             if !text.trim().is_empty() {
-                events.broadcast(chat_message_event(&session.username, text.trim()));
+                let trimmed = text.trim();
+                events.broadcast(chat_message_event(&session.username, trimmed));
+                log_operator_action(
+                    &database,
+                    &session.username,
+                    "operator.chat",
+                    "operator",
+                    Some(session.username.clone()),
+                    audit_details(
+                        AuditResultStatus::Success,
+                        None,
+                        Some("chat"),
+                        Some(parameter_object([("message", Value::String(trimmed.to_owned()))])),
+                    ),
+                )
+                .await;
             }
         }
         other => {
@@ -2601,6 +2616,44 @@ mod tests {
 
         sender.close(None).await.expect("close should send");
         observer.close(None).await.expect("close should send");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_chat_messages_are_persisted_as_session_activity() {
+        let state = TestState::new().await;
+        let (mut sender, server) = spawn_server(state.clone()).await;
+
+        login(&mut sender, "operator", "password1234").await;
+        sender
+            .send(ClientMessage::Text(chat_message("operator", "hello team").into()))
+            .await
+            .expect("chat should send");
+        let _broadcast = read_operator_message(&mut sender).await;
+
+        let page = query_audit_log(
+            &state.database,
+            &AuditQuery {
+                action: Some("operator.chat".to_owned()),
+                actor: Some("operator".to_owned()),
+                ..AuditQuery::default()
+            },
+        )
+        .await
+        .expect("audit query should succeed");
+
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].action, "operator.chat");
+        assert_eq!(
+            page.items[0]
+                .parameters
+                .as_ref()
+                .and_then(|parameters| parameters.get("message"))
+                .and_then(Value::as_str),
+            Some("hello team")
+        );
+
+        sender.close(None).await.expect("close should send");
         server.abort();
     }
 

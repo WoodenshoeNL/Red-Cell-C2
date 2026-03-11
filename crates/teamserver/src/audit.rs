@@ -1,5 +1,7 @@
 //! Structured operator audit logging helpers and REST-facing models.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use time::OffsetDateTime;
@@ -175,6 +177,110 @@ pub struct AuditPage {
     pub items: Vec<AuditRecord>,
 }
 
+/// Query parameters supported by `GET /session-activity`.
+#[derive(Clone, Debug, Default, Deserialize, IntoParams)]
+pub struct SessionActivityQuery {
+    /// Filter by operator username.
+    pub operator: Option<String>,
+    /// Filter by session activity label such as `connect`, `disconnect`, or `chat`.
+    pub activity: Option<String>,
+    /// Include records at or after this RFC 3339 timestamp.
+    pub since: Option<String>,
+    /// Include records at or before this RFC 3339 timestamp.
+    pub until: Option<String>,
+    /// Maximum number of records to return. Defaults to `50`.
+    pub limit: Option<usize>,
+    /// Number of matching records to skip. Defaults to `0`.
+    pub offset: Option<usize>,
+}
+
+impl SessionActivityQuery {
+    /// Return the validated page size.
+    #[must_use]
+    pub fn limit(&self) -> usize {
+        self.limit.unwrap_or(AuditQuery::DEFAULT_LIMIT).clamp(1, AuditQuery::MAX_LIMIT)
+    }
+
+    /// Return the validated page offset.
+    #[must_use]
+    pub fn offset(&self) -> usize {
+        self.offset.unwrap_or_default()
+    }
+
+    fn since_timestamp(&self) -> Option<OffsetDateTime> {
+        self.since.as_deref().and_then(parse_timestamp_filter)
+    }
+
+    fn until_timestamp(&self) -> Option<OffsetDateTime> {
+        self.until.as_deref().and_then(parse_timestamp_filter)
+    }
+}
+
+/// REST-facing operator session activity record.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct SessionActivityRecord {
+    /// Database-assigned primary key.
+    pub id: i64,
+    /// Operator username associated with the activity.
+    pub operator: String,
+    /// Stable session activity label.
+    pub activity: String,
+    /// Optional structured session metadata.
+    pub parameters: Option<Value>,
+    /// Outcome recorded for the activity.
+    pub result_status: AuditResultStatus,
+    /// RFC 3339 timestamp recorded for the activity.
+    pub occurred_at: String,
+}
+
+impl TryFrom<AuditLogEntry> for SessionActivityRecord {
+    type Error = TeamserverError;
+
+    fn try_from(entry: AuditLogEntry) -> Result<Self, Self::Error> {
+        let details =
+            entry.details.map(serde_json::from_value::<AuditDetails>).transpose()?.unwrap_or(
+                AuditDetails {
+                    agent_id: None,
+                    command: None,
+                    parameters: None,
+                    result_status: AuditResultStatus::Success,
+                },
+            );
+
+        let activity = entry.action.strip_prefix("operator.").ok_or_else(|| {
+            TeamserverError::InvalidPersistedValue {
+                field: "action",
+                message: format!("audit row `{}` is not operator session activity", entry.action),
+            }
+        })?;
+
+        Ok(Self {
+            id: entry.id.ok_or_else(|| TeamserverError::InvalidPersistedValue {
+                field: "id",
+                message: "audit log row was missing an id".to_owned(),
+            })?,
+            operator: entry.actor,
+            activity: activity.to_owned(),
+            parameters: details.parameters,
+            result_status: details.result_status,
+            occurred_at: entry.occurred_at,
+        })
+    }
+}
+
+/// Paginated operator session activity response.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct SessionActivityPage {
+    /// Total number of records matching the supplied filters.
+    pub total: usize,
+    /// Maximum number of records returned in this page.
+    pub limit: usize,
+    /// Number of matching records skipped before this page.
+    pub offset: usize,
+    /// Matching activity records ordered from newest to oldest.
+    pub items: Vec<SessionActivityRecord>,
+}
+
 /// Persist a structured audit-log entry for an operator action.
 pub async fn record_operator_action(
     database: &Database,
@@ -223,6 +329,7 @@ pub async fn query_audit_log(
         result_status: query.result_status.map(|s| s.as_str().to_owned()),
         since: normalize_timestamp_utc(query.since_timestamp())?,
         until: normalize_timestamp_utc(query.until_timestamp())?,
+        action_in: None,
     };
 
     let sql_limit = i64::try_from(limit).map_err(|_| TeamserverError::InvalidPersistedValue {
@@ -246,6 +353,62 @@ pub async fn query_audit_log(
     })?;
 
     Ok(AuditPage { total, limit, offset, items })
+}
+
+/// Return a filtered and paginated view of persisted operator session activity.
+pub async fn query_session_activity(
+    database: &Database,
+    query: &SessionActivityQuery,
+) -> Result<SessionActivityPage, TeamserverError> {
+    let limit = query.limit();
+    let offset = query.offset();
+    let mut actions =
+        BTreeSet::from(["operator.connect".to_owned(), "operator.disconnect".to_owned()]);
+    actions.insert("operator.chat".to_owned());
+
+    if let Some(ref action) =
+        query.activity.as_deref().map(|activity| format!("operator.{activity}"))
+    {
+        actions.retain(|value| value == action);
+    }
+
+    if actions.is_empty() {
+        return Ok(SessionActivityPage { total: 0, limit, offset, items: Vec::new() });
+    }
+
+    let filter = AuditLogFilter {
+        actor_contains: query.operator.clone(),
+        action_in: Some(actions.iter().cloned().collect()),
+        since: normalize_timestamp_utc(query.since_timestamp())?,
+        until: normalize_timestamp_utc(query.until_timestamp())?,
+        ..AuditLogFilter::default()
+    };
+
+    let sql_limit = i64::try_from(limit).map_err(|_| TeamserverError::InvalidPersistedValue {
+        field: "limit",
+        message: "limit exceeds i64 range".to_owned(),
+    })?;
+    let sql_offset = i64::try_from(offset).map_err(|_| TeamserverError::InvalidPersistedValue {
+        field: "offset",
+        message: "offset exceeds i64 range".to_owned(),
+    })?;
+
+    let repo = database.audit_log();
+    let entries = repo.query_filtered(&filter, sql_limit, sql_offset).await?;
+    let items = entries
+        .into_iter()
+        .filter(|entry| actions.contains(&entry.action))
+        .map(TryInto::try_into)
+        .collect::<Result<Vec<SessionActivityRecord>, _>>()?;
+
+    let total = usize::try_from(repo.count_filtered(&filter).await?).map_err(|_| {
+        TeamserverError::InvalidPersistedValue {
+            field: "total",
+            message: "row count exceeds usize range".to_owned(),
+        }
+    })?;
+
+    Ok(SessionActivityPage { total, limit, offset, items })
 }
 
 /// Format an optional timestamp as a UTC RFC 3339 string for SQL comparison.

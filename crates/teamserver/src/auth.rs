@@ -123,6 +123,8 @@ pub struct OperatorPresence {
     pub role: OperatorRole,
     /// Whether the operator currently has an authenticated session.
     pub online: bool,
+    /// Most recent persisted operator activity timestamp.
+    pub last_seen: Option<String>,
 }
 
 impl OperatorPresence {
@@ -134,7 +136,7 @@ impl OperatorPresence {
             password_hash: None,
             role: Some(operator_role_name(self.role).to_owned()),
             online: self.online,
-            last_seen: None,
+            last_seen: self.last_seen.clone(),
         }
     }
 }
@@ -145,6 +147,7 @@ pub struct AuthService {
     credentials: Arc<RwLock<BTreeMap<String, OperatorAccount>>>,
     sessions: Arc<RwLock<SessionRegistry>>,
     runtime_operators: Option<OperatorRepository>,
+    audit_log: Option<crate::AuditLogRepository>,
 }
 
 impl AuthService {
@@ -170,6 +173,7 @@ impl AuthService {
             credentials: Arc::new(RwLock::new(credentials)),
             sessions: Arc::new(RwLock::new(SessionRegistry::default())),
             runtime_operators: None,
+            audit_log: None,
         }
     }
 
@@ -197,6 +201,7 @@ impl AuthService {
             )),
             sessions: Arc::new(RwLock::new(SessionRegistry::default())),
             runtime_operators: Some(database.operators()),
+            audit_log: Some(database.audit_log()),
         };
 
         service.load_runtime_operators().await?;
@@ -277,14 +282,30 @@ impl AuthService {
     pub async fn operator_inventory(&self) -> Vec<OperatorPresence> {
         let credentials = self.credentials.read().await.clone();
         let sessions = self.sessions.read().await.list();
+        let last_seen = match &self.audit_log {
+            Some(audit_log) => audit_log
+                .latest_timestamps_by_actor_for_actions(&[
+                    "operator.connect",
+                    "operator.disconnect",
+                    "operator.chat",
+                ])
+                .await
+                .unwrap_or_default(),
+            None => BTreeMap::new(),
+        };
         let mut operators = credentials
             .into_iter()
             .map(|(username, account)| {
-                (username.clone(), OperatorPresence { username, role: account.role, online: false })
+                let last_seen = last_seen.get(&username).cloned();
+                (
+                    username.clone(),
+                    OperatorPresence { username, role: account.role, online: false, last_seen },
+                )
             })
             .collect::<BTreeMap<_, _>>();
 
         for session in sessions {
+            let session_last_seen = last_seen.get(&session.username).cloned();
             operators
                 .entry(session.username.clone())
                 .and_modify(|operator| operator.online = true)
@@ -292,6 +313,7 @@ impl AuthService {
                     username: session.username,
                     role: session.role,
                     online: true,
+                    last_seen: session_last_seen,
                 });
         }
 
@@ -798,24 +820,57 @@ mod tests {
                     username: "admin".to_owned(),
                     role: red_cell_common::config::OperatorRole::Admin,
                     online: false,
+                    last_seen: None,
                 },
                 super::OperatorPresence {
                     username: "analyst".to_owned(),
                     role: red_cell_common::config::OperatorRole::Analyst,
                     online: true,
+                    last_seen: None,
                 },
                 super::OperatorPresence {
                     username: "operator".to_owned(),
                     role: red_cell_common::config::OperatorRole::Operator,
                     online: false,
+                    last_seen: None,
                 },
                 super::OperatorPresence {
                     username: "trinity".to_owned(),
                     role: red_cell_common::config::OperatorRole::Operator,
                     online: false,
+                    last_seen: None,
                 },
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn operator_inventory_populates_last_seen_from_audit_log() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        database
+            .audit_log()
+            .create(&crate::AuditLogEntry {
+                id: None,
+                actor: "operator".to_owned(),
+                action: "operator.disconnect".to_owned(),
+                target_kind: "operator".to_owned(),
+                target_id: Some("operator".to_owned()),
+                details: None,
+                occurred_at: "2026-03-11T08:00:00Z".to_owned(),
+            })
+            .await
+            .expect("audit row should persist");
+        let service = AuthService::from_profile_with_database(&profile(), &database)
+            .await
+            .expect("auth service should initialize");
+
+        let inventory = service.operator_inventory().await;
+        let operator = inventory
+            .into_iter()
+            .find(|entry| entry.username == "operator")
+            .expect("operator entry should exist");
+
+        assert_eq!(operator.last_seen.as_deref(), Some("2026-03-11T08:00:00Z"));
     }
 
     #[test]

@@ -40,8 +40,9 @@ use crate::rbac::{
 };
 use crate::websocket::{AgentCommandError, execute_agent_task};
 use crate::{
-    AuditPage, AuditQuery, AuditResultStatus, AuthError, Database, LootRecord, audit_details,
-    parameter_object, query_audit_log, record_operator_action,
+    AuditPage, AuditQuery, AuditResultStatus, AuthError, Database, LootRecord, SessionActivityPage,
+    SessionActivityQuery, audit_details, parameter_object, query_audit_log, query_session_activity,
+    record_operator_action,
 };
 const API_VERSION: &str = "v1";
 const API_PREFIX: &str = "/api/v1";
@@ -374,6 +375,7 @@ struct OperatorSummary {
     username: String,
     role: OperatorRole,
     online: bool,
+    last_seen: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, ToSchema)]
@@ -682,6 +684,7 @@ pub fn api_routes(api: ApiRuntime) -> Router<TeamserverState> {
         .route("/agents/{id}", get(get_agent).delete(kill_agent))
         .route("/agents/{id}/task", post(queue_agent_task))
         .route("/audit", get(list_audit))
+        .route("/session-activity", get(list_session_activity))
         .route("/credentials", get(list_credentials))
         .route("/credentials/{id}", get(get_credential))
         .route("/jobs", get(list_jobs))
@@ -750,6 +753,7 @@ struct ApiInfoResponse {
         kill_agent,
         queue_agent_task,
         list_audit,
+        list_session_activity,
         list_credentials,
         get_credential,
         list_jobs,
@@ -774,6 +778,7 @@ struct ApiInfoResponse {
             ApiInfoResponse,
             AgentTaskQueuedResponse,
             AuditPage,
+            SessionActivityPage,
             CredentialPage,
             CredentialSummary,
             JobPage,
@@ -785,6 +790,7 @@ struct ApiInfoResponse {
             CreatedOperatorResponse,
             crate::AuditRecord,
             crate::AuditResultStatus,
+            crate::SessionActivityRecord,
             AgentInfo,
             red_cell_common::AgentEncryptionInfo,
             AgentTaskInfo,
@@ -807,6 +813,7 @@ struct ApiInfoResponse {
     tags(
         (name = "rest", description = "Versioned REST API for Red Cell automation clients"),
         (name = "audit", description = "Operator audit trail endpoints"),
+        (name = "session_activity", description = "Persisted operator session activity endpoints"),
         (name = "credentials", description = "Captured credential inventory endpoints"),
         (name = "agents", description = "Agent inventory and tasking endpoints"),
         (name = "jobs", description = "Queued agent job inspection endpoints"),
@@ -1122,6 +1129,28 @@ async fn list_audit(
 
 #[utoipa::path(
     get,
+    path = "/session-activity",
+    context_path = "/api/v1",
+    tag = "session_activity",
+    security(("api_key" = [])),
+    params(SessionActivityQuery),
+    responses(
+        (status = 200, description = "Filtered and paginated operator session activity", body = SessionActivityPage),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
+        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody)
+    )
+)]
+async fn list_session_activity(
+    State(state): State<TeamserverState>,
+    _identity: ReadApiAccess,
+    Query(query): Query<SessionActivityQuery>,
+) -> Result<Json<SessionActivityPage>, AuditApiError> {
+    Ok(Json(query_session_activity(&state.database, &query).await?))
+}
+
+#[utoipa::path(
+    get,
     path = "/credentials",
     context_path = "/api/v1",
     tag = "credentials",
@@ -1427,6 +1456,7 @@ async fn list_operators(
             username: operator.username,
             role: operator.role,
             online: operator.online,
+            last_seen: operator.last_seen,
         })
         .collect::<Vec<_>>();
     Json(operators)
@@ -2625,6 +2655,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_activity_endpoint_returns_only_persisted_operator_session_events() {
+        let database = Database::connect_in_memory().await.expect("database");
+        record_operator_action(
+            &database,
+            "neo",
+            "operator.connect",
+            "operator",
+            Some("neo".to_owned()),
+            audit_details(AuditResultStatus::Success, None, Some("connect"), None),
+        )
+        .await
+        .expect("connect activity should persist");
+        record_operator_action(
+            &database,
+            "neo",
+            "operator.chat",
+            "operator",
+            Some("neo".to_owned()),
+            audit_details(
+                AuditResultStatus::Success,
+                None,
+                Some("chat"),
+                Some(parameter_object([("message", Value::String("hello".to_owned()))])),
+            ),
+        )
+        .await
+        .expect("chat activity should persist");
+        record_operator_action(
+            &database,
+            "rest-admin",
+            "operator.create",
+            "operator",
+            Some("trinity".to_owned()),
+            audit_details(AuditResultStatus::Success, None, Some("create"), None),
+        )
+        .await
+        .expect("operator management audit should persist");
+
+        let (app, _, _) = test_router_with_database(
+            database,
+            Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)),
+        )
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/session-activity?operator=neo")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["total"], 2);
+        assert_eq!(body["items"][0]["activity"], "chat");
+        assert_eq!(body["items"][0]["operator"], "neo");
+        assert_eq!(body["items"][1]["activity"], "connect");
+    }
+
+    #[tokio::test]
     async fn jobs_endpoint_lists_queued_jobs_with_filters() {
         let (app, registry, _) = test_router_with_registry(Some((
             60,
@@ -2942,6 +3036,7 @@ mod tests {
         assert_eq!(operators[0]["username"], "Neo");
         assert_eq!(operators[0]["role"], "Admin");
         assert_eq!(operators[0]["online"], true);
+        assert_eq!(operators[0]["last_seen"], Value::Null);
     }
 
     #[tokio::test]
@@ -2994,12 +3089,14 @@ mod tests {
                 {
                     "username": "Neo",
                     "role": "Admin",
-                    "online": false
+                    "online": false,
+                    "last_seen": null
                 },
                 {
                     "username": "trinity",
                     "role": "Operator",
-                    "online": false
+                    "online": false,
+                    "last_seen": null
                 }
             ])
         );
@@ -3053,15 +3150,56 @@ mod tests {
                 {
                     "username": "Neo",
                     "role": "Admin",
-                    "online": false
+                    "online": false,
+                    "last_seen": null
                 },
                 {
                     "username": "trinity",
                     "role": "Operator",
-                    "online": false
+                    "online": false,
+                    "last_seen": null
                 }
             ])
         );
+    }
+
+    #[tokio::test]
+    async fn operators_endpoint_includes_last_seen_from_persisted_session_activity() {
+        let database = Database::connect_in_memory().await.expect("database");
+        database
+            .audit_log()
+            .create(&crate::AuditLogEntry {
+                id: None,
+                actor: "Neo".to_owned(),
+                action: "operator.disconnect".to_owned(),
+                target_kind: "operator".to_owned(),
+                target_id: Some("Neo".to_owned()),
+                details: None,
+                occurred_at: "2026-03-11T00:00:00Z".to_owned(),
+            })
+            .await
+            .expect("session activity should persist");
+
+        let (app, _, _) = test_router_with_database(
+            database,
+            Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)),
+        )
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/operators")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body[0]["last_seen"], "2026-03-11T00:00:00Z");
     }
 
     #[tokio::test]

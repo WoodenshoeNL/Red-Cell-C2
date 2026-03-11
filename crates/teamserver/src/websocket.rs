@@ -22,9 +22,8 @@ use red_cell_common::demon::{
     DemonProcessCommand, DemonSocketCommand, DemonTokenCommand,
 };
 use red_cell_common::operator::{
-    AgentEncryptionInfo as OperatorAgentEncryptionInfo, AgentInfo as OperatorAgentInfo,
-    AgentPivotsInfo, BuildPayloadMessageInfo, BuildPayloadResponseInfo, EventCode, FlatInfo,
-    Message, MessageHead, OperatorMessage, TeamserverLogInfo,
+    BuildPayloadMessageInfo, BuildPayloadResponseInfo, EventCode, FlatInfo, Message, MessageHead,
+    OperatorMessage, TeamserverLogInfo,
 };
 use serde_json::Value;
 use thiserror::Error;
@@ -36,10 +35,11 @@ use uuid::Uuid;
 use crate::{
     AgentRegistry, AuditResultStatus, AuthError, AuthService, AuthenticationFailure,
     AuthenticationResult, Database, EventBus, Job, ListenerEventAction, ListenerManager,
-    PayloadBuilderService, SocketRelayManager, action_from_mark, audit_details,
-    authorize_websocket_command, listener_config_from_operator, listener_error_event,
-    listener_event_for_action, listener_removed_event, login_failure_message, login_parameters,
-    login_success_message, operator_requests_start, parameter_object, record_operator_action,
+    PayloadBuilderService, SocketRelayManager, action_from_mark, agent_events::agent_new_event,
+    audit_details, authorize_websocket_command, listener_config_from_operator,
+    listener_error_event, listener_event_for_action, listener_removed_event, login_failure_message,
+    login_parameters, login_success_message, operator_requests_start, parameter_object,
+    record_operator_action,
 };
 
 const DEMON_MAX_RESPONSE_LENGTH: usize = 0x01E0_0000;
@@ -2090,56 +2090,7 @@ async fn send_session_snapshot(
 }
 
 fn agent_snapshot_event(agent: &AgentInfo, pivots: &crate::PivotInfo) -> OperatorMessage {
-    let parent = pivots.parent.map(|agent_id| format!("{agent_id:08X}"));
-    let links = pivots.children.iter().map(|agent_id| format!("{agent_id:08X}")).collect();
-    OperatorMessage::AgentNew(Box::new(Message {
-        head: MessageHead {
-            event: EventCode::Session,
-            user: "teamserver".to_owned(),
-            timestamp: agent.last_call_in.clone(),
-            one_time: "true".to_owned(),
-        },
-        info: OperatorAgentInfo {
-            active: agent.active.to_string(),
-            background_check: false,
-            domain_name: agent.domain_name.clone(),
-            elevated: agent.elevated,
-            encryption: OperatorAgentEncryptionInfo {
-                aes_key: agent.encryption.aes_key.clone(),
-                aes_iv: agent.encryption.aes_iv.clone(),
-            },
-            internal_ip: agent.internal_ip.clone(),
-            external_ip: agent.external_ip.clone(),
-            first_call_in: agent.first_call_in.clone(),
-            last_call_in: agent.last_call_in.clone(),
-            hostname: agent.hostname.clone(),
-            listener: "null".to_owned(),
-            magic_value: "deadbeef".to_owned(),
-            name_id: agent.name_id(),
-            os_arch: agent.os_arch.clone(),
-            os_build: String::new(),
-            os_version: agent.os_version.clone(),
-            pivots: AgentPivotsInfo { parent: parent.clone(), links },
-            port_fwds: Vec::new(),
-            process_arch: agent.process_arch.clone(),
-            process_name: agent.process_name.clone(),
-            process_pid: agent.process_pid.to_string(),
-            process_ppid: agent.process_ppid.to_string(),
-            process_path: agent.process_name.clone(),
-            reason: agent.reason.clone(),
-            note: agent.note.clone(),
-            sleep_delay: Value::from(agent.sleep_delay),
-            sleep_jitter: Value::from(agent.sleep_jitter),
-            kill_date: agent.kill_date.map_or(Value::Null, Value::from),
-            working_hours: agent.working_hours.map_or(Value::Null, Value::from),
-            socks_cli: Vec::new(),
-            socks_cli_mtx: None,
-            socks_svr: Vec::new(),
-            tasked_once: false,
-            username: agent.username.clone(),
-            pivot_parent: parent.unwrap_or_default(),
-        },
-    }))
+    agent_new_event("null", red_cell_common::demon::DEMON_MAGIC_VALUE, agent, pivots)
 }
 
 async fn cleanup_connection(
@@ -2491,6 +2442,37 @@ mod tests {
         assert_eq!(message.info.name_id, "DEADBEEF");
         assert_eq!(message.info.listener, "null");
         assert_eq!(message.info.magic_value, "deadbeef");
+
+        socket.close(None).await.expect("close should send");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_session_snapshot_includes_agent_pivot_chain() {
+        let state = TestState::new().await;
+        let registry = state.registry.clone();
+        registry.insert(sample_agent(0x0102_0304)).await.expect("parent should insert");
+        registry.insert(sample_agent(0x1112_1314)).await.expect("child should insert");
+        registry.add_link(0x0102_0304, 0x1112_1314).await.expect("pivot link should insert");
+        let (mut socket, server) = spawn_server(state).await;
+
+        login(&mut socket, "operator", "password1234").await;
+
+        let parent_event = read_operator_message(&mut socket).await;
+        let OperatorMessage::AgentNew(parent_message) = parent_event else {
+            panic!("expected parent snapshot event");
+        };
+        assert_eq!(parent_message.info.name_id, "01020304");
+        assert!(parent_message.info.pivots.parent.is_none());
+        assert_eq!(parent_message.info.pivots.links, vec!["11121314".to_owned()]);
+
+        let child_event = read_operator_message(&mut socket).await;
+        let OperatorMessage::AgentNew(child_message) = child_event else {
+            panic!("expected child snapshot event");
+        };
+        assert_eq!(child_message.info.name_id, "11121314");
+        assert_eq!(child_message.info.pivots.parent.as_deref(), Some("01020304"));
+        assert_eq!(child_message.info.pivot_parent, "01020304");
 
         socket.close(None).await.expect("close should send");
         server.abort();

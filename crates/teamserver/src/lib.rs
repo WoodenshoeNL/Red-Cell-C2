@@ -1,5 +1,6 @@
 //! Red Cell teamserver library components.
 
+mod agent_events;
 pub mod agents;
 pub mod api;
 pub mod app;

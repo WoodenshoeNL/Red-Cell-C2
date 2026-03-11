@@ -23,9 +23,8 @@ use interprocess::os::windows::local_socket::NamedPipe;
 use red_cell_common::config::Profile;
 use red_cell_common::demon::{DEMON_MAGIC_VALUE, DemonHeader};
 use red_cell_common::operator::{
-    AgentEncryptionInfo as OperatorAgentEncryptionInfo, AgentInfo as OperatorAgentInfo,
-    AgentPivotsInfo, EventCode, ListenerErrorInfo, ListenerInfo, ListenerMarkInfo, Message,
-    MessageHead, NameInfo, OperatorMessage,
+    EventCode, ListenerErrorInfo, ListenerInfo, ListenerMarkInfo, Message, MessageHead, NameInfo,
+    OperatorMessage,
 };
 use red_cell_common::tls::{
     TlsKeyAlgorithm, install_default_crypto_provider, resolve_tls_identity,
@@ -35,7 +34,6 @@ use red_cell_common::{
     HttpListenerResponseConfig, ListenerConfig, ListenerProtocol, SmbListenerConfig,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::{Mutex, RwLock};
@@ -46,8 +44,8 @@ use utoipa::ToSchema;
 use crate::{
     AgentRegistry, CommandDispatchError, CommandDispatcher, Database, DemonPacketParser,
     ListenerRepository, ListenerStatus, ParsedDemonPacket, PersistedListener,
-    PersistedListenerState, PluginRuntime, SocketRelayManager, TeamserverError, build_init_ack,
-    events::EventBus, json_error_response,
+    PersistedListenerState, PluginRuntime, SocketRelayManager, TeamserverError,
+    agent_events::agent_new_event, build_init_ack, events::EventBus, json_error_response,
 };
 
 /// Runtime state for a configured listener.
@@ -904,61 +902,6 @@ async fn spawn_http_listener_runtime(
     }
 }
 
-fn agent_new_event(
-    listener_name: &str,
-    magic_value: u32,
-    agent: &red_cell_common::AgentInfo,
-) -> OperatorMessage {
-    OperatorMessage::AgentNew(Box::new(Message {
-        head: MessageHead {
-            event: EventCode::Session,
-            user: "teamserver".to_owned(),
-            timestamp: agent.last_call_in.clone(),
-            one_time: "true".to_owned(),
-        },
-        info: OperatorAgentInfo {
-            active: agent.active.to_string(),
-            background_check: false,
-            domain_name: agent.domain_name.clone(),
-            elevated: agent.elevated,
-            encryption: OperatorAgentEncryptionInfo {
-                aes_key: agent.encryption.aes_key.clone(),
-                aes_iv: agent.encryption.aes_iv.clone(),
-            },
-            internal_ip: agent.internal_ip.clone(),
-            external_ip: agent.external_ip.clone(),
-            first_call_in: agent.first_call_in.clone(),
-            last_call_in: agent.last_call_in.clone(),
-            hostname: agent.hostname.clone(),
-            listener: listener_name.to_owned(),
-            magic_value: format!("{magic_value:08x}"),
-            name_id: agent.name_id(),
-            os_arch: agent.os_arch.clone(),
-            os_build: String::new(),
-            os_version: agent.os_version.clone(),
-            pivots: AgentPivotsInfo::default(),
-            port_fwds: Vec::new(),
-            process_arch: agent.process_arch.clone(),
-            process_name: agent.process_name.clone(),
-            process_pid: agent.process_pid.to_string(),
-            process_ppid: agent.process_ppid.to_string(),
-            process_path: agent.process_name.clone(),
-            reason: agent.reason.clone(),
-            note: agent.note.clone(),
-            sleep_delay: Value::from(agent.sleep_delay),
-            sleep_jitter: Value::from(agent.sleep_jitter),
-            kill_date: agent.kill_date.map_or(Value::Null, Value::from),
-            working_hours: agent.working_hours.map_or(Value::Null, Value::from),
-            socks_cli: Vec::new(),
-            socks_cli_mtx: None,
-            socks_svr: Vec::new(),
-            tasked_once: false,
-            username: agent.username.clone(),
-            pivot_parent: String::new(),
-        },
-    }))
-}
-
 async fn build_callback_response(
     dispatcher: &CommandDispatcher,
     agent_id: u32,
@@ -985,7 +928,13 @@ async fn process_demon_transport(
                     }
                 })?;
 
-            events.broadcast(agent_new_event(listener_name, init.header.magic, &init.agent));
+            let pivots = registry.pivots(init.agent.agent_id).await;
+            events.broadcast(agent_new_event(
+                listener_name,
+                init.header.magic,
+                &init.agent,
+                &pivots,
+            ));
             Ok(ProcessedDemonResponse { agent_id: init.agent.agent_id, payload: response })
         }
         Ok(ParsedDemonPacket::Reconnect { header, .. }) => {
@@ -2805,6 +2754,59 @@ mod tests {
         assert_eq!(message.info.listener, "edge-smb-init");
 
         manager.stop("edge-smb-init").await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn smb_listener_agent_new_event_includes_existing_pivot_chain()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager =
+            ListenerManager::new(database.clone(), registry.clone(), events.clone(), sockets, None);
+        let mut event_receiver = events.subscribe();
+        let pipe_name = unique_smb_pipe_name("pivot-init");
+        let parent_id = 0x1111_2222;
+        let parent_key = [0x31; AGENT_KEY_LENGTH];
+        let parent_iv = [0x41; AGENT_IV_LENGTH];
+        let child_id = 0x3333_4444;
+        let child_key = [0x51; AGENT_KEY_LENGTH];
+        let child_iv = [0x61; AGENT_IV_LENGTH];
+
+        registry.insert(sample_agent_info(parent_id, parent_key, parent_iv)).await?;
+        registry.insert(sample_agent_info(child_id, child_key, child_iv)).await?;
+        registry.add_link(parent_id, child_id).await?;
+
+        manager.create(smb_listener("edge-smb-pivot-init", &pipe_name)).await?;
+        manager.start("edge-smb-pivot-init").await?;
+        wait_for_smb_listener(&pipe_name).await?;
+
+        let mut stream = connect_smb_stream(&pipe_name).await?;
+        write_test_smb_frame(
+            &mut stream,
+            child_id,
+            &valid_demon_init_body(child_id, child_key, child_iv),
+        )
+        .await?;
+
+        let (agent_id, response) = read_test_smb_frame(&mut stream).await?;
+        assert_eq!(agent_id, child_id);
+        let ack_ctr_offset = registry.ctr_offset(child_id).await? - ctr_blocks_for_length(4);
+        let effective_iv = advance_iv(&child_iv, ack_ctr_offset);
+        let decrypted = decrypt_agent_data(&child_key, &effective_iv, &response)?;
+        assert_eq!(decrypted.as_slice(), &child_id.to_le_bytes());
+
+        let event = event_receiver.recv().await.expect("agent registration should broadcast");
+        let OperatorMessage::AgentNew(message) = event else {
+            panic!("unexpected operator event");
+        };
+        assert_eq!(message.info.listener, "edge-smb-pivot-init");
+        assert_eq!(message.info.pivots.parent.as_deref(), Some("11112222"));
+        assert_eq!(message.info.pivot_parent, "11112222");
+
+        manager.stop("edge-smb-pivot-init").await?;
         Ok(())
     }
 

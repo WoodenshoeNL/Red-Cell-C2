@@ -895,6 +895,21 @@ fn patch_payload(
         bytes[..patch.len()].copy_from_slice(patch);
     }
 
+    if let Some(header) = &binary_patch.header {
+        if let Some(compile_time) = header.compile_time.as_deref() {
+            let timestamp = parse_header_u32_field("CompileTime", compile_time)?;
+            write_pe_file_header_timestamp(&mut bytes, timestamp)?;
+        }
+
+        let image_size = match architecture {
+            Architecture::X64 => header.image_size_x64,
+            Architecture::X86 => header.image_size_x86,
+        };
+        if let Some(image_size) = image_size {
+            write_pe_optional_header_image_size(&mut bytes, image_size)?;
+        }
+    }
+
     let replacements = match architecture {
         Architecture::X64 => &binary_patch.replace_strings_x64,
         Architecture::X86 => &binary_patch.replace_strings_x86,
@@ -911,6 +926,84 @@ fn patch_payload(
     }
 
     Ok(bytes)
+}
+
+fn parse_header_u32_field(field_name: &str, value: &str) -> Result<u32, PayloadBuildError> {
+    let trimmed = value.trim();
+    let parsed =
+        if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+            u32::from_str_radix(hex, 16)
+        } else {
+            trimmed.parse::<u32>()
+        };
+
+    parsed.map_err(|_| PayloadBuildError::InvalidRequest {
+        message: format!("{field_name} `{trimmed}` must be a valid u32 value"),
+    })
+}
+
+fn pe_offsets(bytes: &[u8]) -> Result<(usize, usize), PayloadBuildError> {
+    const DOS_HEADER_PE_POINTER_OFFSET: usize = 0x3C;
+    const PE_SIGNATURE_SIZE: usize = 4;
+    const FILE_HEADER_SIZE: usize = 20;
+
+    if bytes.len() < DOS_HEADER_PE_POINTER_OFFSET + 4 {
+        return Err(PayloadBuildError::InvalidRequest {
+            message: "payload is too small to contain a PE header".to_owned(),
+        });
+    }
+
+    let pe_offset = u32::from_le_bytes(
+        bytes[DOS_HEADER_PE_POINTER_OFFSET..DOS_HEADER_PE_POINTER_OFFSET + 4].try_into().map_err(
+            |_| PayloadBuildError::InvalidRequest {
+                message: "payload is too small to contain a PE header".to_owned(),
+            },
+        )?,
+    );
+    let pe_offset = usize::try_from(pe_offset).map_err(|_| PayloadBuildError::InvalidRequest {
+        message: "payload PE header offset does not fit in memory".to_owned(),
+    })?;
+
+    if bytes.len() < pe_offset + PE_SIGNATURE_SIZE + FILE_HEADER_SIZE {
+        return Err(PayloadBuildError::InvalidRequest {
+            message: "payload PE header is truncated".to_owned(),
+        });
+    }
+
+    if bytes[pe_offset..pe_offset + PE_SIGNATURE_SIZE] != *b"PE\0\0" {
+        return Err(PayloadBuildError::InvalidRequest {
+            message: "payload does not contain a valid PE signature".to_owned(),
+        });
+    }
+
+    let optional_header_offset = pe_offset + PE_SIGNATURE_SIZE + FILE_HEADER_SIZE;
+    if bytes.len() < optional_header_offset + 60 {
+        return Err(PayloadBuildError::InvalidRequest {
+            message: "payload PE optional header is truncated".to_owned(),
+        });
+    }
+
+    Ok((pe_offset, optional_header_offset))
+}
+
+fn write_pe_file_header_timestamp(
+    bytes: &mut [u8],
+    timestamp: u32,
+) -> Result<(), PayloadBuildError> {
+    let (pe_offset, _) = pe_offsets(bytes)?;
+    let timestamp_offset = pe_offset + 8;
+    bytes[timestamp_offset..timestamp_offset + 4].copy_from_slice(&timestamp.to_le_bytes());
+    Ok(())
+}
+
+fn write_pe_optional_header_image_size(
+    bytes: &mut [u8],
+    image_size: u32,
+) -> Result<(), PayloadBuildError> {
+    let (_, optional_header_offset) = pe_offsets(bytes)?;
+    let image_size_offset = optional_header_offset + 56;
+    bytes[image_size_offset..image_size_offset + 4].copy_from_slice(&image_size.to_le_bytes());
+    Ok(())
 }
 
 fn replace_all(mut haystack: Vec<u8>, needle: &[u8], replacement: &[u8]) -> Vec<u8> {
@@ -1402,5 +1495,91 @@ mod tests {
         assert!(messages.iter().any(|line| line.contains("nasm-ok")));
         assert!(messages.iter().any(|line| line.contains("gcc-ok")));
         Ok(())
+    }
+
+    #[test]
+    fn patch_payload_updates_pe_header_fields() -> Result<(), Box<dyn std::error::Error>> {
+        let patched = patch_payload(
+            sample_pe_payload(),
+            Architecture::X64,
+            &BinaryConfig {
+                header: Some(red_cell_common::config::HeaderConfig {
+                    magic_mz_x64: Some("MZ".to_owned()),
+                    magic_mz_x86: None,
+                    compile_time: Some("0x12345678".to_owned()),
+                    image_size_x64: Some(0x2000),
+                    image_size_x86: None,
+                }),
+                replace_strings_x64: std::collections::BTreeMap::new(),
+                replace_strings_x86: std::collections::BTreeMap::new(),
+            },
+        )?;
+
+        let pe_offset = 0x80;
+        assert_eq!(&patched[..2], b"MZ");
+        assert_eq!(
+            u32::from_le_bytes(patched[pe_offset + 8..pe_offset + 12].try_into()?),
+            0x1234_5678
+        );
+        let optional_header_offset = pe_offset + 24;
+        assert_eq!(
+            u32::from_le_bytes(
+                patched[optional_header_offset + 56..optional_header_offset + 60].try_into()?
+            ),
+            0x2000
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn patch_payload_rejects_invalid_compile_time() {
+        let error = patch_payload(
+            sample_pe_payload(),
+            Architecture::X64,
+            &BinaryConfig {
+                header: Some(red_cell_common::config::HeaderConfig {
+                    magic_mz_x64: None,
+                    magic_mz_x86: None,
+                    compile_time: Some("not-a-number".to_owned()),
+                    image_size_x64: None,
+                    image_size_x86: None,
+                }),
+                replace_strings_x64: std::collections::BTreeMap::new(),
+                replace_strings_x86: std::collections::BTreeMap::new(),
+            },
+        )
+        .expect_err("invalid compile time should fail");
+
+        assert!(matches!(error, PayloadBuildError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn patch_payload_rejects_truncated_pe_header() {
+        let error = patch_payload(
+            vec![0_u8; 8],
+            Architecture::X64,
+            &BinaryConfig {
+                header: Some(red_cell_common::config::HeaderConfig {
+                    magic_mz_x64: None,
+                    magic_mz_x86: None,
+                    compile_time: Some("1".to_owned()),
+                    image_size_x64: None,
+                    image_size_x86: None,
+                }),
+                replace_strings_x64: std::collections::BTreeMap::new(),
+                replace_strings_x86: std::collections::BTreeMap::new(),
+            },
+        )
+        .expect_err("truncated pe should fail");
+
+        assert!(matches!(error, PayloadBuildError::InvalidRequest { .. }));
+    }
+
+    fn sample_pe_payload() -> Vec<u8> {
+        let mut bytes = vec![0_u8; 0x80 + 24 + 60];
+        bytes[..2].copy_from_slice(b"MZ");
+        bytes[0x3C..0x40].copy_from_slice(&(0x80_u32).to_le_bytes());
+        bytes[0x80..0x84].copy_from_slice(b"PE\0\0");
+        bytes
     }
 }

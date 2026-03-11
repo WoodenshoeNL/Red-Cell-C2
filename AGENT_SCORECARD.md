@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 56 | 31 |
-| Bugs filed against | 0 | 3 | 9 |
-| Bug rate (bugs/task) | N/A | 0.05 | 0.29 |
-| Quality score | N/A | 95% | 71% |
+| Tasks closed | 0 | 61 | 31 |
+| Bugs filed against | 0 | 4 | 9 |
+| Bug rate (bugs/task) | N/A | 0.07 | 0.29 |
+| Quality score | N/A | 93% | 71% |
 
 ## Violation Breakdown
 
@@ -410,3 +410,14 @@ Observation: CTR offset persistence (red-9pf) fully resolved — offsets survive
 
 Build: passed (cargo check + clippy -D warnings clean; cargo test: 485 passed, +9 from new callback/presence/chat tests)
 Notes: Clean sprint. 4 new demon callbacks (CommandError, CommandExit, CommandKillDate, DemonInfo) all covered by unit tests. agent_update_event now correctly emits "Dead" for inactive agents (was always "Alive"). Chat broadcast correctly uses server-authoritative session username, not client-supplied value. Chat permission downgraded to Read (was Write) — correct, all operators should be able to chat. Stopped listener fix correctly filters on ListenerStatus::Created, preventing forced restart of operator-stopped listeners across teamserver restarts.
+
+### QA Review — 2026-03-11 15:05 — 2c2cb5f..20b6897
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA loop only |
+| Codex | 5 | 1 | Closed: red-cell-c2-asj (complete inbound demon command dispatch: 10 new handlers — job, sleep, ppid-spoof, net, assembly ×2, config, transfer, mem-file, package-dropped; 4 new test functions), red-cell-c2-42d (Auth & RBAC epic), red-cell-c2-1mw (shared builtin dispatch registration refactor), red-cell-c2-b7n (kill-date negative wrap), red-cell-c2-3ny (auth typo). Bug: red-cell-c2-234 (P3) — grammar errors in job/transfer callback strings: "Successful suspended/resumed" → "Successfully …", "Failed to suspended/resumed" → "Failed to suspend/resume", "does not exists" → "does not exist" (×3). Same class as red-pgd / red-cell-c2-f0d. Test at line 7297 hardcodes wrong string and needs updating with fix. |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (cargo check + clippy -D warnings clean; cargo test: 491 passed)
+Notes: Solid sprint. All 10 new handlers are well-structured with proper error propagation via `?`. The builtin-handler unification (`register_builtin_handlers` + `BuiltinHandlerDependencies`) cleanly resolves the red-cell-c2-1mw dispatch-chain divergence. Test coverage is good — 4 new integration-style tests cover all new handlers. Minor observation: `handle_config_callback` uses `i64::try_from(raw).unwrap_or(i64::MAX)` and `i32::try_from(raw).unwrap_or(i32::MAX)` for kill_date and working_hours fields — silently clamps out-of-range values rather than erroring; not filed (edge case, no realistic attacker path). Grammar P3 bug filed (red-cell-c2-234).

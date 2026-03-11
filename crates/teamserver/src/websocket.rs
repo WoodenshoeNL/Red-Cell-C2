@@ -275,15 +275,34 @@ where
     .await
     .is_err()
     {
-        cleanup_connection(&auth, &connections, &database, connection_id).await;
+        cleanup_connection(
+            &auth,
+            &connections,
+            &EventBus::from_ref(&state),
+            &database,
+            connection_id,
+        )
+        .await;
         return;
     }
 
     let Some(session) = auth.session_for_connection(connection_id).await else {
         let _ = socket.send(WsMessage::Close(None)).await;
-        cleanup_connection(&auth, &connections, &database, connection_id).await;
+        cleanup_connection(
+            &auth,
+            &connections,
+            &EventBus::from_ref(&state),
+            &database,
+            connection_id,
+        )
+        .await;
         return;
     };
+
+    let event_bus = EventBus::from_ref(&state);
+    if first_online_session(&auth, &session.username).await {
+        event_bus.broadcast(chat_presence_event(&session.username, true));
+    }
 
     log_operator_action(
         &database,
@@ -307,7 +326,6 @@ where
         "operator authenticated"
     );
 
-    let event_bus = EventBus::from_ref(&state);
     let mut event_receiver = event_bus.subscribe();
     if let Err(error) = send_session_snapshot(
         &mut socket,
@@ -324,7 +342,7 @@ where
             %error,
             "failed to synchronize operator session state"
         );
-        cleanup_connection(&auth, &connections, &database, connection_id).await;
+        cleanup_connection(&auth, &connections, &event_bus, &database, connection_id).await;
         return;
     }
 
@@ -348,7 +366,7 @@ where
         }
     }
 
-    cleanup_connection(&auth, &connections, &database, connection_id).await;
+    cleanup_connection(&auth, &connections, &event_bus, &database, connection_id).await;
 }
 
 async fn handle_authentication(
@@ -942,6 +960,12 @@ async fn dispatch_operator_command<S>(
                     }
                 }
             });
+        }
+        OperatorMessage::ChatMessage(message) => {
+            let text = flat_info_string(&message.info, &["Message", "Text"]).unwrap_or_default();
+            if !text.trim().is_empty() {
+                events.broadcast(chat_message_event(&session.username, text.trim()));
+            }
         }
         other => {
             debug!(
@@ -2156,6 +2180,7 @@ fn operator_snapshot_event(
 async fn cleanup_connection(
     auth: &AuthService,
     connections: &OperatorConnectionManager,
+    events: &EventBus,
     database: &Database,
     connection_id: Uuid,
 ) {
@@ -2177,8 +2202,56 @@ async fn cleanup_connection(
             ),
         )
         .await;
+
+        if last_online_session(auth, &session.username).await {
+            events.broadcast(chat_presence_event(&session.username, false));
+        }
     }
     connections.unregister(connection_id).await;
+}
+
+async fn first_online_session(auth: &AuthService, username: &str) -> bool {
+    auth.active_sessions().await.into_iter().filter(|session| session.username == username).count()
+        == 1
+}
+
+async fn last_online_session(auth: &AuthService, username: &str) -> bool {
+    auth.active_sessions().await.into_iter().all(|session| session.username != username)
+}
+
+fn chat_presence_event(user: &str, online: bool) -> OperatorMessage {
+    let message = Message {
+        head: MessageHead {
+            event: EventCode::Chat,
+            user: "teamserver".to_owned(),
+            timestamp: OffsetDateTime::now_utc().unix_timestamp().to_string(),
+            one_time: String::new(),
+        },
+        info: red_cell_common::operator::ChatUserInfo { user: user.to_owned() },
+    };
+
+    if online {
+        OperatorMessage::ChatUserConnected(message)
+    } else {
+        OperatorMessage::ChatUserDisconnected(message)
+    }
+}
+
+fn chat_message_event(user: &str, text: &str) -> OperatorMessage {
+    OperatorMessage::ChatMessage(Message {
+        head: MessageHead {
+            event: EventCode::Chat,
+            user: user.to_owned(),
+            timestamp: OffsetDateTime::now_utc().unix_timestamp().to_string(),
+            one_time: String::new(),
+        },
+        info: FlatInfo {
+            fields: BTreeMap::from([
+                ("User".to_owned(), Value::String(user.to_owned())),
+                ("Message".to_owned(), Value::String(text.to_owned())),
+            ]),
+        },
+    })
 }
 
 async fn log_operator_action(
@@ -2470,6 +2543,64 @@ mod tests {
         socket.close(None).await.expect("close should send");
         wait_for_connection_count(&connection_registry, 0).await;
         assert_eq!(auth.session_count().await, 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_broadcasts_operator_presence_changes() {
+        let state = TestState::new().await;
+        let (mut first, server) = spawn_server(state.clone()).await;
+        let (mut second, _) = spawn_server(state).await;
+
+        login(&mut first, "operator", "password1234").await;
+        login(&mut second, "analyst", "readonly").await;
+
+        let joined = read_operator_message(&mut first).await;
+        let OperatorMessage::ChatUserConnected(message) = joined else {
+            panic!("expected operator join broadcast");
+        };
+        assert_eq!(message.info.user, "analyst");
+
+        second.close(None).await.expect("close should send");
+
+        let left = read_operator_message(&mut first).await;
+        let OperatorMessage::ChatUserDisconnected(message) = left else {
+            panic!("expected operator disconnect broadcast");
+        };
+        assert_eq!(message.info.user, "analyst");
+
+        first.close(None).await.expect("close should send");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_broadcasts_chat_messages_to_other_operators() {
+        let state = TestState::new().await;
+        let (mut sender, server) = spawn_server(state.clone()).await;
+        let (mut observer, _) = spawn_server(state).await;
+
+        login(&mut sender, "operator", "password1234").await;
+        login(&mut observer, "analyst", "readonly").await;
+        let _presence = read_operator_message(&mut sender).await;
+
+        sender
+            .send(ClientMessage::Text(chat_message("operator", "hello team").into()))
+            .await
+            .expect("chat should send");
+
+        let message = read_operator_message(&mut observer).await;
+        let OperatorMessage::ChatMessage(message) = message else {
+            panic!("expected chat broadcast");
+        };
+        assert_eq!(message.head.user, "operator");
+        assert_eq!(message.info.fields.get("User"), Some(&Value::String("operator".to_owned())));
+        assert_eq!(
+            message.info.fields.get("Message"),
+            Some(&Value::String("hello team".to_owned()))
+        );
+
+        sender.close(None).await.expect("close should send");
+        observer.close(None).await.expect("close should send");
         server.abort();
     }
 
@@ -3565,6 +3696,24 @@ mod tests {
             info: NameInfo { name: name.to_owned() },
         }))
         .expect("listener remove should serialize")
+    }
+
+    fn chat_message(user: &str, text: &str) -> String {
+        serde_json::to_string(&OperatorMessage::ChatMessage(Message {
+            head: MessageHead {
+                event: EventCode::Chat,
+                user: user.to_owned(),
+                timestamp: String::new(),
+                one_time: String::new(),
+            },
+            info: FlatInfo {
+                fields: BTreeMap::from([
+                    ("User".to_owned(), Value::String(user.to_owned())),
+                    ("Message".to_owned(), Value::String(text.to_owned())),
+                ]),
+            },
+        }))
+        .expect("chat should serialize")
     }
 
     async fn login(

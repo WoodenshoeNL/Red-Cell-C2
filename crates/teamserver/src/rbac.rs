@@ -252,10 +252,10 @@ fn required_permission(message: &OperatorMessage) -> Result<Permission, Authoriz
         | OperatorMessage::ServiceAgentRegister(_)
         | OperatorMessage::ServiceListenerRegister(_)
         | OperatorMessage::TeamserverLog(_) => Err(AuthorizationError::UnsupportedWebSocketCommand),
+        OperatorMessage::ChatMessage(_) => Ok(Permission::Read),
         OperatorMessage::CredentialsAdd(_)
         | OperatorMessage::CredentialsEdit(_)
         | OperatorMessage::CredentialsRemove(_)
-        | OperatorMessage::ChatMessage(_)
         | OperatorMessage::BuildPayloadStaged(_)
         | OperatorMessage::BuildPayloadRequest(_)
         | OperatorMessage::BuildPayloadResponse(_)
@@ -476,6 +476,22 @@ mod tests {
                 role: OperatorRole::Operator,
                 required: Permission::Admin.as_str(),
             })
+        );
+    }
+
+    #[test]
+    fn websocket_chat_message_requires_only_read_access() {
+        let message = OperatorMessage::ChatMessage(Message {
+            head: MessageHead {
+                event: red_cell_common::operator::EventCode::Chat,
+                ..message_head()
+            },
+            info: FlatInfo::default(),
+        });
+
+        assert_eq!(
+            authorize_websocket_command(&session(OperatorRole::Analyst), &message),
+            Ok(Permission::Read)
         );
     }
 

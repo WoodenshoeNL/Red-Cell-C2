@@ -377,6 +377,9 @@ impl AppState {
                 self.connection_status = ConnectionStatus::Error(message.info.message.clone());
                 self.push_chat_message("teamserver", message.head.timestamp, message.info.message);
             }
+            OperatorMessage::InitConnectionInfo(message) => {
+                self.handle_operator_snapshot(message.info);
+            }
             OperatorMessage::ListenerNew(message) | OperatorMessage::ListenerEdit(message) => {
                 self.upsert_listener(listener_summary_from_info(&message.info));
             }
@@ -491,7 +494,6 @@ impl AppState {
                 );
             }
             OperatorMessage::Login(_)
-            | OperatorMessage::InitConnectionInfo(_)
             | OperatorMessage::InitConnectionProfile(_)
             | OperatorMessage::BuildPayloadStaged(_)
             | OperatorMessage::BuildPayloadRequest(_)
@@ -587,6 +589,32 @@ impl AppState {
                 });
             }
             _ => {}
+        }
+    }
+
+    fn handle_operator_snapshot(&mut self, info: FlatInfo) {
+        let Some(operators) = info.fields.get("Operators").cloned() else {
+            return;
+        };
+
+        let Ok(operators) = serde_json::from_value::<Vec<OperatorInfo>>(operators) else {
+            return;
+        };
+
+        self.online_operators = operators
+            .iter()
+            .filter(|operator| operator.online)
+            .map(|operator| operator.username.clone())
+            .collect();
+
+        if let Some(current_username) =
+            self.operator_info.as_ref().map(|info| info.username.clone())
+        {
+            if let Some(snapshot) =
+                operators.into_iter().find(|operator| operator.username == current_username)
+            {
+                self.operator_info = Some(snapshot);
+            }
         }
     }
 
@@ -1610,6 +1638,65 @@ mod tests {
         assert!(listener_events.is_empty());
         assert_eq!(new_events, vec![AppEvent::AgentCheckin("ABCD1234".to_owned())]);
         assert_eq!(update_events, vec![AppEvent::AgentCheckin("ABCD1234".to_owned())]);
+    }
+
+    #[test]
+    fn operator_snapshot_updates_online_users_and_current_operator_metadata() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+        state.operator_info = Some(OperatorInfo {
+            username: "operator".to_owned(),
+            password_hash: None,
+            role: None,
+            online: true,
+            last_seen: None,
+        });
+
+        state.apply_operator_message(OperatorMessage::InitConnectionInfo(Message {
+            head: head(EventCode::InitConnection),
+            info: FlatInfo {
+                fields: BTreeMap::from([(
+                    "Operators".to_owned(),
+                    serde_json::json!([
+                        {
+                            "Username": "operator",
+                            "PasswordHash": null,
+                            "Role": "Operator",
+                            "Online": true,
+                            "LastSeen": "2026-03-10T12:00:00Z"
+                        },
+                        {
+                            "Username": "analyst",
+                            "PasswordHash": null,
+                            "Role": "Analyst",
+                            "Online": true,
+                            "LastSeen": "2026-03-10T12:00:00Z"
+                        },
+                        {
+                            "Username": "admin",
+                            "PasswordHash": null,
+                            "Role": "Admin",
+                            "Online": false,
+                            "LastSeen": null
+                        }
+                    ]),
+                )]),
+            },
+        }));
+
+        assert_eq!(
+            state.online_operators.iter().cloned().collect::<Vec<_>>(),
+            vec!["analyst".to_owned(), "operator".to_owned()]
+        );
+        assert_eq!(
+            state.operator_info,
+            Some(OperatorInfo {
+                username: "operator".to_owned(),
+                password_hash: None,
+                role: Some("Operator".to_owned()),
+                online: true,
+                last_seen: Some("2026-03-10T12:00:00Z".to_owned()),
+            })
+        );
     }
 
     #[test]

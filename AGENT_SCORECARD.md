@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 83 | 31 |
-| Bugs filed against | 0 | 8 | 9 |
-| Bug rate (bugs/task) | N/A | 0.10 | 0.29 |
-| Quality score | N/A | 90% | 71% |
+| Tasks closed | 0 | 85 | 31 |
+| Bugs filed against | 0 | 9 | 9 |
+| Bug rate (bugs/task) | N/A | 0.11 | 0.29 |
+| Quality score | N/A | 89% | 71% |
 
 ## Violation Breakdown
 
@@ -23,7 +23,7 @@ Each loop run updates the running totals and appends a review entry.
 | Clippy warnings | 0 | 0 | 1 |
 | Protocol errors | 1 | 8 | 3 |
 | Security issues | 0 | 14 | 0 |
-| Architecture drift | 0 | 8 | 0 |
+| Architecture drift | 0 | 9 | 0 |
 | Memory / resource leaks | 0 | 6 | 1 |
 | Startup / lifecycle regressions | 0 | 3 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
@@ -34,6 +34,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-12 00:03 — 806efaa..bb2c902
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA bookkeeping commit only |
+| Codex | 2 | 1 | Closed: red-pkl, red-cell-c2-1m9l. Filed red-cell-c2-2nos for the new Havoc compatibility test's machine-specific path and implicit Go dependency. red-cell-c2-26wc is now in_progress with a matching claim commit. |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (cargo check clean; cargo clippy --workspace -- -D warnings clean; cargo test --workspace passed, including the new `havoc_compatibility` integration test)
+Notes: Reviewed seven commits in range. The AES-CTR rollback itself appears correct and is now validated against the checked-in Havoc reference, but the new regression test is not portable because it shells out to Go and hardcodes this workstation's checkout path. No stale in-progress items or unjustified task closures were found in beads state.
 
 ### Arch Review — 2026-03-11 23:36
 

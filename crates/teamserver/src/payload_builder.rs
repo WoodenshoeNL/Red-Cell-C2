@@ -1212,20 +1212,20 @@ mod tests {
 
     #[test]
     fn parse_hour_minute_rejects_hour_24() {
-        let err = parse_hour_minute("24:00").unwrap_err();
-        assert!(matches!(err, PayloadBuildError::InvalidRequest { .. }));
+        let err = parse_hour_minute("24:00");
+        assert!(matches!(err, Err(PayloadBuildError::InvalidRequest { .. })));
     }
 
     #[test]
     fn parse_hour_minute_rejects_minute_60() {
-        let err = parse_hour_minute("00:60").unwrap_err();
-        assert!(matches!(err, PayloadBuildError::InvalidRequest { .. }));
+        let err = parse_hour_minute("00:60");
+        assert!(matches!(err, Err(PayloadBuildError::InvalidRequest { .. })));
     }
 
     #[test]
     fn parse_hour_minute_rejects_24_60() {
-        let err = parse_hour_minute("24:60").unwrap_err();
-        assert!(matches!(err, PayloadBuildError::InvalidRequest { .. }));
+        let err = parse_hour_minute("24:60");
+        assert!(matches!(err, Err(PayloadBuildError::InvalidRequest { .. })));
     }
 
     #[test]

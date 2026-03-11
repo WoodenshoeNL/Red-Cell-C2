@@ -2729,7 +2729,7 @@ mod tests {
     }
 
     #[test]
-    fn build_jobs_encodes_filesystem_copy_payload() {
+    fn build_jobs_encodes_filesystem_copy_payload() -> Result<(), crate::TeamserverError> {
         let jobs = build_jobs(
             &AgentTaskInfo {
                 task_id: "2E".to_owned(),
@@ -2751,10 +2751,11 @@ mod tests {
         assert_eq!(jobs.len(), 1);
         let mut expected = Vec::new();
         write_u32(&mut expected, u32::from(DemonFilesystemCommand::Copy));
-        write_len_prefixed_bytes(&mut expected, &encode_utf16("C:\\temp\\a.txt")).unwrap();
-        write_len_prefixed_bytes(&mut expected, &encode_utf16("D:\\loot\\b.txt")).unwrap();
+        write_len_prefixed_bytes(&mut expected, &encode_utf16("C:\\temp\\a.txt"))?;
+        write_len_prefixed_bytes(&mut expected, &encode_utf16("D:\\loot\\b.txt"))?;
         assert_eq!(jobs[0].command, u32::from(DemonCommand::CommandFs));
         assert_eq!(jobs[0].payload, expected);
+        Ok(())
     }
 
     #[test]
@@ -3680,17 +3681,19 @@ mod tests {
     }
 
     #[test]
-    fn write_len_prefixed_bytes_normal_input() {
+    fn write_len_prefixed_bytes_normal_input() -> Result<(), crate::TeamserverError> {
         let mut buf = Vec::new();
-        write_len_prefixed_bytes(&mut buf, b"test").unwrap();
+        write_len_prefixed_bytes(&mut buf, b"test")?;
         assert_eq!(buf[..4], 4_u32.to_le_bytes());
         assert_eq!(&buf[4..], b"test");
+        Ok(())
     }
 
     #[test]
-    fn write_len_prefixed_bytes_empty_input() {
+    fn write_len_prefixed_bytes_empty_input() -> Result<(), crate::TeamserverError> {
         let mut buf = Vec::new();
-        write_len_prefixed_bytes(&mut buf, &[]).unwrap();
+        write_len_prefixed_bytes(&mut buf, &[])?;
         assert_eq!(buf, 0_u32.to_le_bytes());
+        Ok(())
     }
 }

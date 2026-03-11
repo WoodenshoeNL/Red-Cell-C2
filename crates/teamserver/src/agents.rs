@@ -1483,10 +1483,10 @@ mod tests {
 
         assert_eq!(map.len(), 10);
         for i in 0..10_u32 {
-            assert!(map.get(&(0xAAAA_0000, i)).is_none(), "entry {i} should have been evicted");
+            assert!(!map.contains_key(&(0xAAAA_0000, i)), "entry {i} should have been evicted");
         }
         for i in 10..20_u32 {
-            assert!(map.get(&(0xAAAA_0000, i)).is_some(), "entry {i} should have been retained");
+            assert!(map.contains_key(&(0xAAAA_0000, i)), "entry {i} should have been retained");
         }
     }
 
@@ -1705,12 +1705,11 @@ mod tests {
     }
 
     #[test]
-    fn encode_pivot_job_payload_normal_input() {
+    fn encode_pivot_job_payload_normal_input() -> Result<(), TeamserverError> {
         let payload = b"hello";
-        let result = super::encode_pivot_job_payload(0xDEAD_BEEF, payload);
-        assert!(result.is_ok());
-        let outer = result.unwrap();
+        let outer = super::encode_pivot_job_payload(0xDEAD_BEEF, payload)?;
         assert!(outer.len() > payload.len());
+        Ok(())
     }
 
     #[test]

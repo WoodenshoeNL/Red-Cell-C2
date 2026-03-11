@@ -972,17 +972,19 @@ mod tests {
     }
 
     #[test]
-    fn write_len_prefixed_bytes_normal_input() {
+    fn write_len_prefixed_bytes_normal_input() -> Result<(), SocketRelayError> {
         let mut buf = Vec::new();
-        super::write_len_prefixed_bytes(&mut buf, b"data").unwrap();
+        super::write_len_prefixed_bytes(&mut buf, b"data")?;
         assert_eq!(buf[..4], 4_u32.to_le_bytes());
         assert_eq!(&buf[4..], b"data");
+        Ok(())
     }
 
     #[test]
-    fn write_len_prefixed_bytes_empty_input() {
+    fn write_len_prefixed_bytes_empty_input() -> Result<(), SocketRelayError> {
         let mut buf = Vec::new();
-        super::write_len_prefixed_bytes(&mut buf, &[]).unwrap();
+        super::write_len_prefixed_bytes(&mut buf, &[])?;
         assert_eq!(buf, 0_u32.to_le_bytes());
+        Ok(())
     }
 }

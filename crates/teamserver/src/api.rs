@@ -3283,19 +3283,21 @@ mod tests {
     }
 
     #[test]
-    fn parse_api_agent_id_always_parses_hex() {
-        assert_eq!(super::parse_api_agent_id("DEADBEEF").unwrap(), 0xDEAD_BEEF);
-        assert_eq!(super::parse_api_agent_id("deadbeef").unwrap(), 0xDEAD_BEEF);
-        assert_eq!(super::parse_api_agent_id("0xDEADBEEF").unwrap(), 0xDEAD_BEEF);
-        assert_eq!(super::parse_api_agent_id("0XDEADBEEF").unwrap(), 0xDEAD_BEEF);
+    fn parse_api_agent_id_always_parses_hex() -> Result<(), AgentApiError> {
+        assert_eq!(super::parse_api_agent_id("DEADBEEF")?, 0xDEAD_BEEF);
+        assert_eq!(super::parse_api_agent_id("deadbeef")?, 0xDEAD_BEEF);
+        assert_eq!(super::parse_api_agent_id("0xDEADBEEF")?, 0xDEAD_BEEF);
+        assert_eq!(super::parse_api_agent_id("0XDEADBEEF")?, 0xDEAD_BEEF);
+        Ok(())
     }
 
     #[test]
-    fn parse_api_agent_id_all_digit_hex_is_not_decimal() {
+    fn parse_api_agent_id_all_digit_hex_is_not_decimal() -> Result<(), AgentApiError> {
         // "00000010" is agent ID 0x10 (16), not decimal 10
-        assert_eq!(super::parse_api_agent_id("00000010").unwrap(), 0x10);
-        assert_eq!(super::parse_api_agent_id("10").unwrap(), 0x10);
-        assert_eq!(super::parse_api_agent_id("0x10").unwrap(), 0x10);
+        assert_eq!(super::parse_api_agent_id("00000010")?, 0x10);
+        assert_eq!(super::parse_api_agent_id("10")?, 0x10);
+        assert_eq!(super::parse_api_agent_id("0x10")?, 0x10);
+        Ok(())
     }
 
     #[test]
@@ -3307,8 +3309,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_api_agent_id_trims_whitespace() {
-        assert_eq!(super::parse_api_agent_id("  DEADBEEF  ").unwrap(), 0xDEAD_BEEF);
-        assert_eq!(super::parse_api_agent_id(" 0x10 ").unwrap(), 0x10);
+    fn parse_api_agent_id_trims_whitespace() -> Result<(), AgentApiError> {
+        assert_eq!(super::parse_api_agent_id("  DEADBEEF  ")?, 0xDEAD_BEEF);
+        assert_eq!(super::parse_api_agent_id(" 0x10 ")?, 0x10);
+        Ok(())
     }
 }

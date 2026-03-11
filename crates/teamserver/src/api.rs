@@ -18,7 +18,7 @@ use hmac::{Hmac, Mac};
 use red_cell_common::config::{OperatorRole, Profile};
 use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::{AgentTaskInfo, EventCode, Message, MessageHead};
-use red_cell_common::{AgentInfo, ListenerConfig};
+use red_cell_common::{AgentInfo as DomainAgentInfo, ListenerConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::Sha256;
@@ -60,6 +60,120 @@ type ApiKeyMac = Hmac<Sha256>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct ApiKeyDigest([u8; 32]);
+
+/// Sanitized REST representation of an agent/session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, ToSchema)]
+struct ApiAgentInfo {
+    /// Numeric agent identifier.
+    #[serde(rename = "AgentID")]
+    agent_id: u32,
+    /// Whether the agent is still marked active.
+    #[serde(rename = "Active")]
+    active: bool,
+    /// Optional inactive reason or registration source.
+    #[serde(rename = "Reason")]
+    reason: String,
+    /// Optional operator-authored note attached to the agent.
+    #[serde(rename = "Note")]
+    note: String,
+    /// Computer hostname.
+    #[serde(rename = "Hostname")]
+    hostname: String,
+    /// Logon username.
+    #[serde(rename = "Username")]
+    username: String,
+    /// Logon domain.
+    #[serde(rename = "DomainName")]
+    domain_name: String,
+    /// External callback IP.
+    #[serde(rename = "ExternalIP")]
+    external_ip: String,
+    /// Internal workstation IP.
+    #[serde(rename = "InternalIP")]
+    internal_ip: String,
+    /// Process executable name.
+    #[serde(rename = "ProcessName")]
+    process_name: String,
+    /// Remote process base address.
+    #[serde(rename = "BaseAddress")]
+    base_address: u64,
+    /// Remote process id.
+    #[serde(rename = "ProcessPID")]
+    process_pid: u32,
+    /// Remote thread id.
+    #[serde(rename = "ProcessTID")]
+    process_tid: u32,
+    /// Remote parent process id.
+    #[serde(rename = "ProcessPPID")]
+    process_ppid: u32,
+    /// Process architecture label.
+    #[serde(rename = "ProcessArch")]
+    process_arch: String,
+    /// Whether the current token is elevated.
+    #[serde(rename = "Elevated")]
+    elevated: bool,
+    /// Operating system version string.
+    #[serde(rename = "OSVersion")]
+    os_version: String,
+    /// Operating system architecture label.
+    #[serde(rename = "OSArch")]
+    os_arch: String,
+    /// Sleep interval in seconds.
+    #[serde(rename = "SleepDelay")]
+    sleep_delay: u32,
+    /// Sleep jitter percentage.
+    #[serde(rename = "SleepJitter")]
+    sleep_jitter: u32,
+    /// Optional kill-date value.
+    #[serde(rename = "KillDate")]
+    kill_date: Option<i64>,
+    /// Optional working-hours bitmask.
+    #[serde(rename = "WorkingHours")]
+    working_hours: Option<i32>,
+    /// Registration timestamp.
+    #[serde(rename = "FirstCallIn")]
+    first_call_in: String,
+    /// Last callback timestamp.
+    #[serde(rename = "LastCallIn")]
+    last_call_in: String,
+}
+
+impl From<DomainAgentInfo> for ApiAgentInfo {
+    fn from(agent: DomainAgentInfo) -> Self {
+        Self::from(&agent)
+    }
+}
+
+impl From<&DomainAgentInfo> for ApiAgentInfo {
+    fn from(agent: &DomainAgentInfo) -> Self {
+        Self {
+            agent_id: agent.agent_id,
+            active: agent.active,
+            reason: agent.reason.clone(),
+            note: agent.note.clone(),
+            hostname: agent.hostname.clone(),
+            username: agent.username.clone(),
+            domain_name: agent.domain_name.clone(),
+            external_ip: agent.external_ip.clone(),
+            internal_ip: agent.internal_ip.clone(),
+            process_name: agent.process_name.clone(),
+            base_address: agent.base_address,
+            process_pid: agent.process_pid,
+            process_tid: agent.process_tid,
+            process_ppid: agent.process_ppid,
+            process_arch: agent.process_arch.clone(),
+            elevated: agent.elevated,
+            os_version: agent.os_version.clone(),
+            os_arch: agent.os_arch.clone(),
+            sleep_delay: agent.sleep_delay,
+            sleep_jitter: agent.sleep_jitter,
+            kill_date: agent.kill_date,
+            working_hours: agent.working_hours,
+            first_call_in: agent.first_call_in.clone(),
+            last_call_in: agent.last_call_in.clone(),
+        }
+    }
+}
 
 /// Fixed REST API rate-limiting configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -792,8 +906,7 @@ struct ApiInfoResponse {
             crate::AuditRecord,
             crate::AuditResultStatus,
             crate::SessionActivityRecord,
-            AgentInfo,
-            red_cell_common::AgentEncryptionInfo,
+            ApiAgentInfo,
             AgentTaskInfo,
             ListenerConfig,
             ListenerSummary,
@@ -867,7 +980,7 @@ async fn api_root(State(api): State<ApiRuntime>) -> Json<ApiInfoResponse> {
     tag = "agents",
     security(("api_key" = [])),
     responses(
-        (status = 200, description = "List all tracked agents", body = [AgentInfo]),
+        (status = 200, description = "List all tracked agents", body = [ApiAgentInfo]),
         (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
         (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
         (status = 429, description = "Rate limit exceeded", body = ApiErrorBody)
@@ -876,8 +989,8 @@ async fn api_root(State(api): State<ApiRuntime>) -> Json<ApiInfoResponse> {
 async fn list_agents(
     State(state): State<TeamserverState>,
     _identity: ReadApiAccess,
-) -> Json<Vec<AgentInfo>> {
-    Json(state.agent_registry.list().await)
+) -> Json<Vec<ApiAgentInfo>> {
+    Json(state.agent_registry.list().await.into_iter().map(ApiAgentInfo::from).collect())
 }
 
 #[utoipa::path(
@@ -888,7 +1001,7 @@ async fn list_agents(
     security(("api_key" = [])),
     params(("id" = String, Path, description = "Agent id in hex (with optional 0x prefix)")),
     responses(
-        (status = 200, description = "Agent details", body = AgentInfo),
+        (status = 200, description = "Agent details", body = ApiAgentInfo),
         (status = 400, description = "Invalid agent id", body = ApiErrorBody),
         (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
         (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
@@ -899,14 +1012,14 @@ async fn get_agent(
     State(state): State<TeamserverState>,
     _identity: ReadApiAccess,
     Path(id): Path<String>,
-) -> Result<Json<AgentInfo>, AgentApiError> {
+) -> Result<Json<ApiAgentInfo>, AgentApiError> {
     let agent_id = parse_api_agent_id(&id)?;
     let agent = state
         .agent_registry
         .get(agent_id)
         .await
         .ok_or(crate::TeamserverError::AgentNotFound { agent_id })?;
-    Ok(Json(agent))
+    Ok(Json(ApiAgentInfo::from(agent)))
 }
 
 #[utoipa::path(
@@ -2437,6 +2550,35 @@ mod tests {
         let body = read_json(response).await;
         assert_eq!(body.as_array().expect("agents array").len(), 1);
         assert_eq!(body[0]["AgentID"], 0xDEAD_BEEF_u32);
+        assert!(body[0].get("Encryption").is_none());
+    }
+
+    #[tokio::test]
+    async fn get_agent_omits_transport_crypto_material() {
+        let (app, registry, _) = test_router_with_registry(Some((
+            60,
+            "rest-admin",
+            "secret-admin",
+            OperatorRole::Admin,
+        )))
+        .await;
+        registry.insert(sample_agent(0xDEAD_BEEF)).await.expect("agent should insert");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/agents/DEADBEEF")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["AgentID"], 0xDEAD_BEEF_u32);
+        assert!(body.get("Encryption").is_none());
     }
 
     #[tokio::test]
@@ -3368,8 +3510,8 @@ mod tests {
         serde_json::from_slice(&bytes).expect("json body")
     }
 
-    fn sample_agent(agent_id: u32) -> AgentInfo {
-        AgentInfo {
+    fn sample_agent(agent_id: u32) -> DomainAgentInfo {
+        DomainAgentInfo {
             agent_id,
             active: true,
             reason: "http".to_owned(),

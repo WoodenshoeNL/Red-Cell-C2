@@ -2688,6 +2688,8 @@ mod tests {
         assert_eq!(message.info.name_id, "DEADBEEF");
         assert_eq!(message.info.listener, "null");
         assert_eq!(message.info.magic_value, "deadbeef");
+        let encoded = serde_json::to_value(&message.info).expect("agent snapshot should serialize");
+        assert!(encoded.get("Encryption").is_none());
 
         socket.close(None).await.expect("close should send");
         server.abort();

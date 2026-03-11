@@ -2,8 +2,8 @@
 
 use red_cell_common::AgentInfo;
 use red_cell_common::operator::{
-    AgentEncryptionInfo as OperatorAgentEncryptionInfo, AgentInfo as OperatorAgentInfo,
-    AgentPivotsInfo, EventCode, Message, MessageHead, OperatorMessage,
+    AgentInfo as OperatorAgentInfo, AgentPivotsInfo, EventCode, Message, MessageHead,
+    OperatorMessage,
 };
 use serde_json::Value;
 
@@ -40,10 +40,6 @@ pub(crate) fn operator_agent_info(
         background_check: false,
         domain_name: agent.domain_name.clone(),
         elevated: agent.elevated,
-        encryption: OperatorAgentEncryptionInfo {
-            aes_key: agent.encryption.aes_key.clone(),
-            aes_iv: agent.encryption.aes_iv.clone(),
-        },
         internal_ip: agent.internal_ip.clone(),
         external_ip: agent.external_ip.clone(),
         first_call_in: agent.first_call_in.clone(),

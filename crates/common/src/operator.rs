@@ -324,17 +324,6 @@ pub struct ChatUserInfo {
     pub user: String,
 }
 
-/// Agent encryption metadata.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentEncryptionInfo {
-    /// Base64-encoded AES key.
-    #[serde(rename = "AESKey")]
-    pub aes_key: String,
-    /// Base64-encoded AES IV.
-    #[serde(rename = "AESIv")]
-    pub aes_iv: String,
-}
-
 /// Agent pivot metadata.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentPivotsInfo {
@@ -357,8 +346,6 @@ pub struct AgentInfo {
     pub domain_name: String,
     #[serde(rename = "Elevated")]
     pub elevated: bool,
-    #[serde(rename = "Encryption")]
-    pub encryption: AgentEncryptionInfo,
     #[serde(rename = "InternalIP")]
     pub internal_ip: String,
     #[serde(rename = "ExternalIP")]
@@ -1111,10 +1098,6 @@ mod tests {
                 background_check: false,
                 domain_name: "LAB".to_string(),
                 elevated: true,
-                encryption: AgentEncryptionInfo {
-                    aes_key: "YWVzLWtleQ==".to_string(),
-                    aes_iv: "aXY=".to_string(),
-                },
                 internal_ip: "10.0.0.10".to_string(),
                 external_ip: "203.0.113.10".to_string(),
                 first_call_in: "09/03/2026 19:04:00".to_string(),
@@ -1148,7 +1131,10 @@ mod tests {
             },
         }));
 
-        let decoded: OperatorMessage = serde_json::from_value(serde_json::to_value(&message)?)?;
+        let encoded = serde_json::to_value(&message)?;
+        assert!(encoded.pointer("/Body/Info/Encryption").is_none());
+
+        let decoded: OperatorMessage = serde_json::from_value(encoded)?;
         assert_eq!(decoded, message);
         Ok(())
     }

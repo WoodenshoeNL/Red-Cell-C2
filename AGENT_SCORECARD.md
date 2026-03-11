@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 61 | 31 |
+| Tasks closed | 0 | 64 | 31 |
 | Bugs filed against | 0 | 4 | 9 |
-| Bug rate (bugs/task) | N/A | 0.07 | 0.29 |
-| Quality score | N/A | 93% | 71% |
+| Bug rate (bugs/task) | N/A | 0.06 | 0.29 |
+| Quality score | N/A | 94% | 71% |
 
 ## Violation Breakdown
 
@@ -421,3 +421,14 @@ Notes: Clean sprint. 4 new demon callbacks (CommandError, CommandExit, CommandKi
 
 Build: passed (cargo check + clippy -D warnings clean; cargo test: 491 passed)
 Notes: Solid sprint. All 10 new handlers are well-structured with proper error propagation via `?`. The builtin-handler unification (`register_builtin_handlers` + `BuiltinHandlerDependencies`) cleanly resolves the red-cell-c2-1mw dispatch-chain divergence. Test coverage is good — 4 new integration-style tests cover all new handlers. Minor observation: `handle_config_callback` uses `i64::try_from(raw).unwrap_or(i64::MAX)` and `i32::try_from(raw).unwrap_or(i32::MAX)` for kill_date and working_hours fields — silently clamps out-of-range values rather than erroring; not filed (edge case, no realistic attacker path). Grammar P3 bug filed (red-cell-c2-234).
+
+### QA Review — 2026-03-11 15:35 — 20b6897..344d499
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA loop only |
+| Codex | 3 | 0 | Closed: red-cell-c2-4ye (REST API — credentials/jobs endpoints: CredentialSummary, JobSummary, paged queries, OpenAPI coverage), red-cell-c2-7zj (Python Plugin System — Havoc-style `RegisterCommand(function=..., module=..., command=...)` keyword shape accepted in addition to native signature), red-cell-c2-234 (grammar fix — "Successful suspended/resumed"/"does not exists" corrected; test at line 7297 updated). Active: claimed red-cell-c2-m5a (Logging & Audit Trail epic); session activity persisted APIs (344d499) appear to be progress toward its close. |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (cargo check + clippy -D warnings clean; cargo test: 502 passed, +11 from new session-activity/operator-inventory/chat-audit/credential/job tests)
+Notes: Clean sprint. Three well-executed closes. Credential endpoint correctly filters by kind="credential" and exposes paginated view. Plugin compatibility shim for Havoc RegisterCommand well-tested (new `register_command_accepts_havoc_keyword_signature` test). Session-activity feature: `last_seen` populated from audit-log MAX(occurred_at) query, `AuditLogFilter.action_in` field added for SQL push-down, websocket chat messages now audited. Minor observation: `list_credentials` fetches all loot records in-memory then filters — superseded by open red-cell-c2-1ga (SQL-backed filters for loot/credentials), not re-filed. `unwrap_or_default()` on `latest_timestamps_by_actor_for_actions` in `operator_inventory()` silently swallows DB read errors; acceptable degraded behavior for display-only API, not filed. No P0/P1/P2 violations found.

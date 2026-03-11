@@ -41,9 +41,6 @@ impl From<InvalidLength> for CryptoError {
     }
 }
 
-/// AES block size in bytes (128 bits).
-const AES_BLOCK_LEN: usize = 16;
-
 type AgentCtr = Ctr128BE<Aes256>;
 
 /// Encrypt agent transport data with AES-256-CTR starting from the given IV.
@@ -61,59 +58,6 @@ pub fn decrypt_agent_data(
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
     apply_agent_keystream(key, iv, ciphertext)
-}
-
-/// Encrypt agent data while tracking the per-session CTR block offset.
-///
-/// The Demon C agent maintains a single AES-CTR context whose counter advances
-/// after every encrypt/decrypt call.  This function replicates that behaviour:
-/// it derives the effective IV by adding `block_offset` to `base_iv` (128-bit
-/// big-endian addition), applies the keystream, and returns the ciphertext
-/// together with the new block offset.
-pub fn encrypt_agent_data_ctr(
-    key: &[u8],
-    base_iv: &[u8; AGENT_IV_LENGTH],
-    block_offset: u64,
-    plaintext: &[u8],
-) -> Result<(Vec<u8>, u64), CryptoError> {
-    let effective_iv = advance_iv(base_iv, block_offset);
-    let ciphertext = apply_agent_keystream(key, &effective_iv, plaintext)?;
-    let new_offset = block_offset.saturating_add(ctr_blocks_for_length(plaintext.len()));
-    Ok((ciphertext, new_offset))
-}
-
-/// Decrypt agent data while tracking the per-session CTR block offset.
-///
-/// Mirror of [`encrypt_agent_data_ctr`] for the receive direction.  See its
-/// documentation for details on counter tracking.
-pub fn decrypt_agent_data_ctr(
-    key: &[u8],
-    base_iv: &[u8; AGENT_IV_LENGTH],
-    block_offset: u64,
-    ciphertext: &[u8],
-) -> Result<(Vec<u8>, u64), CryptoError> {
-    let effective_iv = advance_iv(base_iv, block_offset);
-    let plaintext = apply_agent_keystream(key, &effective_iv, ciphertext)?;
-    let new_offset = block_offset.saturating_add(ctr_blocks_for_length(ciphertext.len()));
-    Ok((plaintext, new_offset))
-}
-
-/// Compute the number of AES blocks required to cover `data_len` bytes.
-#[must_use]
-pub fn ctr_blocks_for_length(data_len: usize) -> u64 {
-    data_len.div_ceil(AES_BLOCK_LEN) as u64
-}
-
-/// Derive an effective IV by adding a block offset to the base IV.
-///
-/// The Demon agent increments its 128-bit counter (big-endian) in place after
-/// each AES block.  This function replicates that by interpreting the IV as a
-/// `u128` BE integer, adding the offset, and converting back.
-#[must_use]
-pub fn advance_iv(base_iv: &[u8; AGENT_IV_LENGTH], block_offset: u64) -> [u8; AGENT_IV_LENGTH] {
-    let iv_val = u128::from_be_bytes(*base_iv);
-    let advanced = iv_val.wrapping_add(u128::from(block_offset));
-    advanced.to_be_bytes()
 }
 
 /// Generate fresh per-agent AES-256-CTR key material.
@@ -174,8 +118,7 @@ mod tests {
     use hex_literal::hex;
 
     use super::{
-        AGENT_IV_LENGTH, AGENT_KEY_LENGTH, CryptoError, advance_iv, ctr_blocks_for_length,
-        decrypt_agent_data, decrypt_agent_data_ctr, encrypt_agent_data, encrypt_agent_data_ctr,
+        AGENT_IV_LENGTH, AGENT_KEY_LENGTH, CryptoError, decrypt_agent_data, encrypt_agent_data,
         generate_agent_crypto_material, hash_password_sha3,
     };
 
@@ -312,109 +255,14 @@ mod tests {
     }
 
     #[test]
-    fn advance_iv_adds_offset_to_base_iv() {
-        let base = [0_u8; AGENT_IV_LENGTH];
-        let advanced = advance_iv(&base, 1);
-        let mut expected = [0_u8; AGENT_IV_LENGTH];
-        expected[15] = 1;
-        assert_eq!(advanced, expected);
-    }
-
-    #[test]
-    fn advance_iv_wraps_on_overflow() {
-        let base = [0xFF; AGENT_IV_LENGTH];
-        let advanced = advance_iv(&base, 1);
-        assert_eq!(advanced, [0_u8; AGENT_IV_LENGTH]);
-    }
-
-    #[test]
-    fn advance_iv_with_zero_offset_is_identity() {
-        let base = hex!("000102030405060708090a0b0c0d0e0f");
-        assert_eq!(advance_iv(&base, 0), base);
-    }
-
-    #[test]
-    fn ctr_blocks_for_length_rounds_up() {
-        assert_eq!(ctr_blocks_for_length(0), 0);
-        assert_eq!(ctr_blocks_for_length(1), 1);
-        assert_eq!(ctr_blocks_for_length(16), 1);
-        assert_eq!(ctr_blocks_for_length(17), 2);
-        assert_eq!(ctr_blocks_for_length(32), 2);
-        assert_eq!(ctr_blocks_for_length(33), 3);
-    }
-
-    #[test]
-    fn ctr_round_trip_at_offset_zero_matches_plain() {
-        let key = [0x41; AGENT_KEY_LENGTH];
-        let iv = [0x24; AGENT_IV_LENGTH];
-        let plaintext = b"hello from demon";
-
-        let plain_ciphertext =
-            encrypt_agent_data(&key, &iv, plaintext).expect("plain encryption should work");
-        let (ctr_ciphertext, new_offset) =
-            encrypt_agent_data_ctr(&key, &iv, 0, plaintext).expect("ctr encrypt should work");
-
-        assert_eq!(plain_ciphertext, ctr_ciphertext);
-        assert_eq!(new_offset, ctr_blocks_for_length(plaintext.len()));
-    }
-
-    #[test]
-    fn ctr_successive_messages_produce_different_keystreams() {
+    fn stateless_ctr_reuses_the_same_keystream_for_each_message() {
         let key = [0x41; AGENT_KEY_LENGTH];
         let iv = [0x24; AGENT_IV_LENGTH];
         let message = b"identical-message-body!!";
 
-        let (ct1, offset1) = encrypt_agent_data_ctr(&key, &iv, 0, message).expect("first encrypt");
-        let (ct2, _offset2) =
-            encrypt_agent_data_ctr(&key, &iv, offset1, message).expect("second encrypt");
+        let first = encrypt_agent_data(&key, &iv, message).expect("first encrypt");
+        let second = encrypt_agent_data(&key, &iv, message).expect("second encrypt");
 
-        assert_ne!(ct1, ct2, "successive messages must use different keystreams");
-    }
-
-    #[test]
-    fn ctr_encrypt_decrypt_round_trip_across_messages() {
-        let key = [0x55; AGENT_KEY_LENGTH];
-        let iv = [0x11; AGENT_IV_LENGTH];
-        let msg1 = b"first-message-from-agent";
-        let msg2 = b"second-callback-payload";
-        let msg3 = b"third-response-from-ts!";
-
-        let (ct1, off1) = encrypt_agent_data_ctr(&key, &iv, 0, msg1).expect("enc1");
-        let (ct2, off2) = encrypt_agent_data_ctr(&key, &iv, off1, msg2).expect("enc2");
-        let (ct3, _off3) = encrypt_agent_data_ctr(&key, &iv, off2, msg3).expect("enc3");
-
-        let (pt1, dec_off1) = decrypt_agent_data_ctr(&key, &iv, 0, &ct1).expect("dec1");
-        let (pt2, dec_off2) = decrypt_agent_data_ctr(&key, &iv, dec_off1, &ct2).expect("dec2");
-        let (pt3, _dec_off3) = decrypt_agent_data_ctr(&key, &iv, dec_off2, &ct3).expect("dec3");
-
-        assert_eq!(pt1, msg1);
-        assert_eq!(pt2, msg2);
-        assert_eq!(pt3, msg3);
-    }
-
-    #[test]
-    fn ctr_matches_single_continuous_keystream() {
-        let key = hex!(
-            "603deb1015ca71be2b73aef0857d7781
-             1f352c073b6108d72d9810a30914dff4"
-        );
-        let iv = hex!("000102030405060708090a0b0c0d0e0f");
-
-        let part_a = b"sixteen-byte-blk";
-        let part_b = b"another-sixteen!";
-        let combined = [part_a.as_slice(), part_b.as_slice()].concat();
-
-        let combined_ct =
-            encrypt_agent_data(&key, &iv, &combined).expect("combined encryption should work");
-
-        let (ct_a, offset_a) = encrypt_agent_data_ctr(&key, &iv, 0, part_a).expect("part a");
-        let (ct_b, _offset_b) =
-            encrypt_agent_data_ctr(&key, &iv, offset_a, part_b).expect("part b");
-
-        let reassembled = [ct_a.as_slice(), ct_b.as_slice()].concat();
-        assert_eq!(
-            reassembled, combined_ct,
-            "CTR offset tracking must produce the same keystream as a single continuous call"
-        );
+        assert_eq!(first, second, "Havoc resets AES-CTR with the base IV per message");
     }
 }

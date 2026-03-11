@@ -2,8 +2,7 @@ use std::time::Duration;
 
 use red_cell::{AgentRegistry, Database, EventBus, ListenerManager, SocketRelayManager};
 use red_cell_common::crypto::{
-    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, advance_iv, ctr_blocks_for_length, decrypt_agent_data,
-    encrypt_agent_data, encrypt_agent_data_ctr,
+    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data, encrypt_agent_data,
 };
 use red_cell_common::demon::{DemonCommand, DemonEnvelope};
 use red_cell_common::operator::OperatorMessage;
@@ -39,9 +38,7 @@ async fn http_listener_pipeline_registers_agent_and_broadcasts_checkin()
         .error_for_status()?;
     let init_ack = init_response.bytes().await?;
 
-    let ack_offset = registry.ctr_offset(agent_id).await? - ctr_blocks_for_length(4);
-    let effective_iv = advance_iv(&iv, ack_offset);
-    let decrypted_ack = decrypt_agent_data(&key, &effective_iv, &init_ack)?;
+    let decrypted_ack = decrypt_agent_data(&key, &iv, &init_ack)?;
     assert_eq!(decrypted_ack.as_slice(), &agent_id.to_le_bytes());
 
     let stored = registry.get(agent_id).await.ok_or("agent should be registered")?;
@@ -57,14 +54,12 @@ async fn http_listener_pipeline_registers_agent_and_broadcasts_checkin()
     assert_eq!(message.info.listener, "edge-http-pipeline");
     assert_eq!(message.info.external_ip, "127.0.0.1");
 
-    let checkin_offset = registry.ctr_offset(agent_id).await?;
     let checkin_response = client
         .post(format!("http://127.0.0.1:{port}/"))
-        .body(valid_demon_callback_body_ctr(
+        .body(valid_demon_callback_body(
             agent_id,
             key,
             iv,
-            checkin_offset,
             u32::from(DemonCommand::CommandCheckin),
             6,
             &[],
@@ -176,11 +171,10 @@ fn valid_demon_init_body(
         .to_bytes()
 }
 
-fn valid_demon_callback_body_ctr(
+fn valid_demon_callback_body(
     agent_id: u32,
     key: [u8; AGENT_KEY_LENGTH],
     iv: [u8; AGENT_IV_LENGTH],
-    block_offset: u64,
     command_id: u32,
     request_id: u32,
     payload: &[u8],
@@ -189,8 +183,8 @@ fn valid_demon_callback_body_ctr(
     decrypted.extend_from_slice(&u32::try_from(payload.len()).unwrap_or_default().to_be_bytes());
     decrypted.extend_from_slice(payload);
 
-    let (encrypted, _) = encrypt_agent_data_ctr(&key, &iv, block_offset, &decrypted)
-        .unwrap_or_else(|error| panic!("ctr encrypt failed: {error}"));
+    let encrypted = encrypt_agent_data(&key, &iv, &decrypted)
+        .unwrap_or_else(|error| panic!("callback encrypt failed: {error}"));
     let body = [
         command_id.to_be_bytes().as_slice(),
         request_id.to_be_bytes().as_slice(),

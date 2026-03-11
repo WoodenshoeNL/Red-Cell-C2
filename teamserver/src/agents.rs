@@ -6,7 +6,7 @@ use std::sync::Arc;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use red_cell_common::crypto::{
-    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data_ctr, encrypt_agent_data_ctr,
+    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data, encrypt_agent_data,
 };
 use red_cell_common::demon::{DemonCommand, DemonMessage, DemonPackage};
 use red_cell_common::{AgentEncryptionInfo, AgentInfo};
@@ -63,12 +63,6 @@ struct AgentEntry {
     info: RwLock<AgentInfo>,
     listener_name: RwLock<String>,
     jobs: Mutex<VecDeque<Job>>,
-    /// Shared CTR block offset tracking counter advancement.
-    ///
-    /// The Demon C agent maintains a single AES-CTR context whose 128-bit
-    /// counter advances after every encrypt **and** decrypt call.  The
-    /// teamserver must mirror this counter so that both sides derive the
-    /// same keystream position for each message.
     ctr_block_offset: Mutex<u64>,
 }
 
@@ -376,8 +370,7 @@ impl AgentRegistry {
         Ok(())
     }
 
-    /// Encrypt a plaintext payload destined for an agent, advancing the shared
-    /// CTR block counter.
+    /// Encrypt a plaintext payload destined for an agent.
     #[instrument(skip(self, plaintext), fields(agent_id = format_args!("0x{:08X}", agent_id), len = plaintext.len()))]
     pub async fn encrypt_for_agent(
         &self,
@@ -390,16 +383,10 @@ impl AgentRegistry {
         let (key, iv) = decode_crypto_material(agent_id, &info.encryption)?;
         drop(info);
 
-        let mut offset = entry.ctr_block_offset.lock().await;
-        let (ciphertext, new_offset) = encrypt_agent_data_ctr(&key, &iv, *offset, plaintext)?;
-        *offset = new_offset;
-        drop(offset);
-        self.repository.set_ctr_block_offset(agent_id, new_offset).await?;
-        Ok(ciphertext)
+        Ok(encrypt_agent_data(&key, &iv, plaintext)?)
     }
 
-    /// Encrypt a plaintext payload for an agent without changing the stored
-    /// shared CTR block counter.
+    /// Encrypt a plaintext payload for an agent without changing registry state.
     #[instrument(skip(self, plaintext), fields(agent_id = format_args!("0x{:08X}", agent_id), len = plaintext.len()))]
     pub(crate) async fn encrypt_for_agent_without_advancing(
         &self,
@@ -412,13 +399,10 @@ impl AgentRegistry {
         let (key, iv) = decode_crypto_material(agent_id, &info.encryption)?;
         drop(info);
 
-        let offset = *entry.ctr_block_offset.lock().await;
-        let (ciphertext, _) = encrypt_agent_data_ctr(&key, &iv, offset, plaintext)?;
-        Ok(ciphertext)
+        Ok(encrypt_agent_data(&key, &iv, plaintext)?)
     }
 
-    /// Decrypt a ciphertext payload received from an agent, advancing the
-    /// shared CTR block counter.
+    /// Decrypt a ciphertext payload received from an agent.
     #[instrument(skip(self, ciphertext), fields(agent_id = format_args!("0x{:08X}", agent_id), len = ciphertext.len()))]
     pub async fn decrypt_from_agent(
         &self,
@@ -431,12 +415,7 @@ impl AgentRegistry {
         let (key, iv) = decode_crypto_material(agent_id, &info.encryption)?;
         drop(info);
 
-        let mut offset = entry.ctr_block_offset.lock().await;
-        let (plaintext, new_offset) = decrypt_agent_data_ctr(&key, &iv, *offset, ciphertext)?;
-        *offset = new_offset;
-        drop(offset);
-        self.repository.set_ctr_block_offset(agent_id, new_offset).await?;
-        Ok(plaintext)
+        Ok(decrypt_agent_data(&key, &iv, ciphertext)?)
     }
 
     /// Update the AES key and IV for an agent and persist the new values.
@@ -729,17 +708,13 @@ impl AgentRegistry {
         let (key, iv) = decode_crypto_material(agent_id, &info.encryption)?;
         drop(info);
 
-        let mut offset = entry.ctr_block_offset.lock().await;
         let mut packages = Vec::with_capacity(jobs.len());
 
         for job in jobs {
             let payload = if job.payload.is_empty() {
                 Vec::new()
             } else {
-                let (ciphertext, new_offset) =
-                    encrypt_agent_data_ctr(&key, &iv, *offset, &job.payload)?;
-                *offset = new_offset;
-                ciphertext
+                encrypt_agent_data(&key, &iv, &job.payload)?
             };
             packages.push(DemonPackage {
                 command_id: job.command,
@@ -747,10 +722,6 @@ impl AgentRegistry {
                 payload,
             });
         }
-
-        let persisted_offset = *offset;
-        drop(offset);
-        self.repository.set_ctr_block_offset(agent_id, persisted_offset).await?;
 
         DemonMessage::new(packages).to_bytes().map_err(Into::into)
     }
@@ -905,9 +876,7 @@ fn encode_pivot_job_payload(
 mod tests {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-    use red_cell_common::crypto::{
-        AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_length, encrypt_agent_data_ctr,
-    };
+    use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, encrypt_agent_data};
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -1026,12 +995,10 @@ mod tests {
             [0x11; AGENT_KEY_LENGTH],
             [0x22; AGENT_IV_LENGTH],
         );
-        let plaintext = b"persist this ctr state across restart";
 
         registry.insert(agent.clone()).await?;
-        let _ciphertext = registry.encrypt_for_agent(agent.agent_id, plaintext).await?;
+        registry.set_ctr_offset(agent.agent_id, 7).await?;
         let persisted_offset = registry.ctr_offset(agent.agent_id).await?;
-        assert!(persisted_offset > 0);
 
         let reloaded = AgentRegistry::load(database.clone()).await?;
         assert_eq!(reloaded.ctr_offset(agent.agent_id).await?, persisted_offset);
@@ -1304,35 +1271,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn encrypt_for_agent_advances_ctr_monotonically() -> Result<(), TeamserverError> {
+    async fn encrypt_for_agent_reuses_base_iv_per_message() -> Result<(), TeamserverError> {
         let registry = AgentRegistry::new(test_database().await?);
-        let agent = sample_agent_with_crypto(
-            0x1000_0701,
-            [0x31; AGENT_KEY_LENGTH],
-            [0x41; AGENT_IV_LENGTH],
-        );
-        let first = b"first encrypted payload";
-        let second = b"second payload with a different size";
+        let key = [0x31; AGENT_KEY_LENGTH];
+        let iv = [0x41; AGENT_IV_LENGTH];
+        let agent = sample_agent_with_crypto(0x1000_0701, key, iv);
+        let plaintext = b"first encrypted payload";
 
         registry.insert(agent.clone()).await?;
 
         assert_eq!(registry.ctr_offset(agent.agent_id).await?, 0);
 
-        let _ = registry.encrypt_for_agent(agent.agent_id, first).await?;
-        let first_offset = registry.ctr_offset(agent.agent_id).await?;
-        assert_eq!(first_offset, ctr_blocks_for_length(first.len()));
+        let first = registry.encrypt_for_agent(agent.agent_id, plaintext).await?;
+        let second = registry.encrypt_for_agent(agent.agent_id, plaintext).await?;
 
-        let _ = registry.encrypt_for_agent(agent.agent_id, second).await?;
-        let second_offset = registry.ctr_offset(agent.agent_id).await?;
-        assert_eq!(second_offset, first_offset + ctr_blocks_for_length(second.len()));
-        assert!(second_offset > first_offset);
+        assert_eq!(first, second);
+        assert_eq!(first, encrypt_agent_data(&key, &iv, plaintext)?);
+        assert_eq!(registry.ctr_offset(agent.agent_id).await?, 0);
 
         Ok(())
     }
 
     #[tokio::test]
-    async fn encrypt_and_decrypt_for_agent_round_trip_with_matching_ctr()
-    -> Result<(), TeamserverError> {
+    async fn encrypt_and_decrypt_for_agent_round_trip() -> Result<(), TeamserverError> {
         let sender = AgentRegistry::new(test_database().await?);
         let receiver = AgentRegistry::new(test_database().await?);
         let agent = sample_agent_with_crypto(
@@ -1347,17 +1308,16 @@ mod tests {
 
         let ciphertext = sender.encrypt_for_agent(agent.agent_id, plaintext).await?;
         let decrypted = receiver.decrypt_from_agent(agent.agent_id, &ciphertext).await?;
-        let expected_offset = ctr_blocks_for_length(plaintext.len());
 
         assert_eq!(decrypted, plaintext);
-        assert_eq!(sender.ctr_offset(agent.agent_id).await?, expected_offset);
-        assert_eq!(receiver.ctr_offset(agent.agent_id).await?, expected_offset);
+        assert_eq!(sender.ctr_offset(agent.agent_id).await?, 0);
+        assert_eq!(receiver.ctr_offset(agent.agent_id).await?, 0);
 
         Ok(())
     }
 
     #[tokio::test]
-    async fn set_ctr_offset_changes_subsequent_encrypt_keystream_position()
+    async fn set_ctr_offset_does_not_change_agent_transport_keystream()
     -> Result<(), TeamserverError> {
         let registry = AgentRegistry::new(test_database().await?);
         let key = [0x73; AGENT_KEY_LENGTH];
@@ -1370,11 +1330,10 @@ mod tests {
         registry.set_ctr_offset(agent.agent_id, starting_offset).await?;
 
         let ciphertext = registry.encrypt_for_agent(agent.agent_id, plaintext).await?;
-        let (expected_ciphertext, expected_offset) =
-            encrypt_agent_data_ctr(&key, &iv, starting_offset, plaintext)?;
+        let expected_ciphertext = encrypt_agent_data(&key, &iv, plaintext)?;
 
         assert_eq!(ciphertext, expected_ciphertext);
-        assert_eq!(registry.ctr_offset(agent.agent_id).await?, expected_offset);
+        assert_eq!(registry.ctr_offset(agent.agent_id).await?, starting_offset);
 
         Ok(())
     }
@@ -1394,11 +1353,9 @@ mod tests {
 
         let ciphertext =
             registry.encrypt_for_agent_without_advancing(agent.agent_id, plaintext).await?;
-        let (expected_ciphertext, expected_offset) =
-            encrypt_agent_data_ctr(&key, &iv, starting_offset, plaintext)?;
+        let expected_ciphertext = encrypt_agent_data(&key, &iv, plaintext)?;
 
         assert_eq!(ciphertext, expected_ciphertext);
-        assert_eq!(expected_offset, starting_offset + ctr_blocks_for_length(plaintext.len()));
         assert_eq!(registry.ctr_offset(agent.agent_id).await?, starting_offset);
 
         Ok(())
@@ -1424,11 +1381,7 @@ mod tests {
             registry.decrypt_from_agent(agent.agent_id, plaintext).await,
             Err(TeamserverError::InvalidAgentCrypto { agent_id, .. }) if agent_id == agent.agent_id
         ));
-        assert_eq!(
-            registry.ctr_offset(agent.agent_id).await?,
-            0,
-            "rejected transport must not advance CTR state"
-        );
+        assert_eq!(registry.ctr_offset(agent.agent_id).await?, 0);
 
         Ok(())
     }

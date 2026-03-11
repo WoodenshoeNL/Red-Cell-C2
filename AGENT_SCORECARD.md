@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 49 | 31 |
+| Tasks closed | 0 | 53 | 31 |
 | Bugs filed against | 0 | 3 | 9 |
 | Bug rate (bugs/task) | N/A | 0.06 | 0.29 |
 | Quality score | N/A | 94% | 71% |
@@ -354,6 +354,17 @@ Biggest blindspot: Unauthenticated DEMON_INIT reconnect probes advance CTR with 
 
 Build: passed (cargo check + clippy -D warnings clean; cargo test: 465 passed)
 Observation: m3s fix is well-designed — `encrypt_for_agent_without_advancing` reads the current CTR offset without updating it, `build_reconnect_ack` uses this path, and the listener correctly calls `build_reconnect_ack` instead of `build_init_ack` for reconnect probes. Three test layers: unit (agents.rs), protocol (demon.rs), integration (listeners.rs). The grm fix properly consolidates to the common-crate implementation. Minor P3 issue: the zero-key dead-code blocks in the encrypt/decrypt functions (filed red-cell-c2-3db). Also: red-cell-c2-1r6 (per-IP DEMON_INIT rate limiting) just claimed by Codex.
+
+### QA Review — 2026-03-11 12:55 — ab04858..b5bbffa
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA loop only |
+| Codex | 4 | 0 | Closed: red-cell-c2-1r6 (per-IP DEMON_INIT rate limiting on HTTP/SMB/DNS listeners), red-cell-c2-3db (dead zero-key transport branches removed), red-cell-c2-5pv (Common Crate retrospective close), red-cell-c2-kug (Project Setup retrospective close). Also: clippy policy cleanup — tests use `?` instead of `.unwrap()`. |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (cargo check + clippy -D warnings clean; cargo test: 470 passed, +5 from rate-limiter tests)
+Notes: Clean sprint. `DemonInitRateLimiter` is well-designed — shared via Arc across all listener types, per-IP windowed with 5-attempt/60s cap and 10K entry eviction. `classify_demon_transport` correctly reads plaintext command_id from unencrypted DEMON_INIT bodies (key negotiation happens in plaintext before AES-CTR kicks in). Three integration tests cover HTTP, SMB, and DNS listeners. SMB correctly uses 127.0.0.1 as the fixed peer (named pipes are local-only). No violations found.
 
 ### QA Review — 2026-03-11 11:48 — 1e7832b..f94a8cf
 

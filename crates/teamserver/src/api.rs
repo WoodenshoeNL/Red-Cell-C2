@@ -1286,17 +1286,73 @@ async fn get_listener(
 )]
 async fn update_listener(
     State(state): State<TeamserverState>,
-    _identity: ListenerManagementApiAccess,
+    identity: ListenerManagementApiAccess,
     Path(name): Path<String>,
     Json(config): Json<ListenerConfig>,
 ) -> Result<Json<ListenerSummary>, ListenerManagerError> {
+    let parameters = serde_json::to_value(&config).ok();
     if config.name() != name {
-        return Err(ListenerManagerError::InvalidConfig {
+        let error = ListenerManagerError::InvalidConfig {
             message: "path name must match listener configuration name".to_owned(),
-        });
+        };
+        record_audit_entry(
+            &state.database,
+            &identity.key_id,
+            "listener.update",
+            "listener",
+            Some(name),
+            audit_details(
+                AuditResultStatus::Failure,
+                None,
+                Some("update"),
+                Some(parameter_object([
+                    ("config", parameters.unwrap_or(Value::Null)),
+                    ("error", Value::String(error.to_string())),
+                ])),
+            ),
+        )
+        .await;
+        return Err(error);
     }
 
-    Ok(Json(state.listeners.update(config).await?))
+    let summary = match state.listeners.update(config).await {
+        Ok(summary) => summary,
+        Err(error) => {
+            record_audit_entry(
+                &state.database,
+                &identity.key_id,
+                "listener.update",
+                "listener",
+                Some(name),
+                audit_details(
+                    AuditResultStatus::Failure,
+                    None,
+                    Some("update"),
+                    Some(parameter_object([
+                        ("config", parameters.unwrap_or(Value::Null)),
+                        ("error", Value::String(error.to_string())),
+                    ])),
+                ),
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    record_audit_entry(
+        &state.database,
+        &identity.key_id,
+        "listener.update",
+        "listener",
+        Some(summary.name.clone()),
+        audit_details(
+            AuditResultStatus::Success,
+            None,
+            Some("update"),
+            serde_json::to_value(&summary.config).ok(),
+        ),
+    )
+    .await;
+    Ok(Json(summary))
 }
 
 #[utoipa::path(
@@ -1315,11 +1371,48 @@ async fn update_listener(
 )]
 async fn delete_listener(
     State(state): State<TeamserverState>,
-    _identity: ListenerManagementApiAccess,
+    identity: ListenerManagementApiAccess,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ListenerManagerError> {
-    state.listeners.delete(&name).await?;
-    Ok(StatusCode::NO_CONTENT)
+    match state.listeners.delete(&name).await {
+        Ok(()) => {
+            record_audit_entry(
+                &state.database,
+                &identity.key_id,
+                "listener.delete",
+                "listener",
+                Some(name.clone()),
+                audit_details(
+                    AuditResultStatus::Success,
+                    None,
+                    Some("delete"),
+                    Some(parameter_object([("listener", Value::String(name))])),
+                ),
+            )
+            .await;
+            Ok(StatusCode::NO_CONTENT)
+        }
+        Err(error) => {
+            record_audit_entry(
+                &state.database,
+                &identity.key_id,
+                "listener.delete",
+                "listener",
+                Some(name.clone()),
+                audit_details(
+                    AuditResultStatus::Failure,
+                    None,
+                    Some("delete"),
+                    Some(parameter_object([
+                        ("listener", Value::String(name)),
+                        ("error", Value::String(error.to_string())),
+                    ])),
+                ),
+            )
+            .await;
+            Err(error)
+        }
+    }
 }
 
 #[utoipa::path(
@@ -2558,6 +2651,99 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    #[tokio::test]
+    async fn update_listener_records_audit_entry_on_success() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let _ = app
+            .clone()
+            .oneshot(create_listener_request(
+                &smb_listener_json("pivot", "old-pipe"),
+                "secret-admin",
+            ))
+            .await
+            .expect("response");
+
+        let update_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/listeners/pivot")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(smb_listener_json("pivot", "new-pipe")))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(update_response.status(), StatusCode::OK);
+
+        let audit_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/audit?action=listener.update")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(audit_response.status(), StatusCode::OK);
+        let body = read_json(audit_response).await;
+        let items = body["items"].as_array().expect("items array");
+        assert!(!items.is_empty(), "expected at least one listener.update audit entry");
+        let entry = &items[0];
+        assert_eq!(entry["action"], "listener.update");
+        assert_eq!(entry["target_kind"], "listener");
+        assert_eq!(entry["target_id"], "pivot");
+        assert_eq!(entry["result_status"], "success");
+    }
+
+    #[tokio::test]
+    async fn update_listener_records_audit_entry_on_name_mismatch() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let _ = app
+            .clone()
+            .oneshot(create_listener_request(&smb_listener_json("pivot", "pipe-a"), "secret-admin"))
+            .await
+            .expect("response");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/listeners/pivot")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(smb_listener_json("wrong-name", "pipe-b")))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let audit_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/audit?action=listener.update")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(audit_response.status(), StatusCode::OK);
+        let body = read_json(audit_response).await;
+        let items = body["items"].as_array().expect("items array");
+        assert!(!items.is_empty(), "expected at least one listener.update audit entry");
+        let entry = &items[0];
+        assert_eq!(entry["action"], "listener.update");
+        assert_eq!(entry["result_status"], "failure");
+    }
+
     // ── DELETE /listeners/{name} ────────────────────────────────────────
 
     #[tokio::test]
@@ -2619,6 +2805,91 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_listener_records_audit_entry_on_success() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let _ = app
+            .clone()
+            .oneshot(create_listener_request(
+                &smb_listener_json("pivot", "pipe-del"),
+                "secret-admin",
+            ))
+            .await
+            .expect("response");
+
+        let delete_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/listeners/pivot")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+
+        let audit_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/audit?action=listener.delete")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(audit_response.status(), StatusCode::OK);
+        let body = read_json(audit_response).await;
+        let items = body["items"].as_array().expect("items array");
+        assert!(!items.is_empty(), "expected at least one listener.delete audit entry");
+        let entry = &items[0];
+        assert_eq!(entry["action"], "listener.delete");
+        assert_eq!(entry["target_kind"], "listener");
+        assert_eq!(entry["target_id"], "pivot");
+        assert_eq!(entry["result_status"], "success");
+    }
+
+    #[tokio::test]
+    async fn delete_listener_records_audit_entry_on_not_found() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/listeners/ghost")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let audit_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/audit?action=listener.delete")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(audit_response.status(), StatusCode::OK);
+        let body = read_json(audit_response).await;
+        let items = body["items"].as_array().expect("items array");
+        assert!(!items.is_empty(), "expected at least one listener.delete audit entry");
+        let entry = &items[0];
+        assert_eq!(entry["action"], "listener.delete");
+        assert_eq!(entry["result_status"], "failure");
     }
 
     // ── PUT /listeners/{name}/start ─────────────────────────────────────

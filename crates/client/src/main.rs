@@ -1741,6 +1741,16 @@ impl ClientApp {
             let selected_entry = browser.and_then(|state| {
                 selected_path.as_deref().and_then(|path| find_file_entry(state, path))
             });
+            let selected_directory = selected_remote_directory(browser, selected_path.as_deref());
+
+            if ui
+                .add_enabled(selected_directory.is_some(), egui::Button::new("Set Working Dir"))
+                .clicked()
+                && let Some(path) = selected_directory.as_deref()
+            {
+                self.queue_file_browser_cd(agent_id, path);
+                self.queue_file_browser_list(agent_id, path);
+            }
 
             if ui
                 .add_enabled(
@@ -3429,19 +3439,25 @@ fn upload_destination(
     browser: Option<&AgentFileBrowserState>,
     selected_path: Option<&str>,
 ) -> Option<String> {
-    selected_path
-        .and_then(|path| {
-            browser.and_then(|state| {
-                find_file_entry(state, path).map(|entry| {
-                    if entry.is_dir {
-                        entry.path.clone()
-                    } else {
-                        parent_remote_path(&entry.path).unwrap_or_else(|| entry.path.clone())
-                    }
-                })
+    selected_remote_directory(browser, selected_path)
+        .or_else(|| browser.and_then(|state| state.current_dir.clone()))
+}
+
+fn selected_remote_directory(
+    browser: Option<&AgentFileBrowserState>,
+    selected_path: Option<&str>,
+) -> Option<String> {
+    selected_path.and_then(|path| {
+        browser.and_then(|state| {
+            find_file_entry(state, path).map(|entry| {
+                if entry.is_dir {
+                    entry.path.clone()
+                } else {
+                    parent_remote_path(&entry.path).unwrap_or_else(|| entry.path.clone())
+                }
             })
         })
-        .or_else(|| browser.and_then(|state| state.current_dir.clone()))
+    })
 }
 
 fn find_file_entry<'a>(
@@ -4054,5 +4070,36 @@ mod tests {
             upload_destination(Some(&browser), Some("C:\\Temp\\Logs")).as_deref(),
             Some("C:\\Temp\\Logs")
         );
+    }
+
+    #[test]
+    fn selected_remote_directory_uses_parent_for_selected_file() {
+        let browser = AgentFileBrowserState {
+            current_dir: Some("C:\\Temp".to_owned()),
+            directories: BTreeMap::from([(
+                "C:\\Temp".to_owned(),
+                vec![FileBrowserEntry {
+                    name: "report.txt".to_owned(),
+                    path: "C:\\Temp\\report.txt".to_owned(),
+                    is_dir: false,
+                    size_label: "5 B".to_owned(),
+                    size_bytes: Some(5),
+                    modified_at: String::new(),
+                    permissions: String::new(),
+                }],
+            )]),
+            ..AgentFileBrowserState::default()
+        };
+
+        assert_eq!(
+            selected_remote_directory(Some(&browser), Some("C:\\Temp\\report.txt")).as_deref(),
+            Some("C:\\Temp\\")
+        );
+    }
+
+    #[test]
+    fn selected_remote_directory_returns_none_without_matching_entry() {
+        let browser = AgentFileBrowserState::default();
+        assert!(selected_remote_directory(Some(&browser), Some("C:\\Missing")).is_none());
     }
 }

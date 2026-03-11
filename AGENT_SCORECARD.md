@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 54 | 31 |
+| Tasks closed | 0 | 56 | 31 |
 | Bugs filed against | 0 | 3 | 9 |
-| Bug rate (bugs/task) | N/A | 0.06 | 0.29 |
-| Quality score | N/A | 94% | 71% |
+| Bug rate (bugs/task) | N/A | 0.05 | 0.29 |
+| Quality score | N/A | 95% | 71% |
 
 ## Violation Breakdown
 
@@ -399,3 +399,14 @@ Biggest remaining risk: parallel dispatch chains (red-cell-c2-1mw) — adding a 
 
 Build: passed (cargo check + clippy -D warnings clean; cargo test: 455 passed)
 Observation: CTR offset persistence (red-9pf) fully resolved — offsets survive teamserver restart, verified by new `build_init_ack_after_registry_reload_uses_persisted_ctr_offset` test. LoginRateLimiter fix evicts oldest 50% when map reaches 10K entries; O(n log n) eviction path is acceptable for this use case. Peer IP fix properly distinguishes behind_redirector=true (trust X-Forwarded-For/X-Real-IP) from behind_redirector=false (use actual socket peer). No violations found this run.
+
+### QA Review — 2026-03-11 — 7014778..2c2cb5f
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA loop only |
+| Codex | 2 | 0 | Closed: red-cell-c2-bam (WS chat + presence: ChatMessage dispatch, chat_presence_event, first/last_online_session, client InitConnectionInfo handling), red-cell-c2-3ug (cargo linker path for python 3.12 via .cargo/config.toml). Also: fix stopped listener auto-restart on startup (start_new_profile_listeners filters to Created-only). Claimed red-cell-c2-asj (Command Dispatch epic). |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (cargo check + clippy -D warnings clean; cargo test: 485 passed, +9 from new callback/presence/chat tests)
+Notes: Clean sprint. 4 new demon callbacks (CommandError, CommandExit, CommandKillDate, DemonInfo) all covered by unit tests. agent_update_event now correctly emits "Dead" for inactive agents (was always "Alive"). Chat broadcast correctly uses server-authoritative session username, not client-supplied value. Chat permission downgraded to Read (was Write) — correct, all operators should be able to chat. Stopped listener fix correctly filters on ListenerStatus::Created, preventing forced restart of operator-stopped listeners across teamserver restarts.

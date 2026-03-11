@@ -1204,6 +1204,14 @@ impl ClientApp {
                             });
                             ui.add_space(2.0);
                             ui.monospace(script.path.display().to_string());
+                            if !script.registered_commands.is_empty() {
+                                ui.add_space(4.0);
+                                ui.label(
+                                    RichText::new(script.registered_commands.join(", "))
+                                        .monospace()
+                                        .weak(),
+                                );
+                            }
                             if let Some(error) = &script.error {
                                 ui.add_space(4.0);
                                 ui.colored_label(Color32::from_rgb(215, 83, 83), error);

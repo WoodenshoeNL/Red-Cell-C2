@@ -9,7 +9,7 @@ use std::thread::{self, JoinHandle};
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyModule;
+use pyo3::types::{PyDict, PyTuple};
 use serde_json::{Value, json};
 use tracing::warn;
 
@@ -25,13 +25,21 @@ fn active_runtime_slot() -> &'static Mutex<Option<Arc<PythonApiState>>> {
 #[derive(Clone, Debug)]
 struct RegisteredCommand {
     script_name: String,
+    description: Option<String>,
     callback: Arc<Py<PyAny>>,
 }
 
 #[derive(Clone, Debug)]
 struct RegisteredAgentCheckinCallback {
     script_name: String,
+    mode: AgentCheckinCallbackMode,
     callback: Arc<Py<PyAny>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AgentCheckinCallbackMode {
+    Agent,
+    Identifier,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -99,7 +107,12 @@ impl PythonApiState {
         }
     }
 
-    fn register_command(&self, name: String, callback: Py<PyAny>) -> PyResult<()> {
+    fn register_command(
+        &self,
+        name: String,
+        description: Option<String>,
+        callback: Py<PyAny>,
+    ) -> PyResult<()> {
         let script_name = self.current_script_name().ok_or_else(|| {
             PyRuntimeError::new_err("red_cell.register_command must be called while a script loads")
         })?;
@@ -107,7 +120,11 @@ impl PythonApiState {
 
         lock_mutex(&self.commands).insert(
             normalized_name.clone(),
-            RegisteredCommand { script_name: script_name.clone(), callback: Arc::new(callback) },
+            RegisteredCommand {
+                script_name: script_name.clone(),
+                description,
+                callback: Arc::new(callback),
+            },
         );
         if let Some(record) = lock_mutex(&self.script_records).get_mut(&script_name) {
             record.registered_commands.insert(normalized_name);
@@ -115,12 +132,19 @@ impl PythonApiState {
         Ok(())
     }
 
-    fn register_agent_checkin_callback(&self, callback: Py<PyAny>) -> PyResult<()> {
+    fn register_agent_checkin_callback(
+        &self,
+        callback: Py<PyAny>,
+        mode: AgentCheckinCallbackMode,
+    ) -> PyResult<()> {
         let script_name = self.current_script_name().ok_or_else(|| {
             PyRuntimeError::new_err("red_cell.on_agent_checkin must be called while a script loads")
         })?;
-        lock_mutex(&self.agent_checkin_callbacks)
-            .push(RegisteredAgentCheckinCallback { script_name, callback: Arc::new(callback) });
+        lock_mutex(&self.agent_checkin_callbacks).push(RegisteredAgentCheckinCallback {
+            script_name,
+            mode,
+            callback: Arc::new(callback),
+        });
         Ok(())
     }
 
@@ -141,6 +165,7 @@ impl PythonApiState {
                 path: record.path.clone(),
                 status: record.status,
                 error: record.error.clone(),
+                registered_commands: record.registered_commands.iter().cloned().collect(),
                 registered_command_count: record.registered_commands.len(),
             })
             .collect()
@@ -148,6 +173,14 @@ impl PythonApiState {
 
     fn output_entries(&self) -> Vec<ScriptOutputEntry> {
         lock_mutex(&self.output_entries).clone()
+    }
+
+    fn push_runtime_note(&self, script_name: Option<&str>, text: &str) {
+        let mut rendered = text.to_owned();
+        if !rendered.ends_with('\n') {
+            rendered.push('\n');
+        }
+        let _ = self.push_output(script_name, ScriptOutputStream::Stdout, &rendered);
     }
 
     fn push_output(
@@ -185,6 +218,32 @@ impl PythonApiState {
         lock_mutex(&self.commands).keys().cloned().collect()
     }
 
+    fn match_registered_command(&self, input: &str) -> Option<(String, Vec<String>)> {
+        let normalized_input = normalize_command_name(input);
+        if normalized_input.is_empty() {
+            return None;
+        }
+
+        let commands = lock_mutex(&self.commands);
+        let matched_name = commands
+            .keys()
+            .filter(|name| {
+                normalized_input == **name
+                    || normalized_input
+                        .strip_prefix(name.as_str())
+                        .is_some_and(|rest| rest.starts_with(' '))
+            })
+            .max_by_key(|name| name.len())?
+            .clone();
+        let arguments = normalized_input
+            .strip_prefix(matched_name.as_str())
+            .map(str::trim)
+            .filter(|rest| !rest.is_empty())
+            .map(|rest| rest.split_whitespace().map(ToOwned::to_owned).collect())
+            .unwrap_or_default();
+        Some((matched_name, arguments))
+    }
+
     fn agent_snapshot(&self, agent_id: &str) -> Option<AgentSummary> {
         let normalized = normalize_agent_id(agent_id);
         let state = lock_app_state(&self.app_state);
@@ -218,7 +277,11 @@ impl PythonApiState {
                 for callback in callbacks {
                     self.begin_script_execution(&callback.script_name);
                     let bound = callback.callback.bind(py);
-                    if let Err(error) = bound.call1((agent.clone_ref(py),)) {
+                    let call_result = match callback.mode {
+                        AgentCheckinCallbackMode::Agent => bound.call1((agent.clone_ref(py),)),
+                        AgentCheckinCallbackMode::Identifier => bound.call1((agent_id,)),
+                    };
+                    if let Err(error) = call_result {
                         let message = format!("agent checkin callback failed: {error}\n");
                         let _ = self.push_output(
                             Some(&callback.script_name),
@@ -241,16 +304,30 @@ impl PythonApiState {
         py: Python<'_>,
         command_name: &str,
         agent_id: &str,
+        command_line: &str,
         arguments: &[String],
     ) -> Result<bool, String> {
-        let normalized_command = normalize_command_name(command_name);
-        let registered = lock_mutex(&self.commands).get(&normalized_command).cloned();
+        let registered = {
+            let commands = lock_mutex(&self.commands);
+            commands.get(command_name).cloned()
+        };
         let Some(registered) = registered else {
             return Ok(false);
         };
 
         let agent = Py::new(py, PyAgent { agent_id: normalize_agent_id(agent_id) })
             .map_err(|error| error.to_string())?;
+        let command_context = Py::new(
+            py,
+            PyCommandContext {
+                command: command_name.to_owned(),
+                command_line: command_line.to_owned(),
+                arguments: arguments.to_vec(),
+                description: registered.description.clone(),
+                agent: agent.clone_ref(py),
+            },
+        )
+        .map_err(|error| error.to_string())?;
         self.begin_script_execution(&registered.script_name);
         let bound = registered.callback.bind(py);
         let result = invoke_registered_command_callback(
@@ -259,6 +336,7 @@ impl PythonApiState {
             &registered.script_name,
             bound,
             agent,
+            command_context,
             arguments,
         );
         self.end_script_execution();
@@ -310,6 +388,7 @@ pub(crate) struct ScriptDescriptor {
     pub(crate) path: PathBuf,
     pub(crate) status: ScriptLoadStatus,
     pub(crate) error: Option<String>,
+    pub(crate) registered_commands: Vec<String>,
     pub(crate) registered_command_count: usize,
 }
 
@@ -440,16 +519,15 @@ impl PythonRuntime {
         agent_id: &str,
         input: &str,
     ) -> Result<bool, PythonRuntimeError> {
-        let mut parts = input.split_whitespace();
-        let Some(command_name) = parts.next() else {
+        let Some((command_name, arguments)) = self.inner.api_state.match_registered_command(input)
+        else {
             return Ok(false);
         };
-        let arguments = parts.map(ToOwned::to_owned).collect::<Vec<_>>();
         let (response_tx, response_rx) = mpsc::sync_channel(1);
         self.inner
             .command_tx
             .send(PythonThreadCommand::ExecuteRegisteredCommand {
-                command_name: command_name.to_owned(),
+                command_name,
                 agent_id: agent_id.to_owned(),
                 arguments,
                 response_tx,
@@ -527,7 +605,13 @@ fn python_thread_main(
                 response_tx,
             } => {
                 let result = Python::with_gil(|py| {
-                    api_state.execute_registered_command(py, &command_name, &agent_id, &arguments)
+                    api_state.execute_registered_command(
+                        py,
+                        &command_name,
+                        &agent_id,
+                        &rebuild_command_line(&command_name, &arguments),
+                        &arguments,
+                    )
                 });
                 let _ = response_tx.send(result);
             }
@@ -562,6 +646,9 @@ fn install_api_module(py: Python<'_>) -> PyResult<()> {
     populate_api_module(&module)?;
     modules.set_item("red_cell", module)?;
     modules.set_item("havoc", modules.get_item("red_cell")?)?;
+    let havocui = PyModule::new(py, "havocui")?;
+    populate_havocui_module(&havocui)?;
+    modules.set_item("havocui", havocui)?;
     Ok(())
 }
 
@@ -704,13 +791,41 @@ fn active_api_state() -> PyResult<Arc<PythonApiState>> {
 
 fn populate_api_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(register_command, module)?)?;
+    module.add_function(wrap_pyfunction!(register_callback, module)?)?;
     module.add_function(wrap_pyfunction!(on_agent_checkin, module)?)?;
     module.add_function(wrap_pyfunction!(agent, module)?)?;
     module.add_function(wrap_pyfunction!(agents, module)?)?;
     module.add_function(wrap_pyfunction!(listener, module)?)?;
     module.add_function(wrap_pyfunction!(listeners, module)?)?;
     module.add_class::<PyAgent>()?;
+    module.add_class::<PyCommandContext>()?;
+    module.add_class::<PyEventRegistrar>()?;
     module.add_class::<PyListener>()?;
+    module.add("RegisterCommand", module.getattr("register_command")?)?;
+    module.add("RegisterCallback", module.getattr("register_callback")?)?;
+    module.add("GetAgent", module.getattr("agent")?)?;
+    module.add("GetAgents", module.getattr("agents")?)?;
+    module.add("GetListener", module.getattr("listener")?)?;
+    module.add("GetListeners", module.getattr("listeners")?)?;
+    module.add("Demon", module.getattr("Agent")?)?;
+    module.add("Event", module.getattr("Event")?)?;
+    Ok(())
+}
+
+fn populate_havocui_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_function(wrap_pyfunction!(messagebox, module)?)?;
+    module.add_function(wrap_pyfunction!(errormessage, module)?)?;
+    module.add_function(wrap_pyfunction!(infomessage, module)?)?;
+    module.add_function(wrap_pyfunction!(successmessage, module)?)?;
+    module.add_function(wrap_pyfunction!(createtab, module)?)?;
+    module.add_function(wrap_pyfunction!(settablayout, module)?)?;
+    module.add_class::<PyLogger>()?;
+    module.add("MessageBox", module.getattr("messagebox")?)?;
+    module.add("ErrorMessage", module.getattr("errormessage")?)?;
+    module.add("InfoMessage", module.getattr("infomessage")?)?;
+    module.add("SuccessMessage", module.getattr("successmessage")?)?;
+    module.add("CreateTab", module.getattr("createtab")?)?;
+    module.add("SetTabLayout", module.getattr("settablayout")?)?;
     Ok(())
 }
 
@@ -742,7 +857,7 @@ fn normalize_agent_id(agent_id: &str) -> String {
 }
 
 fn normalize_command_name(name: &str) -> String {
-    name.trim().to_ascii_lowercase()
+    name.split_whitespace().map(|part| part.to_ascii_lowercase()).collect::<Vec<_>>().join(" ")
 }
 
 fn normalize_listener_name(name: &str) -> String {
@@ -811,19 +926,75 @@ fn invoke_registered_command_callback(
     script_name: &str,
     callback: &Bound<'_, PyAny>,
     agent: Py<PyAgent>,
+    context: Py<PyCommandContext>,
     arguments: &[String],
 ) -> Result<bool, String> {
-    match callback.call1((agent.clone_ref(py), arguments.to_vec())) {
-        Ok(value) => {
-            write_callback_result(api_state, script_name, &value)?;
-            Ok(true)
+    let attempts = [
+        PyCallShape::AgentArgsContext,
+        PyCallShape::AgentArgs,
+        PyCallShape::ContextOnly,
+        PyCallShape::AgentOnly,
+        PyCallShape::NoArgs,
+    ];
+
+    for shape in attempts {
+        if !callback_accepts_shape(py, callback, shape)? {
+            continue;
         }
-        Err(error) if error.is_instance_of::<pyo3::exceptions::PyTypeError>(py) => {
-            let value = callback.call1((agent,)).map_err(|inner| inner.to_string())?;
-            write_callback_result(api_state, script_name, &value)?;
-            Ok(true)
-        }
-        Err(error) => Err(error.to_string()),
+        let result = match shape {
+            PyCallShape::AgentArgsContext => {
+                callback.call1((agent.clone_ref(py), arguments.to_vec(), context.clone_ref(py)))
+            }
+            PyCallShape::AgentArgs => callback.call1((agent.clone_ref(py), arguments.to_vec())),
+            PyCallShape::ContextOnly => callback.call1((context.clone_ref(py),)),
+            PyCallShape::AgentOnly => callback.call1((agent.clone_ref(py),)),
+            PyCallShape::NoArgs => callback.call0(),
+        };
+        let value = result.map_err(|error| error.to_string())?;
+        write_callback_result(api_state, script_name, &value)?;
+        return Ok(true);
+    }
+
+    let _ = agent;
+    Err("registered command callback does not accept any supported signature".to_owned())
+}
+
+#[derive(Clone, Copy)]
+enum PyCallShape {
+    AgentArgsContext,
+    AgentArgs,
+    ContextOnly,
+    AgentOnly,
+    NoArgs,
+}
+
+fn callback_accepts_shape(
+    py: Python<'_>,
+    callback: &Bound<'_, PyAny>,
+    shape: PyCallShape,
+) -> Result<bool, String> {
+    let inspect = py.import("inspect").map_err(|error| error.to_string())?;
+    let signature = match inspect.call_method1("signature", (callback,)) {
+        Ok(signature) => signature,
+        Err(_) => return Ok(true),
+    };
+
+    let args = match shape {
+        PyCallShape::AgentArgsContext => 3_usize,
+        PyCallShape::AgentArgs => 2,
+        PyCallShape::ContextOnly | PyCallShape::AgentOnly => 1,
+        PyCallShape::NoArgs => 0,
+    };
+    let probe =
+        PyTuple::new(py, (0..args).map(|_| py.None())).map_err(|error| error.to_string())?;
+    Ok(signature.call_method1("bind_partial", probe).is_ok())
+}
+
+fn rebuild_command_line(command_name: &str, arguments: &[String]) -> String {
+    if arguments.is_empty() {
+        command_name.to_owned()
+    } else {
+        format!("{command_name} {}", arguments.join(" "))
     }
 }
 
@@ -858,6 +1029,81 @@ impl PyAgent {
             Some(agent) => json_value_to_object(py, &agent_summary_to_json(&agent)),
             None => Ok(py.None().into_bound(py).unbind()),
         }
+    }
+
+    #[pyo3(name = "ConsoleWrite", signature = (text, level=None))]
+    fn console_write(&self, text: String, level: Option<&str>) -> PyResult<()> {
+        let api_state = active_api_state()?;
+        let prefix = level.unwrap_or("INFO");
+        api_state.push_runtime_note(None, &format!("[{prefix}] {}: {text}", self.agent_id));
+        Ok(())
+    }
+}
+
+#[pyclass(name = "CommandContext")]
+#[derive(Debug)]
+struct PyCommandContext {
+    command: String,
+    command_line: String,
+    arguments: Vec<String>,
+    description: Option<String>,
+    agent: Py<PyAgent>,
+}
+
+#[pymethods]
+impl PyCommandContext {
+    #[getter]
+    fn command(&self) -> String {
+        self.command.clone()
+    }
+
+    #[getter]
+    fn command_line(&self) -> String {
+        self.command_line.clone()
+    }
+
+    #[getter]
+    fn args(&self) -> Vec<String> {
+        self.arguments.clone()
+    }
+
+    #[getter]
+    fn description(&self) -> Option<String> {
+        self.description.clone()
+    }
+
+    #[getter]
+    fn agent(&self, py: Python<'_>) -> Py<PyAgent> {
+        self.agent.clone_ref(py)
+    }
+}
+
+#[pyclass(name = "Event")]
+#[derive(Clone, Debug)]
+struct PyEventRegistrar {
+    namespace: String,
+}
+
+#[pymethods]
+impl PyEventRegistrar {
+    #[new]
+    fn new(namespace: String) -> Self {
+        Self { namespace }
+    }
+
+    #[pyo3(name = "OnNewSession")]
+    fn on_new_session(&self, callback: Bound<'_, PyAny>) -> PyResult<()> {
+        ensure_callable(&callback)?;
+        let _ = &self.namespace;
+        active_api_state()?.register_agent_checkin_callback(
+            callback.unbind(),
+            AgentCheckinCallbackMode::Identifier,
+        )
+    }
+
+    #[pyo3(name = "OnAgentCheckin")]
+    fn on_agent_checkin(&self, callback: Bound<'_, PyAny>) -> PyResult<()> {
+        self.on_new_session(callback)
     }
 }
 
@@ -898,6 +1144,36 @@ struct PyOutputSink {
     stream: ScriptOutputStream,
 }
 
+#[pyclass(name = "Logger")]
+struct PyLogger {
+    name: Option<String>,
+}
+
+#[pymethods]
+impl PyLogger {
+    #[new]
+    #[pyo3(signature = (name=None))]
+    fn new(name: Option<String>) -> Self {
+        Self { name }
+    }
+
+    fn write(&self, text: &str) -> PyResult<usize> {
+        let api_state = active_api_state()?;
+        let prefix = self.name.as_deref().unwrap_or("havocui");
+        api_state.push_output(None, ScriptOutputStream::Stdout, &format!("[{prefix}] {text}"))
+    }
+
+    fn info(&self, text: &str) -> PyResult<usize> {
+        self.write(text)
+    }
+
+    fn error(&self, text: &str) -> PyResult<usize> {
+        let api_state = active_api_state()?;
+        let prefix = self.name.as_deref().unwrap_or("havocui");
+        api_state.push_output(None, ScriptOutputStream::Stderr, &format!("[{prefix}] {text}"))
+    }
+}
+
 #[pymethods]
 impl PyOutputSink {
     fn write(&self, text: &str) -> PyResult<usize> {
@@ -907,18 +1183,102 @@ impl PyOutputSink {
     fn flush(&self) {}
 }
 
-#[pyfunction]
-fn register_command(name: String, callback: Bound<'_, PyAny>) -> PyResult<()> {
+struct RegisterCommandRequest {
+    name: String,
+    description: Option<String>,
+    callback: Py<PyAny>,
+}
+
+fn optional_kwarg<'py>(
+    kwargs: Option<&Bound<'py, PyDict>>,
+    key: &str,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    match kwargs {
+        Some(kwargs) => kwargs.get_item(key),
+        None => Ok(None),
+    }
+}
+
+fn extract_string_argument(
+    kwargs: Option<&Bound<'_, PyDict>>,
+    key: &str,
+    positional: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<String>> {
+    if let Some(value) = optional_kwarg(kwargs, key)? {
+        return value.extract::<String>().map(Some);
+    }
+    positional.map(Bound::extract::<String>).transpose()
+}
+
+fn parse_register_command_request(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<RegisterCommandRequest> {
+    let positional = args.iter().collect::<Vec<_>>();
+    let havoc_style = optional_kwarg(kwargs, "function")?.is_some()
+        || positional.first().is_some_and(Bound::is_callable);
+
+    if havoc_style {
+        let callback = if let Some(value) = optional_kwarg(kwargs, "function")? {
+            value
+        } else {
+            positional
+                .first()
+                .cloned()
+                .ok_or_else(|| PyValueError::new_err("RegisterCommand requires a callable"))?
+        };
+        ensure_callable(&callback)?;
+        let module = extract_string_argument(kwargs, "module", positional.get(1))?
+            .ok_or_else(|| PyValueError::new_err("RegisterCommand requires a module name"))?;
+        let command = extract_string_argument(kwargs, "command", positional.get(2))?
+            .ok_or_else(|| PyValueError::new_err("RegisterCommand requires a command name"))?;
+        let description = extract_string_argument(kwargs, "description", positional.get(3))?;
+        let name = if module.trim().is_empty() { command } else { format!("{module} {command}") };
+        return Ok(RegisterCommandRequest { name, description, callback: callback.unbind() });
+    }
+
+    let callback = if let Some(value) = optional_kwarg(kwargs, "callback")? {
+        value
+    } else {
+        positional
+            .get(1)
+            .cloned()
+            .ok_or_else(|| PyValueError::new_err("register_command requires a callback"))?
+    };
     ensure_callable(&callback)?;
+    let name = extract_string_argument(kwargs, "name", positional.first())?
+        .ok_or_else(|| PyValueError::new_err("register_command requires a command name"))?;
+    let description = extract_string_argument(kwargs, "description", positional.get(2))?;
+    Ok(RegisterCommandRequest { name, description, callback: callback.unbind() })
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn register_command(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+    let request = parse_register_command_request(args, kwargs)?;
     let api_state = active_api_state()?;
-    api_state.register_command(name, callback.unbind())
+    api_state.register_command(request.name, request.description, request.callback)
+}
+
+#[pyfunction]
+fn register_callback(event_type: String, callback: Bound<'_, PyAny>) -> PyResult<()> {
+    ensure_callable(&callback)?;
+    let mode = match event_type.trim().to_ascii_lowercase().as_str() {
+        "agent_checkin" | "new_session" => AgentCheckinCallbackMode::Identifier,
+        _ => {
+            return Err(PyValueError::new_err(format!(
+                "unsupported client callback `{event_type}`"
+            )));
+        }
+    };
+    active_api_state()?.register_agent_checkin_callback(callback.unbind(), mode)
 }
 
 #[pyfunction]
 fn on_agent_checkin(callback: Bound<'_, PyAny>) -> PyResult<()> {
     ensure_callable(&callback)?;
     let api_state = active_api_state()?;
-    api_state.register_agent_checkin_callback(callback.unbind())
+    api_state.register_agent_checkin_callback(callback.unbind(), AgentCheckinCallbackMode::Agent)
 }
 
 #[pyfunction]
@@ -949,6 +1309,51 @@ fn listeners(py: Python<'_>) -> PyResult<Vec<Py<PyListener>>> {
         .into_iter()
         .map(|listener| Py::new(py, PyListener { name: listener.name }))
         .collect()
+}
+
+#[pyfunction]
+#[pyo3(signature = (text, title=None))]
+fn messagebox(text: String, title: Option<String>) -> PyResult<()> {
+    let api_state = active_api_state()?;
+    let label = title.unwrap_or_else(|| "Message".to_owned());
+    api_state.push_runtime_note(None, &format!("[havocui:{label}] {text}"));
+    Ok(())
+}
+
+#[pyfunction]
+fn errormessage(text: String) -> PyResult<()> {
+    let api_state = active_api_state()?;
+    let rendered = format!("[havocui:error] {text}\n");
+    let _ = api_state.push_output(None, ScriptOutputStream::Stderr, &rendered)?;
+    Ok(())
+}
+
+#[pyfunction]
+fn infomessage(text: String) -> PyResult<()> {
+    messagebox(text, Some("Info".to_owned()))
+}
+
+#[pyfunction]
+fn successmessage(text: String) -> PyResult<()> {
+    messagebox(text, Some("Success".to_owned()))
+}
+
+#[pyfunction]
+#[pyo3(signature = (title, callback=None))]
+fn createtab(title: String, callback: Option<Bound<'_, PyAny>>) -> PyResult<()> {
+    if let Some(callback) = callback {
+        ensure_callable(&callback)?;
+    }
+    let api_state = active_api_state()?;
+    api_state.push_runtime_note(None, &format!("[havocui] tab requested: {title}"));
+    Ok(())
+}
+
+#[pyfunction]
+fn settablayout(title: String, layout: String) -> PyResult<()> {
+    let api_state = active_api_state()?;
+    api_state.push_runtime_note(None, &format!("[havocui] set layout for {title}: {layout}"));
+    Ok(())
 }
 
 fn lock_mutex<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -1059,6 +1464,7 @@ mod tests {
                 path: temp_dir.path().join("sample.py"),
                 status: ScriptLoadStatus::Loaded,
                 error: None,
+                registered_commands: vec!["demo".to_owned()],
                 registered_command_count: 1,
             }]
         );
@@ -1212,6 +1618,77 @@ red_cell.register_command('demo', demo)\n",
         assert!(executed);
         assert_eq!(wait_for_file_contents(&output_path).as_deref(), Some("00ABCDEF:alpha,bravo"));
         assert!(wait_for_output(&runtime, "handled wkstn-01"));
+    }
+
+    #[test]
+    fn runtime_accepts_havoc_style_command_registration_and_context_callbacks() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let output_path = temp_dir.path().join("context.txt");
+        let script = format!(
+            "import pathlib\nimport havoc\n\
+def run(context):\n    pathlib.Path({output:?}).write_text(context.command_line + '|' + context.agent.id)\n    return context.description or ''\n\
+havoc.RegisterCommand(function=run, module='situational_awareness', command='whoami', description='demo command')\n",
+            output = output_path.display().to_string()
+        );
+        write_script(&temp_dir.path().join("compat.py"), &script);
+
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+        {
+            let mut state = lock_app_state(&app_state);
+            state.agents.push(sample_agent("00ABCDEF"));
+        }
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        assert_eq!(runtime.command_names(), vec!["situational_awareness whoami".to_owned()]);
+
+        let executed = runtime
+            .execute_registered_command("00ABCDEF", "situational_awareness whoami /all")
+            .unwrap_or_else(|error| panic!("havoc-style command should run: {error}"));
+
+        assert!(executed);
+        assert_eq!(
+            wait_for_file_contents(&output_path).as_deref(),
+            Some("situational_awareness whoami /all|00ABCDEF")
+        );
+        assert!(wait_for_output(&runtime, "demo command"));
+    }
+
+    #[test]
+    fn havoc_event_and_havocui_modules_are_compatible() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let output_path = temp_dir.path().join("event.txt");
+        let script = format!(
+            "import pathlib\nimport havoc\nimport havocui\n\
+event = havoc.Event('events')\n\
+def on_new_session(identifier):\n    pathlib.Path({output:?}).write_text(identifier)\n    havocui.MessageBox('new session for ' + identifier)\n\
+event.OnNewSession(on_new_session)\n",
+            output = output_path.display().to_string()
+        );
+        write_script(&temp_dir.path().join("havoc_ui.py"), &script);
+
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+        {
+            let mut state = lock_app_state(&app_state);
+            state.agents.push(sample_agent("00ABCDEF"));
+        }
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        runtime
+            .emit_agent_checkin("00ABCDEF".to_owned())
+            .unwrap_or_else(|error| panic!("havoc event dispatch should succeed: {error}"));
+
+        assert_eq!(wait_for_file_contents(&output_path).as_deref(), Some("00ABCDEF"));
+        assert!(wait_for_output(&runtime, "new session for 00ABCDEF"));
     }
 
     #[test]

@@ -563,8 +563,8 @@ fn pack_config(
     let injection = required_object(config, "Injection")?;
     add_u32(&mut out, injection_mode(injection, "Alloc")?);
     add_u32(&mut out, injection_mode(injection, "Execute")?);
-    add_wstring(&mut out, required_string(injection, "Spawn64")?);
-    add_wstring(&mut out, required_string(injection, "Spawn32")?);
+    add_wstring(&mut out, required_string(injection, "Spawn64")?)?;
+    add_wstring(&mut out, required_string(injection, "Spawn32")?)?;
 
     let sleep_technique = required_string(config, "Sleep Technique")?;
     let obfuscation = sleep_obfuscation_value(sleep_technique);
@@ -619,7 +619,7 @@ fn pack_http_listener(
             message: "GET method is not supported".to_owned(),
         });
     }
-    add_wstring(out, "POST");
+    add_wstring(out, "POST")?;
     add_u32(out, if config.host_rotation.eq_ignore_ascii_case("round-robin") { 0 } else { 1 });
 
     add_u32(
@@ -633,12 +633,12 @@ fn pack_http_listener(
             .rsplit_once(':')
             .and_then(|(host_name, port)| port.parse::<u16>().ok().map(|port| (host_name, port)))
             .unwrap_or((host.as_str(), port));
-        add_wstring(out, host_name);
+        add_wstring(out, host_name)?;
         add_u32(out, u32::from(host_port));
     }
 
     add_u32(out, if config.secure { 1 } else { 0 });
-    add_wstring(out, config.user_agent.as_deref().unwrap_or_default());
+    add_wstring(out, config.user_agent.as_deref().unwrap_or_default())?;
 
     let mut headers = if config.headers.is_empty() {
         vec!["Content-type: */*".to_owned()]
@@ -655,7 +655,7 @@ fn pack_http_listener(
         })?,
     );
     for header in headers {
-        add_wstring(out, &header);
+        add_wstring(out, &header)?;
     }
 
     let uris = if config.uris.is_empty() { vec!["/".to_owned()] } else { config.uris.clone() };
@@ -666,15 +666,15 @@ fn pack_http_listener(
         })?,
     );
     for uri in uris {
-        add_wstring(out, &uri);
+        add_wstring(out, &uri)?;
     }
 
     match &config.proxy {
         Some(proxy) if proxy.enabled => {
             add_u32(out, 1);
-            add_wstring(out, &proxy_url(proxy));
-            add_wstring(out, proxy.username.as_deref().unwrap_or_default());
-            add_wstring(out, proxy.password.as_deref().unwrap_or_default());
+            add_wstring(out, &proxy_url(proxy))?;
+            add_wstring(out, proxy.username.as_deref().unwrap_or_default())?;
+            add_wstring(out, proxy.password.as_deref().unwrap_or_default())?;
         }
         _ => add_u32(out, 0),
     }
@@ -686,7 +686,7 @@ fn pack_smb_listener(
     out: &mut Vec<u8>,
     config: &red_cell_common::SmbListenerConfig,
 ) -> Result<(), PayloadBuildError> {
-    add_wstring(out, &format!(r"\\.\pipe\{}", config.pipe_name));
+    add_wstring(out, &format!(r"\\.\pipe\{}", config.pipe_name))?;
     add_u64(out, parse_kill_date(config.kill_date.as_deref())? as u64);
     add_u32(out, parse_working_hours(config.working_hours.as_deref())? as u32);
     Ok(())
@@ -1084,15 +1084,19 @@ fn add_u64(buffer: &mut Vec<u8>, value: u64) {
     buffer.extend_from_slice(&value.to_le_bytes());
 }
 
-fn add_bytes(buffer: &mut Vec<u8>, value: &[u8]) {
-    add_u32(buffer, u32::try_from(value.len()).unwrap_or_default());
+fn add_bytes(buffer: &mut Vec<u8>, value: &[u8]) -> Result<(), PayloadBuildError> {
+    let len = u32::try_from(value.len()).map_err(|_| PayloadBuildError::InvalidRequest {
+        message: format!("byte slice length {} exceeds u32::MAX", value.len()),
+    })?;
+    add_u32(buffer, len);
     buffer.extend_from_slice(value);
+    Ok(())
 }
 
-fn add_wstring(buffer: &mut Vec<u8>, value: &str) {
+fn add_wstring(buffer: &mut Vec<u8>, value: &str) -> Result<(), PayloadBuildError> {
     let mut utf16: Vec<u8> = value.encode_utf16().flat_map(u16::to_le_bytes).collect();
     utf16.extend_from_slice(&[0, 0]);
-    add_bytes(buffer, &utf16);
+    add_bytes(buffer, &utf16)
 }
 
 #[cfg(test)]
@@ -1222,6 +1226,23 @@ mod tests {
     fn parse_hour_minute_rejects_24_60() {
         let err = parse_hour_minute("24:60").unwrap_err();
         assert!(matches!(err, PayloadBuildError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn add_bytes_writes_length_prefixed_data() -> Result<(), PayloadBuildError> {
+        let mut buf = Vec::new();
+        add_bytes(&mut buf, b"hello")?;
+        assert_eq!(&buf[..4], &5_u32.to_le_bytes());
+        assert_eq!(&buf[4..], b"hello");
+        Ok(())
+    }
+
+    #[test]
+    fn add_bytes_returns_error_for_empty_after_wstring() -> Result<(), PayloadBuildError> {
+        let mut buf = Vec::new();
+        add_wstring(&mut buf, "")?;
+        assert_eq!(&buf[..4], &2_u32.to_le_bytes(), "empty string still has null terminator");
+        Ok(())
     }
 
     #[test]

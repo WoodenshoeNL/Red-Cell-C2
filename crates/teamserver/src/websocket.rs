@@ -895,18 +895,19 @@ pub(crate) async fn execute_agent_task(
     {
         events.broadcast(teamserver_log_event(actor, &result));
         0
-    } else if let Some(plugins) = crate::PluginRuntime::current()? {
-        if let Some((command, args)) = plugins.match_registered_command(&message.info).await {
-            if plugins.invoke_registered_command(&command, actor, agent_id, args).await? {
-                0
+    } else {
+        let handled_by_plugin = if let Some(plugins) = crate::PluginRuntime::current()? {
+            if let Some((command, args)) = plugins.match_registered_command(&message.info).await {
+                plugins.invoke_registered_command(&command, actor, agent_id, args).await?
             } else {
-                let jobs = build_jobs(&message.info, actor)?;
-                let queued_jobs = jobs.len();
-                for job in jobs {
-                    registry.enqueue_job(agent_id, job).await?;
-                }
-                queued_jobs
+                false
             }
+        } else {
+            false
+        };
+
+        if handled_by_plugin {
+            0
         } else {
             let jobs = build_jobs(&message.info, actor)?;
             let queued_jobs = jobs.len();
@@ -915,13 +916,6 @@ pub(crate) async fn execute_agent_task(
             }
             queued_jobs
         }
-    } else {
-        let jobs = build_jobs(&message.info, actor)?;
-        let queued_jobs = jobs.len();
-        for job in jobs {
-            registry.enqueue_job(agent_id, job).await?;
-        }
-        queued_jobs
     };
 
     events.broadcast(OperatorMessage::AgentTask(message));

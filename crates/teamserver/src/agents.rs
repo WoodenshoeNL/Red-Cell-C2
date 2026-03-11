@@ -49,6 +49,15 @@ pub struct JobContext {
     pub operator: String,
 }
 
+/// Snapshot entry describing a queued job and the agent it targets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueuedJob {
+    /// Agent identifier the job is queued for.
+    pub agent_id: u32,
+    /// Queued job payload and metadata.
+    pub job: Job,
+}
+
 #[derive(Debug)]
 struct AgentEntry {
     info: RwLock<AgentInfo>,
@@ -479,6 +488,27 @@ impl AgentRegistry {
             self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
         let jobs = entry.jobs.lock().await;
         Ok(jobs.iter().cloned().collect())
+    }
+
+    /// Return a stable snapshot of every queued job across all tracked agents.
+    #[instrument(skip(self))]
+    pub async fn queued_jobs_all(&self) -> Vec<QueuedJob> {
+        let entries = {
+            let entries = self.entries.read().await;
+            entries
+                .iter()
+                .map(|(agent_id, entry)| (*agent_id, Arc::clone(entry)))
+                .collect::<Vec<_>>()
+        };
+
+        let mut queued = Vec::new();
+        for (agent_id, entry) in entries {
+            let jobs = entry.jobs.lock().await;
+            queued.extend(jobs.iter().cloned().map(|job| QueuedJob { agent_id, job }));
+        }
+
+        queued.sort_by_key(|queued_job| (queued_job.agent_id, queued_job.job.request_id));
+        queued
     }
 
     /// Return the retained task metadata for a callback request, if known.
@@ -1402,6 +1432,34 @@ mod tests {
 
         assert_eq!(registry.dequeue_jobs(agent.agent_id).await?, vec![first, second]);
         assert!(registry.queued_jobs(agent.agent_id).await?.is_empty());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn queued_jobs_all_returns_jobs_across_agents_in_stable_order()
+    -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let first_agent = sample_agent(0x1000_000A);
+        let second_agent = sample_agent(0x1000_000B);
+        registry.insert(first_agent.clone()).await?;
+        registry.insert(second_agent.clone()).await?;
+
+        let second_job = sample_job(2);
+        let first_job = sample_job(1);
+        let third_job = sample_job(3);
+        registry.enqueue_job(second_agent.agent_id, third_job.clone()).await?;
+        registry.enqueue_job(first_agent.agent_id, second_job.clone()).await?;
+        registry.enqueue_job(first_agent.agent_id, first_job.clone()).await?;
+
+        assert_eq!(
+            registry.queued_jobs_all().await,
+            vec![
+                super::QueuedJob { agent_id: first_agent.agent_id, job: first_job },
+                super::QueuedJob { agent_id: first_agent.agent_id, job: second_job },
+                super::QueuedJob { agent_id: second_agent.agent_id, job: third_job },
+            ]
+        );
 
         Ok(())
     }

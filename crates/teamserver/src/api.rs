@@ -32,6 +32,7 @@ use utoipa::{IntoParams, Modify, OpenApi, ToSchema};
 use utoipa_swagger_ui::SwaggerUi;
 use uuid::Uuid;
 
+use crate::agents::QueuedJob;
 use crate::app::TeamserverState;
 use crate::listeners::{ListenerManagerError, ListenerMarkRequest, ListenerSummary};
 use crate::rbac::{
@@ -396,6 +397,99 @@ struct LootPage {
     items: Vec<LootSummary>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+struct CredentialSummary {
+    id: i64,
+    agent_id: String,
+    name: String,
+    captured_at: String,
+    operator: Option<String>,
+    command_line: Option<String>,
+    task_id: Option<String>,
+    pattern: Option<String>,
+    content: Option<String>,
+    metadata: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+struct CredentialPage {
+    total: usize,
+    limit: usize,
+    offset: usize,
+    items: Vec<CredentialSummary>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, IntoParams)]
+struct CredentialQuery {
+    agent_id: Option<String>,
+    operator: Option<String>,
+    command: Option<String>,
+    name: Option<String>,
+    pattern: Option<String>,
+    since: Option<String>,
+    until: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+impl CredentialQuery {
+    const DEFAULT_LIMIT: usize = 50;
+    const MAX_LIMIT: usize = 200;
+
+    fn limit(&self) -> usize {
+        self.limit.unwrap_or(Self::DEFAULT_LIMIT).clamp(1, Self::MAX_LIMIT)
+    }
+
+    fn offset(&self) -> usize {
+        self.offset.unwrap_or_default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+struct JobSummary {
+    agent_id: String,
+    command_id: u32,
+    request_id: String,
+    task_id: String,
+    command_line: String,
+    created_at: String,
+    operator: Option<String>,
+    payload_size: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+struct JobPage {
+    total: usize,
+    limit: usize,
+    offset: usize,
+    items: Vec<JobSummary>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, IntoParams)]
+struct JobQuery {
+    agent_id: Option<String>,
+    operator: Option<String>,
+    command: Option<String>,
+    task_id: Option<String>,
+    request_id: Option<String>,
+    command_id: Option<u32>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+impl JobQuery {
+    const DEFAULT_LIMIT: usize = 50;
+    const MAX_LIMIT: usize = 200;
+
+    fn limit(&self) -> usize {
+        self.limit.unwrap_or(Self::DEFAULT_LIMIT).clamp(1, Self::MAX_LIMIT)
+    }
+
+    fn offset(&self) -> usize {
+        self.offset.unwrap_or_default()
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize, IntoParams)]
 struct LootQuery {
     kind: Option<String>,
@@ -504,6 +598,56 @@ impl IntoResponse for LootApiError {
 }
 
 #[derive(Debug, Error)]
+enum CredentialApiError {
+    #[error("{0}")]
+    Teamserver(#[from] crate::TeamserverError),
+    #[error("invalid credential id `{value}`")]
+    InvalidCredentialId { value: String },
+    #[error("invalid agent id `{value}`")]
+    InvalidAgentId { value: String },
+    #[error("credential `{id}` not found")]
+    NotFound { id: i64 },
+}
+
+impl IntoResponse for CredentialApiError {
+    fn into_response(self) -> Response {
+        let (status, code) = match &self {
+            Self::InvalidCredentialId { .. } => (StatusCode::BAD_REQUEST, "invalid_credential_id"),
+            Self::InvalidAgentId { .. } => (StatusCode::BAD_REQUEST, "invalid_agent_id"),
+            Self::NotFound { .. } => (StatusCode::NOT_FOUND, "credential_not_found"),
+            Self::Teamserver(_) => (StatusCode::INTERNAL_SERVER_ERROR, "credential_api_error"),
+        };
+
+        json_error_response(status, code, self.to_string())
+    }
+}
+
+#[derive(Debug, Error)]
+enum JobApiError {
+    #[error("{0}")]
+    Teamserver(#[from] crate::TeamserverError),
+    #[error("invalid agent id `{value}`")]
+    InvalidAgentId { value: String },
+    #[error("invalid request id `{value}`")]
+    InvalidRequestId { value: String },
+    #[error("queued job not found for agent `{agent_id}` request `{request_id}`")]
+    NotFound { agent_id: String, request_id: String },
+}
+
+impl IntoResponse for JobApiError {
+    fn into_response(self) -> Response {
+        let (status, code) = match &self {
+            Self::InvalidAgentId { .. } => (StatusCode::BAD_REQUEST, "invalid_agent_id"),
+            Self::InvalidRequestId { .. } => (StatusCode::BAD_REQUEST, "invalid_request_id"),
+            Self::NotFound { .. } => (StatusCode::NOT_FOUND, "job_not_found"),
+            Self::Teamserver(_) => (StatusCode::INTERNAL_SERVER_ERROR, "job_api_error"),
+        };
+
+        json_error_response(status, code, self.to_string())
+    }
+}
+
+#[derive(Debug, Error)]
 enum OperatorApiError {
     #[error("{0}")]
     Auth(#[from] AuthError),
@@ -538,6 +682,10 @@ pub fn api_routes(api: ApiRuntime) -> Router<TeamserverState> {
         .route("/agents/{id}", get(get_agent).delete(kill_agent))
         .route("/agents/{id}/task", post(queue_agent_task))
         .route("/audit", get(list_audit))
+        .route("/credentials", get(list_credentials))
+        .route("/credentials/{id}", get(get_credential))
+        .route("/jobs", get(list_jobs))
+        .route("/jobs/{agent_id}/{request_id}", get(get_job))
         .route("/loot", get(list_loot))
         .route("/loot/{id}", get(get_loot))
         .route("/operators", get(list_operators).post(create_operator))
@@ -602,6 +750,10 @@ struct ApiInfoResponse {
         kill_agent,
         queue_agent_task,
         list_audit,
+        list_credentials,
+        get_credential,
+        list_jobs,
+        get_job,
         list_loot,
         get_loot,
         list_operators,
@@ -622,6 +774,10 @@ struct ApiInfoResponse {
             ApiInfoResponse,
             AgentTaskQueuedResponse,
             AuditPage,
+            CredentialPage,
+            CredentialSummary,
+            JobPage,
+            JobSummary,
             LootPage,
             LootSummary,
             OperatorSummary,
@@ -651,7 +807,9 @@ struct ApiInfoResponse {
     tags(
         (name = "rest", description = "Versioned REST API for Red Cell automation clients"),
         (name = "audit", description = "Operator audit trail endpoints"),
+        (name = "credentials", description = "Captured credential inventory endpoints"),
         (name = "agents", description = "Agent inventory and tasking endpoints"),
+        (name = "jobs", description = "Queued agent job inspection endpoints"),
         (name = "loot", description = "Captured loot listing and download endpoints"),
         (name = "operators", description = "Administrative operator-management endpoints"),
         (name = "listeners", description = "Listener lifecycle management endpoints")
@@ -960,6 +1118,188 @@ async fn list_audit(
     Query(query): Query<AuditQuery>,
 ) -> Result<Json<AuditPage>, AuditApiError> {
     Ok(Json(query_audit_log(&state.database, &query).await?))
+}
+
+#[utoipa::path(
+    get,
+    path = "/credentials",
+    context_path = "/api/v1",
+    tag = "credentials",
+    security(("api_key" = [])),
+    params(CredentialQuery),
+    responses(
+        (status = 200, description = "Filtered and paginated captured credentials", body = CredentialPage),
+        (status = 400, description = "Invalid filter value", body = ApiErrorBody),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
+        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody)
+    )
+)]
+async fn list_credentials(
+    State(state): State<TeamserverState>,
+    _identity: ReadApiAccess,
+    Query(query): Query<CredentialQuery>,
+) -> Result<Json<CredentialPage>, CredentialApiError> {
+    let normalized_agent_id = normalize_agent_filter(query.agent_id.as_deref(), |value| {
+        CredentialApiError::InvalidAgentId { value }
+    })?;
+    let since = query.since.as_deref().and_then(parse_rfc3339);
+    let until = query.until.as_deref().and_then(parse_rfc3339);
+
+    let mut items = state
+        .database
+        .loot()
+        .list()
+        .await?
+        .into_iter()
+        .rev()
+        .filter(|record| {
+            credential_matches(&query, record, normalized_agent_id.as_deref(), since, until)
+        })
+        .filter_map(credential_summary)
+        .collect::<Vec<_>>();
+
+    let total = items.len();
+    let offset = query.offset();
+    let limit = query.limit();
+    items = items.into_iter().skip(offset).take(limit).collect();
+
+    Ok(Json(CredentialPage { total, limit, offset, items }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/credentials/{id}",
+    context_path = "/api/v1",
+    tag = "credentials",
+    security(("api_key" = [])),
+    params(("id" = String, Path, description = "Numeric credential identifier")),
+    responses(
+        (status = 200, description = "Captured credential details", body = CredentialSummary),
+        (status = 400, description = "Invalid credential id", body = ApiErrorBody),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
+        (status = 404, description = "Credential not found", body = ApiErrorBody)
+    )
+)]
+async fn get_credential(
+    State(state): State<TeamserverState>,
+    _identity: ReadApiAccess,
+    Path(id): Path<String>,
+) -> Result<Json<CredentialSummary>, CredentialApiError> {
+    let credential_id = id
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| CredentialApiError::InvalidCredentialId { value: id.clone() })?;
+    let record = state
+        .database
+        .loot()
+        .get(credential_id)
+        .await?
+        .filter(|record| record.kind.eq_ignore_ascii_case("credential"))
+        .ok_or(CredentialApiError::NotFound { id: credential_id })?;
+
+    credential_summary(record).map(Json).ok_or(CredentialApiError::NotFound { id: credential_id })
+}
+
+#[utoipa::path(
+    get,
+    path = "/jobs",
+    context_path = "/api/v1",
+    tag = "jobs",
+    security(("api_key" = [])),
+    params(JobQuery),
+    responses(
+        (status = 200, description = "Queued jobs across all tracked agents", body = JobPage),
+        (status = 400, description = "Invalid filter value", body = ApiErrorBody),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
+        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody)
+    )
+)]
+async fn list_jobs(
+    State(state): State<TeamserverState>,
+    _identity: ReadApiAccess,
+    Query(query): Query<JobQuery>,
+) -> Result<Json<JobPage>, JobApiError> {
+    let normalized_agent_id = normalize_agent_filter(query.agent_id.as_deref(), |value| {
+        JobApiError::InvalidAgentId { value }
+    })?;
+    let normalized_request_id = normalize_request_filter(query.request_id.as_deref(), |value| {
+        JobApiError::InvalidRequestId { value }
+    })?;
+
+    let mut items = state
+        .agent_registry
+        .queued_jobs_all()
+        .await
+        .into_iter()
+        .filter(|queued_job| {
+            job_matches(
+                &query,
+                queued_job,
+                normalized_agent_id.as_deref(),
+                normalized_request_id.as_deref(),
+            )
+        })
+        .map(job_summary)
+        .collect::<Vec<_>>();
+
+    let total = items.len();
+    let offset = query.offset();
+    let limit = query.limit();
+    items = items.into_iter().skip(offset).take(limit).collect();
+
+    Ok(Json(JobPage { total, limit, offset, items }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/jobs/{agent_id}/{request_id}",
+    context_path = "/api/v1",
+    tag = "jobs",
+    security(("api_key" = [])),
+    params(
+        ("agent_id" = String, Path, description = "Agent id in hex (with optional 0x prefix)"),
+        ("request_id" = String, Path, description = "Request id in hex (with optional 0x prefix)")
+    ),
+    responses(
+        (status = 200, description = "Queued job details", body = JobSummary),
+        (status = 400, description = "Invalid identifier", body = ApiErrorBody),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
+        (status = 404, description = "Queued job not found", body = ApiErrorBody)
+    )
+)]
+async fn get_job(
+    State(state): State<TeamserverState>,
+    _identity: ReadApiAccess,
+    Path((agent_id, request_id)): Path<(String, String)>,
+) -> Result<Json<JobSummary>, JobApiError> {
+    let normalized_agent_id = normalize_agent_filter(Some(agent_id.as_str()), |value| {
+        JobApiError::InvalidAgentId { value }
+    })?
+    .ok_or(JobApiError::InvalidAgentId { value: agent_id.clone() })?;
+    let normalized_request_id = normalize_request_filter(Some(request_id.as_str()), |value| {
+        JobApiError::InvalidRequestId { value }
+    })?
+    .ok_or(JobApiError::InvalidRequestId { value: request_id.clone() })?;
+
+    state
+        .agent_registry
+        .queued_jobs_all()
+        .await
+        .into_iter()
+        .find(|queued_job| {
+            format!("{:08X}", queued_job.agent_id) == normalized_agent_id
+                && format!("{:X}", queued_job.job.request_id) == normalized_request_id
+        })
+        .map(job_summary)
+        .map(Json)
+        .ok_or(JobApiError::NotFound {
+            agent_id: normalized_agent_id,
+            request_id: normalized_request_id,
+        })
 }
 
 #[utoipa::path(
@@ -1708,11 +2048,65 @@ fn loot_summary(record: LootRecord) -> LootSummary {
     }
 }
 
+fn credential_summary(record: LootRecord) -> Option<CredentialSummary> {
+    if !record.kind.eq_ignore_ascii_case("credential") {
+        return None;
+    }
+
+    let (operator, command_line, task_id) = loot_context_fields(record.metadata.as_ref());
+    Some(CredentialSummary {
+        id: record.id.unwrap_or_default(),
+        agent_id: format!("{:08X}", record.agent_id),
+        name: record.name,
+        captured_at: record.captured_at,
+        operator,
+        command_line,
+        task_id,
+        pattern: metadata_string_field(record.metadata.as_ref(), "pattern"),
+        content: record.data.as_deref().map(|data| String::from_utf8_lossy(data).into_owned()),
+        metadata: record.metadata,
+    })
+}
+
+fn job_summary(queued_job: QueuedJob) -> JobSummary {
+    JobSummary {
+        agent_id: format!("{:08X}", queued_job.agent_id),
+        command_id: queued_job.job.command,
+        request_id: format!("{:X}", queued_job.job.request_id),
+        task_id: queued_job.job.task_id,
+        command_line: queued_job.job.command_line,
+        created_at: queued_job.job.created_at,
+        operator: (!queued_job.job.operator.is_empty()).then_some(queued_job.job.operator),
+        payload_size: queued_job.job.payload.len(),
+    }
+}
+
 fn normalize_loot_agent_filter(value: Option<&str>) -> Result<Option<String>, LootApiError> {
+    normalize_agent_filter(value, |filter_value| LootApiError::InvalidAgentId {
+        value: filter_value,
+    })
+}
+
+fn normalize_agent_filter<E>(
+    value: Option<&str>,
+    invalid: impl FnOnce(String) -> E + Copy,
+) -> Result<Option<String>, E> {
     value
-        .map(|value| match parse_api_agent_id(value) {
-            Ok(agent_id) => Ok(format!("{agent_id:08X}")),
-            Err(_) => Err(LootApiError::InvalidAgentId { value: value.to_owned() }),
+        .map(|filter_value| match parse_hex_u32(filter_value) {
+            Some(parsed) => Ok(format!("{parsed:08X}")),
+            None => Err(invalid(filter_value.to_owned())),
+        })
+        .transpose()
+}
+
+fn normalize_request_filter<E>(
+    value: Option<&str>,
+    invalid: impl FnOnce(String) -> E + Copy,
+) -> Result<Option<String>, E> {
+    value
+        .map(|filter_value| match parse_hex_u32(filter_value) {
+            Some(parsed) => Ok(format!("{parsed:X}")),
+            None => Err(invalid(filter_value.to_owned())),
         })
         .transpose()
 }
@@ -1734,6 +2128,45 @@ fn loot_matches(
         && matches_optional_timestamp(record.captured_at.as_str(), since, until)
 }
 
+fn credential_matches(
+    query: &CredentialQuery,
+    record: &LootRecord,
+    normalized_agent_id: Option<&str>,
+    since: Option<OffsetDateTime>,
+    until: Option<OffsetDateTime>,
+) -> bool {
+    if !record.kind.eq_ignore_ascii_case("credential") {
+        return false;
+    }
+
+    let pattern = metadata_string_field(record.metadata.as_ref(), "pattern");
+    let (operator, command_line, _) = loot_context_fields(record.metadata.as_ref());
+    contains_filter(record.name.as_str(), query.name.as_deref())
+        && optional_contains_filter(operator.as_deref(), query.operator.as_deref())
+        && optional_contains_filter(command_line.as_deref(), query.command.as_deref())
+        && optional_contains_filter(pattern.as_deref(), query.pattern.as_deref())
+        && normalized_agent_id.is_none_or(|agent_id| format!("{:08X}", record.agent_id) == agent_id)
+        && matches_optional_timestamp(record.captured_at.as_str(), since, until)
+}
+
+fn job_matches(
+    query: &JobQuery,
+    queued_job: &QueuedJob,
+    normalized_agent_id: Option<&str>,
+    normalized_request_id: Option<&str>,
+) -> bool {
+    normalized_agent_id.is_none_or(|agent_id| format!("{:08X}", queued_job.agent_id) == agent_id)
+        && normalized_request_id
+            .is_none_or(|request_id| format!("{:X}", queued_job.job.request_id) == request_id)
+        && query.command_id.is_none_or(|command_id| queued_job.job.command == command_id)
+        && contains_filter(queued_job.job.command_line.as_str(), query.command.as_deref())
+        && contains_filter(queued_job.job.task_id.as_str(), query.task_id.as_deref())
+        && optional_contains_filter(
+            (!queued_job.job.operator.is_empty()).then_some(queued_job.job.operator.as_str()),
+            query.operator.as_deref(),
+        )
+}
+
 fn loot_context_fields(
     metadata: Option<&Value>,
 ) -> (Option<String>, Option<String>, Option<String>) {
@@ -1753,6 +2186,14 @@ fn loot_context_fields(
     (operator, command_line, task_id)
 }
 
+fn metadata_string_field(metadata: Option<&Value>, key: &str) -> Option<String> {
+    metadata
+        .and_then(Value::as_object)
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
 fn matches_optional_timestamp(
     occurred_at: &str,
     since: Option<OffsetDateTime>,
@@ -1768,6 +2209,17 @@ fn matches_optional_timestamp(
 
 fn parse_rfc3339(value: &str) -> Option<OffsetDateTime> {
     OffsetDateTime::parse(value, &Rfc3339).ok()
+}
+
+fn parse_hex_u32(value: &str) -> Option<u32> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let hex_digits =
+        trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")).unwrap_or(trimmed);
+    u32::from_str_radix(hex_digits, 16).ok()
 }
 
 fn contains_filter(value: &str, filter: Option<&str>) -> bool {
@@ -2173,6 +2625,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn jobs_endpoint_lists_queued_jobs_with_filters() {
+        let (app, registry, _) = test_router_with_registry(Some((
+            60,
+            "rest-admin",
+            "secret-admin",
+            OperatorRole::Admin,
+        )))
+        .await;
+        registry.insert(sample_agent(0xDEAD_BEEF)).await.expect("agent should insert");
+        registry.insert(sample_agent(0xABCD_EF01)).await.expect("agent should insert");
+
+        let first_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/agents/DEADBEEF/task")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"TaskID":"2A","CommandLine":"checkin","DemonID":"DEADBEEF","CommandID":"100"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(first_response.status(), StatusCode::ACCEPTED);
+
+        let second_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/agents/ABCDEF01")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(second_response.status(), StatusCode::ACCEPTED);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/jobs?agent_id=DEADBEEF&command=checkin")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["total"], 1);
+        assert_eq!(body["items"][0]["agent_id"], "DEADBEEF");
+        assert_eq!(body["items"][0]["request_id"], "2A");
+        assert_eq!(body["items"][0]["command_line"], "checkin");
+    }
+
+    #[tokio::test]
+    async fn get_job_returns_specific_queued_job() {
+        let (app, registry, _) = test_router_with_registry(Some((
+            60,
+            "rest-admin",
+            "secret-admin",
+            OperatorRole::Admin,
+        )))
+        .await;
+        registry.insert(sample_agent(0xDEAD_BEEF)).await.expect("agent should insert");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/agents/DEADBEEF/task")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"TaskID":"2A","CommandLine":"checkin","DemonID":"DEADBEEF","CommandID":"100"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/jobs/DEADBEEF/2A")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["agent_id"], "DEADBEEF");
+        assert_eq!(body["request_id"], "2A");
+        assert_eq!(body["command_id"], u32::from(DemonCommand::CommandCheckin));
+    }
+
+    #[tokio::test]
     async fn loot_endpoint_lists_filtered_records() {
         let database = Database::connect_in_memory().await.expect("database");
         database.agents().create(&sample_agent(0xDEAD_BEEF)).await.expect("agent should insert");
@@ -2217,6 +2777,72 @@ mod tests {
         assert_eq!(body["total"], 1);
         assert_eq!(body["items"][0]["kind"], "credential");
         assert_eq!(body["items"][0]["operator"], "neo");
+    }
+
+    #[tokio::test]
+    async fn credentials_endpoint_lists_filtered_records() {
+        let database = Database::connect_in_memory().await.expect("database");
+        database.agents().create(&sample_agent(0xDEAD_BEEF)).await.expect("agent should insert");
+        let credential_id = database
+            .loot()
+            .create(&LootRecord {
+                id: None,
+                agent_id: 0xDEAD_BEEF,
+                kind: "credential".to_owned(),
+                name: "credential-1".to_owned(),
+                file_path: None,
+                size_bytes: Some(12),
+                captured_at: "2026-03-10T10:00:00Z".to_owned(),
+                data: Some(b"Password: test".to_vec()),
+                metadata: Some(parameter_object([
+                    ("operator", Value::String("neo".to_owned())),
+                    ("command_line", Value::String("sekurlsa::logonpasswords".to_owned())),
+                    ("pattern", Value::String("password".to_owned())),
+                ])),
+            })
+            .await
+            .expect("loot should insert");
+
+        let (router, _, _) = test_router_with_database(
+            database,
+            Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)),
+        )
+        .await;
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/credentials?operator=neo&pattern=pass")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["total"], 1);
+        assert_eq!(body["items"][0]["id"], credential_id);
+        assert_eq!(body["items"][0]["content"], "Password: test");
+        assert_eq!(body["items"][0]["pattern"], "password");
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/credentials/{credential_id}"))
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["name"], "credential-1");
+        assert_eq!(body["content"], "Password: test");
     }
 
     #[tokio::test]
@@ -2518,6 +3144,8 @@ mod tests {
         let body = read_json(response).await;
         assert_eq!(body["openapi"], "3.1.0");
         assert!(body["paths"]["/api/v1/listeners"].is_object());
+        assert!(body["paths"]["/api/v1/credentials"].is_object());
+        assert!(body["paths"]["/api/v1/jobs"].is_object());
     }
 
     #[tokio::test]

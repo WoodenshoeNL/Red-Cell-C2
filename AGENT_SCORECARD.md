@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 80 | 31 |
+| Tasks closed | 0 | 82 | 31 |
 | Bugs filed against | 0 | 8 | 9 |
 | Bug rate (bugs/task) | N/A | 0.10 | 0.29 |
 | Quality score | N/A | 90% | 71% |
@@ -578,3 +578,14 @@ Notes: Reviewed the follow-up fix for red-cell-c2-x38n in `crates/teamserver/src
 
 Build: passed (cargo check + clippy -D warnings clean; cargo test: workspace passed)
 Notes: Review range contained only QA/architecture bookkeeping commits authored by Michel Klomp; no agent-authored development commits, task closes, or new QA bugs in this window. Beads state remains stable with three active in-progress items: red-cell-c2-89o, red-cell-c2-s9d, and red-cell-c2-3h7.
+
+### QA Review — 2026-03-11 22:20 — c1eb030..dedecae
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | Infra only: workspace flatten (crates/ → repo root), removed GitHub Actions CI/release workflows |
+| Codex | 2 | 0 | Closed: red-cell-c2-1uoh (duplicate DEMON_INIT rejection — `parse_for_listener` now early-returns `InvalidInit` if agent_id already registered, with test), red-3c6 (client note task operator attribution — code landed in 3c1651e, close commit only). Active: red-5xw in_progress (agent_new_event deduplication + pivot chain fix, unstaged test additions in dispatch.rs and agent_events.rs observed). |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (cargo check + clippy -D warnings clean; cargo test: 87 passed)
+Notes: Clean sprint. The duplicate DEMON_INIT fix (red-cell-c2-1uoh) is correct — early rejection before any state mutation, plus a deterministic test verifying that stored agent metadata, listener name, and CTR offset are all preserved when a duplicate init arrives. No `unwrap()`/`expect()` in production paths. No violations found. One open P2 bug in_progress (red-5xw) with partial working-tree changes not yet committed.

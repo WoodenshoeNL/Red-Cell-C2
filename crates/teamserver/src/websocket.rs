@@ -1,12 +1,14 @@
 //! Operator WebSocket endpoint and connection tracking.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::{
     Router,
     extract::{
-        FromRef, State,
+        ConnectInfo, FromRef, State,
         ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
     },
     response::IntoResponse,
@@ -92,6 +94,84 @@ struct OperatorConnection {
     username: Option<String>,
 }
 
+/// Maximum failed login attempts per IP within the sliding window.
+const MAX_FAILED_LOGIN_ATTEMPTS: u32 = 5;
+
+/// Duration of the sliding window for tracking failed login attempts.
+const LOGIN_WINDOW_DURATION: Duration = Duration::from_secs(60);
+
+/// Delay applied before responding to a failed login attempt to slow brute-force attacks.
+const FAILED_LOGIN_DELAY: Duration = Duration::from_secs(2);
+
+/// Per-source-IP rate limiter for WebSocket operator login attempts.
+///
+/// Tracks failed login attempts in a sliding window per IP address. Once the
+/// maximum number of failures is reached, further attempts from that IP are
+/// rejected until the window expires.
+#[derive(Debug, Clone, Default)]
+pub struct LoginRateLimiter {
+    windows: Arc<tokio::sync::Mutex<HashMap<IpAddr, LoginAttemptWindow>>>,
+}
+
+#[derive(Debug)]
+struct LoginAttemptWindow {
+    failed_attempts: u32,
+    window_start: Instant,
+}
+
+impl Default for LoginAttemptWindow {
+    fn default() -> Self {
+        Self { failed_attempts: 0, window_start: Instant::now() }
+    }
+}
+
+impl LoginRateLimiter {
+    /// Create an empty rate limiter.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return `true` if the given IP has not exceeded the failed-attempt threshold.
+    async fn is_allowed(&self, ip: IpAddr) -> bool {
+        let mut windows = self.windows.lock().await;
+        let Some(window) = windows.get_mut(&ip) else {
+            return true;
+        };
+
+        if window.window_start.elapsed() >= LOGIN_WINDOW_DURATION {
+            windows.remove(&ip);
+            return true;
+        }
+
+        window.failed_attempts < MAX_FAILED_LOGIN_ATTEMPTS
+    }
+
+    /// Record a failed login attempt from the given IP.
+    async fn record_failure(&self, ip: IpAddr) {
+        let mut windows = self.windows.lock().await;
+        let window = windows.entry(ip).or_default();
+
+        if window.window_start.elapsed() >= LOGIN_WINDOW_DURATION {
+            window.failed_attempts = 1;
+            window.window_start = Instant::now();
+        } else {
+            window.failed_attempts += 1;
+        }
+    }
+
+    /// Clear the failure counter for an IP after a successful login.
+    async fn record_success(&self, ip: IpAddr) {
+        self.windows.lock().await.remove(&ip);
+    }
+
+    /// Return the number of IPs currently tracked (for tests).
+    #[cfg(test)]
+    async fn tracked_ip_count(&self) -> usize {
+        self.windows.lock().await.len()
+    }
+}
+
 /// Register the Havoc-compatible operator WebSocket endpoint at `/`.
 pub fn routes<S>() -> Router<S>
 where
@@ -103,6 +183,7 @@ where
     SocketRelayManager: FromRef<S>,
     PayloadBuilderService: FromRef<S>,
     OperatorConnectionManager: FromRef<S>,
+    LoginRateLimiter: FromRef<S>,
     Database: FromRef<S>,
 {
     Router::new().route("/", get(websocket_handler::<S>))
@@ -112,6 +193,7 @@ where
 #[instrument(skip(state, websocket))]
 pub async fn websocket_handler<S>(
     State(state): State<S>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     websocket: WebSocketUpgrade,
 ) -> impl IntoResponse
 where
@@ -123,12 +205,13 @@ where
     SocketRelayManager: FromRef<S>,
     PayloadBuilderService: FromRef<S>,
     OperatorConnectionManager: FromRef<S>,
+    LoginRateLimiter: FromRef<S>,
     Database: FromRef<S>,
 {
-    websocket.on_upgrade(move |socket| handle_operator_socket(state, socket))
+    websocket.on_upgrade(move |socket| handle_operator_socket(state, socket, addr.ip()))
 }
 
-async fn handle_operator_socket<S>(state: S, mut socket: WebSocket)
+async fn handle_operator_socket<S>(state: S, mut socket: WebSocket, client_ip: IpAddr)
 where
     S: Clone + Send + Sync + 'static,
     AuthService: FromRef<S>,
@@ -138,18 +221,28 @@ where
     SocketRelayManager: FromRef<S>,
     PayloadBuilderService: FromRef<S>,
     OperatorConnectionManager: FromRef<S>,
+    LoginRateLimiter: FromRef<S>,
     Database: FromRef<S>,
 {
     let connection_id = Uuid::new_v4();
     let auth = AuthService::from_ref(&state);
     let connections = OperatorConnectionManager::from_ref(&state);
     let database = Database::from_ref(&state);
+    let rate_limiter = LoginRateLimiter::from_ref(&state);
 
     connections.register(connection_id).await;
 
-    if handle_authentication(&auth, &connections, &database, connection_id, &mut socket)
-        .await
-        .is_err()
+    if handle_authentication(
+        &auth,
+        &connections,
+        &database,
+        &rate_limiter,
+        connection_id,
+        client_ip,
+        &mut socket,
+    )
+    .await
+    .is_err()
     {
         cleanup_connection(&auth, &connections, &database, connection_id).await;
         return;
@@ -230,9 +323,21 @@ async fn handle_authentication(
     auth: &AuthService,
     connections: &OperatorConnectionManager,
     database: &Database,
+    rate_limiter: &LoginRateLimiter,
     connection_id: Uuid,
+    client_ip: IpAddr,
     socket: &mut WebSocket,
 ) -> Result<(), ()> {
+    if !rate_limiter.is_allowed(client_ip).await {
+        warn!(
+            %connection_id,
+            %client_ip,
+            "login rate limit exceeded — rejecting connection"
+        );
+        send_login_error(socket, "", AuthenticationFailure::WrongPassword, connection_id).await;
+        return Err(());
+    }
+
     let Some(frame) = socket.recv().await else {
         warn!(%connection_id, "operator websocket closed before authentication");
         return Err(());
@@ -268,6 +373,7 @@ async fn handle_authentication(
     let response = match auth.authenticate_message(connection_id, message.as_str()).await {
         Ok(AuthenticationResult::Success(success)) => {
             connections.authenticate(connection_id, success.username.clone()).await;
+            rate_limiter.record_success(client_ip).await;
             log_operator_action(
                 database,
                 &success.username,
@@ -285,6 +391,8 @@ async fn handle_authentication(
             login_success_message(&success.username, &success.token)
         }
         Ok(AuthenticationResult::Failure(failure)) => {
+            tokio::time::sleep(FAILED_LOGIN_DELAY).await;
+            rate_limiter.record_failure(client_ip).await;
             log_operator_action(
                 database,
                 &login_user,
@@ -303,6 +411,8 @@ async fn handle_authentication(
             return Err(());
         }
         Err(AuthError::InvalidLoginMessage) => {
+            tokio::time::sleep(FAILED_LOGIN_DELAY).await;
+            rate_limiter.record_failure(client_ip).await;
             log_operator_action(
                 database,
                 &login_user,
@@ -322,6 +432,8 @@ async fn handle_authentication(
         }
         Err(AuthError::InvalidMessageJson(error)) => {
             warn!(%connection_id, %error, "failed to parse operator login message");
+            tokio::time::sleep(FAILED_LOGIN_DELAY).await;
+            rate_limiter.record_failure(client_ip).await;
             log_operator_action(
                 database,
                 "",
@@ -345,6 +457,8 @@ async fn handle_authentication(
         Err(
             AuthError::DuplicateUser { .. } | AuthError::EmptyUsername | AuthError::EmptyPassword,
         ) => {
+            tokio::time::sleep(FAILED_LOGIN_DELAY).await;
+            rate_limiter.record_failure(client_ip).await;
             send_login_error(socket, "", AuthenticationFailure::WrongPassword, connection_id).await;
             return Err(());
         }
@@ -2134,10 +2248,12 @@ mod tests {
     use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
     use uuid::Uuid;
 
+    use std::net::IpAddr;
+
     use super::{
-        AgentCommandError, DEMON_MAX_RESPONSE_LENGTH, OperatorConnectionManager, build_job,
-        build_jobs, encode_utf16, routes, teamserver_log_event, write_len_prefixed_bytes,
-        write_u32,
+        AgentCommandError, DEMON_MAX_RESPONSE_LENGTH, LoginRateLimiter, OperatorConnectionManager,
+        build_job, build_jobs, encode_utf16, routes, teamserver_log_event,
+        write_len_prefixed_bytes, write_u32,
     };
     use crate::{
         AgentRegistry, AuditQuery, AuditResultStatus, AuthService, Database, EventBus,
@@ -2154,6 +2270,7 @@ mod tests {
         listeners: ListenerManager,
         payload_builder: PayloadBuilderService,
         sockets: SocketRelayManager,
+        login_rate_limiter: LoginRateLimiter,
     }
 
     impl TestState {
@@ -2199,6 +2316,7 @@ mod tests {
                 listeners: ListenerManager::new(database, registry, events, sockets.clone(), None),
                 payload_builder: PayloadBuilderService::disabled_for_tests(),
                 sockets,
+                login_rate_limiter: LoginRateLimiter::new(),
             }
         }
     }
@@ -2248,6 +2366,12 @@ mod tests {
     impl FromRef<TestState> for PayloadBuilderService {
         fn from_ref(input: &TestState) -> Self {
             input.payload_builder.clone()
+        }
+    }
+
+    impl FromRef<TestState> for LoginRateLimiter {
+        fn from_ref(input: &TestState) -> Self {
+            input.login_rate_limiter.clone()
         }
     }
 
@@ -3128,7 +3252,11 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener should bind");
         let addr = listener.local_addr().expect("listener should expose addr");
         let server = tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
+            let _ = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await;
         });
         let (socket, _) =
             connect_async(format!("ws://{addr}/")).await.expect("websocket should connect");
@@ -3141,7 +3269,7 @@ mod tests {
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
     ) -> OperatorMessage {
-        let frame = timeout(Duration::from_secs(2), socket.next())
+        let frame = timeout(Duration::from_secs(5), socket.next())
             .await
             .expect("socket should yield a frame")
             .expect("frame should be present")
@@ -3358,6 +3486,85 @@ mod tests {
             secure: Some("false".to_owned()),
             ..ListenerInfo::default()
         }
+    }
+
+    #[tokio::test]
+    async fn login_rate_limiter_allows_attempts_below_threshold() {
+        let limiter = LoginRateLimiter::new();
+        let ip: IpAddr = "192.168.1.10".parse().expect("valid IP");
+
+        for _ in 0..super::MAX_FAILED_LOGIN_ATTEMPTS {
+            assert!(limiter.is_allowed(ip).await);
+            limiter.record_failure(ip).await;
+        }
+
+        assert!(!limiter.is_allowed(ip).await);
+    }
+
+    #[tokio::test]
+    async fn login_rate_limiter_isolates_different_ips() {
+        let limiter = LoginRateLimiter::new();
+        let ip_a: IpAddr = "10.0.0.1".parse().expect("valid IP");
+        let ip_b: IpAddr = "10.0.0.2".parse().expect("valid IP");
+
+        for _ in 0..super::MAX_FAILED_LOGIN_ATTEMPTS {
+            limiter.record_failure(ip_a).await;
+        }
+
+        assert!(!limiter.is_allowed(ip_a).await);
+        assert!(limiter.is_allowed(ip_b).await);
+    }
+
+    #[tokio::test]
+    async fn login_rate_limiter_success_clears_counter() {
+        let limiter = LoginRateLimiter::new();
+        let ip: IpAddr = "172.16.0.5".parse().expect("valid IP");
+
+        for _ in 0..super::MAX_FAILED_LOGIN_ATTEMPTS - 1 {
+            limiter.record_failure(ip).await;
+        }
+        assert!(limiter.is_allowed(ip).await);
+
+        limiter.record_success(ip).await;
+        assert!(limiter.is_allowed(ip).await);
+        assert_eq!(limiter.tracked_ip_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn websocket_rejects_login_after_too_many_failures() {
+        let state = TestState::new().await;
+        let rate_limiter = state.login_rate_limiter.clone();
+        let ip: IpAddr = "127.0.0.1".parse().expect("valid IP");
+
+        for _ in 0..super::MAX_FAILED_LOGIN_ATTEMPTS {
+            rate_limiter.record_failure(ip).await;
+        }
+
+        let (mut socket, server) = spawn_server(state).await;
+
+        socket
+            .send(ClientMessage::Text(login_message("operator", "password1234").into()))
+            .await
+            .expect("send should succeed");
+
+        let frame = timeout(Duration::from_secs(3), socket.next())
+            .await
+            .expect("should receive a frame")
+            .expect("frame should exist")
+            .expect("frame should decode");
+
+        if let ClientMessage::Text(payload) = frame {
+            let msg: OperatorMessage =
+                serde_json::from_str(&payload).expect("should parse operator message");
+            assert!(
+                matches!(msg, OperatorMessage::InitConnectionError(_)),
+                "expected connection error, got {msg:?}"
+            );
+        } else {
+            panic!("expected text frame, got {frame:?}");
+        }
+
+        server.abort();
     }
 
     #[test]

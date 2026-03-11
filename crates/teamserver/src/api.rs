@@ -2257,6 +2257,7 @@ mod tests {
             listeners,
             payload_builder: crate::PayloadBuilderService::disabled_for_tests(),
             sockets,
+            login_rate_limiter: crate::LoginRateLimiter::new(),
         });
 
         let response = app
@@ -2455,6 +2456,7 @@ mod tests {
                 listeners,
                 payload_builder: crate::PayloadBuilderService::disabled_for_tests(),
                 sockets,
+                login_rate_limiter: crate::LoginRateLimiter::new(),
             }),
             agent_registry,
             auth,

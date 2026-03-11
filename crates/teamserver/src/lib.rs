@@ -56,4 +56,6 @@ pub use rbac::{
     ReadAccess, TaskAgentAccess, authorize_permission, authorize_websocket_command,
 };
 pub use sockets::{SocketRelayError, SocketRelayManager};
-pub use websocket::{OperatorConnectionManager, routes as websocket_routes, websocket_handler};
+pub use websocket::{
+    LoginRateLimiter, OperatorConnectionManager, routes as websocket_routes, websocket_handler,
+};

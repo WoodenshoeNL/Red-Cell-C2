@@ -11,7 +11,7 @@ use axum::{
 use red_cell_common::config::Profile;
 
 use crate::{
-    AgentRegistry, ApiRuntime, AuthService, Database, EventBus, ListenerManager,
+    AgentRegistry, ApiRuntime, AuthService, Database, EventBus, ListenerManager, LoginRateLimiter,
     OperatorConnectionManager, PayloadBuilderService, SocketRelayManager, api_routes,
     websocket_routes,
 };
@@ -39,6 +39,8 @@ pub struct TeamserverState {
     pub payload_builder: PayloadBuilderService,
     /// Pivot socket relay manager.
     pub sockets: SocketRelayManager,
+    /// WebSocket login rate limiter.
+    pub login_rate_limiter: LoginRateLimiter,
 }
 
 impl FromRef<TeamserverState> for AuthService {
@@ -92,6 +94,12 @@ impl FromRef<TeamserverState> for AgentRegistry {
 impl FromRef<TeamserverState> for SocketRelayManager {
     fn from_ref(input: &TeamserverState) -> Self {
         input.sockets.clone()
+    }
+}
+
+impl FromRef<TeamserverState> for LoginRateLimiter {
+    fn from_ref(input: &TeamserverState) -> Self {
+        input.login_rate_limiter.clone()
     }
 }
 

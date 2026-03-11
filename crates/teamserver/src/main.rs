@@ -7,8 +7,8 @@ use axum_server::{Handle, tls_rustls::RustlsConfig};
 use clap::Parser;
 use red_cell::{
     AgentRegistry, ApiRuntime, AuthService, Database, EventBus, ListenerManager,
-    ListenerManagerError, OperatorConnectionManager, PayloadBuilderService, PluginRuntime,
-    SocketRelayManager, TeamserverState, build_router,
+    ListenerManagerError, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
+    PluginRuntime, SocketRelayManager, TeamserverState, build_router,
 };
 use red_cell_common::config::{Profile, ProfileValidationError};
 use red_cell_common::tls::{
@@ -92,6 +92,7 @@ async fn main() -> Result<()> {
         sockets,
         listeners,
         payload_builder,
+        login_rate_limiter: LoginRateLimiter::new(),
     });
     let handle = Handle::new();
 
@@ -101,7 +102,7 @@ async fn main() -> Result<()> {
 
     axum_server::bind_rustls(bind_addr, tls_config)
         .handle(handle)
-        .serve(router.into_make_service())
+        .serve(router.into_make_service_with_connect_info::<SocketAddr>())
         .await
         .context("teamserver exited with an error")?;
 
@@ -239,7 +240,8 @@ mod tests {
     use clap::Parser;
     use red_cell::{
         AgentRegistry, ApiRuntime, AuthService, Database, EventBus, ListenerManager,
-        OperatorConnectionManager, PayloadBuilderService, SocketRelayManager, TeamserverState,
+        LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService, SocketRelayManager,
+        TeamserverState,
     };
     use red_cell_common::config::{OperatorRole, Profile};
     use tempfile::NamedTempFile;
@@ -367,6 +369,7 @@ mod tests {
             payload_builder: PayloadBuilderService::disabled_for_tests(),
             sockets,
             profile,
+            login_rate_limiter: LoginRateLimiter::new(),
         };
 
         let _ = AuthService::from_ref(&state);

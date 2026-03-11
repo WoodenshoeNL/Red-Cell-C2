@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use red_cell::{
-    AgentRegistry, ApiRuntime, AuthService, Database, EventBus, ListenerManager,
+    AgentRegistry, ApiRuntime, AuthService, Database, EventBus, ListenerManager, LoginRateLimiter,
     OperatorConnectionManager, PayloadBuilderService, SocketRelayManager, TeamserverState,
     hash_password, websocket_routes,
 };
@@ -61,12 +61,18 @@ async fn mock_demon_checkin_get_job_and_output_flow() -> Result<(), Box<dyn std:
         listeners: listeners.clone(),
         payload_builder: PayloadBuilderService::disabled_for_tests(),
         sockets,
+        login_rate_limiter: LoginRateLimiter::new(),
     };
 
     let server_listener = TcpListener::bind("127.0.0.1:0").await?;
     let server_addr = server_listener.local_addr()?;
     let server = tokio::spawn(async move {
-        let _ = axum::serve(server_listener, websocket_routes().with_state(state)).await;
+        let app = websocket_routes().with_state(state);
+        let _ = axum::serve(
+            server_listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await;
     });
 
     let listener_port = available_port_excluding(server_addr.port())?;

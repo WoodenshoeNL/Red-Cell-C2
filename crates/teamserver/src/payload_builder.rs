@@ -509,8 +509,6 @@ fn merged_request_config(
     insert_default_string(&mut config, "Sleep Technique", defaults.sleep_technique.clone());
     insert_default_string(&mut config, "Proxy Loading", defaults.proxy_loading.clone());
     insert_default_string(&mut config, "Amsi/Etw Patch", defaults.amsi_etw_patching.clone());
-    insert_default_string(&mut config, "DotNetNamePipe", defaults.dotnet_name_pipe.clone());
-
     if let Some(injection) = &defaults.injection {
         let entry =
             config.entry("Injection".to_owned()).or_insert_with(|| Value::Object(Map::new()));
@@ -602,9 +600,6 @@ fn pack_config(
             });
         }
     }
-
-    add_wstring(&mut out, optional_string(config, "DotNetNamePipe").unwrap_or_default())?;
-
     Ok(out)
 }
 
@@ -1234,10 +1229,7 @@ mod tests {
         assert_eq!(config.get("Indirect Syscall"), Some(&Value::Bool(true)));
         assert_eq!(config.get("Stack Duplication"), Some(&Value::Bool(true)));
         assert_eq!(config.get("Sleep Technique"), Some(&Value::String("Ekko".to_owned())));
-        assert_eq!(
-            config.get("DotNetNamePipe"),
-            Some(&Value::String(r"\\.\pipe\red-cell-dotnet".to_owned()))
-        );
+        assert_eq!(config.get("DotNetNamePipe"), None);
         assert_eq!(
             config["Injection"]["Spawn64"],
             Value::String("C:\\Windows\\System32\\notepad.exe".to_owned())
@@ -1260,7 +1252,6 @@ mod tests {
             "Sleep Jmp Gadget": "jmp rbx",
             "Proxy Loading": "RtlCreateTimer",
             "Amsi/Etw Patch": "Hardware breakpoints",
-            "DotNetNamePipe": "\\\\.\\pipe\\red-cell-dotnet",
             "Injection": {
                 "Alloc": "Win32",
                 "Execute": "Native/Syscall",
@@ -1328,14 +1319,12 @@ mod tests {
         assert_eq!(read_wstring(&mut cursor)?, "http://proxy.local:8080");
         assert_eq!(read_wstring(&mut cursor)?, "neo");
         assert_eq!(read_wstring(&mut cursor)?, "trinity");
-        assert_eq!(read_wstring(&mut cursor)?, r"\\.\pipe\red-cell-dotnet");
         assert!(cursor.is_empty());
         Ok(())
     }
 
     #[test]
-    fn pack_config_emits_empty_dotnet_name_pipe_when_unset()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn pack_config_ends_after_listener_specific_fields() -> Result<(), Box<dyn std::error::Error>> {
         let config = serde_json::from_value::<Map<String, Value>>(json!({
             "Sleep": "5",
             "Jitter": "0",
@@ -1371,7 +1360,6 @@ mod tests {
         assert_eq!(read_wstring(&mut cursor)?, r"\\.\pipe\pivot");
         assert_eq!(read_u64(&mut cursor)?, 0);
         assert_eq!(read_u32(&mut cursor)?, 0);
-        assert_eq!(read_wstring(&mut cursor)?, "");
         assert!(cursor.is_empty());
         Ok(())
     }

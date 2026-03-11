@@ -341,28 +341,37 @@ impl CommandDispatcher {
         );
 
         let exit_registry = registry.clone();
+        let exit_sockets = sockets.clone();
         let exit_events = events.clone();
         self.register_handler(
             u32::from(DemonCommand::CommandExit),
             move |agent_id, request_id, payload| {
                 let registry = exit_registry.clone();
+                let sockets = exit_sockets.clone();
                 let events = exit_events.clone();
                 Box::pin(async move {
-                    handle_exit_callback(&registry, &events, agent_id, request_id, &payload).await
+                    handle_exit_callback(
+                        &registry, &sockets, &events, agent_id, request_id, &payload,
+                    )
+                    .await
                 })
             },
         );
 
         let kill_date_registry = registry.clone();
+        let kill_date_sockets = sockets.clone();
         let kill_date_events = events.clone();
         self.register_handler(
             u32::from(DemonCommand::CommandKillDate),
             move |agent_id, request_id, payload| {
                 let registry = kill_date_registry.clone();
+                let sockets = kill_date_sockets.clone();
                 let events = kill_date_events.clone();
                 Box::pin(async move {
-                    handle_kill_date_callback(&registry, &events, agent_id, request_id, &payload)
-                        .await
+                    handle_kill_date_callback(
+                        &registry, &sockets, &events, agent_id, request_id, &payload,
+                    )
+                    .await
                 })
             },
         );
@@ -1427,6 +1436,7 @@ async fn handle_command_error_callback(
 
 async fn handle_exit_callback(
     registry: &AgentRegistry,
+    sockets: &SocketRelayManager,
     events: &EventBus,
     agent_id: u32,
     request_id: u32,
@@ -1442,6 +1452,7 @@ async fn handle_exit_callback(
 
     mark_agent_dead_and_broadcast(
         registry,
+        sockets,
         events,
         agent_id,
         u32::from(DemonCommand::CommandExit),
@@ -1453,6 +1464,7 @@ async fn handle_exit_callback(
 
 async fn handle_kill_date_callback(
     registry: &AgentRegistry,
+    sockets: &SocketRelayManager,
     events: &EventBus,
     agent_id: u32,
     request_id: u32,
@@ -1460,6 +1472,7 @@ async fn handle_kill_date_callback(
 ) -> Result<Option<Vec<u8>>, CommandDispatchError> {
     mark_agent_dead_and_broadcast(
         registry,
+        sockets,
         events,
         agent_id,
         u32::from(DemonCommand::CommandKillDate),
@@ -1471,6 +1484,7 @@ async fn handle_kill_date_callback(
 
 async fn mark_agent_dead_and_broadcast(
     registry: &AgentRegistry,
+    sockets: &SocketRelayManager,
     events: &EventBus,
     agent_id: u32,
     command_id: u32,
@@ -1478,6 +1492,7 @@ async fn mark_agent_dead_and_broadcast(
     message: &str,
 ) -> Result<Option<Vec<u8>>, CommandDispatchError> {
     registry.mark_dead(agent_id, message).await?;
+    let _ = sockets.remove_agent(agent_id).await;
     if let Some(agent) = registry.get(agent_id).await {
         events.broadcast(agent_update_event(&agent));
     }
@@ -7096,9 +7111,10 @@ mod tests {
             registry.clone(),
             events,
             database,
-            sockets,
+            sockets.clone(),
             None,
         );
+        sockets.add_socks_server(0xAABB_CCDD, "0").await?;
 
         dispatcher
             .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandExit), 40, &1_u32.to_le_bytes())
@@ -7124,6 +7140,7 @@ mod tests {
 
         let agent = registry.get(0xAABB_CCDD).await.ok_or("agent should remain tracked")?;
         assert!(!agent.active);
+        assert_eq!(sockets.list_socks_servers(0xAABB_CCDD).await, "No active SOCKS5 servers");
         Ok(())
     }
 
@@ -7146,9 +7163,10 @@ mod tests {
             registry.clone(),
             events,
             database,
-            sockets,
+            sockets.clone(),
             None,
         );
+        sockets.add_socks_server(0x1020_3040, "0").await?;
 
         dispatcher.dispatch(0x1020_3040, u32::from(DemonCommand::CommandKillDate), 41, &[]).await?;
 
@@ -7165,6 +7183,7 @@ mod tests {
             ))
         );
         assert_eq!(message.info.extra.get("Type"), Some(&Value::String("Good".to_owned())));
+        assert_eq!(sockets.list_socks_servers(0x1020_3040).await, "No active SOCKS5 servers");
         Ok(())
     }
 

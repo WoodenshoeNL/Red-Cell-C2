@@ -83,6 +83,10 @@ impl Default for RateLimitWindow {
     }
 }
 
+fn prune_expired_rate_limit_windows(windows: &mut BTreeMap<String, RateLimitWindow>, now: Instant) {
+    windows.retain(|_, window| now.duration_since(window.started_at) < RATE_LIMIT_WINDOW);
+}
+
 /// Authenticated REST API identity derived from an API key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiIdentity {
@@ -186,10 +190,12 @@ impl ApiRuntime {
         }
 
         let mut windows = self.windows.lock().await;
+        let now = Instant::now();
+        prune_expired_rate_limit_windows(&mut windows, now);
         let window = windows.entry(key_id.to_owned()).or_default();
 
-        if window.started_at.elapsed() >= RATE_LIMIT_WINDOW {
-            window.started_at = Instant::now();
+        if now.duration_since(window.started_at) >= RATE_LIMIT_WINDOW {
+            window.started_at = now;
             window.request_count = 0;
         }
 
@@ -2388,6 +2394,36 @@ mod tests {
 
         let body = read_json(second).await;
         assert_eq!(body["error"]["code"], "rate_limited");
+    }
+
+    #[tokio::test]
+    async fn rate_limiting_prunes_expired_windows_for_inactive_keys() {
+        let api = ApiRuntime {
+            key_hash_secret: Arc::new(ApiRuntime::generate_key_hash_secret()),
+            keys: Arc::new(BTreeMap::new()),
+            rate_limit: ApiRateLimit { requests_per_minute: 60 },
+            windows: Arc::new(Mutex::new(BTreeMap::from([
+                (
+                    "expired-key".to_owned(),
+                    RateLimitWindow {
+                        started_at: Instant::now() - RATE_LIMIT_WINDOW - Duration::from_secs(1),
+                        request_count: 1,
+                    },
+                ),
+                (
+                    "fresh-key".to_owned(),
+                    RateLimitWindow { started_at: Instant::now(), request_count: 1 },
+                ),
+            ]))),
+        };
+
+        api.check_rate_limit("new-key").await.expect("rate limit should allow request");
+
+        let windows = api.windows.lock().await;
+        assert!(!windows.contains_key("expired-key"));
+        assert!(windows.contains_key("fresh-key"));
+        assert!(windows.contains_key("new-key"));
+        assert_eq!(windows.len(), 2);
     }
 
     #[tokio::test]

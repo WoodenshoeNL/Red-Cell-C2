@@ -7,7 +7,7 @@ use red_cell_common::{AgentInfo, ListenerConfig, ListenerProtocol};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::{FromRow, Row, SqlitePool};
+use sqlx::{FromRow, QueryBuilder, Row, Sqlite, SqlitePool};
 use thiserror::Error;
 use tracing::instrument;
 use utoipa::ToSchema;
@@ -914,6 +914,94 @@ impl AuditLogRepository {
         sqlx::query("DELETE FROM ts_audit_log WHERE id = ?").bind(id).execute(&self.pool).await?;
 
         Ok(())
+    }
+
+    /// Return filtered audit-log rows ordered newest-first with SQL-level pagination.
+    pub async fn query_filtered(
+        &self,
+        filter: &AuditLogFilter,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<AuditLogEntry>, TeamserverError> {
+        let mut builder = QueryBuilder::new(
+            "SELECT id, actor, action, target_kind, target_id, details, occurred_at \
+             FROM ts_audit_log WHERE 1=1",
+        );
+        append_audit_filters(&mut builder, filter);
+        builder.push(" ORDER BY id DESC LIMIT ").push_bind(limit);
+        builder.push(" OFFSET ").push_bind(offset);
+
+        let rows = builder.build_query_as::<AuditLogRow>().fetch_all(&self.pool).await?;
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    /// Count audit-log rows matching the given filters without fetching row data.
+    pub async fn count_filtered(&self, filter: &AuditLogFilter) -> Result<i64, TeamserverError> {
+        let mut builder = QueryBuilder::new("SELECT COUNT(*) FROM ts_audit_log WHERE 1=1");
+        append_audit_filters(&mut builder, filter);
+
+        let row = builder.build().fetch_one(&self.pool).await?;
+        Ok(row.get::<i64, _>(0))
+    }
+}
+
+/// Filter criteria for paginated audit-log queries pushed down to SQL.
+///
+/// All fields are optional. When `None`, the corresponding filter is not applied.
+/// Substring filters use SQLite `instr()` for literal matching (no wildcard
+/// interpretation). JSON-embedded fields are extracted with `json_extract()`.
+#[derive(Clone, Debug, Default)]
+pub struct AuditLogFilter {
+    /// Substring match against the `actor` column.
+    pub actor_contains: Option<String>,
+    /// Substring match against the `action` column.
+    pub action_contains: Option<String>,
+    /// Substring match against the `target_kind` column.
+    pub target_kind_contains: Option<String>,
+    /// Substring match against the `target_id` column.
+    pub target_id_contains: Option<String>,
+    /// Exact match against `json_extract(details, '$.agent_id')`.
+    pub agent_id: Option<String>,
+    /// Substring match against `json_extract(details, '$.command')`.
+    pub command_contains: Option<String>,
+    /// Exact match against `json_extract(details, '$.result_status')`.
+    pub result_status: Option<String>,
+    /// Inclusive lower bound on `occurred_at` (UTC RFC 3339 string).
+    pub since: Option<String>,
+    /// Inclusive upper bound on `occurred_at` (UTC RFC 3339 string).
+    pub until: Option<String>,
+}
+
+fn append_audit_filters(builder: &mut QueryBuilder<'_, Sqlite>, filter: &AuditLogFilter) {
+    if let Some(ref value) = filter.actor_contains {
+        builder.push(" AND instr(actor, ").push_bind(value.clone()).push(") > 0");
+    }
+    if let Some(ref value) = filter.action_contains {
+        builder.push(" AND instr(action, ").push_bind(value.clone()).push(") > 0");
+    }
+    if let Some(ref value) = filter.target_kind_contains {
+        builder.push(" AND instr(target_kind, ").push_bind(value.clone()).push(") > 0");
+    }
+    if let Some(ref value) = filter.target_id_contains {
+        builder.push(" AND instr(target_id, ").push_bind(value.clone()).push(") > 0");
+    }
+    if let Some(ref value) = filter.agent_id {
+        builder.push(" AND json_extract(details, '$.agent_id') = ").push_bind(value.clone());
+    }
+    if let Some(ref value) = filter.command_contains {
+        builder
+            .push(" AND instr(json_extract(details, '$.command'), ")
+            .push_bind(value.clone())
+            .push(") > 0");
+    }
+    if let Some(ref value) = filter.result_status {
+        builder.push(" AND json_extract(details, '$.result_status') = ").push_bind(value.clone());
+    }
+    if let Some(ref value) = filter.since {
+        builder.push(" AND occurred_at >= ").push_bind(value.clone());
+    }
+    if let Some(ref value) = filter.until {
+        builder.push(" AND occurred_at <= ").push_bind(value.clone());
     }
 }
 

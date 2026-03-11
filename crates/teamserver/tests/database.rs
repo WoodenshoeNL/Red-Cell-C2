@@ -1,6 +1,6 @@
 use red_cell::database::{
-    AgentResponseRecord, AuditLogEntry, Database, LinkRecord, ListenerStatus, LootRecord,
-    PersistedListener, PersistedListenerState, TeamserverError,
+    AgentResponseRecord, AuditLogEntry, AuditLogFilter, Database, LinkRecord, ListenerStatus,
+    LootRecord, PersistedListener, PersistedListenerState, TeamserverError,
 };
 use red_cell::{
     AuditQuery, AuditResultStatus, audit_details, query_audit_log, record_operator_action,
@@ -359,6 +359,185 @@ async fn audit_helpers_persist_and_filter_structured_records() -> Result<(), Tea
     assert_eq!(page.items[0].command.as_deref(), Some("checkin"));
     assert_eq!(page.items[0].agent_id.as_deref(), Some("DEADBEEF"));
     assert_eq!(page.items[0].result_status, AuditResultStatus::Success);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn audit_query_filtered_pushes_pagination_to_sql() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+
+    for i in 0..5 {
+        let ts = format!("2026-03-10T10:{i:02}:00Z");
+        database
+            .audit_log()
+            .create(&AuditLogEntry {
+                id: None,
+                actor: "neo".to_owned(),
+                action: format!("action.{i}"),
+                target_kind: "agent".to_owned(),
+                target_id: None,
+                details: Some(
+                    serde_json::to_value(audit_details(
+                        AuditResultStatus::Success,
+                        None,
+                        None,
+                        None,
+                    ))
+                    .map_err(TeamserverError::Json)?,
+                ),
+                occurred_at: ts,
+            })
+            .await?;
+    }
+
+    let page = query_audit_log(
+        &database,
+        &AuditQuery { limit: Some(2), offset: Some(1), ..AuditQuery::default() },
+    )
+    .await?;
+
+    assert_eq!(page.total, 5);
+    assert_eq!(page.items.len(), 2);
+    assert_eq!(page.items[0].action, "action.3");
+    assert_eq!(page.items[1].action, "action.2");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn audit_query_filtered_applies_timestamp_range() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+
+    for i in 0..3 {
+        let ts = format!("2026-03-1{i}T12:00:00Z");
+        database
+            .audit_log()
+            .create(&AuditLogEntry {
+                id: None,
+                actor: "morpheus".to_owned(),
+                action: "check".to_owned(),
+                target_kind: "system".to_owned(),
+                target_id: None,
+                details: None,
+                occurred_at: ts,
+            })
+            .await?;
+    }
+
+    let page = query_audit_log(
+        &database,
+        &AuditQuery {
+            since: Some("2026-03-11T00:00:00Z".to_owned()),
+            until: Some("2026-03-11T23:59:59Z".to_owned()),
+            ..AuditQuery::default()
+        },
+    )
+    .await?;
+
+    assert_eq!(page.total, 1);
+    assert_eq!(page.items[0].occurred_at, "2026-03-11T12:00:00Z");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn audit_repository_count_filtered_matches_query_filtered_length()
+-> Result<(), TeamserverError> {
+    let database = test_database().await?;
+
+    record_operator_action(
+        &database,
+        "trinity",
+        "agent.task",
+        "agent",
+        Some("CAFEBABE".to_owned()),
+        audit_details(AuditResultStatus::Success, Some(0xCAFE_BABE), Some("ls"), None),
+    )
+    .await?;
+    record_operator_action(
+        &database,
+        "trinity",
+        "listener.create",
+        "listener",
+        Some("https-main".to_owned()),
+        audit_details(AuditResultStatus::Failure, None, Some("create"), None),
+    )
+    .await?;
+    record_operator_action(
+        &database,
+        "neo",
+        "agent.task",
+        "agent",
+        Some("DEADBEEF".to_owned()),
+        audit_details(AuditResultStatus::Success, Some(0xDEAD_BEEF), Some("pwd"), None),
+    )
+    .await?;
+
+    let filter = AuditLogFilter {
+        actor_contains: Some("trinity".to_owned()),
+        result_status: Some("success".to_owned()),
+        ..AuditLogFilter::default()
+    };
+
+    let repo = database.audit_log();
+    let count = repo.count_filtered(&filter).await?;
+    let rows = repo.query_filtered(&filter, 100, 0).await?;
+
+    assert_eq!(count, 1);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].actor, "trinity");
+    assert_eq!(rows[0].action, "agent.task");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn audit_query_filtered_supports_json_field_filters() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+
+    record_operator_action(
+        &database,
+        "neo",
+        "agent.task",
+        "agent",
+        Some("DEADBEEF".to_owned()),
+        audit_details(AuditResultStatus::Success, Some(0xDEAD_BEEF), Some("checkin"), None),
+    )
+    .await?;
+    record_operator_action(
+        &database,
+        "neo",
+        "agent.task",
+        "agent",
+        Some("CAFEBABE".to_owned()),
+        audit_details(AuditResultStatus::Failure, Some(0xCAFE_BABE), Some("shell"), None),
+    )
+    .await?;
+
+    let page = query_audit_log(
+        &database,
+        &AuditQuery { command: Some("shell".to_owned()), ..AuditQuery::default() },
+    )
+    .await?;
+    assert_eq!(page.total, 1);
+    assert_eq!(page.items[0].command.as_deref(), Some("shell"));
+
+    let page = query_audit_log(
+        &database,
+        &AuditQuery { agent_id: Some("0xCAFEBABE".to_owned()), ..AuditQuery::default() },
+    )
+    .await?;
+    assert_eq!(page.total, 1);
+    assert_eq!(page.items[0].agent_id.as_deref(), Some("CAFEBABE"));
+
+    let page = query_audit_log(
+        &database,
+        &AuditQuery { result_status: Some(AuditResultStatus::Failure), ..AuditQuery::default() },
+    )
+    .await?;
+    assert_eq!(page.total, 1);
+    assert_eq!(page.items[0].result_status, AuditResultStatus::Failure);
 
     Ok(())
 }

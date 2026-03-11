@@ -32,7 +32,7 @@ pub use auth::{
     OperatorSession, hash_password, login_failure_message, login_success_message,
 };
 pub use database::{
-    AgentRepository, AgentResponseRecord, AgentResponseRepository, AuditLogEntry,
+    AgentRepository, AgentResponseRecord, AgentResponseRepository, AuditLogEntry, AuditLogFilter,
     AuditLogRepository, Database, LinkRecord, LinkRepository, ListenerRepository, ListenerStatus,
     LootRecord, LootRepository, PersistedListener, PersistedListenerState, TeamserverError,
 };

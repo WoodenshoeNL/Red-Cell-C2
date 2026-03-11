@@ -6,6 +6,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use utoipa::{IntoParams, ToSchema};
 
+use crate::database::AuditLogFilter;
 use crate::{AuditLogEntry, Database, TeamserverError};
 
 /// Result status recorded for an audited action.
@@ -202,28 +203,62 @@ pub async fn record_operator_action(
 }
 
 /// Return a filtered and paginated view of the audit log.
+///
+/// Filtering and pagination are pushed into SQL so only the requested page of
+/// rows is transferred from the database.
 pub async fn query_audit_log(
     database: &Database,
     query: &AuditQuery,
 ) -> Result<AuditPage, TeamserverError> {
-    let normalized_agent_id = query.normalized_agent_id();
-    let mut items = database
-        .audit_log()
-        .list()
-        .await?
-        .into_iter()
-        .map(TryInto::try_into)
-        .collect::<Result<Vec<AuditRecord>, _>>()?;
-
-    items.reverse();
-    items.retain(|entry| matches_query(entry, query, normalized_agent_id.as_deref()));
-
-    let total = items.len();
-    let offset = query.offset();
     let limit = query.limit();
-    let items = items.into_iter().skip(offset).take(limit).collect();
+    let offset = query.offset();
+
+    let filter = AuditLogFilter {
+        actor_contains: query.actor_filter().map(ToOwned::to_owned),
+        action_contains: query.action.clone(),
+        target_kind_contains: query.target_kind.clone(),
+        target_id_contains: query.target_id.clone(),
+        agent_id: query.normalized_agent_id(),
+        command_contains: query.command.clone(),
+        result_status: query.result_status.map(|s| s.as_str().to_owned()),
+        since: normalize_timestamp_utc(query.since_timestamp())?,
+        until: normalize_timestamp_utc(query.until_timestamp())?,
+    };
+
+    let sql_limit = i64::try_from(limit).map_err(|_| TeamserverError::InvalidPersistedValue {
+        field: "limit",
+        message: "limit exceeds i64 range".to_owned(),
+    })?;
+    let sql_offset = i64::try_from(offset).map_err(|_| TeamserverError::InvalidPersistedValue {
+        field: "offset",
+        message: "offset exceeds i64 range".to_owned(),
+    })?;
+
+    let repo = database.audit_log();
+    let total = repo.count_filtered(&filter).await?;
+    let entries = repo.query_filtered(&filter, sql_limit, sql_offset).await?;
+    let items =
+        entries.into_iter().map(TryInto::try_into).collect::<Result<Vec<AuditRecord>, _>>()?;
+
+    let total = usize::try_from(total).map_err(|_| TeamserverError::InvalidPersistedValue {
+        field: "total",
+        message: "row count exceeds usize range".to_owned(),
+    })?;
 
     Ok(AuditPage { total, limit, offset, items })
+}
+
+/// Format an optional timestamp as a UTC RFC 3339 string for SQL comparison.
+fn normalize_timestamp_utc(ts: Option<OffsetDateTime>) -> Result<Option<String>, TeamserverError> {
+    ts.map(|t| {
+        t.to_offset(time::UtcOffset::UTC).format(&Rfc3339).map_err(|error| {
+            TeamserverError::InvalidPersistedValue {
+                field: "timestamp",
+                message: error.to_string(),
+            }
+        })
+    })
+    .transpose()
 }
 
 /// Build common structured details for an operator audit record.
@@ -250,50 +285,6 @@ pub fn parameter_object(pairs: impl IntoIterator<Item = (&'static str, Value)>) 
         object.insert(key.to_owned(), value);
     }
     Value::Object(object)
-}
-
-fn matches_query(
-    entry: &AuditRecord,
-    query: &AuditQuery,
-    normalized_agent_id: Option<&str>,
-) -> bool {
-    contains_filter(&entry.actor, query.actor_filter())
-        && contains_filter(&entry.action, query.action.as_deref())
-        && contains_filter(&entry.target_kind, query.target_kind.as_deref())
-        && optional_contains_filter(entry.target_id.as_deref(), query.target_id.as_deref())
-        && optional_contains_filter(entry.command.as_deref(), query.command.as_deref())
-        && matches_agent_id(entry.agent_id.as_deref(), normalized_agent_id)
-        && query.result_status.is_none_or(|status| entry.result_status == status)
-        && matches_timestamp(
-            entry.occurred_at.as_str(),
-            query.since_timestamp(),
-            query.until_timestamp(),
-        )
-}
-
-fn contains_filter(value: &str, filter: Option<&str>) -> bool {
-    filter.is_none_or(|filter| value.contains(filter))
-}
-
-fn optional_contains_filter(value: Option<&str>, filter: Option<&str>) -> bool {
-    filter.is_none_or(|filter| value.is_some_and(|value| value.contains(filter)))
-}
-
-fn matches_agent_id(value: Option<&str>, filter: Option<&str>) -> bool {
-    filter.is_none_or(|filter| value == Some(filter))
-}
-
-fn matches_timestamp(
-    occurred_at: &str,
-    since: Option<OffsetDateTime>,
-    until: Option<OffsetDateTime>,
-) -> bool {
-    let Some(timestamp) = parse_timestamp_filter(occurred_at) else {
-        return false;
-    };
-
-    since.is_none_or(|boundary| timestamp >= boundary)
-        && until.is_none_or(|boundary| timestamp <= boundary)
 }
 
 fn parse_timestamp_filter(value: &str) -> Option<OffsetDateTime> {

@@ -5674,6 +5674,21 @@ mod tests {
             progress_two.info.extra.get("ExpectedSize"),
             Some(&Value::String("64".to_owned()))
         );
+        let active = dispatcher.downloads.active_for_agent(0xABCD_EF12).await;
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].0, file_id);
+        assert_eq!(active[0].1.request_id, 0x9A);
+        assert_eq!(active[0].1.remote_path, remote_path);
+        assert_eq!(active[0].1.expected_size, 64);
+        assert_eq!(active[0].1.data, b"secret-bytes");
+        assert!(
+            !active[0].1.started_at.is_empty(),
+            "active filesystem download should preserve its start timestamp"
+        );
+        assert!(
+            timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),
+            "filesystem download should remain incomplete until close"
+        );
 
         dispatcher
             .dispatch(
@@ -5788,6 +5803,39 @@ mod tests {
             })
         );
         assert_eq!(tracker.finish(0xABCD_EF51, 0x41).await, None);
+    }
+
+    #[tokio::test]
+    async fn download_tracker_keeps_partial_downloads_active_until_finish() {
+        let tracker = DownloadTracker::new(64);
+        tracker
+            .start(
+                0xABCD_EF54,
+                0x44,
+                DownloadState {
+                    request_id: 0x73,
+                    remote_path: "C:\\Temp\\pending.bin".to_owned(),
+                    expected_size: 32,
+                    data: Vec::new(),
+                    started_at: "2026-03-11T09:10:00Z".to_owned(),
+                },
+            )
+            .await;
+
+        let partial = tracker
+            .append(0xABCD_EF54, 0x44, b"partial")
+            .await
+            .expect("partial chunk should append");
+        assert_eq!(partial.data, b"partial");
+        assert_eq!(partial.expected_size, 32);
+
+        let active = tracker.active_for_agent(0xABCD_EF54).await;
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].0, 0x44);
+        assert_eq!(active[0].1, partial);
+
+        assert_eq!(tracker.active_for_agent(0xABCD_EF99).await, Vec::new());
+        assert_eq!(tracker.finish(0xABCD_EF54, 0x44).await, Some(partial));
     }
 
     #[tokio::test]
@@ -6003,6 +6051,21 @@ mod tests {
         assert_eq!(
             progress_two.info.extra.get("ExpectedSize"),
             Some(&Value::String("32".to_owned()))
+        );
+        let active = dispatcher.downloads.active_for_agent(0xABCD_EF22).await;
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].0, file_id);
+        assert_eq!(active[0].1.request_id, 0x78);
+        assert_eq!(active[0].1.remote_path, remote_path);
+        assert_eq!(active[0].1.expected_size, 32);
+        assert_eq!(active[0].1.data, b"beacon-chunk");
+        assert!(
+            !active[0].1.started_at.is_empty(),
+            "active beacon download should preserve its start timestamp"
+        );
+        assert!(
+            timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),
+            "beacon download should remain incomplete until close"
         );
 
         dispatcher

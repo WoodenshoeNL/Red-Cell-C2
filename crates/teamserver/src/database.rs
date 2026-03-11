@@ -70,6 +70,9 @@ pub enum TeamserverError {
         /// Actual buffer length in bytes.
         length: usize,
     },
+    /// Returned when an AES transport operation fails.
+    #[error("agent crypto error: {0}")]
+    Crypto(#[from] red_cell_common::crypto::CryptoError),
 }
 
 /// Connection pool and repository factory for the teamserver database.

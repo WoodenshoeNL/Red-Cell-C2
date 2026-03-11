@@ -5,7 +5,7 @@ use std::borrow::Cow;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use red_cell_common::crypto::{
-    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, CryptoError, decrypt_agent_data, encrypt_agent_data,
+    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, CryptoError, ctr_blocks_for_length, decrypt_agent_data,
 };
 use red_cell_common::demon::{DemonCommand, DemonEnvelope, DemonHeader, DemonProtocolError};
 use red_cell_common::{AgentEncryptionInfo, AgentInfo};
@@ -138,11 +138,16 @@ impl DemonPacketParser {
             }
 
             let agent = parse_init_agent(envelope.header.agent_id, remaining, &external_ip, now)?;
+            let init_encrypted_len =
+                remaining.len().saturating_sub(AGENT_KEY_LENGTH + AGENT_IV_LENGTH);
             if self.registry.get(agent.agent_id).await.is_some() {
                 self.registry.update_agent(agent.clone()).await?;
             } else {
                 self.registry.insert(agent.clone()).await?;
             }
+            self.registry
+                .set_ctr_offset(agent.agent_id, ctr_blocks_for_length(init_encrypted_len))
+                .await?;
 
             return Ok(ParsedDemonPacket::Init(Box::new(ParsedDemonInit {
                 header: envelope.header,
@@ -151,35 +156,31 @@ impl DemonPacketParser {
             })));
         }
 
-        let (key, iv) = self.decode_registry_crypto(envelope.header.agent_id).await?;
-        let decrypted = decrypt_agent_data(&key, &iv, remaining)?;
+        let decrypted =
+            self.registry.decrypt_from_agent(envelope.header.agent_id, remaining).await?;
         let packages = parse_callback_packages(command_id, request_id, &decrypted)?;
 
         Ok(ParsedDemonPacket::Callback { header: envelope.header, packages })
     }
-
-    async fn decode_registry_crypto(
-        &self,
-        agent_id: u32,
-    ) -> Result<([u8; AGENT_KEY_LENGTH], [u8; AGENT_IV_LENGTH]), DemonParserError> {
-        let encryption = self.registry.encryption(agent_id).await?;
-        decode_agent_crypto(agent_id, &encryption)
-    }
 }
 
 /// Build the encrypted acknowledgement body returned after a Demon init or reconnect request.
-pub fn build_init_ack(
+///
+/// The encryption uses the agent's current CTR block offset (via the registry)
+/// so that the counter stays synchronised with the Demon agent's AES context.
+pub async fn build_init_ack(
+    registry: &crate::AgentRegistry,
     agent_id: u32,
-    encryption: &AgentEncryptionInfo,
 ) -> Result<Vec<u8>, DemonParserError> {
-    let (key, iv) = decode_agent_crypto(agent_id, encryption)?;
+    let encryption = registry.encryption(agent_id).await?;
+    let (key, _iv) = decode_agent_crypto(agent_id, &encryption)?;
     let payload = agent_id.to_le_bytes();
 
     if key.iter().all(|byte| *byte == 0) {
         return Ok(payload.to_vec());
     }
 
-    Ok(encrypt_agent_data(&key, &iv, &payload))
+    Ok(registry.encrypt_for_agent(agent_id, &payload).await?)
 }
 
 fn decode_agent_crypto(
@@ -481,10 +482,9 @@ fn read_length_prefixed_utf16_be(
 
 #[cfg(test)]
 mod tests {
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use red_cell_common::crypto::{
-        AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data, encrypt_agent_data,
+        AGENT_IV_LENGTH, AGENT_KEY_LENGTH, advance_iv, ctr_blocks_for_length, decrypt_agent_data,
+        encrypt_agent_data,
     };
     use red_cell_common::demon::{DEMON_MAGIC_VALUE, DemonCommand, DemonEnvelope};
     use time::macros::datetime;
@@ -519,11 +519,7 @@ mod tests {
         AgentRegistry::new(database)
     }
 
-    fn build_init_packet(
-        agent_id: u32,
-        key: [u8; AGENT_KEY_LENGTH],
-        iv: [u8; AGENT_IV_LENGTH],
-    ) -> Vec<u8> {
+    fn build_init_metadata(agent_id: u32) -> Vec<u8> {
         let mut metadata = Vec::new();
         metadata.extend_from_slice(&u32_be(agent_id));
         add_str(&mut metadata, "wkstn-01");
@@ -547,7 +543,15 @@ mod tests {
         metadata.extend_from_slice(&u32_be(20));
         metadata.extend_from_slice(&u64_be(1_893_456_000));
         metadata.extend_from_slice(&u32_be(0b101010));
+        metadata
+    }
 
+    fn build_init_packet(
+        agent_id: u32,
+        key: [u8; AGENT_KEY_LENGTH],
+        iv: [u8; AGENT_IV_LENGTH],
+    ) -> Vec<u8> {
+        let metadata = build_init_metadata(agent_id);
         let encrypted = encrypt_agent_data(&key, &iv, &metadata);
         let mut payload = Vec::new();
         payload.extend_from_slice(&u32_be(u32::from(DemonCommand::DemonInit)));
@@ -559,10 +563,13 @@ mod tests {
         DemonEnvelope::new(agent_id, payload).expect("init envelope should be valid").to_bytes()
     }
 
-    fn build_callback_packet(
+    /// Build a callback packet encrypted at the given CTR block offset,
+    /// simulating the Demon agent's counter-advancing AES context.
+    fn build_callback_packet_ctr(
         agent_id: u32,
         key: [u8; AGENT_KEY_LENGTH],
         iv: [u8; AGENT_IV_LENGTH],
+        block_offset: u64,
     ) -> Vec<u8> {
         let mut decrypted = Vec::new();
         decrypted.extend_from_slice(&u32_be(3));
@@ -572,7 +579,8 @@ mod tests {
         decrypted.extend_from_slice(&u32_be(5));
         decrypted.extend_from_slice(b"hello");
 
-        let encrypted = encrypt_agent_data(&key, &iv, &decrypted);
+        let effective_iv = advance_iv(&iv, block_offset);
+        let encrypted = encrypt_agent_data(&key, &effective_iv, &decrypted);
         let mut payload = Vec::new();
         payload.extend_from_slice(&u32_be(u32::from(DemonCommand::CommandCheckin)));
         payload.extend_from_slice(&u32_be(42));
@@ -610,6 +618,11 @@ mod tests {
         assert_eq!(init.agent.kill_date, Some(1_893_456_000));
         assert_eq!(init.agent.working_hours, Some(0b101010));
         assert_eq!(registry.get(0x1234_5678).await, Some(init.agent));
+
+        let metadata = build_init_metadata(0x1234_5678);
+        let expected_offset = ctr_blocks_for_length(encrypt_agent_data(&key, &iv, &metadata).len());
+        let actual_offset = registry.ctr_offset(0x1234_5678).await.expect("offset should be set");
+        assert_eq!(actual_offset, expected_offset);
     }
 
     #[tokio::test]
@@ -624,7 +637,12 @@ mod tests {
             .await
             .expect("init should succeed");
 
-        let callback_packet = build_callback_packet(0x0102_0304, key, iv);
+        // Simulate the full protocol flow: build init ACK to advance CTR counter
+        let _ack = build_init_ack(&registry, 0x0102_0304).await.expect("ack should build");
+
+        // The callback must be encrypted at the agent's current counter position
+        let offset = registry.ctr_offset(0x0102_0304).await.expect("offset should exist");
+        let callback_packet = build_callback_packet_ctr(0x0102_0304, key, iv, offset);
         let parsed = parser
             .parse_at(
                 &callback_packet,
@@ -685,19 +703,57 @@ mod tests {
         );
     }
 
-    #[test]
-    fn build_init_ack_encrypts_agent_identifier() {
+    #[tokio::test]
+    async fn build_init_ack_encrypts_agent_identifier() {
+        let registry = test_registry().await;
         let key = [0x33; AGENT_KEY_LENGTH];
         let iv = [0x44; AGENT_IV_LENGTH];
-        let encryption = red_cell_common::AgentEncryptionInfo {
-            aes_key: BASE64_STANDARD.encode(key),
-            aes_iv: BASE64_STANDARD.encode(iv),
-        };
+        let agent_id: u32 = 0xAABB_CCDD;
 
-        let ack = build_init_ack(0xAABB_CCDD, &encryption).expect("ack should build");
-        let decrypted = decrypt_agent_data(&key, &iv, &ack).expect("ack should decrypt");
+        let init_packet = build_init_packet(agent_id, key, iv);
+        let parser = DemonPacketParser::new(registry.clone());
+        parser
+            .parse_at(&init_packet, "10.0.0.1".to_owned(), datetime!(2026-03-09 19:40:00 UTC))
+            .await
+            .expect("init should succeed");
 
-        assert_eq!(decrypted, 0xAABB_CCDDu32.to_le_bytes());
+        let offset_before_ack = registry.ctr_offset(agent_id).await.expect("offset");
+        let ack = build_init_ack(&registry, agent_id).await.expect("ack should build");
+
+        let effective_iv = advance_iv(&iv, offset_before_ack);
+        let decrypted = decrypt_agent_data(&key, &effective_iv, &ack).expect("ack should decrypt");
+        assert_eq!(decrypted, agent_id.to_le_bytes());
+    }
+
+    #[tokio::test]
+    async fn successive_messages_use_different_keystreams() {
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry.clone());
+        let key = [0x77; AGENT_KEY_LENGTH];
+        let iv = [0x88; AGENT_IV_LENGTH];
+        let agent_id: u32 = 0xDEAD_BEEF;
+
+        let init_packet = build_init_packet(agent_id, key, iv);
+        parser
+            .parse_at(&init_packet, "10.0.0.2".to_owned(), datetime!(2026-03-09 19:50:00 UTC))
+            .await
+            .expect("init should succeed");
+
+        let _ack = build_init_ack(&registry, agent_id).await.expect("ack should build");
+
+        let offset1 = registry.ctr_offset(agent_id).await.expect("offset");
+        let msg = b"same-payload-bytes";
+        let ct1 = registry.encrypt_for_agent(agent_id, msg).await.expect("enc1");
+        let ct2 = registry.encrypt_for_agent(agent_id, msg).await.expect("enc2");
+
+        assert_ne!(
+            ct1, ct2,
+            "two encryptions of the same plaintext must produce different ciphertext"
+        );
+
+        let iv1 = advance_iv(&iv, offset1);
+        let pt1 = decrypt_agent_data(&key, &iv1, &ct1).expect("dec1");
+        assert_eq!(pt1, msg);
     }
 
     #[tokio::test]

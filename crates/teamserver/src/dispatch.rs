@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, encrypt_agent_data};
 use red_cell_common::demon::{
     DemonCallback, DemonCommand, DemonFilesystemCommand, DemonInjectError, DemonKerberosCommand,
     DemonMessage, DemonPackage, DemonProcessCommand, DemonProtocolError, DemonSocketCommand,
@@ -97,28 +96,6 @@ pub enum CommandDispatchError {
     /// The dispatcher could not format a callback timestamp.
     #[error("failed to format callback timestamp: {0}")]
     Timestamp(#[from] time::error::Format),
-    /// Stored AES material is invalid.
-    #[error("invalid base64 in stored {field} for agent 0x{agent_id:08X}: {message}")]
-    InvalidStoredCryptoEncoding {
-        /// Agent identifier associated with the invalid value.
-        agent_id: u32,
-        /// Stored field name.
-        field: &'static str,
-        /// Decoder error message.
-        message: String,
-    },
-    /// Stored AES material decoded to an unexpected length.
-    #[error("stored {field} for agent 0x{agent_id:08X} has {actual} bytes, expected {expected}")]
-    InvalidStoredCryptoLength {
-        /// Agent identifier associated with the invalid value.
-        agent_id: u32,
-        /// Stored field name.
-        field: &'static str,
-        /// Required decoded length.
-        expected: usize,
-        /// Observed decoded length.
-        actual: usize,
-    },
     /// A callback payload could not be parsed according to the Havoc wire format.
     #[error("failed to parse callback payload for command 0x{command_id:08X}: {message}")]
     InvalidCallbackPayload {
@@ -458,16 +435,13 @@ async fn handle_get_job(
         return Ok(None);
     }
 
-    let encryption = registry.encryption(agent_id).await?;
-    let key = decode_fixed::<AGENT_KEY_LENGTH>(agent_id, "aes_key", encryption.aes_key.as_bytes())?;
-    let iv = decode_fixed::<AGENT_IV_LENGTH>(agent_id, "aes_iv", encryption.aes_iv.as_bytes())?;
     let mut packages = Vec::with_capacity(jobs.len());
 
     for job in jobs {
         let payload = if job.payload.is_empty() {
             Vec::new()
         } else {
-            encrypt_agent_data(&key, &iv, &job.payload)
+            registry.encrypt_for_agent(agent_id, &job.payload).await?
         };
         packages.push(DemonPackage {
             command_id: job.command,
@@ -2993,28 +2967,6 @@ async fn handle_socket_callback(
     }
 
     Ok(None)
-}
-
-fn decode_fixed<const N: usize>(
-    agent_id: u32,
-    field: &'static str,
-    encoded: &[u8],
-) -> Result<[u8; N], CommandDispatchError> {
-    let decoded = BASE64_STANDARD.decode(encoded).map_err(|error| {
-        CommandDispatchError::InvalidStoredCryptoEncoding {
-            agent_id,
-            field,
-            message: error.to_string(),
-        }
-    })?;
-
-    let actual = decoded.len();
-    decoded.try_into().map_err(|_| CommandDispatchError::InvalidStoredCryptoLength {
-        agent_id,
-        field,
-        expected: N,
-        actual,
-    })
 }
 
 fn agent_new_event(

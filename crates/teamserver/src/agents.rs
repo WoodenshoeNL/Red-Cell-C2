@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, encrypt_agent_data};
+use red_cell_common::crypto::{
+    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data_ctr, encrypt_agent_data_ctr,
+};
 use red_cell_common::demon::{DemonCommand, DemonMessage, DemonPackage};
 use red_cell_common::{AgentEncryptionInfo, AgentInfo};
 use tokio::sync::{Mutex, RwLock};
@@ -51,11 +53,22 @@ pub struct JobContext {
 struct AgentEntry {
     info: RwLock<AgentInfo>,
     jobs: Mutex<VecDeque<Job>>,
+    /// Shared CTR block offset tracking counter advancement.
+    ///
+    /// The Demon C agent maintains a single AES-CTR context whose 128-bit
+    /// counter advances after every encrypt **and** decrypt call.  The
+    /// teamserver must mirror this counter so that both sides derive the
+    /// same keystream position for each message.
+    ctr_block_offset: Mutex<u64>,
 }
 
 impl AgentEntry {
     fn new(info: AgentInfo) -> Self {
-        Self { info: RwLock::new(info), jobs: Mutex::new(VecDeque::new()) }
+        Self {
+            info: RwLock::new(info),
+            jobs: Mutex::new(VecDeque::new()),
+            ctr_block_offset: Mutex::new(0),
+        }
     }
 }
 
@@ -257,6 +270,65 @@ impl AgentRegistry {
             self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
         let info = entry.info.read().await;
         Ok(info.encryption.clone())
+    }
+
+    /// Return the current CTR block offset for an agent.
+    #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id)))]
+    pub async fn ctr_offset(&self, agent_id: u32) -> Result<u64, TeamserverError> {
+        let entry =
+            self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
+        let offset = entry.ctr_block_offset.lock().await;
+        Ok(*offset)
+    }
+
+    /// Set the CTR block offset for an agent (e.g. after DEMON_INIT parsing).
+    #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id), offset))]
+    pub async fn set_ctr_offset(&self, agent_id: u32, offset: u64) -> Result<(), TeamserverError> {
+        let entry =
+            self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
+        let mut current = entry.ctr_block_offset.lock().await;
+        *current = offset;
+        Ok(())
+    }
+
+    /// Encrypt a plaintext payload destined for an agent, advancing the shared
+    /// CTR block counter.
+    #[instrument(skip(self, plaintext), fields(agent_id = format_args!("0x{:08X}", agent_id), len = plaintext.len()))]
+    pub async fn encrypt_for_agent(
+        &self,
+        agent_id: u32,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, TeamserverError> {
+        let entry =
+            self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
+        let info = entry.info.read().await;
+        let (key, iv) = decode_crypto_material(agent_id, &info.encryption)?;
+        drop(info);
+
+        let mut offset = entry.ctr_block_offset.lock().await;
+        let (ciphertext, new_offset) = encrypt_agent_data_ctr(&key, &iv, *offset, plaintext)?;
+        *offset = new_offset;
+        Ok(ciphertext)
+    }
+
+    /// Decrypt a ciphertext payload received from an agent, advancing the
+    /// shared CTR block counter.
+    #[instrument(skip(self, ciphertext), fields(agent_id = format_args!("0x{:08X}", agent_id), len = ciphertext.len()))]
+    pub async fn decrypt_from_agent(
+        &self,
+        agent_id: u32,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, TeamserverError> {
+        let entry =
+            self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
+        let info = entry.info.read().await;
+        let (key, iv) = decode_crypto_material(agent_id, &info.encryption)?;
+        drop(info);
+
+        let mut offset = entry.ctr_block_offset.lock().await;
+        let (plaintext, new_offset) = decrypt_agent_data_ctr(&key, &iv, *offset, ciphertext)?;
+        *offset = new_offset;
+        Ok(plaintext)
     }
 
     /// Update the AES key and IV for an agent and persist the new values.
@@ -509,17 +581,23 @@ impl AgentRegistry {
         agent_id: u32,
         jobs: &[Job],
     ) -> Result<Vec<u8>, TeamserverError> {
-        let encryption = self.encryption(agent_id).await?;
-        let key =
-            decode_fixed::<AGENT_KEY_LENGTH>(agent_id, "aes_key", encryption.aes_key.as_bytes())?;
-        let iv = decode_fixed::<AGENT_IV_LENGTH>(agent_id, "aes_iv", encryption.aes_iv.as_bytes())?;
+        let entry =
+            self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
+        let info = entry.info.read().await;
+        let (key, iv) = decode_crypto_material(agent_id, &info.encryption)?;
+        drop(info);
+
+        let mut offset = entry.ctr_block_offset.lock().await;
         let mut packages = Vec::with_capacity(jobs.len());
 
         for job in jobs {
             let payload = if job.payload.is_empty() {
                 Vec::new()
             } else {
-                encrypt_agent_data(&key, &iv, &job.payload)
+                let (ciphertext, new_offset) =
+                    encrypt_agent_data_ctr(&key, &iv, *offset, &job.payload)?;
+                *offset = new_offset;
+                ciphertext
             };
             packages.push(DemonPackage {
                 command_id: job.command,
@@ -594,6 +672,15 @@ impl AgentRegistry {
         info.reason = reason.to_owned();
         Ok(())
     }
+}
+
+fn decode_crypto_material(
+    agent_id: u32,
+    encryption: &AgentEncryptionInfo,
+) -> Result<([u8; AGENT_KEY_LENGTH], [u8; AGENT_IV_LENGTH]), TeamserverError> {
+    let key = decode_fixed::<AGENT_KEY_LENGTH>(agent_id, "aes_key", encryption.aes_key.as_bytes())?;
+    let iv = decode_fixed::<AGENT_IV_LENGTH>(agent_id, "aes_iv", encryption.aes_iv.as_bytes())?;
+    Ok((key, iv))
 }
 
 fn decode_fixed<const N: usize>(

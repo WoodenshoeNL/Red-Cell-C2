@@ -979,7 +979,7 @@ async fn process_demon_transport(
     match parser.parse(body, external_ip).await {
         Ok(ParsedDemonPacket::Init(init)) => {
             let response =
-                build_init_ack(init.agent.agent_id, &init.agent.encryption).map_err(|error| {
+                build_init_ack(registry, init.agent.agent_id).await.map_err(|error| {
                     ListenerManagerError::InvalidConfig {
                         message: format!("failed to build demon init ack: {error}"),
                     }
@@ -989,8 +989,8 @@ async fn process_demon_transport(
             Ok(ProcessedDemonResponse { agent_id: init.agent.agent_id, payload: response })
         }
         Ok(ParsedDemonPacket::Reconnect { header, .. }) => {
-            let payload = if let Some(agent) = registry.get(header.agent_id).await {
-                build_init_ack(header.agent_id, &agent.encryption).map_err(|error| {
+            let payload = if registry.get(header.agent_id).await.is_some() {
+                build_init_ack(registry, header.agent_id).await.map_err(|error| {
                     ListenerManagerError::InvalidConfig {
                         message: format!("failed to build reconnect ack: {error}"),
                     }
@@ -2271,7 +2271,8 @@ mod tests {
     use interprocess::local_socket::traits::tokio::Stream as _;
     use red_cell_common::AgentEncryptionInfo;
     use red_cell_common::crypto::{
-        AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data, encrypt_agent_data,
+        AGENT_IV_LENGTH, AGENT_KEY_LENGTH, advance_iv, ctr_blocks_for_length, decrypt_agent_data,
+        decrypt_agent_data_ctr, encrypt_agent_data,
     };
     use red_cell_common::demon::{DemonCommand, DemonEnvelope, DemonMessage};
     use red_cell_common::operator::{ListenerInfo, OperatorMessage};
@@ -2552,7 +2553,9 @@ mod tests {
             .await?;
 
         assert_eq!(response.status(), StatusCode::OK);
-        let decrypted = decrypt_agent_data(&key, &iv, &response.bytes().await?)?;
+        let ack_ctr_offset = registry.ctr_offset(0x1234_5678).await? - ctr_blocks_for_length(4); // ACK was 4 bytes (agent_id LE)
+        let effective_iv = advance_iv(&iv, ack_ctr_offset);
+        let decrypted = decrypt_agent_data(&key, &effective_iv, &response.bytes().await?)?;
         assert_eq!(decrypted.as_slice(), &0x1234_5678_u32.to_le_bytes());
 
         let stored = registry.get(0x1234_5678).await.expect("agent should be registered");
@@ -2675,10 +2678,14 @@ mod tests {
         assert_eq!(message.packages.len(), 2);
         assert_eq!(message.packages[0].command_id, u32::from(DemonCommand::CommandSleep));
         assert_eq!(message.packages[0].request_id, 41);
-        assert_eq!(decrypt_agent_data(&key, &iv, &message.packages[0].payload)?, vec![1, 2, 3, 4]);
+        let callback_blocks = ctr_blocks_for_length(4);
+        let (pt0, off0) =
+            decrypt_agent_data_ctr(&key, &iv, callback_blocks, &message.packages[0].payload)?;
+        assert_eq!(pt0, vec![1, 2, 3, 4]);
         assert_eq!(message.packages[1].command_id, u32::from(DemonCommand::CommandCheckin));
         assert_eq!(message.packages[1].request_id, 42);
-        assert_eq!(decrypt_agent_data(&key, &iv, &message.packages[1].payload)?, vec![5, 6, 7]);
+        let (pt1, _) = decrypt_agent_data_ctr(&key, &iv, off0, &message.packages[1].payload)?;
+        assert_eq!(pt1, vec![5, 6, 7]);
         assert!(registry.queued_jobs(agent_id).await?.is_empty());
 
         manager.stop("edge-http-jobs").await?;
@@ -2781,7 +2788,9 @@ mod tests {
 
         let (agent_id, response) = read_test_smb_frame(&mut stream).await?;
         assert_eq!(agent_id, 0x1234_5678);
-        let decrypted = decrypt_agent_data(&key, &iv, &response)?;
+        let ack_ctr_offset = registry.ctr_offset(0x1234_5678).await? - ctr_blocks_for_length(4);
+        let effective_iv = advance_iv(&iv, ack_ctr_offset);
+        let decrypted = decrypt_agent_data(&key, &effective_iv, &response)?;
         assert_eq!(decrypted.as_slice(), &0x1234_5678_u32.to_le_bytes());
 
         let stored = registry.get(0x1234_5678).await.expect("agent should be registered");
@@ -2866,10 +2875,14 @@ mod tests {
         assert_eq!(message.packages.len(), 2);
         assert_eq!(message.packages[0].command_id, u32::from(DemonCommand::CommandSleep));
         assert_eq!(message.packages[0].request_id, 41);
-        assert_eq!(decrypt_agent_data(&key, &iv, &message.packages[0].payload)?, vec![1, 2, 3, 4]);
+        let callback_blocks = ctr_blocks_for_length(4);
+        let (pt0, off0) =
+            decrypt_agent_data_ctr(&key, &iv, callback_blocks, &message.packages[0].payload)?;
+        assert_eq!(pt0, vec![1, 2, 3, 4]);
         assert_eq!(message.packages[1].command_id, u32::from(DemonCommand::CommandCheckin));
         assert_eq!(message.packages[1].request_id, 42);
-        assert_eq!(decrypt_agent_data(&key, &iv, &message.packages[1].payload)?, vec![5, 6, 7]);
+        let (pt1, _) = decrypt_agent_data_ctr(&key, &iv, off0, &message.packages[1].payload)?;
+        assert_eq!(pt1, vec![5, 6, 7]);
         assert!(registry.queued_jobs(agent_id).await?.is_empty());
 
         manager.stop("edge-smb-jobs").await?;

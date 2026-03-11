@@ -10,16 +10,16 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 0 | 27 | 15 |
-| Bugs filed against | 0 | 2 | 7 |
-| Bug rate (bugs/task) | N/A | 0.07 | 0.47 |
-| Quality score | N/A | 93% | 53% |
+| Bugs filed against | 0 | 2 | 8 |
+| Bug rate (bugs/task) | N/A | 0.07 | 0.53 |
+| Quality score | N/A | 93% | 47% |
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 0 | 0 | 0 |
-| Missing tests | 0 | 2 | 4 |
+| Missing tests | 0 | 2 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
 | Protocol errors | 1 | 2 | 2 |
 | Security issues | 0 | 7 | 0 |
@@ -232,3 +232,14 @@ Build: clippy FAILED on uncommitted working-tree changes to crates/common/src/cr
 
 Overall codebase health: degraded — working tree (red-2bm) breaks `cargo test` compilation (P1 blocker)
 Biggest blindspot: AES-CTR counter not persisted to DB — every teamserver restart silently resets CTR to 0 for all agents; reconnecting agents will fail to decrypt acks with no error surfaced to operator
+
+### QA Review — 2026-03-11 03:55 — ce937e1..e73cf89
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA loop only |
+| Codex | 0 | 0 | No activity this run |
+| Cursor | 0 | 1 | red-2bm in_progress. Filed red-1km (P1): operator_session_listener_and_mock_demon_round_trip E2E test FAILS — init ack decrypted at CTR offset=0 but server now encrypts at offset N after DEMON_INIT processing. cargo test FAILED. |
+
+Build: cargo check PASSED, clippy -D warnings FAILED (red-3t4: manual_div_ceil in crypto.rs), cargo test FAILED (red-1km: E2E ack decryption at wrong CTR offset: got [76,123,184,63] expected [120,86,52,18])
+Note: committed codebase (HEAD, before Cursor's WIP) passes all checks (74 tests, clippy clean). Failures are in uncommitted working-tree changes only.

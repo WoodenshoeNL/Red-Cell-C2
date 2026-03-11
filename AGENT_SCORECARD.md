@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 44 | 31 |
-| Bugs filed against | 0 | 2 | 9 |
-| Bug rate (bugs/task) | N/A | 0.05 | 0.29 |
-| Quality score | N/A | 95% | 71% |
+| Tasks closed | 0 | 49 | 31 |
+| Bugs filed against | 0 | 3 | 9 |
+| Bug rate (bugs/task) | N/A | 0.06 | 0.29 |
+| Quality score | N/A | 94% | 71% |
 
 ## Violation Breakdown
 
@@ -23,7 +23,7 @@ Each loop run updates the running totals and appends a review entry.
 | Clippy warnings | 0 | 0 | 1 |
 | Protocol errors | 1 | 3 | 2 |
 | Security issues | 0 | 10 | 0 |
-| Architecture drift | 0 | 2 | 0 |
+| Architecture drift | 0 | 3 | 0 |
 | Memory / resource leaks | 0 | 6 | 1 |
 | Audit attribution errors | 0 | 1 | 0 |
 
@@ -343,6 +343,17 @@ Note: Issue red-cell-c2-1tp (DownloadTracker unit tests) is in_progress — Code
 
 Overall codebase health: on track
 Biggest blindspot: Unauthenticated DEMON_INIT reconnect probes advance CTR with no key validation — any attacker knowing a 32-bit agent_id can permanently desync agent comms via repeated forged probes (requires only reaching the listener port and knowing the agent_id, visible in plaintext if TLS is off)
+
+### QA Review — 2026-03-11 13:20 — f94a8cf..ab04858
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA loop only |
+| Codex | 5 | 1 | Closed: red-cell-c2-131 (zero-key DEMON_INIT bypass), red-cell-c2-22x (agent registry cap), red-cell-c2-35f (ApiRuntime rate-limit window pruning), red-cell-c2-m3s (reconnect probe CTR desync — non-mutating preview path via `encrypt_for_agent_without_advancing` + `build_reconnect_ack`), red-cell-c2-grm (deduplicated SHA3-256 hash to `red_cell_common::crypto::hash_password_sha3`). Bug: red-cell-c2-3db (P3) — dead unreachable zero-key plaintext passthrough in `encrypt_for_agent`, `encrypt_for_agent_without_advancing`, `decrypt_from_agent` after `decode_crypto_material` already errors on zero keys. |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (cargo check + clippy -D warnings clean; cargo test: 465 passed)
+Observation: m3s fix is well-designed — `encrypt_for_agent_without_advancing` reads the current CTR offset without updating it, `build_reconnect_ack` uses this path, and the listener correctly calls `build_reconnect_ack` instead of `build_init_ack` for reconnect probes. Three test layers: unit (agents.rs), protocol (demon.rs), integration (listeners.rs). The grm fix properly consolidates to the common-crate implementation. Minor P3 issue: the zero-key dead-code blocks in the encrypt/decrypt functions (filed red-cell-c2-3db). Also: red-cell-c2-1r6 (per-IP DEMON_INIT rate limiting) just claimed by Codex.
 
 ### QA Review — 2026-03-11 11:48 — 1e7832b..f94a8cf
 

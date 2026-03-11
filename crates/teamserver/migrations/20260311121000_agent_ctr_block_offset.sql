@@ -1,0 +1,1 @@
+ALTER TABLE ts_agents ADD COLUMN ctr_block_offset INTEGER NOT NULL DEFAULT 0;

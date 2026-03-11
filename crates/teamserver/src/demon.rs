@@ -482,12 +482,15 @@ fn read_length_prefixed_utf16_be(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use red_cell_common::crypto::{
         AGENT_IV_LENGTH, AGENT_KEY_LENGTH, advance_iv, ctr_blocks_for_length, decrypt_agent_data,
         encrypt_agent_data,
     };
     use red_cell_common::demon::{DEMON_MAGIC_VALUE, DemonCommand, DemonEnvelope};
     use time::macros::datetime;
+    use uuid::Uuid;
 
     use super::{DemonPacketParser, DemonParserError, ParsedDemonPacket, build_init_ack};
     use crate::{AgentRegistry, Database};
@@ -517,6 +520,10 @@ mod tests {
     async fn test_registry() -> AgentRegistry {
         let database = Database::connect_in_memory().await.expect("in-memory db should work");
         AgentRegistry::new(database)
+    }
+
+    fn temp_db_path() -> PathBuf {
+        std::env::temp_dir().join(format!("red-cell-demon-parser-{}.sqlite", Uuid::new_v4()))
     }
 
     fn build_init_metadata(agent_id: u32) -> Vec<u8> {
@@ -727,6 +734,34 @@ mod tests {
         let ack = build_init_ack(&registry, agent_id).await.expect("ack should build");
 
         let effective_iv = advance_iv(&iv, offset_before_ack);
+        let decrypted = decrypt_agent_data(&key, &effective_iv, &ack).expect("ack should decrypt");
+        assert_eq!(decrypted, agent_id.to_le_bytes());
+    }
+
+    #[tokio::test]
+    async fn build_init_ack_after_registry_reload_uses_persisted_ctr_offset() {
+        let database =
+            Database::connect(temp_db_path()).await.expect("temp database should initialize");
+        let registry = AgentRegistry::new(database.clone());
+        let parser = DemonPacketParser::new(registry.clone());
+        let key = [0x55; AGENT_KEY_LENGTH];
+        let iv = [0x66; AGENT_IV_LENGTH];
+        let agent_id: u32 = 0x1122_3344;
+
+        let init_packet = build_init_packet(agent_id, key, iv);
+        parser
+            .parse_at(&init_packet, "10.0.0.3".to_owned(), datetime!(2026-03-09 19:45:00 UTC))
+            .await
+            .expect("init should succeed");
+
+        let _first_ack = build_init_ack(&registry, agent_id).await.expect("ack should build");
+        let offset_before_restart = registry.ctr_offset(agent_id).await.expect("offset");
+
+        let reloaded = AgentRegistry::load(database).await.expect("registry should reload");
+        assert_eq!(reloaded.ctr_offset(agent_id).await.expect("offset"), offset_before_restart);
+
+        let ack = build_init_ack(&reloaded, agent_id).await.expect("reconnect ack should build");
+        let effective_iv = advance_iv(&iv, offset_before_restart);
         let decrypted = decrypt_agent_data(&key, &effective_iv, &ack).expect("ack should decrypt");
         assert_eq!(decrypted, agent_id.to_le_bytes());
     }

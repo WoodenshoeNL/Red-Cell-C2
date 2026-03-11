@@ -161,6 +161,15 @@ pub struct AgentRepository {
     pool: SqlitePool,
 }
 
+/// Persisted agent row plus transport state needed by the in-memory registry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PersistedAgent {
+    /// Agent metadata mirrored into operator-facing APIs.
+    pub info: AgentInfo,
+    /// Shared AES-CTR block offset tracked across decrypt/encrypt operations.
+    pub ctr_block_offset: u64,
+}
+
 impl AgentRepository {
     /// Create a new agent repository from a shared pool.
     #[must_use]
@@ -173,17 +182,18 @@ impl AgentRepository {
         sqlx::query(
             r#"
             INSERT INTO ts_agents (
-                agent_id, active, reason, note, aes_key, aes_iv, hostname, username, domain_name,
+                agent_id, active, reason, note, ctr_block_offset, aes_key, aes_iv, hostname, username, domain_name,
                 external_ip, internal_ip, process_name, base_address, process_pid, process_tid,
                 process_ppid, process_arch, elevated, os_version, os_arch, sleep_delay,
                 sleep_jitter, kill_date, working_hours, first_call_in, last_call_in
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(i64::from(agent.agent_id))
         .bind(bool_to_i64(agent.active))
         .bind(&agent.reason)
         .bind(&agent.note)
+        .bind(0_i64)
         .bind(&agent.encryption.aes_key)
         .bind(&agent.encryption.aes_iv)
         .bind(&agent.hostname)
@@ -329,6 +339,43 @@ impl AgentRepository {
     pub async fn set_note(&self, agent_id: u32, note: &str) -> Result<(), TeamserverError> {
         sqlx::query("UPDATE ts_agents SET note = ? WHERE agent_id = ?")
             .bind(note)
+            .bind(i64::from(agent_id))
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Fetch a single persisted agent plus its CTR state.
+    pub async fn get_persisted(
+        &self,
+        agent_id: u32,
+    ) -> Result<Option<PersistedAgent>, TeamserverError> {
+        let row = sqlx::query_as::<_, AgentRow>("SELECT * FROM ts_agents WHERE agent_id = ?")
+            .bind(i64::from(agent_id))
+            .fetch_optional(&self.pool)
+            .await?;
+
+        row.map(TryInto::try_into).transpose()
+    }
+
+    /// Return all persisted agents plus their CTR state.
+    pub async fn list_persisted(&self) -> Result<Vec<PersistedAgent>, TeamserverError> {
+        let rows = sqlx::query_as::<_, AgentRow>("SELECT * FROM ts_agents ORDER BY agent_id")
+            .fetch_all(&self.pool)
+            .await?;
+
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    /// Persist the current CTR block offset for an agent.
+    pub async fn set_ctr_block_offset(
+        &self,
+        agent_id: u32,
+        ctr_block_offset: u64,
+    ) -> Result<(), TeamserverError> {
+        sqlx::query("UPDATE ts_agents SET ctr_block_offset = ? WHERE agent_id = ?")
+            .bind(i64_from_u64("ctr_block_offset", ctr_block_offset)?)
             .bind(i64::from(agent_id))
             .execute(&self.pool)
             .await?;
@@ -1011,6 +1058,7 @@ struct AgentRow {
     active: i64,
     reason: String,
     note: String,
+    ctr_block_offset: i64,
     aes_key: String,
     aes_iv: String,
     hostname: String,
@@ -1073,6 +1121,16 @@ impl TryFrom<AgentRow> for AgentInfo {
             first_call_in: row.first_call_in,
             last_call_in: row.last_call_in,
         })
+    }
+}
+
+impl TryFrom<AgentRow> for PersistedAgent {
+    type Error = TeamserverError;
+
+    fn try_from(row: AgentRow) -> Result<Self, Self::Error> {
+        let ctr_block_offset = u64_from_i64("ctr_block_offset", row.ctr_block_offset)?;
+        let info = AgentInfo::try_from(row)?;
+        Ok(Self { info, ctr_block_offset })
     }
 }
 

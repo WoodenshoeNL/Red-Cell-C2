@@ -63,11 +63,11 @@ struct AgentEntry {
 }
 
 impl AgentEntry {
-    fn new(info: AgentInfo) -> Self {
+    fn new(info: AgentInfo, ctr_block_offset: u64) -> Self {
         Self {
             info: RwLock::new(info),
             jobs: Mutex::new(VecDeque::new()),
-            ctr_block_offset: Mutex::new(0),
+            ctr_block_offset: Mutex::new(ctr_block_offset),
         }
     }
 }
@@ -116,14 +116,17 @@ impl AgentRegistry {
     #[instrument(skip(database))]
     pub async fn load(database: Database) -> Result<Self, TeamserverError> {
         let registry = Self::new(database.clone());
-        let agents = database.agents().list().await?;
+        let agents = database.agents().list_persisted().await?;
         let links = database.links().list().await?;
         let mut entries = registry.entries.write().await;
         let mut parent_links = registry.parent_links.write().await;
         let mut child_links = registry.child_links.write().await;
 
         for agent in agents {
-            entries.insert(agent.agent_id, Arc::new(AgentEntry::new(agent)));
+            entries.insert(
+                agent.info.agent_id,
+                Arc::new(AgentEntry::new(agent.info, agent.ctr_block_offset)),
+            );
         }
 
         for link in links {
@@ -147,7 +150,7 @@ impl AgentRegistry {
         }
 
         self.repository.create(&agent).await?;
-        entries.insert(agent.agent_id, Arc::new(AgentEntry::new(agent)));
+        entries.insert(agent.agent_id, Arc::new(AgentEntry::new(agent, 0)));
         Ok(())
     }
 
@@ -297,6 +300,8 @@ impl AgentRegistry {
             self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
         let mut current = entry.ctr_block_offset.lock().await;
         *current = offset;
+        drop(current);
+        self.repository.set_ctr_block_offset(agent_id, offset).await?;
         Ok(())
     }
 
@@ -317,6 +322,8 @@ impl AgentRegistry {
         let mut offset = entry.ctr_block_offset.lock().await;
         let (ciphertext, new_offset) = encrypt_agent_data_ctr(&key, &iv, *offset, plaintext)?;
         *offset = new_offset;
+        drop(offset);
+        self.repository.set_ctr_block_offset(agent_id, new_offset).await?;
         Ok(ciphertext)
     }
 
@@ -337,6 +344,8 @@ impl AgentRegistry {
         let mut offset = entry.ctr_block_offset.lock().await;
         let (plaintext, new_offset) = decrypt_agent_data_ctr(&key, &iv, *offset, ciphertext)?;
         *offset = new_offset;
+        drop(offset);
+        self.repository.set_ctr_block_offset(agent_id, new_offset).await?;
         Ok(plaintext)
     }
 
@@ -626,6 +635,10 @@ impl AgentRegistry {
             });
         }
 
+        let persisted_offset = *offset;
+        drop(offset);
+        self.repository.set_ctr_block_offset(agent_id, persisted_offset).await?;
+
         DemonMessage::new(packages).to_bytes().map_err(Into::into)
     }
 
@@ -864,6 +877,33 @@ mod tests {
         let registry = AgentRegistry::load(database).await?;
 
         assert_eq!(registry.get(agent.agent_id).await, Some(agent));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn load_restores_persisted_ctr_offsets() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let agent = sample_agent_with_crypto(
+            0x1000_0ABC,
+            [0x11; AGENT_KEY_LENGTH],
+            [0x22; AGENT_IV_LENGTH],
+        );
+        let plaintext = b"persist this ctr state across restart";
+
+        registry.insert(agent.clone()).await?;
+        let _ciphertext = registry.encrypt_for_agent(agent.agent_id, plaintext).await?;
+        let persisted_offset = registry.ctr_offset(agent.agent_id).await?;
+        assert!(persisted_offset > 0);
+
+        let reloaded = AgentRegistry::load(database.clone()).await?;
+        assert_eq!(reloaded.ctr_offset(agent.agent_id).await?, persisted_offset);
+        let stored = database
+            .agents()
+            .get_persisted(agent.agent_id)
+            .await?
+            .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?;
+        assert_eq!(stored.ctr_block_offset, persisted_offset);
         Ok(())
     }
 

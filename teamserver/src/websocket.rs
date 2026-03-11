@@ -106,6 +106,9 @@ const MAX_LOGIN_ATTEMPT_WINDOWS: usize = 10_000;
 /// Delay applied before responding to a failed login attempt to slow brute-force attacks.
 const FAILED_LOGIN_DELAY: Duration = Duration::from_secs(2);
 
+/// Maximum time an unauthenticated socket may idle before sending the first login frame.
+const AUTHENTICATION_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Per-source-IP rate limiter for WebSocket operator login attempts.
 ///
 /// Tracks failed login attempts in a sliding window per IP address. Once the
@@ -397,9 +400,21 @@ async fn handle_authentication(
         return Err(());
     }
 
-    let Some(frame) = socket.recv().await else {
-        warn!(%connection_id, "operator websocket closed before authentication");
-        return Err(());
+    let frame = match tokio::time::timeout(AUTHENTICATION_FRAME_TIMEOUT, socket.recv()).await {
+        Ok(Some(frame)) => frame,
+        Ok(None) => {
+            warn!(%connection_id, "operator websocket closed before authentication");
+            return Err(());
+        }
+        Err(_) => {
+            warn!(
+                %connection_id,
+                timeout_secs = AUTHENTICATION_FRAME_TIMEOUT.as_secs(),
+                "operator websocket authentication timed out"
+            );
+            let _ = socket.send(WsMessage::Close(None)).await;
+            return Err(());
+        }
     };
 
     let message = match frame {
@@ -2574,6 +2589,25 @@ mod tests {
         assert!(matches!(response, OperatorMessage::InitConnectionError(_)));
 
         wait_for_connection_count(&connection_registry, 0).await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_closes_idle_unauthenticated_connections() {
+        let state = TestState::new().await;
+        let connection_registry = state.connections.clone();
+        let (mut socket, server) = spawn_server(state).await;
+
+        let frame =
+            timeout(super::AUTHENTICATION_FRAME_TIMEOUT + Duration::from_secs(2), socket.next())
+                .await
+                .expect("socket should close idle unauthenticated connection")
+                .expect("close frame should be present")
+                .expect("close frame should decode");
+        assert!(matches!(frame, ClientMessage::Close(_)));
+
+        wait_for_connection_count(&connection_registry, 0).await;
+        assert_eq!(connection_registry.authenticated_count().await, 0);
         server.abort();
     }
 

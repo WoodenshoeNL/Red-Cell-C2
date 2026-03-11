@@ -590,7 +590,10 @@ impl ListenerManager {
 
         for listener in listeners {
             if listener.state.status == ListenerStatus::Running {
-                let _ = self.start(&listener.name).await?;
+                match self.start(&listener.name).await {
+                    Ok(_) | Err(ListenerManagerError::StartFailed { .. }) => {}
+                    Err(error) => return Err(error),
+                }
             }
         }
 
@@ -3037,10 +3040,9 @@ mod tests {
         repository.create(&external_listener("external", "svc")).await?;
         repository.set_state("external", ListenerStatus::Running, None).await?;
 
-        let error = manager.restore_running().await.expect_err("restore should fail");
+        manager.restore_running().await?;
         let summary = manager.summary("external").await?;
 
-        assert!(matches!(error, ListenerManagerError::StartFailed { .. }));
         assert_eq!(summary.state.status, ListenerStatus::Error);
         assert!(summary.state.last_error.as_deref().is_some_and(|message| {
             message.contains("not implemented") && message.contains("svc")

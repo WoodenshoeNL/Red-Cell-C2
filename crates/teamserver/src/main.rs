@@ -541,6 +541,75 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn startup_restores_supported_listeners_when_external_restore_fails() {
+        let port = available_port().expect("ephemeral port should be available");
+        let profile = Profile::parse(&format!(
+            r#"
+            Teamserver {{
+              Host = "127.0.0.1"
+              Port = 40056
+            }}
+
+            Operators {{
+              user "operator" {{
+                Password = "password1234"
+              }}
+            }}
+
+            Listeners {{
+              Http = [{{
+                Name = "http"
+                Hosts = ["127.0.0.1"]
+                HostBind = "127.0.0.1"
+                HostRotation = "round-robin"
+                PortBind = {port}
+                Secure = false
+              }}]
+              External = [{{
+                Name = "external"
+                Endpoint = "svc"
+              }}]
+            }}
+
+            Demon {{}}
+            "#
+        ))
+        .expect("profile should parse");
+
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let listeners = ListenerManager::new(database, registry, events, sockets, None);
+
+        listeners.sync_profile(&profile).await.expect("profile listeners should sync");
+        listeners
+            .repository()
+            .set_state("http", ListenerStatus::Running, None)
+            .await
+            .expect("http state should update");
+        listeners
+            .repository()
+            .set_state("external", ListenerStatus::Running, None)
+            .await
+            .expect("external state should update");
+
+        listeners.restore_running().await.expect("restore should continue");
+        start_new_profile_listeners(&listeners, &profile)
+            .await
+            .expect("startup should continue after external restore failure");
+
+        let http = listeners.summary("http").await.expect("http listener should exist");
+        let external = listeners.summary("external").await.expect("external listener should exist");
+
+        assert_eq!(http.state.status, ListenerStatus::Running);
+        assert_eq!(external.state.status, ListenerStatus::Error);
+        assert!(external.state.last_error.as_deref().is_some_and(|message| {
+            message.contains("not implemented") && message.contains("svc")
+        }));
+    }
+
     fn available_port() -> std::io::Result<u16> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         Ok(listener.local_addr()?.port())

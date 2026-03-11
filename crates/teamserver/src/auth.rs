@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use red_cell_common::OperatorInfo;
 use red_cell_common::config::{OperatorRole, Profile};
 use red_cell_common::crypto::hash_password_sha3;
 use red_cell_common::operator::{
@@ -111,6 +112,31 @@ pub struct OperatorSession {
     pub role: OperatorRole,
     /// Connection identifier used by the current WebSocket.
     pub connection_id: Uuid,
+}
+
+/// Operator account inventory entry with current presence metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperatorPresence {
+    /// Operator username.
+    pub username: String,
+    /// RBAC role assigned to the operator account.
+    pub role: OperatorRole,
+    /// Whether the operator currently has an authenticated session.
+    pub online: bool,
+}
+
+impl OperatorPresence {
+    /// Convert the operator-presence entry into the shared wire/domain representation.
+    #[must_use]
+    pub fn as_operator_info(&self) -> OperatorInfo {
+        OperatorInfo {
+            username: self.username.clone(),
+            password_hash: None,
+            role: Some(operator_role_name(self.role).to_owned()),
+            online: self.online,
+            last_seen: None,
+        }
+    }
 }
 
 /// In-memory operator credential store and active session registry.
@@ -245,6 +271,31 @@ impl AuthService {
     /// Return all currently authenticated operator sessions.
     pub async fn active_sessions(&self) -> Vec<OperatorSession> {
         self.sessions.read().await.list()
+    }
+
+    /// Return all configured and runtime-created operators with current presence state.
+    pub async fn operator_inventory(&self) -> Vec<OperatorPresence> {
+        let credentials = self.credentials.read().await.clone();
+        let sessions = self.sessions.read().await.list();
+        let mut operators = credentials
+            .into_iter()
+            .map(|(username, account)| {
+                (username.clone(), OperatorPresence { username, role: account.role, online: false })
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        for session in sessions {
+            operators
+                .entry(session.username.clone())
+                .and_modify(|operator| operator.online = true)
+                .or_insert(OperatorPresence {
+                    username: session.username,
+                    role: session.role,
+                    online: true,
+                });
+        }
+
+        operators.into_values().collect()
     }
 
     /// Parse and authenticate a raw JSON operator message.
@@ -385,6 +436,14 @@ fn password_hashes_match(submitted: &str, expected: &str) -> bool {
     let expected = expected.to_ascii_lowercase();
 
     submitted.as_bytes().ct_eq(expected.as_bytes()).into()
+}
+
+const fn operator_role_name(role: OperatorRole) -> &'static str {
+    match role {
+        OperatorRole::Admin => "Admin",
+        OperatorRole::Operator => "Operator",
+        OperatorRole::Analyst => "Analyst",
+    }
 }
 
 #[cfg(test)]
@@ -711,6 +770,52 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].connection_id, connection_id);
         assert_eq!(sessions[0].username, "operator");
+    }
+
+    #[tokio::test]
+    async fn operator_inventory_includes_configured_and_runtime_accounts_with_presence() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        let service = AuthService::from_profile_with_database(&profile(), &database)
+            .await
+            .expect("auth service should initialize");
+        service
+            .create_operator("trinity", "zion", red_cell_common::config::OperatorRole::Operator)
+            .await
+            .expect("runtime operator should be created");
+        let result = service
+            .authenticate_login(
+                Uuid::new_v4(),
+                &LoginInfo { user: "analyst".to_owned(), password: hash_password_sha3("readonly") },
+            )
+            .await;
+        assert!(matches!(result, AuthenticationResult::Success(_)));
+
+        let inventory = service.operator_inventory().await;
+        assert_eq!(
+            inventory,
+            vec![
+                super::OperatorPresence {
+                    username: "admin".to_owned(),
+                    role: red_cell_common::config::OperatorRole::Admin,
+                    online: false,
+                },
+                super::OperatorPresence {
+                    username: "analyst".to_owned(),
+                    role: red_cell_common::config::OperatorRole::Analyst,
+                    online: true,
+                },
+                super::OperatorPresence {
+                    username: "operator".to_owned(),
+                    role: red_cell_common::config::OperatorRole::Operator,
+                    online: false,
+                },
+                super::OperatorPresence {
+                    username: "trinity".to_owned(),
+                    role: red_cell_common::config::OperatorRole::Operator,
+                    online: false,
+                },
+            ]
+        );
     }
 
     #[test]

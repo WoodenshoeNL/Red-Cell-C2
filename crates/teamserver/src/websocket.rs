@@ -16,7 +16,6 @@ use axum::{
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use red_cell_common::AgentInfo;
 use red_cell_common::demon::{
     DemonCommand, DemonFilesystemCommand, DemonInjectWay, DemonKerberosCommand,
     DemonProcessCommand, DemonSocketCommand, DemonTokenCommand,
@@ -25,6 +24,7 @@ use red_cell_common::operator::{
     BuildPayloadMessageInfo, BuildPayloadResponseInfo, EventCode, FlatInfo, Message, MessageHead,
     OperatorMessage, TeamserverLogInfo,
 };
+use red_cell_common::{AgentInfo, OperatorInfo};
 use serde_json::Value;
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -311,6 +311,7 @@ where
     let mut event_receiver = event_bus.subscribe();
     if let Err(error) = send_session_snapshot(
         &mut socket,
+        &auth,
         &event_bus,
         &ListenerManager::from_ref(&state),
         &AgentRegistry::from_ref(&state),
@@ -2094,6 +2095,8 @@ enum SnapshotSyncError {
     #[error(transparent)]
     Send(#[from] SendMessageError),
     #[error(transparent)]
+    Serialize(#[from] serde_json::Error),
+    #[error(transparent)]
     Listener(#[from] crate::ListenerManagerError),
     #[error(transparent)]
     Teamserver(#[from] crate::TeamserverError),
@@ -2101,10 +2104,15 @@ enum SnapshotSyncError {
 
 async fn send_session_snapshot(
     socket: &mut WebSocket,
+    auth: &AuthService,
     events: &EventBus,
     listeners: &ListenerManager,
     registry: &AgentRegistry,
 ) -> Result<(), SnapshotSyncError> {
+    let operators =
+        auth.operator_inventory().await.into_iter().map(|entry| entry.as_operator_info()).collect();
+    send_operator_message(socket, &operator_snapshot_event(operators)?).await?;
+
     for summary in listeners.list().await?.into_iter() {
         send_operator_message(
             socket,
@@ -2127,6 +2135,22 @@ async fn send_session_snapshot(
 
 fn agent_snapshot_event(agent: &AgentInfo, pivots: &crate::PivotInfo) -> OperatorMessage {
     agent_new_event("null", red_cell_common::demon::DEMON_MAGIC_VALUE, agent, pivots)
+}
+
+fn operator_snapshot_event(
+    operators: Vec<OperatorInfo>,
+) -> Result<OperatorMessage, serde_json::Error> {
+    Ok(OperatorMessage::InitConnectionInfo(Message {
+        head: MessageHead {
+            event: EventCode::InitConnection,
+            user: String::new(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info: FlatInfo {
+            fields: BTreeMap::from([("Operators".to_owned(), serde_json::to_value(operators)?)]),
+        },
+    }))
 }
 
 async fn cleanup_connection(
@@ -2218,7 +2242,7 @@ mod tests {
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use futures_util::{SinkExt, StreamExt};
     use red_cell_common::{
-        AgentEncryptionInfo,
+        AgentEncryptionInfo, OperatorInfo,
         config::Profile,
         demon::{
             DemonCommand, DemonFilesystemCommand, DemonInjectWay, DemonProcessCommand,
@@ -2424,6 +2448,7 @@ mod tests {
 
         let response = read_operator_message(&mut socket).await;
         assert!(matches!(response, OperatorMessage::InitConnectionSuccess(_)));
+        let _snapshot = read_operator_snapshot(&mut socket).await;
         assert_eq!(connection_registry.connection_count().await, 1);
         assert_eq!(connection_registry.authenticated_count().await, 1);
         assert_eq!(auth.session_count().await, 1);
@@ -2479,6 +2504,62 @@ mod tests {
         assert_eq!(message.info.name_id, "DEADBEEF");
         assert_eq!(message.info.listener, "null");
         assert_eq!(message.info.magic_value, "deadbeef");
+
+        socket.close(None).await.expect("close should send");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_session_snapshot_includes_configured_and_runtime_operators() {
+        let state = TestState::new().await;
+        state
+            .auth
+            .create_operator("trinity", "zion", red_cell_common::config::OperatorRole::Operator)
+            .await
+            .expect("runtime operator should be created");
+        let (mut socket, server) = spawn_server(state).await;
+
+        socket
+            .send(ClientMessage::Text(login_message("operator", "password1234").into()))
+            .await
+            .expect("login should send");
+        let response = read_operator_message(&mut socket).await;
+        assert!(matches!(response, OperatorMessage::InitConnectionSuccess(_)));
+
+        let operators = read_operator_snapshot(&mut socket).await;
+        assert_eq!(
+            operators,
+            vec![
+                OperatorInfo {
+                    username: "admin".to_owned(),
+                    password_hash: None,
+                    role: Some("Admin".to_owned()),
+                    online: false,
+                    last_seen: None,
+                },
+                OperatorInfo {
+                    username: "analyst".to_owned(),
+                    password_hash: None,
+                    role: Some("Analyst".to_owned()),
+                    online: false,
+                    last_seen: None,
+                },
+                OperatorInfo {
+                    username: "operator".to_owned(),
+                    password_hash: None,
+                    role: Some("Operator".to_owned()),
+                    online: true,
+                    last_seen: None,
+                },
+                OperatorInfo {
+                    username: "trinity".to_owned(),
+                    password_hash: None,
+                    role: Some("Operator".to_owned()),
+                    online: false,
+                    last_seen: None,
+                },
+            ]
+        );
 
         socket.close(None).await.expect("close should send");
         server.abort();
@@ -2550,6 +2631,7 @@ mod tests {
             .expect("login should send");
         let response = read_operator_message(&mut socket).await;
         assert!(matches!(response, OperatorMessage::InitConnectionSuccess(_)));
+        let _snapshot = read_operator_snapshot(&mut socket).await;
 
         let task = serde_json::to_string(&OperatorMessage::AgentTask(Message {
             head: MessageHead {
@@ -3348,6 +3430,27 @@ mod tests {
         }
     }
 
+    async fn read_operator_snapshot(
+        socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> Vec<OperatorInfo> {
+        let message = read_operator_message(socket).await;
+        let OperatorMessage::InitConnectionInfo(message) = message else {
+            panic!("expected operator snapshot event");
+        };
+
+        serde_json::from_value(
+            message
+                .info
+                .fields
+                .get("Operators")
+                .cloned()
+                .expect("operator snapshot should include operators"),
+        )
+        .expect("operator snapshot should decode")
+    }
+
     async fn wait_for_connection_count(manager: &OperatorConnectionManager, expected: usize) {
         timeout(Duration::from_secs(2), async {
             loop {
@@ -3477,6 +3580,7 @@ mod tests {
             .expect("login should send");
         let response = read_operator_message(socket).await;
         assert!(matches!(response, OperatorMessage::InitConnectionSuccess(_)));
+        let _snapshot = read_operator_snapshot(socket).await;
     }
 
     fn sample_agent(agent_id: u32) -> red_cell_common::AgentInfo {

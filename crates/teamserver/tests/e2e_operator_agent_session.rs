@@ -16,7 +16,7 @@ use red_cell_common::operator::{
     AgentResponseInfo, AgentTaskInfo, EventCode, ListenerInfo, ListenerMarkInfo, LoginInfo,
     Message, MessageHead, OperatorMessage,
 };
-use red_cell_common::{HttpListenerConfig, ListenerConfig};
+use red_cell_common::{HttpListenerConfig, ListenerConfig, OperatorInfo};
 use reqwest::Client;
 use tokio::net::TcpListener;
 use tokio::time::{sleep, timeout};
@@ -220,6 +220,7 @@ async fn login(
     socket.send(ClientMessage::Text(payload.into())).await?;
     let response = read_operator_message(socket).await?;
     assert!(matches!(response, OperatorMessage::InitConnectionSuccess(_)));
+    let _snapshot = read_operator_snapshot(socket).await?;
     Ok(())
 }
 
@@ -234,6 +235,26 @@ async fn read_operator_message(
         ClientMessage::Text(payload) => Ok(serde_json::from_str(payload.as_str())?),
         other => Err(format!("unexpected websocket frame: {other:?}").into()),
     }
+}
+
+async fn read_operator_snapshot(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> Result<Vec<OperatorInfo>, Box<dyn std::error::Error>> {
+    let message = read_operator_message(socket).await?;
+    let OperatorMessage::InitConnectionInfo(message) = message else {
+        return Err("expected operator snapshot event".into());
+    };
+
+    Ok(serde_json::from_value(
+        message
+            .info
+            .fields
+            .get("Operators")
+            .cloned()
+            .ok_or_else(|| "operator snapshot missing operators".to_owned())?,
+    )?)
 }
 
 async fn assert_no_operator_message(

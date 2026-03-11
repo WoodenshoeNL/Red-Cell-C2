@@ -372,7 +372,7 @@ struct LootSummary {
 struct OperatorSummary {
     username: String,
     role: OperatorRole,
-    connection_id: String,
+    online: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, ToSchema)]
@@ -1068,7 +1068,7 @@ async fn get_loot(
     tag = "operators",
     security(("api_key" = [])),
     responses(
-        (status = 200, description = "List active operator sessions", body = [OperatorSummary]),
+        (status = 200, description = "List configured and runtime-created operators with presence state", body = [OperatorSummary]),
         (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
         (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
         (status = 429, description = "Rate limit exceeded", body = ApiErrorBody)
@@ -1078,21 +1078,18 @@ async fn list_operators(
     State(state): State<TeamserverState>,
     _identity: AdminApiAccess,
 ) -> Json<Vec<OperatorSummary>> {
-    let mut sessions = state
+    let operators = state
         .auth
-        .active_sessions()
+        .operator_inventory()
         .await
         .into_iter()
-        .map(|session| OperatorSummary {
-            username: session.username,
-            role: session.role,
-            connection_id: session.connection_id.to_string(),
+        .map(|operator| OperatorSummary {
+            username: operator.username,
+            role: operator.role,
+            online: operator.online,
         })
         .collect::<Vec<_>>();
-    sessions.sort_by(|left, right| {
-        left.username.cmp(&right.username).then(left.connection_id.cmp(&right.connection_id))
-    });
-    Json(sessions)
+    Json(operators)
 }
 
 #[utoipa::path(
@@ -2284,7 +2281,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn operators_endpoint_is_admin_only_and_lists_active_sessions() {
+    async fn operators_endpoint_is_admin_only_and_lists_configured_accounts_with_presence() {
         let (app, _, auth) = test_router_with_registry(Some((
             60,
             "rest-admin",
@@ -2314,12 +2311,15 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = read_json(response).await;
-        assert_eq!(body.as_array().expect("array").len(), 1);
-        assert_eq!(body[0]["username"], "Neo");
+        let operators = body.as_array().expect("array");
+        assert_eq!(operators.len(), 1);
+        assert_eq!(operators[0]["username"], "Neo");
+        assert_eq!(operators[0]["role"], "Admin");
+        assert_eq!(operators[0]["online"], true);
     }
 
     #[tokio::test]
-    async fn create_operator_endpoint_creates_runtime_account() {
+    async fn create_operator_endpoint_creates_runtime_account_and_lists_it_offline() {
         let (app, _, auth) = test_router_with_registry(Some((
             60,
             "rest-admin",
@@ -2349,6 +2349,35 @@ mod tests {
         assert_eq!(body["username"], "trinity");
         assert_eq!(body["role"], "Operator");
 
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/operators")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(
+            body,
+            serde_json::json!([
+                {
+                    "username": "Neo",
+                    "role": "Admin",
+                    "online": false
+                },
+                {
+                    "username": "trinity",
+                    "role": "Operator",
+                    "online": false
+                }
+            ])
+        );
+
         let result = auth
             .authenticate_login(
                 Uuid::new_v4(),
@@ -2359,6 +2388,54 @@ mod tests {
             )
             .await;
         assert!(matches!(result, crate::auth::AuthenticationResult::Success(_)));
+    }
+
+    #[tokio::test]
+    async fn operators_endpoint_includes_persisted_runtime_accounts_loaded_at_startup() {
+        let database = Database::connect_in_memory().await.expect("database");
+        database
+            .operators()
+            .create(&crate::PersistedOperator {
+                username: "trinity".to_owned(),
+                password_hash: hash_password_sha3("zion"),
+                role: OperatorRole::Operator,
+            })
+            .await
+            .expect("runtime operator should persist");
+        let (app, _, _) = test_router_with_database(
+            database,
+            Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)),
+        )
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/operators")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(
+            body,
+            serde_json::json!([
+                {
+                    "username": "Neo",
+                    "role": "Admin",
+                    "online": false
+                },
+                {
+                    "username": "trinity",
+                    "role": "Operator",
+                    "online": false
+                }
+            ])
+        );
     }
 
     #[tokio::test]
@@ -2479,7 +2556,8 @@ mod tests {
         );
 
         let api = ApiRuntime::from_profile(&profile);
-        let auth = AuthService::from_profile(&profile);
+        let auth =
+            AuthService::from_profile_with_database(&profile, &database).await.expect("auth");
 
         (
             api_routes(api.clone()).with_state(TeamserverState {

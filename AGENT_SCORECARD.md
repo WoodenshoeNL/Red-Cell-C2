@@ -9,11 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 27 | 31 |
+| Tasks closed | 0 | 40 | 31 |
 | Bugs filed against | 0 | 2 | 9 |
-| Bug rate (bugs/task) | N/A | 0.07 | 0.29 |
-| Quality score | N/A | 93% | 71% |
-<!-- Totals unchanged this run: no new dev closes or bugs filed -->
+| Bug rate (bugs/task) | N/A | 0.05 | 0.29 |
+| Quality score | N/A | 95% | 71% |
 
 ## Violation Breakdown
 
@@ -322,3 +321,14 @@ Biggest blindspot: Zero-key DEMON_INIT bypass — any attacker that can reach th
 
 Build: passed (cargo check + clippy -D warnings: clean; cargo test: 426 passed)
 No new development commits since last checkpoint. Only QA/arch review commits in range. Open P2 in_progress: red-cell-c2-2pw (encrypt_agent_data silent empty return). Open bugs: red-3nf, red-2d4, red-2ne (arch review finds, not yet fixed), red-9pf (AES-CTR block offset lost on restart). No new bugs filed this run.
+
+### QA Review — 2026-03-11 12:45 — c5ed19..394c73
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | Infrastructure only: setup.sh, br prefix fix, QA checkpoint |
+| Codex | 13 | 0 | Also closed: 1tp (DownloadTracker test coverage). Closed: 2pw (encrypt_agent_data error propagation), 2l6 (E2E HTTP listener integration test), 73w (note task operator attribution), ggu (shared agent_new_event builder), 1yv (AgentSocketState stale agent pruning), djc (graceful SOCKS shutdown), o17 (DNS pending response expiry), nk2 (token privs SubCommand preserve), 1ui (token steal grammar), zd9 (DownloadTracker memory cap), 1us (SOCKS5 oversized domain rejection), vyz (SOCKS write_client_data error surfaced) |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (cargo check + clippy -D warnings clean; cargo test: 446 passed)
+Note: Issue red-cell-c2-1tp (DownloadTracker unit tests) is in_progress — Codex just claimed it. The zd9 fix already added high-level integration tests; uncommitted working-tree changes add 3 direct DownloadTracker unit tests (multi-chunk, orphan chunk, size cap). Expect close next pass.

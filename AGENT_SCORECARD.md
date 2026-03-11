@@ -633,3 +633,15 @@ Notes: Clean sprint. The duplicate DEMON_INIT fix (red-cell-c2-1uoh) is correct 
 
 Build: passed (cargo check clean; cargo clippy --workspace -- -D warnings clean; cargo test: 175 passed, 0 failed; doc-tests clean)
 Notes: Reviewed four commits in range; only one agent-authored development change landed, and it is test-only follow-up for the earlier shared `agent_new_event` fix. Current `HEAD` uses the shared builder from both `listeners.rs` and `dispatch.rs`, so closing red-5xw is justified. No new QA bugs filed. Beads state is consistent: one active in-progress issue (`red-pkl`) and no task closures without corresponding implementation.
+
+### Arch Review — 2026-03-12 00:50
+
+| Agent | Findings | Categories | Notes |
+|-------|---------:|------------|-------|
+| Claude | 0 | — | No new agent-attributed findings this run |
+| Codex | 0 | — | Reconfirmed existing open DNS release-build gap (`red-cell-c2-33lj`), but no new Codex-attributed defects were filed |
+| Cursor | 0 | — | No new agent-attributed findings this run |
+
+Overall codebase health: drifting
+Biggest blindspot: auth and shared-domain review still lacks protocol-hardening around operator identity handling and cross-crate agent-id parsing consistency.
+Additional findings filed this run were attributed to Michel Klomp: red-cell-c2-1pb7, red-cell-c2-2znr, and red-cell-c2-2g5q.

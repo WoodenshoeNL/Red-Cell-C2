@@ -1235,6 +1235,8 @@ struct DnsPendingUpload {
 struct DnsPendingResponse {
     /// Base32hex-encoded response chunks.
     chunks: Vec<String>,
+    /// Timestamp of when the response was queued for download.
+    received_at: Instant,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1394,7 +1396,10 @@ impl DnsListenerState {
             Ok(response) => {
                 if !response.payload.is_empty() {
                     let chunks = chunk_response_to_b32hex(&response.payload);
-                    self.responses.lock().await.insert(agent_id, DnsPendingResponse { chunks });
+                    self.responses.lock().await.insert(
+                        agent_id,
+                        DnsPendingResponse { chunks, received_at: Instant::now() },
+                    );
                 }
                 "ack"
             }
@@ -1413,6 +1418,11 @@ impl DnsListenerState {
     async fn cleanup_expired_uploads(&self) {
         let mut uploads = self.uploads.lock().await;
         uploads
+            .retain(|_, pending| pending.received_at.elapsed().as_secs() < DNS_UPLOAD_TIMEOUT_SECS);
+        drop(uploads);
+
+        let mut responses = self.responses.lock().await;
+        responses
             .retain(|_, pending| pending.received_at.elapsed().as_secs() < DNS_UPLOAD_TIMEOUT_SECS);
     }
 
@@ -3593,7 +3603,10 @@ mod tests {
 
         state.responses.lock().await.insert(
             agent_id,
-            DnsPendingResponse { chunks: vec!["AAA".to_owned(), "BBB".to_owned()] },
+            DnsPendingResponse {
+                chunks: vec!["AAA".to_owned(), "BBB".to_owned()],
+                received_at: Instant::now(),
+            },
         );
 
         assert_eq!(state.handle_download(agent_id, 0).await, "2 AAA");
@@ -3672,11 +3685,30 @@ mod tests {
                 DnsPendingUpload { chunks: HashMap::new(), total: 1, received_at: Instant::now() },
             );
         }
+        {
+            let mut responses = state.responses.lock().await;
+            responses.insert(
+                3,
+                DnsPendingResponse {
+                    chunks: vec!["AAA".to_owned()],
+                    received_at: Instant::now() - stale_age,
+                },
+            );
+            responses.insert(
+                4,
+                DnsPendingResponse { chunks: vec!["BBB".to_owned()], received_at: Instant::now() },
+            );
+        }
 
         state.cleanup_expired_uploads().await;
 
         let uploads = state.uploads.lock().await;
         assert!(!uploads.contains_key(&1));
         assert!(uploads.contains_key(&2));
+        drop(uploads);
+
+        let responses = state.responses.lock().await;
+        assert!(!responses.contains_key(&3));
+        assert!(responses.contains_key(&4));
     }
 }

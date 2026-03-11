@@ -35,7 +35,9 @@ use red_cell_common::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, UdpSocket};
+use tokio::net::TcpListener;
+#[cfg(test)]
+use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{info, instrument, warn};
@@ -351,6 +353,8 @@ pub struct ListenerMarkRequest {
     pub mark: String,
 }
 
+const DNS_LISTENER_PAYLOAD_GENERATION_UNAVAILABLE: &str = "DNS listeners are not yet available because Demon payload generation does not support DNS transport";
+
 /// Errors returned by [`ListenerManager`].
 #[derive(Debug, thiserror::Error)]
 pub enum ListenerManagerError {
@@ -474,6 +478,7 @@ impl ListenerManager {
     ) -> Result<ListenerSummary, ListenerManagerError> {
         let _guard = self.operations.lock().await;
         let repository = self.repository();
+        ensure_listener_creation_supported(&config)?;
 
         if repository.exists(config.name()).await? {
             return Err(ListenerManagerError::DuplicateListener { name: config.name().to_owned() });
@@ -491,6 +496,7 @@ impl ListenerManager {
     ) -> Result<ListenerSummary, ListenerManagerError> {
         let _guard = self.operations.lock().await;
         let repository = self.repository();
+        ensure_listener_creation_supported(&config)?;
         let existing = repository.get(config.name()).await?.ok_or_else(|| {
             ListenerManagerError::ListenerNotFound { name: config.name().to_owned() }
         })?;
@@ -1462,21 +1468,19 @@ impl ListenerManager {
                 .await
             }
             ListenerConfig::External(config) => Err(unsupported_external_listener_error(config)),
-            ListenerConfig::Dns(config) => {
-                spawn_dns_listener_runtime(
-                    config,
-                    self.agent_registry.clone(),
-                    self.events.clone(),
-                    self.database.clone(),
-                    self.sockets.clone(),
-                    self.plugins.clone(),
-                    self.demon_init_rate_limiter.clone(),
-                    self.max_download_bytes,
-                )
-                .await
-            }
+            ListenerConfig::Dns(config) => Err(unsupported_dns_listener_error(config)),
         }
     }
+}
+
+fn ensure_listener_creation_supported(config: &ListenerConfig) -> Result<(), ListenerManagerError> {
+    if let ListenerConfig::Dns(config) = config {
+        return Err(ListenerManagerError::InvalidConfig {
+            message: format!("{} (`{}`)", DNS_LISTENER_PAYLOAD_GENERATION_UNAVAILABLE, config.name),
+        });
+    }
+
+    Ok(())
 }
 
 fn unsupported_external_listener_error(config: &ExternalListenerConfig) -> ListenerManagerError {
@@ -1489,41 +1493,64 @@ fn unsupported_external_listener_error(config: &ExternalListenerConfig) -> Liste
     }
 }
 
+fn unsupported_dns_listener_error(config: &DnsListenerConfig) -> ListenerManagerError {
+    ListenerManagerError::StartFailed {
+        name: config.name.clone(),
+        message: DNS_LISTENER_PAYLOAD_GENERATION_UNAVAILABLE.to_owned(),
+    }
+}
+
 // ── DNS C2 Listener ──────────────────────────────────────────────────────────
 
 /// DNS wire-format header length in bytes.
+#[cfg(test)]
 const DNS_HEADER_LEN: usize = 12;
 /// DNS record type for TXT records.
+#[cfg(test)]
 const DNS_TYPE_TXT: u16 = 16;
 /// DNS record type for A records.
+#[cfg(test)]
 const DNS_TYPE_A: u16 = 1;
 /// DNS record type for CNAME records.
+#[cfg(test)]
 const DNS_TYPE_CNAME: u16 = 5;
 /// DNS record class IN.
+#[cfg(test)]
 const DNS_CLASS_IN: u16 = 1;
 /// DNS flag: Query/Response bit.
+#[cfg(test)]
 const DNS_FLAG_QR: u16 = 0x8000;
 /// DNS flag: Authoritative Answer bit.
+#[cfg(test)]
 const DNS_FLAG_AA: u16 = 0x0400;
 /// DNS RCODE: No Error.
+#[cfg(test)]
 const DNS_RCODE_NOERROR: u16 = 0;
 /// DNS RCODE: Refused.
+#[cfg(test)]
 const DNS_RCODE_REFUSED: u16 = 5;
 /// Maximum age in seconds before a pending DNS upload is discarded.
+#[cfg(test)]
 const DNS_UPLOAD_TIMEOUT_SECS: u64 = 120;
 /// How often the DNS listener prunes expired upload sessions.
+#[cfg(test)]
 const DNS_UPLOAD_CLEANUP_INTERVAL_SECS: u64 = 30;
 /// Maximum number of chunks accepted for a single DNS upload.
+#[cfg(test)]
 const DNS_MAX_UPLOAD_CHUNKS: u16 = 256;
 /// Maximum number of concurrent DNS upload sessions retained in memory.
+#[cfg(test)]
 const DNS_MAX_PENDING_UPLOADS: usize = 1000;
 /// Maximum response chunk size in bytes (encoded as base32hex in a TXT string).
 /// 200 base32hex chars × 5 bits ÷ 8 = 125 bytes.
+#[cfg(test)]
 const DNS_RESPONSE_CHUNK_BYTES: usize = 125;
 /// Base32hex alphabet (RFC 4648 §7): 0-9 followed by A-V.
+#[cfg(test)]
 const BASE32HEX_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHIJKLMNOPQRSTUV";
 
 /// In-progress multi-chunk upload reassembly buffer for a DNS C2 agent.
+#[cfg(test)]
 #[derive(Debug)]
 struct DnsPendingUpload {
     /// Received chunks indexed by sequence number.
@@ -1535,6 +1562,7 @@ struct DnsPendingUpload {
 }
 
 /// Pre-chunked C2 response ready to be polled by a DNS agent.
+#[cfg(test)]
 #[derive(Debug)]
 struct DnsPendingResponse {
     /// Base32hex-encoded response chunks.
@@ -1543,6 +1571,7 @@ struct DnsPendingResponse {
     received_at: Instant,
 }
 
+#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 enum DnsUploadAssembly {
     Pending,
@@ -1583,6 +1612,7 @@ enum DnsUploadAssembly {
 /// * `wait`              — no response queued for this agent
 /// * `<TOTAL> <B32HEX>` — total chunk count and the requested chunk
 /// * `done`              — `SEQ` is past the end of the response
+#[cfg(test)]
 #[derive(Debug)]
 struct DnsListenerState {
     config: DnsListenerConfig,
@@ -1597,6 +1627,7 @@ struct DnsListenerState {
     responses: Mutex<HashMap<u32, DnsPendingResponse>>,
 }
 
+#[cfg(test)]
 impl DnsListenerState {
     fn new(
         config: &DnsListenerConfig,
@@ -1857,6 +1888,7 @@ impl DnsListenerState {
     }
 }
 
+#[cfg(test)]
 fn dns_allowed_query_types(record_types: &[String]) -> Option<Vec<u16>> {
     let configured =
         if record_types.is_empty() { vec!["TXT".to_owned()] } else { record_types.to_vec() };
@@ -1879,6 +1911,7 @@ fn dns_allowed_query_types(record_types: &[String]) -> Option<Vec<u16>> {
 }
 
 /// A parsed DNS C2 query from a Demon agent.
+#[cfg(test)]
 enum DnsC2Query {
     /// Upload chunk: `<b32hex-data>.<seq>-<total>-<agentid>.up.<domain>`
     Upload { agent_id: u32, seq: u16, total: u16, data: Vec<u8> },
@@ -1887,6 +1920,7 @@ enum DnsC2Query {
 }
 
 /// A minimally parsed DNS query sufficient for C2 processing.
+#[cfg(test)]
 struct ParsedDnsQuery {
     id: u16,
     /// Raw wire-format QNAME bytes (including final zero label).
@@ -1899,6 +1933,7 @@ struct ParsedDnsQuery {
 /// Parse the first question from a raw DNS UDP payload.
 ///
 /// Returns `None` if the packet is malformed or has ≠ 1 question.
+#[cfg(test)]
 fn parse_dns_query(buf: &[u8]) -> Option<ParsedDnsQuery> {
     if buf.len() < DNS_HEADER_LEN {
         return None;
@@ -1955,6 +1990,7 @@ fn parse_dns_query(buf: &[u8]) -> Option<ParsedDnsQuery> {
 /// Expected formats (labels listed from leftmost to rightmost, domain stripped):
 /// * Upload:   `["<b32>", "<seq>-<total>-<aid>", "up"]`
 /// * Download: `["<seq>-<aid>",                  "dn"]`
+#[cfg(test)]
 fn parse_dns_c2_query(labels: &[String], domain: &str) -> Option<DnsC2Query> {
     // Strip the domain suffix labels from the right
     let domain_labels: Vec<&str> = domain.split('.').collect();
@@ -2000,6 +2036,7 @@ fn parse_dns_c2_query(labels: &[String], domain: &str) -> Option<DnsC2Query> {
 }
 
 /// Encode `data` as uppercase base32hex (RFC 4648 §7) with no padding.
+#[cfg(test)]
 fn base32hex_encode(data: &[u8]) -> String {
     let mut result = String::with_capacity((data.len() * 8).div_ceil(5));
     let mut buf: u32 = 0;
@@ -2024,6 +2061,7 @@ fn base32hex_encode(data: &[u8]) -> String {
 /// Decode a base32hex string (case-insensitive, no padding) into bytes.
 ///
 /// Returns `None` if any character is outside the base32hex alphabet.
+#[cfg(test)]
 fn base32hex_decode(s: &str) -> Option<Vec<u8>> {
     let mut result = Vec::with_capacity(s.len() * 5 / 8);
     let mut buf: u32 = 0;
@@ -2048,6 +2086,7 @@ fn base32hex_decode(s: &str) -> Option<Vec<u8>> {
 }
 
 /// Split a Demon response payload into base32hex-encoded chunks for DNS delivery.
+#[cfg(test)]
 fn chunk_response_to_b32hex(payload: &[u8]) -> Vec<String> {
     payload.chunks(DNS_RESPONSE_CHUNK_BYTES).map(base32hex_encode).collect()
 }
@@ -2057,6 +2096,7 @@ fn chunk_response_to_b32hex(payload: &[u8]) -> Vec<String> {
 /// The question section is reconstructed from `qname_raw` (which already includes the
 /// zero-label terminator), and a single answer TXT record is appended using a pointer
 /// back to offset 12 (the start of the question QNAME).
+#[cfg(test)]
 fn build_dns_txt_response(query_id: u16, qname_raw: &[u8], qtype: u16, txt_data: &[u8]) -> Vec<u8> {
     // Clamp TXT data to 255 bytes (single TXT string limit per RFC 1035).
     let txt_data = &txt_data[..txt_data.len().min(255)];
@@ -2096,6 +2136,7 @@ fn build_dns_txt_response(query_id: u16, qname_raw: &[u8], qtype: u16, txt_data:
 }
 
 /// Build a DNS REFUSED response for `query_id`.
+#[cfg(test)]
 fn build_dns_refused_response(query_id: u16) -> Vec<u8> {
     let mut response = vec![0u8; DNS_HEADER_LEN];
     response[0] = (query_id >> 8) as u8;
@@ -2106,6 +2147,7 @@ fn build_dns_refused_response(query_id: u16) -> Vec<u8> {
     response
 }
 
+#[cfg(test)]
 async fn spawn_dns_listener_runtime(
     config: &DnsListenerConfig,
     registry: AgentRegistry,
@@ -2709,7 +2751,7 @@ mod tests {
         base32hex_encode, build_dns_txt_response, chunk_response_to_b32hex,
         dns_allowed_query_types, extract_external_ip, listener_config_from_operator,
         operator_requests_start, parse_dns_c2_query, parse_dns_query, parse_trusted_proxy_peer,
-        read_smb_frame, smb_local_socket_name,
+        read_smb_frame, smb_local_socket_name, spawn_dns_listener_runtime,
     };
     use crate::{
         AgentRegistry, Database, EventBus, Job, PersistedListenerState, SocketRelayManager,
@@ -2736,6 +2778,7 @@ mod tests {
     };
     use reqwest::Client;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::task::JoinHandle;
     use tokio::time::sleep;
 
     fn http_listener(name: &str, port: u16) -> ListenerConfig {
@@ -2941,6 +2984,47 @@ mod tests {
             message.contains("not implemented") && message.contains("svc")
         }));
         assert!(!manager.active_handles.read().await.contains_key("external"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_rejects_dns_listener_until_payload_generation_support_exists()
+    -> Result<(), ListenerManagerError> {
+        let manager = manager().await?;
+        let error = manager
+            .create(dns_listener_config("dns-gated", 5300, "c2.example.com"))
+            .await
+            .expect_err("dns listener should be rejected");
+
+        assert!(matches!(error, ListenerManagerError::InvalidConfig { .. }));
+        assert!(
+            error.to_string().contains("Demon payload generation does not support DNS transport"),
+            "unexpected error: {error}"
+        );
+        assert!(matches!(
+            manager.summary("dns-gated").await,
+            Err(ListenerManagerError::ListenerNotFound { .. })
+        ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn start_marks_persisted_dns_listener_as_error() -> Result<(), ListenerManagerError> {
+        let manager = manager().await?;
+        let repository = manager.repository();
+        repository.create(&dns_listener_config("dns-gated", 5301, "c2.example.com")).await?;
+
+        let error = manager.start("dns-gated").await.expect_err("dns listener should not start");
+        let summary = manager.summary("dns-gated").await?;
+
+        assert!(matches!(error, ListenerManagerError::StartFailed { .. }));
+        assert_eq!(summary.state.status, ListenerStatus::Error);
+        assert!(summary.state.last_error.as_deref().is_some_and(|message| {
+            message.contains("Demon payload generation does not support DNS transport")
+        }));
+        assert!(!manager.active_handles.read().await.contains_key("dns-gated"));
 
         Ok(())
     }
@@ -4167,6 +4251,29 @@ mod tests {
         )
     }
 
+    async fn spawn_test_dns_listener(
+        config: red_cell_common::DnsListenerConfig,
+    ) -> (JoinHandle<()>, AgentRegistry) {
+        let database = Database::connect_in_memory().await.expect("database creation failed");
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let handle = spawn_dns_listener_runtime(
+            &config,
+            registry.clone(),
+            events,
+            database,
+            sockets,
+            None,
+            DemonInitRateLimiter::new(),
+            super::DEFAULT_MAX_DOWNLOAD_BYTES,
+        )
+        .await
+        .expect("dns runtime should start");
+
+        (handle, registry)
+    }
+
     /// Build a minimal DNS query packet for `qname`.
     fn build_dns_query(id: u16, qname: &str, qtype: u16) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -4344,10 +4451,16 @@ mod tests {
     #[tokio::test]
     async fn dns_listener_starts_and_responds_to_unknown_queries_with_refused() {
         let port = free_udp_port();
-        let manager = manager().await.expect("manager creation failed");
-        let config = dns_listener_config("dns-test", port, "c2.example.com");
-        manager.create(config).await.expect("create failed");
-        manager.start("dns-test").await.expect("start failed");
+        let config = red_cell_common::DnsListenerConfig {
+            name: "dns-test".to_owned(),
+            host_bind: "127.0.0.1".to_owned(),
+            port_bind: port,
+            domain: "c2.example.com".to_owned(),
+            record_types: vec!["TXT".to_owned()],
+            kill_date: None,
+            working_hours: None,
+        };
+        let (handle, _) = spawn_test_dns_listener(config).await;
 
         // Brief delay for the listener to bind
         sleep(Duration::from_millis(50)).await;
@@ -4368,15 +4481,22 @@ mod tests {
         // RCODE should be 5 (REFUSED)
         let rcode = buf[3] & 0x0F;
         assert_eq!(rcode, 5, "expected REFUSED RCODE");
+        handle.abort();
     }
 
     #[tokio::test]
     async fn dns_listener_download_poll_returns_wait_when_no_response_queued() {
         let port = free_udp_port();
-        let manager = manager().await.expect("manager creation failed");
-        let config = dns_listener_config("dns-wait", port, "c2.example.com");
-        manager.create(config).await.expect("create failed");
-        manager.start("dns-wait").await.expect("start failed");
+        let config = red_cell_common::DnsListenerConfig {
+            name: "dns-wait".to_owned(),
+            host_bind: "127.0.0.1".to_owned(),
+            port_bind: port,
+            domain: "c2.example.com".to_owned(),
+            record_types: vec!["TXT".to_owned()],
+            kill_date: None,
+            working_hours: None,
+        };
+        let (handle, _) = spawn_test_dns_listener(config).await;
 
         sleep(Duration::from_millis(50)).await;
 
@@ -4401,23 +4521,23 @@ mod tests {
         // ANCOUNT = 1
         let ancount = u16::from_be_bytes([buf[6], buf[7]]);
         assert_eq!(ancount, 1);
+        handle.abort();
     }
 
     #[tokio::test]
     async fn dns_listener_rate_limits_demon_init_per_source_ip() {
-        let database = Database::connect_in_memory().await.expect("database creation failed");
-        let registry = AgentRegistry::new(database.clone());
-        let events = EventBus::default();
-        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
         let port = free_udp_port();
-        let domain = "c2.example.com";
-
-        manager
-            .create(dns_listener_config("dns-init-limit", port, domain))
-            .await
-            .expect("create failed");
-        manager.start("dns-init-limit").await.expect("start failed");
+        let domain = "c2.example.com".to_owned();
+        let config = red_cell_common::DnsListenerConfig {
+            name: "dns-init-limit".to_owned(),
+            host_bind: "127.0.0.1".to_owned(),
+            port_bind: port,
+            domain: domain.clone(),
+            record_types: vec!["TXT".to_owned()],
+            kill_date: None,
+            working_hours: None,
+        };
+        let (handle, registry) = spawn_test_dns_listener(config).await;
 
         sleep(Duration::from_millis(50)).await;
 
@@ -4438,7 +4558,7 @@ mod tests {
                     u16::try_from(seq).expect("chunk index should fit in u16"),
                     total,
                     chunk,
-                    domain,
+                    &domain,
                 );
                 let packet = build_dns_txt_query(0x4000 + seq as u16, &qname);
                 client.send(&packet).await.expect("send failed");
@@ -4464,20 +4584,22 @@ mod tests {
                 assert!(registry.get(agent_id).await.is_none());
             }
         }
+        handle.abort();
     }
 
     #[tokio::test]
     async fn dns_listener_refuses_query_types_not_enabled_by_config() {
         let port = free_udp_port();
-        let manager = manager().await.expect("manager creation failed");
-        let mut config = dns_listener_config("dns-txt-only", port, "c2.example.com");
-        let ListenerConfig::Dns(dns_config) = &mut config else {
-            panic!("expected DNS config");
+        let config = red_cell_common::DnsListenerConfig {
+            name: "dns-txt-only".to_owned(),
+            host_bind: "127.0.0.1".to_owned(),
+            port_bind: port,
+            domain: "c2.example.com".to_owned(),
+            record_types: vec!["TXT".to_owned()],
+            kill_date: None,
+            working_hours: None,
         };
-        dns_config.record_types = vec!["TXT".to_owned()];
-
-        manager.create(config).await.expect("create failed");
-        manager.start("dns-txt-only").await.expect("start failed");
+        let (handle, _) = spawn_test_dns_listener(config).await;
 
         sleep(Duration::from_millis(50)).await;
 
@@ -4494,20 +4616,22 @@ mod tests {
             .expect("recv failed");
 
         assert_eq!(buf[3] & 0x0F, 5, "expected REFUSED RCODE");
+        handle.abort();
     }
 
     #[tokio::test]
     async fn dns_listener_accepts_cname_queries_when_enabled() {
         let port = free_udp_port();
-        let manager = manager().await.expect("manager creation failed");
-        let mut config = dns_listener_config("dns-cname", port, "c2.example.com");
-        let ListenerConfig::Dns(dns_config) = &mut config else {
-            panic!("expected DNS config");
+        let config = red_cell_common::DnsListenerConfig {
+            name: "dns-cname".to_owned(),
+            host_bind: "127.0.0.1".to_owned(),
+            port_bind: port,
+            domain: "c2.example.com".to_owned(),
+            record_types: vec!["CNAME".to_owned()],
+            kill_date: None,
+            working_hours: None,
         };
-        dns_config.record_types = vec!["CNAME".to_owned()];
-
-        manager.create(config).await.expect("create failed");
-        manager.start("dns-cname").await.expect("start failed");
+        let (handle, _) = spawn_test_dns_listener(config).await;
 
         sleep(Duration::from_millis(50)).await;
 
@@ -4531,20 +4655,38 @@ mod tests {
         let echoed_qtype =
             u16::from_be_bytes([buf[question_qtype_offset], buf[question_qtype_offset + 1]]);
         assert_eq!(echoed_qtype, DNS_TYPE_CNAME);
+        handle.abort();
     }
 
     #[tokio::test]
     async fn dns_listener_start_rejects_unsupported_record_types() {
         let port = free_udp_port();
-        let manager = manager().await.expect("manager creation failed");
-        let mut config = dns_listener_config("dns-invalid-type", port, "c2.example.com");
-        let ListenerConfig::Dns(dns_config) = &mut config else {
-            panic!("expected DNS config");
+        let config = red_cell_common::DnsListenerConfig {
+            name: "dns-invalid-type".to_owned(),
+            host_bind: "127.0.0.1".to_owned(),
+            port_bind: port,
+            domain: "c2.example.com".to_owned(),
+            record_types: vec!["MX".to_owned()],
+            kill_date: None,
+            working_hours: None,
         };
-        dns_config.record_types = vec!["MX".to_owned()];
 
-        manager.create(config).await.expect("create failed");
-        let error = manager.start("dns-invalid-type").await.expect_err("start should fail");
+        let database = Database::connect_in_memory().await.expect("database creation failed");
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let error = spawn_dns_listener_runtime(
+            &config,
+            registry,
+            events,
+            database,
+            sockets,
+            None,
+            DemonInitRateLimiter::new(),
+            super::DEFAULT_MAX_DOWNLOAD_BYTES,
+        )
+        .await
+        .expect_err("start should fail");
         assert!(
             error.to_string().contains("unsupported DNS record type configuration"),
             "unexpected error: {error}"

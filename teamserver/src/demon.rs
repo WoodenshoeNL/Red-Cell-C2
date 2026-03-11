@@ -159,14 +159,21 @@ impl DemonPacketParser {
                 return Ok(ParsedDemonPacket::Reconnect { header: envelope.header, request_id });
             }
 
+            if self.registry.get(envelope.header.agent_id).await.is_some() {
+                warn!(
+                    agent_id = format_args!("0x{:08X}", envelope.header.agent_id),
+                    listener_name,
+                    "rejecting duplicate full DEMON_INIT for an already-registered agent"
+                );
+                return Err(DemonParserError::InvalidInit(
+                    "agent is already registered; reconnect probe required",
+                ));
+            }
+
             let agent = parse_init_agent(envelope.header.agent_id, remaining, &external_ip, now)?;
             let init_encrypted_len =
                 remaining.len().saturating_sub(AGENT_KEY_LENGTH + AGENT_IV_LENGTH);
-            if self.registry.get(agent.agent_id).await.is_some() {
-                self.registry.update_agent_with_listener(agent.clone(), listener_name).await?;
-            } else {
-                self.registry.insert_with_listener(agent.clone(), listener_name).await?;
-            }
+            self.registry.insert_with_listener(agent.clone(), listener_name).await?;
             self.registry
                 .set_ctr_offset(agent.agent_id, ctr_blocks_for_length(init_encrypted_len))
                 .await?;
@@ -742,6 +749,46 @@ mod tests {
                 },
                 request_id: 123,
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_rejects_duplicate_full_init_without_mutating_registered_agent() {
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry.clone());
+        let agent_id = 0x1111_2222;
+        let first_key = [0x41; AGENT_KEY_LENGTH];
+        let first_iv = [0x24; AGENT_IV_LENGTH];
+        let first_packet = build_init_packet(agent_id, first_key, first_iv);
+        parser
+            .parse_for_listener(&first_packet, "192.0.2.10", "http-main")
+            .await
+            .expect("initial init should succeed");
+
+        let stored_before = registry.get(agent_id).await.expect("agent should be registered");
+        let listener_before =
+            registry.listener_name(agent_id).await.expect("listener should exist");
+        let ctr_before = registry.ctr_offset(agent_id).await.expect("ctr offset should exist");
+
+        let duplicate_packet =
+            build_init_packet(agent_id, [0x99; AGENT_KEY_LENGTH], [0x55; AGENT_IV_LENGTH]);
+        let error = parser
+            .parse_for_listener(&duplicate_packet, "198.51.100.99", "smb-secondary")
+            .await
+            .expect_err("duplicate full init must be rejected");
+
+        assert!(matches!(
+            error,
+            DemonParserError::InvalidInit("agent is already registered; reconnect probe required")
+        ));
+        assert_eq!(registry.get(agent_id).await, Some(stored_before));
+        assert_eq!(
+            registry.listener_name(agent_id).await.as_deref(),
+            Some(listener_before.as_str())
+        );
+        assert_eq!(
+            registry.ctr_offset(agent_id).await.expect("ctr offset should exist"),
+            ctr_before
         );
     }
 

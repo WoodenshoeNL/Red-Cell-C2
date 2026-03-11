@@ -3632,7 +3632,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn smb_listener_agent_new_event_includes_existing_pivot_chain()
+    async fn smb_listener_rejects_duplicate_full_init_for_registered_pivot_agent()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());
@@ -3652,6 +3652,9 @@ mod tests {
         registry.insert(sample_agent_info(parent_id, parent_key, parent_iv)).await?;
         registry.insert(sample_agent_info(child_id, child_key, child_iv)).await?;
         registry.add_link(parent_id, child_id).await?;
+        let stored_before = registry.get(child_id).await.expect("child agent should exist");
+        let listener_before = registry.listener_name(child_id).await;
+        let ctr_before = registry.ctr_offset(child_id).await?;
 
         manager.create(smb_listener("edge-smb-pivot-init", &pipe_name)).await?;
         manager.start("edge-smb-pivot-init").await?;
@@ -3665,20 +3668,19 @@ mod tests {
         )
         .await?;
 
-        let (agent_id, response) = read_test_smb_frame(&mut stream).await?;
-        assert_eq!(agent_id, child_id);
-        let ack_ctr_offset = registry.ctr_offset(child_id).await? - ctr_blocks_for_length(4);
-        let effective_iv = advance_iv(&child_iv, ack_ctr_offset);
-        let decrypted = decrypt_agent_data(&child_key, &effective_iv, &response)?;
-        assert_eq!(decrypted.as_slice(), &child_id.to_le_bytes());
-
-        let event = event_receiver.recv().await.expect("agent registration should broadcast");
-        let OperatorMessage::AgentNew(message) = event else {
-            panic!("unexpected operator event");
-        };
-        assert_eq!(message.info.listener, "edge-smb-pivot-init");
-        assert_eq!(message.info.pivots.parent.as_deref(), Some("11112222"));
-        assert_eq!(message.info.pivot_parent, "11112222");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), read_test_smb_frame(&mut stream))
+                .await
+                .is_err(),
+            "duplicate full init must not return an SMB ACK"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), event_receiver.recv()).await.is_err(),
+            "duplicate full init must not broadcast AgentNew"
+        );
+        assert_eq!(registry.get(child_id).await, Some(stored_before));
+        assert_eq!(registry.listener_name(child_id).await, listener_before);
+        assert_eq!(registry.ctr_offset(child_id).await?, ctr_before);
 
         manager.stop("edge-smb-pivot-init").await?;
         Ok(())

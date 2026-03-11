@@ -81,6 +81,12 @@ pub struct PivotInfo {
     pub children: Vec<u32>,
 }
 
+/// Maximum number of retained request contexts before eviction kicks in.
+///
+/// When the map exceeds this threshold, the oldest entries (by `created_at`
+/// timestamp) are pruned down to half the limit.
+const MAX_REQUEST_CONTEXTS: usize = 10_000;
+
 /// Thread-safe in-memory registry of active and historical agents.
 #[derive(Clone, Debug)]
 pub struct AgentRegistry {
@@ -224,9 +230,11 @@ impl AgentRegistry {
         for child_id in descendants {
             self.mark_subtree_member_dead(child_id, "pivot parent disconnected").await?;
             self.clear_links_for_agent(child_id).await?;
+            self.purge_request_contexts(child_id).await;
         }
 
         self.clear_links_for_agent(agent_id).await?;
+        self.purge_request_contexts(agent_id).await;
         Ok(())
     }
 
@@ -252,6 +260,7 @@ impl AgentRegistry {
     #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id)))]
     pub async fn remove(&self, agent_id: u32) -> Result<AgentInfo, TeamserverError> {
         self.clear_links_for_agent(agent_id).await?;
+        self.purge_request_contexts(agent_id).await;
         let entry = {
             let mut entries = self.entries.write().await;
             entries.remove(&agent_id).ok_or(TeamserverError::AgentNotFound { agent_id })?
@@ -355,16 +364,22 @@ impl AgentRegistry {
     #[instrument(skip(self, job), fields(agent_id = format_args!("0x{:08X}", agent_id), command = job.command, request_id = job.request_id))]
     pub async fn enqueue_job(&self, agent_id: u32, job: Job) -> Result<(), TeamserverError> {
         self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
-        self.request_contexts.write().await.insert(
-            (agent_id, job.request_id),
-            JobContext {
-                request_id: job.request_id,
-                command_line: job.command_line.clone(),
-                task_id: job.task_id.clone(),
-                created_at: job.created_at.clone(),
-                operator: job.operator.clone(),
-            },
-        );
+        {
+            let mut contexts = self.request_contexts.write().await;
+            contexts.insert(
+                (agent_id, job.request_id),
+                JobContext {
+                    request_id: job.request_id,
+                    command_line: job.command_line.clone(),
+                    task_id: job.task_id.clone(),
+                    created_at: job.created_at.clone(),
+                    operator: job.operator.clone(),
+                },
+            );
+            if contexts.len() > MAX_REQUEST_CONTEXTS {
+                evict_oldest_contexts(&mut contexts, MAX_REQUEST_CONTEXTS / 2);
+            }
+        }
 
         if let Some(parent_agent_id) = self.parent_of(agent_id).await {
             let (queue_agent_id, pivot_job) =
@@ -413,10 +428,15 @@ impl AgentRegistry {
     }
 
     /// Return the retained task metadata for a callback request, if known.
+    ///
+    /// Contexts are not consumed on read because multi-phase callbacks
+    /// (e.g. file downloads, output + error pairs) may reference the same
+    /// `(agent_id, request_id)` more than once.  Bounded eviction in
+    /// [`Self::enqueue_job`] and cleanup in [`Self::mark_dead`] /
+    /// [`Self::remove`] prevent unbounded growth.
     #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id), request_id))]
     pub async fn request_context(&self, agent_id: u32, request_id: u32) -> Option<JobContext> {
-        let request_contexts = self.request_contexts.read().await;
-        request_contexts.get(&(agent_id, request_id)).cloned()
+        self.request_contexts.read().await.get(&(agent_id, request_id)).cloned()
     }
 
     /// Update an agent's last callback timestamp and persist the change.
@@ -659,6 +679,10 @@ impl AgentRegistry {
         }
     }
 
+    async fn purge_request_contexts(&self, agent_id: u32) {
+        self.request_contexts.write().await.retain(|&(aid, _), _| aid != agent_id);
+    }
+
     async fn mark_subtree_member_dead(
         &self,
         agent_id: u32,
@@ -701,6 +725,21 @@ fn decode_fixed<const N: usize>(
     })
 }
 
+/// Evict the oldest entries (by `created_at` timestamp) until the map has
+/// at most `target_size` entries.  The `created_at` field is an RFC 3339
+/// timestamp string and sorts lexicographically.
+fn evict_oldest_contexts(contexts: &mut HashMap<(u32, u32), JobContext>, target_size: usize) {
+    if contexts.len() <= target_size {
+        return;
+    }
+    let to_remove = contexts.len() - target_size;
+    let mut entries: Vec<_> = contexts.iter().map(|(k, v)| (*k, v.created_at.clone())).collect();
+    entries.sort_unstable_by(|a, b| a.1.cmp(&b.1));
+    for (key, _) in entries.into_iter().take(to_remove) {
+        contexts.remove(&key);
+    }
+}
+
 fn encode_pivot_job_payload(
     target_agent_id: u32,
     payload: &[u8],
@@ -731,6 +770,7 @@ mod tests {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use red_cell_common::AgentEncryptionInfo;
@@ -1094,7 +1134,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enqueue_job_retains_request_context_after_dequeue() -> Result<(), TeamserverError> {
+    async fn request_context_survives_multiple_reads() -> Result<(), TeamserverError> {
         let registry = AgentRegistry::new(test_database().await?);
         let agent = sample_agent(0x1000_000B);
         let job = sample_job(5);
@@ -1114,7 +1154,85 @@ mod tests {
         assert_eq!(context.created_at, job.created_at);
         assert_eq!(context.operator, job.operator);
 
+        assert!(
+            registry.request_context(agent.agent_id, job.request_id).await.is_some(),
+            "context must survive multiple reads for multi-phase callbacks"
+        );
+
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn mark_dead_purges_request_contexts() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let agent = sample_agent(0x1000_00A0);
+        registry.insert(agent.clone()).await?;
+        registry.enqueue_job(agent.agent_id, sample_job(10)).await?;
+        registry.enqueue_job(agent.agent_id, sample_job(11)).await?;
+
+        registry.mark_dead(agent.agent_id, "lost contact").await?;
+
+        assert!(registry.request_context(agent.agent_id, 10).await.is_none());
+        assert!(registry.request_context(agent.agent_id, 11).await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn remove_purges_request_contexts() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let agent = sample_agent(0x1000_00B0);
+        registry.insert(agent.clone()).await?;
+        registry.enqueue_job(agent.agent_id, sample_job(20)).await?;
+
+        registry.remove(agent.agent_id).await?;
+
+        assert!(registry.request_context(agent.agent_id, 20).await.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn evict_oldest_contexts_prunes_to_target_size() {
+        let mut map = HashMap::new();
+        for i in 0..20_u32 {
+            map.insert(
+                (0xAAAA_0000, i),
+                super::JobContext {
+                    request_id: i,
+                    command_line: String::new(),
+                    task_id: String::new(),
+                    created_at: format!("2026-03-10T10:{i:02}:00Z"),
+                    operator: String::new(),
+                },
+            );
+        }
+
+        super::evict_oldest_contexts(&mut map, 10);
+
+        assert_eq!(map.len(), 10);
+        for i in 0..10_u32 {
+            assert!(map.get(&(0xAAAA_0000, i)).is_none(), "entry {i} should have been evicted");
+        }
+        for i in 10..20_u32 {
+            assert!(map.get(&(0xAAAA_0000, i)).is_some(), "entry {i} should have been retained");
+        }
+    }
+
+    #[test]
+    fn evict_oldest_contexts_noop_when_under_target() {
+        let mut map = HashMap::new();
+        map.insert(
+            (0xBBBB_0000, 1),
+            super::JobContext {
+                request_id: 1,
+                command_line: String::new(),
+                task_id: String::new(),
+                created_at: "2026-03-10T10:00:00Z".to_owned(),
+                operator: String::new(),
+            },
+        );
+
+        super::evict_oldest_contexts(&mut map, 100);
+        assert_eq!(map.len(), 1);
     }
 
     #[tokio::test]

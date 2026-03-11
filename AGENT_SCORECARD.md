@@ -22,8 +22,8 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests | 0 | 2 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
 | Protocol errors | 1 | 4 | 2 |
-| Security issues | 0 | 10 | 0 |
-| Architecture drift | 0 | 3 | 0 |
+| Security issues | 0 | 13 | 0 |
+| Architecture drift | 0 | 4 | 0 |
 | Memory / resource leaks | 0 | 6 | 1 |
 | Audit attribution errors | 0 | 1 | 0 |
 
@@ -32,6 +32,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-11 16:58
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 0 | — | No findings this run |
+| Codex | 4 | Security ×3, Architecture drift ×1 | red-cell-c2-1ja (agent AES keys leaked over WS/API), red-cell-c2-3qm (session token logged), red-cell-c2-2nk (spoofable redirector headers), red-cell-c2-166 (listener identity lost in snapshots) |
+| Cursor | 0 | — | No findings this run |
+
+Overall codebase health: drifting
+Biggest blindspot: operator-facing state surfaces still expose or mishandle secrets — authenticated readers can recover per-agent transport keys, and the WebSocket auth path logs bearer tokens.
 
 ### Arch Review — 2026-03-10 16:00
 

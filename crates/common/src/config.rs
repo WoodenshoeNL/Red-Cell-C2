@@ -76,6 +76,10 @@ impl Profile {
             errors.push("Teamserver.PluginsDir must not be empty when specified".to_owned());
         }
 
+        if self.teamserver.max_download_bytes == Some(0) {
+            errors.push("Teamserver.MaxDownloadBytes must be greater than zero".to_owned());
+        }
+
         if let Some(logging) = &self.teamserver.logging {
             if logging.level.as_deref().is_some_and(|level| level.trim().is_empty()) {
                 errors.push("Teamserver.Logging.Level must not be empty when specified".to_owned());
@@ -261,6 +265,9 @@ pub struct TeamserverConfig {
     /// Optional directory containing Python plugin modules.
     #[serde(rename = "PluginsDir", default)]
     pub plugins_dir: Option<String>,
+    /// Maximum in-memory size of a single agent download before the server drops it.
+    #[serde(rename = "MaxDownloadBytes", default)]
+    pub max_download_bytes: Option<u64>,
     /// Optional structured logging settings for the teamserver runtime.
     #[serde(rename = "Logging", default)]
     pub logging: Option<LoggingConfig>,
@@ -1184,6 +1191,7 @@ mod tests {
               Host = "127.0.0.1"
               Port = 40056
               PluginsDir = "plugins"
+              MaxDownloadBytes = 1048576
             }
 
             Operators {
@@ -1198,6 +1206,7 @@ mod tests {
         .expect("profile should parse");
 
         assert_eq!(profile.teamserver.plugins_dir.as_deref(), Some("plugins"));
+        assert_eq!(profile.teamserver.max_download_bytes, Some(1_048_576));
     }
 
     #[test]
@@ -1296,5 +1305,30 @@ mod tests {
         assert!(error.errors.iter().any(|message| message.contains("Logging.Level")));
         assert!(error.errors.iter().any(|message| message.contains("Logging.File.Directory")));
         assert!(error.errors.iter().any(|message| message.contains("Logging.File.Prefix")));
+    }
+
+    #[test]
+    fn rejects_zero_max_download_bytes() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+              MaxDownloadBytes = 0
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("profile should be invalid");
+        assert!(error.errors.iter().any(|message| message.contains("MaxDownloadBytes")));
     }
 }

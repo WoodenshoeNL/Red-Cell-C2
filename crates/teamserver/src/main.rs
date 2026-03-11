@@ -59,12 +59,13 @@ async fn main() -> Result<()> {
     )
     .await
     .context("failed to initialize embedded Python runtime")?;
-    let listeners = ListenerManager::new(
+    let listeners = ListenerManager::with_max_download_bytes(
         database.clone(),
         agent_registry.clone(),
         events.clone(),
         sockets.clone(),
         Some(plugins.clone()),
+        profile.teamserver.max_download_bytes.unwrap_or(512 * 1024 * 1024),
     );
     plugins.attach_listener_manager(listeners.clone()).await;
     let payload_builder = PayloadBuilderService::from_profile(&profile)

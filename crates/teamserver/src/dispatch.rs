@@ -32,8 +32,11 @@ type HandlerFuture =
     Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>, CommandDispatchError>> + Send>>;
 type Handler = dyn Fn(u32, u32, Vec<u8>) -> HandlerFuture + Send + Sync + 'static;
 
-#[derive(Clone, Debug, Default)]
+const DEFAULT_MAX_DOWNLOAD_BYTES: usize = 512 * 1024 * 1024;
+
+#[derive(Clone, Debug)]
 struct DownloadTracker {
+    max_download_bytes: usize,
     inner: Arc<RwLock<HashMap<(u32, u32), DownloadState>>>,
 }
 
@@ -102,6 +105,18 @@ pub enum CommandDispatchError {
         /// Human-readable parser error.
         message: String,
     },
+    /// A download exceeded the configured in-memory accumulation cap and was dropped.
+    #[error(
+        "download 0x{file_id:08X} for agent 0x{agent_id:08X} exceeded max_download_bytes ({max_download_bytes} bytes)"
+    )]
+    DownloadTooLarge {
+        /// Agent owning the dropped download.
+        agent_id: u32,
+        /// File identifier associated with the dropped download.
+        file_id: u32,
+        /// Configured maximum number of bytes allowed in memory for a single download.
+        max_download_bytes: usize,
+    },
 }
 
 /// Central registry of Demon command handlers keyed by command identifier.
@@ -129,7 +144,15 @@ impl CommandDispatcher {
     /// Create an empty dispatcher with no registered handlers.
     #[must_use]
     pub fn new() -> Self {
-        Self { handlers: Arc::new(HashMap::new()), downloads: DownloadTracker::default() }
+        Self::with_max_download_bytes(DEFAULT_MAX_DOWNLOAD_BYTES)
+    }
+
+    #[must_use]
+    fn with_max_download_bytes(max_download_bytes: usize) -> Self {
+        Self {
+            handlers: Arc::new(HashMap::new()),
+            downloads: DownloadTracker::new(max_download_bytes),
+        }
     }
 
     /// Create a dispatcher with the built-in Demon command handlers.
@@ -141,7 +164,31 @@ impl CommandDispatcher {
         sockets: SocketRelayManager,
         plugins: Option<PluginRuntime>,
     ) -> Self {
-        let mut dispatcher = Self::new();
+        Self::with_builtin_handlers_and_max_download_bytes(
+            registry,
+            events,
+            database,
+            sockets,
+            plugins,
+            u64::try_from(DEFAULT_MAX_DOWNLOAD_BYTES).unwrap_or(u64::MAX),
+        )
+    }
+
+    /// Create a dispatcher with the built-in Demon command handlers and a custom download cap.
+    #[must_use]
+    pub fn with_builtin_handlers_and_max_download_bytes(
+        registry: AgentRegistry,
+        events: EventBus,
+        database: Database,
+        sockets: SocketRelayManager,
+        plugins: Option<PluginRuntime>,
+        max_download_bytes: u64,
+    ) -> Self {
+        let max_download_bytes = match usize::try_from(max_download_bytes) {
+            Ok(value) => value,
+            Err(_) => usize::MAX,
+        };
+        let mut dispatcher = Self::with_max_download_bytes(max_download_bytes);
         let downloads = dispatcher.downloads.clone();
 
         let get_job_registry = registry.clone();
@@ -757,6 +804,10 @@ fn inner_demon_agent_id(bytes: &[u8]) -> Result<u32, DemonProtocolError> {
 }
 
 impl DownloadTracker {
+    fn new(max_download_bytes: usize) -> Self {
+        Self { max_download_bytes, inner: Arc::new(RwLock::new(HashMap::new())) }
+    }
+
     async fn start(&self, agent_id: u32, file_id: u32, state: DownloadState) {
         self.inner.write().await.insert((agent_id, file_id), state);
     }
@@ -768,6 +819,29 @@ impl DownloadTracker {
         chunk: &[u8],
     ) -> Result<DownloadState, CommandDispatchError> {
         let mut state = self.inner.write().await;
+        let Some(current_len) = state.get(&(agent_id, file_id)).map(|download| download.data.len())
+        else {
+            return Err(CommandDispatchError::InvalidCallbackPayload {
+                command_id: u32::from(DemonCommand::BeaconOutput),
+                message: format!("download 0x{file_id:08X} was not opened"),
+            });
+        };
+        let Some(next_len) = current_len.checked_add(chunk.len()) else {
+            state.remove(&(agent_id, file_id));
+            return Err(CommandDispatchError::DownloadTooLarge {
+                agent_id,
+                file_id,
+                max_download_bytes: self.max_download_bytes,
+            });
+        };
+        if next_len > self.max_download_bytes {
+            state.remove(&(agent_id, file_id));
+            return Err(CommandDispatchError::DownloadTooLarge {
+                agent_id,
+                file_id,
+                max_download_bytes: self.max_download_bytes,
+            });
+        }
         let Some(download) = state.get_mut(&(agent_id, file_id)) else {
             return Err(CommandDispatchError::InvalidCallbackPayload {
                 command_id: u32::from(DemonCommand::BeaconOutput),
@@ -3580,6 +3654,7 @@ mod tests {
     };
     use red_cell_common::operator::OperatorMessage;
     use serde_json::Value;
+    use tokio::time::{Duration, timeout};
 
     use super::CommandDispatcher;
     use crate::{AgentRegistry, Database, EventBus, Job, SocketRelayManager};
@@ -4544,6 +4619,166 @@ mod tests {
         assert_eq!(loot.len(), 1);
         assert_eq!(loot[0].data.as_deref(), Some(content.as_slice()));
         assert_eq!(loot[0].file_path.as_deref(), Some(remote_path));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_filesystem_download_handler_drops_downloads_over_limit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xABCD_EF31,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let dispatcher = CommandDispatcher::with_builtin_handlers_and_max_download_bytes(
+            registry,
+            events,
+            database.clone(),
+            sockets,
+            None,
+            4,
+        );
+
+        let file_id = 0x91_u32;
+        let mut open = Vec::new();
+        add_u32(&mut open, u32::from(DemonFilesystemCommand::Download));
+        add_u32(&mut open, 0);
+        add_u32(&mut open, file_id);
+        add_u64(&mut open, 8);
+        add_utf16(&mut open, "C:\\Temp\\oversized.bin");
+        dispatcher.dispatch(0xABCD_EF31, u32::from(DemonCommand::CommandFs), 0x99, &open).await?;
+
+        let mut write = Vec::new();
+        add_u32(&mut write, u32::from(DemonFilesystemCommand::Download));
+        add_u32(&mut write, 1);
+        add_u32(&mut write, file_id);
+        add_bytes(&mut write, b"12345");
+        let error = dispatcher
+            .dispatch(0xABCD_EF31, u32::from(DemonCommand::CommandFs), 0x99, &write)
+            .await
+            .expect_err("oversized download should be rejected");
+        assert!(matches!(
+            error,
+            crate::CommandDispatchError::DownloadTooLarge {
+                agent_id: 0xABCD_EF31,
+                file_id: 0x91,
+                max_download_bytes: 4,
+            }
+        ));
+
+        let open_event = receiver.recv().await.ok_or("missing open event")?;
+        let OperatorMessage::AgentResponse(open_message) = open_event else {
+            panic!("expected download open response");
+        };
+        assert_eq!(
+            open_message.info.extra.get("MiscType"),
+            Some(&Value::String("download-progress".to_owned()))
+        );
+        assert!(
+            timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),
+            "oversized download should not emit progress or completion events"
+        );
+        assert!(database.loot().list_for_agent(0xABCD_EF31).await?.is_empty());
+
+        let mut close = Vec::new();
+        add_u32(&mut close, u32::from(DemonFilesystemCommand::Download));
+        add_u32(&mut close, 2);
+        add_u32(&mut close, file_id);
+        add_u32(&mut close, 0);
+        assert_eq!(
+            dispatcher
+                .dispatch(0xABCD_EF31, u32::from(DemonCommand::CommandFs), 0x99, &close)
+                .await?,
+            None
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_beacon_file_callbacks_drop_downloads_over_limit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xABCD_EF41,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let dispatcher = CommandDispatcher::with_builtin_handlers_and_max_download_bytes(
+            registry,
+            events,
+            database.clone(),
+            sockets,
+            None,
+            4,
+        );
+
+        let file_id = 0x92_u32;
+        let mut open_header = Vec::new();
+        open_header.extend_from_slice(&file_id.to_be_bytes());
+        open_header.extend_from_slice(&8_u32.to_be_bytes());
+        open_header.extend_from_slice(b"C:\\Windows\\Temp\\oversized.txt");
+        let mut open = Vec::new();
+        add_u32(&mut open, u32::from(DemonCallback::File));
+        add_bytes(&mut open, &open_header);
+        dispatcher
+            .dispatch(0xABCD_EF41, u32::from(DemonCommand::BeaconOutput), 0x77, &open)
+            .await?;
+
+        let mut chunk = Vec::new();
+        chunk.extend_from_slice(&file_id.to_be_bytes());
+        chunk.extend_from_slice(b"12345");
+        let mut write = Vec::new();
+        add_u32(&mut write, u32::from(DemonCallback::FileWrite));
+        add_bytes(&mut write, &chunk);
+        let error = dispatcher
+            .dispatch(0xABCD_EF41, u32::from(DemonCommand::BeaconOutput), 0x77, &write)
+            .await
+            .expect_err("oversized beacon download should be rejected");
+        assert!(matches!(
+            error,
+            crate::CommandDispatchError::DownloadTooLarge {
+                agent_id: 0xABCD_EF41,
+                file_id: 0x92,
+                max_download_bytes: 4,
+            }
+        ));
+
+        let open_event = receiver.recv().await.ok_or("missing beacon open event")?;
+        let OperatorMessage::AgentResponse(open_message) = open_event else {
+            panic!("expected beacon open response");
+        };
+        assert_eq!(
+            open_message.info.extra.get("MiscType"),
+            Some(&Value::String("download-progress".to_owned()))
+        );
+        assert!(
+            timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),
+            "oversized beacon download should not emit progress or completion events"
+        );
+        assert!(database.loot().list_for_agent(0xABCD_EF41).await?.is_empty());
+
+        let mut close = Vec::new();
+        add_u32(&mut close, u32::from(DemonCallback::FileClose));
+        add_bytes(&mut close, &file_id.to_be_bytes());
+        assert_eq!(
+            dispatcher
+                .dispatch(0xABCD_EF41, u32::from(DemonCommand::BeaconOutput), 0x77, &close)
+                .await?,
+            None
+        );
         Ok(())
     }
 

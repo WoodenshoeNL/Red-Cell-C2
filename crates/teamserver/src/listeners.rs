@@ -48,6 +48,8 @@ use crate::{
     agent_events::agent_new_event, build_init_ack, events::EventBus, json_error_response,
 };
 
+const DEFAULT_MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
+
 /// Runtime state for a configured listener.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ListenerSummary {
@@ -253,6 +255,7 @@ pub struct ListenerManager {
     events: EventBus,
     sockets: SocketRelayManager,
     plugins: Option<PluginRuntime>,
+    max_download_bytes: u64,
     active_handles: Arc<RwLock<BTreeMap<String, JoinHandle<()>>>>,
     operations: Arc<Mutex<()>>,
 }
@@ -267,12 +270,33 @@ impl ListenerManager {
         sockets: SocketRelayManager,
         plugins: Option<PluginRuntime>,
     ) -> Self {
+        Self::with_max_download_bytes(
+            database,
+            agent_registry,
+            events,
+            sockets,
+            plugins,
+            DEFAULT_MAX_DOWNLOAD_BYTES,
+        )
+    }
+
+    /// Build a listener manager backed by `database` with a custom per-download memory cap.
+    #[must_use]
+    pub fn with_max_download_bytes(
+        database: Database,
+        agent_registry: AgentRegistry,
+        events: EventBus,
+        sockets: SocketRelayManager,
+        plugins: Option<PluginRuntime>,
+        max_download_bytes: u64,
+    ) -> Self {
         Self {
             database,
             agent_registry,
             events,
             sockets,
             plugins,
+            max_download_bytes,
             active_handles: Arc::new(RwLock::new(BTreeMap::new())),
             operations: Arc::new(Mutex::new(())),
         }
@@ -518,6 +542,7 @@ impl HttpListenerState {
         database: Database,
         sockets: SocketRelayManager,
         plugins: Option<PluginRuntime>,
+        max_download_bytes: u64,
     ) -> Result<Self, ListenerManagerError> {
         let method = parse_method(config)?;
         let required_headers = config
@@ -542,12 +567,13 @@ impl HttpListenerState {
             config: config.clone(),
             registry: registry.clone(),
             parser: DemonPacketParser::new(registry.clone()),
-            dispatcher: CommandDispatcher::with_builtin_handlers(
+            dispatcher: CommandDispatcher::with_builtin_handlers_and_max_download_bytes(
                 registry.clone(),
                 events.clone(),
                 database.clone(),
                 sockets,
                 plugins,
+                max_download_bytes,
             ),
             events,
             method,
@@ -591,18 +617,20 @@ impl SmbListenerState {
         database: Database,
         sockets: SocketRelayManager,
         plugins: Option<PluginRuntime>,
+        max_download_bytes: u64,
     ) -> Self {
         Self {
             config: config.clone(),
             registry: registry.clone(),
             parser: DemonPacketParser::new(registry.clone()),
             events: events.clone(),
-            dispatcher: CommandDispatcher::with_builtin_handlers(
+            dispatcher: CommandDispatcher::with_builtin_handlers_and_max_download_bytes(
                 registry.clone(),
                 events.clone(),
                 database,
                 sockets,
                 plugins,
+                max_download_bytes,
             ),
         }
     }
@@ -855,9 +883,17 @@ async fn spawn_http_listener_runtime(
     database: Database,
     sockets: SocketRelayManager,
     plugins: Option<PluginRuntime>,
+    max_download_bytes: u64,
 ) -> Result<JoinHandle<()>, ListenerManagerError> {
-    let state =
-        Arc::new(HttpListenerState::build(config, registry, events, database, sockets, plugins)?);
+    let state = Arc::new(HttpListenerState::build(
+        config,
+        registry,
+        events,
+        database,
+        sockets,
+        plugins,
+        max_download_bytes,
+    )?);
     let address = format!("{}:{}", config.host_bind, config.port_bind);
     let listener = TcpListener::bind(address.as_str()).await.map_err(|error| {
         ListenerManagerError::StartFailed {
@@ -972,9 +1008,17 @@ async fn spawn_smb_listener_runtime(
     database: Database,
     sockets: SocketRelayManager,
     plugins: Option<PluginRuntime>,
+    max_download_bytes: u64,
 ) -> Result<JoinHandle<()>, ListenerManagerError> {
-    let state =
-        Arc::new(SmbListenerState::build(config, registry, events, database, sockets, plugins));
+    let state = Arc::new(SmbListenerState::build(
+        config,
+        registry,
+        events,
+        database,
+        sockets,
+        plugins,
+        max_download_bytes,
+    ));
     let listener_name = normalized_smb_pipe_name(&config.pipe_name);
     let socket_name = smb_local_socket_name(&config.pipe_name).map_err(|error| {
         ListenerManagerError::StartFailed {
@@ -1153,6 +1197,7 @@ impl ListenerManager {
                     self.database.clone(),
                     self.sockets.clone(),
                     self.plugins.clone(),
+                    self.max_download_bytes,
                 )
                 .await
             }
@@ -1164,6 +1209,7 @@ impl ListenerManager {
                     self.database.clone(),
                     self.sockets.clone(),
                     self.plugins.clone(),
+                    self.max_download_bytes,
                 )
                 .await
             }
@@ -1178,6 +1224,7 @@ impl ListenerManager {
                     self.database.clone(),
                     self.sockets.clone(),
                     self.plugins.clone(),
+                    self.max_download_bytes,
                 )
                 .await
             }
@@ -1300,18 +1347,20 @@ impl DnsListenerState {
         database: Database,
         sockets: SocketRelayManager,
         plugins: Option<PluginRuntime>,
+        max_download_bytes: u64,
     ) -> Self {
         Self {
             config: config.clone(),
             registry: registry.clone(),
             parser: DemonPacketParser::new(registry.clone()),
             events: events.clone(),
-            dispatcher: CommandDispatcher::with_builtin_handlers(
+            dispatcher: CommandDispatcher::with_builtin_handlers_and_max_download_bytes(
                 registry.clone(),
                 events.clone(),
                 database,
                 sockets,
                 plugins,
+                max_download_bytes,
             ),
             uploads: Mutex::new(HashMap::new()),
             responses: Mutex::new(HashMap::new()),
@@ -1793,6 +1842,7 @@ async fn spawn_dns_listener_runtime(
     database: Database,
     sockets: SocketRelayManager,
     plugins: Option<PluginRuntime>,
+    max_download_bytes: u64,
 ) -> Result<JoinHandle<()>, ListenerManagerError> {
     if dns_allowed_query_types(&config.record_types).is_none() {
         return Err(ListenerManagerError::StartFailed {
@@ -1804,8 +1854,15 @@ async fn spawn_dns_listener_runtime(
         });
     }
 
-    let state =
-        Arc::new(DnsListenerState::new(config, registry, events, database, sockets, plugins));
+    let state = Arc::new(DnsListenerState::new(
+        config,
+        registry,
+        events,
+        database,
+        sockets,
+        plugins,
+        max_download_bytes,
+    ));
     let addr = format!("{}:{}", config.host_bind, config.port_bind);
 
     let socket =
@@ -3272,7 +3329,15 @@ mod tests {
             working_hours: None,
         };
 
-        DnsListenerState::new(&config, registry, events, database, sockets, None)
+        DnsListenerState::new(
+            &config,
+            registry,
+            events,
+            database,
+            sockets,
+            None,
+            super::DEFAULT_MAX_DOWNLOAD_BYTES,
+        )
     }
 
     /// Build a minimal DNS query packet for `qname`.

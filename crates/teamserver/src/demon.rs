@@ -814,6 +814,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn parse_rejects_init_when_registry_limit_is_reached() {
+        let database =
+            Database::connect(temp_db_path()).await.expect("temp database should initialize");
+        let registry = AgentRegistry::with_max_registered_agents(database, 1);
+        let parser = DemonPacketParser::new(registry.clone());
+
+        parser
+            .parse_at(
+                &build_init_packet(0x1357_9BDF, [0x21; AGENT_KEY_LENGTH], [0x31; AGENT_IV_LENGTH]),
+                "203.0.113.77".to_owned(),
+                datetime!(2026-03-10 10:15:00 UTC),
+            )
+            .await
+            .expect("first init should succeed");
+
+        let error = parser
+            .parse_at(
+                &build_init_packet(0x2468_ACED, [0x22; AGENT_KEY_LENGTH], [0x32; AGENT_IV_LENGTH]),
+                "203.0.113.78".to_owned(),
+                datetime!(2026-03-10 10:16:00 UTC),
+            )
+            .await
+            .expect_err("second init must be rejected");
+
+        assert!(matches!(
+            error,
+            DemonParserError::Registry(crate::TeamserverError::MaxRegisteredAgentsExceeded {
+                max_registered_agents: 1,
+                registered: 1,
+            })
+        ));
+        assert!(registry.get(0x2468_ACED).await.is_none(), "rejected init must not register");
+    }
+
+    #[tokio::test]
     async fn build_init_ack_rejects_zero_key_agent() {
         let registry = test_registry().await;
         let agent_id: u32 = 0x2468_ACED;

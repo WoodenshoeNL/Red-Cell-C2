@@ -80,6 +80,10 @@ impl Profile {
             errors.push("Teamserver.MaxDownloadBytes must be greater than zero".to_owned());
         }
 
+        if self.teamserver.max_registered_agents == Some(0) {
+            errors.push("Teamserver.MaxRegisteredAgents must be greater than zero".to_owned());
+        }
+
         if let Some(logging) = &self.teamserver.logging {
             if logging.level.as_deref().is_some_and(|level| level.trim().is_empty()) {
                 errors.push("Teamserver.Logging.Level must not be empty when specified".to_owned());
@@ -268,6 +272,9 @@ pub struct TeamserverConfig {
     /// Maximum in-memory size of a single agent download before the server drops it.
     #[serde(rename = "MaxDownloadBytes", default)]
     pub max_download_bytes: Option<u64>,
+    /// Maximum number of registered agents retained in memory and SQLite.
+    #[serde(rename = "MaxRegisteredAgents", default)]
+    pub max_registered_agents: Option<usize>,
     /// Optional structured logging settings for the teamserver runtime.
     #[serde(rename = "Logging", default)]
     pub logging: Option<LoggingConfig>,
@@ -1207,6 +1214,31 @@ mod tests {
 
         assert_eq!(profile.teamserver.plugins_dir.as_deref(), Some("plugins"));
         assert_eq!(profile.teamserver.max_download_bytes, Some(1_048_576));
+        assert_eq!(profile.teamserver.max_registered_agents, None);
+    }
+
+    #[test]
+    fn parses_teamserver_max_registered_agents() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+              MaxRegisteredAgents = 2048
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        assert_eq!(profile.teamserver.max_registered_agents, Some(2_048));
     }
 
     #[test]
@@ -1271,6 +1303,31 @@ mod tests {
 
         let error = profile.validate().expect_err("profile should be invalid");
         assert!(error.errors.iter().any(|message| message.contains("PluginsDir")));
+    }
+
+    #[test]
+    fn rejects_zero_max_registered_agents() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+              MaxRegisteredAgents = 0
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("profile should be invalid");
+        assert!(error.errors.iter().any(|message| message.contains("MaxRegisteredAgents")));
     }
 
     #[test]

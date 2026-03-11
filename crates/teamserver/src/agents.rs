@@ -86,6 +86,8 @@ pub struct PivotInfo {
 /// When the map exceeds this threshold, the oldest entries (by `created_at`
 /// timestamp) are pruned down to half the limit.
 const MAX_REQUEST_CONTEXTS: usize = 10_000;
+/// Default cap on the total number of registered agents accepted by the teamserver.
+pub const DEFAULT_MAX_REGISTERED_AGENTS: usize = 10_000;
 
 /// Thread-safe in-memory registry of active and historical agents.
 #[derive(Clone, Debug)]
@@ -96,12 +98,19 @@ pub struct AgentRegistry {
     parent_links: Arc<RwLock<HashMap<u32, u32>>>,
     child_links: Arc<RwLock<HashMap<u32, BTreeSet<u32>>>>,
     request_contexts: Arc<RwLock<HashMap<(u32, u32), JobContext>>>,
+    max_registered_agents: usize,
 }
 
 impl AgentRegistry {
     /// Create an empty registry backed by the provided database.
     #[must_use]
     pub fn new(database: Database) -> Self {
+        Self::with_max_registered_agents(database, DEFAULT_MAX_REGISTERED_AGENTS)
+    }
+
+    /// Create an empty registry with an explicit cap on registered agents.
+    #[must_use]
+    pub fn with_max_registered_agents(database: Database, max_registered_agents: usize) -> Self {
         Self {
             repository: database.agents(),
             link_repository: database.links(),
@@ -109,13 +118,23 @@ impl AgentRegistry {
             parent_links: Arc::new(RwLock::new(HashMap::new())),
             child_links: Arc::new(RwLock::new(HashMap::new())),
             request_contexts: Arc::new(RwLock::new(HashMap::new())),
+            max_registered_agents,
         }
     }
 
     /// Load all persisted agents from SQLite into a new registry.
     #[instrument(skip(database))]
     pub async fn load(database: Database) -> Result<Self, TeamserverError> {
-        let registry = Self::new(database.clone());
+        Self::load_with_max_registered_agents(database, DEFAULT_MAX_REGISTERED_AGENTS).await
+    }
+
+    /// Load all persisted agents from SQLite into a new registry with an explicit cap.
+    #[instrument(skip(database))]
+    pub async fn load_with_max_registered_agents(
+        database: Database,
+        max_registered_agents: usize,
+    ) -> Result<Self, TeamserverError> {
+        let registry = Self::with_max_registered_agents(database.clone(), max_registered_agents);
         let agents = database.agents().list_persisted().await?;
         let links = database.links().list().await?;
         let mut entries = registry.entries.write().await;
@@ -147,6 +166,13 @@ impl AgentRegistry {
 
         if entries.contains_key(&agent.agent_id) {
             return Err(TeamserverError::DuplicateAgent { agent_id: agent.agent_id });
+        }
+
+        if entries.len() >= self.max_registered_agents {
+            return Err(TeamserverError::MaxRegisteredAgentsExceeded {
+                max_registered_agents: self.max_registered_agents,
+                registered: entries.len(),
+            });
         }
 
         self.repository.create(&agent).await?;
@@ -965,6 +991,29 @@ mod tests {
             duplicate,
             Err(TeamserverError::DuplicateAgent { agent_id: 0x1000_0002 })
         ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn insert_rejects_agents_after_registry_limit() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::with_max_registered_agents(database.clone(), 1);
+        let first = sample_agent(0x1000_0100);
+        let second = sample_agent(0x1000_0101);
+
+        registry.insert(first).await?;
+        let error = registry.insert(second.clone()).await.expect_err("second insert must fail");
+
+        assert!(matches!(
+            error,
+            TeamserverError::MaxRegisteredAgentsExceeded {
+                max_registered_agents: 1,
+                registered: 1,
+            }
+        ));
+        assert_eq!(registry.get(second.agent_id).await, None);
+        assert_eq!(database.agents().get(second.agent_id).await?, None);
 
         Ok(())
     }

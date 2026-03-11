@@ -17,7 +17,7 @@ pub mod rbac;
 pub mod sockets;
 pub mod websocket;
 
-pub use agents::{AgentRegistry, Job, PivotInfo};
+pub use agents::{AgentRegistry, DEFAULT_MAX_REGISTERED_AGENTS, Job, PivotInfo};
 pub use api::{
     AdminApiAccess, ApiAuthError, ApiErrorBody, ApiErrorDetail, ApiIdentity, ApiPermissionGuard,
     ApiRateLimit, ApiRuntime, ListenerManagementApiAccess, ReadApiAccess, api_routes,

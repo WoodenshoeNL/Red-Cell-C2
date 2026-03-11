@@ -46,6 +46,16 @@ pub enum TeamserverError {
         /// Duplicate agent identifier.
         agent_id: u32,
     },
+    /// Returned when the registry has reached its configured capacity.
+    #[error(
+        "agent registry limit reached: {registered} registered agents already tracked (max {max_registered_agents})"
+    )]
+    MaxRegisteredAgentsExceeded {
+        /// Configured upper bound for registered agents.
+        max_registered_agents: usize,
+        /// Number of agents already tracked when the insert was attempted.
+        registered: usize,
+    },
     /// Returned when an in-memory agent cannot be found.
     #[error("agent 0x{agent_id:08X} not found")]
     AgentNotFound {

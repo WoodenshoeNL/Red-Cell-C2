@@ -6,9 +6,9 @@ use anyhow::{Context, Result, anyhow};
 use axum_server::{Handle, tls_rustls::RustlsConfig};
 use clap::Parser;
 use red_cell::{
-    AgentRegistry, ApiRuntime, AuthService, Database, EventBus, ListenerManager,
-    ListenerManagerError, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
-    PluginRuntime, SocketRelayManager, TeamserverState, build_router,
+    AgentRegistry, ApiRuntime, AuthService, DEFAULT_MAX_REGISTERED_AGENTS, Database, EventBus,
+    ListenerManager, ListenerManagerError, LoginRateLimiter, OperatorConnectionManager,
+    PayloadBuilderService, PluginRuntime, SocketRelayManager, TeamserverState, build_router,
 };
 use red_cell_common::config::{Profile, ProfileValidationError};
 use red_cell_common::tls::{
@@ -47,7 +47,11 @@ async fn main() -> Result<()> {
     let database = Database::connect(&database_path)
         .await
         .with_context(|| format!("failed to open database {}", database_path.display()))?;
-    let agent_registry = AgentRegistry::load(database.clone()).await?;
+    let agent_registry = AgentRegistry::load_with_max_registered_agents(
+        database.clone(),
+        profile.teamserver.max_registered_agents.unwrap_or(DEFAULT_MAX_REGISTERED_AGENTS),
+    )
+    .await?;
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(agent_registry.clone(), events.clone());
     let plugins = PluginRuntime::initialize(

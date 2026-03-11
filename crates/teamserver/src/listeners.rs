@@ -1078,7 +1078,7 @@ async fn process_demon_transport(
     body: &[u8],
     external_ip: String,
 ) -> Result<ProcessedDemonResponse, ListenerManagerError> {
-    match parser.parse(body, external_ip).await {
+    match parser.parse_for_listener(body, external_ip, listener_name).await {
         Ok(ParsedDemonPacket::Init(init)) => {
             let response =
                 build_init_ack(registry, init.agent.agent_id).await.map_err(|error| {

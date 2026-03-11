@@ -117,14 +117,35 @@ impl DemonPacketParser {
         bytes: &[u8],
         external_ip: impl Into<String>,
     ) -> Result<ParsedDemonPacket, DemonParserError> {
-        let now = OffsetDateTime::now_utc();
-        self.parse_at(bytes, external_ip.into(), now).await
+        self.parse_for_listener(bytes, external_ip, "null").await
     }
 
+    /// Parse an incoming Demon request and retain the listener that accepted it.
+    pub async fn parse_for_listener(
+        &self,
+        bytes: &[u8],
+        external_ip: impl Into<String>,
+        listener_name: &str,
+    ) -> Result<ParsedDemonPacket, DemonParserError> {
+        let now = OffsetDateTime::now_utc();
+        self.parse_at_for_listener(bytes, external_ip.into(), listener_name, now).await
+    }
+
+    #[cfg(test)]
     async fn parse_at(
         &self,
         bytes: &[u8],
         external_ip: String,
+        now: OffsetDateTime,
+    ) -> Result<ParsedDemonPacket, DemonParserError> {
+        self.parse_at_for_listener(bytes, external_ip, "null", now).await
+    }
+
+    async fn parse_at_for_listener(
+        &self,
+        bytes: &[u8],
+        external_ip: String,
+        listener_name: &str,
         now: OffsetDateTime,
     ) -> Result<ParsedDemonPacket, DemonParserError> {
         let envelope = DemonEnvelope::from_bytes(bytes)?;
@@ -142,9 +163,9 @@ impl DemonPacketParser {
             let init_encrypted_len =
                 remaining.len().saturating_sub(AGENT_KEY_LENGTH + AGENT_IV_LENGTH);
             if self.registry.get(agent.agent_id).await.is_some() {
-                self.registry.update_agent(agent.clone()).await?;
+                self.registry.update_agent_with_listener(agent.clone(), listener_name).await?;
             } else {
-                self.registry.insert(agent.clone()).await?;
+                self.registry.insert_with_listener(agent.clone(), listener_name).await?;
             }
             self.registry
                 .set_ctr_offset(agent.agent_id, ctr_blocks_for_length(init_encrypted_len))
@@ -629,6 +650,21 @@ mod tests {
         );
         let actual_offset = registry.ctr_offset(0x1234_5678).await.expect("offset should be set");
         assert_eq!(actual_offset, expected_offset);
+    }
+
+    #[tokio::test]
+    async fn parse_for_listener_persists_accepting_listener_name() {
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry.clone());
+        let packet =
+            build_init_packet(0x2233_4455, [0x31; AGENT_KEY_LENGTH], [0x42; AGENT_IV_LENGTH]);
+
+        parser
+            .parse_for_listener(&packet, "203.0.113.20", "http-main")
+            .await
+            .expect("init packet should parse");
+
+        assert_eq!(registry.listener_name(0x2233_4455).await.as_deref(), Some("http-main"));
     }
 
     #[tokio::test]

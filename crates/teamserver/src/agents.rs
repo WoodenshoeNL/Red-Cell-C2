@@ -61,6 +61,7 @@ pub struct QueuedJob {
 #[derive(Debug)]
 struct AgentEntry {
     info: RwLock<AgentInfo>,
+    listener_name: RwLock<String>,
     jobs: Mutex<VecDeque<Job>>,
     /// Shared CTR block offset tracking counter advancement.
     ///
@@ -72,9 +73,10 @@ struct AgentEntry {
 }
 
 impl AgentEntry {
-    fn new(info: AgentInfo, ctr_block_offset: u64) -> Self {
+    fn new(info: AgentInfo, listener_name: String, ctr_block_offset: u64) -> Self {
         Self {
             info: RwLock::new(info),
+            listener_name: RwLock::new(listener_name),
             jobs: Mutex::new(VecDeque::new()),
             ctr_block_offset: Mutex::new(ctr_block_offset),
         }
@@ -153,7 +155,7 @@ impl AgentRegistry {
         for agent in agents {
             entries.insert(
                 agent.info.agent_id,
-                Arc::new(AgentEntry::new(agent.info, agent.ctr_block_offset)),
+                Arc::new(AgentEntry::new(agent.info, agent.listener_name, agent.ctr_block_offset)),
             );
         }
 
@@ -171,6 +173,16 @@ impl AgentRegistry {
     /// Insert a newly registered agent and persist it to SQLite.
     #[instrument(skip(self, agent), fields(agent_id = format_args!("0x{:08X}", agent.agent_id)))]
     pub async fn insert(&self, agent: AgentInfo) -> Result<(), TeamserverError> {
+        self.insert_with_listener(agent, "null").await
+    }
+
+    /// Insert a newly registered agent and persist its accepting listener.
+    #[instrument(skip(self, agent, listener_name), fields(agent_id = format_args!("0x{:08X}", agent.agent_id), listener_name = %listener_name))]
+    pub async fn insert_with_listener(
+        &self,
+        agent: AgentInfo,
+        listener_name: &str,
+    ) -> Result<(), TeamserverError> {
         let mut entries = self.entries.write().await;
 
         if entries.contains_key(&agent.agent_id) {
@@ -184,8 +196,9 @@ impl AgentRegistry {
             });
         }
 
-        self.repository.create(&agent).await?;
-        entries.insert(agent.agent_id, Arc::new(AgentEntry::new(agent, 0)));
+        self.repository.create_with_listener(&agent, listener_name).await?;
+        entries
+            .insert(agent.agent_id, Arc::new(AgentEntry::new(agent, listener_name.to_owned(), 0)));
         Ok(())
     }
 
@@ -232,17 +245,40 @@ impl AgentRegistry {
         agents
     }
 
+    /// Return the listener that accepted the current or most recent session.
+    #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id)))]
+    pub async fn listener_name(&self, agent_id: u32) -> Option<String> {
+        let entry = self.entry(agent_id).await?;
+        let listener_name = entry.listener_name.read().await;
+        Some(listener_name.clone())
+    }
+
     /// Replace the stored metadata for an existing agent and persist the change.
     #[instrument(skip(self, agent), fields(agent_id = format_args!("0x{:08X}", agent.agent_id)))]
     pub async fn update_agent(&self, agent: AgentInfo) -> Result<(), TeamserverError> {
+        let listener_name =
+            self.listener_name(agent.agent_id).await.unwrap_or_else(|| "null".to_owned());
+        self.update_agent_with_listener(agent, &listener_name).await
+    }
+
+    /// Replace the stored metadata and listener provenance for an existing agent.
+    #[instrument(skip(self, agent, listener_name), fields(agent_id = format_args!("0x{:08X}", agent.agent_id), listener_name = %listener_name))]
+    pub async fn update_agent_with_listener(
+        &self,
+        agent: AgentInfo,
+        listener_name: &str,
+    ) -> Result<(), TeamserverError> {
         let entry = self
             .entry(agent.agent_id)
             .await
             .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?;
 
-        self.repository.update(&agent).await?;
+        self.repository.update_with_listener(&agent, listener_name).await?;
         let mut info = entry.info.write().await;
         *info = agent;
+        drop(info);
+        let mut stored_listener_name = entry.listener_name.write().await;
+        *stored_listener_name = listener_name.to_owned();
         Ok(())
     }
 
@@ -419,7 +455,8 @@ impl AgentRegistry {
             info.clone()
         };
 
-        self.repository.update(&updated).await?;
+        let listener_name = entry.listener_name.read().await.clone();
+        self.repository.update_with_listener(&updated, &listener_name).await?;
         Ok(())
     }
 
@@ -538,7 +575,8 @@ impl AgentRegistry {
             info.clone()
         };
 
-        self.repository.update(&updated).await?;
+        let listener_name = entry.listener_name.read().await.clone();
+        self.repository.update_with_listener(&updated, &listener_name).await?;
         Ok(updated)
     }
 
@@ -968,6 +1006,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_restores_persisted_listener_name() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let agent = sample_agent(0x1000_000A);
+        database.agents().create_with_listener(&agent, "http-main").await?;
+
+        let registry = AgentRegistry::load(database).await?;
+
+        assert_eq!(registry.listener_name(agent.agent_id).await.as_deref(), Some("http-main"));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn load_restores_persisted_ctr_offsets() -> Result<(), TeamserverError> {
         let database = test_database().await?;
         let registry = AgentRegistry::new(database.clone());
@@ -1023,9 +1073,17 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let agent = sample_agent(0x1000_0002);
 
-        registry.insert(agent.clone()).await?;
+        registry.insert_with_listener(agent.clone(), "https-edge").await?;
         assert_eq!(registry.get(agent.agent_id).await, Some(agent.clone()));
         assert_eq!(database.agents().get(agent.agent_id).await?, Some(agent.clone()));
+        assert_eq!(
+            database
+                .agents()
+                .get_persisted(agent.agent_id)
+                .await?
+                .map(|persisted| persisted.listener_name),
+            Some("https-edge".to_owned())
+        );
 
         let duplicate = registry.insert(agent).await;
         assert!(matches!(
@@ -1094,15 +1152,16 @@ mod tests {
         let database = test_database().await?;
         let registry = AgentRegistry::new(database.clone());
         let mut agent = sample_agent(0x1000_0005);
-        registry.insert(agent.clone()).await?;
+        registry.insert_with_listener(agent.clone(), "http-alpha").await?;
 
         agent.sleep_delay = 60;
         agent.reason = "updated".to_owned();
         agent.last_call_in = "2026-03-09T20:00:00Z".to_owned();
-        registry.update_agent(agent.clone()).await?;
+        registry.update_agent_with_listener(agent.clone(), "http-beta").await?;
 
         assert_eq!(registry.get(agent.agent_id).await, Some(agent.clone()));
         assert_eq!(database.agents().get(agent.agent_id).await?, Some(agent));
+        assert_eq!(registry.listener_name(0x1000_0005).await.as_deref(), Some("http-beta"));
         Ok(())
     }
 

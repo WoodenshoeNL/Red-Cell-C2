@@ -2165,14 +2165,21 @@ async fn send_session_snapshot(
 
     for agent in registry.list_active().await {
         let pivots = registry.pivots(agent.agent_id).await;
-        send_operator_message(socket, &agent_snapshot_event(&agent, &pivots)).await?;
+        let listener_name =
+            registry.listener_name(agent.agent_id).await.unwrap_or_else(|| "null".to_owned());
+        send_operator_message(socket, &agent_snapshot_event(&listener_name, &agent, &pivots))
+            .await?;
     }
 
     Ok(())
 }
 
-fn agent_snapshot_event(agent: &AgentInfo, pivots: &crate::PivotInfo) -> OperatorMessage {
-    agent_new_event("null", red_cell_common::demon::DEMON_MAGIC_VALUE, agent, pivots)
+fn agent_snapshot_event(
+    listener_name: &str,
+    agent: &AgentInfo,
+    pivots: &crate::PivotInfo,
+) -> OperatorMessage {
+    agent_new_event(listener_name, red_cell_common::demon::DEMON_MAGIC_VALUE, agent, pivots)
 }
 
 fn operator_snapshot_event(
@@ -2662,7 +2669,10 @@ mod tests {
         let registry = state.registry.clone();
         let listeners = state.listeners.clone();
         let events = state.events.clone();
-        registry.insert(sample_agent(0xDEAD_BEEF)).await.expect("agent should insert");
+        registry
+            .insert_with_listener(sample_agent(0xDEAD_BEEF), "alpha")
+            .await
+            .expect("agent should insert");
         listeners.create(sample_http_listener("alpha", 0)).await.expect("listener should persist");
         listeners.start("alpha").await.expect("listener should start");
         let expected_log = teamserver_log_event("teamserver", "snapshot entry");
@@ -2685,7 +2695,7 @@ mod tests {
             panic!("expected agent snapshot event");
         };
         assert_eq!(message.info.name_id, "DEADBEEF");
-        assert_eq!(message.info.listener, "null");
+        assert_eq!(message.info.listener, "alpha");
         assert_eq!(message.info.magic_value, "deadbeef");
         let encoded = serde_json::to_value(&message.info).expect("agent snapshot should serialize");
         assert!(encoded.get("Encryption").is_none());

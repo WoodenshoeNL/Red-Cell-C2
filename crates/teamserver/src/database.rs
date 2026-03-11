@@ -192,6 +192,8 @@ pub struct AgentRepository {
 pub struct PersistedAgent {
     /// Agent metadata mirrored into operator-facing APIs.
     pub info: AgentInfo,
+    /// Listener that accepted the current or most recent session.
+    pub listener_name: String,
     /// Shared AES-CTR block offset tracked across decrypt/encrypt operations.
     pub ctr_block_offset: u64,
 }
@@ -205,14 +207,23 @@ impl AgentRepository {
 
     /// Insert a new agent row.
     pub async fn create(&self, agent: &AgentInfo) -> Result<(), TeamserverError> {
+        self.create_with_listener(agent, "null").await
+    }
+
+    /// Insert a new agent row with the listener that accepted the session.
+    pub async fn create_with_listener(
+        &self,
+        agent: &AgentInfo,
+        listener_name: &str,
+    ) -> Result<(), TeamserverError> {
         sqlx::query(
             r#"
             INSERT INTO ts_agents (
                 agent_id, active, reason, note, ctr_block_offset, aes_key, aes_iv, hostname, username, domain_name,
                 external_ip, internal_ip, process_name, base_address, process_pid, process_tid,
-                process_ppid, process_arch, elevated, os_version, os_arch, sleep_delay,
+                process_ppid, process_arch, elevated, os_version, os_arch, listener_name, sleep_delay,
                 sleep_jitter, kill_date, working_hours, first_call_in, last_call_in
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(i64::from(agent.agent_id))
@@ -236,6 +247,7 @@ impl AgentRepository {
         .bind(bool_to_i64(agent.elevated))
         .bind(&agent.os_version)
         .bind(&agent.os_arch)
+        .bind(listener_name)
         .bind(i64::from(agent.sleep_delay))
         .bind(i64::from(agent.sleep_jitter))
         .bind(agent.kill_date)
@@ -250,13 +262,22 @@ impl AgentRepository {
 
     /// Update an existing agent row.
     pub async fn update(&self, agent: &AgentInfo) -> Result<(), TeamserverError> {
+        self.update_with_listener(agent, "null").await
+    }
+
+    /// Update an existing agent row and the listener that accepted the session.
+    pub async fn update_with_listener(
+        &self,
+        agent: &AgentInfo,
+        listener_name: &str,
+    ) -> Result<(), TeamserverError> {
         sqlx::query(
             r#"
             UPDATE ts_agents SET
                 active = ?, reason = ?, note = ?, aes_key = ?, aes_iv = ?, hostname = ?, username = ?,
                 domain_name = ?, external_ip = ?, internal_ip = ?, process_name = ?,
                 base_address = ?, process_pid = ?, process_tid = ?, process_ppid = ?,
-                process_arch = ?, elevated = ?, os_version = ?, os_arch = ?, sleep_delay = ?,
+                process_arch = ?, elevated = ?, os_version = ?, os_arch = ?, listener_name = ?, sleep_delay = ?,
                 sleep_jitter = ?, kill_date = ?, working_hours = ?, first_call_in = ?,
                 last_call_in = ?
             WHERE agent_id = ?
@@ -281,6 +302,7 @@ impl AgentRepository {
         .bind(bool_to_i64(agent.elevated))
         .bind(&agent.os_version)
         .bind(&agent.os_arch)
+        .bind(listener_name)
         .bind(i64::from(agent.sleep_delay))
         .bind(i64::from(agent.sleep_jitter))
         .bind(agent.kill_date)
@@ -1301,6 +1323,7 @@ struct AgentRow {
     elevated: i64,
     os_version: String,
     os_arch: String,
+    listener_name: String,
     sleep_delay: i64,
     sleep_jitter: i64,
     kill_date: Option<i64>,
@@ -1355,8 +1378,9 @@ impl TryFrom<AgentRow> for PersistedAgent {
 
     fn try_from(row: AgentRow) -> Result<Self, Self::Error> {
         let ctr_block_offset = u64_from_i64("ctr_block_offset", row.ctr_block_offset)?;
+        let listener_name = row.listener_name.clone();
         let info = AgentInfo::try_from(row)?;
-        Ok(Self { info, ctr_block_offset })
+        Ok(Self { info, listener_name, ctr_block_offset })
     }
 }
 

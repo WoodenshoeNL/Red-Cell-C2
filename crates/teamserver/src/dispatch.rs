@@ -9,9 +9,10 @@ use std::sync::Arc;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use red_cell_common::demon::{
-    DemonCallback, DemonCallbackError, DemonCommand, DemonFilesystemCommand, DemonInfoClass,
-    DemonInjectError, DemonKerberosCommand, DemonMessage, DemonPackage, DemonProcessCommand,
-    DemonProtocolError, DemonSocketCommand, DemonSocketType, DemonTokenCommand,
+    DemonCallback, DemonCallbackError, DemonCommand, DemonConfigKey, DemonFilesystemCommand,
+    DemonInfoClass, DemonInjectError, DemonJobCommand, DemonKerberosCommand, DemonMessage,
+    DemonNetCommand, DemonPackage, DemonProcessCommand, DemonProtocolError, DemonSocketCommand,
+    DemonSocketType, DemonTokenCommand, DemonTransferCommand,
 };
 use red_cell_common::operator::{
     AgentResponseInfo, AgentUpdateInfo, EventCode, Message, MessageHead, OperatorMessage,
@@ -33,6 +34,11 @@ type HandlerFuture =
 type Handler = dyn Fn(u32, u32, Vec<u8>) -> HandlerFuture + Send + Sync + 'static;
 
 const DEFAULT_MAX_DOWNLOAD_BYTES: usize = 512 * 1024 * 1024;
+const DOTNET_INFO_PATCHED: u32 = 0x1;
+const DOTNET_INFO_NET_VERSION: u32 = 0x2;
+const DOTNET_INFO_ENTRYPOINT_EXECUTED: u32 = 0x3;
+const DOTNET_INFO_FINISHED: u32 = 0x4;
+const DOTNET_INFO_FAILED: u32 = 0x5;
 
 #[derive(Clone, Debug)]
 struct DownloadTracker {
@@ -226,6 +232,19 @@ impl CommandDispatcher {
             },
         );
 
+        let sleep_registry = registry.clone();
+        let sleep_events = events.clone();
+        dispatcher.register_handler(
+            u32::from(DemonCommand::CommandSleep),
+            move |agent_id, request_id, payload| {
+                let registry = sleep_registry.clone();
+                let events = sleep_events.clone();
+                Box::pin(async move {
+                    handle_sleep_callback(&registry, &events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
         let fs_database = database.clone();
         let fs_events = events.clone();
         let fs_downloads = downloads.clone();
@@ -253,6 +272,22 @@ impl CommandDispatcher {
                 let events = proc_events.clone();
                 Box::pin(async move {
                     handle_process_command_callback(&events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let proc_ppid_registry = registry.clone();
+        let proc_ppid_events = events.clone();
+        dispatcher.register_handler(
+            u32::from(DemonCommand::CommandProcPpidSpoof),
+            move |agent_id, request_id, payload| {
+                let registry = proc_ppid_registry.clone();
+                let events = proc_ppid_events.clone();
+                Box::pin(async move {
+                    handle_proc_ppid_spoof_callback(
+                        &registry, &events, agent_id, request_id, &payload,
+                    )
+                    .await
                 })
             },
         );
@@ -396,6 +431,65 @@ impl CommandDispatcher {
             },
         );
 
+        let assembly_events = events.clone();
+        dispatcher.register_handler(
+            u32::from(DemonCommand::CommandAssemblyInlineExecute),
+            move |agent_id, request_id, payload| {
+                let events = assembly_events.clone();
+                Box::pin(async move {
+                    handle_assembly_inline_execute_callback(&events, agent_id, request_id, &payload)
+                        .await
+                })
+            },
+        );
+
+        let assembly_versions_events = events.clone();
+        dispatcher.register_handler(
+            u32::from(DemonCommand::CommandAssemblyListVersions),
+            move |agent_id, request_id, payload| {
+                let events = assembly_versions_events.clone();
+                Box::pin(async move {
+                    handle_assembly_list_versions_callback(&events, agent_id, request_id, &payload)
+                        .await
+                })
+            },
+        );
+
+        let job_events = events.clone();
+        dispatcher.register_handler(
+            u32::from(DemonCommand::CommandJob),
+            move |agent_id, request_id, payload| {
+                let events = job_events.clone();
+                Box::pin(async move {
+                    handle_job_callback(&events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let net_events = events.clone();
+        dispatcher.register_handler(
+            u32::from(DemonCommand::CommandNet),
+            move |agent_id, request_id, payload| {
+                let events = net_events.clone();
+                Box::pin(async move {
+                    handle_net_callback(&events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let config_registry = registry.clone();
+        let config_events = events.clone();
+        dispatcher.register_handler(
+            u32::from(DemonCommand::CommandConfig),
+            move |agent_id, request_id, payload| {
+                let registry = config_registry.clone();
+                let events = config_events.clone();
+                Box::pin(async move {
+                    handle_config_callback(&registry, &events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
         let screenshot_database = database.clone();
         let screenshot_events = events.clone();
         let screenshot_registry = registry.clone();
@@ -414,6 +508,20 @@ impl CommandDispatcher {
             },
         );
 
+        let transfer_events = events.clone();
+        let transfer_downloads = downloads.clone();
+        dispatcher.register_handler(
+            u32::from(DemonCommand::CommandTransfer),
+            move |agent_id, request_id, payload| {
+                let events = transfer_events.clone();
+                let downloads = transfer_downloads.clone();
+                Box::pin(async move {
+                    handle_transfer_callback(&events, &downloads, agent_id, request_id, &payload)
+                        .await
+                })
+            },
+        );
+
         let kerberos_events = events.clone();
         dispatcher.register_handler(
             u32::from(DemonCommand::CommandKerberos),
@@ -421,6 +529,28 @@ impl CommandDispatcher {
                 let events = kerberos_events.clone();
                 Box::pin(async move {
                     handle_kerberos_callback(&events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let mem_file_events = events.clone();
+        dispatcher.register_handler(
+            u32::from(DemonCommand::CommandMemFile),
+            move |agent_id, request_id, payload| {
+                let events = mem_file_events.clone();
+                Box::pin(async move {
+                    handle_mem_file_callback(&events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let package_dropped_events = events.clone();
+        dispatcher.register_handler(
+            u32::from(DemonCommand::CommandPackageDropped),
+            move |agent_id, request_id, payload| {
+                let events = package_dropped_events.clone();
+                Box::pin(async move {
+                    handle_package_dropped_callback(&events, agent_id, request_id, &payload).await
                 })
             },
         );
@@ -780,12 +910,35 @@ async fn dispatch_builtin_package(
         )
         .await;
     }
+    if command_id == u32::from(DemonCommand::CommandSleep) {
+        return handle_sleep_callback(
+            context.registry,
+            context.events,
+            agent_id,
+            request_id,
+            payload,
+        )
+        .await;
+    }
     if command_id == u32::from(DemonCommand::CommandProcList) {
         return handle_process_list_callback(context.events, agent_id, request_id, payload).await;
     }
     if command_id == u32::from(DemonCommand::CommandProc) {
         return handle_process_command_callback(context.events, agent_id, request_id, payload)
             .await;
+    }
+    if command_id == u32::from(DemonCommand::CommandProcPpidSpoof) {
+        return handle_proc_ppid_spoof_callback(
+            context.registry,
+            context.events,
+            agent_id,
+            request_id,
+            payload,
+        )
+        .await;
+    }
+    if command_id == u32::from(DemonCommand::CommandJob) {
+        return handle_job_callback(context.events, agent_id, request_id, payload).await;
     }
     if command_id == u32::from(DemonCommand::CommandOutput) {
         return handle_command_output_callback(
@@ -837,12 +990,43 @@ async fn dispatch_builtin_package(
         )
         .await;
     }
+    if command_id == u32::from(DemonCommand::CommandNet) {
+        return handle_net_callback(context.events, agent_id, request_id, payload).await;
+    }
+    if command_id == u32::from(DemonCommand::CommandConfig) {
+        return handle_config_callback(
+            context.registry,
+            context.events,
+            agent_id,
+            request_id,
+            payload,
+        )
+        .await;
+    }
     if command_id == u32::from(DemonCommand::CommandInjectShellcode) {
         return handle_inject_shellcode_callback(context.events, agent_id, request_id, payload)
             .await;
     }
     if command_id == u32::from(DemonCommand::CommandToken) {
         return handle_token_callback(context.events, agent_id, request_id, payload).await;
+    }
+    if command_id == u32::from(DemonCommand::CommandAssemblyInlineExecute) {
+        return handle_assembly_inline_execute_callback(
+            context.events,
+            agent_id,
+            request_id,
+            payload,
+        )
+        .await;
+    }
+    if command_id == u32::from(DemonCommand::CommandAssemblyListVersions) {
+        return handle_assembly_list_versions_callback(
+            context.events,
+            agent_id,
+            request_id,
+            payload,
+        )
+        .await;
     }
     if command_id == u32::from(DemonCommand::CommandScreenshot) {
         return handle_screenshot_callback(
@@ -855,8 +1039,25 @@ async fn dispatch_builtin_package(
         )
         .await;
     }
+    if command_id == u32::from(DemonCommand::CommandTransfer) {
+        return handle_transfer_callback(
+            context.events,
+            context.downloads,
+            agent_id,
+            request_id,
+            payload,
+        )
+        .await;
+    }
     if command_id == u32::from(DemonCommand::CommandKerberos) {
         return handle_kerberos_callback(context.events, agent_id, request_id, payload).await;
+    }
+    if command_id == u32::from(DemonCommand::CommandMemFile) {
+        return handle_mem_file_callback(context.events, agent_id, request_id, payload).await;
+    }
+    if command_id == u32::from(DemonCommand::CommandPackageDropped) {
+        return handle_package_dropped_callback(context.events, agent_id, request_id, payload)
+            .await;
     }
     if command_id == u32::from(DemonCommand::CommandSocket) {
         return handle_socket_callback(
@@ -929,6 +1130,18 @@ impl DownloadTracker {
 
     async fn finish(&self, agent_id: u32, file_id: u32) -> Option<DownloadState> {
         self.inner.write().await.remove(&(agent_id, file_id))
+    }
+
+    async fn active_for_agent(&self, agent_id: u32) -> Vec<(u32, DownloadState)> {
+        let state = self.inner.read().await;
+        let mut downloads = state
+            .iter()
+            .filter_map(|((download_agent_id, file_id), download)| {
+                (*download_agent_id == agent_id).then_some((*file_id, download.clone()))
+            })
+            .collect::<Vec<_>>();
+        downloads.sort_by_key(|(file_id, _)| *file_id);
+        downloads
     }
 }
 
@@ -1493,6 +1706,589 @@ async fn handle_demon_info_callback(
         request_id,
         "Info",
         &message,
+        None,
+    )?);
+    Ok(None)
+}
+
+async fn handle_job_callback(
+    events: &EventBus,
+    agent_id: u32,
+    request_id: u32,
+    payload: &[u8],
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::CommandJob));
+    let subcommand = parser.read_u32("job subcommand")?;
+    let subcommand = DemonJobCommand::try_from(subcommand).map_err(|error| {
+        CommandDispatchError::InvalidCallbackPayload {
+            command_id: u32::from(DemonCommand::CommandJob),
+            message: error.to_string(),
+        }
+    })?;
+
+    match subcommand {
+        DemonJobCommand::List => {
+            let mut rows = Vec::new();
+            while !parser.is_empty() {
+                rows.push((
+                    parser.read_u32("job list id")?,
+                    parser.read_u32("job list type")?,
+                    parser.read_u32("job list state")?,
+                ));
+            }
+
+            let mut output =
+                String::from(" Job ID  Type           State\n ------  ----           -----\n");
+            for (job_id, job_type, state) in rows {
+                output.push_str(&format!(
+                    " {job_id:<6}  {:<13}  {}\n",
+                    job_type_name(job_type),
+                    job_state_name(state)
+                ));
+            }
+            events.broadcast(agent_response_event(
+                agent_id,
+                u32::from(DemonCommand::CommandJob),
+                request_id,
+                "Info",
+                "Job list:",
+                Some(output.trim_end().to_owned()),
+            )?);
+        }
+        DemonJobCommand::Suspend | DemonJobCommand::Resume | DemonJobCommand::KillRemove => {
+            let job_id = parser.read_u32("job action id")?;
+            let success = parser.read_bool("job action success")?;
+            let (success_text, failure_text) = match subcommand {
+                DemonJobCommand::Suspend => ("Successful suspended job", "Failed to suspended job"),
+                DemonJobCommand::Resume => ("Successful resumed job", "Failed to resumed job"),
+                DemonJobCommand::KillRemove => {
+                    ("Successful killed and removed job", "Failed to kill job")
+                }
+                DemonJobCommand::List | DemonJobCommand::Died => unreachable!(),
+            };
+            events.broadcast(agent_response_event(
+                agent_id,
+                u32::from(DemonCommand::CommandJob),
+                request_id,
+                if success { "Good" } else { "Error" },
+                &format!("{} {job_id}", if success { success_text } else { failure_text }),
+                None,
+            )?);
+        }
+        DemonJobCommand::Died => {}
+    }
+
+    Ok(None)
+}
+
+async fn handle_sleep_callback(
+    registry: &AgentRegistry,
+    events: &EventBus,
+    agent_id: u32,
+    request_id: u32,
+    payload: &[u8],
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::CommandSleep));
+    let sleep_delay = parser.read_u32("sleep delay")?;
+    let sleep_jitter = parser.read_u32("sleep jitter")?;
+    let mut agent =
+        registry.get(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
+    agent.sleep_delay = sleep_delay;
+    agent.sleep_jitter = sleep_jitter;
+    registry.update_agent(agent.clone()).await?;
+    events.broadcast(agent_update_event(&agent));
+    events.broadcast(agent_response_event(
+        agent_id,
+        u32::from(DemonCommand::CommandSleep),
+        request_id,
+        "Good",
+        &format!("Set sleep interval to {sleep_delay} seconds with {sleep_jitter}% jitter"),
+        None,
+    )?);
+    Ok(None)
+}
+
+async fn handle_proc_ppid_spoof_callback(
+    registry: &AgentRegistry,
+    events: &EventBus,
+    agent_id: u32,
+    request_id: u32,
+    payload: &[u8],
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::CommandProcPpidSpoof));
+    let ppid = parser.read_u32("proc ppid spoof pid")?;
+    if let Some(mut agent) = registry.get(agent_id).await {
+        agent.process_ppid = ppid;
+        registry.update_agent(agent.clone()).await?;
+        events.broadcast(agent_update_event(&agent));
+    }
+    events.broadcast(agent_response_event(
+        agent_id,
+        u32::from(DemonCommand::CommandProcPpidSpoof),
+        request_id,
+        "Good",
+        &format!("Changed parent pid to spoof: {ppid}"),
+        None,
+    )?);
+    Ok(None)
+}
+
+async fn handle_net_callback(
+    events: &EventBus,
+    agent_id: u32,
+    request_id: u32,
+    payload: &[u8],
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::CommandNet));
+    let subcommand = parser.read_u32("net subcommand")?;
+    let subcommand = DemonNetCommand::try_from(subcommand).map_err(|error| {
+        CommandDispatchError::InvalidCallbackPayload {
+            command_id: u32::from(DemonCommand::CommandNet),
+            message: error.to_string(),
+        }
+    })?;
+
+    let (kind, message, output) = match subcommand {
+        DemonNetCommand::Domain => {
+            let domain = parser.read_string("net domain")?;
+            if domain.is_empty() {
+                ("Good", "The machine does not seem to be joined to a domain".to_owned(), None)
+            } else {
+                ("Good", format!("Domain for this Host: {domain}"), None)
+            }
+        }
+        DemonNetCommand::Logons => {
+            let target = parser.read_utf16("net logons target")?;
+            let mut users = Vec::new();
+            while !parser.is_empty() {
+                users.push(parser.read_utf16("net logon user")?);
+            }
+            let mut output = String::from(" Usernames\n ---------\n");
+            for user in &users {
+                output.push_str(&format!("  {user}\n"));
+            }
+            (
+                "Info",
+                format!("Logged on users at {target} [{}]: ", users.len()),
+                Some(output.trim_end().to_owned()),
+            )
+        }
+        DemonNetCommand::Sessions => {
+            let target = parser.read_utf16("net sessions target")?;
+            let mut rows = Vec::new();
+            while !parser.is_empty() {
+                rows.push((
+                    parser.read_utf16("net session client")?,
+                    parser.read_utf16("net session user")?,
+                    parser.read_u32("net session active")?,
+                    parser.read_u32("net session idle")?,
+                ));
+            }
+            (
+                "Info",
+                format!("Sessions for {target} [{}]: ", rows.len()),
+                Some(format_net_sessions(&rows)),
+            )
+        }
+        DemonNetCommand::Computer | DemonNetCommand::DcList => return Ok(None),
+        DemonNetCommand::Share => {
+            let target = parser.read_utf16("net shares target")?;
+            let mut rows = Vec::new();
+            while !parser.is_empty() {
+                rows.push((
+                    parser.read_utf16("net share name")?,
+                    parser.read_utf16("net share path")?,
+                    parser.read_utf16("net share remark")?,
+                    parser.read_u32("net share access")?,
+                ));
+            }
+            (
+                "Info",
+                format!("Shares for {target} [{}]: ", rows.len()),
+                Some(format_net_shares(&rows)),
+            )
+        }
+        DemonNetCommand::LocalGroup => {
+            let target = parser.read_utf16("net localgroup target")?;
+            let mut rows = Vec::new();
+            while !parser.is_empty() {
+                rows.push((
+                    parser.read_utf16("net localgroup name")?,
+                    parser.read_utf16("net localgroup description")?,
+                ));
+            }
+            (
+                "Info",
+                format!("Local Groups for {target}: "),
+                Some(format_net_group_descriptions(&rows)),
+            )
+        }
+        DemonNetCommand::Group => {
+            let target = parser.read_utf16("net group target")?;
+            let mut rows = Vec::new();
+            while !parser.is_empty() {
+                rows.push((
+                    parser.read_utf16("net group name")?,
+                    parser.read_utf16("net group description")?,
+                ));
+            }
+            (
+                "Info",
+                format!("List groups on {target}: "),
+                Some(format_net_group_descriptions(&rows)),
+            )
+        }
+        DemonNetCommand::Users => {
+            let target = parser.read_utf16("net users target")?;
+            let mut users = Vec::new();
+            while !parser.is_empty() {
+                let username = parser.read_utf16("net user name")?;
+                let is_admin = parser.read_bool("net user admin")?;
+                users.push((username, is_admin));
+            }
+            let mut output = String::new();
+            for (username, is_admin) in &users {
+                output.push_str(&format!(
+                    " - {username}{}\n",
+                    if *is_admin { " (Admin)" } else { "" }
+                ));
+            }
+            ("Info", format!("Users on {target}: "), Some(output.trim_end().to_owned()))
+        }
+    };
+
+    events.broadcast(agent_response_event(
+        agent_id,
+        u32::from(DemonCommand::CommandNet),
+        request_id,
+        kind,
+        &message,
+        output,
+    )?);
+    Ok(None)
+}
+
+async fn handle_assembly_inline_execute_callback(
+    events: &EventBus,
+    agent_id: u32,
+    request_id: u32,
+    payload: &[u8],
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let mut parser =
+        CallbackParser::new(payload, u32::from(DemonCommand::CommandAssemblyInlineExecute));
+    let info_id = parser.read_u32("assembly inline execute info id")?;
+
+    let (kind, message) = match info_id {
+        DOTNET_INFO_PATCHED => {
+            ("Info", "[HwBpEngine] Amsi/Etw has been hooked & patched".to_owned())
+        }
+        DOTNET_INFO_NET_VERSION => {
+            ("Info", format!("Using CLR Version: {}", parser.read_utf16("assembly clr version")?))
+        }
+        DOTNET_INFO_ENTRYPOINT_EXECUTED => (
+            "Good",
+            format!(
+                "Assembly has been executed [Thread: {}]",
+                parser.read_u32("assembly entrypoint thread id")?
+            ),
+        ),
+        DOTNET_INFO_FINISHED => ("Good", "Finished executing assembly.".to_owned()),
+        DOTNET_INFO_FAILED => {
+            ("Error", "Failed to execute assembly or initialize the clr".to_owned())
+        }
+        _ => return Ok(None),
+    };
+
+    events.broadcast(agent_response_event(
+        agent_id,
+        u32::from(DemonCommand::CommandAssemblyInlineExecute),
+        request_id,
+        kind,
+        &message,
+        None,
+    )?);
+    Ok(None)
+}
+
+async fn handle_assembly_list_versions_callback(
+    events: &EventBus,
+    agent_id: u32,
+    request_id: u32,
+    payload: &[u8],
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let mut parser =
+        CallbackParser::new(payload, u32::from(DemonCommand::CommandAssemblyListVersions));
+    let mut output = String::new();
+    while !parser.is_empty() {
+        output.push_str(&format!("   - {}\n", parser.read_utf16("assembly version")?));
+    }
+
+    events.broadcast(agent_response_event(
+        agent_id,
+        u32::from(DemonCommand::CommandAssemblyListVersions),
+        request_id,
+        "Info",
+        "List available assembly versions:",
+        Some(output.trim_end().to_owned()),
+    )?);
+    Ok(None)
+}
+
+async fn handle_config_callback(
+    registry: &AgentRegistry,
+    events: &EventBus,
+    agent_id: u32,
+    request_id: u32,
+    payload: &[u8],
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::CommandConfig));
+    let key = parser.read_u32("config key")?;
+    let key = DemonConfigKey::try_from(key).map_err(|error| {
+        CommandDispatchError::InvalidCallbackPayload {
+            command_id: u32::from(DemonCommand::CommandConfig),
+            message: error.to_string(),
+        }
+    })?;
+
+    let message = match key {
+        DemonConfigKey::MemoryAlloc => {
+            format!("Default memory allocation set to {}", parser.read_u32("config value")?)
+        }
+        DemonConfigKey::MemoryExecute => {
+            format!("Default memory executing set to {}", parser.read_u32("config value")?)
+        }
+        DemonConfigKey::InjectSpawn64 => {
+            format!("Default x64 target process set to {}", parser.read_utf16("config path")?)
+        }
+        DemonConfigKey::InjectSpawn32 => {
+            format!("Default x86 target process set to {}", parser.read_utf16("config path")?)
+        }
+        DemonConfigKey::KillDate => {
+            let raw = parser.read_u64("config kill date")?;
+            let mut agent =
+                registry.get(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
+            agent.kill_date = (raw != 0).then(|| i64::try_from(raw).unwrap_or(i64::MAX));
+            registry.update_agent(agent.clone()).await?;
+            events.broadcast(agent_update_event(&agent));
+            if raw == 0 {
+                "KillDate was disabled".to_owned()
+            } else {
+                "KillDate has been set".to_owned()
+            }
+        }
+        DemonConfigKey::WorkingHours => {
+            let raw = parser.read_u32("config working hours")?;
+            let mut agent =
+                registry.get(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
+            agent.working_hours = (raw != 0).then(|| i32::try_from(raw).unwrap_or(i32::MAX));
+            registry.update_agent(agent.clone()).await?;
+            events.broadcast(agent_update_event(&agent));
+            if raw == 0 {
+                "WorkingHours was disabled".to_owned()
+            } else {
+                "WorkingHours has been set".to_owned()
+            }
+        }
+        DemonConfigKey::ImplantSpfThreadStart => {
+            let module = parser.read_string("config spf module")?;
+            let symbol = parser.read_string("config spf symbol")?;
+            format!("Sleep obfuscation spoof thread start addr to {module}!{symbol}")
+        }
+        DemonConfigKey::ImplantSleepTechnique => {
+            format!("Sleep obfuscation technique set to {}", parser.read_u32("config value")?)
+        }
+        DemonConfigKey::ImplantCoffeeVeh => {
+            format!("Coffee VEH set to {}", bool_string(parser.read_bool("config coffee veh")?))
+        }
+        DemonConfigKey::ImplantCoffeeThreaded => format!(
+            "Coffee threading set to {}",
+            bool_string(parser.read_bool("config coffee threaded")?)
+        ),
+        DemonConfigKey::InjectTechnique => {
+            format!("Set default injection technique to {}", parser.read_u32("config value")?)
+        }
+        DemonConfigKey::InjectSpoofAddr => {
+            let module = parser.read_string("config inject spoof module")?;
+            let symbol = parser.read_string("config inject spoof symbol")?;
+            format!("Injection thread spoofing value set to {module}!{symbol}")
+        }
+        DemonConfigKey::ImplantVerbose => format!(
+            "Implant verbose messaging: {}",
+            bool_string(parser.read_bool("config implant verbose")?)
+        ),
+    };
+
+    events.broadcast(agent_response_event(
+        agent_id,
+        u32::from(DemonCommand::CommandConfig),
+        request_id,
+        "Good",
+        &message,
+        None,
+    )?);
+    Ok(None)
+}
+
+async fn handle_transfer_callback(
+    events: &EventBus,
+    downloads: &DownloadTracker,
+    agent_id: u32,
+    request_id: u32,
+    payload: &[u8],
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::CommandTransfer));
+    let subcommand = parser.read_u32("transfer subcommand")?;
+    let subcommand = DemonTransferCommand::try_from(subcommand).map_err(|error| {
+        CommandDispatchError::InvalidCallbackPayload {
+            command_id: u32::from(DemonCommand::CommandTransfer),
+            message: error.to_string(),
+        }
+    })?;
+
+    match subcommand {
+        DemonTransferCommand::List => {
+            let active = downloads.active_for_agent(agent_id).await;
+            let mut output = String::from(
+                " File ID   Size      Progress  State     File\n -------   ----      --------  -----     ----\n",
+            );
+            let mut count = 0_usize;
+
+            while !parser.is_empty() {
+                let file_id = parser.read_u32("transfer list file id")?;
+                let progress = u64::from(parser.read_u32("transfer list progress")?);
+                let state = parser.read_u32("transfer list state")?;
+                if let Some((_, download)) =
+                    active.iter().find(|(active_file_id, _)| *active_file_id == file_id)
+                {
+                    output.push_str(&format!(
+                        " {file_id:<7x}   {:<8}  {:<8}  {:<8}  {}\n",
+                        byte_count(download.expected_size),
+                        transfer_progress_text(progress, download.expected_size),
+                        transfer_state_name(state),
+                        download.remote_path
+                    ));
+                    count += 1;
+                }
+            }
+
+            events.broadcast(agent_response_event(
+                agent_id,
+                u32::from(DemonCommand::CommandTransfer),
+                request_id,
+                "Info",
+                &format!("List downloads [{count} current downloads]:"),
+                Some(output.trim_end().to_owned()),
+            )?);
+        }
+        DemonTransferCommand::Stop
+        | DemonTransferCommand::Resume
+        | DemonTransferCommand::Remove => {
+            let found = parser.read_bool("transfer found")?;
+            let file_id = parser.read_u32("transfer file id")?;
+            let exists = downloads
+                .active_for_agent(agent_id)
+                .await
+                .iter()
+                .any(|(active_file_id, _)| *active_file_id == file_id);
+            let (kind, message) = match subcommand {
+                DemonTransferCommand::Stop => {
+                    if found && exists {
+                        ("Good", format!("Successful found and stopped download: {file_id:x}"))
+                    } else if found {
+                        (
+                            "Error",
+                            format!("Couldn't stop download {file_id:x}: Download does not exists"),
+                        )
+                    } else {
+                        ("Error", format!("Couldn't stop download {file_id:x}: FileID not found"))
+                    }
+                }
+                DemonTransferCommand::Resume => {
+                    if found && exists {
+                        ("Good", format!("Successful found and resumed download: {file_id:x}"))
+                    } else if found {
+                        (
+                            "Error",
+                            format!(
+                                "Couldn't resume download {file_id:x}: Download does not exists"
+                            ),
+                        )
+                    } else {
+                        ("Error", format!("Couldn't resume download {file_id:x}: FileID not found"))
+                    }
+                }
+                DemonTransferCommand::Remove => {
+                    if found && exists {
+                        let _ = downloads.finish(agent_id, file_id).await;
+                        ("Good", format!("Successful found and removed download: {file_id:x}"))
+                    } else if found {
+                        (
+                            "Error",
+                            format!(
+                                "Couldn't remove download {file_id:x}: Download does not exists"
+                            ),
+                        )
+                    } else {
+                        ("Error", format!("Couldn't remove download {file_id:x}: FileID not found"))
+                    }
+                }
+                DemonTransferCommand::List => unreachable!(),
+            };
+            events.broadcast(agent_response_event(
+                agent_id,
+                u32::from(DemonCommand::CommandTransfer),
+                request_id,
+                kind,
+                &message,
+                None,
+            )?);
+        }
+    }
+
+    Ok(None)
+}
+
+async fn handle_mem_file_callback(
+    events: &EventBus,
+    agent_id: u32,
+    request_id: u32,
+    payload: &[u8],
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::CommandMemFile));
+    let mem_file_id = parser.read_u32("mem file id")?;
+    let success = parser.read_bool("mem file success")?;
+    events.broadcast(agent_response_event(
+        agent_id,
+        u32::from(DemonCommand::CommandMemFile),
+        request_id,
+        if success { "Good" } else { "Error" },
+        &format!(
+            "Memory file {:x} {}",
+            mem_file_id,
+            if success { "registered successfully" } else { "failed to register" }
+        ),
+        None,
+    )?);
+    Ok(None)
+}
+
+async fn handle_package_dropped_callback(
+    events: &EventBus,
+    agent_id: u32,
+    request_id: u32,
+    payload: &[u8],
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::CommandPackageDropped));
+    let package_length = parser.read_u32("dropped package length")?;
+    let max_length = parser.read_u32("dropped package max length")?;
+    events.broadcast(agent_response_event(
+        agent_id,
+        u32::from(DemonCommand::CommandPackageDropped),
+        request_id,
+        "Error",
+        &format!(
+            "A package was discarded by demon for being larger than PIPE_BUFFER_MAX ({package_length} > {max_length})"
+        ),
         None,
     )?);
     Ok(None)
@@ -3635,6 +4431,114 @@ fn format_memory_type(mem_type: u32) -> String {
     }
 }
 
+fn transfer_progress_text(progress: u64, total: u64) -> String {
+    if total == 0 {
+        return "0.00%".to_owned();
+    }
+
+    format!("{:.2}%", (progress as f64 / total as f64) * 100.0)
+}
+
+fn transfer_state_name(state: u32) -> &'static str {
+    match state {
+        1 => "Running",
+        2 => "Stopped",
+        3 => "Removed",
+        _ => "Unknown",
+    }
+}
+
+fn job_type_name(job_type: u32) -> &'static str {
+    match job_type {
+        1 => "Thread",
+        2 => "Process",
+        3 => "Track Process",
+        _ => "Unknown",
+    }
+}
+
+fn job_state_name(state: u32) -> &'static str {
+    match state {
+        1 => "Running",
+        2 => "Suspended",
+        3 => "Dead",
+        _ => "Unknown",
+    }
+}
+
+fn bool_string(value: bool) -> &'static str {
+    if value { "true" } else { "false" }
+}
+
+fn format_net_sessions(rows: &[(String, String, u32, u32)]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+
+    let computer_width = rows.iter().map(|row| row.0.len()).max().unwrap_or(8).max(8);
+    let user_width = rows.iter().map(|row| row.1.len()).max().unwrap_or(8).max(8);
+    let mut output = format!(
+        " {:<computer_width$}   {:<user_width$}   {:<6}   {}\n",
+        "Computer", "Username", "Active", "Idle"
+    );
+    output.push_str(&format!(
+        " {:<computer_width$}   {:<user_width$}   {:<6}   {}\n",
+        "--------", "--------", "------", "----"
+    ));
+
+    for (computer, username, active, idle) in rows {
+        output.push_str(&format!(
+            " {:<computer_width$}   {:<user_width$}   {:<6}   {}\n",
+            computer, username, active, idle
+        ));
+    }
+
+    output.trim_end().to_owned()
+}
+
+fn format_net_shares(rows: &[(String, String, String, u32)]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+
+    let name_width = rows.iter().map(|row| row.0.len()).max().unwrap_or(10).max(10);
+    let path_width = rows.iter().map(|row| row.1.len()).max().unwrap_or(4).max(4);
+    let remark_width = rows.iter().map(|row| row.2.len()).max().unwrap_or(6).max(6);
+    let mut output = format!(
+        " {:<name_width$}   {:<path_width$}   {:<remark_width$}   {}\n",
+        "Share name", "Path", "Remark", "Access"
+    );
+    output.push_str(&format!(
+        " {:<name_width$}   {:<path_width$}   {:<remark_width$}   {}\n",
+        "----------", "----", "------", "------"
+    ));
+
+    for (name, path, remark, access) in rows {
+        output.push_str(&format!(
+            " {:<name_width$}   {:<path_width$}   {:<remark_width$}   {}\n",
+            name, path, remark, access
+        ));
+    }
+
+    output.trim_end().to_owned()
+}
+
+fn format_net_group_descriptions(rows: &[(String, String)]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+
+    let group_width = rows.iter().map(|row| row.0.len()).max().unwrap_or(5).max(5);
+    let mut output = format!(" {:<group_width$}  {}\n", "Group", "Description");
+    output.push_str(&format!(" {:<group_width$}  {}\n", "-----", "-----------"));
+
+    for (group, description) in rows {
+        output.push_str(&format!(" {:<group_width$}  {}\n", group, description));
+    }
+
+    output.trim_end().to_owned()
+}
+
 fn format_rportfwd_list(parser: &mut CallbackParser<'_>) -> Result<String, CommandDispatchError> {
     let mut output = String::from("\n Socket ID     Forward\n ---------     -------\n");
 
@@ -3920,9 +4824,10 @@ mod tests {
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data};
     use red_cell_common::demon::{
-        DemonCallback, DemonCallbackError, DemonCommand, DemonFilesystemCommand, DemonInfoClass,
-        DemonInjectError, DemonKerberosCommand, DemonMessage, DemonPivotCommand,
-        DemonProcessCommand, DemonSocketCommand, DemonSocketType, DemonTokenCommand,
+        DemonCallback, DemonCallbackError, DemonCommand, DemonConfigKey, DemonFilesystemCommand,
+        DemonInfoClass, DemonInjectError, DemonJobCommand, DemonKerberosCommand, DemonMessage,
+        DemonNetCommand, DemonPivotCommand, DemonProcessCommand, DemonSocketCommand,
+        DemonSocketType, DemonTokenCommand, DemonTransferCommand,
     };
     use red_cell_common::operator::OperatorMessage;
     use serde_json::Value;
@@ -6509,6 +7414,317 @@ mod tests {
             message.info.extra.get("Message"),
             Some(&Value::String("No tokens inside the token vault".to_owned()))
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_job_and_package_dropped_handlers_broadcast_agent_responses()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0xAABB_CCDD, [0x21; AGENT_KEY_LENGTH], [0x43; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry,
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        let mut job_payload = Vec::new();
+        add_u32(&mut job_payload, u32::from(DemonJobCommand::Resume));
+        add_u32(&mut job_payload, 7);
+        add_u32(&mut job_payload, 1);
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandJob), 30, &job_payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("job response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Successful resumed job 7".to_owned()))
+        );
+
+        let mut dropped_payload = Vec::new();
+        add_u32(&mut dropped_payload, 8192);
+        add_u32(&mut dropped_payload, 4096);
+        dispatcher
+            .dispatch(
+                0xAABB_CCDD,
+                u32::from(DemonCommand::CommandPackageDropped),
+                31,
+                &dropped_payload,
+            )
+            .await?;
+
+        let event = receiver.recv().await.ok_or("package dropped response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(message.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String(
+                "A package was discarded by demon for being larger than PIPE_BUFFER_MAX (8192 > 4096)"
+                    .to_owned(),
+            ))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_net_and_transfer_handlers_format_operator_output()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0x1122_3344, [0x12; AGENT_KEY_LENGTH], [0x34; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        let mut open = Vec::new();
+        add_u32(&mut open, u32::from(DemonFilesystemCommand::Download));
+        add_u32(&mut open, 0);
+        add_u32(&mut open, 0x44);
+        add_u64(&mut open, 20);
+        add_utf16(&mut open, "C:\\loot.bin");
+        dispatcher.dispatch(0x1122_3344, u32::from(DemonCommand::CommandFs), 32, &open).await?;
+        let _ = receiver.recv().await.ok_or("download progress event missing")?;
+
+        let mut transfer_payload = Vec::new();
+        add_u32(&mut transfer_payload, u32::from(DemonTransferCommand::List));
+        add_u32(&mut transfer_payload, 0x44);
+        add_u32(&mut transfer_payload, 10);
+        add_u32(&mut transfer_payload, 1);
+        dispatcher
+            .dispatch(0x1122_3344, u32::from(DemonCommand::CommandTransfer), 33, &transfer_payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("transfer response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("List downloads [1 current downloads]:".to_owned()))
+        );
+        assert!(message.info.output.contains("loot.bin"));
+        assert!(message.info.output.contains("50.00%"));
+
+        let mut net_payload = Vec::new();
+        add_u32(&mut net_payload, u32::from(DemonNetCommand::Users));
+        add_utf16(&mut net_payload, "WKSTN-01");
+        add_utf16(&mut net_payload, "alice");
+        add_u32(&mut net_payload, 1);
+        add_utf16(&mut net_payload, "bob");
+        add_u32(&mut net_payload, 0);
+        dispatcher
+            .dispatch(0x1122_3344, u32::from(DemonCommand::CommandNet), 34, &net_payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("net response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Users on WKSTN-01: ".to_owned()))
+        );
+        assert!(message.info.output.contains("alice (Admin)"));
+        assert!(message.info.output.contains("bob"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_config_and_mem_file_handlers_update_agent_state_and_broadcast()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0x5566_7788, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        let mut config_payload = Vec::new();
+        add_u32(&mut config_payload, u32::from(DemonConfigKey::WorkingHours));
+        add_u32(&mut config_payload, 0b101010);
+        dispatcher
+            .dispatch(0x5566_7788, u32::from(DemonCommand::CommandConfig), 35, &config_payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("agent update missing")?;
+        let OperatorMessage::AgentUpdate(_) = event else {
+            panic!("expected agent update event");
+        };
+        let event = receiver.recv().await.ok_or("config response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("WorkingHours has been set".to_owned()))
+        );
+        assert_eq!(
+            registry.get(0x5566_7788).await.and_then(|agent| agent.working_hours),
+            Some(0b101010)
+        );
+
+        let mut mem_file_payload = Vec::new();
+        add_u32(&mut mem_file_payload, 0xAB);
+        add_u32(&mut mem_file_payload, 1);
+        dispatcher
+            .dispatch(0x5566_7788, u32::from(DemonCommand::CommandMemFile), 36, &mem_file_payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("mem file response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Memory file ab registered successfully".to_owned()))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_sleep_ppid_and_assembly_handlers_update_state_and_broadcast()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0xCAFEBABE, [0x66; AGENT_KEY_LENGTH], [0x77; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        let mut sleep_payload = Vec::new();
+        add_u32(&mut sleep_payload, 60);
+        add_u32(&mut sleep_payload, 15);
+        dispatcher
+            .dispatch(0xCAFEBABE, u32::from(DemonCommand::CommandSleep), 37, &sleep_payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("sleep agent update missing")?;
+        let OperatorMessage::AgentUpdate(_) = event else {
+            panic!("expected agent update event");
+        };
+        let event = receiver.recv().await.ok_or("sleep response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Set sleep interval to 60 seconds with 15% jitter".to_owned()))
+        );
+        let updated = registry.get(0xCAFEBABE).await.ok_or("missing updated agent")?;
+        assert_eq!(updated.sleep_delay, 60);
+        assert_eq!(updated.sleep_jitter, 15);
+
+        let mut ppid_payload = Vec::new();
+        add_u32(&mut ppid_payload, 4242);
+        dispatcher
+            .dispatch(0xCAFEBABE, u32::from(DemonCommand::CommandProcPpidSpoof), 38, &ppid_payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("ppid agent update missing")?;
+        let OperatorMessage::AgentUpdate(_) = event else {
+            panic!("expected agent update event");
+        };
+        let event = receiver.recv().await.ok_or("ppid response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Changed parent pid to spoof: 4242".to_owned()))
+        );
+        assert_eq!(
+            registry.get(0xCAFEBABE).await.ok_or("missing updated agent")?.process_ppid,
+            4242
+        );
+
+        let mut assembly_payload = Vec::new();
+        add_u32(&mut assembly_payload, 0x2);
+        add_utf16(&mut assembly_payload, "v4.0.30319");
+        dispatcher
+            .dispatch(
+                0xCAFEBABE,
+                u32::from(DemonCommand::CommandAssemblyInlineExecute),
+                39,
+                &assembly_payload,
+            )
+            .await?;
+
+        let event = receiver.recv().await.ok_or("assembly response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Using CLR Version: v4.0.30319".to_owned()))
+        );
+
+        let mut versions_payload = Vec::new();
+        add_utf16(&mut versions_payload, "v2.0.50727");
+        add_utf16(&mut versions_payload, "v4.0.30319");
+        dispatcher
+            .dispatch(
+                0xCAFEBABE,
+                u32::from(DemonCommand::CommandAssemblyListVersions),
+                40,
+                &versions_payload,
+            )
+            .await?;
+
+        let event = receiver.recv().await.ok_or("assembly versions response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("List available assembly versions:".to_owned()))
+        );
+        assert!(message.info.output.contains("v2.0.50727"));
+        assert!(message.info.output.contains("v4.0.30319"));
         Ok(())
     }
 

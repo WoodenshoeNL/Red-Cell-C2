@@ -52,6 +52,14 @@ pub enum TeamserverError {
         /// Missing agent identifier.
         agent_id: u32,
     },
+    /// Returned when persisted or supplied agent AES material is forbidden.
+    #[error("invalid agent crypto material for agent 0x{agent_id:08X}: {message}")]
+    InvalidAgentCrypto {
+        /// Agent identifier associated with the invalid AES material.
+        agent_id: u32,
+        /// Human-readable validation failure.
+        message: String,
+    },
     /// Returned when attempting to persist an unsupported listener lifecycle state.
     #[error("invalid listener state `{state}`")]
     InvalidListenerState {

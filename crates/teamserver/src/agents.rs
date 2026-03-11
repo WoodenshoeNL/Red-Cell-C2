@@ -11,7 +11,7 @@ use red_cell_common::crypto::{
 use red_cell_common::demon::{DemonCommand, DemonMessage, DemonPackage};
 use red_cell_common::{AgentEncryptionInfo, AgentInfo};
 use tokio::sync::{Mutex, RwLock};
-use tracing::instrument;
+use tracing::{instrument, warn};
 
 use crate::database::{Database, LinkRecord, TeamserverError};
 
@@ -725,6 +725,16 @@ fn decode_crypto_material(
 ) -> Result<([u8; AGENT_KEY_LENGTH], [u8; AGENT_IV_LENGTH]), TeamserverError> {
     let key = decode_fixed::<AGENT_KEY_LENGTH>(agent_id, "aes_key", encryption.aes_key.as_bytes())?;
     let iv = decode_fixed::<AGENT_IV_LENGTH>(agent_id, "aes_iv", encryption.aes_iv.as_bytes())?;
+    if key.iter().all(|byte| *byte == 0) {
+        warn!(
+            agent_id = format_args!("0x{agent_id:08X}"),
+            "rejecting stored all-zero AES key for agent transport"
+        );
+        return Err(TeamserverError::InvalidAgentCrypto {
+            agent_id,
+            message: "all-zero AES keys are not allowed".to_owned(),
+        });
+    }
     Ok((key, iv))
 }
 
@@ -1221,7 +1231,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zero_key_agent_uses_plaintext_pass_through() -> Result<(), TeamserverError> {
+    async fn zero_key_agent_transport_is_rejected() -> Result<(), TeamserverError> {
         let registry = AgentRegistry::new(test_database().await?);
         let agent = sample_agent_with_crypto(
             0x1000_0704,
@@ -1232,12 +1242,19 @@ mod tests {
 
         registry.insert(agent.clone()).await?;
 
-        let ciphertext = registry.encrypt_for_agent(agent.agent_id, plaintext).await?;
-        let decrypted = registry.decrypt_from_agent(agent.agent_id, plaintext).await?;
-
-        assert_eq!(ciphertext, plaintext);
-        assert_eq!(decrypted, plaintext);
-        assert_eq!(registry.ctr_offset(agent.agent_id).await?, 0);
+        assert!(matches!(
+            registry.encrypt_for_agent(agent.agent_id, plaintext).await,
+            Err(TeamserverError::InvalidAgentCrypto { agent_id, .. }) if agent_id == agent.agent_id
+        ));
+        assert!(matches!(
+            registry.decrypt_from_agent(agent.agent_id, plaintext).await,
+            Err(TeamserverError::InvalidAgentCrypto { agent_id, .. }) if agent_id == agent.agent_id
+        ));
+        assert_eq!(
+            registry.ctr_offset(agent.agent_id).await?,
+            0,
+            "rejected transport must not advance CTR state"
+        );
 
         Ok(())
     }

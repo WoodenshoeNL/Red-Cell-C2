@@ -12,6 +12,7 @@ use red_cell_common::{AgentEncryptionInfo, AgentInfo};
 use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use tracing::warn;
 
 use crate::{AgentRegistry, TeamserverError};
 
@@ -172,47 +173,8 @@ pub async fn build_init_ack(
     registry: &crate::AgentRegistry,
     agent_id: u32,
 ) -> Result<Vec<u8>, DemonParserError> {
-    let encryption = registry.encryption(agent_id).await?;
-    let (key, _iv) = decode_agent_crypto(agent_id, &encryption)?;
     let payload = agent_id.to_le_bytes();
-
-    if key.iter().all(|byte| *byte == 0) {
-        return Ok(payload.to_vec());
-    }
-
     Ok(registry.encrypt_for_agent(agent_id, &payload).await?)
-}
-
-fn decode_agent_crypto(
-    agent_id: u32,
-    encryption: &AgentEncryptionInfo,
-) -> Result<([u8; AGENT_KEY_LENGTH], [u8; AGENT_IV_LENGTH]), DemonParserError> {
-    let key = decode_fixed::<AGENT_KEY_LENGTH>(agent_id, "aes_key", encryption.aes_key.as_bytes())?;
-    let iv = decode_fixed::<AGENT_IV_LENGTH>(agent_id, "aes_iv", encryption.aes_iv.as_bytes())?;
-    Ok((key, iv))
-}
-
-fn decode_fixed<const N: usize>(
-    agent_id: u32,
-    field: &'static str,
-    encoded: &[u8],
-) -> Result<[u8; N], DemonParserError> {
-    let decoded = BASE64_STANDARD.decode(encoded).map_err(|error| {
-        DemonParserError::InvalidStoredCryptoEncoding {
-            agent_id,
-            field,
-            message: error.to_string(),
-        }
-    })?;
-
-    let actual = decoded.len();
-    decoded.try_into().map_err(|_| {
-        DemonParserError::Protocol(DemonProtocolError::BufferTooShort {
-            context: field,
-            expected: N,
-            actual,
-        })
-    })
 }
 
 fn parse_callback_packages(
@@ -250,11 +212,15 @@ fn parse_init_agent(
     let iv = read_fixed::<AGENT_IV_LENGTH>(payload, &mut offset, "init AES IV")?;
     let encrypted = &payload[offset..];
 
-    let decrypted = if key.iter().all(|byte| *byte == 0) {
-        Cow::Borrowed(encrypted)
-    } else {
-        Cow::Owned(decrypt_agent_data(&key, &iv, encrypted)?)
-    };
+    if key.iter().all(|byte| *byte == 0) {
+        warn!(
+            agent_id = format_args!("0x{agent_id:08X}"),
+            "rejecting DEMON_INIT with all-zero AES key"
+        );
+        return Err(DemonParserError::InvalidInit("all-zero AES key is not allowed"));
+    }
+
+    let decrypted = Cow::Owned(decrypt_agent_data(&key, &iv, encrypted)?);
 
     let mut decrypted_offset = 0_usize;
     let parsed_agent_id = read_u32_be(&decrypted, &mut decrypted_offset, "init agent id")?;
@@ -484,11 +450,14 @@ fn read_length_prefixed_utf16_be(
 mod tests {
     use std::path::PathBuf;
 
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use red_cell_common::crypto::{
         AGENT_IV_LENGTH, AGENT_KEY_LENGTH, advance_iv, ctr_blocks_for_length, decrypt_agent_data,
         encrypt_agent_data,
     };
     use red_cell_common::demon::{DEMON_MAGIC_VALUE, DemonCommand, DemonEnvelope};
+    use red_cell_common::{AgentEncryptionInfo, AgentInfo};
     use time::macros::datetime;
     use uuid::Uuid;
 
@@ -567,6 +536,18 @@ mod tests {
         payload.extend_from_slice(&key);
         payload.extend_from_slice(&iv);
         payload.extend_from_slice(&encrypted);
+
+        DemonEnvelope::new(agent_id, payload).expect("init envelope should be valid").to_bytes()
+    }
+
+    fn build_plaintext_zero_key_init_packet(agent_id: u32) -> Vec<u8> {
+        let metadata = build_init_metadata(agent_id);
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u32_be(u32::from(DemonCommand::DemonInit)));
+        payload.extend_from_slice(&u32_be(7));
+        payload.extend_from_slice(&[0; AGENT_KEY_LENGTH]);
+        payload.extend_from_slice(&[0; AGENT_IV_LENGTH]);
+        payload.extend_from_slice(&metadata);
 
         DemonEnvelope::new(agent_id, payload).expect("init envelope should be valid").to_bytes()
     }
@@ -812,6 +793,75 @@ mod tests {
             .expect_err("mismatched init should fail");
 
         assert!(matches!(error, DemonParserError::Crypto(_) | DemonParserError::InvalidInit(_)));
+    }
+
+    #[tokio::test]
+    async fn parse_rejects_plaintext_zero_key_init() {
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry.clone());
+        let packet = build_plaintext_zero_key_init_packet(0x1357_9BDF);
+
+        let error = parser
+            .parse_at(&packet, "203.0.113.77".to_owned(), datetime!(2026-03-10 10:15:00 UTC))
+            .await
+            .expect_err("zero-key init must be rejected");
+
+        assert!(
+            matches!(error, DemonParserError::InvalidInit("all-zero AES key is not allowed")),
+            "expected zero-key init rejection, got: {error}"
+        );
+        assert!(registry.get(0x1357_9BDF).await.is_none(), "rejected init must not register");
+    }
+
+    #[tokio::test]
+    async fn build_init_ack_rejects_zero_key_agent() {
+        let registry = test_registry().await;
+        let agent_id: u32 = 0x2468_ACED;
+        let agent = AgentInfo {
+            agent_id,
+            active: true,
+            reason: String::new(),
+            note: String::new(),
+            encryption: AgentEncryptionInfo {
+                aes_key: BASE64_STANDARD.encode([0; AGENT_KEY_LENGTH]),
+                aes_iv: BASE64_STANDARD.encode([0; AGENT_IV_LENGTH]),
+            },
+            hostname: "wkstn-01".to_owned(),
+            username: "operator".to_owned(),
+            domain_name: "REDCELL".to_owned(),
+            external_ip: "203.0.113.1".to_owned(),
+            internal_ip: "10.0.0.10".to_owned(),
+            process_name: "explorer.exe".to_owned(),
+            base_address: 0x401000,
+            process_pid: 1337,
+            process_tid: 1338,
+            process_ppid: 512,
+            process_arch: "x64".to_owned(),
+            elevated: true,
+            os_version: "Windows 11".to_owned(),
+            os_arch: "x64/AMD64".to_owned(),
+            sleep_delay: 15,
+            sleep_jitter: 20,
+            kill_date: Some(1_893_456_000),
+            working_hours: Some(0b101010),
+            first_call_in: "2026-03-10T10:15:00Z".to_owned(),
+            last_call_in: "2026-03-10T10:15:00Z".to_owned(),
+        };
+        registry.insert(agent).await.expect("agent insert should succeed");
+
+        let error =
+            build_init_ack(&registry, agent_id).await.expect_err("zero-key ack must be rejected");
+
+        assert!(
+            matches!(
+                error,
+                DemonParserError::Registry(crate::TeamserverError::InvalidAgentCrypto {
+                    agent_id: rejected_agent_id,
+                    ..
+                }) if rejected_agent_id == agent_id
+            ),
+            "expected invalid zero-key agent crypto, got: {error}"
+        );
     }
 
     /// Regression test for red-cell-c2-1a5: a header `agent_id = 0` must NOT

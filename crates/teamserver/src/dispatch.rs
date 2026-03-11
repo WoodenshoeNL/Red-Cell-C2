@@ -91,6 +91,16 @@ struct BuiltinDispatchContext<'a> {
     plugins: Option<&'a PluginRuntime>,
 }
 
+#[derive(Clone)]
+struct BuiltinHandlerDependencies {
+    registry: AgentRegistry,
+    events: EventBus,
+    database: Database,
+    sockets: SocketRelayManager,
+    downloads: DownloadTracker,
+    plugins: Option<PluginRuntime>,
+}
+
 /// Error returned while routing or executing a Demon command handler.
 #[derive(Debug, Error)]
 pub enum CommandDispatchError {
@@ -161,6 +171,411 @@ impl CommandDispatcher {
         }
     }
 
+    fn register_builtin_handlers(
+        &mut self,
+        dependencies: BuiltinHandlerDependencies,
+        include_get_job: bool,
+    ) {
+        let BuiltinHandlerDependencies { registry, events, database, sockets, downloads, plugins } =
+            dependencies;
+
+        if include_get_job {
+            let get_job_registry = registry.clone();
+            self.register_handler(u32::from(DemonCommand::CommandGetJob), move |agent_id, _, _| {
+                let registry = get_job_registry.clone();
+                Box::pin(async move { handle_get_job(&registry, agent_id).await })
+            });
+        }
+
+        let checkin_registry = registry.clone();
+        let checkin_events = events.clone();
+        let checkin_plugins = plugins.clone();
+        self.register_handler(u32::from(DemonCommand::CommandCheckin), move |agent_id, _, _| {
+            let registry = checkin_registry.clone();
+            let events = checkin_events.clone();
+            let plugins = checkin_plugins.clone();
+            Box::pin(
+                async move { handle_checkin(&registry, &events, plugins.as_ref(), agent_id).await },
+            )
+        });
+
+        let proc_list_events = events.clone();
+        self.register_handler(
+            u32::from(DemonCommand::CommandProcList),
+            move |agent_id, request_id, payload| {
+                let events = proc_list_events.clone();
+                Box::pin(async move {
+                    handle_process_list_callback(&events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let sleep_registry = registry.clone();
+        let sleep_events = events.clone();
+        self.register_handler(
+            u32::from(DemonCommand::CommandSleep),
+            move |agent_id, request_id, payload| {
+                let registry = sleep_registry.clone();
+                let events = sleep_events.clone();
+                Box::pin(async move {
+                    handle_sleep_callback(&registry, &events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let fs_database = database.clone();
+        let fs_events = events.clone();
+        let fs_downloads = downloads.clone();
+        let fs_registry = registry.clone();
+        self.register_handler(
+            u32::from(DemonCommand::CommandFs),
+            move |agent_id, request_id, payload| {
+                let registry = fs_registry.clone();
+                let database = fs_database.clone();
+                let events = fs_events.clone();
+                let downloads = fs_downloads.clone();
+                Box::pin(async move {
+                    handle_filesystem_callback(
+                        &registry, &database, &events, &downloads, agent_id, request_id, &payload,
+                    )
+                    .await
+                })
+            },
+        );
+
+        let proc_events = events.clone();
+        self.register_handler(
+            u32::from(DemonCommand::CommandProc),
+            move |agent_id, request_id, payload| {
+                let events = proc_events.clone();
+                Box::pin(async move {
+                    handle_process_command_callback(&events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let proc_ppid_registry = registry.clone();
+        let proc_ppid_events = events.clone();
+        self.register_handler(
+            u32::from(DemonCommand::CommandProcPpidSpoof),
+            move |agent_id, request_id, payload| {
+                let registry = proc_ppid_registry.clone();
+                let events = proc_ppid_events.clone();
+                Box::pin(async move {
+                    handle_proc_ppid_spoof_callback(
+                        &registry, &events, agent_id, request_id, &payload,
+                    )
+                    .await
+                })
+            },
+        );
+
+        let inject_events = events.clone();
+        self.register_handler(
+            u32::from(DemonCommand::CommandInjectShellcode),
+            move |agent_id, request_id, payload| {
+                let events = inject_events.clone();
+                Box::pin(async move {
+                    handle_inject_shellcode_callback(&events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let inject_dll_events = events.clone();
+        self.register_handler(
+            u32::from(DemonCommand::CommandInjectDll),
+            move |agent_id, request_id, payload| {
+                let events = inject_dll_events.clone();
+                Box::pin(async move {
+                    handle_inject_dll_callback(&events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let spawn_dll_events = events.clone();
+        self.register_handler(
+            u32::from(DemonCommand::CommandSpawnDll),
+            move |agent_id, request_id, payload| {
+                let events = spawn_dll_events.clone();
+                Box::pin(async move {
+                    handle_spawn_dll_callback(&events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let command_output_events = events.clone();
+        let command_output_plugins = plugins.clone();
+        let command_output_database = database.clone();
+        let command_output_registry = registry.clone();
+        self.register_handler(
+            u32::from(DemonCommand::CommandOutput),
+            move |agent_id, request_id, payload| {
+                let registry = command_output_registry.clone();
+                let database = command_output_database.clone();
+                let events = command_output_events.clone();
+                let plugins = command_output_plugins.clone();
+                Box::pin(async move {
+                    handle_command_output_callback(
+                        &registry,
+                        &database,
+                        &events,
+                        plugins.as_ref(),
+                        agent_id,
+                        request_id,
+                        &payload,
+                    )
+                    .await
+                })
+            },
+        );
+
+        let error_events = events.clone();
+        self.register_handler(
+            u32::from(DemonCommand::CommandError),
+            move |agent_id, request_id, payload| {
+                let events = error_events.clone();
+                Box::pin(async move {
+                    handle_command_error_callback(&events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let exit_registry = registry.clone();
+        let exit_events = events.clone();
+        self.register_handler(
+            u32::from(DemonCommand::CommandExit),
+            move |agent_id, request_id, payload| {
+                let registry = exit_registry.clone();
+                let events = exit_events.clone();
+                Box::pin(async move {
+                    handle_exit_callback(&registry, &events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let kill_date_registry = registry.clone();
+        let kill_date_events = events.clone();
+        self.register_handler(
+            u32::from(DemonCommand::CommandKillDate),
+            move |agent_id, request_id, payload| {
+                let registry = kill_date_registry.clone();
+                let events = kill_date_events.clone();
+                Box::pin(async move {
+                    handle_kill_date_callback(&registry, &events, agent_id, request_id, &payload)
+                        .await
+                })
+            },
+        );
+
+        let info_events = events.clone();
+        self.register_handler(
+            u32::from(DemonCommand::DemonInfo),
+            move |agent_id, request_id, payload| {
+                let events = info_events.clone();
+                Box::pin(async move {
+                    handle_demon_info_callback(&events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let beacon_database = database.clone();
+        let beacon_events = events.clone();
+        let beacon_downloads = downloads.clone();
+        let beacon_registry = registry.clone();
+        self.register_handler(
+            u32::from(DemonCommand::BeaconOutput),
+            move |agent_id, request_id, payload| {
+                let registry = beacon_registry.clone();
+                let database = beacon_database.clone();
+                let events = beacon_events.clone();
+                let downloads = beacon_downloads.clone();
+                Box::pin(async move {
+                    handle_beacon_output_callback(
+                        &registry, &database, &events, &downloads, agent_id, request_id, &payload,
+                    )
+                    .await
+                })
+            },
+        );
+
+        let token_events = events.clone();
+        self.register_handler(
+            u32::from(DemonCommand::CommandToken),
+            move |agent_id, request_id, payload| {
+                let events = token_events.clone();
+                Box::pin(async move {
+                    handle_token_callback(&events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let assembly_events = events.clone();
+        self.register_handler(
+            u32::from(DemonCommand::CommandAssemblyInlineExecute),
+            move |agent_id, request_id, payload| {
+                let events = assembly_events.clone();
+                Box::pin(async move {
+                    handle_assembly_inline_execute_callback(&events, agent_id, request_id, &payload)
+                        .await
+                })
+            },
+        );
+
+        let assembly_versions_events = events.clone();
+        self.register_handler(
+            u32::from(DemonCommand::CommandAssemblyListVersions),
+            move |agent_id, request_id, payload| {
+                let events = assembly_versions_events.clone();
+                Box::pin(async move {
+                    handle_assembly_list_versions_callback(&events, agent_id, request_id, &payload)
+                        .await
+                })
+            },
+        );
+
+        let job_events = events.clone();
+        self.register_handler(
+            u32::from(DemonCommand::CommandJob),
+            move |agent_id, request_id, payload| {
+                let events = job_events.clone();
+                Box::pin(async move {
+                    handle_job_callback(&events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let net_events = events.clone();
+        self.register_handler(
+            u32::from(DemonCommand::CommandNet),
+            move |agent_id, request_id, payload| {
+                let events = net_events.clone();
+                Box::pin(async move {
+                    handle_net_callback(&events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let config_registry = registry.clone();
+        let config_events = events.clone();
+        self.register_handler(
+            u32::from(DemonCommand::CommandConfig),
+            move |agent_id, request_id, payload| {
+                let registry = config_registry.clone();
+                let events = config_events.clone();
+                Box::pin(async move {
+                    handle_config_callback(&registry, &events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let screenshot_database = database.clone();
+        let screenshot_events = events.clone();
+        let screenshot_registry = registry.clone();
+        self.register_handler(
+            u32::from(DemonCommand::CommandScreenshot),
+            move |agent_id, request_id, payload| {
+                let registry = screenshot_registry.clone();
+                let database = screenshot_database.clone();
+                let events = screenshot_events.clone();
+                Box::pin(async move {
+                    handle_screenshot_callback(
+                        &registry, &database, &events, agent_id, request_id, &payload,
+                    )
+                    .await
+                })
+            },
+        );
+
+        let transfer_events = events.clone();
+        let transfer_downloads = downloads.clone();
+        self.register_handler(
+            u32::from(DemonCommand::CommandTransfer),
+            move |agent_id, request_id, payload| {
+                let events = transfer_events.clone();
+                let downloads = transfer_downloads.clone();
+                Box::pin(async move {
+                    handle_transfer_callback(&events, &downloads, agent_id, request_id, &payload)
+                        .await
+                })
+            },
+        );
+
+        let kerberos_events = events.clone();
+        self.register_handler(
+            u32::from(DemonCommand::CommandKerberos),
+            move |agent_id, request_id, payload| {
+                let events = kerberos_events.clone();
+                Box::pin(async move {
+                    handle_kerberos_callback(&events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let mem_file_events = events.clone();
+        self.register_handler(
+            u32::from(DemonCommand::CommandMemFile),
+            move |agent_id, request_id, payload| {
+                let events = mem_file_events.clone();
+                Box::pin(async move {
+                    handle_mem_file_callback(&events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let package_dropped_events = events.clone();
+        self.register_handler(
+            u32::from(DemonCommand::CommandPackageDropped),
+            move |agent_id, request_id, payload| {
+                let events = package_dropped_events.clone();
+                Box::pin(async move {
+                    handle_package_dropped_callback(&events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let socket_events = events.clone();
+        let socket_manager = sockets.clone();
+        self.register_handler(
+            u32::from(DemonCommand::CommandSocket),
+            move |agent_id, request_id, payload| {
+                let events = socket_events.clone();
+                let sockets = socket_manager.clone();
+                Box::pin(async move {
+                    handle_socket_callback(&events, &sockets, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let pivot_registry = registry.clone();
+        let pivot_events = events.clone();
+        let pivot_database = database.clone();
+        let pivot_sockets = sockets.clone();
+        let pivot_downloads = downloads.clone();
+        let pivot_plugins = plugins.clone();
+        self.register_handler(
+            u32::from(DemonCommand::CommandPivot),
+            move |agent_id, request_id, payload| {
+                let registry = pivot_registry.clone();
+                let events = pivot_events.clone();
+                let database = pivot_database.clone();
+                let sockets = pivot_sockets.clone();
+                let downloads = pivot_downloads.clone();
+                let plugins = pivot_plugins.clone();
+                Box::pin(async move {
+                    let context = BuiltinDispatchContext {
+                        registry: &registry,
+                        events: &events,
+                        database: &database,
+                        sockets: &sockets,
+                        downloads: &downloads,
+                        plugins: plugins.as_ref(),
+                    };
+                    handle_pivot_callback(context, agent_id, request_id, &payload).await
+                })
+            },
+        );
+    }
+
     /// Create a dispatcher with the built-in Demon command handlers.
     #[must_use]
     pub fn with_builtin_handlers(
@@ -195,406 +610,16 @@ impl CommandDispatcher {
             Err(_) => usize::MAX,
         };
         let mut dispatcher = Self::with_max_download_bytes(max_download_bytes);
-        let downloads = dispatcher.downloads.clone();
-
-        let get_job_registry = registry.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::CommandGetJob),
-            move |agent_id, _, _| {
-                let registry = get_job_registry.clone();
-                Box::pin(async move { handle_get_job(&registry, agent_id).await })
+        dispatcher.register_builtin_handlers(
+            BuiltinHandlerDependencies {
+                registry,
+                events,
+                database,
+                sockets,
+                downloads: dispatcher.downloads.clone(),
+                plugins,
             },
-        );
-
-        let checkin_registry = registry.clone();
-        let checkin_events = events.clone();
-        let checkin_plugins = plugins.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::CommandCheckin),
-            move |agent_id, _, _| {
-                let registry = checkin_registry.clone();
-                let events = checkin_events.clone();
-                let plugins = checkin_plugins.clone();
-                Box::pin(async move {
-                    handle_checkin(&registry, &events, plugins.as_ref(), agent_id).await
-                })
-            },
-        );
-
-        let proc_list_events = events.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::CommandProcList),
-            move |agent_id, request_id, payload| {
-                let events = proc_list_events.clone();
-                Box::pin(async move {
-                    handle_process_list_callback(&events, agent_id, request_id, &payload).await
-                })
-            },
-        );
-
-        let sleep_registry = registry.clone();
-        let sleep_events = events.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::CommandSleep),
-            move |agent_id, request_id, payload| {
-                let registry = sleep_registry.clone();
-                let events = sleep_events.clone();
-                Box::pin(async move {
-                    handle_sleep_callback(&registry, &events, agent_id, request_id, &payload).await
-                })
-            },
-        );
-
-        let fs_database = database.clone();
-        let fs_events = events.clone();
-        let fs_downloads = downloads.clone();
-        let fs_registry = registry.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::CommandFs),
-            move |agent_id, request_id, payload| {
-                let registry = fs_registry.clone();
-                let database = fs_database.clone();
-                let events = fs_events.clone();
-                let downloads = fs_downloads.clone();
-                Box::pin(async move {
-                    handle_filesystem_callback(
-                        &registry, &database, &events, &downloads, agent_id, request_id, &payload,
-                    )
-                    .await
-                })
-            },
-        );
-
-        let proc_events = events.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::CommandProc),
-            move |agent_id, request_id, payload| {
-                let events = proc_events.clone();
-                Box::pin(async move {
-                    handle_process_command_callback(&events, agent_id, request_id, &payload).await
-                })
-            },
-        );
-
-        let proc_ppid_registry = registry.clone();
-        let proc_ppid_events = events.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::CommandProcPpidSpoof),
-            move |agent_id, request_id, payload| {
-                let registry = proc_ppid_registry.clone();
-                let events = proc_ppid_events.clone();
-                Box::pin(async move {
-                    handle_proc_ppid_spoof_callback(
-                        &registry, &events, agent_id, request_id, &payload,
-                    )
-                    .await
-                })
-            },
-        );
-
-        let inject_events = events.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::CommandInjectShellcode),
-            move |agent_id, request_id, payload| {
-                let events = inject_events.clone();
-                Box::pin(async move {
-                    handle_inject_shellcode_callback(&events, agent_id, request_id, &payload).await
-                })
-            },
-        );
-
-        let inject_dll_events = events.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::CommandInjectDll),
-            move |agent_id, request_id, payload| {
-                let events = inject_dll_events.clone();
-                Box::pin(async move {
-                    handle_inject_dll_callback(&events, agent_id, request_id, &payload).await
-                })
-            },
-        );
-
-        let spawn_dll_events = events.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::CommandSpawnDll),
-            move |agent_id, request_id, payload| {
-                let events = spawn_dll_events.clone();
-                Box::pin(async move {
-                    handle_spawn_dll_callback(&events, agent_id, request_id, &payload).await
-                })
-            },
-        );
-
-        let command_output_events = events.clone();
-        let command_output_plugins = plugins.clone();
-        let command_output_database = database.clone();
-        let command_output_registry = registry.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::CommandOutput),
-            move |agent_id, request_id, payload| {
-                let registry = command_output_registry.clone();
-                let database = command_output_database.clone();
-                let events = command_output_events.clone();
-                let plugins = command_output_plugins.clone();
-                Box::pin(async move {
-                    handle_command_output_callback(
-                        &registry,
-                        &database,
-                        &events,
-                        plugins.as_ref(),
-                        agent_id,
-                        request_id,
-                        &payload,
-                    )
-                    .await
-                })
-            },
-        );
-
-        let error_events = events.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::CommandError),
-            move |agent_id, request_id, payload| {
-                let events = error_events.clone();
-                Box::pin(async move {
-                    handle_command_error_callback(&events, agent_id, request_id, &payload).await
-                })
-            },
-        );
-
-        let exit_registry = registry.clone();
-        let exit_events = events.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::CommandExit),
-            move |agent_id, request_id, payload| {
-                let registry = exit_registry.clone();
-                let events = exit_events.clone();
-                Box::pin(async move {
-                    handle_exit_callback(&registry, &events, agent_id, request_id, &payload).await
-                })
-            },
-        );
-
-        let kill_date_registry = registry.clone();
-        let kill_date_events = events.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::CommandKillDate),
-            move |agent_id, request_id, payload| {
-                let registry = kill_date_registry.clone();
-                let events = kill_date_events.clone();
-                Box::pin(async move {
-                    handle_kill_date_callback(&registry, &events, agent_id, request_id, &payload)
-                        .await
-                })
-            },
-        );
-
-        let info_events = events.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::DemonInfo),
-            move |agent_id, request_id, payload| {
-                let events = info_events.clone();
-                Box::pin(async move {
-                    handle_demon_info_callback(&events, agent_id, request_id, &payload).await
-                })
-            },
-        );
-
-        let beacon_database = database.clone();
-        let beacon_events = events.clone();
-        let beacon_downloads = downloads.clone();
-        let beacon_registry = registry.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::BeaconOutput),
-            move |agent_id, request_id, payload| {
-                let registry = beacon_registry.clone();
-                let database = beacon_database.clone();
-                let events = beacon_events.clone();
-                let downloads = beacon_downloads.clone();
-                Box::pin(async move {
-                    handle_beacon_output_callback(
-                        &registry, &database, &events, &downloads, agent_id, request_id, &payload,
-                    )
-                    .await
-                })
-            },
-        );
-
-        let token_events = events.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::CommandToken),
-            move |agent_id, request_id, payload| {
-                let events = token_events.clone();
-                Box::pin(async move {
-                    handle_token_callback(&events, agent_id, request_id, &payload).await
-                })
-            },
-        );
-
-        let assembly_events = events.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::CommandAssemblyInlineExecute),
-            move |agent_id, request_id, payload| {
-                let events = assembly_events.clone();
-                Box::pin(async move {
-                    handle_assembly_inline_execute_callback(&events, agent_id, request_id, &payload)
-                        .await
-                })
-            },
-        );
-
-        let assembly_versions_events = events.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::CommandAssemblyListVersions),
-            move |agent_id, request_id, payload| {
-                let events = assembly_versions_events.clone();
-                Box::pin(async move {
-                    handle_assembly_list_versions_callback(&events, agent_id, request_id, &payload)
-                        .await
-                })
-            },
-        );
-
-        let job_events = events.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::CommandJob),
-            move |agent_id, request_id, payload| {
-                let events = job_events.clone();
-                Box::pin(async move {
-                    handle_job_callback(&events, agent_id, request_id, &payload).await
-                })
-            },
-        );
-
-        let net_events = events.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::CommandNet),
-            move |agent_id, request_id, payload| {
-                let events = net_events.clone();
-                Box::pin(async move {
-                    handle_net_callback(&events, agent_id, request_id, &payload).await
-                })
-            },
-        );
-
-        let config_registry = registry.clone();
-        let config_events = events.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::CommandConfig),
-            move |agent_id, request_id, payload| {
-                let registry = config_registry.clone();
-                let events = config_events.clone();
-                Box::pin(async move {
-                    handle_config_callback(&registry, &events, agent_id, request_id, &payload).await
-                })
-            },
-        );
-
-        let screenshot_database = database.clone();
-        let screenshot_events = events.clone();
-        let screenshot_registry = registry.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::CommandScreenshot),
-            move |agent_id, request_id, payload| {
-                let registry = screenshot_registry.clone();
-                let database = screenshot_database.clone();
-                let events = screenshot_events.clone();
-                Box::pin(async move {
-                    handle_screenshot_callback(
-                        &registry, &database, &events, agent_id, request_id, &payload,
-                    )
-                    .await
-                })
-            },
-        );
-
-        let transfer_events = events.clone();
-        let transfer_downloads = downloads.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::CommandTransfer),
-            move |agent_id, request_id, payload| {
-                let events = transfer_events.clone();
-                let downloads = transfer_downloads.clone();
-                Box::pin(async move {
-                    handle_transfer_callback(&events, &downloads, agent_id, request_id, &payload)
-                        .await
-                })
-            },
-        );
-
-        let kerberos_events = events.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::CommandKerberos),
-            move |agent_id, request_id, payload| {
-                let events = kerberos_events.clone();
-                Box::pin(async move {
-                    handle_kerberos_callback(&events, agent_id, request_id, &payload).await
-                })
-            },
-        );
-
-        let mem_file_events = events.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::CommandMemFile),
-            move |agent_id, request_id, payload| {
-                let events = mem_file_events.clone();
-                Box::pin(async move {
-                    handle_mem_file_callback(&events, agent_id, request_id, &payload).await
-                })
-            },
-        );
-
-        let package_dropped_events = events.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::CommandPackageDropped),
-            move |agent_id, request_id, payload| {
-                let events = package_dropped_events.clone();
-                Box::pin(async move {
-                    handle_package_dropped_callback(&events, agent_id, request_id, &payload).await
-                })
-            },
-        );
-
-        let socket_events = events.clone();
-        let socket_manager = sockets.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::CommandSocket),
-            move |agent_id, request_id, payload| {
-                let events = socket_events.clone();
-                let sockets = socket_manager.clone();
-                Box::pin(async move {
-                    handle_socket_callback(&events, &sockets, agent_id, request_id, &payload).await
-                })
-            },
-        );
-
-        let pivot_registry = registry.clone();
-        let pivot_events = events.clone();
-        let pivot_database = database.clone();
-        let pivot_sockets = sockets.clone();
-        let pivot_downloads = downloads.clone();
-        let pivot_plugins = plugins.clone();
-        dispatcher.register_handler(
-            u32::from(DemonCommand::CommandPivot),
-            move |agent_id, request_id, payload| {
-                let registry = pivot_registry.clone();
-                let events = pivot_events.clone();
-                let database = pivot_database.clone();
-                let sockets = pivot_sockets.clone();
-                let downloads = pivot_downloads.clone();
-                let plugins = pivot_plugins.clone();
-                Box::pin(async move {
-                    let context = BuiltinDispatchContext {
-                        registry: &registry,
-                        events: &events,
-                        database: &database,
-                        sockets: &sockets,
-                        downloads: &downloads,
-                        plugins: plugins.as_ref(),
-                    };
-                    handle_pivot_callback(context, agent_id, request_id, &payload).await
-                })
-            },
+            true,
         );
 
         dispatcher
@@ -866,213 +891,31 @@ async fn dispatch_builtin_packages(
     agent_id: u32,
     packages: &[DemonCallbackPackage],
 ) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let mut dispatcher =
+        CommandDispatcher::with_max_download_bytes(context.downloads.max_download_bytes);
+    dispatcher.register_builtin_handlers(
+        BuiltinHandlerDependencies {
+            registry: context.registry.clone(),
+            events: context.events.clone(),
+            database: context.database.clone(),
+            sockets: context.sockets.clone(),
+            downloads: context.downloads.clone(),
+            plugins: context.plugins.cloned(),
+        },
+        false,
+    );
     let mut response = None;
 
     for package in packages {
-        let next = dispatch_builtin_package(
-            context,
-            agent_id,
-            package.command_id,
-            package.request_id,
-            &package.payload,
-        )
-        .await?;
+        let next = dispatcher
+            .dispatch(agent_id, package.command_id, package.request_id, &package.payload)
+            .await?;
         if next.is_some() {
             response = next;
         }
     }
 
     Ok(response)
-}
-
-async fn dispatch_builtin_package(
-    context: BuiltinDispatchContext<'_>,
-    agent_id: u32,
-    command_id: u32,
-    request_id: u32,
-    payload: &[u8],
-) -> Result<Option<Vec<u8>>, CommandDispatchError> {
-    if command_id == u32::from(DemonCommand::CommandGetJob) {
-        return Ok(None);
-    }
-    if command_id == u32::from(DemonCommand::CommandCheckin) {
-        return handle_checkin(context.registry, context.events, context.plugins, agent_id).await;
-    }
-    if command_id == u32::from(DemonCommand::CommandFs) {
-        return handle_filesystem_callback(
-            context.registry,
-            context.database,
-            context.events,
-            context.downloads,
-            agent_id,
-            request_id,
-            payload,
-        )
-        .await;
-    }
-    if command_id == u32::from(DemonCommand::CommandSleep) {
-        return handle_sleep_callback(
-            context.registry,
-            context.events,
-            agent_id,
-            request_id,
-            payload,
-        )
-        .await;
-    }
-    if command_id == u32::from(DemonCommand::CommandProcList) {
-        return handle_process_list_callback(context.events, agent_id, request_id, payload).await;
-    }
-    if command_id == u32::from(DemonCommand::CommandProc) {
-        return handle_process_command_callback(context.events, agent_id, request_id, payload)
-            .await;
-    }
-    if command_id == u32::from(DemonCommand::CommandProcPpidSpoof) {
-        return handle_proc_ppid_spoof_callback(
-            context.registry,
-            context.events,
-            agent_id,
-            request_id,
-            payload,
-        )
-        .await;
-    }
-    if command_id == u32::from(DemonCommand::CommandJob) {
-        return handle_job_callback(context.events, agent_id, request_id, payload).await;
-    }
-    if command_id == u32::from(DemonCommand::CommandOutput) {
-        return handle_command_output_callback(
-            context.registry,
-            context.database,
-            context.events,
-            context.plugins,
-            agent_id,
-            request_id,
-            payload,
-        )
-        .await;
-    }
-    if command_id == u32::from(DemonCommand::CommandError) {
-        return handle_command_error_callback(context.events, agent_id, request_id, payload).await;
-    }
-    if command_id == u32::from(DemonCommand::CommandExit) {
-        return handle_exit_callback(
-            context.registry,
-            context.events,
-            agent_id,
-            request_id,
-            payload,
-        )
-        .await;
-    }
-    if command_id == u32::from(DemonCommand::CommandKillDate) {
-        return handle_kill_date_callback(
-            context.registry,
-            context.events,
-            agent_id,
-            request_id,
-            payload,
-        )
-        .await;
-    }
-    if command_id == u32::from(DemonCommand::DemonInfo) {
-        return handle_demon_info_callback(context.events, agent_id, request_id, payload).await;
-    }
-    if command_id == u32::from(DemonCommand::BeaconOutput) {
-        return handle_beacon_output_callback(
-            context.registry,
-            context.database,
-            context.events,
-            context.downloads,
-            agent_id,
-            request_id,
-            payload,
-        )
-        .await;
-    }
-    if command_id == u32::from(DemonCommand::CommandNet) {
-        return handle_net_callback(context.events, agent_id, request_id, payload).await;
-    }
-    if command_id == u32::from(DemonCommand::CommandConfig) {
-        return handle_config_callback(
-            context.registry,
-            context.events,
-            agent_id,
-            request_id,
-            payload,
-        )
-        .await;
-    }
-    if command_id == u32::from(DemonCommand::CommandInjectShellcode) {
-        return handle_inject_shellcode_callback(context.events, agent_id, request_id, payload)
-            .await;
-    }
-    if command_id == u32::from(DemonCommand::CommandToken) {
-        return handle_token_callback(context.events, agent_id, request_id, payload).await;
-    }
-    if command_id == u32::from(DemonCommand::CommandAssemblyInlineExecute) {
-        return handle_assembly_inline_execute_callback(
-            context.events,
-            agent_id,
-            request_id,
-            payload,
-        )
-        .await;
-    }
-    if command_id == u32::from(DemonCommand::CommandAssemblyListVersions) {
-        return handle_assembly_list_versions_callback(
-            context.events,
-            agent_id,
-            request_id,
-            payload,
-        )
-        .await;
-    }
-    if command_id == u32::from(DemonCommand::CommandScreenshot) {
-        return handle_screenshot_callback(
-            context.registry,
-            context.database,
-            context.events,
-            agent_id,
-            request_id,
-            payload,
-        )
-        .await;
-    }
-    if command_id == u32::from(DemonCommand::CommandTransfer) {
-        return handle_transfer_callback(
-            context.events,
-            context.downloads,
-            agent_id,
-            request_id,
-            payload,
-        )
-        .await;
-    }
-    if command_id == u32::from(DemonCommand::CommandKerberos) {
-        return handle_kerberos_callback(context.events, agent_id, request_id, payload).await;
-    }
-    if command_id == u32::from(DemonCommand::CommandMemFile) {
-        return handle_mem_file_callback(context.events, agent_id, request_id, payload).await;
-    }
-    if command_id == u32::from(DemonCommand::CommandPackageDropped) {
-        return handle_package_dropped_callback(context.events, agent_id, request_id, payload)
-            .await;
-    }
-    if command_id == u32::from(DemonCommand::CommandSocket) {
-        return handle_socket_callback(
-            context.events,
-            context.sockets,
-            agent_id,
-            request_id,
-            payload,
-        )
-        .await;
-    }
-    if command_id == u32::from(DemonCommand::CommandPivot) {
-        return Box::pin(handle_pivot_callback(context, agent_id, request_id, payload)).await;
-    }
-    Ok(None)
 }
 
 fn inner_demon_agent_id(bytes: &[u8]) -> Result<u32, DemonProtocolError> {

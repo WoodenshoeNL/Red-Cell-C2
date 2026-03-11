@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 27 | 14 |
+| Tasks closed | 0 | 27 | 15 |
 | Bugs filed against | 0 | 2 | 2 |
-| Bug rate (bugs/task) | N/A | 0.07 | 0.14 |
-| Quality score | N/A | 93% | 86% |
+| Bug rate (bugs/task) | N/A | 0.07 | 0.13 |
+| Quality score | N/A | 93% | 87% |
 
 ## Violation Breakdown
 
@@ -200,3 +200,14 @@ Notes: Clean sprint — all 4 fixes correct and well-tested. Test count grew fro
 
 Overall codebase health: on track
 Biggest blindspot: AES-256-CTR keystream reuse — same IV used for every packet from a given agent session; XOR of any two ciphertexts yields XOR of plaintexts, bypassing protocol-layer confidentiality entirely when TLS is absent (Secure=false listener)
+
+### QA Review — 2026-03-11 02:00 — 9dc2f5..df1e8bd
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA loop only |
+| Codex | 0 | 0 | No activity this run |
+| Cursor | 1 | 0 | Closed red-cell-c2-1qb (plugin emit unit tests: 4 new tests for emit_agent_checkin and emit_command_output, including unknown-agent guard and exception isolation). Active: claimed red-2bm (AES-CTR IV reuse — WIP in local stash, not yet committed). |
+
+Build: passed (cargo check + clippy -D warnings + cargo test: 385 passed)
+Notes: Clean one-task sprint. All 4 new tests are well-structured and exercise meaningful scenarios. No violations found. Cursor's bug rate improves from 0.14 to 0.13 as task count grows without new bugs.

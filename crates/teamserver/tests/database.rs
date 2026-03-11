@@ -65,6 +65,7 @@ fn sample_listener() -> ListenerConfig {
         port_conn: Some(443),
         method: Some("POST".to_owned()),
         behind_redirector: true,
+        trusted_proxy_peers: Vec::new(),
         user_agent: Some("Mozilla/5.0".to_owned()),
         headers: vec!["X-Test: true".to_owned()],
         uris: vec!["/index".to_owned()],

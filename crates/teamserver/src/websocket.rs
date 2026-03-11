@@ -3831,6 +3831,7 @@ mod tests {
             port_conn: Some(port),
             method: Some("GET".to_owned()),
             behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
             user_agent: Some("Mozilla/5.0".to_owned()),
             headers: vec!["X-Test: true".to_owned()],
             uris: vec!["/".to_owned()],

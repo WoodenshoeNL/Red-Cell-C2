@@ -249,6 +249,7 @@ impl PayloadBuilderService {
                     dotnet_name_pipe: None,
                     binary: None,
                     trust_x_forwarded_for: false,
+                    trusted_proxy_peers: Vec::new(),
                 },
                 binary_patch: None,
             }),
@@ -1221,6 +1222,7 @@ mod tests {
                 dotnet_name_pipe: Some(r"\\.\pipe\red-cell-dotnet".to_owned()),
                 binary: None,
                 trust_x_forwarded_for: false,
+                trusted_proxy_peers: Vec::new(),
             },
         )?;
 
@@ -1270,6 +1272,7 @@ mod tests {
             port_conn: Some(443),
             method: None,
             behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
             user_agent: Some("Mozilla".to_owned()),
             headers: vec!["Header: One".to_owned()],
             uris: vec!["/beacon".to_owned()],
@@ -1572,6 +1575,7 @@ mod tests {
                 dotnet_name_pipe: None,
                 binary: None,
                 trust_x_forwarded_for: false,
+                trusted_proxy_peers: Vec::new(),
             },
             None,
         );
@@ -1593,6 +1597,7 @@ mod tests {
             port_conn: Some(443),
             method: None,
             behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
             user_agent: None,
             headers: Vec::new(),
             uris: Vec::new(),

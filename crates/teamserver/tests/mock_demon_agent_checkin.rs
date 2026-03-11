@@ -92,6 +92,7 @@ async fn mock_demon_checkin_get_job_and_output_flow() -> Result<(), Box<dyn std:
             port_conn: Some(listener_port),
             method: Some("POST".to_owned()),
             behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
             user_agent: None,
             headers: Vec::new(),
             uris: vec!["/".to_owned()],

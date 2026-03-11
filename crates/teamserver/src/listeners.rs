@@ -585,6 +585,7 @@ const HEADER_VALIDATION_IGNORES: [&str; 2] = ["connection", "accept-encoding"];
 #[derive(Clone, Debug)]
 struct HttpListenerState {
     config: HttpListenerConfig,
+    trusted_proxy_peers: Vec<TrustedProxyPeer>,
     registry: AgentRegistry,
     parser: DemonPacketParser,
     events: EventBus,
@@ -601,6 +602,18 @@ struct HttpListenerState {
 struct ExpectedHeader {
     name: HeaderName,
     expected_value: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TrustedProxyPeer {
+    Address(IpAddr),
+    Network(TrustedProxyNetwork),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TrustedProxyNetwork {
+    network: IpAddr,
+    prefix_len: u8,
 }
 
 #[derive(Clone, Debug)]
@@ -638,6 +651,11 @@ impl HttpListenerState {
         max_download_bytes: u64,
     ) -> Result<Self, ListenerManagerError> {
         let method = parse_method(config)?;
+        let trusted_proxy_peers = config
+            .trusted_proxy_peers
+            .iter()
+            .map(|value| parse_trusted_proxy_peer(value, &config.name))
+            .collect::<Result<Vec<_>, _>>()?;
         let required_headers = config
             .headers
             .iter()
@@ -658,6 +676,7 @@ impl HttpListenerState {
 
         Ok(Self {
             config: config.clone(),
+            trusted_proxy_peers,
             registry: registry.clone(),
             parser: DemonPacketParser::new(registry.clone()),
             dispatcher: CommandDispatcher::with_builtin_handlers_and_max_download_bytes(
@@ -752,6 +771,7 @@ pub fn listener_config_from_operator(
             port_conn: parse_optional_u16("PortConn", info.port_conn.as_deref())?,
             method: None,
             behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
             user_agent: optional_trimmed(info.user_agent.as_deref()),
             headers: split_csv(info.headers.as_deref()),
             uris: split_csv(info.uris.as_deref()),
@@ -922,6 +942,7 @@ fn profile_listener_configs(profile: &Profile) -> Vec<ListenerConfig> {
             port_conn: config.port_conn,
             method: config.method,
             behind_redirector: profile.demon.trust_x_forwarded_for,
+            trusted_proxy_peers: profile.demon.trusted_proxy_peers.clone(),
             user_agent: config.user_agent,
             headers: config.headers,
             uris: config.uris,
@@ -2151,7 +2172,12 @@ async fn http_listener_handler(
         return state.fake_404_response();
     }
 
-    let external_ip = extract_external_ip(state.config.behind_redirector, peer, &request);
+    let external_ip = extract_external_ip(
+        state.config.behind_redirector,
+        &state.trusted_proxy_peers,
+        peer,
+        &request,
+    );
     let (_, body) = request.into_parts();
     let Ok(body) = to_bytes(body, MAX_AGENT_REQUEST_BODY_LEN).await else {
         return state.fake_404_response();
@@ -2233,10 +2259,11 @@ fn headers_match(expected_headers: &[ExpectedHeader], headers: &HeaderMap) -> bo
 
 fn extract_external_ip(
     behind_redirector: bool,
+    trusted_proxy_peers: &[TrustedProxyPeer],
     peer: SocketAddr,
     request: &Request<Body>,
 ) -> IpAddr {
-    if behind_redirector {
+    if behind_redirector && peer_is_trusted_proxy(peer.ip(), trusted_proxy_peers) {
         if let Some(ip) = request
             .headers()
             .get("x-forwarded-for")
@@ -2261,6 +2288,88 @@ fn extract_external_ip(
     }
 
     peer.ip()
+}
+
+fn parse_trusted_proxy_peer(
+    value: &str,
+    listener_name: &str,
+) -> Result<TrustedProxyPeer, ListenerManagerError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(ListenerManagerError::InvalidConfig {
+            message: format!(
+                "invalid trusted proxy peer for listener `{listener_name}`: value must not be empty"
+            ),
+        });
+    }
+
+    if let Ok(address) = trimmed.parse::<IpAddr>() {
+        return Ok(TrustedProxyPeer::Address(address));
+    }
+
+    let Some((network, prefix_len)) = trimmed.split_once('/') else {
+        return Err(ListenerManagerError::InvalidConfig {
+            message: format!(
+                "invalid trusted proxy peer for listener `{listener_name}`: `{trimmed}` must be an IP address or CIDR"
+            ),
+        });
+    };
+
+    let network = network.parse::<IpAddr>().map_err(|_| ListenerManagerError::InvalidConfig {
+        message: format!(
+            "invalid trusted proxy peer for listener `{listener_name}`: `{trimmed}` must be an IP address or CIDR"
+        ),
+    })?;
+    let prefix_len =
+        prefix_len.parse::<u8>().map_err(|_| ListenerManagerError::InvalidConfig {
+            message: format!(
+                "invalid trusted proxy peer for listener `{listener_name}`: `{trimmed}` has an invalid prefix length"
+            ),
+        })?;
+    let max_prefix_len = match network {
+        IpAddr::V4(_) => 32,
+        IpAddr::V6(_) => 128,
+    };
+    if prefix_len > max_prefix_len {
+        return Err(ListenerManagerError::InvalidConfig {
+            message: format!(
+                "invalid trusted proxy peer for listener `{listener_name}`: `{trimmed}` has an invalid prefix length"
+            ),
+        });
+    }
+
+    Ok(TrustedProxyPeer::Network(TrustedProxyNetwork { network, prefix_len }))
+}
+
+fn peer_is_trusted_proxy(peer_ip: IpAddr, trusted_proxy_peers: &[TrustedProxyPeer]) -> bool {
+    trusted_proxy_peers.iter().any(|entry| match entry {
+        TrustedProxyPeer::Address(address) => *address == peer_ip,
+        TrustedProxyPeer::Network(network) => network.contains(peer_ip),
+    })
+}
+
+impl TrustedProxyNetwork {
+    fn contains(&self, ip: IpAddr) -> bool {
+        match (self.network, ip) {
+            (IpAddr::V4(network), IpAddr::V4(ip)) => {
+                let mask = prefix_mask_u32(self.prefix_len);
+                (u32::from(network) & mask) == (u32::from(ip) & mask)
+            }
+            (IpAddr::V6(network), IpAddr::V6(ip)) => {
+                let mask = prefix_mask_u128(self.prefix_len);
+                (u128::from(network) & mask) == (u128::from(ip) & mask)
+            }
+            _ => false,
+        }
+    }
+}
+
+fn prefix_mask_u32(prefix_len: u8) -> u32 {
+    if prefix_len == 0 { 0 } else { u32::MAX << (32 - u32::from(prefix_len)) }
+}
+
+fn prefix_mask_u128(prefix_len: u8) -> u128 {
+    if prefix_len == 0 { 0 } else { u128::MAX << (128 - u32::from(prefix_len)) }
 }
 
 fn is_valid_demon_callback_request(body: &[u8]) -> bool {
@@ -2471,7 +2580,7 @@ mod tests {
     use std::collections::HashMap;
     use std::io;
     use std::net::TcpListener as StdTcpListener;
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::time::Duration;
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -2481,12 +2590,15 @@ mod tests {
         DnsListenerState, DnsPendingResponse, DnsPendingUpload, DnsUploadAssembly,
         ListenerEventAction, ListenerManager, ListenerManagerError, ListenerStatus,
         MAX_AGENT_REQUEST_BODY_LEN, MAX_DEMON_INIT_ATTEMPTS_PER_IP, MAX_SMB_FRAME_PAYLOAD_LEN,
-        action_from_mark, base32hex_decode, base32hex_encode, build_dns_txt_response,
-        chunk_response_to_b32hex, dns_allowed_query_types, listener_config_from_operator,
-        operator_requests_start, parse_dns_c2_query, parse_dns_query, read_smb_frame,
+        TrustedProxyPeer, action_from_mark, base32hex_decode, base32hex_encode,
+        build_dns_txt_response, chunk_response_to_b32hex, dns_allowed_query_types,
+        extract_external_ip, listener_config_from_operator, operator_requests_start,
+        parse_dns_c2_query, parse_dns_query, parse_trusted_proxy_peer, read_smb_frame,
         smb_local_socket_name,
     };
     use crate::{AgentRegistry, Database, EventBus, Job, SocketRelayManager};
+    use axum::body::Body;
+    use axum::http::Request;
     use axum::http::StatusCode;
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -2520,6 +2632,7 @@ mod tests {
             port_conn: Some(port),
             method: None,
             behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
             user_agent: None,
             headers: Vec::new(),
             uris: vec!["/".to_owned()],
@@ -2585,6 +2698,55 @@ mod tests {
         assert!(windows.contains_key(&fresh_ip));
         drop(windows);
         assert_eq!(limiter.tracked_ip_count().await, 1);
+    }
+
+    #[test]
+    fn extract_external_ip_ignores_forwarded_headers_from_untrusted_peers() {
+        let peer = SocketAddr::from(([198, 51, 100, 25], 443));
+        let trusted_proxy_peers =
+            vec![TrustedProxyPeer::Address(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)))];
+        let request = Request::builder()
+            .header("X-Forwarded-For", "10.0.0.77")
+            .header("X-Real-IP", "10.0.0.88")
+            .body(Body::empty())
+            .expect("request should build");
+
+        let external_ip = extract_external_ip(true, &trusted_proxy_peers, peer, &request);
+        assert_eq!(external_ip, peer.ip());
+    }
+
+    #[test]
+    fn extract_external_ip_trusts_forwarded_headers_from_allowed_proxy_ip() {
+        let peer = SocketAddr::from(([203, 0, 113, 10], 443));
+        let trusted_proxy_peers = vec![TrustedProxyPeer::Address(peer.ip())];
+        let request = Request::builder()
+            .header("X-Forwarded-For", "10.0.0.77, 10.0.0.88")
+            .body(Body::empty())
+            .expect("request should build");
+
+        let external_ip = extract_external_ip(true, &trusted_proxy_peers, peer, &request);
+        assert_eq!(external_ip, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 77)));
+    }
+
+    #[test]
+    fn extract_external_ip_trusts_forwarded_headers_from_allowed_proxy_cidr() {
+        let peer = SocketAddr::from(([10, 1, 2, 3], 443));
+        let trusted_proxy_peers =
+            vec![parse_trusted_proxy_peer("10.0.0.0/8", "edge").expect("cidr should parse")];
+        let request = Request::builder()
+            .header("X-Real-IP", "192.0.2.44")
+            .body(Body::empty())
+            .expect("request should build");
+
+        let external_ip = extract_external_ip(true, &trusted_proxy_peers, peer, &request);
+        assert_eq!(external_ip, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 44)));
+    }
+
+    #[test]
+    fn parse_trusted_proxy_peer_rejects_invalid_entries() {
+        let error = parse_trusted_proxy_peer("10.0.0.0/33", "edge")
+            .expect_err("invalid prefix length should fail");
+        assert!(matches!(error, ListenerManagerError::InvalidConfig { .. }));
     }
 
     #[tokio::test]
@@ -2655,6 +2817,7 @@ mod tests {
             port_conn: Some(port),
             method: Some("POST".to_owned()),
             behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
             user_agent: Some("Agent-UA".to_owned()),
             headers: vec!["Accept-Encoding: gzip".to_owned(), "X-Auth: 123".to_owned()],
             uris: vec!["/submit".to_owned()],
@@ -2715,6 +2878,7 @@ mod tests {
             port_conn: Some(port),
             method: None,
             behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
             user_agent: None,
             headers: Vec::new(),
             uris: vec!["/".to_owned()],

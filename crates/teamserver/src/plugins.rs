@@ -1057,6 +1057,7 @@ mod tests {
             port_conn: Some(443),
             method: Some("POST".to_owned()),
             behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
             user_agent: Some("Mozilla/5.0".to_owned()),
             headers: Vec::new(),
             uris: vec!["/".to_owned()],

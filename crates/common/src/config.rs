@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
+use std::net::IpAddr;
 use std::path::Path;
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -227,6 +228,49 @@ impl Profile {
             && discord.url.trim().is_empty()
         {
             errors.push("WebHook.Discord.Url must not be empty".to_owned());
+        }
+
+        for peer in &self.demon.trusted_proxy_peers {
+            let trimmed = peer.trim();
+            if trimmed.is_empty() {
+                errors.push("Demon.TrustedProxyPeers entries must not be empty".to_owned());
+                continue;
+            }
+
+            if trimmed.parse::<IpAddr>().is_ok() {
+                continue;
+            }
+
+            let Some((network, prefix_len)) = trimmed.split_once('/') else {
+                errors.push(format!(
+                    "Demon.TrustedProxyPeers entry `{trimmed}` must be an IP address or CIDR"
+                ));
+                continue;
+            };
+
+            let Ok(network) = network.parse::<IpAddr>() else {
+                errors.push(format!(
+                    "Demon.TrustedProxyPeers entry `{trimmed}` must be an IP address or CIDR"
+                ));
+                continue;
+            };
+
+            let Ok(prefix_len) = prefix_len.parse::<u8>() else {
+                errors.push(format!(
+                    "Demon.TrustedProxyPeers entry `{trimmed}` has an invalid prefix length"
+                ));
+                continue;
+            };
+
+            let max_prefix_len = match network {
+                IpAddr::V4(_) => 32,
+                IpAddr::V6(_) => 128,
+            };
+            if prefix_len > max_prefix_len {
+                errors.push(format!(
+                    "Demon.TrustedProxyPeers entry `{trimmed}` has an invalid prefix length"
+                ));
+            }
         }
 
         if errors.is_empty() { Ok(()) } else { Err(ProfileValidationError { errors }) }
@@ -590,6 +634,9 @@ pub struct DemonConfig {
     /// Whether to trust `X-Forwarded-For`.
     #[serde(rename = "TrustXForwardedFor", default)]
     pub trust_x_forwarded_for: bool,
+    /// Explicit redirector peers or networks allowed to supply forwarded client IP headers.
+    #[serde(rename = "TrustedProxyPeers", default, deserialize_with = "deserialize_one_or_many")]
+    pub trusted_proxy_peers: Vec<String>,
 }
 
 /// Spawn-to process defaults for injection.
@@ -754,6 +801,7 @@ mod tests {
           Sleep = 2
           Jitter = 15
           TrustXForwardedFor = false
+          TrustedProxyPeers = ["127.0.0.1/32"]
 
           Injection {
             Spawn64 = "C:\\Windows\\System32\\notepad.exe"
@@ -870,6 +918,7 @@ mod tests {
         assert_eq!(profile.demon.sleep, Some(2));
         assert_eq!(profile.demon.jitter, Some(15));
         assert!(!profile.demon.trust_x_forwarded_for);
+        assert_eq!(profile.demon.trusted_proxy_peers, vec!["127.0.0.1/32"]);
         assert_eq!(
             profile.demon.injection.as_ref().and_then(|injection| injection.spawn64.as_deref()),
             Some("C:\\Windows\\System32\\notepad.exe")
@@ -916,6 +965,53 @@ mod tests {
         let webhook = profile.webhook.and_then(|config| config.discord);
         assert_eq!(webhook.as_ref().map(|discord| discord.url.as_str()), Some("..."));
         assert_eq!(webhook.as_ref().and_then(|discord| discord.user.as_deref()), Some("Havoc"));
+    }
+
+    #[test]
+    fn parses_trusted_proxy_peers_from_single_value_or_list() {
+        let single = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "Neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {
+              TrustXForwardedFor = true
+              TrustedProxyPeers = "127.0.0.1/32"
+            }
+            "#,
+        )
+        .expect("profile with single trusted proxy peer should parse");
+        assert_eq!(single.demon.trusted_proxy_peers, vec!["127.0.0.1/32"]);
+
+        let list = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "Neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {
+              TrustXForwardedFor = true
+              TrustedProxyPeers = ["127.0.0.1", "10.0.0.0/8"]
+            }
+            "#,
+        )
+        .expect("profile with trusted proxy peer list should parse");
+        assert_eq!(list.demon.trusted_proxy_peers, vec!["127.0.0.1", "10.0.0.0/8"]);
     }
 
     #[test]
@@ -1118,6 +1214,32 @@ mod tests {
         assert!(error.errors.iter().any(|entry| entry.contains("Teamserver.Port")));
         assert!(error.errors.iter().any(|entry| entry.contains("Operators must define")));
         assert!(error.errors.iter().any(|entry| entry.contains("PortBind")));
+    }
+
+    #[test]
+    fn rejects_invalid_trusted_proxy_peer_configuration() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {
+              TrustedProxyPeers = ["bad-value", "10.0.0.0/33", "   "]
+            }
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("profile should be invalid");
+        assert!(error.errors.iter().any(|message| message.contains("TrustedProxyPeers")));
     }
 
     #[test]

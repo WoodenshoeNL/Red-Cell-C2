@@ -100,6 +100,7 @@ fn http_listener(name: &str, port: u16) -> ListenerConfig {
         port_conn: Some(port),
         method: Some("POST".to_owned()),
         behind_redirector: false,
+        trusted_proxy_peers: Vec::new(),
         user_agent: None,
         headers: Vec::new(),
         uris: vec!["/".to_owned()],

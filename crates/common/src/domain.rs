@@ -125,6 +125,9 @@ pub struct HttpListenerConfig {
     /// Trust redirector forwarding headers.
     #[serde(default)]
     pub behind_redirector: bool,
+    /// Explicit redirector peers or networks allowed to supply forwarded client IP headers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_proxy_peers: Vec<String>,
     /// User-Agent gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,
@@ -611,6 +614,7 @@ mod tests {
             port_conn: Some(443),
             method: Some("POST".to_string()),
             behind_redirector: true,
+            trusted_proxy_peers: vec!["127.0.0.1/32".to_string()],
             user_agent: Some("Mozilla/5.0".to_string()),
             headers: vec!["X-Test: 1".to_string()],
             uris: vec!["/index".to_string()],

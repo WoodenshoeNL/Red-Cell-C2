@@ -2998,7 +2998,22 @@ async fn handle_socket_callback(
 
             let data = parser.read_bytes("socket read data")?;
             if socket_type == u32::from(DemonSocketType::ReverseProxy) {
-                let _ = sockets.write_client_data(agent_id, socket_id, &data).await;
+                if let Err(error) = sockets.write_client_data(agent_id, socket_id, &data).await {
+                    warn!(
+                        agent_id = format_args!("{agent_id:08X}"),
+                        socket_id = format_args!("{socket_id:08X}"),
+                        %error,
+                        "failed to deliver reverse proxy data to SOCKS client"
+                    );
+                    events.broadcast(agent_response_event(
+                        agent_id,
+                        u32::from(DemonCommand::CommandSocket),
+                        request_id,
+                        "Error",
+                        &format!("Failed to deliver socks data for {socket_id}: {error}"),
+                        None,
+                    )?);
+                }
             }
         }
         DemonSocketCommand::Write => {
@@ -3650,7 +3665,7 @@ mod tests {
     use red_cell_common::demon::{
         DemonCallback, DemonCommand, DemonFilesystemCommand, DemonInjectError,
         DemonKerberosCommand, DemonMessage, DemonPivotCommand, DemonProcessCommand,
-        DemonTokenCommand,
+        DemonSocketCommand, DemonSocketType, DemonTokenCommand,
     };
     use red_cell_common::operator::OperatorMessage;
     use serde_json::Value;
@@ -5257,6 +5272,39 @@ mod tests {
         };
         let msg = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
         assert!(msg.contains("Failed to list existing tokens"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn socket_read_callback_broadcasts_error_when_relay_delivery_fails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonSocketCommand::Read));
+        add_u32(&mut payload, 0x55);
+        add_u32(&mut payload, u32::from(DemonSocketType::ReverseProxy));
+        add_u32(&mut payload, 1);
+        add_bytes(&mut payload, b"hello");
+
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandSocket), 27, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("socket relay delivery error missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        let msg = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(msg.contains("Failed to deliver socks data for 85"));
+        assert!(msg.contains("SOCKS5 client 0x00000055 not found"));
+        assert_eq!(message.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
         Ok(())
     }
 

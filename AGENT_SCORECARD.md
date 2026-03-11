@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 40 | 31 |
+| Tasks closed | 0 | 44 | 31 |
 | Bugs filed against | 0 | 2 | 9 |
 | Bug rate (bugs/task) | N/A | 0.05 | 0.29 |
 | Quality score | N/A | 95% | 71% |
@@ -343,3 +343,14 @@ Note: Issue red-cell-c2-1tp (DownloadTracker unit tests) is in_progress — Code
 
 Overall codebase health: on track
 Biggest blindspot: Unauthenticated DEMON_INIT reconnect probes advance CTR with no key validation — any attacker knowing a 32-bit agent_id can permanently desync agent comms via repeated forged probes (requires only reaching the listener port and knowing the agent_id, visible in plaintext if TLS is off)
+
+### QA Review — 2026-03-11 11:48 — 1e7832b..f94a8cf
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA loop only |
+| Codex | 4 | 0 | Closed: red-cell-c2-zdb (CTR offset persistence to DB), red-cell-c2-1u9 (CTR helper tests), red-cell-c2-2b9 (LoginRateLimiter bounded cap), red-cell-c2-xpe (HTTP peer IP capture). Also implicitly fixed red-cell-c2-37c (X-Real-IP trusted when behind_redirector=false) — closed by QA. Active: claimed red-cell-c2-131 (zero-key DEMON_INIT bypass). |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (cargo check + clippy -D warnings clean; cargo test: 455 passed)
+Observation: CTR offset persistence (red-9pf) fully resolved — offsets survive teamserver restart, verified by new `build_init_ack_after_registry_reload_uses_persisted_ctr_offset` test. LoginRateLimiter fix evicts oldest 50% when map reaches 10K entries; O(n log n) eviction path is acceptable for this use case. Peer IP fix properly distinguishes behind_redirector=true (trust X-Forwarded-For/X-Real-IP) from behind_redirector=false (use actual socket peer). No violations found this run.

@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 53 | 31 |
+| Tasks closed | 0 | 54 | 31 |
 | Bugs filed against | 0 | 3 | 9 |
 | Bug rate (bugs/task) | N/A | 0.06 | 0.29 |
 | Quality score | N/A | 94% | 71% |
@@ -365,6 +365,17 @@ Observation: m3s fix is well-designed — `encrypt_for_agent_without_advancing` 
 
 Build: passed (cargo check + clippy -D warnings clean; cargo test: 470 passed, +5 from rate-limiter tests)
 Notes: Clean sprint. `DemonInitRateLimiter` is well-designed — shared via Arc across all listener types, per-IP windowed with 5-attempt/60s cap and 10K entry eviction. `classify_demon_transport` correctly reads plaintext command_id from unencrypted DEMON_INIT bodies (key negotiation happens in plaintext before AES-CTR kicks in). Three integration tests cover HTTP, SMB, and DNS listeners. SMB correctly uses 127.0.0.1 as the fixed peer (named pipes are local-only). No violations found.
+
+### QA Review — 2026-03-11 14:15 — 92a90a5..7014778
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA loop only |
+| Codex | 1 | 0 | Closed: red-cell-c2-89e (persist runtime operator accounts + expose in discovery APIs + presence state). Runtime operator persistence to SQLite with startup reload, operator_inventory() with BTreeMap-sorted output, WS session snapshot includes operator list. Also active: claimed red-cell-c2-120 (Demon Agent Protocol epic). |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: cargo check + clippy -D warnings: PASSED. cargo test: PASSED (476 tests, +6 from operator persistence work) with RUSTFLAGS workaround (RUSTFLAGS="-L /usr/lib/python3.12/config-3.12-x86_64-linux-gnu"); raw `cargo test --workspace` fails due to missing python3.12-dev dev symlink on QA machine (filed red-cell-c2-3ug, P3 infra).
+Notes: Clean sprint. OperatorRepository is well-structured — BTreeMap ordering guarantees consistent REST and WS output, password hashes never exposed over wire (OperatorInfo.password_hash always None in operator_inventory output). write lock held across async DB insert in create_operator is intentional (prevents TOCTOU duplicate). Six new tests cover persistence, inventory, startup reload, and WS snapshot. dev loop fix (by user) adds multi-candidate scanning to prevent skip-and-fail on already-claimed tasks.
 
 ### QA Review — 2026-03-11 11:48 — 1e7832b..f94a8cf
 

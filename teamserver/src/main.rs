@@ -11,6 +11,7 @@ use red_cell::{
     OperatorConnectionManager, PayloadBuilderService, PluginRuntime, SocketRelayManager,
     TeamserverState, build_router,
 };
+use red_cell_common::ListenerConfig;
 use red_cell_common::config::{Profile, ProfileValidationError};
 use red_cell_common::tls::{
     TlsKeyAlgorithm, install_default_crypto_provider, resolve_tls_identity,
@@ -218,20 +219,19 @@ async fn start_new_profile_listeners(
 ) -> Result<(), ListenerManagerError> {
     let profile_listener_names = profile_listener_names(profile);
     let summaries = listeners.list().await?;
-    let new_profile_listener_names: Vec<String> = summaries
+    let new_profile_listeners: Vec<_> = summaries
         .into_iter()
         .filter(|summary| {
             summary.state.status == red_cell::ListenerStatus::Created
                 && profile_listener_names.iter().any(|name| name == &summary.name)
         })
-        .map(|summary| summary.name)
         .collect();
 
-    for listener in new_profile_listener_names {
-        match listeners.start(listener.as_str()).await {
-            Ok(_)
-            | Err(ListenerManagerError::ListenerAlreadyRunning { .. })
-            | Err(ListenerManagerError::StartFailed { .. }) => {}
+    for listener in new_profile_listeners {
+        match listeners.start(listener.name.as_str()).await {
+            Ok(_) | Err(ListenerManagerError::ListenerAlreadyRunning { .. }) => {}
+            Err(ListenerManagerError::StartFailed { .. })
+                if matches!(listener.config, ListenerConfig::External(_)) => {}
             Err(error) => return Err(error),
         }
     }
@@ -260,8 +260,8 @@ mod tests {
     use clap::Parser;
     use red_cell::{
         AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
-        ListenerManager, ListenerStatus, LoginRateLimiter, OperatorConnectionManager,
-        PayloadBuilderService, SocketRelayManager, TeamserverState,
+        ListenerManager, ListenerManagerError, ListenerStatus, LoginRateLimiter,
+        OperatorConnectionManager, PayloadBuilderService, SocketRelayManager, TeamserverState,
     };
     use red_cell_common::config::{OperatorRole, Profile};
     use tempfile::NamedTempFile;
@@ -670,6 +670,67 @@ mod tests {
         assert!(external.state.last_error.as_deref().is_some_and(|message| {
             message.contains("not implemented") && message.contains("svc")
         }));
+    }
+
+    #[tokio::test]
+    async fn startup_fails_when_new_http_profile_listener_cannot_bind() {
+        let occupied_listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("ephemeral port should bind");
+        let port = occupied_listener
+            .local_addr()
+            .expect("occupied listener should have local address")
+            .port();
+        let profile = Profile::parse(&format!(
+            r#"
+            Teamserver {{
+              Host = "127.0.0.1"
+              Port = 40056
+            }}
+
+            Operators {{
+              user "operator" {{
+                Password = "password1234"
+              }}
+            }}
+
+            Listeners {{
+              Http = [{{
+                Name = "http"
+                Hosts = ["127.0.0.1"]
+                HostBind = "127.0.0.1"
+                HostRotation = "round-robin"
+                PortBind = {port}
+                Secure = false
+              }}]
+            }}
+
+            Demon {{}}
+            "#
+        ))
+        .expect("profile should parse");
+
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let listeners = ListenerManager::new(database, registry, events, sockets, None);
+
+        listeners.sync_profile(&profile).await.expect("profile listeners should sync");
+        let error = start_new_profile_listeners(&listeners, &profile)
+            .await
+            .expect_err("startup should fail when a new http listener cannot bind");
+
+        assert!(matches!(error, ListenerManagerError::StartFailed { .. }));
+        let http = listeners.summary("http").await.expect("http listener should exist");
+        assert_eq!(http.state.status, ListenerStatus::Error);
+        assert!(
+            http.state.last_error.as_deref().is_some_and(|message| {
+                message.contains("failed to bind")
+                    && message.to_lowercase().contains("already in use")
+            }),
+            "expected bind error, got {:?}",
+            http.state.last_error
+        );
     }
 
     fn available_port() -> std::io::Result<u16> {

@@ -57,23 +57,33 @@ The original Havoc source lives at `./src/Havoc` and serves as the reference imp
 
 ## Getting Started
 
-### 1. Clone
+### First time on a new machine
 
 ```bash
 git clone git@github.com:WoodenshoeNL/Red-Cell-C2.git
 cd Red-Cell-C2
+./setup.sh
 ```
 
-`br` will auto-import all issues from `.beads/issues.jsonl` on first use.
+`setup.sh` checks required tools, enforces the correct `br` issue prefix, and builds the local beads DB from the committed JSONL.
 
-### 2. Verify issue tracker
+### Switching between machines during the day
+
+Run `setup.sh` at the start of every session — it is idempotent and safe to run repeatedly:
 
 ```bash
-br ready    # shows available work
-br stats    # shows overall project state
+./setup.sh
 ```
 
-### 3. Build (once crates exist)
+It will:
+1. Check required tools
+2. `git pull --ff-only` to fetch work committed on another VM (skips if you have uncommitted changes)
+3. Enforce `br issue_prefix = red-cell-c2`
+4. Rebuild the beads DB from the updated JSONL
+5. Warn about any `in_progress` tasks left running on another VM
+6. Print the agent loop commands for this machine
+
+### Build (once crates exist)
 
 ```bash
 cargo build --workspace
@@ -168,14 +178,19 @@ Both dev loops are safe to run simultaneously across machines. Each loop claims 
 
 Each agent identifies itself as `<hostname>-claude`, `<hostname>-codex`, or `<hostname>-cursor` in git commit messages and log lines, so it is always clear which machine did what.
 
-**VM 1:**
+**On each VM, start with:**
 ```bash
-./codex_loop.sh &
-./claude_dev_loop.sh
+./setup.sh          # pull latest, sync DB, check config
 ```
 
-**VM 2:**
+**Then start loops:**
+
 ```bash
+# VM 1
+./codex_loop.sh &
+./claude_dev_loop.sh
+
+# VM 2
 ./codex_loop.sh &
 ./claude_dev_loop.sh
 ```
@@ -226,7 +241,7 @@ git commit -m "chore: sync issues"
 git push
 ```
 
-On another machine, `git pull` is sufficient — `br` auto-imports from the updated JSONL.
+On another machine, `./setup.sh` pulls and rebuilds the DB in one step.
 
 ---
 
@@ -254,7 +269,8 @@ Red-Cell-C2/
 ├── claude_dev_loop.sh       # Claude development loop
 ├── claude_arch_loop.sh      # Architecture review loop (every 45–90 min)
 ├── codex_loop.sh            # Codex development loop
-└── cursor_loop.sh           # Cursor Agent development loop
+├── cursor_loop.sh           # Cursor Agent development loop
+└── setup.sh                 # Session start / machine onboarding script
 ```
 
 ---

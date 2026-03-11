@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 79 | 31 |
+| Tasks closed | 0 | 80 | 31 |
 | Bugs filed against | 0 | 8 | 9 |
 | Bug rate (bugs/task) | N/A | 0.10 | 0.29 |
 | Quality score | N/A | 90% | 71% |
@@ -544,3 +544,14 @@ Notes: Reviewed the external-listener startup rejection and listener operator ro
 
 Build: passed (cargo check + clippy -D warnings clean; cargo test: workspace passed)
 Notes: Reviewed DNS listener gating, persisted-listener restore handling, and Discord audit webhook delivery. The closed listener-restore issue is now covered by startup tests and appears fixed. One defect remains in the new webhook path: audit notifications are awaited inline with no request timeout, so a hung Discord endpoint can block operator login, chat, listener actions, and API tasking despite the notifier being documented as best-effort.
+
+### QA Review — 2026-03-11 20:14 — 9690167..3901f58
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA/infra loop maintenance only |
+| Codex | 1 | 0 | Closed red-cell-c2-x38n. Audit webhook delivery is now detached from the request path, bounded by a 5s client timeout, and covered by a stalled-webhook regression test. |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (cargo check + clippy -D warnings clean; cargo test: workspace passed)
+Notes: Reviewed the follow-up fix for red-cell-c2-x38n in `crates/teamserver/src/audit.rs` and `crates/teamserver/src/webhook.rs`. The previous availability regression is resolved without introducing new build, clippy, or test failures. No new QA bugs filed in this range.

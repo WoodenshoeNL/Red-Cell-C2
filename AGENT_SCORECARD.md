@@ -9,19 +9,19 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 27 | 1 |
-| Bugs filed against | 0 | 2 | 0 |
-| Bug rate (bugs/task) | N/A | 0.07 | 0.00 |
-| Quality score | N/A | 93% | 100% |
+| Tasks closed | 0 | 27 | 10 |
+| Bugs filed against | 0 | 2 | 2 |
+| Bug rate (bugs/task) | N/A | 0.07 | 0.20 |
+| Quality score | N/A | 93% | 80% |
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 0 | 0 | 0 |
-| Missing tests | 0 | 1 | 0 |
+| Missing tests | 0 | 1 | 1 |
 | Clippy warnings | 0 | 0 | 0 |
-| Protocol errors | 1 | 1 | 0 |
+| Protocol errors | 1 | 1 | 1 |
 | Security issues | 0 | 5 | 0 |
 | Architecture drift | 0 | 1 | 0 |
 | Memory / resource leaks | 0 | 3 | 0 |
@@ -167,3 +167,14 @@ Biggest blindspot: SOCKS5 SOCKS relay bound to 0.0.0.0 — any host on the netwo
 
 Build: passed (cargo check + clippy -D warnings + cargo test: 74 passed)
 Observation: `build_dns_txt_response` always emits DNS_TYPE_TXT in the answer RR regardless of query qtype; CNAME queries accepted by the new config path respond with TXT-encoded answer records. This appears to be an intentional C2 design (agent reads raw TXT data irrespective of qtype) but the CNAME integration test only checks the question-section echo, not the answer RRTYPE. Not filed as a bug — behavior is consistent with existing A-record handling and likely by design.
+
+### QA Review — 2026-03-11 00:05 — bac618..d0efbd
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA loop only |
+| Codex | 0 | 0 | No activity this run |
+| Cursor | 9 | 2 | Closed: red-cell-c2-210, uve, 1xg, 3jn, 2ro, 3al, 3g8, 1p7, 3n6. Bugs: red-1d2 (PrivsGetOrList discards SubCommand via .map(|_|"") — privs-list unreachable through extras), red-pgd ("Successful stole" grammar error in token steal callback, same class as prior f0d fix) |
+
+Build: passed (cargo check + clippy -D warnings + cargo test: 74 passed)
+Notes: High-velocity sprint — 9 closes, ~2000 lines added. Most fixes are correct and well-tested (token/inject/spawn/process callbacks fully covered). The PrivsGetOrList encoding bug (P2) is a subtle lifetime workaround gone wrong; no test covers that path. Grammar nit (P3) is the same pattern previously fixed in red-cell-c2-f0d, reintroduced in new code.

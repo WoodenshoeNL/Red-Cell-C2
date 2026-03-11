@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -21,7 +21,7 @@ use interprocess::os::unix::local_socket::{AbstractNsUdSocket, FilesystemUdSocke
 #[cfg(windows)]
 use interprocess::os::windows::local_socket::NamedPipe;
 use red_cell_common::config::Profile;
-use red_cell_common::demon::{DEMON_MAGIC_VALUE, DemonHeader};
+use red_cell_common::demon::{DEMON_MAGIC_VALUE, DemonCommand, DemonEnvelope, DemonHeader};
 use red_cell_common::operator::{
     EventCode, ListenerErrorInfo, ListenerInfo, ListenerMarkInfo, Message, MessageHead, NameInfo,
     OperatorMessage,
@@ -50,6 +50,86 @@ use crate::{
 };
 
 const DEFAULT_MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_DEMON_INIT_ATTEMPTS_PER_IP: u32 = 5;
+const DEMON_INIT_WINDOW_DURATION: Duration = Duration::from_secs(60);
+const MAX_DEMON_INIT_ATTEMPT_WINDOWS: usize = 10_000;
+
+#[derive(Clone, Debug, Default)]
+struct DemonInitRateLimiter {
+    windows: Arc<Mutex<HashMap<IpAddr, DemonInitAttemptWindow>>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DemonInitAttemptWindow {
+    accepted_attempts: u32,
+    window_start: Instant,
+}
+
+impl Default for DemonInitAttemptWindow {
+    fn default() -> Self {
+        Self { accepted_attempts: 0, window_start: Instant::now() }
+    }
+}
+
+impl DemonInitRateLimiter {
+    #[must_use]
+    fn new() -> Self {
+        Self::default()
+    }
+
+    async fn allow(&self, ip: IpAddr) -> bool {
+        let mut windows = self.windows.lock().await;
+        let now = Instant::now();
+
+        prune_expired_demon_init_windows(&mut windows, now);
+        if !windows.contains_key(&ip) && windows.len() >= MAX_DEMON_INIT_ATTEMPT_WINDOWS {
+            evict_oldest_demon_init_windows(&mut windows, MAX_DEMON_INIT_ATTEMPT_WINDOWS / 2);
+        }
+
+        let window = windows.entry(ip).or_default();
+        if now.duration_since(window.window_start) >= DEMON_INIT_WINDOW_DURATION {
+            window.accepted_attempts = 0;
+            window.window_start = now;
+        }
+
+        if window.accepted_attempts >= MAX_DEMON_INIT_ATTEMPTS_PER_IP {
+            return false;
+        }
+
+        window.accepted_attempts += 1;
+        true
+    }
+
+    #[cfg(test)]
+    async fn tracked_ip_count(&self) -> usize {
+        self.windows.lock().await.len()
+    }
+}
+
+fn prune_expired_demon_init_windows(
+    windows: &mut HashMap<IpAddr, DemonInitAttemptWindow>,
+    now: Instant,
+) {
+    windows
+        .retain(|_, window| now.duration_since(window.window_start) < DEMON_INIT_WINDOW_DURATION);
+}
+
+fn evict_oldest_demon_init_windows(
+    windows: &mut HashMap<IpAddr, DemonInitAttemptWindow>,
+    target_size: usize,
+) {
+    if windows.len() <= target_size {
+        return;
+    }
+
+    let to_remove = windows.len() - target_size;
+    let mut entries: Vec<_> =
+        windows.iter().map(|(ip, window)| (*ip, window.window_start)).collect();
+    entries.sort_unstable_by_key(|(_, window_start)| *window_start);
+    for (ip, _) in entries.into_iter().take(to_remove) {
+        windows.remove(&ip);
+    }
+}
 
 /// Runtime state for a configured listener.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -257,6 +337,7 @@ pub struct ListenerManager {
     sockets: SocketRelayManager,
     plugins: Option<PluginRuntime>,
     max_download_bytes: u64,
+    demon_init_rate_limiter: DemonInitRateLimiter,
     active_handles: Arc<RwLock<BTreeMap<String, JoinHandle<()>>>>,
     operations: Arc<Mutex<()>>,
 }
@@ -298,6 +379,7 @@ impl ListenerManager {
             sockets,
             plugins,
             max_download_bytes,
+            demon_init_rate_limiter: DemonInitRateLimiter::new(),
             active_handles: Arc::new(RwLock::new(BTreeMap::new())),
             operations: Arc::new(Mutex::new(())),
         }
@@ -507,6 +589,7 @@ struct HttpListenerState {
     parser: DemonPacketParser,
     events: EventBus,
     dispatcher: CommandDispatcher,
+    demon_init_rate_limiter: DemonInitRateLimiter,
     method: Method,
     required_headers: Vec<ExpectedHeader>,
     response_headers: Vec<(HeaderName, HeaderValue)>,
@@ -527,12 +610,20 @@ struct SmbListenerState {
     parser: DemonPacketParser,
     events: EventBus,
     dispatcher: CommandDispatcher,
+    demon_init_rate_limiter: DemonInitRateLimiter,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ProcessedDemonResponse {
     agent_id: u32,
     payload: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DemonTransportKind {
+    Init,
+    Reconnect,
+    Callback,
 }
 
 impl HttpListenerState {
@@ -543,6 +634,7 @@ impl HttpListenerState {
         database: Database,
         sockets: SocketRelayManager,
         plugins: Option<PluginRuntime>,
+        demon_init_rate_limiter: DemonInitRateLimiter,
         max_download_bytes: u64,
     ) -> Result<Self, ListenerManagerError> {
         let method = parse_method(config)?;
@@ -577,6 +669,7 @@ impl HttpListenerState {
                 max_download_bytes,
             ),
             events,
+            demon_init_rate_limiter,
             method,
             required_headers,
             response_headers,
@@ -618,6 +711,7 @@ impl SmbListenerState {
         database: Database,
         sockets: SocketRelayManager,
         plugins: Option<PluginRuntime>,
+        demon_init_rate_limiter: DemonInitRateLimiter,
         max_download_bytes: u64,
     ) -> Self {
         Self {
@@ -625,6 +719,7 @@ impl SmbListenerState {
             registry: registry.clone(),
             parser: DemonPacketParser::new(registry.clone()),
             events: events.clone(),
+            demon_init_rate_limiter,
             dispatcher: CommandDispatcher::with_builtin_handlers_and_max_download_bytes(
                 registry.clone(),
                 events.clone(),
@@ -884,6 +979,7 @@ async fn spawn_http_listener_runtime(
     database: Database,
     sockets: SocketRelayManager,
     plugins: Option<PluginRuntime>,
+    demon_init_rate_limiter: DemonInitRateLimiter,
     max_download_bytes: u64,
 ) -> Result<JoinHandle<()>, ListenerManagerError> {
     let state = Arc::new(HttpListenerState::build(
@@ -893,6 +989,7 @@ async fn spawn_http_listener_runtime(
         database,
         sockets,
         plugins,
+        demon_init_rate_limiter,
         max_download_bytes,
     )?);
     let address = format!("{}:{}", config.host_bind, config.port_bind);
@@ -1006,6 +1103,49 @@ fn map_command_dispatch_error(error: CommandDispatchError) -> ListenerManagerErr
     ListenerManagerError::InvalidConfig { message: error.to_string() }
 }
 
+fn classify_demon_transport(body: &[u8]) -> Option<DemonTransportKind> {
+    let envelope = DemonEnvelope::from_bytes(body).ok()?;
+    if envelope.payload.len() < 8 {
+        return None;
+    }
+
+    let command_id = u32::from_be_bytes(envelope.payload[0..4].try_into().ok()?);
+    if command_id != u32::from(DemonCommand::DemonInit) {
+        return Some(DemonTransportKind::Callback);
+    }
+
+    let remaining = &envelope.payload[8..];
+    if remaining.is_empty() {
+        Some(DemonTransportKind::Reconnect)
+    } else {
+        Some(DemonTransportKind::Init)
+    }
+}
+
+async fn allow_demon_init_for_ip(
+    listener_name: &str,
+    rate_limiter: &DemonInitRateLimiter,
+    client_ip: IpAddr,
+    body: &[u8],
+) -> bool {
+    if classify_demon_transport(body) != Some(DemonTransportKind::Init) {
+        return true;
+    }
+
+    if rate_limiter.allow(client_ip).await {
+        return true;
+    }
+
+    warn!(
+        listener = listener_name,
+        client_ip = %client_ip,
+        max_attempts = MAX_DEMON_INIT_ATTEMPTS_PER_IP,
+        window_seconds = DEMON_INIT_WINDOW_DURATION.as_secs(),
+        "rejecting DEMON_INIT because the per-IP rate limit was exceeded"
+    );
+    false
+}
+
 async fn spawn_smb_listener_runtime(
     config: &SmbListenerConfig,
     registry: AgentRegistry,
@@ -1013,6 +1153,7 @@ async fn spawn_smb_listener_runtime(
     database: Database,
     sockets: SocketRelayManager,
     plugins: Option<PluginRuntime>,
+    demon_init_rate_limiter: DemonInitRateLimiter,
     max_download_bytes: u64,
 ) -> Result<JoinHandle<()>, ListenerManagerError> {
     let state = Arc::new(SmbListenerState::build(
@@ -1022,6 +1163,7 @@ async fn spawn_smb_listener_runtime(
         database,
         sockets,
         plugins,
+        demon_init_rate_limiter,
         max_download_bytes,
     ));
     let listener_name = normalized_smb_pipe_name(&config.pipe_name);
@@ -1076,6 +1218,18 @@ async fn handle_smb_connection(state: Arc<SmbListenerState>, mut stream: LocalSo
             continue;
         }
 
+        let client_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        if !allow_demon_init_for_ip(
+            &state.config.name,
+            &state.demon_init_rate_limiter,
+            client_ip,
+            &frame.payload,
+        )
+        .await
+        {
+            continue;
+        }
+
         match process_demon_transport(
             &state.config.name,
             &state.registry,
@@ -1083,7 +1237,7 @@ async fn handle_smb_connection(state: Arc<SmbListenerState>, mut stream: LocalSo
             &state.events,
             &state.dispatcher,
             &frame.payload,
-            "127.0.0.1".to_owned(),
+            client_ip.to_string(),
         )
         .await
         {
@@ -1202,6 +1356,7 @@ impl ListenerManager {
                     self.database.clone(),
                     self.sockets.clone(),
                     self.plugins.clone(),
+                    self.demon_init_rate_limiter.clone(),
                     self.max_download_bytes,
                 )
                 .await
@@ -1214,6 +1369,7 @@ impl ListenerManager {
                     self.database.clone(),
                     self.sockets.clone(),
                     self.plugins.clone(),
+                    self.demon_init_rate_limiter.clone(),
                     self.max_download_bytes,
                 )
                 .await
@@ -1229,6 +1385,7 @@ impl ListenerManager {
                     self.database.clone(),
                     self.sockets.clone(),
                     self.plugins.clone(),
+                    self.demon_init_rate_limiter.clone(),
                     self.max_download_bytes,
                 )
                 .await
@@ -1338,6 +1495,7 @@ struct DnsListenerState {
     parser: DemonPacketParser,
     events: EventBus,
     dispatcher: CommandDispatcher,
+    demon_init_rate_limiter: DemonInitRateLimiter,
     /// Pending uploads keyed by agent ID.
     uploads: Mutex<HashMap<u32, DnsPendingUpload>>,
     /// Pending responses keyed by agent ID.
@@ -1352,6 +1510,7 @@ impl DnsListenerState {
         database: Database,
         sockets: SocketRelayManager,
         plugins: Option<PluginRuntime>,
+        demon_init_rate_limiter: DemonInitRateLimiter,
         max_download_bytes: u64,
     ) -> Self {
         Self {
@@ -1367,12 +1526,13 @@ impl DnsListenerState {
                 plugins,
                 max_download_bytes,
             ),
+            demon_init_rate_limiter,
             uploads: Mutex::new(HashMap::new()),
             responses: Mutex::new(HashMap::new()),
         }
     }
 
-    async fn handle_dns_packet(&self, buf: &[u8], peer_ip: &str) -> Option<Vec<u8>> {
+    async fn handle_dns_packet(&self, buf: &[u8], peer_ip: IpAddr) -> Option<Vec<u8>> {
         let query = parse_dns_query(buf)?;
         let Some(allowed_qtypes) = dns_allowed_query_types(&self.config.record_types) else {
             warn!(
@@ -1419,7 +1579,7 @@ impl DnsListenerState {
         seq: u16,
         total: u16,
         data: Vec<u8>,
-        peer_ip: &str,
+        peer_ip: IpAddr,
     ) -> &'static str {
         let assembled = match self.try_assemble_upload(agent_id, seq, total, data).await {
             DnsUploadAssembly::Pending => return "ok",
@@ -1436,6 +1596,17 @@ impl DnsListenerState {
             return "err";
         }
 
+        if !allow_demon_init_for_ip(
+            &self.config.name,
+            &self.demon_init_rate_limiter,
+            peer_ip,
+            &assembled,
+        )
+        .await
+        {
+            return "err";
+        }
+
         match process_demon_transport(
             &self.config.name,
             &self.registry,
@@ -1443,7 +1614,7 @@ impl DnsListenerState {
             &self.events,
             &self.dispatcher,
             &assembled,
-            peer_ip.to_owned(),
+            peer_ip.to_string(),
         )
         .await
         {
@@ -1847,6 +2018,7 @@ async fn spawn_dns_listener_runtime(
     database: Database,
     sockets: SocketRelayManager,
     plugins: Option<PluginRuntime>,
+    demon_init_rate_limiter: DemonInitRateLimiter,
     max_download_bytes: u64,
 ) -> Result<JoinHandle<()>, ListenerManagerError> {
     if dns_allowed_query_types(&config.record_types).is_none() {
@@ -1866,6 +2038,7 @@ async fn spawn_dns_listener_runtime(
         database,
         sockets,
         plugins,
+        demon_init_rate_limiter,
         max_download_bytes,
     ));
     let addr = format!("{}:{}", config.host_bind, config.port_bind);
@@ -1898,10 +2071,10 @@ async fn spawn_dns_listener_runtime(
                     let packet = buf[..len].to_vec();
                     let state = state.clone();
                     let socket = socket.clone();
-                    let peer_ip = peer.ip().to_string();
+                    let peer_ip = peer.ip();
 
                     tokio::spawn(async move {
-                        if let Some(response) = state.handle_dns_packet(&packet, &peer_ip).await {
+                        if let Some(response) = state.handle_dns_packet(&packet, peer_ip).await {
                             if let Err(error) = socket.send_to(&response, peer).await {
                                 warn!(listener = %state.config.name, %error, "dns listener send error");
                             }
@@ -1988,6 +2161,17 @@ async fn http_listener_handler(
         return state.fake_404_response();
     }
 
+    if !allow_demon_init_for_ip(
+        &state.config.name,
+        &state.demon_init_rate_limiter,
+        external_ip,
+        body.as_ref(),
+    )
+    .await
+    {
+        return state.fake_404_response();
+    }
+
     match process_demon_transport(
         &state.config.name,
         &state.registry,
@@ -1995,7 +2179,7 @@ async fn http_listener_handler(
         &state.events,
         &state.dispatcher,
         &body,
-        external_ip,
+        external_ip.to_string(),
     )
     .await
     {
@@ -2051,7 +2235,7 @@ fn extract_external_ip(
     behind_redirector: bool,
     peer: SocketAddr,
     request: &Request<Body>,
-) -> String {
+) -> IpAddr {
     if behind_redirector {
         if let Some(ip) = request
             .headers()
@@ -2062,7 +2246,7 @@ fn extract_external_ip(
             .map(str::trim)
             .find_map(|value| value.parse::<IpAddr>().ok())
         {
-            return ip.to_string();
+            return ip;
         }
 
         if let Some(ip) = request
@@ -2072,11 +2256,11 @@ fn extract_external_ip(
             .map(str::trim)
             .and_then(|value| value.parse::<IpAddr>().ok())
         {
-            return ip.to_string();
+            return ip;
         }
     }
 
-    peer.ip().to_string()
+    peer.ip()
 }
 
 fn is_valid_demon_callback_request(body: &[u8]) -> bool {
@@ -2287,13 +2471,19 @@ mod tests {
     use std::collections::HashMap;
     use std::io;
     use std::net::TcpListener as StdTcpListener;
+    use std::net::{IpAddr, Ipv4Addr};
     use std::time::Duration;
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     use super::{
+        DEMON_INIT_WINDOW_DURATION, DNS_HEADER_LEN, DNS_MAX_PENDING_UPLOADS, DNS_MAX_UPLOAD_CHUNKS,
+        DNS_TYPE_A, DNS_TYPE_CNAME, DNS_TYPE_TXT, DNS_UPLOAD_TIMEOUT_SECS, DemonInitRateLimiter,
+        DnsListenerState, DnsPendingResponse, DnsPendingUpload, DnsUploadAssembly,
         ListenerEventAction, ListenerManager, ListenerManagerError, ListenerStatus,
-        MAX_AGENT_REQUEST_BODY_LEN, MAX_SMB_FRAME_PAYLOAD_LEN, action_from_mark,
-        listener_config_from_operator, operator_requests_start, read_smb_frame,
+        MAX_AGENT_REQUEST_BODY_LEN, MAX_DEMON_INIT_ATTEMPTS_PER_IP, MAX_SMB_FRAME_PAYLOAD_LEN,
+        action_from_mark, base32hex_decode, base32hex_encode, build_dns_txt_response,
+        chunk_response_to_b32hex, dns_allowed_query_types, listener_config_from_operator,
+        operator_requests_start, parse_dns_c2_query, parse_dns_query, read_smb_frame,
         smb_local_socket_name,
     };
     use crate::{AgentRegistry, Database, EventBus, Job, SocketRelayManager};
@@ -2356,6 +2546,45 @@ mod tests {
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
         Ok(ListenerManager::new(database, registry, events, sockets, None))
+    }
+
+    #[tokio::test]
+    async fn demon_init_rate_limiter_blocks_after_threshold() {
+        let limiter = DemonInitRateLimiter::new();
+        let ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10));
+
+        for _ in 0..MAX_DEMON_INIT_ATTEMPTS_PER_IP {
+            assert!(limiter.allow(ip).await);
+        }
+
+        assert!(!limiter.allow(ip).await);
+    }
+
+    #[tokio::test]
+    async fn demon_init_rate_limiter_prunes_expired_windows() {
+        let limiter = DemonInitRateLimiter::new();
+        let stale_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20));
+        let fresh_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 21));
+
+        {
+            let mut windows = limiter.windows.lock().await;
+            windows.insert(
+                stale_ip,
+                super::DemonInitAttemptWindow {
+                    accepted_attempts: 1,
+                    window_start: Instant::now()
+                        - DEMON_INIT_WINDOW_DURATION
+                        - Duration::from_secs(1),
+                },
+            );
+        }
+
+        assert!(limiter.allow(fresh_ip).await);
+        let windows = limiter.windows.lock().await;
+        assert!(!windows.contains_key(&stale_ip));
+        assert!(windows.contains_key(&fresh_ip));
+        drop(windows);
+        assert_eq!(limiter.tracked_ip_count().await, 1);
     }
 
     #[tokio::test]
@@ -2607,6 +2836,53 @@ mod tests {
         assert_eq!(message.info.process_name, "explorer.exe");
         assert_eq!(message.info.sleep_delay, serde_json::json!(15));
         manager.stop("edge-http-init").await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn http_listener_rate_limits_demon_init_per_source_ip()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+        let port = available_port()?;
+
+        manager.create(http_listener("edge-http-init-limit", port)).await?;
+        manager.start("edge-http-init-limit").await?;
+        wait_for_listener(port, false).await?;
+
+        let client = Client::new();
+        for attempt in 0..MAX_DEMON_INIT_ATTEMPTS_PER_IP {
+            let agent_id = 0x1000_0000 + attempt;
+            let response = client
+                .post(format!("http://127.0.0.1:{port}/"))
+                .body(valid_demon_init_body(
+                    agent_id,
+                    [0x41; AGENT_KEY_LENGTH],
+                    [0x24; AGENT_IV_LENGTH],
+                ))
+                .send()
+                .await?;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(registry.get(agent_id).await.is_some());
+        }
+
+        let blocked_agent_id = 0x1000_00FF;
+        let blocked = client
+            .post(format!("http://127.0.0.1:{port}/"))
+            .body(valid_demon_init_body(
+                blocked_agent_id,
+                [0x41; AGENT_KEY_LENGTH],
+                [0x24; AGENT_IV_LENGTH],
+            ))
+            .send()
+            .await?;
+        assert_eq!(blocked.status(), StatusCode::NOT_FOUND);
+        assert!(registry.get(blocked_agent_id).await.is_none());
+
+        manager.stop("edge-http-init-limit").await?;
         Ok(())
     }
 
@@ -2885,6 +3161,58 @@ mod tests {
         assert_eq!(message.info.listener, "edge-smb-init");
 
         manager.stop("edge-smb-init").await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn smb_listener_rate_limits_demon_init_per_source_ip()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+        let pipe_name = unique_smb_pipe_name("init-limit");
+
+        manager.create(smb_listener("edge-smb-init-limit", &pipe_name)).await?;
+        manager.start("edge-smb-init-limit").await?;
+        wait_for_smb_listener(&pipe_name).await?;
+
+        let mut stream = connect_smb_stream(&pipe_name).await?;
+        for attempt in 0..MAX_DEMON_INIT_ATTEMPTS_PER_IP {
+            let agent_id = 0x2000_0000 + attempt;
+            write_test_smb_frame(
+                &mut stream,
+                agent_id,
+                &valid_demon_init_body(agent_id, [0x41; AGENT_KEY_LENGTH], [0x24; AGENT_IV_LENGTH]),
+            )
+            .await?;
+
+            let (response_agent_id, response) = read_test_smb_frame(&mut stream).await?;
+            assert_eq!(response_agent_id, agent_id);
+            assert!(!response.is_empty());
+            assert!(registry.get(agent_id).await.is_some());
+        }
+
+        let blocked_agent_id = 0x2000_00FF;
+        write_test_smb_frame(
+            &mut stream,
+            blocked_agent_id,
+            &valid_demon_init_body(
+                blocked_agent_id,
+                [0x41; AGENT_KEY_LENGTH],
+                [0x24; AGENT_IV_LENGTH],
+            ),
+        )
+        .await?;
+
+        let blocked =
+            tokio::time::timeout(Duration::from_millis(250), read_test_smb_frame(&mut stream))
+                .await;
+        assert!(blocked.is_err(), "rate-limited SMB init should not receive an ack");
+        assert!(registry.get(blocked_agent_id).await.is_none());
+
+        manager.stop("edge-smb-init-limit").await?;
         Ok(())
     }
 
@@ -3348,15 +3676,34 @@ mod tests {
         add_length_prefixed_bytes(buf, &encoded);
     }
 
-    // ── DNS C2 unit tests ─────────────────────────────────────────────────────
+    fn dns_upload_qname(agent_id: u32, seq: u16, total: u16, chunk: &[u8], domain: &str) -> String {
+        format!("{}.{seq:x}-{total:x}-{agent_id:08x}.up.{domain}", base32hex_encode(chunk))
+    }
 
-    use super::{
-        DNS_HEADER_LEN, DNS_MAX_PENDING_UPLOADS, DNS_MAX_UPLOAD_CHUNKS, DNS_TYPE_A, DNS_TYPE_CNAME,
-        DNS_TYPE_TXT, DNS_UPLOAD_TIMEOUT_SECS, DnsListenerState, DnsPendingResponse,
-        DnsPendingUpload, DnsUploadAssembly, base32hex_decode, base32hex_encode,
-        build_dns_txt_response, chunk_response_to_b32hex, dns_allowed_query_types,
-        parse_dns_c2_query, parse_dns_query,
-    };
+    fn parse_dns_txt_answer(packet: &[u8]) -> Option<String> {
+        if packet.len() < DNS_HEADER_LEN {
+            return None;
+        }
+
+        let mut pos = DNS_HEADER_LEN;
+        while pos < packet.len() {
+            let len = usize::from(packet[pos]);
+            pos += 1;
+            if len == 0 {
+                break;
+            }
+            pos = pos.checked_add(len)?;
+        }
+
+        pos = pos.checked_add(4)?;
+        pos = pos.checked_add(2 + 2 + 2 + 4 + 2)?;
+        let txt_len = usize::from(*packet.get(pos)?);
+        let start = pos.checked_add(1)?;
+        let end = start.checked_add(txt_len)?;
+        std::str::from_utf8(packet.get(start..end)?).ok().map(str::to_owned)
+    }
+
+    // ── DNS C2 unit tests ─────────────────────────────────────────────────────
     use tokio::net::UdpSocket as TokioUdpSocket;
 
     fn free_udp_port() -> u16 {
@@ -3400,6 +3747,7 @@ mod tests {
             database,
             sockets,
             None,
+            DemonInitRateLimiter::new(),
             super::DEFAULT_MAX_DOWNLOAD_BYTES,
         )
     }
@@ -3638,6 +3986,69 @@ mod tests {
         // ANCOUNT = 1
         let ancount = u16::from_be_bytes([buf[6], buf[7]]);
         assert_eq!(ancount, 1);
+    }
+
+    #[tokio::test]
+    async fn dns_listener_rate_limits_demon_init_per_source_ip() {
+        let database = Database::connect_in_memory().await.expect("database creation failed");
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+        let port = free_udp_port();
+        let domain = "c2.example.com";
+
+        manager
+            .create(dns_listener_config("dns-init-limit", port, domain))
+            .await
+            .expect("create failed");
+        manager.start("dns-init-limit").await.expect("start failed");
+
+        sleep(Duration::from_millis(50)).await;
+
+        let client = TokioUdpSocket::bind("127.0.0.1:0").await.expect("client bind failed");
+        client.connect(format!("127.0.0.1:{port}")).await.expect("connect failed");
+
+        for attempt in 0..=MAX_DEMON_INIT_ATTEMPTS_PER_IP {
+            let agent_id = 0x3000_0000 + attempt;
+            let payload =
+                valid_demon_init_body(agent_id, [0x41; AGENT_KEY_LENGTH], [0x24; AGENT_IV_LENGTH]);
+            let chunks: Vec<&[u8]> = payload.chunks(39).collect();
+            let total = u16::try_from(chunks.len()).expect("chunk count should fit in u16");
+            let expected_txt = if attempt < MAX_DEMON_INIT_ATTEMPTS_PER_IP { "ack" } else { "err" };
+
+            for (seq, chunk) in chunks.iter().enumerate() {
+                let qname = dns_upload_qname(
+                    agent_id,
+                    u16::try_from(seq).expect("chunk index should fit in u16"),
+                    total,
+                    chunk,
+                    domain,
+                );
+                let packet = build_dns_txt_query(0x4000 + seq as u16, &qname);
+                client.send(&packet).await.expect("send failed");
+
+                let mut buf = vec![0u8; 1024];
+                tokio::time::timeout(Duration::from_secs(2), client.recv(&mut buf))
+                    .await
+                    .expect("no response received")
+                    .expect("recv failed");
+
+                let txt = parse_dns_txt_answer(&buf).expect("TXT answer should parse");
+                let is_last = seq + 1 == chunks.len();
+                if is_last {
+                    assert_eq!(txt, expected_txt);
+                } else {
+                    assert_eq!(txt, "ok");
+                }
+            }
+
+            if attempt < MAX_DEMON_INIT_ATTEMPTS_PER_IP {
+                assert!(registry.get(agent_id).await.is_some());
+            } else {
+                assert!(registry.get(agent_id).await.is_none());
+            }
+        }
     }
 
     #[tokio::test]

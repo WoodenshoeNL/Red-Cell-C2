@@ -22,9 +22,9 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests | 0 | 2 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
 | Protocol errors | 1 | 2 | 2 |
-| Security issues | 0 | 7 | 0 |
+| Security issues | 0 | 9 | 0 |
 | Architecture drift | 0 | 1 | 0 |
-| Memory / resource leaks | 0 | 4 | 1 |
+| Memory / resource leaks | 0 | 5 | 1 |
 | Audit attribution errors | 0 | 1 | 0 |
 
 ---
@@ -299,3 +299,14 @@ No new development commits since last checkpoint. red-cell-c2-2pw (encrypt_agent
 
 Build: passed (cargo check + clippy -D warnings: clean; cargo test: 506 passed)
 No new development commits since last checkpoint. red-cell-c2-2pw (encrypt_agent_data silent empty return) remains the only in_progress item. No new bugs filed.
+
+### Arch Review — 2026-03-11 08:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 0 | — | No findings this run |
+| Codex | 3 | Security ×2, Memory/resource ×1 | red-3nf (HTTP listener uses into_make_service() — peer IP never captured, always 0.0.0.0), red-2d4 (zero-key bypass in DEMON_INIT allows unauthenticated plaintext registration), red-2ne (no cap on agent registry — unauthenticated DEMON_INIT flood exhausts memory/SQLite) |
+| Cursor | 0 | — | No findings this run |
+
+Overall codebase health: on track
+Biggest blindspot: Zero-key DEMON_INIT bypass — any attacker that can reach the listener port can register phantom agents without a keyed implant, and the HTTP listener never records the actual peer IP, so these registrations are invisible in audit logs (always 0.0.0.0)

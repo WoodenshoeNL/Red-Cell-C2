@@ -1,16 +1,18 @@
 //! Outbound audit webhook delivery.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use red_cell_common::config::Profile;
 use reqwest::StatusCode;
 use serde::Serialize;
 use thiserror::Error;
+use tracing::warn;
 
 use crate::{AuditRecord, AuditResultStatus};
 
 const SUCCESS_COLOR: u32 = 0x002E_CC71;
 const FAILURE_COLOR: u32 = 0x00E7_4C3C;
+const DISCORD_WEBHOOK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Best-effort outbound webhook dispatcher for audit events.
 #[derive(Debug, Clone, Default)]
@@ -28,7 +30,7 @@ impl AuditWebhookNotifier {
                     url: config.url.clone(),
                     username: config.user.clone(),
                     avatar_url: config.avatar_url.clone(),
-                    client: reqwest::Client::new(),
+                    client: discord_webhook_client(),
                 })
             });
 
@@ -49,6 +51,29 @@ impl AuditWebhookNotifier {
 
         Ok(())
     }
+
+    /// Emit a notification for a persisted audit record without blocking the caller.
+    pub fn notify_audit_record_detached(&self, record: AuditRecord) {
+        if let Some(discord) = self.discord.clone() {
+            tokio::spawn(async move {
+                if let Err(error) = discord.send(&record).await {
+                    warn!(
+                        actor = record.actor,
+                        action = record.action,
+                        %error,
+                        "failed to deliver audit webhook notification"
+                    );
+                }
+            });
+        }
+    }
+}
+
+fn discord_webhook_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(DISCORD_WEBHOOK_TIMEOUT)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
 }
 
 #[derive(Debug)]

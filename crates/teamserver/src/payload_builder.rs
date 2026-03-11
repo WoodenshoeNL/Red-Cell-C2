@@ -509,6 +509,7 @@ fn merged_request_config(
     insert_default_string(&mut config, "Sleep Technique", defaults.sleep_technique.clone());
     insert_default_string(&mut config, "Proxy Loading", defaults.proxy_loading.clone());
     insert_default_string(&mut config, "Amsi/Etw Patch", defaults.amsi_etw_patching.clone());
+    insert_default_string(&mut config, "DotNetNamePipe", defaults.dotnet_name_pipe.clone());
 
     if let Some(injection) = &defaults.injection {
         let entry =
@@ -601,6 +602,8 @@ fn pack_config(
             });
         }
     }
+
+    add_wstring(&mut out, optional_string(config, "DotNetNamePipe").unwrap_or_default())?;
 
     Ok(out)
 }
@@ -1220,7 +1223,7 @@ mod tests {
                     spawn64: Some("C:\\Windows\\System32\\notepad.exe".to_owned()),
                     spawn32: Some("C:\\Windows\\SysWOW64\\notepad.exe".to_owned()),
                 }),
-                dotnet_name_pipe: None,
+                dotnet_name_pipe: Some(r"\\.\pipe\red-cell-dotnet".to_owned()),
                 binary: None,
                 trust_x_forwarded_for: false,
             },
@@ -1231,6 +1234,10 @@ mod tests {
         assert_eq!(config.get("Indirect Syscall"), Some(&Value::Bool(true)));
         assert_eq!(config.get("Stack Duplication"), Some(&Value::Bool(true)));
         assert_eq!(config.get("Sleep Technique"), Some(&Value::String("Ekko".to_owned())));
+        assert_eq!(
+            config.get("DotNetNamePipe"),
+            Some(&Value::String(r"\\.\pipe\red-cell-dotnet".to_owned()))
+        );
         assert_eq!(
             config["Injection"]["Spawn64"],
             Value::String("C:\\Windows\\System32\\notepad.exe".to_owned())
@@ -1253,6 +1260,7 @@ mod tests {
             "Sleep Jmp Gadget": "jmp rbx",
             "Proxy Loading": "RtlCreateTimer",
             "Amsi/Etw Patch": "Hardware breakpoints",
+            "DotNetNamePipe": "\\\\.\\pipe\\red-cell-dotnet",
             "Injection": {
                 "Alloc": "Win32",
                 "Execute": "Native/Syscall",
@@ -1289,9 +1297,82 @@ mod tests {
         }));
 
         let bytes = pack_config(&listener, &config)?;
-        assert!(bytes.starts_with(&5_u32.to_le_bytes()));
-        assert!(bytes.windows("listener.local".len() * 2).count() > 0);
-        assert!(bytes.windows("proxy.local".len() * 2).count() > 0);
+        let mut cursor = bytes.as_slice();
+        assert_eq!(read_u32(&mut cursor)?, 5);
+        assert_eq!(read_u32(&mut cursor)?, 15);
+        assert_eq!(read_u32(&mut cursor)?, 1);
+        assert_eq!(read_u32(&mut cursor)?, 2);
+        assert_eq!(read_wstring(&mut cursor)?, "C:\\Windows\\System32\\notepad.exe");
+        assert_eq!(read_wstring(&mut cursor)?, "C:\\Windows\\SysWOW64\\notepad.exe");
+        assert_eq!(read_u32(&mut cursor)?, 1);
+        assert_eq!(read_u32(&mut cursor)?, 2);
+        assert_eq!(read_u32(&mut cursor)?, 1);
+        assert_eq!(read_u32(&mut cursor)?, 2);
+        assert_eq!(read_u32(&mut cursor)?, 1);
+        assert_eq!(read_u32(&mut cursor)?, 1);
+        assert_eq!(read_u64(&mut cursor)?, 1234);
+        assert_eq!(read_u32(&mut cursor)?, 5_243_968);
+        assert_eq!(read_wstring(&mut cursor)?, "POST");
+        assert_eq!(read_u32(&mut cursor)?, 0);
+        assert_eq!(read_u32(&mut cursor)?, 1);
+        assert_eq!(read_wstring(&mut cursor)?, "listener.local");
+        assert_eq!(read_u32(&mut cursor)?, 443);
+        assert_eq!(read_u32(&mut cursor)?, 1);
+        assert_eq!(read_wstring(&mut cursor)?, "Mozilla");
+        assert_eq!(read_u32(&mut cursor)?, 2);
+        assert_eq!(read_wstring(&mut cursor)?, "Header: One");
+        assert_eq!(read_wstring(&mut cursor)?, "Host: front.local");
+        assert_eq!(read_u32(&mut cursor)?, 1);
+        assert_eq!(read_wstring(&mut cursor)?, "/beacon");
+        assert_eq!(read_u32(&mut cursor)?, 1);
+        assert_eq!(read_wstring(&mut cursor)?, "http://proxy.local:8080");
+        assert_eq!(read_wstring(&mut cursor)?, "neo");
+        assert_eq!(read_wstring(&mut cursor)?, "trinity");
+        assert_eq!(read_wstring(&mut cursor)?, r"\\.\pipe\red-cell-dotnet");
+        assert!(cursor.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn pack_config_emits_empty_dotnet_name_pipe_when_unset()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config = serde_json::from_value::<Map<String, Value>>(json!({
+            "Sleep": "5",
+            "Jitter": "0",
+            "Sleep Technique": "WaitForSingleObjectEx",
+            "Injection": {
+                "Alloc": "Win32",
+                "Execute": "Win32",
+                "Spawn64": "a",
+                "Spawn32": "b"
+            }
+        }))?;
+        let listener = ListenerConfig::Smb(red_cell_common::SmbListenerConfig {
+            name: "smb".to_owned(),
+            pipe_name: "pivot".to_owned(),
+            kill_date: None,
+            working_hours: None,
+        });
+
+        let bytes = pack_config(&listener, &config)?;
+        let mut cursor = bytes.as_slice();
+        assert_eq!(read_u32(&mut cursor)?, 5);
+        assert_eq!(read_u32(&mut cursor)?, 0);
+        assert_eq!(read_u32(&mut cursor)?, 1);
+        assert_eq!(read_u32(&mut cursor)?, 1);
+        assert_eq!(read_wstring(&mut cursor)?, "a");
+        assert_eq!(read_wstring(&mut cursor)?, "b");
+        assert_eq!(read_u32(&mut cursor)?, 0);
+        assert_eq!(read_u32(&mut cursor)?, 0);
+        assert_eq!(read_u32(&mut cursor)?, 0);
+        assert_eq!(read_u32(&mut cursor)?, 0);
+        assert_eq!(read_u32(&mut cursor)?, 0);
+        assert_eq!(read_u32(&mut cursor)?, 0);
+        assert_eq!(read_wstring(&mut cursor)?, r"\\.\pipe\pivot");
+        assert_eq!(read_u64(&mut cursor)?, 0);
+        assert_eq!(read_u32(&mut cursor)?, 0);
+        assert_eq!(read_wstring(&mut cursor)?, "");
+        assert!(cursor.is_empty());
         Ok(())
     }
 
@@ -1358,6 +1439,54 @@ mod tests {
         add_wstring(&mut buf, "")?;
         assert_eq!(&buf[..4], &2_u32.to_le_bytes(), "empty string still has null terminator");
         Ok(())
+    }
+
+    fn read_u32(cursor: &mut &[u8]) -> Result<u32, PayloadBuildError> {
+        let bytes = take(cursor, 4)?;
+        let array: [u8; 4] = bytes.try_into().map_err(|_| PayloadBuildError::InvalidRequest {
+            message: "test parser failed to decode u32".to_owned(),
+        })?;
+        Ok(u32::from_le_bytes(array))
+    }
+
+    fn read_u64(cursor: &mut &[u8]) -> Result<u64, PayloadBuildError> {
+        let bytes = take(cursor, 8)?;
+        let array: [u8; 8] = bytes.try_into().map_err(|_| PayloadBuildError::InvalidRequest {
+            message: "test parser failed to decode u64".to_owned(),
+        })?;
+        Ok(u64::from_le_bytes(array))
+    }
+
+    fn read_wstring(cursor: &mut &[u8]) -> Result<String, PayloadBuildError> {
+        let byte_len =
+            usize::try_from(read_u32(cursor)?).map_err(|_| PayloadBuildError::InvalidRequest {
+                message: "test parser string length overflow".to_owned(),
+            })?;
+        let bytes = take(cursor, byte_len)?;
+        if bytes.len() < 2 || bytes[bytes.len() - 2..] != [0, 0] {
+            return Err(PayloadBuildError::InvalidRequest {
+                message: "test parser missing UTF-16 terminator".to_owned(),
+            });
+        }
+
+        let units = bytes[..bytes.len() - 2]
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect::<Vec<_>>();
+        String::from_utf16(&units).map_err(|error| PayloadBuildError::InvalidRequest {
+            message: format!("test parser invalid UTF-16: {error}"),
+        })
+    }
+
+    fn take<'a>(cursor: &mut &'a [u8], len: usize) -> Result<&'a [u8], PayloadBuildError> {
+        if cursor.len() < len {
+            return Err(PayloadBuildError::InvalidRequest {
+                message: "test parser reached end of buffer".to_owned(),
+            });
+        }
+        let (head, tail) = cursor.split_at(len);
+        *cursor = tail;
+        Ok(head)
     }
 
     #[test]

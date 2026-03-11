@@ -84,7 +84,7 @@ For each file changed, which agent's commit last touched it?
 
 ## Step 4 — Check Build Health
 
-If any Rust source files exist under `crates/`:
+If any Rust source files exist under `teamserver/`, `client/`, or `common/`:
 
 ```bash
 cargo check --workspace 2>&1
@@ -92,7 +92,7 @@ cargo clippy --workspace -- -D warnings 2>&1
 cargo test --workspace 2>&1
 ```
 
-If no `crates/` directory exists yet, skip this step.
+If no workspace crates have been implemented yet, skip this step.
 
 ---
 
@@ -121,7 +121,7 @@ Architecture compliance:
 - Database must use SQLite via sqlx
 - Config parsing must use HCL/YAOTL
 - Rust edition must be 2024
-- Workspace structure: `crates/teamserver`, `crates/client`, `crates/common`
+- Workspace structure: `./teamserver`, `./client`, `./common` at repo root
 
 Code quality:
 - No `unwrap()` or `expect()` in production paths

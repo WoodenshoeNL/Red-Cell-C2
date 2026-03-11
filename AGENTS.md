@@ -17,7 +17,7 @@ Rewrite of the [Havoc C2 framework](./src/Havoc) in Rust — teamserver and oper
 
 | Concern | Decision |
 |---|---|
-| **Repo structure** | Cargo workspace: `crates/teamserver`, `crates/client`, `crates/common` |
+| **Repo structure** | Cargo workspace: `./teamserver`, `./client`, `./common` at repo root |
 | **Binaries** | `red-cell` (teamserver), `red-cell-client` (operator GUI) |
 | **Rust edition** | 2024, latest stable |
 | **Teamserver framework** | Axum + Tokio |
@@ -30,7 +30,7 @@ Rewrite of the [Havoc C2 framework](./src/Havoc) in Rust — teamserver and oper
 | **New features** | RBAC, REST API, DNS listener, structured audit logging |
 | **Testing** | Full suite: unit + integration (mock Demon agent) + E2E |
 
-The original Havoc source lives in `./src/Havoc` as reference only — **do not modify it, do not stage it, do not commit it**. It is intentionally excluded from git via `.gitignore`. Agents must never `git add src/` or include any path under `src/` in a commit.
+The original Havoc source lives in `./src/Havoc` as reference only — **do not modify it, do not stage it, do not delete it**. It is committed to git for cross-machine sync, but it is **read-only**. Agents must never edit, create, or delete any file under `./src/`. It is there purely so the code can be read as a reference implementation.
 
 ## Stopping a Dev Loop
 

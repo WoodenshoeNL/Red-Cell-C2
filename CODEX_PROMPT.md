@@ -42,13 +42,13 @@ The original Havoc source is at `./src/Havoc` — use it as reference for:
 
 | Concern | Decision |
 |---|---|
-| Workspace | `Cargo.toml` at root, crates in `crates/teamserver`, `crates/client`, `crates/common` |
+| Workspace | `Cargo.toml` at root, crates at `./teamserver`, `./client`, `./common` |
 | Rust edition | `2024` |
 | Async runtime | Tokio only — no async-std |
 | Teamserver framework | Axum |
 | Database | SQLite via sqlx — async, with migrations |
 | Config format | HCL/YAOTL (use `hcl-rs` crate) |
-| Operator protocol | JSON over WebSocket — types defined in `crates/common` |
+| Operator protocol | JSON over WebSocket — types defined in `./common` |
 | Agent protocol | Demon binary — 0xDEADBEEF magic, AES-256-CTR, per-agent keys |
 | Client UI | egui |
 | Error handling | `thiserror` for library errors, `anyhow` only in binary entry points |

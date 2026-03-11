@@ -22,7 +22,7 @@ The original Havoc source lives at `./src/Havoc` and serves as the reference imp
 
 | Concern | Decision |
 |---|---|
-| Repo structure | Cargo workspace: `crates/teamserver`, `crates/client`, `crates/common` |
+| Repo structure | Cargo workspace: `./teamserver`, `./client`, `./common` at repo root |
 | Binaries | `red-cell` (teamserver), `red-cell-client` (operator GUI) |
 | Rust edition | 2024, latest stable |
 | Teamserver framework | Axum |
@@ -283,13 +283,11 @@ On another machine, `./setup.sh` pulls and rebuilds the DB in one step.
 
 ```
 Red-Cell-C2/
-├── crates/                  # Rust workspace (created during implementation)
-│   ├── common/              # Shared types: protocol, crypto, config
-│   ├── teamserver/          # Axum-based C2 server (red-cell binary)
-│   └── client/              # egui operator client (red-cell-client binary)
+├── teamserver/              # Axum-based C2 server (red-cell binary)
+├── client/                  # egui operator client (red-cell-client binary)
+├── common/                  # Shared types: protocol, crypto, config
 ├── src/
-│   └── Havoc/               # Original Havoc source — reference only, do not modify
-├── profiles/                # HCL/YAOTL profile examples (from Havoc)
+│   └── Havoc/               # Original Havoc source — read-only reference, do not modify
 ├── logs/                    # Agent loop log output (gitignored)
 ├── .beads/                  # Issue tracker database
 │   └── issues.jsonl         # Issues — committed to git for sync
@@ -299,7 +297,7 @@ Red-Cell-C2/
 ├── CLAUDE_ARCH_PROMPT.md    # Architecture reviewer prompt
 ├── CODEX_PROMPT.md          # Codex developer prompt
 ├── CURSOR_PROMPT.md         # Cursor Agent developer prompt
-├── claude_loop.sh           # QA review loop (every 10 min)
+├── claude_loop.sh           # QA review loop (every 20 min)
 ├── claude_dev_loop.sh       # Claude development loop
 ├── claude_arch_loop.sh      # Architecture review loop (every 45–90 min)
 ├── codex_loop.sh            # Codex development loop

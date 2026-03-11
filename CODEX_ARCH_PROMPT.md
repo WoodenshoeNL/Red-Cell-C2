@@ -35,10 +35,10 @@ git log --oneline -5
 ## Step 2 — Map the Codebase
 
 ```bash
-find crates -name '*.rs' | sort
-find crates -name 'Cargo.toml' | xargs grep -l '^\[package\]' | sort
-find crates -name '*.rs' | xargs wc -l | sort -rn | head -30
-grep -rn '^pub ' crates/common/src/ | grep -v '^\s*//' | head -60
+find teamserver common client -name '*.rs' | sort
+find teamserver common client -name 'Cargo.toml' | xargs grep -l '^\[package\]' | sort
+find teamserver common client -name '*.rs' | xargs wc -l | sort -rn | head -30
+grep -rn '^pub ' common/src/ | grep -v '^\s*//' | head -60
 ```
 
 ---
@@ -46,22 +46,22 @@ grep -rn '^pub ' crates/common/src/ | grep -v '^\s*//' | head -60
 ## Step 3 — Read the Core Files in Full
 
 ```bash
-cat crates/common/src/lib.rs
-cat crates/common/src/domain.rs
-cat crates/common/src/config.rs
-cat crates/teamserver/src/main.rs
-cat crates/teamserver/src/lib.rs
+cat common/src/lib.rs
+cat common/src/domain.rs
+cat common/src/config.rs
+cat teamserver/src/main.rs
+cat teamserver/src/lib.rs
 ```
 
 Then read every teamserver module and integration test:
 
 ```bash
-find crates/teamserver/src -name '*.rs' | sort | while read f; do
+find teamserver/src -name '*.rs' | sort | while read f; do
   echo "====== $f ======"
   cat "$f"
 done
 
-find crates/teamserver/tests -name '*.rs' 2>/dev/null | while read f; do
+find teamserver/tests -name '*.rs' 2>/dev/null | while read f; do
   echo "====== $f ======"
   cat "$f"
 done
@@ -134,7 +134,7 @@ Compare code to `AGENTS.md`:
 
 ### 5f — Consistency and Cohesion
 
-- Types duplicated instead of shared from `crates/common`
+- Types duplicated instead of shared from `./common`
 - Duplicate logic across modules
 - Listener implementations diverging without reason
 - Shared state misuse

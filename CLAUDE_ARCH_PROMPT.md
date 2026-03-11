@@ -37,14 +37,14 @@ Get a full structural picture before reading any code:
 
 ```bash
 # Workspace layout
-find crates -name '*.rs' | sort
-find crates -name 'Cargo.toml' | xargs grep -l '^\[package\]' | sort
+find teamserver common client -name '*.rs' | sort
+find teamserver common client -name 'Cargo.toml' | xargs grep -l '^\[package\]' | sort
 
 # Lines of code per file (spot unusually large files)
-find crates -name '*.rs' | xargs wc -l | sort -rn | head -30
+find teamserver common client -name '*.rs' | xargs wc -l | sort -rn | head -30
 
 # Public API surface per crate
-grep -rn '^pub ' crates/common/src/ | grep -v '^\s*//' | head -60
+grep -rn '^pub ' common/src/ | grep -v '^\s*//' | head -60
 ```
 
 ---
@@ -55,19 +55,19 @@ Read each of these files completely — do not skim:
 
 ```bash
 # Common crate (shared types)
-cat crates/common/src/lib.rs
-cat crates/common/src/domain.rs
-cat crates/common/src/config.rs
+cat common/src/lib.rs
+cat common/src/domain.rs
+cat common/src/config.rs
 
 # Teamserver entry point and main modules
-cat crates/teamserver/src/main.rs
-cat crates/teamserver/src/lib.rs   # or equivalent top-level module file
+cat teamserver/src/main.rs
+cat teamserver/src/lib.rs   # or equivalent top-level module file
 ```
 
 Then read the full contents of each teamserver module:
 
 ```bash
-find crates/teamserver/src -name '*.rs' | sort | while read f; do
+find teamserver/src -name '*.rs' | sort | while read f; do
   echo "====== $f ======"
   cat "$f"
 done
@@ -76,7 +76,7 @@ done
 And the integration tests:
 
 ```bash
-find crates/teamserver/tests -name '*.rs' 2>/dev/null | while read f; do
+find teamserver/tests -name '*.rs' 2>/dev/null | while read f; do
   echo "====== $f ======"
   cat "$f"
 done
@@ -147,7 +147,7 @@ Compare what the code actually does to what `AGENTS.md` specifies:
 
 ### 5f — Consistency and Cohesion
 
-- Types defined in multiple places that should live in `crates/common`
+- Types defined in multiple places that should live in `./common`
 - Duplicate logic across modules
 - Listener implementations (HTTP, SMB, DNS) that handle the same concern differently with no good reason
 - State management: is shared state always behind `Arc<Mutex<>>` or `Arc<RwLock<>>`? Any data races?

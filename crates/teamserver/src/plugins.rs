@@ -72,6 +72,9 @@ pub enum PluginError {
         /// Human-readable tasking failure.
         message: String,
     },
+    /// The global plugin runtime mutex was poisoned by a panic in another thread.
+    #[error("plugin runtime mutex poisoned: a thread panicked while holding the lock")]
+    MutexPoisoned,
 }
 
 /// Events exposed to Python callbacks.
@@ -149,7 +152,7 @@ impl PluginRuntime {
             }),
         };
 
-        runtime.install_as_active();
+        runtime.install_as_active()?;
         let runtime_for_python = runtime.clone();
         tokio::task::spawn_blocking(move || {
             pyo3::prepare_freethreaded_python();
@@ -239,27 +242,22 @@ impl PluginRuntime {
     }
 
     /// Return the active process-wide plugin runtime when initialized.
-    #[must_use]
-    pub fn current() -> Option<Self> {
+    pub fn current() -> Result<Option<Self>, PluginError> {
         let lock = runtime_slot();
-        let guard = match lock.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        guard.clone()
+        let guard = lock.lock().map_err(|_| PluginError::MutexPoisoned)?;
+        Ok(guard.clone())
     }
 
-    fn install_as_active(&self) {
+    fn install_as_active(&self) -> Result<(), PluginError> {
         let lock = runtime_slot();
-        let mut guard = match lock.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut guard = lock.lock().map_err(|_| PluginError::MutexPoisoned)?;
         *guard = Some(self.clone());
+        Ok(())
     }
 
     fn active() -> PyResult<Self> {
         Self::current()
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
             .ok_or_else(|| PyRuntimeError::new_err("red_cell Python runtime is not initialized"))
     }
 

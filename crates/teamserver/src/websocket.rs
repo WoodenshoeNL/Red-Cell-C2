@@ -895,7 +895,7 @@ pub(crate) async fn execute_agent_task(
     {
         events.broadcast(teamserver_log_event(actor, &result));
         0
-    } else if let Some(plugins) = crate::PluginRuntime::current() {
+    } else if let Some(plugins) = crate::PluginRuntime::current()? {
         if let Some((command, args)) = plugins.match_registered_command(&message.info).await {
             if plugins.invoke_registered_command(&command, actor, agent_id, args).await? {
                 0

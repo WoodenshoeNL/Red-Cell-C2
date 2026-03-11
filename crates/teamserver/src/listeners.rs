@@ -1395,9 +1395,7 @@ impl ListenerManager {
                 )
                 .await
             }
-            ListenerConfig::External(_) => Ok(tokio::spawn(async move {
-                std::future::pending::<()>().await;
-            })),
+            ListenerConfig::External(config) => Err(unsupported_external_listener_error(config)),
             ListenerConfig::Dns(config) => {
                 spawn_dns_listener_runtime(
                     config,
@@ -1412,6 +1410,16 @@ impl ListenerManager {
                 .await
             }
         }
+    }
+}
+
+fn unsupported_external_listener_error(config: &ExternalListenerConfig) -> ListenerManagerError {
+    ListenerManagerError::StartFailed {
+        name: config.name.clone(),
+        message: format!(
+            "external/service bridge listener `{}` is not implemented; endpoint `{}` cannot be started",
+            config.name, config.endpoint
+        ),
     }
 }
 
@@ -2614,7 +2622,8 @@ mod tests {
     use red_cell_common::demon::{DemonCommand, DemonEnvelope, DemonMessage};
     use red_cell_common::operator::{ListenerInfo, OperatorMessage};
     use red_cell_common::{
-        HttpListenerConfig, HttpListenerResponseConfig, ListenerConfig, SmbListenerConfig,
+        ExternalListenerConfig, HttpListenerConfig, HttpListenerResponseConfig, ListenerConfig,
+        SmbListenerConfig,
     };
     use reqwest::Client;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2650,6 +2659,13 @@ mod tests {
             pipe_name: pipe_name.to_owned(),
             kill_date: None,
             working_hours: None,
+        })
+    }
+
+    fn external_listener(name: &str, endpoint: &str) -> ListenerConfig {
+        ListenerConfig::from(ExternalListenerConfig {
+            name: name.to_owned(),
+            endpoint: endpoint.to_owned(),
         })
     }
 
@@ -2797,6 +2813,46 @@ mod tests {
         assert!(matches!(error, ListenerManagerError::StartFailed { .. }));
         assert_eq!(summary.state.status, ListenerStatus::Error);
         assert!(summary.state.last_error.is_some());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn external_listener_start_returns_error_and_does_not_register_runtime()
+    -> Result<(), ListenerManagerError> {
+        let manager = manager().await?;
+        manager.create(external_listener("external", "svc")).await?;
+
+        let error = manager.start("external").await.expect_err("external listener should fail");
+        let summary = manager.summary("external").await?;
+
+        assert!(matches!(error, ListenerManagerError::StartFailed { .. }));
+        assert_eq!(summary.state.status, ListenerStatus::Error);
+        assert!(summary.state.last_error.as_deref().is_some_and(|message| {
+            message.contains("not implemented") && message.contains("svc")
+        }));
+        assert!(!manager.active_handles.read().await.contains_key("external"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restore_running_marks_external_listener_as_error() -> Result<(), ListenerManagerError>
+    {
+        let manager = manager().await?;
+        let repository = manager.repository();
+        repository.create(&external_listener("external", "svc")).await?;
+        repository.set_state("external", ListenerStatus::Running, None).await?;
+
+        let error = manager.restore_running().await.expect_err("restore should fail");
+        let summary = manager.summary("external").await?;
+
+        assert!(matches!(error, ListenerManagerError::StartFailed { .. }));
+        assert_eq!(summary.state.status, ListenerStatus::Error);
+        assert!(summary.state.last_error.as_deref().is_some_and(|message| {
+            message.contains("not implemented") && message.contains("svc")
+        }));
+        assert!(!manager.active_handles.read().await.contains_key("external"));
 
         Ok(())
     }

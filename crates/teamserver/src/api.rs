@@ -714,7 +714,7 @@ async fn list_agents(
     context_path = "/api/v1",
     tag = "agents",
     security(("api_key" = [])),
-    params(("id" = String, Path, description = "Agent id in hex or decimal form")),
+    params(("id" = String, Path, description = "Agent id in hex (with optional 0x prefix)")),
     responses(
         (status = 200, description = "Agent details", body = AgentInfo),
         (status = 400, description = "Invalid agent id", body = ApiErrorBody),
@@ -743,7 +743,7 @@ async fn get_agent(
     context_path = "/api/v1",
     tag = "agents",
     security(("api_key" = [])),
-    params(("id" = String, Path, description = "Agent id in hex or decimal form")),
+    params(("id" = String, Path, description = "Agent id in hex (with optional 0x prefix)")),
     responses(
         (status = 202, description = "Agent kill task queued", body = AgentTaskQueuedResponse),
         (status = 400, description = "Invalid agent id", body = ApiErrorBody),
@@ -839,7 +839,7 @@ async fn kill_agent(
     context_path = "/api/v1",
     tag = "agents",
     security(("api_key" = [])),
-    params(("id" = String, Path, description = "Agent id in hex or decimal form")),
+    params(("id" = String, Path, description = "Agent id in hex (with optional 0x prefix)")),
     request_body = AgentTaskInfo,
     responses(
         (status = 202, description = "Agent task queued", body = AgentTaskQueuedResponse),
@@ -1587,14 +1587,10 @@ fn parse_api_agent_id(value: &str) -> Result<u32, AgentApiError> {
         return Err(AgentCommandError::MissingAgentId.into());
     }
 
-    let maybe_prefixed =
+    let hex_digits =
         trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")).unwrap_or(trimmed);
-    let parse_hex = trimmed.starts_with("0x")
-        || trimmed.starts_with("0X")
-        || maybe_prefixed.chars().any(|character| character.is_ascii_alphabetic());
-    let radix = if parse_hex { 16 } else { 10 };
 
-    u32::from_str_radix(maybe_prefixed, radix)
+    u32::from_str_radix(hex_digits, 16)
         .map_err(|_| AgentCommandError::InvalidAgentId { agent_id: trimmed.to_owned() }.into())
 }
 
@@ -2974,5 +2970,35 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn parse_api_agent_id_always_parses_hex() {
+        assert_eq!(super::parse_api_agent_id("DEADBEEF").unwrap(), 0xDEAD_BEEF);
+        assert_eq!(super::parse_api_agent_id("deadbeef").unwrap(), 0xDEAD_BEEF);
+        assert_eq!(super::parse_api_agent_id("0xDEADBEEF").unwrap(), 0xDEAD_BEEF);
+        assert_eq!(super::parse_api_agent_id("0XDEADBEEF").unwrap(), 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn parse_api_agent_id_all_digit_hex_is_not_decimal() {
+        // "00000010" is agent ID 0x10 (16), not decimal 10
+        assert_eq!(super::parse_api_agent_id("00000010").unwrap(), 0x10);
+        assert_eq!(super::parse_api_agent_id("10").unwrap(), 0x10);
+        assert_eq!(super::parse_api_agent_id("0x10").unwrap(), 0x10);
+    }
+
+    #[test]
+    fn parse_api_agent_id_rejects_empty_and_invalid() {
+        assert!(super::parse_api_agent_id("").is_err());
+        assert!(super::parse_api_agent_id("   ").is_err());
+        assert!(super::parse_api_agent_id("ZZZZ").is_err());
+        assert!(super::parse_api_agent_id("not-hex").is_err());
+    }
+
+    #[test]
+    fn parse_api_agent_id_trims_whitespace() {
+        assert_eq!(super::parse_api_agent_id("  DEADBEEF  ").unwrap(), 0xDEAD_BEEF);
+        assert_eq!(super::parse_api_agent_id(" 0x10 ").unwrap(), 0x10);
     }
 }

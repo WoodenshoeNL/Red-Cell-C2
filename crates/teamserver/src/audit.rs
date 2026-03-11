@@ -306,13 +306,9 @@ fn parse_agent_id_filter(value: &str) -> Option<String> {
         return None;
     }
 
-    let maybe_prefixed =
+    let hex_digits =
         trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")).unwrap_or(trimmed);
-    let parse_hex = trimmed.starts_with("0x")
-        || trimmed.starts_with("0X")
-        || maybe_prefixed.chars().any(|character| character.is_ascii_alphabetic());
-    let radix = if parse_hex { 16 } else { 10 };
-    let agent_id = u32::from_str_radix(maybe_prefixed, radix).ok()?;
+    let agent_id = u32::from_str_radix(hex_digits, 16).ok()?;
     Some(format!("{agent_id:08X}"))
 }
 
@@ -368,11 +364,13 @@ mod tests {
     }
 
     #[test]
-    fn agent_id_filter_normalizes_hex_and_decimal_inputs() {
+    fn agent_id_filter_always_parses_hex() {
         assert_eq!(parse_agent_id_filter("DEADBEEF").as_deref(), Some("DEADBEEF"));
         assert_eq!(parse_agent_id_filter("0x10").as_deref(), Some("00000010"));
-        assert_eq!(parse_agent_id_filter("16").as_deref(), Some("00000010"));
+        assert_eq!(parse_agent_id_filter("00000010").as_deref(), Some("00000010"));
+        assert_eq!(parse_agent_id_filter("16").as_deref(), Some("00000016"));
         assert!(parse_agent_id_filter("").is_none());
+        assert!(parse_agent_id_filter("ZZZZ").is_none());
     }
 
     #[test]

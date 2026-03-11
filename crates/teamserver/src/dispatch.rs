@@ -3671,7 +3671,7 @@ mod tests {
     use serde_json::Value;
     use tokio::time::{Duration, timeout};
 
-    use super::CommandDispatcher;
+    use super::{CommandDispatchError, CommandDispatcher, DownloadState, DownloadTracker};
     use crate::{AgentRegistry, Database, EventBus, Job, SocketRelayManager};
 
     fn sample_agent_info(
@@ -4560,6 +4560,260 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn builtin_filesystem_download_handler_accumulates_multi_chunk_downloads_until_close()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xABCD_EF12,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry,
+            events,
+            database.clone(),
+            sockets,
+            None,
+        );
+
+        let file_id = 0x34_u32;
+        let remote_path = "C:\\Temp\\partial.dump";
+
+        dispatcher
+            .dispatch(
+                0xABCD_EF12,
+                u32::from(DemonCommand::CommandFs),
+                0x9A,
+                &filesystem_download_open(file_id, 64, remote_path),
+            )
+            .await?;
+        dispatcher
+            .dispatch(
+                0xABCD_EF12,
+                u32::from(DemonCommand::CommandFs),
+                0x9A,
+                &filesystem_download_write(file_id, b"secret-"),
+            )
+            .await?;
+        dispatcher
+            .dispatch(
+                0xABCD_EF12,
+                u32::from(DemonCommand::CommandFs),
+                0x9A,
+                &filesystem_download_write(file_id, b"bytes"),
+            )
+            .await?;
+
+        assert!(database.loot().list_for_agent(0xABCD_EF12).await?.is_empty());
+
+        let _ = receiver.recv().await.ok_or("missing filesystem open event")?;
+        let progress_one =
+            receiver.recv().await.ok_or("missing first filesystem progress event")?;
+        let progress_two =
+            receiver.recv().await.ok_or("missing second filesystem progress event")?;
+
+        let OperatorMessage::AgentResponse(progress_one) = progress_one else {
+            panic!("expected first filesystem progress response");
+        };
+        assert_eq!(
+            progress_one.info.extra.get("CurrentSize"),
+            Some(&Value::String("7".to_owned()))
+        );
+        assert_eq!(
+            progress_one.info.extra.get("ExpectedSize"),
+            Some(&Value::String("64".to_owned()))
+        );
+
+        let OperatorMessage::AgentResponse(progress_two) = progress_two else {
+            panic!("expected second filesystem progress response");
+        };
+        assert_eq!(
+            progress_two.info.extra.get("CurrentSize"),
+            Some(&Value::String("12".to_owned()))
+        );
+        assert_eq!(
+            progress_two.info.extra.get("ExpectedSize"),
+            Some(&Value::String("64".to_owned()))
+        );
+
+        dispatcher
+            .dispatch(
+                0xABCD_EF12,
+                u32::from(DemonCommand::CommandFs),
+                0x9A,
+                &filesystem_download_close(file_id, 0),
+            )
+            .await?;
+
+        let _ = receiver.recv().await.ok_or("missing filesystem loot event")?;
+        let completion = receiver.recv().await.ok_or("missing filesystem completion event")?;
+        let OperatorMessage::AgentResponse(completion) = completion else {
+            panic!("expected filesystem completion response");
+        };
+        assert_eq!(
+            completion.info.extra.get("MiscData"),
+            Some(&Value::String(BASE64_STANDARD.encode(b"secret-bytes")))
+        );
+
+        let loot = database.loot().list_for_agent(0xABCD_EF12).await?;
+        assert_eq!(loot.len(), 1);
+        assert_eq!(loot[0].data.as_deref(), Some(b"secret-bytes".as_slice()));
+        assert_eq!(loot[0].file_path.as_deref(), Some(remote_path));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_filesystem_download_handler_rejects_writes_without_open()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xABCD_EF13,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry,
+            events,
+            database.clone(),
+            sockets,
+            None,
+        );
+
+        let error = dispatcher
+            .dispatch(
+                0xABCD_EF13,
+                u32::from(DemonCommand::CommandFs),
+                0x9B,
+                &filesystem_download_write(0x35, b"orphan"),
+            )
+            .await
+            .expect_err("filesystem download write without open should fail");
+        assert!(matches!(
+            error,
+            CommandDispatchError::InvalidCallbackPayload {
+                command_id,
+                message,
+            } if command_id == u32::from(DemonCommand::BeaconOutput)
+                && message == "download 0x00000035 was not opened"
+        ));
+        assert!(
+            timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),
+            "unexpected events for rejected filesystem download write"
+        );
+        assert!(database.loot().list_for_agent(0xABCD_EF13).await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn download_tracker_accumulates_multi_chunk_data_until_finish() {
+        let tracker = DownloadTracker::new(64);
+        tracker
+            .start(
+                0xABCD_EF51,
+                0x41,
+                DownloadState {
+                    request_id: 0x71,
+                    remote_path: "C:\\Temp\\multi.bin".to_owned(),
+                    expected_size: 32,
+                    data: Vec::new(),
+                    started_at: "2026-03-11T09:00:00Z".to_owned(),
+                },
+            )
+            .await;
+
+        let first =
+            tracker.append(0xABCD_EF51, 0x41, b"abc").await.expect("first chunk should append");
+        assert_eq!(first.data, b"abc");
+        assert_eq!(first.expected_size, 32);
+
+        let second =
+            tracker.append(0xABCD_EF51, 0x41, b"def").await.expect("second chunk should append");
+        assert_eq!(second.data, b"abcdef");
+        assert_eq!(second.expected_size, 32);
+
+        let finished = tracker.finish(0xABCD_EF51, 0x41).await;
+        assert_eq!(
+            finished,
+            Some(DownloadState {
+                request_id: 0x71,
+                remote_path: "C:\\Temp\\multi.bin".to_owned(),
+                expected_size: 32,
+                data: b"abcdef".to_vec(),
+                started_at: "2026-03-11T09:00:00Z".to_owned(),
+            })
+        );
+        assert_eq!(tracker.finish(0xABCD_EF51, 0x41).await, None);
+    }
+
+    #[tokio::test]
+    async fn download_tracker_rejects_chunks_for_unknown_downloads() {
+        let tracker = DownloadTracker::new(64);
+
+        let error = tracker
+            .append(0xABCD_EF52, 0x42, b"orphan")
+            .await
+            .expect_err("append without start should fail");
+        assert!(matches!(
+            error,
+            CommandDispatchError::InvalidCallbackPayload {
+                command_id,
+                message,
+            } if command_id == u32::from(DemonCommand::BeaconOutput)
+                && message == "download 0x00000042 was not opened"
+        ));
+    }
+
+    #[tokio::test]
+    async fn download_tracker_drops_downloads_that_exceed_the_size_cap() {
+        let tracker = DownloadTracker::new(4);
+        tracker
+            .start(
+                0xABCD_EF53,
+                0x43,
+                DownloadState {
+                    request_id: 0x72,
+                    remote_path: "C:\\Temp\\oversized.bin".to_owned(),
+                    expected_size: 16,
+                    data: Vec::new(),
+                    started_at: "2026-03-11T09:05:00Z".to_owned(),
+                },
+            )
+            .await;
+
+        let partial = tracker
+            .append(0xABCD_EF53, 0x43, b"12")
+            .await
+            .expect("first partial chunk should append");
+        assert_eq!(partial.data, b"12");
+
+        let error = tracker
+            .append(0xABCD_EF53, 0x43, b"345")
+            .await
+            .expect_err("downloads above the cap should be dropped");
+        assert!(matches!(
+            error,
+            CommandDispatchError::DownloadTooLarge {
+                agent_id: 0xABCD_EF53,
+                file_id: 0x43,
+                max_download_bytes: 4,
+            }
+        ));
+        assert_eq!(tracker.finish(0xABCD_EF53, 0x43).await, None);
+    }
+
+    #[tokio::test]
     async fn builtin_beacon_file_callbacks_reassemble_downloads()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
@@ -4634,6 +4888,161 @@ mod tests {
         assert_eq!(loot.len(), 1);
         assert_eq!(loot[0].data.as_deref(), Some(content.as_slice()));
         assert_eq!(loot[0].file_path.as_deref(), Some(remote_path));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_beacon_file_callbacks_accumulate_partial_downloads_until_close()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xABCD_EF22,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry,
+            events,
+            database.clone(),
+            sockets,
+            None,
+        );
+
+        let file_id = 0x56_u32;
+        let remote_path = "C:\\Windows\\Temp\\partial.txt";
+
+        dispatcher
+            .dispatch(
+                0xABCD_EF22,
+                u32::from(DemonCommand::BeaconOutput),
+                0x78,
+                &beacon_file_open(file_id, 32, remote_path),
+            )
+            .await?;
+        dispatcher
+            .dispatch(
+                0xABCD_EF22,
+                u32::from(DemonCommand::BeaconOutput),
+                0x78,
+                &beacon_file_write(file_id, b"beacon-"),
+            )
+            .await?;
+        dispatcher
+            .dispatch(
+                0xABCD_EF22,
+                u32::from(DemonCommand::BeaconOutput),
+                0x78,
+                &beacon_file_write(file_id, b"chunk"),
+            )
+            .await?;
+
+        assert!(database.loot().list_for_agent(0xABCD_EF22).await?.is_empty());
+
+        let _ = receiver.recv().await.ok_or("missing beacon open event")?;
+        let progress_one = receiver.recv().await.ok_or("missing first beacon progress event")?;
+        let progress_two = receiver.recv().await.ok_or("missing second beacon progress event")?;
+
+        let OperatorMessage::AgentResponse(progress_one) = progress_one else {
+            panic!("expected first beacon progress response");
+        };
+        assert_eq!(
+            progress_one.info.extra.get("CurrentSize"),
+            Some(&Value::String("7".to_owned()))
+        );
+        assert_eq!(
+            progress_one.info.extra.get("ExpectedSize"),
+            Some(&Value::String("32".to_owned()))
+        );
+
+        let OperatorMessage::AgentResponse(progress_two) = progress_two else {
+            panic!("expected second beacon progress response");
+        };
+        assert_eq!(
+            progress_two.info.extra.get("CurrentSize"),
+            Some(&Value::String("12".to_owned()))
+        );
+        assert_eq!(
+            progress_two.info.extra.get("ExpectedSize"),
+            Some(&Value::String("32".to_owned()))
+        );
+
+        dispatcher
+            .dispatch(
+                0xABCD_EF22,
+                u32::from(DemonCommand::BeaconOutput),
+                0x78,
+                &beacon_file_close(file_id),
+            )
+            .await?;
+
+        let _ = receiver.recv().await.ok_or("missing beacon loot event")?;
+        let completion = receiver.recv().await.ok_or("missing beacon completion event")?;
+        let OperatorMessage::AgentResponse(completion) = completion else {
+            panic!("expected beacon completion response");
+        };
+        assert_eq!(
+            completion.info.extra.get("MiscData"),
+            Some(&Value::String(BASE64_STANDARD.encode(b"beacon-chunk")))
+        );
+
+        let loot = database.loot().list_for_agent(0xABCD_EF22).await?;
+        assert_eq!(loot.len(), 1);
+        assert_eq!(loot[0].data.as_deref(), Some(b"beacon-chunk".as_slice()));
+        assert_eq!(loot[0].file_path.as_deref(), Some(remote_path));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_beacon_file_callbacks_reject_writes_without_open()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xABCD_EF23,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry,
+            events,
+            database.clone(),
+            sockets,
+            None,
+        );
+
+        let error = dispatcher
+            .dispatch(
+                0xABCD_EF23,
+                u32::from(DemonCommand::BeaconOutput),
+                0x79,
+                &beacon_file_write(0x57, b"orphan"),
+            )
+            .await
+            .expect_err("beacon file write without open should fail");
+        assert!(matches!(
+            error,
+            CommandDispatchError::InvalidCallbackPayload {
+                command_id,
+                message,
+            } if command_id == u32::from(DemonCommand::BeaconOutput)
+                && message == "download 0x00000057 was not opened"
+        ));
+        assert!(
+            timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),
+            "unexpected events for rejected beacon download write"
+        );
+        assert!(database.loot().list_for_agent(0xABCD_EF23).await?.is_empty());
         Ok(())
     }
 
@@ -5667,5 +6076,61 @@ mod tests {
         let mut encoded: Vec<u8> = value.encode_utf16().flat_map(u16::to_le_bytes).collect();
         encoded.extend_from_slice(&[0, 0]);
         add_bytes(buf, &encoded);
+    }
+
+    fn beacon_file_open(file_id: u32, expected_size: u32, remote_path: &str) -> Vec<u8> {
+        let mut header = Vec::new();
+        header.extend_from_slice(&file_id.to_be_bytes());
+        header.extend_from_slice(&expected_size.to_be_bytes());
+        header.extend_from_slice(remote_path.as_bytes());
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonCallback::File));
+        add_bytes(&mut payload, &header);
+        payload
+    }
+
+    fn beacon_file_write(file_id: u32, chunk: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&file_id.to_be_bytes());
+        bytes.extend_from_slice(chunk);
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonCallback::FileWrite));
+        add_bytes(&mut payload, &bytes);
+        payload
+    }
+
+    fn beacon_file_close(file_id: u32) -> Vec<u8> {
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonCallback::FileClose));
+        add_bytes(&mut payload, &file_id.to_be_bytes());
+        payload
+    }
+
+    fn filesystem_download_open(file_id: u32, expected_size: u64, remote_path: &str) -> Vec<u8> {
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonFilesystemCommand::Download));
+        add_u32(&mut payload, 0);
+        add_u32(&mut payload, file_id);
+        add_u64(&mut payload, expected_size);
+        add_utf16(&mut payload, remote_path);
+        payload
+    }
+
+    fn filesystem_download_write(file_id: u32, chunk: &[u8]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonFilesystemCommand::Download));
+        add_u32(&mut payload, 1);
+        add_u32(&mut payload, file_id);
+        add_bytes(&mut payload, chunk);
+        payload
+    }
+
+    fn filesystem_download_close(file_id: u32, reason: u32) -> Vec<u8> {
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonFilesystemCommand::Download));
+        add_u32(&mut payload, 2);
+        add_u32(&mut payload, file_id);
+        add_u32(&mut payload, reason);
+        payload
     }
 }

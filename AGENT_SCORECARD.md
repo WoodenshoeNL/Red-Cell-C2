@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 82 | 31 |
+| Tasks closed | 0 | 83 | 31 |
 | Bugs filed against | 0 | 8 | 9 |
 | Bug rate (bugs/task) | N/A | 0.10 | 0.29 |
 | Quality score | N/A | 90% | 71% |
@@ -21,19 +21,30 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 0 | 0 | 0 |
 | Missing tests | 0 | 2 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
-| Protocol errors | 1 | 7 | 2 |
+| Protocol errors | 1 | 8 | 3 |
 | Security issues | 0 | 14 | 0 |
-| Architecture drift | 0 | 7 | 0 |
+| Architecture drift | 0 | 8 | 0 |
 | Memory / resource leaks | 0 | 6 | 1 |
-| Startup / lifecycle regressions | 0 | 1 | 0 |
+| Startup / lifecycle regressions | 0 | 3 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
-| Availability / timeout regressions | 0 | 1 | 0 |
+| Availability / timeout regressions | 0 | 2 | 0 |
 
 ---
 
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-11 23:36
+
+| Agent | Findings | Categories | Notes |
+|-------|---------:|------------|-------|
+| Claude | 0 | — | No findings this run |
+| Codex | 5 | Availability / timeout regressions, Startup / lifecycle regressions, Architecture drift, Protocol errors | Filed red-cell-c2-26wc, red-cell-c2-39z8, red-cell-c2-3rgl, red-cell-c2-33lj, red-cell-c2-pyct |
+| Cursor | 1 | Protocol errors | Filed red-cell-c2-1m9l against the new AES-CTR offset model, which diverges from the checked-in Havoc reference implementation |
+
+Overall codebase health: drifting
+Biggest blindspot: protocol fidelity is being validated mostly against Red Cell's own mocks instead of the checked-in Havoc implementation, so wire-level incompatibilities can stay green in tests while breaking real Demon interoperability.
 
 ### Arch Review — 2026-03-11 20:34
 
@@ -589,3 +600,14 @@ Notes: Review range contained only QA/architecture bookkeeping commits authored 
 
 Build: passed (cargo check + clippy -D warnings clean; cargo test: 87 passed)
 Notes: Clean sprint. The duplicate DEMON_INIT fix (red-cell-c2-1uoh) is correct — early rejection before any state mutation, plus a deterministic test verifying that stored agent metadata, listener name, and CTR offset are all preserved when a duplicate init arrives. No `unwrap()`/`expect()` in production paths. No violations found. One open P2 bug in_progress (red-5xw) with partial working-tree changes not yet committed.
+
+### QA Review — 2026-03-11 23:35 — dedecae..806efaa
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA bookkeeping commit only |
+| Codex | 1 | 0 | Closed red-5xw. Added regression coverage in `teamserver/src/agent_events.rs` and `teamserver/src/dispatch.rs`; pivot parent metadata is preserved in shared `AgentNew` events. Claimed red-pkl. |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (cargo check clean; cargo clippy --workspace -- -D warnings clean; cargo test: 175 passed, 0 failed; doc-tests clean)
+Notes: Reviewed four commits in range; only one agent-authored development change landed, and it is test-only follow-up for the earlier shared `agent_new_event` fix. Current `HEAD` uses the shared builder from both `listeners.rs` and `dispatch.rs`, so closing red-5xw is justified. No new QA bugs filed. Beads state is consistent: one active in-progress issue (`red-pkl`) and no task closures without corresponding implementation.

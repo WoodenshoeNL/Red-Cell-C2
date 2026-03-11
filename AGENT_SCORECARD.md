@@ -10,9 +10,9 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 0 | 27 | 15 |
-| Bugs filed against | 0 | 2 | 2 |
-| Bug rate (bugs/task) | N/A | 0.07 | 0.13 |
-| Quality score | N/A | 93% | 87% |
+| Bugs filed against | 0 | 2 | 3 |
+| Bug rate (bugs/task) | N/A | 0.07 | 0.20 |
+| Quality score | N/A | 93% | 80% |
 
 ## Violation Breakdown
 
@@ -20,7 +20,7 @@ Each loop run updates the running totals and appends a review entry.
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 0 | 0 | 0 |
 | Missing tests | 0 | 2 | 1 |
-| Clippy warnings | 0 | 0 | 0 |
+| Clippy warnings | 0 | 0 | 1 |
 | Protocol errors | 1 | 2 | 1 |
 | Security issues | 0 | 7 | 0 |
 | Architecture drift | 0 | 1 | 0 |
@@ -211,3 +211,13 @@ Biggest blindspot: AES-256-CTR keystream reuse — same IV used for every packet
 
 Build: passed (cargo check + clippy -D warnings + cargo test: 385 passed)
 Notes: Clean one-task sprint. All 4 new tests are well-structured and exercise meaningful scenarios. No violations found. Cursor's bug rate improves from 0.14 to 0.13 as task count grows without new bugs.
+
+### QA Review — 2026-03-11 02:45 — df1e8bd..ce937e1
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA loop only |
+| Codex | 0 | 0 | No activity this run |
+| Cursor | 0 | 1 | red-2bm in_progress: local `ctr_blocks_for_length` uses manual div_ceil — clippy -D warnings failure (red-3t4). Work not yet committed. |
+
+Build: clippy FAILED on uncommitted working-tree changes to crates/common/src/crypto.rs (manual_div_ceil lint). cargo check + cargo test both passed (82 tests green).

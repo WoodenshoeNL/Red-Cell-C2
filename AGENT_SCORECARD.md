@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 68 | 31 |
-| Bugs filed against | 0 | 5 | 9 |
-| Bug rate (bugs/task) | N/A | 0.07 | 0.29 |
-| Quality score | N/A | 93% | 71% |
+| Tasks closed | 0 | 71 | 31 |
+| Bugs filed against | 0 | 6 | 9 |
+| Bug rate (bugs/task) | N/A | 0.08 | 0.29 |
+| Quality score | N/A | 92% | 71% |
 
 ## Violation Breakdown
 
@@ -21,7 +21,7 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 0 | 0 | 0 |
 | Missing tests | 0 | 2 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
-| Protocol errors | 1 | 4 | 2 |
+| Protocol errors | 1 | 5 | 2 |
 | Security issues | 0 | 13 | 0 |
 | Architecture drift | 0 | 4 | 0 |
 | Memory / resource leaks | 0 | 6 | 1 |
@@ -476,3 +476,14 @@ Notes: One non-agent/unattributed commit added the Codex QA and architecture loo
 
 Build: passed (cargo check + clippy -D warnings clean; cargo test: 502 passed, +11 from new session-activity/operator-inventory/chat-audit/credential/job tests)
 Notes: Clean sprint. Three well-executed closes. Credential endpoint correctly filters by kind="credential" and exposes paginated view. Plugin compatibility shim for Havoc RegisterCommand well-tested (new `register_command_accepts_havoc_keyword_signature` test). Session-activity feature: `last_seen` populated from audit-log MAX(occurred_at) query, `AuditLogFilter.action_in` field added for SQL push-down, websocket chat messages now audited. Minor observation: `list_credentials` fetches all loot records in-memory then filters — superseded by open red-cell-c2-1ga (SQL-backed filters for loot/credentials), not re-filed. `unwrap_or_default()` on `latest_timestamps_by_actor_for_actions` in `operator_inventory()` silently swallows DB read errors; acceptable degraded behavior for display-only API, not filed. No P0/P1/P2 violations found.
+
+### QA Review — 2026-03-11 18:18 — 7e9e37f..f17173f
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No activity in reviewed development commits |
+| Codex | 3 | 1 | Closed: red-cell-c2-2r2, red-cell-c2-1ja, red-cell-c2-3qm. Filed red-cell-c2-29bq (P1 protocol/compatibility regression): client Python command dispatch lowercases callback arguments and `CommandContext.command_line`. Additional Codex work in range: claimed red-cell-c2-2nk and added Havoc client Python compatibility shims. |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (cargo check + clippy -D warnings clean; cargo test: 515 passed)
+Notes: Security fixes for agent crypto exposure and websocket token logging are correct. One new regression was introduced in the client Python compatibility layer: command matching is case-insensitive by lowercasing the entire operator input, which mutates argument payloads before scripts receive them. Non-agent commits in range: one prior QA checkpoint and one architecture-review bookkeeping commit.

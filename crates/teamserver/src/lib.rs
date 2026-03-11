@@ -15,6 +15,7 @@ pub mod payload_builder;
 pub mod plugins;
 pub mod rbac;
 pub mod sockets;
+pub mod webhook;
 pub mod websocket;
 
 pub use agents::{AgentRegistry, DEFAULT_MAX_REGISTERED_AGENTS, Job, PivotInfo};
@@ -28,6 +29,7 @@ pub use audit::{
     AuditDetails, AuditPage, AuditQuery, AuditRecord, AuditResultStatus, SessionActivityPage,
     SessionActivityQuery, SessionActivityRecord, audit_details, login_parameters, parameter_object,
     query_audit_log, query_session_activity, record_operator_action,
+    record_operator_action_with_notifications,
 };
 pub use auth::{
     AuthError, AuthService, AuthenticationFailure, AuthenticationResult, AuthenticationSuccess,
@@ -60,6 +62,7 @@ pub use rbac::{
 };
 pub use red_cell_common::crypto::hash_password_sha3;
 pub use sockets::{SocketRelayError, SocketRelayManager};
+pub use webhook::AuditWebhookNotifier;
 pub use websocket::{
     LoginRateLimiter, OperatorConnectionManager, routes as websocket_routes, websocket_handler,
 };

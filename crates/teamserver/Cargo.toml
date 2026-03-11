@@ -16,6 +16,7 @@ hmac = "0.12"
 interprocess = { version = "2.4.0", features = ["tokio"] }
 red-cell-common = { path = "../common" }
 pyo3 = "0.23"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
@@ -35,7 +36,6 @@ uuid = { version = "1.18", features = ["v4"] }
 
 [dev-dependencies]
 futures-util = "0.3"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 tokio-tungstenite = "0.26"
 tower = { version = "0.5", features = ["util"] }
 

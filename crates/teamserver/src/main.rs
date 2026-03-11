@@ -6,9 +6,10 @@ use anyhow::{Context, Result, anyhow};
 use axum_server::{Handle, tls_rustls::RustlsConfig};
 use clap::Parser;
 use red_cell::{
-    AgentRegistry, ApiRuntime, AuthService, DEFAULT_MAX_REGISTERED_AGENTS, Database, EventBus,
-    ListenerManager, ListenerManagerError, LoginRateLimiter, OperatorConnectionManager,
-    PayloadBuilderService, PluginRuntime, SocketRelayManager, TeamserverState, build_router,
+    AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, DEFAULT_MAX_REGISTERED_AGENTS,
+    Database, EventBus, ListenerManager, ListenerManagerError, LoginRateLimiter,
+    OperatorConnectionManager, PayloadBuilderService, PluginRuntime, SocketRelayManager,
+    TeamserverState, build_router,
 };
 use red_cell_common::config::{Profile, ProfileValidationError};
 use red_cell_common::tls::{
@@ -97,6 +98,7 @@ async fn main() -> Result<()> {
         sockets,
         listeners,
         payload_builder,
+        webhooks: AuditWebhookNotifier::from_profile(&profile),
         login_rate_limiter: LoginRateLimiter::new(),
     });
     let handle = Handle::new();
@@ -255,9 +257,9 @@ mod tests {
     use axum::extract::FromRef;
     use clap::Parser;
     use red_cell::{
-        AgentRegistry, ApiRuntime, AuthService, Database, EventBus, ListenerManager,
-        ListenerStatus, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
-        SocketRelayManager, TeamserverState,
+        AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
+        ListenerManager, ListenerStatus, LoginRateLimiter, OperatorConnectionManager,
+        PayloadBuilderService, SocketRelayManager, TeamserverState,
     };
     use red_cell_common::config::{OperatorRole, Profile};
     use tempfile::NamedTempFile;
@@ -384,6 +386,7 @@ mod tests {
             ),
             payload_builder: PayloadBuilderService::disabled_for_tests(),
             sockets,
+            webhooks: AuditWebhookNotifier::from_profile(&profile),
             profile,
             login_rate_limiter: LoginRateLimiter::new(),
         };

@@ -11,9 +11,9 @@ use axum::{
 use red_cell_common::config::Profile;
 
 use crate::{
-    AgentRegistry, ApiRuntime, AuthService, Database, EventBus, ListenerManager, LoginRateLimiter,
-    OperatorConnectionManager, PayloadBuilderService, SocketRelayManager, api_routes,
-    websocket_routes,
+    AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
+    ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
+    SocketRelayManager, api_routes, websocket_routes,
 };
 
 /// Shared state injected into Axum routes and middleware.
@@ -39,6 +39,8 @@ pub struct TeamserverState {
     pub payload_builder: PayloadBuilderService,
     /// Pivot socket relay manager.
     pub sockets: SocketRelayManager,
+    /// Outbound audit webhook dispatcher.
+    pub webhooks: AuditWebhookNotifier,
     /// WebSocket login rate limiter.
     pub login_rate_limiter: LoginRateLimiter,
 }
@@ -94,6 +96,12 @@ impl FromRef<TeamserverState> for AgentRegistry {
 impl FromRef<TeamserverState> for SocketRelayManager {
     fn from_ref(input: &TeamserverState) -> Self {
         input.sockets.clone()
+    }
+}
+
+impl FromRef<TeamserverState> for AuditWebhookNotifier {
+    fn from_ref(input: &TeamserverState) -> Self {
+        input.webhooks.clone()
     }
 }
 

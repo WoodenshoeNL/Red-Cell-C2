@@ -33,13 +33,13 @@ use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::{
-    AgentRegistry, AuditResultStatus, AuthError, AuthService, AuthenticationFailure,
-    AuthenticationResult, Database, EventBus, Job, ListenerEventAction, ListenerManager,
-    PayloadBuilderService, SocketRelayManager, action_from_mark, agent_events::agent_new_event,
-    audit_details, authorize_websocket_command, listener_config_from_operator,
-    listener_error_event, listener_event_for_action, listener_removed_event, login_failure_message,
-    login_parameters, login_success_message, operator_requests_start, parameter_object,
-    record_operator_action,
+    AgentRegistry, AuditResultStatus, AuditWebhookNotifier, AuthError, AuthService,
+    AuthenticationFailure, AuthenticationResult, Database, EventBus, Job, ListenerEventAction,
+    ListenerManager, PayloadBuilderService, SocketRelayManager, action_from_mark,
+    agent_events::agent_new_event, audit_details, authorize_websocket_command,
+    listener_config_from_operator, listener_error_event, listener_event_for_action,
+    listener_removed_event, login_failure_message, login_parameters, login_success_message,
+    operator_requests_start, parameter_object, record_operator_action_with_notifications,
 };
 
 const DEMON_MAX_RESPONSE_LENGTH: usize = 0x01E0_0000;
@@ -215,6 +215,7 @@ where
     PayloadBuilderService: FromRef<S>,
     OperatorConnectionManager: FromRef<S>,
     LoginRateLimiter: FromRef<S>,
+    AuditWebhookNotifier: FromRef<S>,
     Database: FromRef<S>,
 {
     Router::new().route("/", get(websocket_handler::<S>))
@@ -237,6 +238,7 @@ where
     PayloadBuilderService: FromRef<S>,
     OperatorConnectionManager: FromRef<S>,
     LoginRateLimiter: FromRef<S>,
+    AuditWebhookNotifier: FromRef<S>,
     Database: FromRef<S>,
 {
     websocket.on_upgrade(move |socket| handle_operator_socket(state, socket, addr.ip()))
@@ -253,6 +255,7 @@ where
     PayloadBuilderService: FromRef<S>,
     OperatorConnectionManager: FromRef<S>,
     LoginRateLimiter: FromRef<S>,
+    AuditWebhookNotifier: FromRef<S>,
     Database: FromRef<S>,
 {
     let connection_id = Uuid::new_v4();
@@ -260,6 +263,7 @@ where
     let connections = OperatorConnectionManager::from_ref(&state);
     let database = Database::from_ref(&state);
     let rate_limiter = LoginRateLimiter::from_ref(&state);
+    let webhooks = AuditWebhookNotifier::from_ref(&state);
 
     connections.register(connection_id).await;
 
@@ -267,6 +271,7 @@ where
         &auth,
         &connections,
         &database,
+        &webhooks,
         &rate_limiter,
         connection_id,
         client_ip,
@@ -280,6 +285,7 @@ where
             &connections,
             &EventBus::from_ref(&state),
             &database,
+            &webhooks,
             connection_id,
         )
         .await;
@@ -293,6 +299,7 @@ where
             &connections,
             &EventBus::from_ref(&state),
             &database,
+            &webhooks,
             connection_id,
         )
         .await;
@@ -306,6 +313,7 @@ where
 
     log_operator_action(
         &database,
+        &webhooks,
         &session.username,
         "operator.connect",
         "operator",
@@ -341,7 +349,8 @@ where
             %error,
             "failed to synchronize operator session state"
         );
-        cleanup_connection(&auth, &connections, &event_bus, &database, connection_id).await;
+        cleanup_connection(&auth, &connections, &event_bus, &database, &webhooks, connection_id)
+            .await;
         return;
     }
 
@@ -365,13 +374,14 @@ where
         }
     }
 
-    cleanup_connection(&auth, &connections, &event_bus, &database, connection_id).await;
+    cleanup_connection(&auth, &connections, &event_bus, &database, &webhooks, connection_id).await;
 }
 
 async fn handle_authentication(
     auth: &AuthService,
     connections: &OperatorConnectionManager,
     database: &Database,
+    webhooks: &AuditWebhookNotifier,
     rate_limiter: &LoginRateLimiter,
     connection_id: Uuid,
     client_ip: IpAddr,
@@ -425,6 +435,7 @@ async fn handle_authentication(
             rate_limiter.record_success(client_ip).await;
             log_operator_action(
                 database,
+                webhooks,
                 &success.username,
                 "operator.login",
                 "operator",
@@ -444,6 +455,7 @@ async fn handle_authentication(
             rate_limiter.record_failure(client_ip).await;
             log_operator_action(
                 database,
+                webhooks,
                 &login_user,
                 "operator.login",
                 "operator",
@@ -464,6 +476,7 @@ async fn handle_authentication(
             rate_limiter.record_failure(client_ip).await;
             log_operator_action(
                 database,
+                webhooks,
                 &login_user,
                 "operator.login",
                 "operator",
@@ -485,6 +498,7 @@ async fn handle_authentication(
             rate_limiter.record_failure(client_ip).await;
             log_operator_action(
                 database,
+                webhooks,
                 "",
                 "operator.login",
                 "operator",
@@ -540,6 +554,7 @@ where
     AgentRegistry: FromRef<S>,
     SocketRelayManager: FromRef<S>,
     PayloadBuilderService: FromRef<S>,
+    AuditWebhookNotifier: FromRef<S>,
     Database: FromRef<S>,
 {
     let Some(frame) = incoming else {
@@ -621,6 +636,7 @@ async fn dispatch_operator_command<S>(
     AgentRegistry: FromRef<S>,
     SocketRelayManager: FromRef<S>,
     PayloadBuilderService: FromRef<S>,
+    AuditWebhookNotifier: FromRef<S>,
     Database: FromRef<S>,
 {
     let events = EventBus::from_ref(state);
@@ -628,6 +644,7 @@ async fn dispatch_operator_command<S>(
     let registry = AgentRegistry::from_ref(state);
     let sockets = SocketRelayManager::from_ref(state);
     let payload_builder = PayloadBuilderService::from_ref(state);
+    let webhooks = AuditWebhookNotifier::from_ref(state);
     let database = Database::from_ref(state);
 
     match message {
@@ -639,6 +656,7 @@ async fn dispatch_operator_command<S>(
                     Ok(summary) => {
                         log_operator_action(
                             &database,
+                            &webhooks,
                             &session.username,
                             "listener.create",
                             "listener",
@@ -662,6 +680,7 @@ async fn dispatch_operator_command<S>(
                                 Ok(started) => {
                                     log_operator_action(
                                         &database,
+                                        &webhooks,
                                         &session.username,
                                         "listener.start",
                                         "listener",
@@ -686,6 +705,7 @@ async fn dispatch_operator_command<S>(
                                 Err(error) => {
                                     log_operator_action(
                                         &database,
+                                        &webhooks,
                                         &session.username,
                                         "listener.start",
                                         "listener",
@@ -713,6 +733,7 @@ async fn dispatch_operator_command<S>(
                     Err(error) => {
                         log_operator_action(
                             &database,
+                            &webhooks,
                             &session.username,
                             "listener.create",
                             "listener",
@@ -734,6 +755,7 @@ async fn dispatch_operator_command<S>(
                 Err(error) => {
                     log_operator_action(
                         &database,
+                        &webhooks,
                         &session.username,
                         "listener.create",
                         "listener",
@@ -779,6 +801,7 @@ async fn dispatch_operator_command<S>(
                 Ok(()) => {
                     log_operator_action(
                         &database,
+                        &webhooks,
                         &session.username,
                         "listener.delete",
                         "listener",
@@ -796,6 +819,7 @@ async fn dispatch_operator_command<S>(
                 Err(error) => {
                     log_operator_action(
                         &database,
+                        &webhooks,
                         &session.username,
                         "listener.delete",
                         "listener",
@@ -839,6 +863,7 @@ async fn dispatch_operator_command<S>(
                     };
                     log_operator_action(
                         &database,
+                        &webhooks,
                         &session.username,
                         audit_action,
                         "listener",
@@ -867,6 +892,7 @@ async fn dispatch_operator_command<S>(
                     };
                     log_operator_action(
                         &database,
+                        &webhooks,
                         &session.username,
                         audit_action,
                         "listener",
@@ -892,6 +918,7 @@ async fn dispatch_operator_command<S>(
                 &sockets,
                 &events,
                 &database,
+                &webhooks,
                 session,
                 sanitize_agent_task(session, message),
             )
@@ -967,6 +994,7 @@ async fn dispatch_operator_command<S>(
                 events.broadcast(chat_message_event(&session.username, trimmed));
                 log_operator_action(
                     &database,
+                    &webhooks,
                     &session.username,
                     "operator.chat",
                     "operator",
@@ -1045,6 +1073,7 @@ async fn handle_agent_task(
     sockets: &SocketRelayManager,
     events: &EventBus,
     database: &Database,
+    webhooks: &AuditWebhookNotifier,
     session: &crate::OperatorSession,
     message: Message<red_cell_common::operator::AgentTaskInfo>,
 ) -> Result<(), AgentCommandError> {
@@ -1055,6 +1084,7 @@ async fn handle_agent_task(
         Ok(_) => {
             log_operator_action(
                 database,
+                webhooks,
                 &session.username,
                 "agent.task",
                 "agent",
@@ -1071,6 +1101,7 @@ async fn handle_agent_task(
         Err(error) => {
             log_operator_action(
                 database,
+                webhooks,
                 &session.username,
                 "agent.task",
                 "agent",
@@ -2203,11 +2234,13 @@ async fn cleanup_connection(
     connections: &OperatorConnectionManager,
     events: &EventBus,
     database: &Database,
+    webhooks: &AuditWebhookNotifier,
     connection_id: Uuid,
 ) {
     if let Some(session) = auth.remove_connection(connection_id).await {
         log_operator_action(
             database,
+            webhooks,
             &session.username,
             "operator.disconnect",
             "operator",
@@ -2277,14 +2310,23 @@ fn chat_message_event(user: &str, text: &str) -> OperatorMessage {
 
 async fn log_operator_action(
     database: &Database,
+    webhooks: &AuditWebhookNotifier,
     actor: &str,
     action: &str,
     target_kind: &str,
     target_id: Option<String>,
     details: crate::AuditDetails,
 ) {
-    if let Err(error) =
-        record_operator_action(database, actor, action, target_kind, target_id, details).await
+    if let Err(error) = record_operator_action_with_notifications(
+        database,
+        webhooks,
+        actor,
+        action,
+        target_kind,
+        target_id,
+        details,
+    )
+    .await
     {
         warn!(actor, action, %error, "failed to persist audit log entry");
     }
@@ -2361,8 +2403,8 @@ mod tests {
         write_len_prefixed_bytes, write_u32,
     };
     use crate::{
-        AgentRegistry, AuditQuery, AuditResultStatus, AuthService, Database, EventBus,
-        ListenerManager, PayloadBuilderService, SocketRelayManager, query_audit_log,
+        AgentRegistry, AuditQuery, AuditResultStatus, AuditWebhookNotifier, AuthService, Database,
+        EventBus, ListenerManager, PayloadBuilderService, SocketRelayManager, query_audit_log,
     };
     use red_cell_common::crypto::hash_password_sha3;
 
@@ -2376,6 +2418,7 @@ mod tests {
         listeners: ListenerManager,
         payload_builder: PayloadBuilderService,
         sockets: SocketRelayManager,
+        webhooks: AuditWebhookNotifier,
         login_rate_limiter: LoginRateLimiter,
     }
 
@@ -2422,6 +2465,7 @@ mod tests {
                 listeners: ListenerManager::new(database, registry, events, sockets.clone(), None),
                 payload_builder: PayloadBuilderService::disabled_for_tests(),
                 sockets,
+                webhooks: AuditWebhookNotifier::from_profile(&profile),
                 login_rate_limiter: LoginRateLimiter::new(),
             }
         }
@@ -2472,6 +2516,12 @@ mod tests {
     impl FromRef<TestState> for PayloadBuilderService {
         fn from_ref(input: &TestState) -> Self {
             input.payload_builder.clone()
+        }
+    }
+
+    impl FromRef<TestState> for AuditWebhookNotifier {
+        fn from_ref(input: &TestState) -> Self {
+            input.webhooks.clone()
         }
     }
 

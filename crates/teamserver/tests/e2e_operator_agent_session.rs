@@ -2,9 +2,9 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use red_cell::{
-    AgentRegistry, ApiRuntime, AuthService, Database, EventBus, ListenerManager, LoginRateLimiter,
-    OperatorConnectionManager, PayloadBuilderService, SocketRelayManager, TeamserverState,
-    websocket_routes,
+    AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
+    ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
+    SocketRelayManager, TeamserverState, websocket_routes,
 };
 use red_cell_common::config::Profile;
 use red_cell_common::crypto::{
@@ -65,6 +65,7 @@ async fn operator_session_listener_and_mock_demon_round_trip()
         listeners: listeners.clone(),
         payload_builder: PayloadBuilderService::disabled_for_tests(),
         sockets,
+        webhooks: AuditWebhookNotifier::from_profile(&profile),
         login_rate_limiter: LoginRateLimiter::new(),
     };
 

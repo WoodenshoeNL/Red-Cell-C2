@@ -6,10 +6,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use tracing::warn;
 use utoipa::{IntoParams, ToSchema};
 
 use crate::database::AuditLogFilter;
-use crate::{AuditLogEntry, Database, TeamserverError};
+use crate::{AuditLogEntry, AuditWebhookNotifier, Database, TeamserverError};
 
 /// Result status recorded for an audited action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -290,22 +291,72 @@ pub async fn record_operator_action(
     target_id: Option<String>,
     details: AuditDetails,
 ) -> Result<i64, TeamserverError> {
+    let (id, _) =
+        persist_operator_action(database, actor, action, target_kind, target_id, details).await?;
+    Ok(id)
+}
+
+/// Persist a structured audit-log entry and emit outbound notifications when configured.
+pub async fn record_operator_action_with_notifications(
+    database: &Database,
+    webhooks: &AuditWebhookNotifier,
+    actor: &str,
+    action: &str,
+    target_kind: &str,
+    target_id: Option<String>,
+    details: AuditDetails,
+) -> Result<i64, TeamserverError> {
+    let (id, record) =
+        persist_operator_action(database, actor, action, target_kind, target_id, details).await?;
+
+    if let Err(error) = webhooks.notify_audit_record(&record).await {
+        warn!(actor, action, %error, "failed to deliver audit webhook notification");
+    }
+
+    Ok(id)
+}
+
+async fn persist_operator_action(
+    database: &Database,
+    actor: &str,
+    action: &str,
+    target_kind: &str,
+    target_id: Option<String>,
+    details: AuditDetails,
+) -> Result<(i64, AuditRecord), TeamserverError> {
     let occurred_at = OffsetDateTime::now_utc().format(&Rfc3339).map_err(|error| {
         TeamserverError::InvalidPersistedValue { field: "occurred_at", message: error.to_string() }
     })?;
+    let serialized_details = serde_json::to_value(&details)?;
 
-    database
+    let id = database
         .audit_log()
         .create(&AuditLogEntry {
             id: None,
             actor: actor.to_owned(),
             action: action.to_owned(),
             target_kind: target_kind.to_owned(),
-            target_id,
-            details: Some(serde_json::to_value(details)?),
-            occurred_at,
+            target_id: target_id.clone(),
+            details: Some(serialized_details),
+            occurred_at: occurred_at.clone(),
         })
-        .await
+        .await?;
+
+    Ok((
+        id,
+        AuditRecord {
+            id,
+            actor: actor.to_owned(),
+            action: action.to_owned(),
+            target_kind: target_kind.to_owned(),
+            target_id,
+            agent_id: details.agent_id,
+            command: details.command,
+            parameters: details.parameters,
+            result_status: details.result_status,
+            occurred_at,
+        },
+    ))
 }
 
 /// Return a filtered and paginated view of the audit log.
@@ -477,11 +528,21 @@ pub fn login_parameters(username: &str, connection_id: &uuid::Uuid) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
+
+    use axum::{Json, Router, routing::post};
+    use red_cell_common::config::Profile;
+    use serde_json::Value;
+    use tokio::net::TcpListener;
+    use tokio::sync::mpsc;
+
     use super::{
         AuditQuery, AuditRecord, AuditResultStatus, audit_details, parameter_object,
         parse_agent_id_filter,
     };
-    use crate::AuditLogEntry;
+    use crate::{
+        AuditLogEntry, AuditWebhookNotifier, Database, record_operator_action_with_notifications,
+    };
     use serde_json::json;
 
     #[test]
@@ -536,5 +597,83 @@ mod tests {
         let clamped = AuditQuery { limit: Some(500), offset: Some(4), ..AuditQuery::default() };
         assert_eq!(clamped.limit(), 200);
         assert_eq!(clamped.offset(), 4);
+    }
+
+    #[tokio::test]
+    async fn notifying_audit_helper_posts_to_configured_discord_webhook() {
+        let (address, mut receiver, server) = webhook_server().await;
+        let profile = Profile::parse(&format!(
+            r#"
+            Teamserver {{
+              Host = "127.0.0.1"
+              Port = 40056
+            }}
+
+            Operators {{
+              user "operator" {{
+                Password = "password1234"
+              }}
+            }}
+
+            WebHook {{
+              Discord {{
+                Url = "http://{address}/"
+                User = "Red Cell"
+              }}
+            }}
+
+            Demon {{}}
+            "#
+        ))
+        .expect("profile should parse");
+        let notifier = AuditWebhookNotifier::from_profile(&profile);
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+
+        let id = record_operator_action_with_notifications(
+            &database,
+            &notifier,
+            "operator",
+            "listener.create",
+            "listener",
+            Some("http-1".to_owned()),
+            audit_details(
+                AuditResultStatus::Success,
+                None,
+                Some("create"),
+                Some(json!({"listener":"http-1"})),
+            ),
+        )
+        .await
+        .expect("audit record should persist");
+
+        let payload = receiver.recv().await.expect("payload should arrive");
+        server.abort();
+
+        assert_eq!(id, 1);
+        assert_eq!(payload["username"], "Red Cell");
+        assert_eq!(payload["embeds"][0]["fields"][1]["value"], "listener.create");
+        assert_eq!(payload["embeds"][0]["fields"][4]["value"], "http-1");
+    }
+
+    async fn webhook_server()
+    -> (SocketAddr, mpsc::UnboundedReceiver<Value>, tokio::task::JoinHandle<()>) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let app = Router::new().route(
+            "/",
+            post(move |Json(payload): Json<Value>| {
+                let sender = sender.clone();
+                async move {
+                    let _ = sender.send(payload);
+                    Json(json!({"ok": true}))
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener should bind");
+        let address = listener.local_addr().expect("listener address should resolve");
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        (address, receiver, server)
     }
 }

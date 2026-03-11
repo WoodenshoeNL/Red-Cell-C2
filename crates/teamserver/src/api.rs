@@ -41,9 +41,10 @@ use crate::rbac::{
 };
 use crate::websocket::{AgentCommandError, execute_agent_task};
 use crate::{
-    AuditPage, AuditQuery, AuditResultStatus, AuthError, Database, LootRecord, SessionActivityPage,
-    SessionActivityQuery, TeamserverError, audit_details, parameter_object, query_audit_log,
-    query_session_activity, record_operator_action,
+    AuditPage, AuditQuery, AuditResultStatus, AuditWebhookNotifier, AuthError, Database,
+    LootRecord, SessionActivityPage, SessionActivityQuery, TeamserverError, audit_details,
+    parameter_object, query_audit_log, query_session_activity,
+    record_operator_action_with_notifications,
 };
 const API_VERSION: &str = "v1";
 const API_PREFIX: &str = "/api/v1";
@@ -1072,6 +1073,7 @@ async fn kill_agent(
         Ok(queued_jobs) => {
             record_audit_entry(
                 &state.database,
+                &state.webhooks,
                 &identity.key_id,
                 "agent.task",
                 "agent",
@@ -1092,6 +1094,7 @@ async fn kill_agent(
         Err(error) => {
             record_audit_entry(
                 &state.database,
+                &state.webhooks,
                 &identity.key_id,
                 "agent.task",
                 "agent",
@@ -1173,6 +1176,7 @@ async fn queue_agent_task(
         Ok(queued_jobs) => {
             record_audit_entry(
                 &state.database,
+                &state.webhooks,
                 &identity.key_id,
                 "agent.task",
                 "agent",
@@ -1190,6 +1194,7 @@ async fn queue_agent_task(
         Err(error) => {
             record_audit_entry(
                 &state.database,
+                &state.webhooks,
                 &identity.key_id,
                 "agent.task",
                 "agent",
@@ -1607,6 +1612,7 @@ async fn create_operator(
         Ok(()) => {
             record_audit_entry(
                 &state.database,
+                &state.webhooks,
                 &identity.key_id,
                 "operator.create",
                 "operator",
@@ -1631,6 +1637,7 @@ async fn create_operator(
         Err(error) => {
             record_audit_entry(
                 &state.database,
+                &state.webhooks,
                 &identity.key_id,
                 "operator.create",
                 "operator",
@@ -1700,6 +1707,7 @@ async fn create_listener(
         Err(error) => {
             record_audit_entry(
                 &state.database,
+                &state.webhooks,
                 &identity.key_id,
                 "listener.create",
                 "listener",
@@ -1720,6 +1728,7 @@ async fn create_listener(
     };
     record_audit_entry(
         &state.database,
+        &state.webhooks,
         &identity.key_id,
         "listener.create",
         "listener",
@@ -1786,6 +1795,7 @@ async fn update_listener(
         };
         record_audit_entry(
             &state.database,
+            &state.webhooks,
             &identity.key_id,
             "listener.update",
             "listener",
@@ -1809,6 +1819,7 @@ async fn update_listener(
         Err(error) => {
             record_audit_entry(
                 &state.database,
+                &state.webhooks,
                 &identity.key_id,
                 "listener.update",
                 "listener",
@@ -1829,6 +1840,7 @@ async fn update_listener(
     };
     record_audit_entry(
         &state.database,
+        &state.webhooks,
         &identity.key_id,
         "listener.update",
         "listener",
@@ -1867,6 +1879,7 @@ async fn delete_listener(
         Ok(()) => {
             record_audit_entry(
                 &state.database,
+                &state.webhooks,
                 &identity.key_id,
                 "listener.delete",
                 "listener",
@@ -1884,6 +1897,7 @@ async fn delete_listener(
         Err(error) => {
             record_audit_entry(
                 &state.database,
+                &state.webhooks,
                 &identity.key_id,
                 "listener.delete",
                 "listener",
@@ -1930,6 +1944,7 @@ async fn start_listener(
         Err(error) => {
             record_audit_entry(
                 &state.database,
+                &state.webhooks,
                 &identity.key_id,
                 "listener.start",
                 "listener",
@@ -1950,6 +1965,7 @@ async fn start_listener(
     };
     record_audit_entry(
         &state.database,
+        &state.webhooks,
         &identity.key_id,
         "listener.start",
         "listener",
@@ -1990,6 +2006,7 @@ async fn stop_listener(
         Err(error) => {
             record_audit_entry(
                 &state.database,
+                &state.webhooks,
                 &identity.key_id,
                 "listener.stop",
                 "listener",
@@ -2010,6 +2027,7 @@ async fn stop_listener(
     };
     record_audit_entry(
         &state.database,
+        &state.webhooks,
         &identity.key_id,
         "listener.stop",
         "listener",
@@ -2054,6 +2072,7 @@ async fn mark_listener(
                 Err(error) => {
                     record_audit_entry(
                         &state.database,
+                        &state.webhooks,
                         &identity.key_id,
                         "listener.start",
                         "listener",
@@ -2079,6 +2098,7 @@ async fn mark_listener(
                 Err(error) => {
                     record_audit_entry(
                         &state.database,
+                        &state.webhooks,
                         &identity.key_id,
                         "listener.stop",
                         "listener",
@@ -2110,6 +2130,7 @@ async fn mark_listener(
     };
     record_audit_entry(
         &state.database,
+        &state.webhooks,
         &identity.key_id,
         action,
         "listener",
@@ -2371,14 +2392,23 @@ fn next_task_id() -> String {
 
 async fn record_audit_entry(
     database: &Database,
+    webhooks: &AuditWebhookNotifier,
     actor: &str,
     action: &str,
     target_kind: &str,
     target_id: Option<String>,
     details: crate::AuditDetails,
 ) {
-    if let Err(error) =
-        record_operator_action(database, actor, action, target_kind, target_id, details).await
+    if let Err(error) = record_operator_action_with_notifications(
+        database,
+        webhooks,
+        actor,
+        action,
+        target_kind,
+        target_id,
+        details,
+    )
+    .await
     {
         debug!(actor, action, %error, "failed to persist audit log entry");
     }
@@ -2775,7 +2805,7 @@ mod tests {
     #[tokio::test]
     async fn session_activity_endpoint_returns_only_persisted_operator_session_events() {
         let database = Database::connect_in_memory().await.expect("database");
-        record_operator_action(
+        crate::record_operator_action(
             &database,
             "neo",
             "operator.connect",
@@ -2785,7 +2815,7 @@ mod tests {
         )
         .await
         .expect("connect activity should persist");
-        record_operator_action(
+        crate::record_operator_action(
             &database,
             "neo",
             "operator.chat",
@@ -2800,7 +2830,7 @@ mod tests {
         )
         .await
         .expect("chat activity should persist");
-        record_operator_action(
+        crate::record_operator_action(
             &database,
             "rest-admin",
             "operator.create",
@@ -3099,6 +3129,7 @@ mod tests {
             listeners,
             payload_builder: crate::PayloadBuilderService::disabled_for_tests(),
             sockets,
+            webhooks: crate::AuditWebhookNotifier::from_profile(&profile),
             login_rate_limiter: crate::LoginRateLimiter::new(),
         });
 
@@ -3455,6 +3486,7 @@ mod tests {
                 listeners,
                 payload_builder: crate::PayloadBuilderService::disabled_for_tests(),
                 sockets,
+                webhooks: crate::AuditWebhookNotifier::from_profile(&profile),
                 login_rate_limiter: crate::LoginRateLimiter::new(),
             }),
             agent_registry,

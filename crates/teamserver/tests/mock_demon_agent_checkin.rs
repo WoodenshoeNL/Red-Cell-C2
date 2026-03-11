@@ -2,9 +2,9 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use red_cell::{
-    AgentRegistry, ApiRuntime, AuthService, Database, EventBus, ListenerManager, LoginRateLimiter,
-    OperatorConnectionManager, PayloadBuilderService, SocketRelayManager, TeamserverState,
-    websocket_routes,
+    AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
+    ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
+    SocketRelayManager, TeamserverState, websocket_routes,
 };
 use red_cell_common::crypto::{
     AGENT_IV_LENGTH, AGENT_KEY_LENGTH, advance_iv, ctr_blocks_for_length, decrypt_agent_data,
@@ -61,6 +61,7 @@ async fn mock_demon_checkin_get_job_and_output_flow() -> Result<(), Box<dyn std:
         listeners: listeners.clone(),
         payload_builder: PayloadBuilderService::disabled_for_tests(),
         sockets,
+        webhooks: AuditWebhookNotifier::from_profile(&profile),
         login_rate_limiter: LoginRateLimiter::new(),
     };
 

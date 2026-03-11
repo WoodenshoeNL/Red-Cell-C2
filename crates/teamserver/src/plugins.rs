@@ -1129,4 +1129,181 @@ havoc.RegisterCommand("demo", "demo command", run)
         assert_eq!(queued[0].payload, b"alpha beta");
         Ok(())
     }
+
+    fn make_tracker_and_callback(
+        runtime: &PluginRuntime,
+        py: Python<'_>,
+        append_expr: &std::ffi::CStr,
+    ) -> PyResult<(Py<PyList>, Py<PyAny>)> {
+        runtime.install_api_module(py)?;
+        let tracker = PyList::empty(py);
+        let locals = pyo3::types::PyDict::new(py);
+        locals.set_item("_tracker", tracker.clone())?;
+        let cb = py.eval(append_expr, None, Some(&locals))?;
+        Ok((tracker.unbind(), cb.unbind()))
+    }
+
+    fn tracker_len(tracker: Py<PyList>) -> usize {
+        Python::with_gil(|py| tracker.bind(py).len())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn emit_agent_checkin_invokes_registered_callbacks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let (_database, registry, _events, _sockets, runtime) =
+            runtime_fixture("emit-checkin").await?;
+        registry.insert(sample_agent(0x00AB_CDEF)).await?;
+
+        let (tracker, callback) = tokio::task::spawn_blocking({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| {
+                    make_tracker_and_callback(
+                        &runtime,
+                        py,
+                        pyo3::ffi::c_str!(
+                            "(lambda t: lambda event: t.append(event.event_type))(_tracker)"
+                        ),
+                    )
+                })
+            }
+        })
+        .await??;
+
+        runtime.register_callback(PluginEvent::AgentCheckin, callback).await?;
+        runtime.emit_agent_checkin(0x00AB_CDEF).await?;
+
+        let (count, event_type) = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<(usize, String)> {
+                let list = tracker.bind(py);
+                let count = list.len();
+                let first = list.get_item(0)?.extract::<String>()?;
+                Ok((count, first))
+            })
+        })
+        .await??;
+        assert_eq!(count, 1);
+        assert_eq!(event_type, "agent_checkin");
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn emit_command_output_invokes_registered_callbacks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("emit-output").await?;
+
+        let (tracker, callback) = tokio::task::spawn_blocking({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| {
+                    make_tracker_and_callback(
+                        &runtime,
+                        py,
+                        pyo3::ffi::c_str!(
+                            "(lambda t: lambda event: t.append(event.data['output']))(_tracker)"
+                        ),
+                    )
+                })
+            }
+        })
+        .await??;
+
+        runtime.register_callback(PluginEvent::CommandOutput, callback).await?;
+        runtime.emit_command_output(0x00AB_CDEF, 42, 1, "hello world").await?;
+
+        let (count, output) = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<(usize, String)> {
+                let list = tracker.bind(py);
+                let count = list.len();
+                let first = list.get_item(0)?.extract::<String>()?;
+                Ok((count, first))
+            })
+        })
+        .await??;
+        assert_eq!(count, 1);
+        assert_eq!(output, "hello world");
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn emit_agent_checkin_skips_unknown_agent() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("emit-checkin-unknown").await?;
+
+        let (tracker, callback) = tokio::task::spawn_blocking({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| {
+                    make_tracker_and_callback(
+                        &runtime,
+                        py,
+                        pyo3::ffi::c_str!("(lambda t: lambda event: t.append(1))(_tracker)"),
+                    )
+                })
+            }
+        })
+        .await??;
+
+        runtime.register_callback(PluginEvent::AgentCheckin, callback).await?;
+        runtime.emit_agent_checkin(0xDEAD).await?;
+
+        let count = tokio::task::spawn_blocking(move || tracker_len(tracker)).await?;
+        assert_eq!(count, 0, "callback must not fire when agent is unknown");
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn emit_callback_exception_does_not_propagate() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let (_database, registry, _events, _sockets, runtime) =
+            runtime_fixture("emit-exception").await?;
+        registry.insert(sample_agent(0x00AB_CDEF)).await?;
+
+        let (tracker, bad_cb, good_cb) = tokio::task::spawn_blocking({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| -> PyResult<(Py<PyList>, Py<PyAny>, Py<PyAny>)> {
+                    runtime.install_api_module(py)?;
+                    let helper = PyModule::from_code(
+                        py,
+                        pyo3::ffi::c_str!("def raise_error(event):\n    raise Exception('boom')"),
+                        pyo3::ffi::c_str!("test_raiser.py"),
+                        pyo3::ffi::c_str!("test_raiser"),
+                    )?;
+                    let bad_cb = helper.getattr("raise_error")?.unbind();
+
+                    let tracker = PyList::empty(py);
+                    let locals = pyo3::types::PyDict::new(py);
+                    locals.set_item("_tracker", tracker.clone())?;
+                    let good_cb = py.eval(
+                        pyo3::ffi::c_str!(
+                            "(lambda t: lambda event: t.append(event.event_type))(_tracker)"
+                        ),
+                        None,
+                        Some(&locals),
+                    )?;
+                    Ok((tracker.unbind(), bad_cb, good_cb.unbind()))
+                })
+            }
+        })
+        .await??;
+
+        runtime.register_callback(PluginEvent::AgentCheckin, bad_cb).await?;
+        runtime.register_callback(PluginEvent::AgentCheckin, good_cb).await?;
+
+        runtime.emit_agent_checkin(0x00AB_CDEF).await?;
+
+        let count = tokio::task::spawn_blocking(move || tracker_len(tracker)).await?;
+        assert_eq!(count, 1, "good callback must still fire after bad callback raises");
+        Ok(())
+    }
 }

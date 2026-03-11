@@ -19,12 +19,12 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 0 | 0 | 0 |
-| Missing tests | 0 | 1 | 1 |
+| Missing tests | 0 | 2 | 1 |
 | Clippy warnings | 0 | 0 | 0 |
-| Protocol errors | 1 | 1 | 1 |
-| Security issues | 0 | 5 | 0 |
+| Protocol errors | 1 | 2 | 1 |
+| Security issues | 0 | 7 | 0 |
 | Architecture drift | 0 | 1 | 0 |
-| Memory / resource leaks | 0 | 3 | 0 |
+| Memory / resource leaks | 0 | 4 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
 
 ---
@@ -189,3 +189,14 @@ Notes: High-velocity sprint — 9 closes, ~2000 lines added. Most fixes are corr
 
 Build: passed (cargo check + clippy -D warnings + cargo test: 381 passed)
 Notes: Clean sprint — all 4 fixes correct and well-tested. Test count grew from 74 to 381 (+307 across all crates). No violations found. Cursor's bug rate improves from 0.20 to 0.14 as previously filed bugs don't recur in new work.
+
+### Arch Review — 2026-03-11 00:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 0 | — | No findings this run |
+| Codex | 5 | Security ×2, Memory/resource ×1, Protocol ×1, Missing tests ×1 | AES-CTR IV reuse (red-2bm), SOCKS5 domain truncation (red-1u6), DownloadTracker OOM (red-aow), SOCKS write failure silenced (red-2d3), DownloadTracker test gap (red-sh4) |
+| Cursor | 0 | — | No findings this run |
+
+Overall codebase health: on track
+Biggest blindspot: AES-256-CTR keystream reuse — same IV used for every packet from a given agent session; XOR of any two ciphertexts yields XOR of plaintexts, bypassing protocol-layer confidentiality entirely when TLS is absent (Secure=false listener)

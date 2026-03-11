@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 27 | 15 |
-| Bugs filed against | 0 | 2 | 8 |
-| Bug rate (bugs/task) | N/A | 0.07 | 0.53 |
-| Quality score | N/A | 93% | 47% |
+| Tasks closed | 0 | 27 | 31 |
+| Bugs filed against | 0 | 2 | 9 |
+| Bug rate (bugs/task) | N/A | 0.07 | 0.29 |
+| Quality score | N/A | 93% | 71% |
 
 ## Violation Breakdown
 
@@ -24,7 +24,7 @@ Each loop run updates the running totals and appends a review entry.
 | Protocol errors | 1 | 2 | 2 |
 | Security issues | 0 | 7 | 0 |
 | Architecture drift | 0 | 1 | 0 |
-| Memory / resource leaks | 0 | 4 | 0 |
+| Memory / resource leaks | 0 | 4 | 1 |
 | Audit attribution errors | 0 | 1 | 0 |
 
 ---
@@ -243,3 +243,15 @@ Biggest blindspot: AES-CTR counter not persisted to DB — every teamserver rest
 
 Build: cargo check PASSED, clippy -D warnings FAILED (red-3t4: manual_div_ceil in crypto.rs), cargo test FAILED (red-1km: E2E ack decryption at wrong CTR offset: got [76,123,184,63] expected [120,86,52,18])
 Note: committed codebase (HEAD, before Cursor's WIP) passes all checks (74 tests, clippy clean). Failures are in uncommitted working-tree changes only.
+
+### QA Review — 2026-03-11 05:00 — 6b0b573..9b8fc34
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA loop only |
+| Codex | 0 | 0 | No activity this run |
+| Cursor | 16 | 1 | Closed: red-2bm (AES-CTR keystream reuse — critical fix), red-3tc, red-1s8, red-3t4, red-1km (5 via single CTR commit), red-cell-c2-3o3 (mutex poison fatal), red-cell-c2-30u (request_id mismatch), red-cell-c2-1nk (task_id broadcast), red-cell-c2-3p5 (dedup job-queuing), red-cell-c2-3kc (REST audit), red-cell-c2-ljt (WS ListenerRemove audit), red-cell-c2-35x (audit SQL push), red-cell-c2-irr (TLS cert bypass), red-cell-c2-3s5 (WS rate limit), red-cell-c2-1a5 (agent_id=0 bypass), red-cell-c2-3c2 (request_contexts eviction). Bug: red-mwx (P3) LoginRateLimiter windows map unbounded — lazy eviction allows OOM under many distinct IPs. |
+
+Build: cargo check PASSED, clippy -D warnings PASSED, cargo test PASSED (82/82)
+
+Overall codebase health: strong recovery — the critical AES-CTR keystream reuse vulnerability (red-2bm) is fully resolved with proper per-session counter tracking, comprehensive tests, and all blocked follow-on bugs closed in the same commit. No P0/P1 issues remain open. Biggest open risk: AES-CTR block offset not persisted to DB (red-9pf) — agent reconnects after teamserver restart will receive acks encrypted at counter=0 instead of the expected offset.

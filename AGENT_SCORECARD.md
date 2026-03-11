@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 27 | 10 |
+| Tasks closed | 0 | 27 | 14 |
 | Bugs filed against | 0 | 2 | 2 |
-| Bug rate (bugs/task) | N/A | 0.07 | 0.20 |
-| Quality score | N/A | 93% | 80% |
+| Bug rate (bugs/task) | N/A | 0.07 | 0.14 |
+| Quality score | N/A | 93% | 86% |
 
 ## Violation Breakdown
 
@@ -178,3 +178,14 @@ Observation: `build_dns_txt_response` always emits DNS_TYPE_TXT in the answer RR
 
 Build: passed (cargo check + clippy -D warnings + cargo test: 74 passed)
 Notes: High-velocity sprint — 9 closes, ~2000 lines added. Most fixes are correct and well-tested (token/inject/spawn/process callbacks fully covered). The PrivsGetOrList encoding bug (P2) is a subtle lifetime workaround gone wrong; no test covers that path. Grammar nit (P3) is the same pattern previously fixed in red-cell-c2-f0d, reintroduced in new code.
+
+### QA Review — 2026-03-11 01:30 — d0efbd..9dc2f5
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA loop only |
+| Codex | 0 | 0 | No activity this run |
+| Cursor | 4 | 0 | Closed: red-cell-c2-1k3 (listener endpoint tests: ~550 lines, full update/delete/start/stop/mark coverage), red-cell-c2-315 (parse_api_agent_id always-hex fix), red-cell-c2-11s (parse_hour_minute off-by-one fix), red-cell-c2-2dq (add_bytes overflow: unwrap_or_default→Result propagation). Active: claimed red-cell-c2-1qb (plugin emit unit tests). |
+
+Build: passed (cargo check + clippy -D warnings + cargo test: 381 passed)
+Notes: Clean sprint — all 4 fixes correct and well-tested. Test count grew from 74 to 381 (+307 across all crates). No violations found. Cursor's bug rate improves from 0.20 to 0.14 as previously filed bugs don't recur in new work.

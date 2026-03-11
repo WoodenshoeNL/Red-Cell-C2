@@ -743,10 +743,22 @@ async fn send_socks_connect_reply(
     address: &[u8],
     port: u16,
 ) {
+    if atyp == SOCKS_ATYP_DOMAIN && address.len() > usize::from(u8::MAX) {
+        warn!(
+            address_len = address.len(),
+            "refusing to send invalid SOCKS5 domain reply with oversized address"
+        );
+        let failure_response =
+            [SOCKS_VERSION, SOCKS_REPLY_GENERAL_FAILURE, 0, SOCKS_ATYP_IPV4, 0, 0, 0, 0, 0, 0];
+        let mut writer = writer.lock().await;
+        let _ = writer.write_all(&failure_response).await;
+        return;
+    }
+
     let mut response = vec![SOCKS_VERSION, reply, 0, atyp];
     match atyp {
         SOCKS_ATYP_DOMAIN => {
-            response.push(u8::try_from(address.len()).unwrap_or_default());
+            response.push(address.len() as u8);
             response.extend_from_slice(address);
         }
         _ => response.extend_from_slice(address),
@@ -779,10 +791,13 @@ fn write_len_prefixed_bytes(buf: &mut Vec<u8>, value: &[u8]) -> Result<(), Teams
 
 #[cfg(test)]
 mod tests {
+    use std::io;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use red_cell_common::AgentEncryptionInfo;
+    use tokio::io::AsyncReadExt;
+    use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::oneshot;
 
     use super::{SocketRelayError, SocketRelayManager, SocksServerHandle};
@@ -904,6 +919,56 @@ mod tests {
         .expect("shutdown task should finish");
         assert!(graceful_exit.load(Ordering::SeqCst));
         assert!(handle.shutdown.is_none());
+    }
+
+    async fn connected_write_half_and_reader() -> io::Result<(
+        Arc<tokio::sync::Mutex<tokio::net::tcp::OwnedWriteHalf>>,
+        tokio::net::tcp::OwnedReadHalf,
+    )> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let client = tokio::spawn(async move { TcpStream::connect(addr).await });
+        let (server_stream, _) = listener.accept().await?;
+        let client_stream = client.await.map_err(|error| io::Error::other(error.to_string()))??;
+        let (_client_read, client_write) = client_stream.into_split();
+        let (server_read, _server_write) = server_stream.into_split();
+        Ok((Arc::new(tokio::sync::Mutex::new(client_write)), server_read))
+    }
+
+    #[tokio::test]
+    async fn send_socks_connect_reply_rejects_oversized_domain_addresses() -> io::Result<()> {
+        let (writer, mut reader) = connected_write_half_and_reader().await?;
+        let oversized_domain = vec![b'a'; usize::from(u8::MAX) + 1];
+
+        super::send_socks_connect_reply(
+            &writer,
+            super::SOCKS_REPLY_SUCCEEDED,
+            super::SOCKS_ATYP_DOMAIN,
+            &oversized_domain,
+            8080,
+        )
+        .await;
+
+        let mut response = [0_u8; 10];
+        reader.read_exact(&mut response).await?;
+
+        assert_eq!(
+            response,
+            [
+                super::SOCKS_VERSION,
+                super::SOCKS_REPLY_GENERAL_FAILURE,
+                0,
+                super::SOCKS_ATYP_IPV4,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ]
+        );
+
+        Ok(())
     }
 
     #[test]

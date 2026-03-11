@@ -2245,11 +2245,30 @@ impl ClientApp {
 
     fn submit_console_command(&mut self, agent_id: &str) {
         let operator = self.current_operator_username();
+        let python_runtime = self.python_runtime.clone();
 
         let console = self.session_panel.console_state_mut(agent_id);
         let command_line = console.input.trim().to_owned();
         if command_line.is_empty() {
             return;
+        }
+
+        if let Some(runtime) = python_runtime {
+            match runtime.execute_registered_command(agent_id, &command_line) {
+                Ok(true) => {
+                    push_history_entry(console, &command_line);
+                    console.input.clear();
+                    console.status_message =
+                        Some(format!("Executed script command `{command_line}`."));
+                    return;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    console.status_message =
+                        Some(format!("Script command `{command_line}` failed: {error}"));
+                    return;
+                }
+            }
         }
 
         match build_console_task(agent_id, &command_line, &operator) {

@@ -43,7 +43,7 @@ repair_db_if_needed() {
         log "DB schema error detected — rebuilding from JSONL"
         local db_path="$SCRIPT_DIR/.beads/beads.db"
         rm -f "$db_path" "$db_path-wal" "$db_path-shm" 2>/dev/null
-        if br sync --import-only --quiet 2>/dev/null; then
+        if br sync --import-only --rename-prefix --quiet 2>/dev/null; then
             log "DB rebuilt successfully"
         else
             log "WARNING: DB rebuild failed"
@@ -108,7 +108,7 @@ except Exception: pass
         # leaving the DB/JSONL mismatch intact. Delete and rebuild to fix it.
         local db_path="$SCRIPT_DIR/.beads/beads.db"
         rm -f "$db_path" "$db_path-wal" "$db_path-shm" 2>/dev/null
-        br sync --import-only --quiet 2>/dev/null || true
+        br sync --import-only --rename-prefix --quiet 2>/dev/null || true
         return 1
     fi
 
@@ -117,7 +117,7 @@ except Exception: pass
 
     if git -C "$SCRIPT_DIR" diff --quiet -- .beads/issues.jsonl; then
         log "CLAIM SKIP: $task_id produced no issue change locally; refreshing issue state"
-        br sync --import-only --quiet 2>/dev/null || true
+        br sync --import-only --rename-prefix --quiet 2>/dev/null || true
         return 1
     fi
 
@@ -126,7 +126,7 @@ except Exception: pass
         log "CLAIM SKIP: failed to create claim commit for $task_id"
         git -C "$SCRIPT_DIR" restore --staged .beads/issues.jsonl 2>/dev/null || true
         git -C "$SCRIPT_DIR" checkout -- .beads/issues.jsonl 2>/dev/null || true
-        br sync --import-only --quiet 2>/dev/null || true
+        br sync --import-only --rename-prefix --quiet 2>/dev/null || true
         return 1
     fi
     claim_commit=$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null) || return 1
@@ -137,7 +137,7 @@ except Exception: pass
             return 1
         fi
 
-        br sync --import-only --quiet 2>/dev/null || true
+        br sync --import-only --rename-prefix --quiet 2>/dev/null || true
 
         if ! git -C "$SCRIPT_DIR" merge-base --is-ancestor "$claim_commit" HEAD 2>/dev/null; then
             log "CLAIM VERIFY FAILED: claim commit for $task_id is no longer on the current branch"
@@ -159,7 +159,7 @@ except Exception: pass
     git -C "$SCRIPT_DIR" reset "$head_before" --mixed --quiet
     git -C "$SCRIPT_DIR" checkout -- .beads/issues.jsonl
     git -C "$SCRIPT_DIR" pull --ff-only --quiet 2>/dev/null || true
-    br sync --import-only --quiet 2>/dev/null || true
+    br sync --import-only --rename-prefix --quiet 2>/dev/null || true
     return 1
 }
 
@@ -255,7 +255,7 @@ while true; do
     fi
 
     # Import any new issues from JSONL (picks up claims by other agents)
-    br sync --import-only --quiet 2>/dev/null \
+    br sync --import-only --rename-prefix --quiet 2>/dev/null \
         && log "br sync import: ok" \
         || log "WARNING: br sync import failed, continuing"
 

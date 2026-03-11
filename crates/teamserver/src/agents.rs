@@ -345,10 +345,6 @@ impl AgentRegistry {
         let (key, iv) = decode_crypto_material(agent_id, &info.encryption)?;
         drop(info);
 
-        if key.iter().all(|byte| *byte == 0) {
-            return Ok(plaintext.to_vec());
-        }
-
         let mut offset = entry.ctr_block_offset.lock().await;
         let (ciphertext, new_offset) = encrypt_agent_data_ctr(&key, &iv, *offset, plaintext)?;
         *offset = new_offset;
@@ -371,10 +367,6 @@ impl AgentRegistry {
         let (key, iv) = decode_crypto_material(agent_id, &info.encryption)?;
         drop(info);
 
-        if key.iter().all(|byte| *byte == 0) {
-            return Ok(plaintext.to_vec());
-        }
-
         let offset = *entry.ctr_block_offset.lock().await;
         let (ciphertext, _) = encrypt_agent_data_ctr(&key, &iv, offset, plaintext)?;
         Ok(ciphertext)
@@ -393,10 +385,6 @@ impl AgentRegistry {
         let info = entry.info.read().await;
         let (key, iv) = decode_crypto_material(agent_id, &info.encryption)?;
         drop(info);
-
-        if key.iter().all(|byte| *byte == 0) {
-            return Ok(ciphertext.to_vec());
-        }
 
         let mut offset = entry.ctr_block_offset.lock().await;
         let (plaintext, new_offset) = decrypt_agent_data_ctr(&key, &iv, *offset, ciphertext)?;

@@ -21,10 +21,10 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 0 | 0 | 0 |
 | Missing tests | 0 | 2 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
-| Protocol errors | 1 | 2 | 2 |
-| Security issues | 0 | 9 | 0 |
-| Architecture drift | 0 | 1 | 0 |
-| Memory / resource leaks | 0 | 5 | 1 |
+| Protocol errors | 1 | 3 | 2 |
+| Security issues | 0 | 10 | 0 |
+| Architecture drift | 0 | 2 | 0 |
+| Memory / resource leaks | 0 | 6 | 1 |
 | Audit attribution errors | 0 | 1 | 0 |
 
 ---
@@ -332,3 +332,14 @@ No new development commits since last checkpoint. Only QA/arch review commits in
 
 Build: passed (cargo check + clippy -D warnings clean; cargo test: 446 passed)
 Note: Issue red-cell-c2-1tp (DownloadTracker unit tests) is in_progress — Codex just claimed it. The zd9 fix already added high-level integration tests; uncommitted working-tree changes add 3 direct DownloadTracker unit tests (multi-chunk, orphan chunk, size cap). Expect close next pass.
+
+### Arch Review — 2026-03-11 11:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 0 | — | No findings this run |
+| Codex | 4 | Security ×1, Protocol ×1, Architecture ×1, Memory/resource ×1 | red-cell-c2-m3s (P2): unauthenticated DEMON_INIT reconnect probe desyncs agent AES-CTR — attacker knowing agent_id can forge 20-byte probes to advance server CTR, breaking comms; red-cell-c2-37c (P3): X-Real-IP header trusted from agent when behind_redirector=false — agent-supplied IP stored as external_ip; red-cell-c2-grm (P3): duplicate SHA3-256 hash implementation in auth.rs vs common/crypto.rs — arch drift from common-crate ownership; red-cell-c2-35f (P3): ApiRuntime::windows map never pruned — same class as LoginRateLimiter bug red-cell-c2-2b9 |
+| Cursor | 0 | — | No findings this run |
+
+Overall codebase health: on track
+Biggest blindspot: Unauthenticated DEMON_INIT reconnect probes advance CTR with no key validation — any attacker knowing a 32-bit agent_id can permanently desync agent comms via repeated forged probes (requires only reaching the listener port and knowing the agent_id, visible in plaintext if TLS is off)

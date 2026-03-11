@@ -2205,11 +2205,26 @@ impl ClientApp {
         if save_note {
             let agent_id = editor.agent_id.clone();
             let note = editor.note.trim().to_owned();
-            match app_state.lock() {
-                Ok(mut state) => state.update_agent_note(&agent_id, note.clone()),
-                Err(poisoned) => poisoned.into_inner().update_agent_note(&agent_id, note.clone()),
-            }
-            self.session_panel.pending_messages.push(build_note_task(&agent_id, &note, ""));
+            let operator = match app_state.lock() {
+                Ok(mut state) => {
+                    state.update_agent_note(&agent_id, note.clone());
+                    state
+                        .operator_info
+                        .as_ref()
+                        .map(|operator| operator.username.clone())
+                        .unwrap_or_default()
+                }
+                Err(poisoned) => {
+                    let mut state = poisoned.into_inner();
+                    state.update_agent_note(&agent_id, note.clone());
+                    state
+                        .operator_info
+                        .as_ref()
+                        .map(|operator| operator.username.clone())
+                        .unwrap_or_default()
+                }
+            };
+            self.session_panel.pending_messages.push(build_note_task(&agent_id, &note, &operator));
             self.session_panel.status_message = Some(format!("Updated note for {agent_id}."));
             self.session_panel.note_editor = None;
             ctx.request_repaint();
@@ -3801,6 +3816,7 @@ mod tests {
             panic!("expected agent task");
         };
 
+        assert_eq!(message.head.user, "operator");
         assert_eq!(message.info.demon_id, "ABCD1234");
         assert_eq!(message.info.command_id, "Teamserver");
         assert_eq!(message.info.command.as_deref(), Some("note"));

@@ -9,9 +9,9 @@ use std::sync::Arc;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use red_cell_common::demon::{
-    DemonCallback, DemonCommand, DemonFilesystemCommand, DemonInjectError, DemonKerberosCommand,
-    DemonMessage, DemonPackage, DemonProcessCommand, DemonProtocolError, DemonSocketCommand,
-    DemonSocketType, DemonTokenCommand,
+    DemonCallback, DemonCallbackError, DemonCommand, DemonFilesystemCommand, DemonInfoClass,
+    DemonInjectError, DemonKerberosCommand, DemonMessage, DemonPackage, DemonProcessCommand,
+    DemonProtocolError, DemonSocketCommand, DemonSocketType, DemonTokenCommand,
 };
 use red_cell_common::operator::{
     AgentResponseInfo, AgentUpdateInfo, EventCode, Message, MessageHead, OperatorMessage,
@@ -312,6 +312,55 @@ impl CommandDispatcher {
                         &payload,
                     )
                     .await
+                })
+            },
+        );
+
+        let error_events = events.clone();
+        dispatcher.register_handler(
+            u32::from(DemonCommand::CommandError),
+            move |agent_id, request_id, payload| {
+                let events = error_events.clone();
+                Box::pin(async move {
+                    handle_command_error_callback(&events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let exit_registry = registry.clone();
+        let exit_events = events.clone();
+        dispatcher.register_handler(
+            u32::from(DemonCommand::CommandExit),
+            move |agent_id, request_id, payload| {
+                let registry = exit_registry.clone();
+                let events = exit_events.clone();
+                Box::pin(async move {
+                    handle_exit_callback(&registry, &events, agent_id, request_id, &payload).await
+                })
+            },
+        );
+
+        let kill_date_registry = registry.clone();
+        let kill_date_events = events.clone();
+        dispatcher.register_handler(
+            u32::from(DemonCommand::CommandKillDate),
+            move |agent_id, request_id, payload| {
+                let registry = kill_date_registry.clone();
+                let events = kill_date_events.clone();
+                Box::pin(async move {
+                    handle_kill_date_callback(&registry, &events, agent_id, request_id, &payload)
+                        .await
+                })
+            },
+        );
+
+        let info_events = events.clone();
+        dispatcher.register_handler(
+            u32::from(DemonCommand::DemonInfo),
+            move |agent_id, request_id, payload| {
+                let events = info_events.clone();
+                Box::pin(async move {
+                    handle_demon_info_callback(&events, agent_id, request_id, &payload).await
                 })
             },
         );
@@ -749,6 +798,32 @@ async fn dispatch_builtin_package(
             payload,
         )
         .await;
+    }
+    if command_id == u32::from(DemonCommand::CommandError) {
+        return handle_command_error_callback(context.events, agent_id, request_id, payload).await;
+    }
+    if command_id == u32::from(DemonCommand::CommandExit) {
+        return handle_exit_callback(
+            context.registry,
+            context.events,
+            agent_id,
+            request_id,
+            payload,
+        )
+        .await;
+    }
+    if command_id == u32::from(DemonCommand::CommandKillDate) {
+        return handle_kill_date_callback(
+            context.registry,
+            context.events,
+            agent_id,
+            request_id,
+            payload,
+        )
+        .await;
+    }
+    if command_id == u32::from(DemonCommand::DemonInfo) {
+        return handle_demon_info_callback(context.events, agent_id, request_id, payload).await;
     }
     if command_id == u32::from(DemonCommand::BeaconOutput) {
         return handle_beacon_output_callback(
@@ -1250,6 +1325,176 @@ async fn handle_command_output_callback(
     {
         warn!(agent_id = format_args!("{agent_id:08X}"), %error, "failed to emit python command_output event");
     }
+    Ok(None)
+}
+
+async fn handle_command_error_callback(
+    events: &EventBus,
+    agent_id: u32,
+    request_id: u32,
+    payload: &[u8],
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::CommandError));
+    let error_class = parser.read_u32("command error class")?;
+
+    let message = match DemonCallbackError::try_from(error_class) {
+        Ok(DemonCallbackError::Win32) => {
+            let error_code = parser.read_u32("command error win32 code")?;
+            match win32_error_code_name(error_code) {
+                Some(name) => format!("Win32 Error: {name} [{error_code}]"),
+                None => format!("Win32 Error: [{error_code}]"),
+            }
+        }
+        Ok(DemonCallbackError::Token) => {
+            let status = parser.read_u32("command error token status")?;
+            match status {
+                0x1 => "No tokens inside the token vault".to_owned(),
+                other => format!("Token operation failed with status 0x{other:X}"),
+            }
+        }
+        Ok(DemonCallbackError::Coffee) => {
+            return Ok(None);
+        }
+        Err(_) => return Ok(None),
+    };
+
+    events.broadcast(agent_response_event(
+        agent_id,
+        u32::from(DemonCommand::CommandError),
+        request_id,
+        "Error",
+        &message,
+        None,
+    )?);
+    Ok(None)
+}
+
+async fn handle_exit_callback(
+    registry: &AgentRegistry,
+    events: &EventBus,
+    agent_id: u32,
+    request_id: u32,
+    payload: &[u8],
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::CommandExit));
+    let exit_method = parser.read_u32("command exit method")?;
+    let message = match exit_method {
+        1 => "Agent has been tasked to cleanup and exit thread. cya...",
+        2 => "Agent has been tasked to cleanup and exit process. cya...",
+        _ => "Agent exited",
+    };
+
+    mark_agent_dead_and_broadcast(
+        registry,
+        events,
+        agent_id,
+        u32::from(DemonCommand::CommandExit),
+        request_id,
+        message,
+    )
+    .await
+}
+
+async fn handle_kill_date_callback(
+    registry: &AgentRegistry,
+    events: &EventBus,
+    agent_id: u32,
+    request_id: u32,
+    _payload: &[u8],
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    mark_agent_dead_and_broadcast(
+        registry,
+        events,
+        agent_id,
+        u32::from(DemonCommand::CommandKillDate),
+        request_id,
+        "Agent has reached its kill date, tasked to cleanup and exit thread. cya...",
+    )
+    .await
+}
+
+async fn mark_agent_dead_and_broadcast(
+    registry: &AgentRegistry,
+    events: &EventBus,
+    agent_id: u32,
+    command_id: u32,
+    request_id: u32,
+    message: &str,
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    registry.mark_dead(agent_id, message).await?;
+    if let Some(agent) = registry.get(agent_id).await {
+        events.broadcast(agent_update_event(&agent));
+    }
+    events
+        .broadcast(agent_response_event(agent_id, command_id, request_id, "Good", message, None)?);
+    Ok(None)
+}
+
+async fn handle_demon_info_callback(
+    events: &EventBus,
+    agent_id: u32,
+    request_id: u32,
+    payload: &[u8],
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::DemonInfo));
+    let info_class = parser.read_u32("demon info class")?;
+
+    let message = match DemonInfoClass::try_from(info_class) {
+        Ok(DemonInfoClass::MemAlloc) => {
+            let pointer = parser.read_u64("demon info mem alloc pointer")?;
+            let size = parser.read_u32("demon info mem alloc size")?;
+            let protection = parser.read_u32("demon info mem alloc protection")?;
+            format!(
+                "Memory Allocated : Pointer:[0x{pointer:x}] Size:[{size}] Protection:[{}]",
+                format_memory_protect(protection)
+            )
+        }
+        Ok(DemonInfoClass::MemExec) => {
+            let function = parser.read_u64("demon info mem exec function")?;
+            let thread_id = parser.read_u32("demon info mem exec thread id")?;
+            format!("Memory Executed  : Function:[0x{function:x}] ThreadId:[{thread_id}]")
+        }
+        Ok(DemonInfoClass::MemProtect) => {
+            let memory = parser.read_u64("demon info mem protect memory")?;
+            let size = parser.read_u32("demon info mem protect size")?;
+            let old = parser.read_u32("demon info mem protect old protection")?;
+            let new = parser.read_u32("demon info mem protect protection")?;
+            format!(
+                "Memory Protection: Memory:[0x{memory:x}] Size:[{size}] Protection[{} -> {}]",
+                format_memory_protect(old),
+                format_memory_protect(new)
+            )
+        }
+        Ok(DemonInfoClass::ProcCreate) => {
+            let path = parser.read_utf16("demon info proc create path")?;
+            let pid = parser.read_u32("demon info proc create pid")?;
+            let success = parser.read_bool("demon info proc create success")?;
+            let piped = parser.read_bool("demon info proc create piped")?;
+            let verbose = parser.read_bool("demon info proc create verbose")?;
+
+            if !verbose {
+                return Ok(None);
+            }
+
+            if success {
+                format!("Process started: Path:[{path}] ProcessID:[{pid}]")
+            } else if !piped {
+                format!("Process could not be started: Path:[{path}]")
+            } else {
+                format!("Process started without output pipe: Path:[{path}] ProcessID:[{pid}]")
+            }
+        }
+        Err(_) => return Ok(None),
+    };
+
+    events.broadcast(agent_response_event(
+        agent_id,
+        u32::from(DemonCommand::DemonInfo),
+        request_id,
+        "Info",
+        &message,
+        None,
+    )?);
     Ok(None)
 }
 
@@ -3057,6 +3302,7 @@ async fn handle_socket_callback(
 }
 
 fn agent_update_event(agent: &red_cell_common::AgentInfo) -> OperatorMessage {
+    let marked = if agent.active { "Alive" } else { "Dead" };
     OperatorMessage::AgentUpdate(Message {
         head: MessageHead {
             event: EventCode::Session,
@@ -3064,7 +3310,7 @@ fn agent_update_event(agent: &red_cell_common::AgentInfo) -> OperatorMessage {
             timestamp: agent.last_call_in.clone(),
             one_time: String::new(),
         },
-        info: AgentUpdateInfo { agent_id: agent.name_id(), marked: "Alive".to_owned() },
+        info: AgentUpdateInfo { agent_id: agent.name_id(), marked: marked.to_owned() },
     })
 }
 
@@ -3357,6 +3603,17 @@ fn format_memory_protect(protect: u32) -> String {
         0x80 => "PAGE_EXECUTE_WRITECOPY".to_owned(),
         0x100 => "PAGE_GUARD".to_owned(),
         other => format!("0x{other:X}"),
+    }
+}
+
+fn win32_error_code_name(code: u32) -> Option<&'static str> {
+    match code {
+        2 => Some("ERROR_FILE_NOT_FOUND"),
+        5 => Some("ERROR_ACCESS_DENIED"),
+        87 => Some("ERROR_INVALID_PARAMETER"),
+        183 => Some("ERROR_ALREADY_EXISTS"),
+        997 => Some("ERROR_IO_PENDING"),
+        _ => None,
     }
 }
 
@@ -3663,9 +3920,9 @@ mod tests {
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data};
     use red_cell_common::demon::{
-        DemonCallback, DemonCommand, DemonFilesystemCommand, DemonInjectError,
-        DemonKerberosCommand, DemonMessage, DemonPivotCommand, DemonProcessCommand,
-        DemonSocketCommand, DemonSocketType, DemonTokenCommand,
+        DemonCallback, DemonCallbackError, DemonCommand, DemonFilesystemCommand, DemonInfoClass,
+        DemonInjectError, DemonKerberosCommand, DemonMessage, DemonPivotCommand,
+        DemonProcessCommand, DemonSocketCommand, DemonSocketType, DemonTokenCommand,
     };
     use red_cell_common::operator::OperatorMessage;
     use serde_json::Value;
@@ -6056,6 +6313,202 @@ mod tests {
             Some(&Value::String("Failed to spawn DLL in new process".to_owned()))
         );
         assert_eq!(message.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_exit_handler_marks_agent_dead_and_broadcasts_events()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        registry
+            .insert(sample_agent_info(
+                0xAABB_CCDD,
+                [0x41; AGENT_KEY_LENGTH],
+                [0x24; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database,
+            sockets,
+            None,
+        );
+
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandExit), 40, &1_u32.to_le_bytes())
+            .await?;
+
+        let event = receiver.recv().await.ok_or("agent update missing")?;
+        let OperatorMessage::AgentUpdate(message) = event else {
+            panic!("expected agent update event");
+        };
+        assert_eq!(message.info.agent_id, "AABBCCDD");
+        assert_eq!(message.info.marked, "Dead");
+
+        let event = receiver.recv().await.ok_or("agent response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String(
+                "Agent has been tasked to cleanup and exit thread. cya...".to_owned(),
+            ))
+        );
+
+        let agent = registry.get(0xAABB_CCDD).await.ok_or("agent should remain tracked")?;
+        assert!(!agent.active);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_kill_date_handler_marks_agent_dead_and_broadcasts_response()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        registry
+            .insert(sample_agent_info(
+                0x1020_3040,
+                [0x42; AGENT_KEY_LENGTH],
+                [0x25; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database,
+            sockets,
+            None,
+        );
+
+        dispatcher.dispatch(0x1020_3040, u32::from(DemonCommand::CommandKillDate), 41, &[]).await?;
+
+        let _ = receiver.recv().await.ok_or("agent update missing")?;
+        let event = receiver.recv().await.ok_or("agent response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String(
+                "Agent has reached its kill date, tasked to cleanup and exit thread. cya..."
+                    .to_owned(),
+            ))
+        );
+        assert_eq!(message.info.extra.get("Type"), Some(&Value::String("Good".to_owned())));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_demon_info_handler_formats_memory_and_process_messages()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonInfoClass::MemAlloc));
+        add_u64(&mut payload, 0x1234_5000);
+        add_u32(&mut payload, 4096);
+        add_u32(&mut payload, 0x40);
+        dispatcher.dispatch(0xDEAD_BEEF, u32::from(DemonCommand::DemonInfo), 42, &payload).await?;
+
+        let event = receiver.recv().await.ok_or("mem alloc response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(message.info.extra.get("Type"), Some(&Value::String("Info".to_owned())));
+        assert!(
+            message
+                .info
+                .extra
+                .get("Message")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.contains("Memory Allocated"))
+        );
+        assert!(
+            message
+                .info
+                .extra
+                .get("Message")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.contains("PAGE_EXECUTE_READWRITE"))
+        );
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonInfoClass::ProcCreate));
+        add_utf16(&mut payload, "C:\\Windows\\System32\\cmd.exe");
+        add_u32(&mut payload, 777);
+        add_u32(&mut payload, 1);
+        add_u32(&mut payload, 1);
+        add_u32(&mut payload, 1);
+        dispatcher.dispatch(0xDEAD_BEEF, u32::from(DemonCommand::DemonInfo), 43, &payload).await?;
+
+        let event = receiver.recv().await.ok_or("proc create response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert!(message.info.extra.get("Message").and_then(Value::as_str).is_some_and(|value| {
+            value.contains("Process started: Path:[C:\\Windows\\System32\\cmd.exe]")
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_command_error_handler_broadcasts_win32_and_token_messages()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonCallbackError::Win32));
+        add_u32(&mut payload, 2);
+        dispatcher
+            .dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandError), 44, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("win32 error response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Win32 Error: ERROR_FILE_NOT_FOUND [2]".to_owned()))
+        );
+        assert_eq!(message.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonCallbackError::Token));
+        add_u32(&mut payload, 1);
+        dispatcher
+            .dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandError), 45, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("token error response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("No tokens inside the token vault".to_owned()))
+        );
         Ok(())
     }
 

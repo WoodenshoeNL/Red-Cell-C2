@@ -607,9 +607,40 @@ async fn dispatch_operator_command<S>(
             let name = message.info.name;
             match listeners.delete(&name).await {
                 Ok(()) => {
+                    log_operator_action(
+                        &database,
+                        &session.username,
+                        "listener.delete",
+                        "listener",
+                        (!name.is_empty()).then_some(name.clone()),
+                        audit_details(
+                            AuditResultStatus::Success,
+                            None,
+                            Some("delete"),
+                            Some(parameter_object([("name", Value::String(name.clone()))])),
+                        ),
+                    )
+                    .await;
                     events.broadcast(listener_removed_event(&session.username, &name));
                 }
                 Err(error) => {
+                    log_operator_action(
+                        &database,
+                        &session.username,
+                        "listener.delete",
+                        "listener",
+                        (!name.is_empty()).then_some(name.clone()),
+                        audit_details(
+                            AuditResultStatus::Failure,
+                            None,
+                            Some("delete"),
+                            Some(parameter_object([
+                                ("name", Value::String(name.clone())),
+                                ("error", Value::String(error.to_string())),
+                            ])),
+                        ),
+                    )
+                    .await;
                     events.broadcast(listener_error_event(&session.username, &name, &error));
                 }
             }
@@ -2109,8 +2140,8 @@ mod tests {
         write_u32,
     };
     use crate::{
-        AgentRegistry, AuthService, Database, EventBus, ListenerManager, PayloadBuilderService,
-        SocketRelayManager, hash_password,
+        AgentRegistry, AuditQuery, AuditResultStatus, AuthService, Database, EventBus,
+        ListenerManager, PayloadBuilderService, SocketRelayManager, hash_password, query_audit_log,
     };
 
     #[derive(Clone)]
@@ -2901,6 +2932,82 @@ mod tests {
 
         sender.close(None).await.expect("close should send");
         observer.close(None).await.expect("close should send");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_listener_remove_records_audit_trail() {
+        let state = TestState::new().await;
+        let database = state.database.clone();
+        let (mut socket, server) = spawn_server(state).await;
+
+        login(&mut socket, "operator", "password1234").await;
+
+        socket
+            .send(ClientMessage::Text(
+                listener_new_message("operator", sample_listener_info("beta", "Online", 0), false)
+                    .into(),
+            ))
+            .await
+            .expect("listener create should send");
+
+        let _created = read_operator_message(&mut socket).await;
+        let _started = read_operator_message(&mut socket).await;
+
+        socket
+            .send(ClientMessage::Text(listener_remove_message("operator", "beta").into()))
+            .await
+            .expect("listener delete should send");
+
+        let _removed = read_operator_message(&mut socket).await;
+
+        let page = query_audit_log(
+            &database,
+            &AuditQuery { action: Some("listener.delete".to_owned()), ..AuditQuery::default() },
+        )
+        .await
+        .expect("audit query should succeed");
+
+        assert!(!page.items.is_empty(), "expected at least one listener.delete audit entry");
+        let entry = &page.items[0];
+        assert_eq!(entry.action, "listener.delete");
+        assert_eq!(entry.target_kind, "listener");
+        assert_eq!(entry.target_id.as_deref(), Some("beta"));
+        assert_eq!(entry.result_status, AuditResultStatus::Success);
+
+        socket.close(None).await.expect("close should send");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_listener_remove_nonexistent_records_failure_audit() {
+        let state = TestState::new().await;
+        let database = state.database.clone();
+        let (mut socket, server) = spawn_server(state).await;
+
+        login(&mut socket, "operator", "password1234").await;
+
+        socket
+            .send(ClientMessage::Text(listener_remove_message("operator", "ghost").into()))
+            .await
+            .expect("listener delete should send");
+
+        let _error_msg = read_operator_message(&mut socket).await;
+
+        let page = query_audit_log(
+            &database,
+            &AuditQuery { action: Some("listener.delete".to_owned()), ..AuditQuery::default() },
+        )
+        .await
+        .expect("audit query should succeed");
+
+        assert!(!page.items.is_empty(), "expected at least one listener.delete audit entry");
+        let entry = &page.items[0];
+        assert_eq!(entry.action, "listener.delete");
+        assert_eq!(entry.target_kind, "listener");
+        assert_eq!(entry.result_status, AuditResultStatus::Failure);
+
+        socket.close(None).await.expect("close should send");
         server.abort();
     }
 

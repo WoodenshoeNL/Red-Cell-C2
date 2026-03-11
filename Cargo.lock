@@ -3882,8 +3882,10 @@ dependencies = [
  "pyo3",
  "red-cell-common",
  "rfd",
+ "rustls-pemfile",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -3892,6 +3894,7 @@ dependencies = [
  "toml",
  "tracing",
  "url",
+ "webpki-roots 1.0.6",
 ]
 
 [[package]]

@@ -19,6 +19,12 @@ pub(crate) struct LocalConfig {
     /// Directory containing client-side Python scripts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scripts_dir: Option<PathBuf>,
+    /// Path to a custom CA certificate PEM file for teamserver verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_cert: Option<PathBuf>,
+    /// SHA-256 fingerprint (hex) of the pinned teamserver certificate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert_fingerprint: Option<String>,
 }
 
 impl LocalConfig {
@@ -77,6 +83,8 @@ mod tests {
         assert_eq!(config.server_url, None);
         assert_eq!(config.username, None);
         assert_eq!(config.scripts_dir, None);
+        assert_eq!(config.ca_cert, None);
+        assert_eq!(config.cert_fingerprint, None);
     }
 
     #[test]
@@ -85,6 +93,8 @@ mod tests {
             server_url: Some("wss://10.0.0.1:40056/havoc/".to_owned()),
             username: Some("operator".to_owned()),
             scripts_dir: Some(PathBuf::from("/tmp/red-cell-client/scripts")),
+            ca_cert: Some(PathBuf::from("/tmp/ca.pem")),
+            cert_fingerprint: Some("abcdef0123456789".to_owned()),
         };
 
         let serialized = toml::to_string_pretty(&config)
@@ -124,6 +134,8 @@ mod tests {
             server_url: Some("wss://10.0.0.5:9999/havoc/".to_owned()),
             username: Some("admin".to_owned()),
             scripts_dir: Some(dir.path().join("scripts")),
+            ca_cert: None,
+            cert_fingerprint: None,
         };
 
         let contents = toml::to_string_pretty(&config)

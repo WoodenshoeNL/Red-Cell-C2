@@ -27,7 +27,7 @@ use rfd::FileDialog;
 use transport::{
     AgentConsoleEntry, AgentConsoleEntryKind, AgentFileBrowserState, AgentProcessListState,
     AppState, ClientTransport, ConnectionStatus, FileBrowserEntry, LootItem, LootKind,
-    ProcessEntry, SharedAppState,
+    ProcessEntry, SharedAppState, TlsVerification,
 };
 
 const WINDOW_TITLE: &str = "Red Cell Client";
@@ -48,6 +48,16 @@ struct Cli {
     /// Directory containing client-side Python scripts.
     #[arg(long)]
     scripts_dir: Option<PathBuf>,
+    /// Path to a PEM-encoded CA certificate for teamserver verification.
+    #[arg(long)]
+    ca_cert: Option<PathBuf>,
+    /// SHA-256 fingerprint (hex) of the pinned teamserver certificate.
+    #[arg(long)]
+    cert_fingerprint: Option<String>,
+    /// Disable TLS certificate verification entirely. DANGEROUS: makes connections
+    /// vulnerable to man-in-the-middle attacks. Prefer --ca-cert or --cert-fingerprint.
+    #[arg(long, default_value_t = false)]
+    accept_invalid_certs: bool,
 }
 
 /// Application lifecycle phase.
@@ -357,6 +367,7 @@ struct ClientApp {
     local_config: LocalConfig,
     cli_server_url: String,
     scripts_dir: Option<PathBuf>,
+    tls_verification: TlsVerification,
     session_panel: SessionPanelState,
     outgoing_tx: Option<tokio::sync::mpsc::UnboundedSender<OperatorMessage>>,
     python_runtime: Option<PythonRuntime>,
@@ -366,12 +377,14 @@ impl ClientApp {
     fn new(cli: Cli) -> Self {
         let local_config = LocalConfig::load();
         let login_state = LoginState::new(&cli.server, &local_config);
+        let tls_verification = resolve_tls_verification(&cli, &local_config);
 
         Self {
             phase: AppPhase::Login(login_state),
             local_config,
             cli_server_url: cli.server,
             scripts_dir: cli.scripts_dir,
+            tls_verification,
             session_panel: SessionPanelState {
                 sort_column: Some(AgentSortColumn::LastCheckin),
                 descending: true,
@@ -416,6 +429,7 @@ impl ClientApp {
             app_state.clone(),
             ctx.clone(),
             python_runtime.clone(),
+            self.tls_verification.clone(),
         ) {
             Ok(transport) => {
                 let login_message = login_state.build_login_message();
@@ -2423,6 +2437,29 @@ impl eframe::App for ClientApp {
     }
 }
 
+/// Determine the TLS verification mode from CLI flags, falling back to local config.
+///
+/// Precedence: CLI `--accept-invalid-certs` > CLI `--cert-fingerprint` > CLI `--ca-cert`
+///           > config `cert_fingerprint` > config `ca_cert` > system root CAs.
+fn resolve_tls_verification(cli: &Cli, config: &LocalConfig) -> TlsVerification {
+    if cli.accept_invalid_certs {
+        return TlsVerification::DangerousSkipVerify;
+    }
+    if let Some(fingerprint) = &cli.cert_fingerprint {
+        return TlsVerification::Fingerprint(fingerprint.clone());
+    }
+    if let Some(ca_path) = &cli.ca_cert {
+        return TlsVerification::CustomCa(ca_path.clone());
+    }
+    if let Some(fingerprint) = &config.cert_fingerprint {
+        return TlsVerification::Fingerprint(fingerprint.clone());
+    }
+    if let Some(ca_path) = &config.ca_cert {
+        return TlsVerification::CustomCa(ca_path.clone());
+    }
+    TlsVerification::CertificateAuthority
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     launch_client(cli)
@@ -3494,6 +3531,97 @@ mod tests {
     }
 
     #[test]
+    fn cli_accepts_tls_flags() {
+        let cli = Cli::parse_from([
+            "red-cell-client",
+            "--ca-cert",
+            "/tmp/ca.pem",
+            "--cert-fingerprint",
+            "abcd1234",
+        ]);
+        assert_eq!(cli.ca_cert, Some(PathBuf::from("/tmp/ca.pem")));
+        assert_eq!(cli.cert_fingerprint.as_deref(), Some("abcd1234"));
+        assert!(!cli.accept_invalid_certs);
+    }
+
+    #[test]
+    fn cli_accept_invalid_certs_defaults_to_false() {
+        let cli = Cli::parse_from(["red-cell-client"]);
+        assert!(!cli.accept_invalid_certs);
+    }
+
+    #[test]
+    fn cli_accept_invalid_certs_flag_sets_true() {
+        let cli = Cli::parse_from(["red-cell-client", "--accept-invalid-certs"]);
+        assert!(cli.accept_invalid_certs);
+    }
+
+    #[test]
+    fn resolve_tls_prefers_cli_accept_invalid_certs() {
+        let cli = Cli {
+            server: DEFAULT_SERVER_URL.to_owned(),
+            scripts_dir: None,
+            ca_cert: Some(PathBuf::from("/tmp/ca.pem")),
+            cert_fingerprint: Some("abcd".to_owned()),
+            accept_invalid_certs: true,
+        };
+        let config = LocalConfig::default();
+        assert!(matches!(
+            resolve_tls_verification(&cli, &config),
+            TlsVerification::DangerousSkipVerify
+        ));
+    }
+
+    #[test]
+    fn resolve_tls_prefers_cli_fingerprint_over_ca() {
+        let cli = Cli {
+            server: DEFAULT_SERVER_URL.to_owned(),
+            scripts_dir: None,
+            ca_cert: Some(PathBuf::from("/tmp/ca.pem")),
+            cert_fingerprint: Some("abcd".to_owned()),
+            accept_invalid_certs: false,
+        };
+        let config = LocalConfig::default();
+        assert!(matches!(
+            resolve_tls_verification(&cli, &config),
+            TlsVerification::Fingerprint(ref fp) if fp == "abcd"
+        ));
+    }
+
+    #[test]
+    fn resolve_tls_falls_back_to_config_fingerprint() {
+        let cli = Cli {
+            server: DEFAULT_SERVER_URL.to_owned(),
+            scripts_dir: None,
+            ca_cert: None,
+            cert_fingerprint: None,
+            accept_invalid_certs: false,
+        };
+        let config =
+            LocalConfig { cert_fingerprint: Some("configfp".to_owned()), ..LocalConfig::default() };
+        assert!(matches!(
+            resolve_tls_verification(&cli, &config),
+            TlsVerification::Fingerprint(ref fp) if fp == "configfp"
+        ));
+    }
+
+    #[test]
+    fn resolve_tls_defaults_to_certificate_authority() {
+        let cli = Cli {
+            server: DEFAULT_SERVER_URL.to_owned(),
+            scripts_dir: None,
+            ca_cert: None,
+            cert_fingerprint: None,
+            accept_invalid_certs: false,
+        };
+        let config = LocalConfig::default();
+        assert!(matches!(
+            resolve_tls_verification(&cli, &config),
+            TlsVerification::CertificateAuthority
+        ));
+    }
+
+    #[test]
     fn client_app_state_initializes_placeholder_state() {
         let app_state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
 
@@ -3511,14 +3639,26 @@ mod tests {
 
     #[test]
     fn client_app_starts_in_login_phase() {
-        let cli = Cli { server: DEFAULT_SERVER_URL.to_owned(), scripts_dir: None };
+        let cli = Cli {
+            server: DEFAULT_SERVER_URL.to_owned(),
+            scripts_dir: None,
+            ca_cert: None,
+            cert_fingerprint: None,
+            accept_invalid_certs: false,
+        };
         let app = ClientApp::new(cli);
         assert!(matches!(app.phase, AppPhase::Login(_)));
     }
 
     #[test]
     fn client_app_login_state_uses_cli_default() {
-        let cli = Cli { server: "wss://custom:1234/havoc/".to_owned(), scripts_dir: None };
+        let cli = Cli {
+            server: "wss://custom:1234/havoc/".to_owned(),
+            scripts_dir: None,
+            ca_cert: None,
+            cert_fingerprint: None,
+            accept_invalid_certs: false,
+        };
         let app = ClientApp::new(cli);
         match &app.phase {
             AppPhase::Login(state) => {

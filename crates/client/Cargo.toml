@@ -16,12 +16,15 @@ futures-util = "0.3"
 pyo3 = "0.23"
 red-cell-common = { path = "../common" }
 rfd = "0.15"
+rustls-pemfile = "2.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"
 thiserror = "2.0"
 tokio = { version = "1.45", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-rustls = "0.26.4"
 tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+webpki-roots = "1.0"
 toml = "0.8"
 tracing = "0.1"
 url = "2.5"

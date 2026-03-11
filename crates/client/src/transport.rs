@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::BufReader;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -12,11 +14,13 @@ use red_cell_common::operator::{
     OperatorMessage,
 };
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 use tokio::sync::{mpsc, watch};
 use tokio::time::sleep;
 use tokio_rustls::rustls::ClientConfig;
+use tokio_rustls::rustls::RootCertStore;
 use tokio_rustls::rustls::SignatureScheme;
 use tokio_rustls::rustls::client::danger::{
     HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
@@ -42,6 +46,20 @@ const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 
 pub(crate) type SharedAppState = Arc<Mutex<AppState>>;
 
+/// Controls how the client verifies the teamserver's TLS certificate.
+#[derive(Debug, Clone)]
+pub(crate) enum TlsVerification {
+    /// Verify against system/webpki root CA certificates (default, secure).
+    CertificateAuthority,
+    /// Verify against a custom CA certificate loaded from a PEM file.
+    CustomCa(PathBuf),
+    /// Pin against a specific SHA-256 certificate fingerprint (hex-encoded).
+    Fingerprint(String),
+    /// Skip all certificate verification. Requires explicit opt-in via
+    /// `--accept-invalid-certs`. Logs a prominent warning on every connection.
+    DangerousSkipVerify,
+}
+
 #[derive(Debug)]
 pub(crate) struct ClientTransport {
     runtime: Option<Runtime>,
@@ -56,6 +74,7 @@ impl ClientTransport {
         app_state: SharedAppState,
         repaint: egui::Context,
         python_runtime: Option<PythonRuntime>,
+        tls_verification: TlsVerification,
     ) -> Result<Self, TransportError> {
         red_cell_common::tls::install_default_crypto_provider();
 
@@ -83,6 +102,7 @@ impl ClientTransport {
                 shutdown_rx,
                 repaint,
                 python_runtime,
+                tls_verification,
             )
             .await;
         });
@@ -704,6 +724,14 @@ pub(crate) enum TransportError {
     MissingHost,
     #[error("failed to build rustls client config: {0}")]
     Rustls(#[source] Box<tokio_rustls::rustls::Error>),
+    #[error("failed to read custom CA certificate from `{path}`: {source}")]
+    CustomCaRead { path: String, source: std::io::Error },
+    #[error("failed to parse PEM-encoded CA certificate: {0}")]
+    CustomCaParse(std::io::Error),
+    #[error("no certificates found in the custom CA PEM file `{0}`")]
+    CustomCaEmpty(String),
+    #[error("custom CA certificate rejected by root store: {0}")]
+    CustomCaInvalid(String),
     #[error("failed to create websocket request: {0}")]
     WebSocketRequest(#[source] Box<tungstenite::Error>),
     #[error("failed to serialize websocket command: {0}")]
@@ -722,6 +750,7 @@ async fn run_connection_manager(
     mut shutdown_rx: watch::Receiver<bool>,
     repaint: egui::Context,
     python_runtime: Option<PythonRuntime>,
+    tls_verification: TlsVerification,
 ) {
     let mut reconnect_delay = INITIAL_RECONNECT_DELAY;
     loop {
@@ -732,7 +761,7 @@ async fn run_connection_manager(
 
         set_connection_status(&app_state, &repaint, ConnectionStatus::Connecting);
 
-        let disconnect_reason = match connect_websocket(&server_url).await {
+        let disconnect_reason = match connect_websocket(&server_url, &tls_verification).await {
             Ok(socket) => {
                 reconnect_delay = INITIAL_RECONNECT_DELAY;
                 set_connection_status(&app_state, &repaint, ConnectionStatus::Connected);
@@ -803,11 +832,14 @@ async fn run_connection_manager(
     }
 }
 
-async fn connect_websocket(server_url: &str) -> Result<ClientWebSocket, TransportError> {
+async fn connect_websocket(
+    server_url: &str,
+    tls_verification: &TlsVerification,
+) -> Result<ClientWebSocket, TransportError> {
     let request = server_url
         .into_client_request()
         .map_err(|error| TransportError::WebSocketRequest(Box::new(error)))?;
-    let connector = build_insecure_tls_connector()?;
+    let connector = build_tls_connector(tls_verification)?;
     let (stream, _) = connect_async_tls_with_config(request, None, false, Some(connector))
         .await
         .map_err(|error| TransportError::WebSocketRequest(Box::new(error)))?;
@@ -886,17 +918,72 @@ async fn run_send_loop(
     }
 }
 
-fn build_insecure_tls_connector() -> Result<Connector, TransportError> {
+fn build_tls_connector(verification: &TlsVerification) -> Result<Connector, TransportError> {
     let provider = aws_lc_rs::default_provider();
-    let verifier = Arc::new(DangerousCertificateVerifier { provider: provider.clone() });
-    let client_config = ClientConfig::builder_with_provider(provider.into())
-        .with_safe_default_protocol_versions()
-        .map_err(|error| TransportError::Rustls(Box::new(error)))?
-        .dangerous()
-        .with_custom_certificate_verifier(verifier)
-        .with_no_client_auth();
 
-    Ok(Connector::Rustls(Arc::new(client_config)))
+    match verification {
+        TlsVerification::CertificateAuthority => {
+            let mut root_store = RootCertStore::empty();
+            root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            let client_config = ClientConfig::builder_with_provider(provider.into())
+                .with_safe_default_protocol_versions()
+                .map_err(|error| TransportError::Rustls(Box::new(error)))?
+                .with_root_certificates(root_store)
+                .with_no_client_auth();
+            Ok(Connector::Rustls(Arc::new(client_config)))
+        }
+        TlsVerification::CustomCa(path) => {
+            let ca_pem = std::fs::read(path).map_err(|source| TransportError::CustomCaRead {
+                path: path.display().to_string(),
+                source,
+            })?;
+            let mut reader = BufReader::new(ca_pem.as_slice());
+            let mut root_store = RootCertStore::empty();
+            let mut found_any = false;
+            for cert_result in rustls_pemfile::certs(&mut reader) {
+                let cert = cert_result.map_err(TransportError::CustomCaParse)?;
+                root_store
+                    .add(cert)
+                    .map_err(|error| TransportError::CustomCaInvalid(error.to_string()))?;
+                found_any = true;
+            }
+            if !found_any {
+                return Err(TransportError::CustomCaEmpty(path.display().to_string()));
+            }
+            let client_config = ClientConfig::builder_with_provider(provider.into())
+                .with_safe_default_protocol_versions()
+                .map_err(|error| TransportError::Rustls(Box::new(error)))?
+                .with_root_certificates(root_store)
+                .with_no_client_auth();
+            Ok(Connector::Rustls(Arc::new(client_config)))
+        }
+        TlsVerification::Fingerprint(expected) => {
+            let verifier = Arc::new(FingerprintCertificateVerifier {
+                expected_fingerprint: expected.to_ascii_lowercase(),
+                provider: provider.clone(),
+            });
+            let client_config = ClientConfig::builder_with_provider(provider.into())
+                .with_safe_default_protocol_versions()
+                .map_err(|error| TransportError::Rustls(Box::new(error)))?
+                .dangerous()
+                .with_custom_certificate_verifier(verifier)
+                .with_no_client_auth();
+            Ok(Connector::Rustls(Arc::new(client_config)))
+        }
+        TlsVerification::DangerousSkipVerify => {
+            warn!(
+                "TLS certificate verification is DISABLED — connections are vulnerable to MITM attacks"
+            );
+            let verifier = Arc::new(DangerousCertificateVerifier { provider: provider.clone() });
+            let client_config = ClientConfig::builder_with_provider(provider.into())
+                .with_safe_default_protocol_versions()
+                .map_err(|error| TransportError::Rustls(Box::new(error)))?
+                .dangerous()
+                .with_custom_certificate_verifier(verifier)
+                .with_no_client_auth();
+            Ok(Connector::Rustls(Arc::new(client_config)))
+        }
+    }
 }
 
 fn normalize_server_url(server_url: &str) -> Result<String, TransportError> {
@@ -1305,6 +1392,75 @@ fn parse_human_size(value: &str) -> Option<u64> {
     Some((number * multiplier).round() as u64)
 }
 
+/// Compute the lowercase hex-encoded SHA-256 fingerprint of a DER-encoded certificate.
+pub(crate) fn certificate_fingerprint(cert_der: &[u8]) -> String {
+    let hash = Sha256::digest(cert_der);
+    hash.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Verifies the server certificate by comparing its SHA-256 fingerprint against
+/// a pinned value. Signature verification still uses the real crypto provider.
+#[derive(Debug)]
+struct FingerprintCertificateVerifier {
+    expected_fingerprint: String,
+    provider: crypto::CryptoProvider,
+}
+
+impl ServerCertVerifier for FingerprintCertificateVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, tokio_rustls::rustls::Error> {
+        let actual = certificate_fingerprint(end_entity.as_ref());
+        if actual == self.expected_fingerprint {
+            Ok(ServerCertVerified::assertion())
+        } else {
+            Err(tokio_rustls::rustls::Error::General(format!(
+                "certificate fingerprint mismatch: expected {}, got {actual}",
+                self.expected_fingerprint
+            )))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &tokio_rustls::rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+        crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &tokio_rustls::rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+        crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.provider.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+/// Accepts any server certificate without verification. Only used when the operator
+/// explicitly passes `--accept-invalid-certs`.
 #[derive(Debug)]
 struct DangerousCertificateVerifier {
     provider: crypto::CryptoProvider,
@@ -1802,14 +1958,9 @@ mod tests {
         assert_eq!(state.chat_messages[0].message, "message-5");
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn websocket_connection_accepts_self_signed_certificates() {
-        red_cell_common::tls::install_default_crypto_provider();
-        let identity = generate_self_signed_tls_identity(
-            &["127.0.0.1".to_owned()],
-            TlsKeyAlgorithm::EcdsaP256,
-        )
-        .expect("identity generation should succeed");
+    async fn spawn_tls_echo_server(
+        identity: &red_cell_common::tls::TlsIdentity,
+    ) -> std::net::SocketAddr {
         let tls_acceptor = identity.tls_acceptor().expect("tls acceptor should build");
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener should bind");
         let address = listener.local_addr().expect("listener should have local address");
@@ -1836,9 +1987,10 @@ mod tests {
                 .expect("server should send log event");
         });
 
-        let mut socket = connect_websocket(&format!("wss://{address}/havoc/"))
-            .await
-            .expect("client should accept self-signed cert");
+        address
+    }
+
+    async fn assert_websocket_receives_log(mut socket: ClientWebSocket) {
         let frame = socket
             .next()
             .await
@@ -1853,6 +2005,140 @@ mod tests {
             }
             other => panic!("unexpected websocket frame: {other:?}"),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dangerous_skip_verify_accepts_self_signed_certificates() {
+        red_cell_common::tls::install_default_crypto_provider();
+        let identity = generate_self_signed_tls_identity(
+            &["127.0.0.1".to_owned()],
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("identity generation should succeed");
+        let address = spawn_tls_echo_server(&identity).await;
+
+        let socket = connect_websocket(
+            &format!("wss://{address}/havoc/"),
+            &TlsVerification::DangerousSkipVerify,
+        )
+        .await
+        .expect("client should accept self-signed cert with skip-verify");
+        assert_websocket_receives_log(socket).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fingerprint_verification_accepts_matching_certificate() {
+        red_cell_common::tls::install_default_crypto_provider();
+        let identity = generate_self_signed_tls_identity(
+            &["127.0.0.1".to_owned()],
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("identity generation should succeed");
+
+        let cert_der = {
+            let mut reader = std::io::BufReader::new(identity.certificate_pem());
+            let certs = rustls_pemfile::certs(&mut reader)
+                .collect::<Result<Vec<_>, _>>()
+                .expect("cert PEM should parse");
+            certs.into_iter().next().expect("should have one cert")
+        };
+        let fingerprint = certificate_fingerprint(cert_der.as_ref());
+        let address = spawn_tls_echo_server(&identity).await;
+
+        let socket = connect_websocket(
+            &format!("wss://{address}/havoc/"),
+            &TlsVerification::Fingerprint(fingerprint),
+        )
+        .await
+        .expect("client should accept cert with matching fingerprint");
+        assert_websocket_receives_log(socket).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fingerprint_verification_rejects_mismatched_certificate() {
+        red_cell_common::tls::install_default_crypto_provider();
+        let identity = generate_self_signed_tls_identity(
+            &["127.0.0.1".to_owned()],
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("identity generation should succeed");
+        let address = spawn_tls_echo_server(&identity).await;
+
+        let wrong_fingerprint = "00".repeat(32);
+        let result = connect_websocket(
+            &format!("wss://{address}/havoc/"),
+            &TlsVerification::Fingerprint(wrong_fingerprint),
+        )
+        .await;
+
+        assert!(result.is_err(), "mismatched fingerprint should be rejected");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn custom_ca_verification_accepts_certificate_signed_by_ca() {
+        red_cell_common::tls::install_default_crypto_provider();
+        let identity = generate_self_signed_tls_identity(
+            &["127.0.0.1".to_owned()],
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("identity generation should succeed");
+
+        let ca_dir = tempfile::tempdir().expect("tempdir should be created");
+        let ca_path = ca_dir.path().join("ca.pem");
+        std::fs::write(&ca_path, identity.certificate_pem()).expect("CA cert should be written");
+
+        let address = spawn_tls_echo_server(&identity).await;
+
+        let socket = connect_websocket(
+            &format!("wss://{address}/havoc/"),
+            &TlsVerification::CustomCa(ca_path),
+        )
+        .await
+        .expect("client should accept cert signed by custom CA");
+        assert_websocket_receives_log(socket).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ca_verification_rejects_self_signed_certificate() {
+        red_cell_common::tls::install_default_crypto_provider();
+        let identity = generate_self_signed_tls_identity(
+            &["127.0.0.1".to_owned()],
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("identity generation should succeed");
+        let address = spawn_tls_echo_server(&identity).await;
+
+        let result = connect_websocket(
+            &format!("wss://{address}/havoc/"),
+            &TlsVerification::CertificateAuthority,
+        )
+        .await;
+
+        assert!(result.is_err(), "self-signed cert should be rejected by default CA verification");
+    }
+
+    #[test]
+    fn certificate_fingerprint_produces_hex_sha256() {
+        let identity = generate_self_signed_tls_identity(
+            &["test.local".to_owned()],
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("identity generation should succeed");
+
+        let cert_der = {
+            let mut reader = std::io::BufReader::new(identity.certificate_pem());
+            let certs = rustls_pemfile::certs(&mut reader)
+                .collect::<Result<Vec<_>, _>>()
+                .expect("cert PEM should parse");
+            certs.into_iter().next().expect("should have one cert")
+        };
+
+        let fingerprint = certificate_fingerprint(cert_der.as_ref());
+        assert_eq!(fingerprint.len(), 64, "SHA-256 hex should be 64 chars");
+        assert!(
+            fingerprint.chars().all(|c| c.is_ascii_hexdigit()),
+            "fingerprint should be hex-only"
+        );
     }
 
     #[test]

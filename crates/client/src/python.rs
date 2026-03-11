@@ -36,6 +36,13 @@ struct RegisteredAgentCheckinCallback {
     callback: Arc<Py<PyAny>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MatchedCommand {
+    name: String,
+    command_line: String,
+    arguments: Vec<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AgentCheckinCallbackMode {
     Agent,
@@ -218,30 +225,32 @@ impl PythonApiState {
         lock_mutex(&self.commands).keys().cloned().collect()
     }
 
-    fn match_registered_command(&self, input: &str) -> Option<(String, Vec<String>)> {
-        let normalized_input = normalize_command_name(input);
-        if normalized_input.is_empty() {
+    fn match_registered_command(&self, input: &str) -> Option<MatchedCommand> {
+        let trimmed_input = input.trim();
+        if trimmed_input.is_empty() {
             return None;
         }
+        let input_parts = trimmed_input.split_whitespace().collect::<Vec<_>>();
 
         let commands = lock_mutex(&self.commands);
         let matched_name = commands
             .keys()
-            .filter(|name| {
-                normalized_input == **name
-                    || normalized_input
-                        .strip_prefix(name.as_str())
-                        .is_some_and(|rest| rest.starts_with(' '))
+            .filter_map(|name| {
+                let command_parts = name.split_whitespace().collect::<Vec<_>>();
+                (input_parts.len() >= command_parts.len()
+                    && input_parts.iter().zip(command_parts.iter()).all(
+                        |(input_part, command_part)| input_part.eq_ignore_ascii_case(command_part),
+                    ))
+                .then_some((name, command_parts.len()))
             })
-            .max_by_key(|name| name.len())?
-            .clone();
-        let arguments = normalized_input
-            .strip_prefix(matched_name.as_str())
-            .map(str::trim)
-            .filter(|rest| !rest.is_empty())
-            .map(|rest| rest.split_whitespace().map(ToOwned::to_owned).collect())
-            .unwrap_or_default();
-        Some((matched_name, arguments))
+            .max_by_key(|(_, part_count)| *part_count)?;
+        let arguments =
+            input_parts[matched_name.1..].iter().map(|argument| (*argument).to_owned()).collect();
+        Some(MatchedCommand {
+            name: matched_name.0.clone(),
+            command_line: trimmed_input.to_owned(),
+            arguments,
+        })
     }
 
     fn agent_snapshot(&self, agent_id: &str) -> Option<AgentSummary> {
@@ -349,6 +358,7 @@ enum PythonThreadCommand {
     EmitAgentCheckin(String),
     ExecuteRegisteredCommand {
         command_name: String,
+        command_line: String,
         agent_id: String,
         arguments: Vec<String>,
         response_tx: SyncSender<Result<bool, String>>,
@@ -519,17 +529,17 @@ impl PythonRuntime {
         agent_id: &str,
         input: &str,
     ) -> Result<bool, PythonRuntimeError> {
-        let Some((command_name, arguments)) = self.inner.api_state.match_registered_command(input)
-        else {
+        let Some(matched_command) = self.inner.api_state.match_registered_command(input) else {
             return Ok(false);
         };
         let (response_tx, response_rx) = mpsc::sync_channel(1);
         self.inner
             .command_tx
             .send(PythonThreadCommand::ExecuteRegisteredCommand {
-                command_name,
+                command_name: matched_command.name,
+                command_line: matched_command.command_line,
                 agent_id: agent_id.to_owned(),
-                arguments,
+                arguments: matched_command.arguments,
                 response_tx,
             })
             .map_err(|_| PythonRuntimeError::ThreadUnavailable)?;
@@ -600,6 +610,7 @@ fn python_thread_main(
             }
             PythonThreadCommand::ExecuteRegisteredCommand {
                 command_name,
+                command_line,
                 agent_id,
                 arguments,
                 response_tx,
@@ -609,7 +620,7 @@ fn python_thread_main(
                         py,
                         &command_name,
                         &agent_id,
-                        &rebuild_command_line(&command_name, &arguments),
+                        &command_line,
                         &arguments,
                     )
                 });
@@ -988,14 +999,6 @@ fn callback_accepts_shape(
     let probe =
         PyTuple::new(py, (0..args).map(|_| py.None())).map_err(|error| error.to_string())?;
     Ok(signature.call_method1("bind_partial", probe).is_ok())
-}
-
-fn rebuild_command_line(command_name: &str, arguments: &[String]) -> String {
-    if arguments.is_empty() {
-        command_name.to_owned()
-    } else {
-        format!("{command_name} {}", arguments.join(" "))
-    }
 }
 
 #[pyclass(name = "Agent")]
@@ -1656,6 +1659,44 @@ havoc.RegisterCommand(function=run, module='situational_awareness', command='who
             Some("situational_awareness whoami /all|00ABCDEF")
         );
         assert!(wait_for_output(&runtime, "demo command"));
+    }
+
+    #[test]
+    fn runtime_preserves_original_argument_casing_for_registered_commands() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let output_path = temp_dir.path().join("preserved_case.txt");
+        let script = format!(
+            "import json\nimport pathlib\nimport red_cell\n\
+def demo(context):\n    payload = {{'command_line': context.command_line, 'args': context.args}}\n    pathlib.Path({output:?}).write_text(json.dumps(payload))\n\
+red_cell.register_command('demo', demo)\n",
+            output = output_path.display().to_string()
+        );
+        write_script(&temp_dir.path().join("preserve.py"), &script);
+
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+        {
+            let mut state = lock_app_state(&app_state);
+            state.agents.push(sample_agent("00ABCDEF"));
+        }
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        let executed = runtime
+            .execute_registered_command("00ABCDEF", "DeMo C:\\Temp\\Foo.txt MiXeDCaseToken")
+            .unwrap_or_else(|error| panic!("registered command should run: {error}"));
+
+        assert!(executed);
+        assert_eq!(
+            wait_for_file_contents(&output_path).as_deref(),
+            Some(
+                "{\"command_line\": \"DeMo C:\\\\Temp\\\\Foo.txt MiXeDCaseToken\", \
+\"args\": [\"C:\\\\Temp\\\\Foo.txt\", \"MiXeDCaseToken\"]}"
+            )
+        );
     }
 
     #[test]

@@ -1063,7 +1063,7 @@ fn parse_hour_minute(value: &str) -> Result<(u8, u8), PayloadBuildError> {
     let minute = minute.trim().parse::<u8>().map_err(|_| PayloadBuildError::InvalidRequest {
         message: format!("invalid working-hours minute `{minute}`"),
     })?;
-    if hour > 24 || minute > 60 {
+    if hour > 23 || minute > 59 {
         return Err(PayloadBuildError::InvalidRequest {
             message: "WorkingHours contains an out-of-range hour or minute".to_owned(),
         });
@@ -1195,6 +1195,40 @@ mod tests {
     #[test]
     fn parse_working_hours_encodes_expected_bitmask() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(parse_working_hours(Some("08:00-17:00"))?, 5_243_968);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_hour_minute_accepts_max_valid_time() -> Result<(), Box<dyn std::error::Error>> {
+        let (h, m) = parse_hour_minute("23:59")?;
+        assert_eq!(h, 23);
+        assert_eq!(m, 59);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_hour_minute_rejects_hour_24() {
+        let err = parse_hour_minute("24:00").unwrap_err();
+        assert!(matches!(err, PayloadBuildError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn parse_hour_minute_rejects_minute_60() {
+        let err = parse_hour_minute("00:60").unwrap_err();
+        assert!(matches!(err, PayloadBuildError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn parse_hour_minute_rejects_24_60() {
+        let err = parse_hour_minute("24:60").unwrap_err();
+        assert!(matches!(err, PayloadBuildError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn parse_hour_minute_accepts_zero() -> Result<(), Box<dyn std::error::Error>> {
+        let (h, m) = parse_hour_minute("00:00")?;
+        assert_eq!(h, 0);
+        assert_eq!(m, 0);
         Ok(())
     }
 

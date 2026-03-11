@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 76 | 31 |
-| Bugs filed against | 0 | 7 | 9 |
-| Bug rate (bugs/task) | N/A | 0.09 | 0.29 |
-| Quality score | N/A | 91% | 71% |
+| Tasks closed | 0 | 79 | 31 |
+| Bugs filed against | 0 | 8 | 9 |
+| Bug rate (bugs/task) | N/A | 0.10 | 0.29 |
+| Quality score | N/A | 90% | 71% |
 
 ## Violation Breakdown
 
@@ -27,6 +27,7 @@ Each loop run updates the running totals and appends a review entry.
 | Memory / resource leaks | 0 | 6 | 1 |
 | Startup / lifecycle regressions | 0 | 1 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
+| Availability / timeout regressions | 0 | 1 | 0 |
 
 ---
 
@@ -532,3 +533,14 @@ Notes: Review range contained no product-code changes, only the previous QA chec
 
 Build: passed (cargo check + clippy -D warnings clean; cargo test: workspace passed)
 Notes: Reviewed the external-listener startup rejection and listener operator round-trip preservation changes in `crates/teamserver/src/listeners.rs`. One regression remains: `restore_running()` now propagates the new external-listener `StartFailed` path into `main`, so a persisted external listener marked Running can prevent the entire teamserver from booting after restart. `br list` still intermittently reports `database is busy`, but repeated reads and `br ready` succeeded; treated as a transient tooling lock, not a repository defect.
+
+### QA Review — 2026-03-11 19:51 — fa73426..9690167
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No activity this run |
+| Codex | 3 | 1 | Closed: red-cell-c2-6gn9, red-cell-c2-1exz, red-cell-c2-3djm. Filed red-cell-c2-x38n (P1 availability regression: synchronous audit webhook delivery can stall operator/API actions indefinitely). |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (cargo check + clippy -D warnings clean; cargo test: workspace passed)
+Notes: Reviewed DNS listener gating, persisted-listener restore handling, and Discord audit webhook delivery. The closed listener-restore issue is now covered by startup tests and appears fixed. One defect remains in the new webhook path: audit notifications are awaited inline with no request timeout, so a hung Discord endpoint can block operator login, chat, listener actions, and API tasking despite the notifier being documented as best-effort.

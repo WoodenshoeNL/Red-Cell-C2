@@ -254,10 +254,27 @@ while true; do
         continue
     fi
 
-    # Import any new issues from JSONL (picks up claims by other agents)
+    # Import any new issues from JSONL (picks up claims by other agents).
+    # --rename-prefix normalises any red-xxx IDs from other VMs to red-cell-c2-xxx.
     br sync --import-only --rename-prefix --quiet 2>/dev/null \
         && log "br sync import: ok" \
         || log "WARNING: br sync import failed, continuing"
+
+    # If --rename-prefix renamed IDs, the DB is now ahead of JSONL and the
+    # Stale DB Guard will block every subsequent flush.  Detect this by
+    # attempting a normal flush; if it fails with CONFIG_ERROR, force-flush
+    # and commit so the JSONL is normalised once and for all.
+    if ! br sync --flush-only --quiet 2>/dev/null; then
+        if br sync --flush-only --force --quiet 2>/dev/null; then
+            if ! git -C "$SCRIPT_DIR" diff --quiet -- .beads/issues.jsonl; then
+                git -C "$SCRIPT_DIR" add .beads/issues.jsonl
+                git -C "$SCRIPT_DIR" commit -m "chore: normalize issue IDs to red-cell-c2 prefix [$AGENT_ID]" --quiet \
+                    && git -C "$SCRIPT_DIR" push --quiet 2>/dev/null \
+                    && log "Normalized issue IDs in JSONL and pushed" \
+                    || log "WARNING: could not push normalized JSONL"
+            fi
+        fi
+    fi
 
     # Heal DB schema drift (new br version may require columns not yet in DB)
     repair_db_if_needed

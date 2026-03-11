@@ -114,6 +114,21 @@ else
     exit 1
 fi
 
+# If --rename-prefix renamed IDs, the DB is ahead of JSONL and subsequent
+# flushes will be blocked by the Stale DB Guard.  Heal this now.
+if ! br sync --flush-only --quiet 2>/dev/null; then
+    if br sync --flush-only --force --quiet 2>/dev/null; then
+        if ! git diff --quiet -- .beads/issues.jsonl 2>/dev/null; then
+            warn "Renamed issue IDs written to JSONL — committing and pushing"
+            git add .beads/issues.jsonl
+            git commit -m "chore: normalize issue IDs to red-cell-c2 prefix" --quiet \
+                && git push --quiet \
+                && ok "Normalized JSONL pushed" \
+                || warn "Could not push — commit manually: git push"
+        fi
+    fi
+fi
+
 # Show any tasks currently in_progress (left over from another VM's session)
 IN_PROGRESS="$(br list --status=in_progress --json 2>/dev/null | python3 -c '
 import json, sys

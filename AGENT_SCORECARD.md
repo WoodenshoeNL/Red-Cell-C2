@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 74 | 31 |
-| Bugs filed against | 0 | 6 | 9 |
-| Bug rate (bugs/task) | N/A | 0.08 | 0.29 |
-| Quality score | N/A | 92% | 71% |
+| Tasks closed | 0 | 76 | 31 |
+| Bugs filed against | 0 | 7 | 9 |
+| Bug rate (bugs/task) | N/A | 0.09 | 0.29 |
+| Quality score | N/A | 91% | 71% |
 
 ## Violation Breakdown
 
@@ -25,6 +25,7 @@ Each loop run updates the running totals and appends a review entry.
 | Security issues | 0 | 13 | 0 |
 | Architecture drift | 0 | 7 | 0 |
 | Memory / resource leaks | 0 | 6 | 1 |
+| Startup / lifecycle regressions | 0 | 1 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
 
 ---
@@ -520,3 +521,14 @@ Notes: Reviewed the forwarded-IP trust hardening, Python command casing preserva
 
 Build: passed (cargo check + clippy -D warnings clean; cargo test: workspace passed)
 Notes: Review range contained no product-code changes, only the previous QA checkpoint/scorecard commit. No new QA bugs filed. `br list --status=open` intermittently returned `database is busy`, but repeated reads succeeded and `br ready` returned expected results; treated as a transient tooling lock, not a repository defect.
+
+### QA Review — 2026-03-11 19:28 — 8bac71d..fa73426
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No activity this run |
+| Codex | 2 | 1 | Closed: red-cell-c2-36v7, red-cell-c2-1tfr. Filed red-cell-c2-1exz (P1 startup/lifecycle regression: persisted external listener in Running state aborts teamserver startup on restart). red-cell-c2-6gn9 was claimed but not closed. |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (cargo check + clippy -D warnings clean; cargo test: workspace passed)
+Notes: Reviewed the external-listener startup rejection and listener operator round-trip preservation changes in `crates/teamserver/src/listeners.rs`. One regression remains: `restore_running()` now propagates the new external-listener `StartFailed` path into `main`, so a persisted external listener marked Running can prevent the entire teamserver from booting after restart. `br list` still intermittently reports `database is busy`, but repeated reads and `br ready` succeeded; treated as a transient tooling lock, not a repository defect.

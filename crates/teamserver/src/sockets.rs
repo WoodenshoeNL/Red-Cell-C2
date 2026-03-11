@@ -229,7 +229,7 @@ impl SocketRelayManager {
         port: &str,
     ) -> Result<String, SocketRelayError> {
         let port = parse_port(port)?;
-        let handle = {
+        let mut handle = {
             let mut state = self.state.write().await;
             let Some(agent_state) = state.get_mut(&agent_id) else {
                 return Err(SocketRelayError::ServerNotFound { agent_id, port });
@@ -247,7 +247,7 @@ impl SocketRelayManager {
 
     /// Stop every SOCKS5 listener for an agent.
     pub async fn clear_socks_servers(&self, agent_id: u32) -> Result<String, SocketRelayError> {
-        let handles = {
+        let mut handles = {
             let mut state = self.state.write().await;
             let Some(agent_state) = state.get_mut(&agent_id) else {
                 return Ok("No active SOCKS5 servers".to_owned());
@@ -267,7 +267,7 @@ impl SocketRelayManager {
             return Ok("No active SOCKS5 servers".to_owned());
         }
 
-        for handle in &handles {
+        for handle in &mut handles {
             handle.shutdown();
         }
 
@@ -564,8 +564,10 @@ struct SocksServerHandle {
 }
 
 impl SocksServerHandle {
-    fn shutdown(&self) {
-        self.task.abort();
+    fn shutdown(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
     }
 
     fn port(&self) -> u16 {
@@ -660,7 +662,7 @@ async fn prune_stale_agent_state(
 }
 
 async fn close_agent_state(agent_state: AgentSocketState) {
-    for handle in agent_state.servers.into_values() {
+    for mut handle in agent_state.servers.into_values() {
         handle.shutdown();
     }
 
@@ -777,9 +779,13 @@ fn write_len_prefixed_bytes(buf: &mut Vec<u8>, value: &[u8]) -> Result<(), Teams
 
 #[cfg(test)]
 mod tests {
-    use red_cell_common::AgentEncryptionInfo;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    use super::{SocketRelayError, SocketRelayManager};
+    use red_cell_common::AgentEncryptionInfo;
+    use tokio::sync::oneshot;
+
+    use super::{SocketRelayError, SocketRelayManager, SocksServerHandle};
     use crate::{AgentRegistry, Database, EventBus};
 
     fn sample_agent(agent_id: u32) -> red_cell_common::AgentInfo {
@@ -868,6 +874,36 @@ mod tests {
         assert!(state.contains_key(&0xFEED_FACE));
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn socks_server_handle_shutdown_signals_graceful_exit() {
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let graceful_exit = Arc::new(AtomicBool::new(false));
+        let graceful_exit_task = Arc::clone(&graceful_exit);
+        let task = tokio::spawn(async move {
+            tokio::select! {
+                _ = shutdown_rx => graceful_exit_task.store(true, Ordering::SeqCst),
+                _ = std::future::pending::<()>() => {}
+            }
+        });
+        let mut handle = SocksServerHandle {
+            local_addr: "127.0.0.1:0".to_owned(),
+            shutdown: Some(shutdown_tx),
+            task,
+        };
+
+        handle.shutdown();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !handle.task.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("shutdown task should finish");
+        assert!(graceful_exit.load(Ordering::SeqCst));
+        assert!(handle.shutdown.is_none());
     }
 
     #[test]

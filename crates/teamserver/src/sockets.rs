@@ -4,12 +4,14 @@ use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
 use red_cell_common::demon::{DemonCommand, DemonSocketCommand};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::runtime::Handle;
 use tokio::sync::{Mutex, RwLock, oneshot};
 use tracing::{debug, warn};
 
@@ -25,6 +27,7 @@ const SOCKS_REPLY_COMMAND_NOT_SUPPORTED: u8 = 7;
 const SOCKS_ATYP_IPV4: u8 = 1;
 const SOCKS_ATYP_DOMAIN: u8 = 3;
 const SOCKS_ATYP_IPV6: u8 = 4;
+const STALE_AGENT_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Errors returned by [`SocketRelayManager`].
 #[derive(Debug, Error)]
@@ -79,18 +82,68 @@ pub struct SocketRelayManager {
     _events: EventBus,
     next_socket_id: Arc<AtomicU32>,
     state: Arc<RwLock<HashMap<u32, AgentSocketState>>>,
+    _sweeper: Option<Arc<RelayStateSweeper>>,
 }
 
 impl SocketRelayManager {
     /// Create an empty socket relay manager.
     #[must_use]
     pub fn new(registry: AgentRegistry, events: EventBus) -> Self {
+        let state = Arc::new(RwLock::new(HashMap::new()));
+        let sweeper = spawn_stale_agent_sweeper(registry.clone(), state.clone());
+
         Self {
             registry,
             _events: events,
             next_socket_id: Arc::new(AtomicU32::new(1)),
-            state: Arc::new(RwLock::new(HashMap::new())),
+            state,
+            _sweeper: sweeper,
         }
+    }
+
+    /// Remove all relay state for an agent, closing local resources.
+    pub async fn remove_agent(&self, agent_id: u32) -> bool {
+        let agent_state = {
+            let mut state = self.state.write().await;
+            state.remove(&agent_id)
+        };
+
+        if let Some(agent_state) = agent_state {
+            close_agent_state(agent_state).await;
+            return true;
+        }
+
+        false
+    }
+
+    /// Remove relay state for agents that are missing or inactive in the registry.
+    pub async fn prune_stale_agents(&self) -> usize {
+        let active_agents = self
+            .registry
+            .list_active()
+            .await
+            .into_iter()
+            .map(|agent| agent.agent_id)
+            .collect::<std::collections::HashSet<_>>();
+        let stale_states = {
+            let mut state = self.state.write().await;
+            let stale_agent_ids = state
+                .keys()
+                .copied()
+                .filter(|agent_id| !active_agents.contains(agent_id))
+                .collect::<Vec<_>>();
+            stale_agent_ids
+                .into_iter()
+                .filter_map(|agent_id| state.remove(&agent_id))
+                .collect::<Vec<_>>()
+        };
+
+        let removed = stale_states.len();
+        for agent_state in stale_states {
+            close_agent_state(agent_state).await;
+        }
+
+        removed
     }
 
     /// Start a SOCKS5 listener for an agent.
@@ -489,6 +542,21 @@ struct AgentSocketState {
 }
 
 #[derive(Debug)]
+struct RelayStateSweeper {
+    shutdown: Option<oneshot::Sender<()>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for RelayStateSweeper {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        self.task.abort();
+    }
+}
+
+#[derive(Debug)]
 struct SocksServerHandle {
     local_addr: String,
     shutdown: Option<oneshot::Sender<()>>,
@@ -538,6 +606,68 @@ fn parse_port(port: &str) -> Result<u16, SocketRelayError> {
 
 fn io_error(error: TeamserverError) -> io::Error {
     io::Error::other(error.to_string())
+}
+
+fn spawn_stale_agent_sweeper(
+    registry: AgentRegistry,
+    state: Arc<RwLock<HashMap<u32, AgentSocketState>>>,
+) -> Option<Arc<RelayStateSweeper>> {
+    let handle = Handle::try_current().ok()?;
+    let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+    let task = handle.spawn(async move {
+        let mut ticker = tokio::time::interval(STALE_AGENT_SWEEP_INTERVAL);
+        loop {
+            tokio::select! {
+                _ = &mut shutdown_rx => break,
+                _ = ticker.tick() => {
+                    let _ = prune_stale_agent_state(&registry, &state).await;
+                }
+            }
+        }
+    });
+
+    Some(Arc::new(RelayStateSweeper { shutdown: Some(shutdown_tx), task }))
+}
+
+async fn prune_stale_agent_state(
+    registry: &AgentRegistry,
+    state: &Arc<RwLock<HashMap<u32, AgentSocketState>>>,
+) -> usize {
+    let active_agents = registry
+        .list_active()
+        .await
+        .into_iter()
+        .map(|agent| agent.agent_id)
+        .collect::<std::collections::HashSet<_>>();
+    let stale_states = {
+        let mut state = state.write().await;
+        let stale_agent_ids = state
+            .keys()
+            .copied()
+            .filter(|agent_id| !active_agents.contains(agent_id))
+            .collect::<Vec<_>>();
+        stale_agent_ids
+            .into_iter()
+            .filter_map(|agent_id| state.remove(&agent_id))
+            .collect::<Vec<_>>()
+    };
+
+    let removed = stale_states.len();
+    for agent_state in stale_states {
+        close_agent_state(agent_state).await;
+    }
+    removed
+}
+
+async fn close_agent_state(agent_state: AgentSocketState) {
+    for handle in agent_state.servers.into_values() {
+        handle.shutdown();
+    }
+
+    for client in agent_state.clients.into_values() {
+        let mut writer = client.writer.lock().await;
+        let _ = writer.shutdown().await;
+    }
 }
 
 async fn negotiate_socks5(stream: &mut TcpStream) -> Result<(), io::Error> {
@@ -649,8 +779,8 @@ fn write_len_prefixed_bytes(buf: &mut Vec<u8>, value: &[u8]) -> Result<(), Teams
 mod tests {
     use red_cell_common::AgentEncryptionInfo;
 
-    use super::SocketRelayManager;
-    use crate::{AgentRegistry, Database, EventBus, TeamserverError};
+    use super::{SocketRelayError, SocketRelayManager};
+    use crate::{AgentRegistry, Database, EventBus};
 
     fn sample_agent(agent_id: u32) -> red_cell_common::AgentInfo {
         red_cell_common::AgentInfo {
@@ -686,7 +816,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn socks_server_lifecycle_commands_track_state() -> Result<(), TeamserverError> {
+    async fn socks_server_lifecycle_commands_track_state() -> Result<(), SocketRelayError> {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());
         registry.insert(sample_agent(0xDEAD_BEEF)).await?;
@@ -699,6 +829,43 @@ mod tests {
         let cleared = manager.clear_socks_servers(0xDEAD_BEEF).await;
         assert!(cleared.is_ok());
         assert_eq!(manager.list_socks_servers(0xDEAD_BEEF).await, "No active SOCKS5 servers");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn remove_agent_clears_tracked_socket_state() -> Result<(), SocketRelayError> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        registry.insert(sample_agent(0xDEAD_BEEF)).await?;
+        let manager = SocketRelayManager::new(registry, EventBus::default());
+
+        manager.add_socks_server(0xDEAD_BEEF, "0").await?;
+        assert!(manager.state.read().await.contains_key(&0xDEAD_BEEF));
+
+        assert!(manager.remove_agent(0xDEAD_BEEF).await);
+        assert!(!manager.state.read().await.contains_key(&0xDEAD_BEEF));
+        assert_eq!(manager.list_socks_servers(0xDEAD_BEEF).await, "No active SOCKS5 servers");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prune_stale_agents_removes_inactive_agent_state() -> Result<(), SocketRelayError> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        registry.insert(sample_agent(0xDEAD_BEEF)).await?;
+        registry.insert(sample_agent(0xFEED_FACE)).await?;
+        let manager = SocketRelayManager::new(registry.clone(), EventBus::default());
+
+        manager.add_socks_server(0xDEAD_BEEF, "0").await?;
+        manager.add_socks_server(0xFEED_FACE, "0").await?;
+        registry.mark_dead(0xDEAD_BEEF, "lost contact").await?;
+
+        assert_eq!(manager.prune_stale_agents().await, 1);
+        let state = manager.state.read().await;
+        assert!(!state.contains_key(&0xDEAD_BEEF));
+        assert!(state.contains_key(&0xFEED_FACE));
 
         Ok(())
     }

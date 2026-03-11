@@ -847,6 +847,7 @@ async fn dispatch_operator_command<S>(
         OperatorMessage::AgentRemove(message) => {
             if let Err(error) = handle_agent_remove(
                 &registry,
+                &sockets,
                 &events,
                 session,
                 sanitize_agent_remove(session, message),
@@ -1069,6 +1070,7 @@ pub(crate) async fn execute_agent_task(
 
 async fn handle_agent_remove(
     registry: &AgentRegistry,
+    sockets: &SocketRelayManager,
     events: &EventBus,
     session: &crate::OperatorSession,
     message: Message<FlatInfo>,
@@ -1078,6 +1080,7 @@ async fn handle_agent_remove(
     };
     let agent_id = parse_agent_id(&agent_id)?;
     registry.remove(agent_id).await?;
+    let _ = sockets.remove_agent(agent_id).await;
     events.broadcast(OperatorMessage::AgentRemove(message));
     debug!(
         connection_id = %session.connection_id,
@@ -3168,7 +3171,10 @@ mod tests {
     async fn websocket_agent_remove_deletes_agent_for_admins() {
         let state = TestState::new().await;
         let registry = state.registry.clone();
+        let sockets = state.sockets.clone();
         registry.insert(sample_agent(0xDEAD_BEEF)).await.expect("agent should insert");
+        sockets.add_socks_server(0xDEAD_BEEF, "0").await.expect("SOCKS server should start");
+        assert!(sockets.list_socks_servers(0xDEAD_BEEF).await.contains("SOCKS5 servers"));
         let (mut socket, server) = spawn_server(state).await;
 
         login(&mut socket, "admin", "adminpass").await;
@@ -3183,6 +3189,7 @@ mod tests {
         let event = read_operator_message(&mut socket).await;
         assert!(matches!(event, OperatorMessage::AgentRemove(_)));
         assert!(registry.get(0xDEAD_BEEF).await.is_none());
+        assert_eq!(sockets.list_socks_servers(0xDEAD_BEEF).await, "No active SOCKS5 servers");
 
         socket.close(None).await.expect("close should send");
         server.abort();

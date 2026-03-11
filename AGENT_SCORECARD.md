@@ -498,3 +498,14 @@ Notes: Security fixes for agent crypto exposure and websocket token logging are 
 
 Build: passed (cargo check + clippy -D warnings clean; cargo test: workspace passed)
 Notes: Reviewed the forwarded-IP trust hardening, Python command casing preservation, and listener-identity persistence changes. Build and tests are clean, migration for `listener_name` is backfilled safely with a non-null default, and no new protocol/security regressions were found in this range. `br` intermittently returned `database is busy` for one ready-list query during the review, but repeated reads succeeded and this appears to be a transient tooling lock rather than a repository defect.
+
+### QA Review — 2026-03-11 19:04 — 3e67e3b..8bac71d
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No activity this run |
+| Codex | 0 | 0 | No development commits in range; reviewed one prior QA bookkeeping commit only |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (cargo check + clippy -D warnings clean; cargo test: workspace passed)
+Notes: Review range contained no product-code changes, only the previous QA checkpoint/scorecard commit. No new QA bugs filed. `br list --status=open` intermittently returned `database is busy`, but repeated reads succeeded and `br ready` returned expected results; treated as a transient tooling lock, not a repository defect.

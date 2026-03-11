@@ -47,7 +47,7 @@ async fn http_listener_pipeline_registers_agent_and_broadcasts_checkin()
     let stored = registry.get(agent_id).await.ok_or("agent should be registered")?;
     let before_checkin = stored.last_call_in.clone();
     assert_eq!(stored.hostname, "wkstn-01");
-    assert_eq!(stored.external_ip, "198.51.100.44");
+    assert_eq!(stored.external_ip, "127.0.0.1");
 
     let event = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
     let Some(OperatorMessage::AgentNew(message)) = event else {
@@ -55,7 +55,7 @@ async fn http_listener_pipeline_registers_agent_and_broadcasts_checkin()
     };
     assert_eq!(message.info.name_id, "12345678");
     assert_eq!(message.info.listener, "edge-http-pipeline");
-    assert_eq!(message.info.external_ip, "198.51.100.44");
+    assert_eq!(message.info.external_ip, "127.0.0.1");
 
     let checkin_offset = registry.ctr_offset(agent_id).await?;
     let checkin_response = client

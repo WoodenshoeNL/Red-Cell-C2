@@ -2,13 +2,13 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::io;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
@@ -918,7 +918,9 @@ async fn spawn_http_listener_runtime(
         })?;
 
         Ok(tokio::spawn(async move {
-            if let Err(error) = server.serve(router.into_make_service()).await {
+            if let Err(error) =
+                server.serve(router.into_make_service_with_connect_info::<SocketAddr>()).await
+            {
                 warn!(listener = %state.config.name, %error, "https listener exited");
             }
         }))
@@ -931,7 +933,9 @@ async fn spawn_http_listener_runtime(
         })?;
 
         Ok(tokio::spawn(async move {
-            if let Err(error) = server.serve(router.into_make_service()).await {
+            if let Err(error) =
+                server.serve(router.into_make_service_with_connect_info::<SocketAddr>()).await
+            {
                 warn!(listener = %state.config.name, %error, "http listener exited");
             }
         }))
@@ -1966,13 +1970,14 @@ fn http_listener_subject_alt_names(config: &HttpListenerConfig) -> Vec<String> {
 
 async fn http_listener_handler(
     State(state): State<Arc<HttpListenerState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     request: Request<Body>,
 ) -> Response {
     if !http_request_matches(&state, &request) {
         return state.fake_404_response();
     }
 
-    let external_ip = extract_external_ip(&state, &request);
+    let external_ip = extract_external_ip(state.config.behind_redirector, peer, &request);
     let (_, body) = request.into_parts();
     let Ok(body) = to_bytes(body, MAX_AGENT_REQUEST_BODY_LEN).await else {
         return state.fake_404_response();
@@ -2041,23 +2046,36 @@ fn headers_match(expected_headers: &[ExpectedHeader], headers: &HeaderMap) -> bo
     })
 }
 
-fn extract_external_ip(state: &HttpListenerState, request: &Request<Body>) -> String {
-    if state.config.behind_redirector {
-        if let Some(value) =
-            request.headers().get("x-forwarded-for").and_then(|value| value.to_str().ok())
+fn extract_external_ip(
+    behind_redirector: bool,
+    peer: SocketAddr,
+    request: &Request<Body>,
+) -> String {
+    if behind_redirector {
+        if let Some(ip) = request
+            .headers()
+            .get("x-forwarded-for")
+            .and_then(|value| value.to_str().ok())
+            .into_iter()
+            .flat_map(|value| value.split(','))
+            .map(str::trim)
+            .find_map(|value| value.parse::<IpAddr>().ok())
         {
-            if let Some(ip) = value.split(',').map(str::trim).find(|value| !value.is_empty()) {
-                return ip.to_owned();
-            }
+            return ip.to_string();
+        }
+
+        if let Some(ip) = request
+            .headers()
+            .get("x-real-ip")
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .and_then(|value| value.parse::<IpAddr>().ok())
+        {
+            return ip.to_string();
         }
     }
 
-    request
-        .headers()
-        .get("x-real-ip")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.trim().is_empty())
-        .map_or_else(|| "0.0.0.0".to_owned(), |value| value.trim().to_owned())
+    peer.ip().to_string()
 }
 
 fn is_valid_demon_callback_request(body: &[u8]) -> bool {
@@ -2576,7 +2594,7 @@ mod tests {
 
         let stored = registry.get(0x1234_5678).await.expect("agent should be registered");
         assert_eq!(stored.hostname, "wkstn-01");
-        assert_eq!(stored.external_ip, "0.0.0.0");
+        assert_eq!(stored.external_ip, "127.0.0.1");
         assert_eq!(database.agents().get(0x1234_5678).await?, Some(stored.clone()));
 
         let event = event_receiver.recv().await.expect("agent registration should broadcast");

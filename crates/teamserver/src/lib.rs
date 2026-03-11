@@ -35,7 +35,8 @@ pub use auth::{
 pub use database::{
     AgentRepository, AgentResponseRecord, AgentResponseRepository, AuditLogEntry, AuditLogFilter,
     AuditLogRepository, Database, LinkRecord, LinkRepository, ListenerRepository, ListenerStatus,
-    LootRecord, LootRepository, PersistedListener, PersistedListenerState, TeamserverError,
+    LootRecord, LootRepository, OperatorRepository, PersistedListener, PersistedListenerState,
+    PersistedOperator, TeamserverError,
 };
 pub use demon::{
     DemonCallbackPackage, DemonPacketParser, DemonParserError, ParsedDemonInit, ParsedDemonPacket,

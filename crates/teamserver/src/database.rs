@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use red_cell_common::config::OperatorRole;
 use red_cell_common::demon::DemonProtocolError;
 use red_cell_common::{AgentInfo, ListenerConfig, ListenerProtocol};
 use serde::{Deserialize, Serialize};
@@ -170,6 +171,12 @@ impl Database {
     #[must_use]
     pub fn audit_log(&self) -> AuditLogRepository {
         AuditLogRepository::new(self.pool.clone())
+    }
+
+    /// Access runtime-operator persistence methods.
+    #[must_use]
+    pub fn operators(&self) -> OperatorRepository {
+        OperatorRepository::new(self.pool.clone())
     }
 }
 
@@ -464,6 +471,68 @@ impl ListenerStatus {
 #[derive(Clone, Debug)]
 pub struct ListenerRepository {
     pool: SqlitePool,
+}
+
+/// Persisted runtime operator credential record stored in SQLite.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PersistedOperator {
+    /// Operator username.
+    pub username: String,
+    /// Stored SHA3-256 password hash.
+    pub password_hash: String,
+    /// RBAC role granted to the operator.
+    pub role: OperatorRole,
+}
+
+/// CRUD operations for persisted runtime operators.
+#[derive(Clone, Debug)]
+pub struct OperatorRepository {
+    pool: SqlitePool,
+}
+
+impl OperatorRepository {
+    /// Create a new operator repository from a shared pool.
+    #[must_use]
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+
+    /// Insert a runtime operator credential row.
+    pub async fn create(&self, operator: &PersistedOperator) -> Result<(), TeamserverError> {
+        sqlx::query(
+            "INSERT INTO ts_runtime_operators (username, password_hash, role) VALUES (?, ?, ?)",
+        )
+        .bind(&operator.username)
+        .bind(&operator.password_hash)
+        .bind(operator_role_label(operator.role))
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Fetch a runtime operator by username.
+    pub async fn get(&self, username: &str) -> Result<Option<PersistedOperator>, TeamserverError> {
+        let row = sqlx::query_as::<_, OperatorRow>(
+            "SELECT username, password_hash, role FROM ts_runtime_operators WHERE username = ?",
+        )
+        .bind(username)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(TryInto::try_into).transpose()
+    }
+
+    /// Return all persisted runtime operators sorted by username.
+    pub async fn list(&self) -> Result<Vec<PersistedOperator>, TeamserverError> {
+        let rows = sqlx::query_as::<_, OperatorRow>(
+            "SELECT username, password_hash, role FROM ts_runtime_operators ORDER BY username",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
 }
 
 impl ListenerRepository {
@@ -1176,6 +1245,45 @@ impl TryFrom<ListenerRow> for PersistedListener {
             config,
             state: PersistedListenerState { status, last_error: row.last_error },
         })
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct OperatorRow {
+    username: String,
+    password_hash: String,
+    role: String,
+}
+
+impl TryFrom<OperatorRow> for PersistedOperator {
+    type Error = TeamserverError;
+
+    fn try_from(row: OperatorRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            username: row.username,
+            password_hash: row.password_hash,
+            role: parse_operator_role(&row.role)?,
+        })
+    }
+}
+
+const fn operator_role_label(role: OperatorRole) -> &'static str {
+    match role {
+        OperatorRole::Admin => "Admin",
+        OperatorRole::Operator => "Operator",
+        OperatorRole::Analyst => "Analyst",
+    }
+}
+
+fn parse_operator_role(value: &str) -> Result<OperatorRole, TeamserverError> {
+    match value {
+        "Admin" | "admin" => Ok(OperatorRole::Admin),
+        "Operator" | "operator" => Ok(OperatorRole::Operator),
+        "Analyst" | "analyst" => Ok(OperatorRole::Analyst),
+        _ => Err(TeamserverError::InvalidPersistedValue {
+            field: "ts_runtime_operators.role",
+            message: format!("unsupported operator role `{value}`"),
+        }),
     }
 }
 

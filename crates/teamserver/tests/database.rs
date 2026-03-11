@@ -1,10 +1,11 @@
 use red_cell::database::{
     AgentResponseRecord, AuditLogEntry, AuditLogFilter, Database, LinkRecord, ListenerStatus,
-    LootRecord, PersistedListener, PersistedListenerState, TeamserverError,
+    LootRecord, PersistedListener, PersistedListenerState, PersistedOperator, TeamserverError,
 };
 use red_cell::{
     AuditQuery, AuditResultStatus, audit_details, query_audit_log, record_operator_action,
 };
+use red_cell_common::config::OperatorRole;
 use red_cell_common::{
     AgentEncryptionInfo, AgentInfo, HttpListenerConfig, HttpListenerProxyConfig,
     HttpListenerResponseConfig, ListenerConfig, ListenerTlsConfig,
@@ -104,6 +105,26 @@ async fn database_runs_migrations_for_all_tables() -> Result<(), TeamserverError
     assert!(tables.iter().any(|name| name == "ts_loot"));
     assert!(tables.iter().any(|name| name == "ts_agent_responses"));
     assert!(tables.iter().any(|name| name == "ts_audit_log"));
+    assert!(tables.iter().any(|name| name == "ts_runtime_operators"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn operator_repository_supports_runtime_operator_crud_queries() -> Result<(), TeamserverError>
+{
+    let database = test_database().await?;
+    let repository = database.operators();
+    let operator = PersistedOperator {
+        username: "trinity".to_owned(),
+        password_hash: "abc123".to_owned(),
+        role: OperatorRole::Analyst,
+    };
+
+    repository.create(&operator).await?;
+
+    assert_eq!(repository.get("trinity").await?, Some(operator.clone()));
+    assert_eq!(repository.list().await?, vec![operator]);
 
     Ok(())
 }

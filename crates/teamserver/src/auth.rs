@@ -14,8 +14,10 @@ use tokio::sync::RwLock;
 use tracing::instrument;
 use uuid::Uuid;
 
+use crate::{Database, OperatorRepository, PersistedOperator, TeamserverError};
+
 /// Errors returned while preparing or validating operator authentication state.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum AuthError {
     /// The WebSocket client sent a message that was not a login request.
     #[error("expected an operator login message")]
@@ -35,7 +37,30 @@ pub enum AuthError {
     /// The submitted password was blank.
     #[error("operator password must not be empty")]
     EmptyPassword,
+    /// Runtime operator persistence failed.
+    #[error(transparent)]
+    Persistence(#[from] TeamserverError),
 }
+
+impl PartialEq for AuthError {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::InvalidLoginMessage, Self::InvalidLoginMessage)
+            | (Self::EmptyUsername, Self::EmptyUsername)
+            | (Self::EmptyPassword, Self::EmptyPassword) => true,
+            (Self::DuplicateUser { username: left }, Self::DuplicateUser { username: right }) => {
+                left == right
+            }
+            (Self::InvalidMessageJson(left), Self::InvalidMessageJson(right)) => left == right,
+            (Self::Persistence(left), Self::Persistence(right)) => {
+                left.to_string() == right.to_string()
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for AuthError {}
 
 /// Successful login result with a newly issued session token.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +118,7 @@ pub struct OperatorSession {
 pub struct AuthService {
     credentials: Arc<RwLock<BTreeMap<String, OperatorAccount>>>,
     sessions: Arc<RwLock<SessionRegistry>>,
+    runtime_operators: Option<OperatorRepository>,
 }
 
 impl AuthService {
@@ -117,7 +143,38 @@ impl AuthService {
         Self {
             credentials: Arc::new(RwLock::new(credentials)),
             sessions: Arc::new(RwLock::new(SessionRegistry::default())),
+            runtime_operators: None,
         }
+    }
+
+    /// Build an authentication service from a validated profile and load persisted runtime users.
+    pub async fn from_profile_with_database(
+        profile: &Profile,
+        database: &Database,
+    ) -> Result<Self, TeamserverError> {
+        let service = Self {
+            credentials: Arc::new(RwLock::new(
+                profile
+                    .operators
+                    .users
+                    .iter()
+                    .map(|(username, config)| {
+                        (
+                            username.clone(),
+                            OperatorAccount {
+                                password_hash: hash_password_sha3(&config.password),
+                                role: config.role,
+                            },
+                        )
+                    })
+                    .collect(),
+            )),
+            sessions: Arc::new(RwLock::new(SessionRegistry::default())),
+            runtime_operators: Some(database.operators()),
+        };
+
+        service.load_runtime_operators().await?;
+        Ok(service)
     }
 
     /// Authenticate a parsed login payload and create a session on success.
@@ -170,10 +227,18 @@ impl AuthService {
             return Err(AuthError::DuplicateUser { username: username.to_owned() });
         }
 
-        credentials.insert(
-            username.to_owned(),
-            OperatorAccount { password_hash: hash_password_sha3(password), role },
-        );
+        let password_hash = hash_password_sha3(password);
+        if let Some(runtime_operators) = &self.runtime_operators {
+            runtime_operators
+                .create(&PersistedOperator {
+                    username: username.to_owned(),
+                    password_hash: password_hash.clone(),
+                    role,
+                })
+                .await?;
+        }
+
+        credentials.insert(username.to_owned(), OperatorAccount { password_hash, role });
         Ok(())
     }
 
@@ -222,6 +287,23 @@ impl AuthService {
     #[instrument(skip(self))]
     pub async fn session_count(&self) -> usize {
         self.sessions.read().await.len()
+    }
+
+    async fn load_runtime_operators(&self) -> Result<(), TeamserverError> {
+        let Some(runtime_operators) = &self.runtime_operators else {
+            return Ok(());
+        };
+
+        let persisted = runtime_operators.list().await?;
+        let mut credentials = self.credentials.write().await;
+        for operator in persisted {
+            credentials.entry(operator.username).or_insert(OperatorAccount {
+                password_hash: operator.password_hash,
+                role: operator.role,
+            });
+        }
+
+        Ok(())
     }
 }
 
@@ -307,6 +389,7 @@ fn password_hashes_match(submitted: &str, expected: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::{Database, PersistedOperator};
     use red_cell_common::config::Profile;
     use red_cell_common::crypto::hash_password_sha3;
     use red_cell_common::operator::{
@@ -558,6 +641,55 @@ mod tests {
             .await;
 
         assert!(matches!(result, AuthenticationResult::Success(_)));
+    }
+
+    #[tokio::test]
+    async fn from_profile_with_database_loads_persisted_runtime_operators() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        database
+            .operators()
+            .create(&PersistedOperator {
+                username: "trinity".to_owned(),
+                password_hash: hash_password_sha3("zion"),
+                role: red_cell_common::config::OperatorRole::Operator,
+            })
+            .await
+            .expect("runtime operator should persist");
+
+        let service = AuthService::from_profile_with_database(&profile(), &database)
+            .await
+            .expect("auth service should load runtime operators");
+        let result = service
+            .authenticate_login(
+                Uuid::new_v4(),
+                &LoginInfo { user: "trinity".to_owned(), password: hash_password_sha3("zion") },
+            )
+            .await;
+
+        assert!(matches!(result, AuthenticationResult::Success(_)));
+    }
+
+    #[tokio::test]
+    async fn create_operator_persists_runtime_credentials_when_database_backed() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        let service = AuthService::from_profile_with_database(&profile(), &database)
+            .await
+            .expect("auth service should initialize");
+
+        service
+            .create_operator("trinity", "zion", red_cell_common::config::OperatorRole::Analyst)
+            .await
+            .expect("operator should be created");
+
+        let persisted = database
+            .operators()
+            .get("trinity")
+            .await
+            .expect("query should succeed")
+            .expect("runtime operator should be persisted");
+        assert_eq!(persisted.username, "trinity");
+        assert_eq!(persisted.password_hash, hash_password_sha3("zion"));
+        assert_eq!(persisted.role, red_cell_common::config::OperatorRole::Analyst);
     }
 
     #[tokio::test]

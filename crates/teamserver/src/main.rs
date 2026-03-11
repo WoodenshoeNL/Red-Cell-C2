@@ -88,8 +88,8 @@ async fn main() -> Result<()> {
     let tls_config = build_tls_config(&profile).await?;
     let router = build_router(TeamserverState {
         profile: profile.clone(),
+        auth: AuthService::from_profile_with_database(&profile, &database).await?,
         database,
-        auth: AuthService::from_profile(&profile),
         api: ApiRuntime::from_profile(&profile),
         events,
         connections: OperatorConnectionManager::new(),

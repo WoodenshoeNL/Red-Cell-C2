@@ -377,6 +377,18 @@ Notes: Clean sprint. `DemonInitRateLimiter` is well-designed — shared via Arc 
 Build: cargo check + clippy -D warnings: PASSED. cargo test: PASSED (476 tests, +6 from operator persistence work) with RUSTFLAGS workaround (RUSTFLAGS="-L /usr/lib/python3.12/config-3.12-x86_64-linux-gnu"); raw `cargo test --workspace` fails due to missing python3.12-dev dev symlink on QA machine (filed red-cell-c2-3ug, P3 infra).
 Notes: Clean sprint. OperatorRepository is well-structured — BTreeMap ordering guarantees consistent REST and WS output, password hashes never exposed over wire (OperatorInfo.password_hash always None in operator_inventory output). write lock held across async DB insert in create_operator is intentional (prevents TOCTOU duplicate). Six new tests cover persistence, inventory, startup reload, and WS snapshot. dev loop fix (by user) adds multi-candidate scanning to prevent skip-and-fail on already-claimed tasks.
 
+### Arch Review — 2026-03-11 14:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 3 | Architecture ×1, Protocol ×1, Consistency ×1 | red-cell-c2-3ny (P3): auth.rs:89 typo "exits" vs "exist" in UnknownUser error — surfaced to operator UI; red-cell-c2-1mw (P3): dispatch_builtin_package duplicates entire builtin handler chain as if-chain parallel to CommandDispatcher::with_builtin_handlers — maintenance divergence risk if new pivot callbacks added to one path but not the other; red-cell-c2-b7n (P3): payload_builder.rs parse_kill_date() returns i64 cast to u64 — negative timestamp wraps silently to u64::MAX, embedding ~year 584B kill date instead of error |
+| Codex | 0 | — | No new findings this run |
+| Cursor | 0 | — | No new findings this run |
+
+All three findings attributed to michel@woodenshoe.org (human maintainer), not to Codex/Cursor agents — agent violation counts unchanged.
+Overall codebase health: strong — no P0/P1/P2 issues identified. All previously fixed security vulnerabilities confirmed resolved. Clippy clean, 85 tests passing.
+Biggest remaining risk: parallel dispatch chains (red-cell-c2-1mw) — adding a new pivot-context command to with_builtin_handlers without also updating dispatch_builtin_package (or vice versa) will silently drop callbacks in one path.
+
 ### QA Review — 2026-03-11 11:48 — 1e7832b..f94a8cf
 
 | Agent | Tasks closed | Bugs filed | Notes |

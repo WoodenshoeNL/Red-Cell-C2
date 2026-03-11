@@ -1602,10 +1602,10 @@ async fn handle_job_callback(
             let job_id = parser.read_u32("job action id")?;
             let success = parser.read_bool("job action success")?;
             let (success_text, failure_text) = match subcommand {
-                DemonJobCommand::Suspend => ("Successful suspended job", "Failed to suspended job"),
-                DemonJobCommand::Resume => ("Successful resumed job", "Failed to resumed job"),
+                DemonJobCommand::Suspend => ("Successfully suspended job", "Failed to suspend job"),
+                DemonJobCommand::Resume => ("Successfully resumed job", "Failed to resume job"),
                 DemonJobCommand::KillRemove => {
-                    ("Successful killed and removed job", "Failed to kill job")
+                    ("Successfully killed and removed job", "Failed to kill job")
                 }
                 DemonJobCommand::List | DemonJobCommand::Died => unreachable!(),
             };
@@ -2036,11 +2036,11 @@ async fn handle_transfer_callback(
             let (kind, message) = match subcommand {
                 DemonTransferCommand::Stop => {
                     if found && exists {
-                        ("Good", format!("Successful found and stopped download: {file_id:x}"))
+                        ("Good", format!("Successfully found and stopped download: {file_id:x}"))
                     } else if found {
                         (
                             "Error",
-                            format!("Couldn't stop download {file_id:x}: Download does not exists"),
+                            format!("Couldn't stop download {file_id:x}: Download does not exist"),
                         )
                     } else {
                         ("Error", format!("Couldn't stop download {file_id:x}: FileID not found"))
@@ -2048,12 +2048,12 @@ async fn handle_transfer_callback(
                 }
                 DemonTransferCommand::Resume => {
                     if found && exists {
-                        ("Good", format!("Successful found and resumed download: {file_id:x}"))
+                        ("Good", format!("Successfully found and resumed download: {file_id:x}"))
                     } else if found {
                         (
                             "Error",
                             format!(
-                                "Couldn't resume download {file_id:x}: Download does not exists"
+                                "Couldn't resume download {file_id:x}: Download does not exist"
                             ),
                         )
                     } else {
@@ -2063,12 +2063,12 @@ async fn handle_transfer_callback(
                 DemonTransferCommand::Remove => {
                     if found && exists {
                         let _ = downloads.finish(agent_id, file_id).await;
-                        ("Good", format!("Successful found and removed download: {file_id:x}"))
+                        ("Good", format!("Successfully found and removed download: {file_id:x}"))
                     } else if found {
                         (
                             "Error",
                             format!(
-                                "Couldn't remove download {file_id:x}: Download does not exists"
+                                "Couldn't remove download {file_id:x}: Download does not exist"
                             ),
                         )
                     } else {
@@ -7294,7 +7294,7 @@ mod tests {
         };
         assert_eq!(
             message.info.extra.get("Message"),
-            Some(&Value::String("Successful resumed job 7".to_owned()))
+            Some(&Value::String("Successfully resumed job 7".to_owned()))
         );
 
         let mut dropped_payload = Vec::new();

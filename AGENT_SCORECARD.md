@@ -21,8 +21,8 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 0 | 0 | 0 |
 | Missing tests | 0 | 2 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
-| Protocol errors | 1 | 6 | 2 |
-| Security issues | 0 | 13 | 0 |
+| Protocol errors | 1 | 7 | 2 |
+| Security issues | 0 | 14 | 0 |
 | Architecture drift | 0 | 7 | 0 |
 | Memory / resource leaks | 0 | 6 | 1 |
 | Startup / lifecycle regressions | 0 | 1 | 0 |
@@ -34,6 +34,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-11 20:34
+
+| Agent | Findings | Categories | Notes |
+|-------|---------:|------------|-------|
+| Claude | 0 | — | No findings this run |
+| Codex | 1 | Security issues, Protocol errors | Filed red-cell-c2-1uoh: existing DEMON_INIT can overwrite a registered agent session |
+| Cursor | 0 | — | No findings this run |
+
+Overall codebase health: drifting
+Biggest blindspot: the operator WebSocket still bypasses structured audit logging for destructive mutations, and listener runtimes do not reconcile persisted state when their tasks die.
+Additional findings filed this run were attributed to Michel Klomp: red-cell-c2-1cb1, red-cell-c2-34qy, and red-cell-c2-7369.
 
 ### Arch Review — 2026-03-11 19:08
 

@@ -301,7 +301,8 @@ fn valid_demon_init_body(
     metadata.extend_from_slice(&1_893_456_000_u64.to_be_bytes());
     metadata.extend_from_slice(&0b101010_u32.to_be_bytes());
 
-    let encrypted = encrypt_agent_data(&key, &iv, &metadata);
+    let encrypted =
+        encrypt_agent_data(&key, &iv, &metadata).expect("metadata encryption should succeed");
     let payload = [
         u32::from(DemonCommand::DemonInit).to_be_bytes().as_slice(),
         7_u32.to_be_bytes().as_slice(),

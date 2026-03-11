@@ -552,7 +552,8 @@ mod tests {
         iv: [u8; AGENT_IV_LENGTH],
     ) -> Vec<u8> {
         let metadata = build_init_metadata(agent_id);
-        let encrypted = encrypt_agent_data(&key, &iv, &metadata);
+        let encrypted =
+            encrypt_agent_data(&key, &iv, &metadata).expect("metadata encryption should succeed");
         let mut payload = Vec::new();
         payload.extend_from_slice(&u32_be(u32::from(DemonCommand::DemonInit)));
         payload.extend_from_slice(&u32_be(7));
@@ -580,7 +581,8 @@ mod tests {
         decrypted.extend_from_slice(b"hello");
 
         let effective_iv = advance_iv(&iv, block_offset);
-        let encrypted = encrypt_agent_data(&key, &effective_iv, &decrypted);
+        let encrypted = encrypt_agent_data(&key, &effective_iv, &decrypted)
+            .expect("callback encryption should succeed");
         let mut payload = Vec::new();
         payload.extend_from_slice(&u32_be(u32::from(DemonCommand::CommandCheckin)));
         payload.extend_from_slice(&u32_be(42));
@@ -620,7 +622,11 @@ mod tests {
         assert_eq!(registry.get(0x1234_5678).await, Some(init.agent));
 
         let metadata = build_init_metadata(0x1234_5678);
-        let expected_offset = ctr_blocks_for_length(encrypt_agent_data(&key, &iv, &metadata).len());
+        let expected_offset = ctr_blocks_for_length(
+            encrypt_agent_data(&key, &iv, &metadata)
+                .expect("metadata encryption should succeed")
+                .len(),
+        );
         let actual_offset = registry.ctr_offset(0x1234_5678).await.expect("offset should be set");
         assert_eq!(actual_offset, expected_offset);
     }
@@ -784,7 +790,8 @@ mod tests {
         let spoofed_id: u32 = 0xAAAA_BBBB;
 
         let metadata = build_init_metadata(spoofed_id);
-        let encrypted = encrypt_agent_data(&key, &iv, &metadata);
+        let encrypted =
+            encrypt_agent_data(&key, &iv, &metadata).expect("metadata encryption should succeed");
 
         let mut payload = Vec::new();
         payload.extend_from_slice(&u32_be(u32::from(DemonCommand::DemonInit)));

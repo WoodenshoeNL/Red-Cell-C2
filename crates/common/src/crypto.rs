@@ -50,9 +50,8 @@ type AgentCtr = Ctr128BE<Aes256>;
 ///
 /// Havoc uses a big-endian 128-bit counter on both the teamserver and Demon sides.
 ///
-/// Returns an empty buffer if the supplied key or IV length is invalid.
-pub fn encrypt_agent_data(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Vec<u8> {
-    apply_agent_keystream(key, iv, plaintext).unwrap_or_default()
+pub fn encrypt_agent_data(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    apply_agent_keystream(key, iv, plaintext)
 }
 
 /// Decrypt agent transport data with AES-256-CTR starting from the given IV.
@@ -193,7 +192,8 @@ mod tests {
              1e2e93b8f2fd48"
         );
 
-        let ciphertext = encrypt_agent_data(&key, &iv, plaintext);
+        let ciphertext =
+            encrypt_agent_data(&key, &iv, plaintext).expect("reference encryption should succeed");
 
         assert_eq!(ciphertext, expected_ciphertext);
     }
@@ -222,7 +222,8 @@ mod tests {
         let iv = [0x24; AGENT_IV_LENGTH];
         let plaintext = b"\x00\x01\x02demon-tasking";
 
-        let ciphertext = encrypt_agent_data(&key, &iv, plaintext);
+        let ciphertext =
+            encrypt_agent_data(&key, &iv, plaintext).expect("round-trip encryption should succeed");
         let decrypted = decrypt_agent_data(&key, &iv, &ciphertext)
             .expect("round-trip decryption should succeed");
 
@@ -246,10 +247,15 @@ mod tests {
     }
 
     #[test]
-    fn encrypt_agent_data_returns_empty_vec_for_invalid_key_length() {
-        let ciphertext = encrypt_agent_data(&[0_u8; 31], &[0_u8; AGENT_IV_LENGTH], b"abc");
+    fn encrypt_agent_data_rejects_invalid_key_length() {
+        let error = encrypt_agent_data(&[0_u8; 31], &[0_u8; AGENT_IV_LENGTH], b"abc")
+            .expect_err("invalid key length must fail encryption");
 
-        assert!(ciphertext.is_empty());
+        assert!(matches!(
+            error,
+            CryptoError::InvalidKeyLength { expected, actual }
+                if expected == AGENT_KEY_LENGTH && actual == AGENT_KEY_LENGTH - 1
+        ));
     }
 
     #[test]
@@ -268,7 +274,8 @@ mod tests {
     #[test]
     fn encrypt_agent_data_preserves_empty_plaintext() {
         let ciphertext =
-            encrypt_agent_data(&[0x41; AGENT_KEY_LENGTH], &[0x24; AGENT_IV_LENGTH], b"");
+            encrypt_agent_data(&[0x41; AGENT_KEY_LENGTH], &[0x24; AGENT_IV_LENGTH], b"")
+                .expect("empty plaintext encryption should succeed");
 
         assert!(ciphertext.is_empty());
     }
@@ -342,7 +349,8 @@ mod tests {
         let iv = [0x24; AGENT_IV_LENGTH];
         let plaintext = b"hello from demon";
 
-        let plain_ciphertext = encrypt_agent_data(&key, &iv, plaintext);
+        let plain_ciphertext =
+            encrypt_agent_data(&key, &iv, plaintext).expect("plain encryption should work");
         let (ctr_ciphertext, new_offset) =
             encrypt_agent_data_ctr(&key, &iv, 0, plaintext).expect("ctr encrypt should work");
 
@@ -396,7 +404,8 @@ mod tests {
         let part_b = b"another-sixteen!";
         let combined = [part_a.as_slice(), part_b.as_slice()].concat();
 
-        let combined_ct = encrypt_agent_data(&key, &iv, &combined);
+        let combined_ct =
+            encrypt_agent_data(&key, &iv, &combined).expect("combined encryption should work");
 
         let (ct_a, offset_a) = encrypt_agent_data_ctr(&key, &iv, 0, part_a).expect("part a");
         let (ct_b, _offset_b) =

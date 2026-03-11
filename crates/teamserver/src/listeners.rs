@@ -3138,7 +3138,8 @@ mod tests {
         metadata.extend_from_slice(&1_893_456_000_u64.to_be_bytes());
         metadata.extend_from_slice(&0b101010_u32.to_be_bytes());
 
-        let encrypted = red_cell_common::crypto::encrypt_agent_data(&key, &iv, &metadata);
+        let encrypted = red_cell_common::crypto::encrypt_agent_data(&key, &iv, &metadata)
+            .expect("metadata encryption should succeed");
         let payload = [
             u32::from(DemonCommand::DemonInit).to_be_bytes().as_slice(),
             7_u32.to_be_bytes().as_slice(),
@@ -3190,7 +3191,8 @@ mod tests {
             decrypted.extend_from_slice(payload);
         }
 
-        let encrypted = encrypt_agent_data(&key, &iv, &decrypted);
+        let encrypted =
+            encrypt_agent_data(&key, &iv, &decrypted).expect("callback encryption should succeed");
         let payload = [
             first.0.to_be_bytes().as_slice(),
             first.1.to_be_bytes().as_slice(),

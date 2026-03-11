@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 71 | 31 |
+| Tasks closed | 0 | 74 | 31 |
 | Bugs filed against | 0 | 6 | 9 |
 | Bug rate (bugs/task) | N/A | 0.08 | 0.29 |
 | Quality score | N/A | 92% | 71% |
@@ -487,3 +487,14 @@ Notes: Clean sprint. Three well-executed closes. Credential endpoint correctly f
 
 Build: passed (cargo check + clippy -D warnings clean; cargo test: 515 passed)
 Notes: Security fixes for agent crypto exposure and websocket token logging are correct. One new regression was introduced in the client Python compatibility layer: command matching is case-insensitive by lowercasing the entire operator input, which mutates argument payloads before scripts receive them. Non-agent commits in range: one prior QA checkpoint and one architecture-review bookkeeping commit.
+
+### QA Review — 2026-03-11 18:41 — f17173f..3e67e3b
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No activity in reviewed development commits |
+| Codex | 3 | 0 | Closed: red-cell-c2-2nk, red-cell-c2-29bq, red-cell-c2-166. All three fixes reviewed clean; no new QA issues filed. Active: claimed red-cell-c2-89o. |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (cargo check + clippy -D warnings clean; cargo test: workspace passed)
+Notes: Reviewed the forwarded-IP trust hardening, Python command casing preservation, and listener-identity persistence changes. Build and tests are clean, migration for `listener_name` is backfilled safely with a non-null default, and no new protocol/security regressions were found in this range. `br` intermittently returned `database is busy` for one ready-list query during the review, but repeated reads succeeded and this appears to be a transient tooling lock rather than a repository defect.

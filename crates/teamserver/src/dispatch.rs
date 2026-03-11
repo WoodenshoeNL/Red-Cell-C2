@@ -2247,7 +2247,7 @@ async fn handle_token_callback(
                 request_id,
                 "Good",
                 &format!(
-                    "Successful stole and impersonated token from {target_pid} User:[{user}] TokenID:[{token_id}]"
+                    "Successfully stole and impersonated token from {target_pid} User:[{user}] TokenID:[{token_id}]"
                 ),
                 None,
             )?);
@@ -4629,7 +4629,10 @@ mod tests {
             panic!("expected agent response event");
         };
         let msg = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
-        assert!(msg.contains("stole and impersonated token from 1234"));
+        assert_eq!(
+            msg,
+            "Successfully stole and impersonated token from 1234 User:[LAB\\admin] TokenID:[3]"
+        );
         assert!(msg.contains("LAB\\admin"));
         assert!(msg.contains("TokenID:[3]"));
         Ok(())

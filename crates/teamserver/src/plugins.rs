@@ -463,8 +463,9 @@ impl PluginRuntime {
         agent_id: u32,
         command: u32,
         payload: Vec<u8>,
-    ) -> Result<(), PluginError> {
+    ) -> Result<String, PluginError> {
         let id = next_request_id();
+        let task_id = format!("{id:08X}");
         self.inner
             .agents
             .enqueue_job(
@@ -474,13 +475,13 @@ impl PluginRuntime {
                     request_id: id,
                     payload,
                     command_line: format!("python:{command}"),
-                    task_id: format!("{id:08X}"),
+                    task_id: task_id.clone(),
                     created_at: OffsetDateTime::now_utc().unix_timestamp().to_string(),
                     operator: String::new(),
                 },
             )
             .await?;
-        Ok(())
+        Ok(task_id)
     }
 
     pub(crate) async fn invoke_registered_command(
@@ -501,10 +502,13 @@ impl PluginRuntime {
         let runtime = self.clone();
         let callback_args = args.clone();
         let joined_args = args.join(" ");
+        let captured_task_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let task_id_for_callback = captured_task_id.clone();
         tokio::task::spawn_blocking(move || {
             Python::with_gil(|py| -> PyResult<()> {
                 runtime.install_api_module(py)?;
-                let agent = Py::new(py, PyAgent { agent_id })?.into_any();
+                let agent = Py::new(py, PyAgent { agent_id, last_task_id: task_id_for_callback })?
+                    .into_any();
                 let list = PyList::new(py, callback_args)?.into_any().unbind();
                 let py_args = PyTuple::new(py, [agent, list])?;
                 command.callback.bind(py).call1(py_args)?;
@@ -512,6 +516,12 @@ impl PluginRuntime {
             })
         })
         .await??;
+
+        let task_id = captured_task_id
+            .lock()
+            .map_err(|_| PluginError::MutexPoisoned)?
+            .clone()
+            .unwrap_or_else(|| format!("{:08X}", next_request_id()));
 
         self.inner.events.broadcast(OperatorMessage::AgentTask(Message {
             head: MessageHead {
@@ -521,7 +531,7 @@ impl PluginRuntime {
                 one_time: String::new(),
             },
             info: AgentTaskInfo {
-                task_id: format!("{:08X}", next_request_id()),
+                task_id,
                 command_line: format!("{name} {joined_args}").trim().to_owned(),
                 demon_id: format!("{agent_id:08X}"),
                 command_id: "Python".to_owned(),
@@ -600,6 +610,9 @@ fn ensure_callable(callback: &Bound<'_, PyAny>) -> PyResult<()> {
 #[derive(Clone, Debug)]
 struct PyAgent {
     agent_id: u32,
+    /// Captures the task_id assigned during the most recent `task()` call so callers
+    /// (e.g. `invoke_registered_command`) can correlate the broadcast with the queued job.
+    last_task_id: Arc<Mutex<Option<String>>>,
 }
 
 #[pymethods]
@@ -609,7 +622,7 @@ impl PyAgent {
         let trimmed = agent_id.trim().trim_start_matches("0x").trim_start_matches("0X");
         let agent_id = u32::from_str_radix(trimmed, 16)
             .map_err(|_| PyValueError::new_err(format!("invalid agent id `{agent_id}`")))?;
-        Ok(Self { agent_id })
+        Ok(Self { agent_id, last_task_id: Arc::new(Mutex::new(None)) })
     }
 
     #[getter]
@@ -653,10 +666,15 @@ impl PyAgent {
             }
         };
 
-        py.allow_threads(move || {
-            runtime.block_on(runtime.queue_raw_agent_task(self.agent_id, command, payload))
-        })
-        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        let agent_id = self.agent_id;
+        let task_id = py
+            .allow_threads(move || {
+                runtime.block_on(runtime.queue_raw_agent_task(agent_id, command, payload))
+            })
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        if let Ok(mut guard) = self.last_task_id.lock() {
+            *guard = Some(task_id);
+        }
         Ok(())
     }
 }
@@ -734,7 +752,10 @@ impl PyEvent {
     #[getter]
     fn agent(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         self.agent_id
-            .map(|agent_id| Py::new(py, PyAgent { agent_id }).map(|agent| agent.into_any()))
+            .map(|agent_id| {
+                Py::new(py, PyAgent { agent_id, last_task_id: Arc::new(Mutex::new(None)) })
+                    .map(|agent| agent.into_any())
+            })
             .transpose()
     }
 
@@ -1126,6 +1147,60 @@ havoc.RegisterCommand("demo", "demo command", run)
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].command, 99);
         assert_eq!(queued[0].payload, b"alpha beta");
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn invoke_registered_command_broadcast_task_id_matches_queued_job()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let (_database, registry, events, _sockets, runtime) =
+            runtime_fixture("plugins-task-id-match").await?;
+        registry.insert(sample_agent(0x00AB_CDEF)).await?;
+
+        let handle = std::thread::spawn({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| -> PyResult<()> {
+                    runtime.install_api_module(py)?;
+                    let module = py.import("red_cell")?;
+                    let callback = py.eval(
+                        pyo3::ffi::c_str!("lambda agent, args: agent.task(99, ' '.join(args))"),
+                        None,
+                        None,
+                    )?;
+                    module.call_method1("register_command", ("sync_cmd", "sync test", callback))?;
+                    Ok(())
+                })
+            }
+        });
+        handle.join().map_err(|_| "python test thread panicked")??;
+
+        let mut receiver = events.subscribe();
+
+        runtime
+            .invoke_registered_command("sync_cmd", "operator", 0x00AB_CDEF, vec!["arg1".to_owned()])
+            .await?;
+
+        let queued = registry.dequeue_jobs(0x00AB_CDEF).await?;
+        assert_eq!(queued.len(), 1);
+        let queued_task_id = &queued[0].task_id;
+
+        let broadcast_msg =
+            tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
+                .await?
+                .expect("expected a broadcast message");
+
+        match broadcast_msg {
+            OperatorMessage::AgentTask(msg) => {
+                assert_eq!(
+                    &msg.info.task_id, queued_task_id,
+                    "broadcast task_id must match the queued job's task_id"
+                );
+            }
+            other => panic!("expected AgentTask broadcast, got {other:?}"),
+        }
         Ok(())
     }
 

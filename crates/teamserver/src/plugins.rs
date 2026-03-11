@@ -464,16 +464,17 @@ impl PluginRuntime {
         command: u32,
         payload: Vec<u8>,
     ) -> Result<(), PluginError> {
+        let id = next_request_id();
         self.inner
             .agents
             .enqueue_job(
                 agent_id,
                 Job {
                     command,
-                    request_id: next_request_id(),
+                    request_id: id,
                     payload,
                     command_line: format!("python:{command}"),
-                    task_id: format!("{:08X}", next_request_id()),
+                    task_id: format!("{id:08X}"),
                     created_at: OffsetDateTime::now_utc().unix_timestamp().to_string(),
                     operator: String::new(),
                 },

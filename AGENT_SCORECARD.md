@@ -10,18 +10,18 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 0 | 27 | 15 |
-| Bugs filed against | 0 | 2 | 3 |
-| Bug rate (bugs/task) | N/A | 0.07 | 0.20 |
-| Quality score | N/A | 93% | 80% |
+| Bugs filed against | 0 | 2 | 7 |
+| Bug rate (bugs/task) | N/A | 0.07 | 0.47 |
+| Quality score | N/A | 93% | 53% |
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 0 | 0 | 0 |
-| Missing tests | 0 | 2 | 1 |
+| Missing tests | 0 | 2 | 4 |
 | Clippy warnings | 0 | 0 | 1 |
-| Protocol errors | 1 | 2 | 1 |
+| Protocol errors | 1 | 2 | 2 |
 | Security issues | 0 | 7 | 0 |
 | Architecture drift | 0 | 1 | 0 |
 | Memory / resource leaks | 0 | 4 | 0 |
@@ -221,3 +221,14 @@ Notes: Clean one-task sprint. All 4 new tests are well-structured and exercise m
 | Cursor | 0 | 1 | red-2bm in_progress: local `ctr_blocks_for_length` uses manual div_ceil — clippy -D warnings failure (red-3t4). Work not yet committed. |
 
 Build: clippy FAILED on uncommitted working-tree changes to crates/common/src/crypto.rs (manual_div_ceil lint). cargo check + cargo test both passed (82 tests green).
+
+### Arch Review — 2026-03-11 03:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 0 | — | No findings this run |
+| Codex | 0 | — | No findings this run |
+| Cursor | 4 | Missing tests ×3, Protocol ×1 | red-3tc (P1): build_init_ack test uses stale sync API — cargo test fails to compile; red-1s8 (P2): callback CTR test will decrypt garbage once counter is tracked correctly; red-9pf (P2): AES-CTR block offset lost on teamserver restart — reconnect ack at wrong counter; red-rts (P3): no unit tests for encrypt_for_agent / decrypt_from_agent / ctr_offset |
+
+Overall codebase health: degraded — working tree (red-2bm) breaks `cargo test` compilation (P1 blocker)
+Biggest blindspot: AES-CTR counter not persisted to DB — every teamserver restart silently resets CTR to 0 for all agents; reconnecting agents will fail to decrypt acks with no error surfaced to operator

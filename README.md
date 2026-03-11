@@ -134,6 +134,18 @@ Runs every 20 minutes. Reviews commits since the last QA checkpoint, checks buil
 
 Log: `logs/claude_qa.log`
 
+### QA review loop (`codex_qa_loop.sh`)
+
+Runs every 20 minutes. Same QA workflow as the Claude loop, but executed by Codex.
+Reviews commits since the last QA checkpoint, checks build health, verifies architecture
+compliance, and creates beads issues for any problems found. Does not write code.
+
+```bash
+./codex_qa_loop.sh
+```
+
+Log: `logs/codex_qa.log`
+
 ### Architecture review loop (`claude_arch_loop.sh`)
 
 Runs every 45–90 minutes (randomised interval). Reads the **entire codebase from scratch** — not just recent commits. Looks for security issues, architectural drift, missing test coverage, protocol correctness, and stubbed-out code that silently does nothing. Files beads issues for all findings. Does not write code.
@@ -147,6 +159,23 @@ Runs every 45–90 minutes (randomised interval). Reads the **entire codebase fr
 ```
 
 Logs: `logs/claude_arch.log` (loop control), `logs/arch_review_YYYYMMDD_HHMMSS.log` (per run)
+
+### Architecture review loop (`codex_arch_loop.sh`)
+
+Runs every 45–90 minutes (randomised interval). Same architecture review workflow as the
+Claude loop, but executed by Codex. Reads the entire codebase from scratch, looks for
+security issues, architectural drift, missing coverage, protocol correctness problems, and
+stubbed-out behavior that silently does nothing.
+
+```bash
+# Run forever
+./codex_arch_loop.sh
+
+# Run exactly N reviews then exit
+./codex_arch_loop.sh 3
+```
+
+Logs: `logs/codex_arch.log` (loop control), `logs/codex_arch_review_YYYYMMDD_HHMMSS.log` (per run)
 
 ### Stopping a loop
 
@@ -197,6 +226,9 @@ Each agent identifies itself as `<hostname>-claude`, `<hostname>-codex`, or `<ho
 
 The QA loop (`claude_loop.sh`) and architecture loop (`claude_arch_loop.sh`) only need to run on one machine.
 
+Codex QA and architecture loops are alternatives to the Claude review loops, not companions.
+Run one QA loop and one architecture loop total.
+
 ### Prompt files
 
 Each loop has a corresponding prompt file that controls agent behaviour:
@@ -208,6 +240,8 @@ Each loop has a corresponding prompt file that controls agent behaviour:
 | `CURSOR_PROMPT.md` | `cursor_loop.sh` |
 | `CLAUDE_PROMPT.md` | `claude_loop.sh` |
 | `CLAUDE_ARCH_PROMPT.md` | `claude_arch_loop.sh` |
+| `CODEX_QA_PROMPT.md` | `codex_qa_loop.sh` |
+| `CODEX_ARCH_PROMPT.md` | `codex_arch_loop.sh` |
 
 ---
 

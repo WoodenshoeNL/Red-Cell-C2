@@ -4,12 +4,12 @@ use futures_util::{SinkExt, StreamExt};
 use red_cell::{
     AgentRegistry, ApiRuntime, AuthService, Database, EventBus, ListenerManager, LoginRateLimiter,
     OperatorConnectionManager, PayloadBuilderService, SocketRelayManager, TeamserverState,
-    hash_password, websocket_routes,
+    websocket_routes,
 };
 use red_cell_common::config::Profile;
 use red_cell_common::crypto::{
     AGENT_IV_LENGTH, AGENT_KEY_LENGTH, advance_iv, ctr_blocks_for_length, decrypt_agent_data,
-    encrypt_agent_data, encrypt_agent_data_ctr,
+    encrypt_agent_data, encrypt_agent_data_ctr, hash_password_sha3,
 };
 use red_cell_common::demon::{DemonCommand, DemonEnvelope, DemonMessage};
 use red_cell_common::operator::{
@@ -211,7 +211,10 @@ async fn login(
             timestamp: String::new(),
             one_time: String::new(),
         },
-        info: LoginInfo { user: "operator".to_owned(), password: hash_password("password1234") },
+        info: LoginInfo {
+            user: "operator".to_owned(),
+            password: hash_password_sha3("password1234"),
+        },
     }))?;
 
     socket.send(ClientMessage::Text(payload.into())).await?;

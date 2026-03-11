@@ -2237,8 +2237,9 @@ mod tests {
     };
     use crate::{
         AgentRegistry, AuditQuery, AuditResultStatus, AuthService, Database, EventBus,
-        ListenerManager, PayloadBuilderService, SocketRelayManager, hash_password, query_audit_log,
+        ListenerManager, PayloadBuilderService, SocketRelayManager, query_audit_log,
     };
+    use red_cell_common::crypto::hash_password_sha3;
 
     #[derive(Clone)]
     struct TestState {
@@ -3360,7 +3361,7 @@ mod tests {
                 timestamp: String::new(),
                 one_time: String::new(),
             },
-            info: LoginInfo { user: user.to_owned(), password: hash_password(password) },
+            info: LoginInfo { user: user.to_owned(), password: hash_password_sha3(password) },
         }))
         .expect("login should serialize")
     }

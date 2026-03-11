@@ -30,7 +30,7 @@ pub use audit::{
 };
 pub use auth::{
     AuthError, AuthService, AuthenticationFailure, AuthenticationResult, AuthenticationSuccess,
-    OperatorSession, hash_password, login_failure_message, login_success_message,
+    OperatorSession, login_failure_message, login_success_message,
 };
 pub use database::{
     AgentRepository, AgentResponseRecord, AgentResponseRepository, AuditLogEntry, AuditLogFilter,
@@ -56,6 +56,7 @@ pub use rbac::{
     AdminAccess, AuthenticatedOperator, AuthorizationError, ListenerManagementAccess, Permission,
     ReadAccess, TaskAgentAccess, authorize_permission, authorize_websocket_command,
 };
+pub use red_cell_common::crypto::hash_password_sha3;
 pub use sockets::{SocketRelayError, SocketRelayManager};
 pub use websocket::{
     LoginRateLimiter, OperatorConnectionManager, routes as websocket_routes, websocket_handler,

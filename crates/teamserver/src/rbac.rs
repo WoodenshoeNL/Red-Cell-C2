@@ -307,7 +307,8 @@ mod tests {
         AdminAccess, AuthenticatedOperator, AuthorizationError, Permission, ReadAccess,
         TaskAgentAccess, authorize_permission, authorize_websocket_command,
     };
-    use crate::auth::{AuthService, OperatorSession, hash_password};
+    use crate::auth::{AuthService, OperatorSession};
+    use red_cell_common::crypto::hash_password_sha3;
 
     #[derive(Debug, Clone)]
     struct TestState {
@@ -487,7 +488,7 @@ mod tests {
                 connection_id,
                 &red_cell_common::operator::LoginInfo {
                     user: "operator".to_owned(),
-                    password: hash_password("operatorpw"),
+                    password: hash_password_sha3("operatorpw"),
                 },
             )
             .await;
@@ -527,7 +528,7 @@ mod tests {
                 connection_id,
                 &red_cell_common::operator::LoginInfo {
                     user: "analyst".to_owned(),
-                    password: hash_password("analystpw"),
+                    password: hash_password_sha3("analystpw"),
                 },
             )
             .await;
@@ -575,7 +576,7 @@ mod tests {
                 connection_id,
                 &red_cell_common::operator::LoginInfo {
                     user: "admin".to_owned(),
-                    password: hash_password("adminpw"),
+                    password: hash_password_sha3("adminpw"),
                 },
             )
             .await;

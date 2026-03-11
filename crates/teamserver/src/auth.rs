@@ -1,14 +1,13 @@
 //! Operator authentication and session tracking.
 
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
 use std::sync::Arc;
 
 use red_cell_common::config::{OperatorRole, Profile};
+use red_cell_common::crypto::hash_password_sha3;
 use red_cell_common::operator::{
     EventCode, LoginInfo, Message, MessageHead, MessageInfo, OperatorMessage,
 };
-use sha3::{Digest, Sha3_256};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::sync::RwLock;
@@ -108,7 +107,7 @@ impl AuthService {
                 (
                     username.clone(),
                     OperatorAccount {
-                        password_hash: hash_password(&config.password),
+                        password_hash: hash_password_sha3(&config.password),
                         role: config.role,
                     },
                 )
@@ -173,7 +172,7 @@ impl AuthService {
 
         credentials.insert(
             username.to_owned(),
-            OperatorAccount { password_hash: hash_password(password), role },
+            OperatorAccount { password_hash: hash_password_sha3(password), role },
         );
         Ok(())
     }
@@ -272,19 +271,6 @@ impl SessionRegistry {
     }
 }
 
-/// Compute the Havoc-compatible SHA3-256 hex digest for a plaintext password.
-#[must_use]
-pub fn hash_password(password: &str) -> String {
-    let digest = Sha3_256::digest(password.as_bytes());
-    let mut encoded = String::with_capacity(digest.len() * 2);
-
-    for byte in digest {
-        let _ = write!(&mut encoded, "{byte:02x}");
-    }
-
-    encoded
-}
-
 /// Build a success response for an authenticated login handshake.
 #[must_use]
 pub fn login_success_message(user: &str, token: &str) -> OperatorMessage {
@@ -322,6 +308,7 @@ fn password_hashes_match(submitted: &str, expected: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use red_cell_common::config::Profile;
+    use red_cell_common::crypto::hash_password_sha3;
     use red_cell_common::operator::{
         EventCode, InitConnectionCode, LoginInfo, Message, MessageHead, OperatorMessage,
     };
@@ -329,8 +316,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        AuthError, AuthService, AuthenticationFailure, AuthenticationResult, hash_password,
-        login_failure_message, login_success_message,
+        AuthError, AuthService, AuthenticationFailure, AuthenticationResult, login_failure_message,
+        login_success_message,
     };
 
     fn profile() -> Profile {
@@ -365,7 +352,7 @@ mod tests {
     #[test]
     fn hash_password_matches_havoc_sha3_256() {
         assert_eq!(
-            hash_password("password1234"),
+            hash_password_sha3("password1234"),
             "2f7d3e77d0786c5d305c0afadd4c1a2a6869a3210956c963ad2420c52e797022"
         );
     }
@@ -387,7 +374,7 @@ mod tests {
                     },
                     info: LoginInfo {
                         user: "operator".to_owned(),
-                        password: hash_password("password1234"),
+                        password: hash_password_sha3("password1234"),
                     },
                 }))
                 .expect("login message should serialize"),
@@ -425,7 +412,10 @@ mod tests {
         let result = service
             .authenticate_login(
                 connection_id,
-                &LoginInfo { user: "ghost".to_owned(), password: hash_password("password1234") },
+                &LoginInfo {
+                    user: "ghost".to_owned(),
+                    password: hash_password_sha3("password1234"),
+                },
             )
             .await;
 
@@ -440,7 +430,7 @@ mod tests {
         let result = service
             .authenticate_login(
                 Uuid::new_v4(),
-                &LoginInfo { user: "operator".to_owned(), password: hash_password("wrong") },
+                &LoginInfo { user: "operator".to_owned(), password: hash_password_sha3("wrong") },
             )
             .await;
 
@@ -457,7 +447,7 @@ mod tests {
                 Uuid::new_v4(),
                 &LoginInfo {
                     user: "operator".to_owned(),
-                    password: hash_password("password1234").to_ascii_uppercase(),
+                    password: hash_password_sha3("password1234").to_ascii_uppercase(),
                 },
             )
             .await;
@@ -494,7 +484,7 @@ mod tests {
                 "SubEvent": InitConnectionCode::Login.as_u32(),
                 "Info": {
                     "User": "operator",
-                    "Password_SHA3": hash_password("password1234")
+                    "Password_SHA3": hash_password_sha3("password1234")
                 }
             }
         });
@@ -515,7 +505,10 @@ mod tests {
         let result = service
             .authenticate_login(
                 connection_id,
-                &LoginInfo { user: "operator".to_owned(), password: hash_password("password1234") },
+                &LoginInfo {
+                    user: "operator".to_owned(),
+                    password: hash_password_sha3("password1234"),
+                },
             )
             .await;
 
@@ -538,7 +531,7 @@ mod tests {
         let result = service
             .authenticate_login(
                 connection_id,
-                &LoginInfo { user: "analyst".to_owned(), password: hash_password("readonly") },
+                &LoginInfo { user: "analyst".to_owned(), password: hash_password_sha3("readonly") },
             )
             .await;
 
@@ -560,7 +553,7 @@ mod tests {
         let result = service
             .authenticate_login(
                 Uuid::new_v4(),
-                &LoginInfo { user: "trinity".to_owned(), password: hash_password("zion") },
+                &LoginInfo { user: "trinity".to_owned(), password: hash_password_sha3("zion") },
             )
             .await;
 
@@ -574,7 +567,10 @@ mod tests {
         let result = service
             .authenticate_login(
                 connection_id,
-                &LoginInfo { user: "operator".to_owned(), password: hash_password("password1234") },
+                &LoginInfo {
+                    user: "operator".to_owned(),
+                    password: hash_password_sha3("password1234"),
+                },
             )
             .await;
         assert!(matches!(result, AuthenticationResult::Success(_)));

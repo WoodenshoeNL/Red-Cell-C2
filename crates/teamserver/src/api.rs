@@ -1839,8 +1839,9 @@ mod tests {
     use super::*;
     use crate::{
         AgentRegistry, AuthService, Database, EventBus, ListenerManager, OperatorConnectionManager,
-        SocketRelayManager, hash_password,
+        SocketRelayManager,
     };
+    use red_cell_common::crypto::hash_password_sha3;
 
     #[tokio::test]
     async fn root_reports_versioning_and_docs_metadata() {
@@ -2295,7 +2296,7 @@ mod tests {
             Uuid::new_v4(),
             &red_cell_common::operator::LoginInfo {
                 user: "Neo".to_owned(),
-                password: hash_password("password1234"),
+                password: hash_password_sha3("password1234"),
             },
         )
         .await;
@@ -2353,7 +2354,7 @@ mod tests {
                 Uuid::new_v4(),
                 &red_cell_common::operator::LoginInfo {
                     user: "trinity".to_owned(),
-                    password: hash_password("zion"),
+                    password: hash_password_sha3("zion"),
                 },
             )
             .await;

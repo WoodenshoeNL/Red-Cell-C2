@@ -9,8 +9,8 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 85 | 31 |
-| Bugs filed against | 0 | 9 | 9 |
+| Tasks closed | 0 | 91 | 31 |
+| Bugs filed against | 0 | 10 | 9 |
 | Bug rate (bugs/task) | N/A | 0.11 | 0.29 |
 | Quality score | N/A | 89% | 71% |
 
@@ -25,7 +25,7 @@ Each loop run updates the running totals and appends a review entry.
 | Security issues | 0 | 14 | 0 |
 | Architecture drift | 0 | 9 | 0 |
 | Memory / resource leaks | 0 | 6 | 1 |
-| Startup / lifecycle regressions | 0 | 3 | 0 |
+| Startup / lifecycle regressions | 0 | 4 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
 | Availability / timeout regressions | 0 | 2 | 0 |
 
@@ -34,6 +34,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-12 00:29 — bb2c902..98d3599
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No activity this run |
+| Codex | 6 | 1 | Closed: red-pgd, red-1d2, red-8o6, red-4vu, red-cell-c2-3rgl, red-cell-c2-26wc. Filed red-cell-c2-3bh1 because the external-listener startup fix now suppresses all `StartFailed` listener boot errors, not just unsupported External listeners. |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (`cargo check`, `cargo clippy --workspace -- -D warnings`, and `cargo test --workspace` on a clean `HEAD` archive; local worktree had unrelated uncommitted changes)
+Notes: Reviewed seven non-QA commits in range. The websocket idle-auth timeout change looks correct and is covered by a regression test. The startup listener change regressed boot semantics by allowing real listener bind/init failures to be silently downgraded to Error state during fresh-profile startup.
 
 ### QA Review — 2026-03-12 00:03 — 806efaa..bb2c902
 

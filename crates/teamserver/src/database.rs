@@ -785,6 +785,35 @@ pub struct LootRepository {
     pool: SqlitePool,
 }
 
+/// Filter criteria for paginated loot queries pushed down to SQL.
+///
+/// All fields are optional. When `None`, the corresponding filter is not applied.
+/// Substring filters use SQLite `instr()` for literal matching (no wildcard
+/// interpretation). JSON-embedded fields are extracted with `json_extract()`.
+#[derive(Clone, Debug, Default)]
+pub struct LootFilter {
+    /// Exact match against the `kind` column.
+    pub kind_exact: Option<String>,
+    /// Substring match against the `kind` column.
+    pub kind_contains: Option<String>,
+    /// Exact match against the `agent_id` column.
+    pub agent_id: Option<u32>,
+    /// Substring match against the `name` column.
+    pub name_contains: Option<String>,
+    /// Substring match against the `file_path` column.
+    pub file_path_contains: Option<String>,
+    /// Substring match against `json_extract(metadata, '$.operator')`.
+    pub operator_contains: Option<String>,
+    /// Substring match against `json_extract(metadata, '$.command_line')`.
+    pub command_contains: Option<String>,
+    /// Substring match against `json_extract(metadata, '$.pattern')`.
+    pub pattern_contains: Option<String>,
+    /// Inclusive lower bound on `captured_at` (UTC RFC 3339 string).
+    pub since: Option<String>,
+    /// Inclusive upper bound on `captured_at` (UTC RFC 3339 string).
+    pub until: Option<String>,
+}
+
 impl LootRepository {
     /// Create a new loot repository from a shared pool.
     #[must_use]
@@ -844,6 +873,34 @@ impl LootRepository {
             .await?;
 
         rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    /// Query loot rows ordered newest-first with SQL-level pagination.
+    pub async fn query_filtered(
+        &self,
+        filter: &LootFilter,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<LootRecord>, TeamserverError> {
+        let mut builder = QueryBuilder::new(
+            "SELECT id, agent_id, kind, name, file_path, size_bytes, captured_at, data, metadata \
+             FROM ts_loot WHERE 1=1",
+        );
+        append_loot_filters(&mut builder, filter);
+        builder.push(" ORDER BY id DESC LIMIT ").push_bind(limit);
+        builder.push(" OFFSET ").push_bind(offset);
+
+        let rows = builder.build_query_as::<LootRow>().fetch_all(&self.pool).await?;
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    /// Count loot rows matching the given filters without fetching row data.
+    pub async fn count_filtered(&self, filter: &LootFilter) -> Result<i64, TeamserverError> {
+        let mut builder = QueryBuilder::new("SELECT COUNT(*) FROM ts_loot WHERE 1=1");
+        append_loot_filters(&mut builder, filter);
+
+        let row = builder.build().fetch_one(&self.pool).await?;
+        Ok(row.get::<i64, _>(0))
     }
 
     /// Delete a loot record by id.
@@ -1134,6 +1191,48 @@ pub struct AuditLogFilter {
     pub until: Option<String>,
     /// Exact action labels allowed by the query.
     pub action_in: Option<Vec<String>>,
+}
+
+fn append_loot_filters(builder: &mut QueryBuilder<'_, Sqlite>, filter: &LootFilter) {
+    if let Some(ref value) = filter.kind_exact {
+        builder.push(" AND kind = ").push_bind(value.clone());
+    }
+    if let Some(ref value) = filter.kind_contains {
+        builder.push(" AND instr(kind, ").push_bind(value.clone()).push(") > 0");
+    }
+    if let Some(value) = filter.agent_id {
+        builder.push(" AND agent_id = ").push_bind(i64::from(value));
+    }
+    if let Some(ref value) = filter.name_contains {
+        builder.push(" AND instr(name, ").push_bind(value.clone()).push(") > 0");
+    }
+    if let Some(ref value) = filter.file_path_contains {
+        builder.push(" AND instr(file_path, ").push_bind(value.clone()).push(") > 0");
+    }
+    if let Some(ref value) = filter.operator_contains {
+        builder
+            .push(" AND instr(json_extract(metadata, '$.operator'), ")
+            .push_bind(value.clone())
+            .push(") > 0");
+    }
+    if let Some(ref value) = filter.command_contains {
+        builder
+            .push(" AND instr(json_extract(metadata, '$.command_line'), ")
+            .push_bind(value.clone())
+            .push(") > 0");
+    }
+    if let Some(ref value) = filter.pattern_contains {
+        builder
+            .push(" AND instr(json_extract(metadata, '$.pattern'), ")
+            .push_bind(value.clone())
+            .push(") > 0");
+    }
+    if let Some(ref value) = filter.since {
+        builder.push(" AND captured_at >= ").push_bind(value.clone());
+    }
+    if let Some(ref value) = filter.until {
+        builder.push(" AND captured_at <= ").push_bind(value.clone());
+    }
 }
 
 fn append_audit_filters(builder: &mut QueryBuilder<'_, Sqlite>, filter: &AuditLogFilter) {

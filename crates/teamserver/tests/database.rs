@@ -1,6 +1,7 @@
 use red_cell::database::{
     AgentResponseRecord, AuditLogEntry, AuditLogFilter, Database, LinkRecord, ListenerStatus,
-    LootRecord, PersistedListener, PersistedListenerState, PersistedOperator, TeamserverError,
+    LootFilter, LootRecord, PersistedListener, PersistedListenerState, PersistedOperator,
+    TeamserverError,
 };
 use red_cell::{
     AuditQuery, AuditResultStatus, SessionActivityQuery, audit_details, query_audit_log,
@@ -262,6 +263,100 @@ async fn loot_repository_supports_insert_query_and_delete() -> Result<(), Teamse
 
     loot.delete(id).await?;
     assert!(loot.get(id).await?.is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn loot_repository_count_filtered_matches_query_filtered_length()
+-> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let agents = database.agents();
+    let loot = database.loot();
+    let agent = sample_agent(0x2200_0003);
+
+    agents.create(&agent).await?;
+
+    for (name, kind, captured_at, operator, pattern) in [
+        ("credential-1", "credential", "2026-03-10T10:00:00Z", "neo", Some("password")),
+        ("credential-2", "credential", "2026-03-11T10:00:00Z", "neo", Some("hash")),
+        ("download-1", "download", "2026-03-11T11:00:00Z", "trinity", None),
+    ] {
+        loot.create(&LootRecord {
+            id: None,
+            agent_id: agent.agent_id,
+            kind: kind.to_owned(),
+            name: name.to_owned(),
+            file_path: Some(format!("C:\\Temp\\{name}.bin")),
+            size_bytes: Some(32),
+            captured_at: captured_at.to_owned(),
+            data: Some(b"secret".to_vec()),
+            metadata: Some(json!({
+                "operator": operator,
+                "command_line": "sekurlsa::logonpasswords",
+                "pattern": pattern,
+            })),
+        })
+        .await?;
+    }
+
+    let filter = LootFilter {
+        kind_exact: Some("credential".to_owned()),
+        operator_contains: Some("neo".to_owned()),
+        pattern_contains: Some("pass".to_owned()),
+        since: Some("2026-03-10T00:00:00Z".to_owned()),
+        until: Some("2026-03-10T23:59:59Z".to_owned()),
+        ..LootFilter::default()
+    };
+
+    let count = loot.count_filtered(&filter).await?;
+    let rows = loot.query_filtered(&filter, 10, 0).await?;
+
+    assert_eq!(count, 1);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].name, "credential-1");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn loot_repository_query_filtered_pushes_pagination_to_sql() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let agents = database.agents();
+    let loot = database.loot();
+    let agent = sample_agent(0x2200_0004);
+
+    agents.create(&agent).await?;
+
+    for i in 0..5 {
+        loot.create(&LootRecord {
+            id: None,
+            agent_id: agent.agent_id,
+            kind: "download".to_owned(),
+            name: format!("artifact-{i}"),
+            file_path: Some(format!("C:\\Temp\\artifact-{i}.bin")),
+            size_bytes: Some(64),
+            captured_at: format!("2026-03-10T10:{i:02}:00Z"),
+            data: Some(vec![u8::try_from(i).map_err(|_| {
+                TeamserverError::InvalidPersistedValue {
+                    field: "i",
+                    message: "loop index does not fit in u8".to_owned(),
+                }
+            })?]),
+            metadata: Some(json!({
+                "operator": "neo",
+                "command_line": "download C:\\Temp\\artifact.bin",
+            })),
+        })
+        .await?;
+    }
+
+    let filter = LootFilter { operator_contains: Some("neo".to_owned()), ..LootFilter::default() };
+    let rows = loot.query_filtered(&filter, 2, 1).await?;
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].name, "artifact-3");
+    assert_eq!(rows[1].name, "artifact-2");
 
     Ok(())
 }

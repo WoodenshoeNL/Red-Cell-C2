@@ -34,6 +34,7 @@ use uuid::Uuid;
 
 use crate::agents::QueuedJob;
 use crate::app::TeamserverState;
+use crate::database::LootFilter;
 use crate::listeners::{ListenerManagerError, ListenerMarkRequest, ListenerSummary};
 use crate::rbac::{
     CanAdminister, CanManageListeners, CanRead, CanTaskAgents, Permission, PermissionMarker,
@@ -41,8 +42,8 @@ use crate::rbac::{
 use crate::websocket::{AgentCommandError, execute_agent_task};
 use crate::{
     AuditPage, AuditQuery, AuditResultStatus, AuthError, Database, LootRecord, SessionActivityPage,
-    SessionActivityQuery, audit_details, parameter_object, query_audit_log, query_session_activity,
-    record_operator_action,
+    SessionActivityQuery, TeamserverError, audit_details, parameter_object, query_audit_log,
+    query_session_activity, record_operator_action,
 };
 const API_VERSION: &str = "v1";
 const API_PREFIX: &str = "/api/v1";
@@ -1169,29 +1170,29 @@ async fn list_credentials(
     _identity: ReadApiAccess,
     Query(query): Query<CredentialQuery>,
 ) -> Result<Json<CredentialPage>, CredentialApiError> {
-    let normalized_agent_id = normalize_agent_filter(query.agent_id.as_deref(), |value| {
-        CredentialApiError::InvalidAgentId { value }
-    })?;
-    let since = query.since.as_deref().and_then(parse_rfc3339);
-    let until = query.until.as_deref().and_then(parse_rfc3339);
-
-    let mut items = state
-        .database
-        .loot()
-        .list()
-        .await?
-        .into_iter()
-        .rev()
-        .filter(|record| {
-            credential_matches(&query, record, normalized_agent_id.as_deref(), since, until)
-        })
-        .filter_map(credential_summary)
-        .collect::<Vec<_>>();
-
-    let total = items.len();
     let offset = query.offset();
     let limit = query.limit();
-    items = items.into_iter().skip(offset).take(limit).collect();
+    let filter = LootFilter {
+        kind_exact: Some("credential".to_owned()),
+        agent_id: parse_optional_agent_id(query.agent_id.as_deref(), |value| {
+            CredentialApiError::InvalidAgentId { value }
+        })?,
+        name_contains: query.name.clone(),
+        operator_contains: query.operator.clone(),
+        command_contains: query.command.clone(),
+        pattern_contains: query.pattern.clone(),
+        since: normalize_timestamp_filter(query.since.as_deref()),
+        until: normalize_timestamp_filter(query.until.as_deref()),
+        ..LootFilter::default()
+    };
+    let repo = state.database.loot();
+    let items = repo
+        .query_filtered(&filter, usize_to_i64(limit, "limit")?, usize_to_i64(offset, "offset")?)
+        .await?
+        .into_iter()
+        .filter_map(credential_summary)
+        .collect::<Vec<_>>();
+    let total = i64_to_usize(repo.count_filtered(&filter).await?, "total")?;
 
     Ok(Json(CredentialPage { total, limit, offset, items }))
 }
@@ -1350,27 +1351,29 @@ async fn list_loot(
     _identity: ReadApiAccess,
     Query(query): Query<LootQuery>,
 ) -> Result<Json<LootPage>, LootApiError> {
-    let normalized_agent_id = normalize_loot_agent_filter(query.agent_id.as_deref())?;
-    let since = query.since.as_deref().and_then(parse_rfc3339);
-    let until = query.until.as_deref().and_then(parse_rfc3339);
-
-    let mut items = state
-        .database
-        .loot()
-        .list()
-        .await?
-        .into_iter()
-        .rev()
-        .filter_map(|record| {
-            loot_matches(&record, &query, normalized_agent_id.as_deref(), since, until)
-                .then(|| loot_summary(record))
-        })
-        .collect::<Vec<_>>();
-
-    let total = items.len();
     let offset = query.offset();
     let limit = query.limit();
-    items = items.into_iter().skip(offset).take(limit).collect();
+    let filter = LootFilter {
+        kind_contains: query.kind.clone(),
+        agent_id: parse_optional_agent_id(query.agent_id.as_deref(), |value| {
+            LootApiError::InvalidAgentId { value }
+        })?,
+        name_contains: query.name.clone(),
+        file_path_contains: query.file_path.clone(),
+        operator_contains: query.operator.clone(),
+        command_contains: query.command.clone(),
+        since: normalize_timestamp_filter(query.since.as_deref()),
+        until: normalize_timestamp_filter(query.until.as_deref()),
+        ..LootFilter::default()
+    };
+    let repo = state.database.loot();
+    let items = repo
+        .query_filtered(&filter, usize_to_i64(limit, "limit")?, usize_to_i64(offset, "offset")?)
+        .await?
+        .into_iter()
+        .map(loot_summary)
+        .collect::<Vec<_>>();
+    let total = i64_to_usize(repo.count_filtered(&filter).await?, "total")?;
 
     Ok(Json(LootPage { total, limit, offset, items }))
 }
@@ -2111,12 +2114,6 @@ fn job_summary(queued_job: QueuedJob) -> JobSummary {
     }
 }
 
-fn normalize_loot_agent_filter(value: Option<&str>) -> Result<Option<String>, LootApiError> {
-    normalize_agent_filter(value, |filter_value| LootApiError::InvalidAgentId {
-        value: filter_value,
-    })
-}
-
 fn normalize_agent_filter<E>(
     value: Option<&str>,
     invalid: impl FnOnce(String) -> E + Copy,
@@ -2139,44 +2136,6 @@ fn normalize_request_filter<E>(
             None => Err(invalid(filter_value.to_owned())),
         })
         .transpose()
-}
-
-fn loot_matches(
-    record: &LootRecord,
-    query: &LootQuery,
-    normalized_agent_id: Option<&str>,
-    since: Option<OffsetDateTime>,
-    until: Option<OffsetDateTime>,
-) -> bool {
-    let (operator, command_line, _) = loot_context_fields(record.metadata.as_ref());
-    contains_filter(record.kind.as_str(), query.kind.as_deref())
-        && contains_filter(record.name.as_str(), query.name.as_deref())
-        && optional_contains_filter(record.file_path.as_deref(), query.file_path.as_deref())
-        && optional_contains_filter(operator.as_deref(), query.operator.as_deref())
-        && optional_contains_filter(command_line.as_deref(), query.command.as_deref())
-        && normalized_agent_id.is_none_or(|agent_id| format!("{:08X}", record.agent_id) == agent_id)
-        && matches_optional_timestamp(record.captured_at.as_str(), since, until)
-}
-
-fn credential_matches(
-    query: &CredentialQuery,
-    record: &LootRecord,
-    normalized_agent_id: Option<&str>,
-    since: Option<OffsetDateTime>,
-    until: Option<OffsetDateTime>,
-) -> bool {
-    if !record.kind.eq_ignore_ascii_case("credential") {
-        return false;
-    }
-
-    let pattern = metadata_string_field(record.metadata.as_ref(), "pattern");
-    let (operator, command_line, _) = loot_context_fields(record.metadata.as_ref());
-    contains_filter(record.name.as_str(), query.name.as_deref())
-        && optional_contains_filter(operator.as_deref(), query.operator.as_deref())
-        && optional_contains_filter(command_line.as_deref(), query.command.as_deref())
-        && optional_contains_filter(pattern.as_deref(), query.pattern.as_deref())
-        && normalized_agent_id.is_none_or(|agent_id| format!("{:08X}", record.agent_id) == agent_id)
-        && matches_optional_timestamp(record.captured_at.as_str(), since, until)
 }
 
 fn job_matches(
@@ -2224,21 +2183,38 @@ fn metadata_string_field(metadata: Option<&Value>, key: &str) -> Option<String> 
         .map(ToOwned::to_owned)
 }
 
-fn matches_optional_timestamp(
-    occurred_at: &str,
-    since: Option<OffsetDateTime>,
-    until: Option<OffsetDateTime>,
-) -> bool {
-    let Some(timestamp) = parse_rfc3339(occurred_at) else {
-        return false;
-    };
-
-    since.is_none_or(|boundary| timestamp >= boundary)
-        && until.is_none_or(|boundary| timestamp <= boundary)
-}
-
 fn parse_rfc3339(value: &str) -> Option<OffsetDateTime> {
     OffsetDateTime::parse(value, &Rfc3339).ok()
+}
+
+fn normalize_timestamp_filter(value: Option<&str>) -> Option<String> {
+    parse_rfc3339(value?)
+        .and_then(|timestamp| timestamp.to_offset(time::UtcOffset::UTC).format(&Rfc3339).ok())
+}
+
+fn parse_optional_agent_id<E>(
+    value: Option<&str>,
+    invalid: impl FnOnce(String) -> E + Copy,
+) -> Result<Option<u32>, E> {
+    value
+        .map(|filter_value| {
+            parse_hex_u32(filter_value).ok_or_else(|| invalid(filter_value.to_owned()))
+        })
+        .transpose()
+}
+
+fn usize_to_i64(value: usize, field: &'static str) -> Result<i64, TeamserverError> {
+    i64::try_from(value).map_err(|_| TeamserverError::InvalidPersistedValue {
+        field,
+        message: format!("{field} exceeds i64 range"),
+    })
+}
+
+fn i64_to_usize(value: i64, field: &'static str) -> Result<usize, TeamserverError> {
+    usize::try_from(value).map_err(|_| TeamserverError::InvalidPersistedValue {
+        field,
+        message: format!("{field} exceeds usize range"),
+    })
 }
 
 fn parse_hex_u32(value: &str) -> Option<u32> {

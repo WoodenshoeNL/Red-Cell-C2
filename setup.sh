@@ -1,7 +1,14 @@
 #!/bin/bash
-# Machine setup script for Red-Cell-C2
-# Run this once on a new machine after cloning the repo.
-# Idempotent — safe to re-run.
+# Red-Cell-C2 session start script
+# Run on any machine at the start of a session — first time or switching VMs.
+# Idempotent: safe to run as many times as you like.
+#
+# What it does:
+#   1. Checks required tools are installed
+#   2. git pull to get latest work from other VMs
+#   3. Enforces br issue_prefix = red-cell-c2
+#   4. Rebuilds beads DB from JSONL
+#   5. Shows open issues count and any in_progress tasks
 
 set -euo pipefail
 
@@ -13,7 +20,7 @@ ok()   { echo -e "${GREEN}[ok]${NC}    $*"; }
 warn() { echo -e "${YELLOW}[warn]${NC}  $*"; }
 fail() { echo -e "${RED}[fail]${NC}  $*"; }
 
-echo "=== Red-Cell-C2 machine setup ==="
+echo "=== Red-Cell-C2 session start ==="
 echo ""
 
 # ── 1. Required tools ──────────────────────────────────────────────────────────
@@ -40,9 +47,42 @@ if [[ "$MISSING" -eq 1 ]]; then
     exit 1
 fi
 
-# ── 2. br config — issue_prefix must match project config ─────────────────────
+# ── 2. Git sync ───────────────────────────────────────────────────────────────
 echo ""
-echo "--- Configuring br ---"
+echo "--- Git sync ---"
+
+# Check for uncommitted local changes that would block pull
+if ! git diff --quiet || ! git diff --cached --quiet; then
+    warn "You have uncommitted local changes:"
+    git status --short
+    echo ""
+    warn "Skipping git pull — commit or stash your changes first."
+else
+    CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+    UPSTREAM="$(git rev-parse --abbrev-ref '@{u}' 2>/dev/null || echo '')"
+    if [[ -z "$UPSTREAM" ]]; then
+        warn "No upstream configured for branch '$CURRENT_BRANCH' — skipping pull"
+    else
+        BEFORE="$(git rev-parse HEAD)"
+        if git pull --ff-only --quiet 2>/dev/null; then
+            AFTER="$(git rev-parse HEAD)"
+            if [[ "$BEFORE" == "$AFTER" ]]; then
+                ok "git: already up to date"
+            else
+                NEW_COMMITS="$(git log --oneline "$BEFORE..$AFTER" | wc -l | tr -d ' ')"
+                ok "git: pulled $NEW_COMMITS new commit(s)"
+                git log --oneline "$BEFORE..$AFTER" | sed 's/^/        /'
+            fi
+        else
+            warn "git pull --ff-only failed (diverged?). Check manually:"
+            echo "  git status; git log --oneline -5"
+        fi
+    fi
+fi
+
+# ── 4. br config — issue_prefix must match project config ─────────────────────
+echo ""
+echo "--- br config ---"
 
 EXPECTED_PREFIX="red-cell-c2"
 ACTUAL_PREFIX="$(br config get issue_prefix 2>/dev/null || echo '')"
@@ -55,9 +95,9 @@ else
     ok "br issue_prefix set to $EXPECTED_PREFIX"
 fi
 
-# ── 3. Build / refresh the beads DB from JSONL ────────────────────────────────
+# ── 5. Build / refresh the beads DB from JSONL ────────────────────────────────
 echo ""
-echo "--- Building beads DB ---"
+echo "--- beads DB ---"
 
 DB_PATH="$SCRIPT_DIR/.beads/beads.db"
 if [[ -f "$DB_PATH" ]]; then
@@ -74,7 +114,20 @@ else
     exit 1
 fi
 
-# ── 4. Git identity ────────────────────────────────────────────────────────────
+# Show any tasks currently in_progress (left over from another VM's session)
+IN_PROGRESS="$(br list --status=in_progress --json 2>/dev/null | python3 -c '
+import json, sys
+issues = json.load(sys.stdin)
+if not isinstance(issues, list): issues = issues.get("issues", [])
+for i in issues:
+    print(f"  {i[\"id\"]}  {i[\"title\"][:60]}")
+' 2>/dev/null || echo '')"
+if [[ -n "$IN_PROGRESS" ]]; then
+    warn "Tasks currently in_progress (may be stale from another VM):"
+    echo "$IN_PROGRESS"
+fi
+
+# ── 6. Git identity ────────────────────────────────────────────────────────────
 echo ""
 echo "--- Git identity ---"
 GIT_USER="$(git config user.name 2>/dev/null || echo '')"
@@ -88,18 +141,16 @@ else
     ok "Git identity: $GIT_USER <$GIT_EMAIL>"
 fi
 
-# ── 5. Logs directory ─────────────────────────────────────────────────────────
+# ── 7. Logs directory ─────────────────────────────────────────────────────────
 mkdir -p "$SCRIPT_DIR/logs"
 ok "logs/ directory ready"
 
-# ── 6. Summary ────────────────────────────────────────────────────────────────
+# ── 8. Summary ────────────────────────────────────────────────────────────────
 echo ""
-echo "=== Setup complete ==="
+HOSTNAME_ID="${HOSTNAME:-$(hostname)}"
+echo "=== Ready on ${HOSTNAME_ID} ==="
 echo ""
-echo "To start the agent loops:"
-echo "  ./codex_loop.sh          # Codex dev agent"
-echo "  ./claude_loop.sh         # Claude QA agent"
-echo "  ./cursor_loop.sh         # Cursor dev agent"
-echo ""
-HOSTNAME_SUFFIX="${HOSTNAME:-$(hostname)}"
-echo "This machine's agent IDs will be: ${HOSTNAME_SUFFIX}-codex, ${HOSTNAME_SUFFIX}-codex (QA), etc."
+echo "Agent loops:"
+echo "  ./codex_loop.sh          # ${HOSTNAME_ID}-codex"
+echo "  ./claude_loop.sh         # ${HOSTNAME_ID}-claude (QA)"
+echo "  ./cursor_loop.sh         # ${HOSTNAME_ID}-cursor"

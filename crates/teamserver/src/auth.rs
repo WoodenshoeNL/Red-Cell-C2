@@ -86,7 +86,7 @@ impl AuthenticationFailure {
     #[must_use]
     pub fn message(&self) -> &'static str {
         match self {
-            Self::UnknownUser => "User doesn't exits",
+            Self::UnknownUser => "User doesn't exist",
             Self::WrongPassword => "Wrong Password",
         }
     }
@@ -837,6 +837,6 @@ mod tests {
         let value = serde_json::to_value(&message).expect("message should serialize");
 
         assert_eq!(value["Body"]["SubEvent"], json!(InitConnectionCode::Error.as_u32()));
-        assert_eq!(value["Body"]["Info"]["Message"], json!("User doesn't exits"));
+        assert_eq!(value["Body"]["Info"]["Message"], json!("User doesn't exist"));
     }
 }

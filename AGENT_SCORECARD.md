@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 64 | 31 |
-| Bugs filed against | 0 | 4 | 9 |
-| Bug rate (bugs/task) | N/A | 0.06 | 0.29 |
-| Quality score | N/A | 94% | 71% |
+| Tasks closed | 0 | 68 | 31 |
+| Bugs filed against | 0 | 5 | 9 |
+| Bug rate (bugs/task) | N/A | 0.07 | 0.29 |
+| Quality score | N/A | 93% | 71% |
 
 ## Violation Breakdown
 
@@ -21,7 +21,7 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 0 | 0 | 0 |
 | Missing tests | 0 | 2 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
-| Protocol errors | 1 | 3 | 2 |
+| Protocol errors | 1 | 4 | 2 |
 | Security issues | 0 | 10 | 0 |
 | Architecture drift | 0 | 3 | 0 |
 | Memory / resource leaks | 0 | 6 | 1 |
@@ -443,6 +443,17 @@ No new development commits since last checkpoint. Only QA checkpoint commit in r
 
 Build: passed (cargo check + clippy -D warnings clean; cargo test: 502 passed)
 No new development commits. Only QA checkpoint and a Codex claim commit in range. red-cell-c2-1ga (P2) now in_progress. Open P1 epics: red-cell-c2-120, red-cell-c2-50q. No new bugs filed.
+
+### QA Review — 2026-03-11 17:54 — 32a0678..7e9e37f
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA loop only |
+| Codex | 4 | 1 | Closed: red-cell-c2-1ga, red-cell-c2-50q, red-cell-c2-2nf, red-cell-c2-3ci. Filed red-cell-c2-2r2 (P1 protocol regression): payload builder appends a non-Havoc DotNetNamePipe field to the packed Demon config, breaking payload compatibility with the reference builder. Additional Codex work in range: PE-header patching, client Python console command wiring, file-browser working-dir action. |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (cargo check + clippy -D warnings clean; cargo test: 512 passed)
+Notes: One non-agent/unattributed commit added the Codex QA and architecture loop prompt/scripts. Main QA finding is protocol-level: Havoc's builder stops the Demon config after listener fields, but the Rust payload builder now appends DotNetNamePipe, altering the payload config layout. red-cell-c2-s9d now depends on red-cell-c2-2r2 until that compatibility regression is removed.
 
 ### QA Review — 2026-03-11 15:35 — 20b6897..344d499
 

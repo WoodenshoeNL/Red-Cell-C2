@@ -103,7 +103,7 @@ This project uses autonomous AI agent loops for development. Three loops are ava
 | `./codex_loop.sh` | Codex | Development | Continuous |
 | `./claude_dev_loop.sh` | Claude | Development | Continuous |
 | `./cursor_loop.sh` | Cursor Agent | Development | Continuous |
-| `./claude_loop.sh` | Claude | QA review | Every 15 min |
+| `./claude_loop.sh` | Claude | QA review | Every 20 min |
 | `./claude_arch_loop.sh` | Claude | Architecture review | Every 45–90 min |
 
 ### Development loops (`codex_loop.sh`, `claude_dev_loop.sh`, `cursor_loop.sh`)
@@ -126,7 +126,7 @@ Logs: `logs/codex_dev.log`, `logs/claude_dev.log`, `logs/cursor_dev.log`
 
 ### QA review loop (`claude_loop.sh`)
 
-Runs every 15 minutes. Reviews commits since the last QA checkpoint, checks build health, verifies architecture compliance, and creates beads issues for any problems found. Does not write code.
+Runs every 20 minutes. Reviews commits since the last QA checkpoint, checks build health, verifies architecture compliance, and creates beads issues for any problems found. Does not write code.
 
 ```bash
 ./claude_loop.sh

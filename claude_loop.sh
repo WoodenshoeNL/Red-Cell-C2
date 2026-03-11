@@ -1,5 +1,5 @@
 #!/bin/bash
-# Claude QA review loop — runs every 15 minutes
+# Claude QA review loop — runs every 20 minutes
 # Checks Codex's work, enforces quality, creates beads issues for problems
 
 set -uo pipefail
@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="$SCRIPT_DIR/logs"
 LOG_FILE="$LOG_DIR/claude_qa.log"
 PROMPT_FILE="$SCRIPT_DIR/CLAUDE_PROMPT.md"
-SLEEP_INTERVAL=900  # 15 minutes
+SLEEP_INTERVAL=1200  # 20 minutes
 
 mkdir -p "$LOG_DIR"
 

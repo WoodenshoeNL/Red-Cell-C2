@@ -165,7 +165,7 @@ impl DemonPacketParser {
     }
 }
 
-/// Build the encrypted acknowledgement body returned after a Demon init or reconnect request.
+/// Build the encrypted acknowledgement body returned after a Demon init request.
 ///
 /// The encryption uses the agent's current CTR block offset (via the registry)
 /// so that the counter stays synchronised with the Demon agent's AES context.
@@ -175,6 +175,16 @@ pub async fn build_init_ack(
 ) -> Result<Vec<u8>, DemonParserError> {
     let payload = agent_id.to_le_bytes();
     Ok(registry.encrypt_for_agent(agent_id, &payload).await?)
+}
+
+/// Build the encrypted acknowledgement body returned for a reconnect probe
+/// without mutating the stored CTR state.
+pub async fn build_reconnect_ack(
+    registry: &crate::AgentRegistry,
+    agent_id: u32,
+) -> Result<Vec<u8>, DemonParserError> {
+    let payload = agent_id.to_le_bytes();
+    Ok(registry.encrypt_for_agent_without_advancing(agent_id, &payload).await?)
 }
 
 fn parse_callback_packages(
@@ -461,7 +471,9 @@ mod tests {
     use time::macros::datetime;
     use uuid::Uuid;
 
-    use super::{DemonPacketParser, DemonParserError, ParsedDemonPacket, build_init_ack};
+    use super::{
+        DemonPacketParser, DemonParserError, ParsedDemonPacket, build_init_ack, build_reconnect_ack,
+    };
     use crate::{AgentRegistry, Database};
 
     fn u32_be(value: u32) -> [u8; 4] {
@@ -745,6 +757,31 @@ mod tests {
         let effective_iv = advance_iv(&iv, offset_before_restart);
         let decrypted = decrypt_agent_data(&key, &effective_iv, &ack).expect("ack should decrypt");
         assert_eq!(decrypted, agent_id.to_le_bytes());
+    }
+
+    #[tokio::test]
+    async fn build_reconnect_ack_uses_current_ctr_offset_without_advancing() {
+        let registry = test_registry().await;
+        let key = [0x56; AGENT_KEY_LENGTH];
+        let iv = [0x67; AGENT_IV_LENGTH];
+        let agent_id: u32 = 0x5566_7788;
+
+        let init_packet = build_init_packet(agent_id, key, iv);
+        let parser = DemonPacketParser::new(registry.clone());
+        parser
+            .parse_at(&init_packet, "10.0.0.4".to_owned(), datetime!(2026-03-09 19:46:00 UTC))
+            .await
+            .expect("init should succeed");
+
+        let _first_ack = build_init_ack(&registry, agent_id).await.expect("ack should build");
+        let offset_before_reconnect = registry.ctr_offset(agent_id).await.expect("offset");
+
+        let ack = build_reconnect_ack(&registry, agent_id).await.expect("reconnect ack");
+        let effective_iv = advance_iv(&iv, offset_before_reconnect);
+        let decrypted = decrypt_agent_data(&key, &effective_iv, &ack).expect("ack should decrypt");
+
+        assert_eq!(decrypted, agent_id.to_le_bytes());
+        assert_eq!(registry.ctr_offset(agent_id).await.expect("offset"), offset_before_reconnect);
     }
 
     #[tokio::test]

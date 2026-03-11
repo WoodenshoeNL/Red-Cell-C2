@@ -45,7 +45,8 @@ use crate::{
     AgentRegistry, CommandDispatchError, CommandDispatcher, Database, DemonPacketParser,
     ListenerRepository, ListenerStatus, ParsedDemonPacket, PersistedListener,
     PersistedListenerState, PluginRuntime, SocketRelayManager, TeamserverError,
-    agent_events::agent_new_event, build_init_ack, events::EventBus, json_error_response,
+    agent_events::agent_new_event, build_init_ack, build_reconnect_ack, events::EventBus,
+    json_error_response,
 };
 
 const DEFAULT_MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
@@ -979,7 +980,7 @@ async fn process_demon_transport(
         }
         Ok(ParsedDemonPacket::Reconnect { header, .. }) => {
             let payload = if registry.get(header.agent_id).await.is_some() {
-                build_init_ack(registry, header.agent_id).await.map_err(|error| {
+                build_reconnect_ack(registry, header.agent_id).await.map_err(|error| {
                     ListenerManagerError::InvalidConfig {
                         message: format!("failed to build reconnect ack: {error}"),
                     }
@@ -2644,6 +2645,51 @@ mod tests {
         assert!(response.bytes().await?.is_empty());
 
         manager.stop("edge-http-empty-jobs").await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn http_listener_reconnect_ack_does_not_advance_ctr_offset()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+        let port = available_port()?;
+        let key = [0x52; AGENT_KEY_LENGTH];
+        let iv = [0x1A; AGENT_IV_LENGTH];
+        let agent_id = 0x1020_3040;
+        let client = Client::new();
+
+        manager.create(http_listener("edge-http-reconnect", port)).await?;
+        manager.start("edge-http-reconnect").await?;
+        wait_for_listener(port, false).await?;
+
+        let init_response = client
+            .post(format!("http://127.0.0.1:{port}/"))
+            .body(valid_demon_init_body(agent_id, key, iv))
+            .send()
+            .await?;
+        assert_eq!(init_response.status(), StatusCode::OK);
+        let _ = init_response.bytes().await?;
+
+        let offset_before_reconnect = registry.ctr_offset(agent_id).await?;
+        let reconnect_response = client
+            .post(format!("http://127.0.0.1:{port}/"))
+            .body(valid_demon_request_body(agent_id))
+            .send()
+            .await?;
+
+        assert_eq!(reconnect_response.status(), StatusCode::OK);
+        let reconnect_bytes = reconnect_response.bytes().await?;
+        let effective_iv = advance_iv(&iv, offset_before_reconnect);
+        let decrypted = decrypt_agent_data(&key, &effective_iv, &reconnect_bytes)?;
+
+        assert_eq!(decrypted.as_slice(), &agent_id.to_le_bytes());
+        assert_eq!(registry.ctr_offset(agent_id).await?, offset_before_reconnect);
+
+        manager.stop("edge-http-reconnect").await?;
         Ok(())
     }
 

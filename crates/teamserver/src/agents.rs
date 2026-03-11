@@ -357,6 +357,29 @@ impl AgentRegistry {
         Ok(ciphertext)
     }
 
+    /// Encrypt a plaintext payload for an agent without changing the stored
+    /// shared CTR block counter.
+    #[instrument(skip(self, plaintext), fields(agent_id = format_args!("0x{:08X}", agent_id), len = plaintext.len()))]
+    pub(crate) async fn encrypt_for_agent_without_advancing(
+        &self,
+        agent_id: u32,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, TeamserverError> {
+        let entry =
+            self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
+        let info = entry.info.read().await;
+        let (key, iv) = decode_crypto_material(agent_id, &info.encryption)?;
+        drop(info);
+
+        if key.iter().all(|byte| *byte == 0) {
+            return Ok(plaintext.to_vec());
+        }
+
+        let offset = *entry.ctr_block_offset.lock().await;
+        let (ciphertext, _) = encrypt_agent_data_ctr(&key, &iv, offset, plaintext)?;
+        Ok(ciphertext)
+    }
+
     /// Decrypt a ciphertext payload received from an agent, advancing the
     /// shared CTR block counter.
     #[instrument(skip(self, ciphertext), fields(agent_id = format_args!("0x{:08X}", agent_id), len = ciphertext.len()))]
@@ -1275,6 +1298,31 @@ mod tests {
 
         assert_eq!(ciphertext, expected_ciphertext);
         assert_eq!(registry.ctr_offset(agent.agent_id).await?, expected_offset);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn encrypt_for_agent_without_advancing_keeps_ctr_unchanged() -> Result<(), TeamserverError>
+    {
+        let registry = AgentRegistry::new(test_database().await?);
+        let key = [0x74; AGENT_KEY_LENGTH];
+        let iv = [0x84; AGENT_IV_LENGTH];
+        let agent = sample_agent_with_crypto(0x1000_0705, key, iv);
+        let starting_offset = 11;
+        let plaintext = b"preview-only encryption";
+
+        registry.insert(agent.clone()).await?;
+        registry.set_ctr_offset(agent.agent_id, starting_offset).await?;
+
+        let ciphertext =
+            registry.encrypt_for_agent_without_advancing(agent.agent_id, plaintext).await?;
+        let (expected_ciphertext, expected_offset) =
+            encrypt_agent_data_ctr(&key, &iv, starting_offset, plaintext)?;
+
+        assert_eq!(ciphertext, expected_ciphertext);
+        assert_eq!(expected_offset, starting_offset + ctr_blocks_for_length(plaintext.len()));
+        assert_eq!(registry.ctr_offset(agent.agent_id).await?, starting_offset);
 
         Ok(())
     }

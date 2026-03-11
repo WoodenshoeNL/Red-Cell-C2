@@ -39,7 +39,7 @@ pub use database::{
 };
 pub use demon::{
     DemonCallbackPackage, DemonPacketParser, DemonParserError, ParsedDemonInit, ParsedDemonPacket,
-    build_init_ack,
+    build_init_ack, build_reconnect_ack,
 };
 pub use dispatch::{CommandDispatchError, CommandDispatcher};
 pub use events::{EventBus, EventReceiver};

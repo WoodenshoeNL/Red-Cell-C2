@@ -322,7 +322,6 @@ where
     info!(
         %connection_id,
         username = %session.username,
-        token = %session.token,
         "operator authenticated"
     );
 

@@ -67,6 +67,31 @@ except Exception:
 '
 }
 
+issue_status_from_jsonl() {
+    local task_id="$1"
+
+    CLAIM_TASK_ID="$task_id" CLAIM_JSONL="$SCRIPT_DIR/.beads/issues.jsonl" \
+        python3 -c "
+import json, os
+tid = os.environ['CLAIM_TASK_ID']
+last = None
+try:
+    with open(os.environ['CLAIM_JSONL']) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    e = json.loads(line)
+                    if e.get('id') == tid:
+                        last = e
+                except Exception:
+                    pass
+    print((last or {}).get('status', ''))
+except Exception:
+    pass
+" 2>/dev/null
+}
+
 # Claim a task with optimistic git locking.
 # Immediately pushes the claim commit so other agents see it.
 # Returns 0 on success, 1 if another agent beat us to it.
@@ -85,23 +110,7 @@ claim_task() {
     # updated_at timestamp, making git diff --quiet pass despite no real
     # status change — causing a double-claim. Bypass the DB entirely here.
     local pre_status
-    pre_status=$(CLAIM_TASK_ID="$task_id" CLAIM_JSONL="$SCRIPT_DIR/.beads/issues.jsonl" \
-        python3 -c "
-import json, os
-tid = os.environ['CLAIM_TASK_ID']
-last = None
-try:
-    with open(os.environ['CLAIM_JSONL']) as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                try:
-                    e = json.loads(line)
-                    if e.get('id') == tid: last = e
-                except Exception: pass
-    print((last or {}).get('status', ''))
-except Exception: pass
-" 2>/dev/null)
+    pre_status=$(issue_status_from_jsonl "$task_id")
     if [ "$pre_status" = "in_progress" ]; then
         log "CLAIM SKIP: $task_id already in_progress in JSONL (stale DB) — forcing DB rebuild"
         # br sync --import-only skips when the JSONL hash is cached as current,
@@ -266,31 +275,47 @@ while true; do
     reset_stuck_tasks
 
     # ── Pick next task ─────────────────────────────────────────────────────────
-    NEXT_ID=$(br ready --json 2>/dev/null | python3 -c "
+    READY_CANDIDATES=$(br ready --json 2>/dev/null | python3 -c "
 import sys, json
 try:
     issues = json.load(sys.stdin)
     tasks = [i for i in issues if i.get('issue_type', 'task') not in ('epic',)]
     pool = tasks if tasks else issues
-    if pool:
-        print(pool[0]['id'])
+    for issue in pool[:20]:
+        print(issue['id'])
 except Exception:
     pass
 " 2>/dev/null || true)
 
-    if [ -z "$NEXT_ID" ]; then
+    if [ -z "$READY_CANDIDATES" ]; then
         log "No ready work found. Sleeping ${SLEEP_ON_NO_WORK}s..."
         flock -u 9
         sleep "$SLEEP_ON_NO_WORK"
         continue
     fi
 
-    log "Selected task: $NEXT_ID"
-
     # ── Claim with optimistic locking ──────────────────────────────────────────
-    if ! claim_task "$NEXT_ID"; then
+    NEXT_ID=""
+    while IFS= read -r candidate_id; do
+        [ -n "$candidate_id" ] || continue
+
+        if [ "$(issue_status_from_jsonl "$candidate_id")" = "in_progress" ]; then
+            log "Skipping candidate already in_progress in JSONL: $candidate_id"
+            continue
+        fi
+
+        log "Selected task: $candidate_id"
+        if claim_task "$candidate_id"; then
+            NEXT_ID="$candidate_id"
+            break
+        fi
+    done << EOF
+$READY_CANDIDATES
+EOF
+
+    if [ -z "$NEXT_ID" ]; then
         flock -u 9
-        log "Could not claim $NEXT_ID — retrying with a different task"
+        log "Could not claim any ready task — retrying after backoff"
         sleep $((5 + RANDOM % 20))
         continue
     fi

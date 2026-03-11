@@ -610,7 +610,7 @@ fn pack_http_listener(
     config: &HttpListenerConfig,
 ) -> Result<(), PayloadBuildError> {
     let port = config.port_conn.unwrap_or(config.port_bind);
-    add_u64(out, parse_kill_date(config.kill_date.as_deref())? as u64);
+    add_u64(out, parse_kill_date(config.kill_date.as_deref())?);
     add_u32(out, parse_working_hours(config.working_hours.as_deref())? as u32);
 
     let method = config.method.as_deref().unwrap_or("POST");
@@ -687,7 +687,7 @@ fn pack_smb_listener(
     config: &red_cell_common::SmbListenerConfig,
 ) -> Result<(), PayloadBuildError> {
     add_wstring(out, &format!(r"\\.\pipe\{}", config.pipe_name))?;
-    add_u64(out, parse_kill_date(config.kill_date.as_deref())? as u64);
+    add_u64(out, parse_kill_date(config.kill_date.as_deref())?);
     add_u32(out, parse_working_hours(config.working_hours.as_deref())? as u32);
     Ok(())
 }
@@ -1018,11 +1018,17 @@ fn amsi_patch_value(value: Option<&str>) -> u32 {
     }
 }
 
-fn parse_kill_date(value: Option<&str>) -> Result<i64, PayloadBuildError> {
+fn parse_kill_date(value: Option<&str>) -> Result<u64, PayloadBuildError> {
     match value.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(value) => value.parse::<i64>().map_err(|_| PayloadBuildError::InvalidRequest {
-            message: format!("KillDate `{value}` must be a unix timestamp"),
-        }),
+        Some(value) => {
+            let timestamp =
+                value.parse::<i64>().map_err(|_| PayloadBuildError::InvalidRequest {
+                    message: format!("KillDate `{value}` must be a unix timestamp"),
+                })?;
+            u64::try_from(timestamp).map_err(|_| PayloadBuildError::InvalidRequest {
+                message: format!("KillDate `{value}` must be a non-negative unix timestamp"),
+            })
+        }
         None => Ok(0),
     }
 }
@@ -1200,6 +1206,22 @@ mod tests {
     fn parse_working_hours_encodes_expected_bitmask() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(parse_working_hours(Some("08:00-17:00"))?, 5_243_968);
         Ok(())
+    }
+
+    #[test]
+    fn parse_kill_date_accepts_positive_timestamp() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(parse_kill_date(Some("1234"))?, 1234);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_kill_date_rejects_negative_timestamp() {
+        let err = parse_kill_date(Some("-1"));
+        assert!(matches!(
+            err,
+            Err(PayloadBuildError::InvalidRequest { message })
+                if message == "KillDate `-1` must be a non-negative unix timestamp"
+        ));
     }
 
     #[test]

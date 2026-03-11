@@ -53,6 +53,14 @@ const DEFAULT_MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_DEMON_INIT_ATTEMPTS_PER_IP: u32 = 5;
 const DEMON_INIT_WINDOW_DURATION: Duration = Duration::from_secs(60);
 const MAX_DEMON_INIT_ATTEMPT_WINDOWS: usize = 10_000;
+const EXTRA_METHOD: &str = "Method";
+const EXTRA_BEHIND_REDIRECTOR: &str = "BehindRedirector";
+const EXTRA_TRUSTED_PROXY_PEERS: &str = "TrustedProxyPeers";
+const EXTRA_CERT_PATH: &str = "Cert";
+const EXTRA_KEY_PATH: &str = "Key";
+const EXTRA_RESPONSE_BODY: &str = "ResponseBody";
+const EXTRA_KILL_DATE: &str = "KillDate";
+const EXTRA_WORKING_HOURS: &str = "WorkingHours";
 
 #[derive(Clone, Debug, Default)]
 struct DemonInitRateLimiter {
@@ -197,6 +205,21 @@ impl ListenerSummary {
                         serde_json::Value::String(host_header.clone()),
                     );
                 }
+                insert_optional_extra_string(
+                    &mut info.extra,
+                    EXTRA_METHOD,
+                    config.method.as_deref(),
+                );
+                info.extra.insert(
+                    EXTRA_BEHIND_REDIRECTOR.to_owned(),
+                    serde_json::Value::String(config.behind_redirector.to_string()),
+                );
+                if !config.trusted_proxy_peers.is_empty() {
+                    info.extra.insert(
+                        EXTRA_TRUSTED_PROXY_PEERS.to_owned(),
+                        serde_json::Value::String(config.trusted_proxy_peers.join(", ")),
+                    );
+                }
                 info.proxy_enabled =
                     Some(config.proxy.as_ref().is_some_and(|proxy| proxy.enabled).to_string());
                 info.proxy_type = config.proxy.as_ref().and_then(|proxy| proxy.proxy_type.clone());
@@ -207,8 +230,34 @@ impl ListenerSummary {
                 info.proxy_password =
                     config.proxy.as_ref().and_then(|proxy| proxy.password.clone());
                 info.secure = Some(config.secure.to_string());
-                info.response_headers =
-                    config.response.as_ref().map(|response| response.headers.join(", "));
+                info.response_headers = config.response.as_ref().and_then(|response| {
+                    (!response.headers.is_empty()).then(|| response.headers.join(", "))
+                });
+                insert_optional_extra_string(
+                    &mut info.extra,
+                    EXTRA_CERT_PATH,
+                    config.cert.as_ref().map(|cert| cert.cert.as_str()),
+                );
+                insert_optional_extra_string(
+                    &mut info.extra,
+                    EXTRA_KEY_PATH,
+                    config.cert.as_ref().map(|cert| cert.key.as_str()),
+                );
+                insert_optional_extra_string(
+                    &mut info.extra,
+                    EXTRA_RESPONSE_BODY,
+                    config.response.as_ref().and_then(|response| response.body.as_deref()),
+                );
+                insert_optional_extra_string(
+                    &mut info.extra,
+                    EXTRA_KILL_DATE,
+                    config.kill_date.as_deref(),
+                );
+                insert_optional_extra_string(
+                    &mut info.extra,
+                    EXTRA_WORKING_HOURS,
+                    config.working_hours.as_deref(),
+                );
             }
             ListenerConfig::Smb(config) => {
                 info.extra.insert("Host".to_owned(), serde_json::Value::String(String::new()));
@@ -225,6 +274,16 @@ impl ListenerSummary {
                 info.extra.insert(
                     "PipeName".to_owned(),
                     serde_json::Value::String(config.pipe_name.clone()),
+                );
+                insert_optional_extra_string(
+                    &mut info.extra,
+                    EXTRA_KILL_DATE,
+                    config.kill_date.as_deref(),
+                );
+                insert_optional_extra_string(
+                    &mut info.extra,
+                    EXTRA_WORKING_HOURS,
+                    config.working_hours.as_deref(),
                 );
             }
             ListenerConfig::External(config) => {
@@ -265,6 +324,16 @@ impl ListenerSummary {
                 info.extra.insert(
                     "RecordTypes".to_owned(),
                     serde_json::Value::String(config.record_types.join(",")),
+                );
+                insert_optional_extra_string(
+                    &mut info.extra,
+                    EXTRA_KILL_DATE,
+                    config.kill_date.as_deref(),
+                );
+                insert_optional_extra_string(
+                    &mut info.extra,
+                    EXTRA_WORKING_HOURS,
+                    config.working_hours.as_deref(),
                 );
                 info.host_bind = Some(config.host_bind.clone());
                 info.port_bind = Some(config.port_bind.to_string());
@@ -761,17 +830,17 @@ pub fn listener_config_from_operator(
     match ListenerProtocol::try_from_str(protocol) {
         Ok(ListenerProtocol::Http) => Ok(ListenerConfig::from(HttpListenerConfig {
             name: name.to_owned(),
-            kill_date: None,
-            working_hours: None,
+            kill_date: optional_extra_string(info, EXTRA_KILL_DATE),
+            working_hours: optional_extra_string(info, EXTRA_WORKING_HOURS),
             hosts: split_csv(info.hosts.as_deref()),
             host_bind: required_field("HostBind", info.host_bind.as_deref())?.to_owned(),
             host_rotation: required_field("HostRotation", info.host_rotation.as_deref())?
                 .to_owned(),
             port_bind: parse_u16("PortBind", info.port_bind.as_deref())?,
             port_conn: parse_optional_u16("PortConn", info.port_conn.as_deref())?,
-            method: None,
-            behind_redirector: false,
-            trusted_proxy_peers: Vec::new(),
+            method: optional_extra_string(info, EXTRA_METHOD),
+            behind_redirector: parse_extra_bool(info, EXTRA_BEHIND_REDIRECTOR)?,
+            trusted_proxy_peers: split_csv(extra_value_as_str(info, EXTRA_TRUSTED_PROXY_PEERS)),
             user_agent: optional_trimmed(info.user_agent.as_deref()),
             headers: split_csv(info.headers.as_deref()),
             uris: split_csv(info.uris.as_deref()),
@@ -780,19 +849,16 @@ pub fn listener_config_from_operator(
                 .get("HostHeader")
                 .and_then(serde_json::Value::as_str)
                 .and_then(|value| optional_trimmed(Some(value))),
-            secure: parse_bool("Secure", info.secure.as_deref()).unwrap_or(false),
-            cert: None,
-            response: info.response_headers.as_deref().map(|headers| HttpListenerResponseConfig {
-                headers: split_csv(Some(headers)),
-                body: None,
-            }),
+            secure: parse_bool("Secure", info.secure.as_deref())?,
+            cert: tls_config_from_operator(info),
+            response: http_response_from_operator(info),
             proxy: proxy_from_operator(info)?,
         })),
         Ok(ListenerProtocol::Smb) => Ok(ListenerConfig::from(SmbListenerConfig {
             name: name.to_owned(),
             pipe_name: required_extra_string(info, "PipeName")?,
-            kill_date: None,
-            working_hours: None,
+            kill_date: optional_extra_string(info, EXTRA_KILL_DATE),
+            working_hours: optional_extra_string(info, EXTRA_WORKING_HOURS),
         })),
         Ok(ListenerProtocol::External) => Ok(ListenerConfig::from(ExternalListenerConfig {
             name: name.to_owned(),
@@ -810,8 +876,8 @@ pub fn listener_config_from_operator(
             record_types: split_csv(
                 info.extra.get("RecordTypes").and_then(serde_json::Value::as_str),
             ),
-            kill_date: None,
-            working_hours: None,
+            kill_date: optional_extra_string(info, EXTRA_KILL_DATE),
+            working_hours: optional_extra_string(info, EXTRA_WORKING_HOURS),
         })),
         Err(error) => Err(ListenerManagerError::InvalidConfig { message: error.to_string() }),
     }
@@ -2517,6 +2583,31 @@ fn required_extra_string(
     }
 }
 
+fn optional_extra_string(info: &ListenerInfo, field: &'static str) -> Option<String> {
+    extra_value_as_str(info, field).and_then(|value| optional_trimmed(Some(value)))
+}
+
+fn extra_value_as_str<'a>(info: &'a ListenerInfo, field: &'static str) -> Option<&'a str> {
+    info.extra.get(field).and_then(serde_json::Value::as_str)
+}
+
+fn parse_extra_bool(
+    info: &ListenerInfo,
+    field: &'static str,
+) -> Result<bool, ListenerManagerError> {
+    parse_bool(field, extra_value_as_str(info, field))
+}
+
+fn insert_optional_extra_string(
+    extra: &mut BTreeMap<String, serde_json::Value>,
+    field: &'static str,
+    value: Option<&str>,
+) {
+    if let Some(value) = optional_trimmed(value) {
+        extra.insert(field.to_owned(), serde_json::Value::String(value));
+    }
+}
+
 fn parse_u16(field: &'static str, value: Option<&str>) -> Result<u16, ListenerManagerError> {
     let value = required_field(field, value)?;
     value.parse::<u16>().map_err(|error| ListenerManagerError::InvalidConfig {
@@ -2583,6 +2674,22 @@ fn proxy_from_operator(
     }))
 }
 
+fn tls_config_from_operator(info: &ListenerInfo) -> Option<red_cell_common::ListenerTlsConfig> {
+    match (
+        optional_extra_string(info, EXTRA_CERT_PATH),
+        optional_extra_string(info, EXTRA_KEY_PATH),
+    ) {
+        (Some(cert), Some(key)) => Some(red_cell_common::ListenerTlsConfig { cert, key }),
+        _ => None,
+    }
+}
+
+fn http_response_from_operator(info: &ListenerInfo) -> Option<HttpListenerResponseConfig> {
+    let headers = split_csv(info.response_headers.as_deref());
+    let body = optional_extra_string(info, EXTRA_RESPONSE_BODY);
+    (!headers.is_empty() || body.is_some()).then_some(HttpListenerResponseConfig { headers, body })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -2597,14 +2704,16 @@ mod tests {
         DNS_TYPE_A, DNS_TYPE_CNAME, DNS_TYPE_TXT, DNS_UPLOAD_TIMEOUT_SECS, DemonInitRateLimiter,
         DnsListenerState, DnsPendingResponse, DnsPendingUpload, DnsUploadAssembly,
         ListenerEventAction, ListenerManager, ListenerManagerError, ListenerStatus,
-        MAX_AGENT_REQUEST_BODY_LEN, MAX_DEMON_INIT_ATTEMPTS_PER_IP, MAX_SMB_FRAME_PAYLOAD_LEN,
-        TrustedProxyPeer, action_from_mark, base32hex_decode, base32hex_encode,
-        build_dns_txt_response, chunk_response_to_b32hex, dns_allowed_query_types,
-        extract_external_ip, listener_config_from_operator, operator_requests_start,
-        parse_dns_c2_query, parse_dns_query, parse_trusted_proxy_peer, read_smb_frame,
-        smb_local_socket_name,
+        ListenerSummary, MAX_AGENT_REQUEST_BODY_LEN, MAX_DEMON_INIT_ATTEMPTS_PER_IP,
+        MAX_SMB_FRAME_PAYLOAD_LEN, TrustedProxyPeer, action_from_mark, base32hex_decode,
+        base32hex_encode, build_dns_txt_response, chunk_response_to_b32hex,
+        dns_allowed_query_types, extract_external_ip, listener_config_from_operator,
+        operator_requests_start, parse_dns_c2_query, parse_dns_query, parse_trusted_proxy_peer,
+        read_smb_frame, smb_local_socket_name,
     };
-    use crate::{AgentRegistry, Database, EventBus, Job, SocketRelayManager};
+    use crate::{
+        AgentRegistry, Database, EventBus, Job, PersistedListenerState, SocketRelayManager,
+    };
     use axum::body::Body;
     use axum::http::Request;
     use axum::http::StatusCode;
@@ -2622,8 +2731,8 @@ mod tests {
     use red_cell_common::demon::{DemonCommand, DemonEnvelope, DemonMessage};
     use red_cell_common::operator::{ListenerInfo, OperatorMessage};
     use red_cell_common::{
-        ExternalListenerConfig, HttpListenerConfig, HttpListenerResponseConfig, ListenerConfig,
-        SmbListenerConfig,
+        DnsListenerConfig, ExternalListenerConfig, HttpListenerConfig, HttpListenerProxyConfig,
+        HttpListenerResponseConfig, ListenerConfig, ListenerTlsConfig, SmbListenerConfig,
     };
     use reqwest::Client;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -3598,6 +3707,92 @@ mod tests {
                 assert_eq!(config.hosts, vec!["a.example".to_owned(), "b.example".to_owned()]);
             }
             other => panic!("unexpected config: {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn http_listener_operator_round_trip_preserves_advanced_settings()
+    -> Result<(), ListenerManagerError> {
+        let original = ListenerConfig::from(HttpListenerConfig {
+            name: "edge".to_owned(),
+            kill_date: Some("2026-03-09 20:00:00".to_owned()),
+            working_hours: Some("08:00-17:00".to_owned()),
+            hosts: vec!["a.example".to_owned(), "b.example".to_owned()],
+            host_bind: "0.0.0.0".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: 8443,
+            port_conn: Some(443),
+            method: Some("POST".to_owned()),
+            behind_redirector: true,
+            trusted_proxy_peers: vec!["127.0.0.1/32".to_owned(), "10.0.0.0/8".to_owned()],
+            user_agent: Some("Mozilla/5.0".to_owned()),
+            headers: vec!["X-Test: true".to_owned()],
+            uris: vec!["/one".to_owned(), "/two".to_owned()],
+            host_header: Some("team.example".to_owned()),
+            secure: true,
+            cert: Some(ListenerTlsConfig {
+                cert: "/tmp/server.crt".to_owned(),
+                key: "/tmp/server.key".to_owned(),
+            }),
+            response: Some(HttpListenerResponseConfig {
+                headers: vec!["Server: nginx".to_owned()],
+                body: Some("{\"status\":\"ok\"}".to_owned()),
+            }),
+            proxy: Some(HttpListenerProxyConfig {
+                enabled: true,
+                proxy_type: Some("http".to_owned()),
+                host: "127.0.0.1".to_owned(),
+                port: 8080,
+                username: Some("user".to_owned()),
+                password: Some("pass".to_owned()),
+            }),
+        });
+        let summary = ListenerSummary {
+            name: "edge".to_owned(),
+            protocol: original.protocol(),
+            state: PersistedListenerState { status: ListenerStatus::Created, last_error: None },
+            config: original.clone(),
+        };
+
+        let info = summary.to_operator_info();
+        let round_tripped = listener_config_from_operator(&info)?;
+
+        assert_eq!(round_tripped, original);
+        Ok(())
+    }
+
+    #[test]
+    fn smb_and_dns_listener_operator_round_trip_preserves_profile_timing()
+    -> Result<(), ListenerManagerError> {
+        let smb = ListenerConfig::from(SmbListenerConfig {
+            name: "pivot".to_owned(),
+            pipe_name: r"pivot-01".to_owned(),
+            kill_date: Some("2026-03-09 20:00:00".to_owned()),
+            working_hours: Some("08:00-17:00".to_owned()),
+        });
+        let dns = ListenerConfig::from(DnsListenerConfig {
+            name: "dns-edge".to_owned(),
+            host_bind: "0.0.0.0".to_owned(),
+            port_bind: 53,
+            domain: "c2.example".to_owned(),
+            record_types: vec!["A".to_owned(), "TXT".to_owned()],
+            kill_date: Some("2026-03-09 20:00:00".to_owned()),
+            working_hours: Some("08:00-17:00".to_owned()),
+        });
+
+        for config in [smb, dns] {
+            let summary = ListenerSummary {
+                name: config.name().to_owned(),
+                protocol: config.protocol(),
+                state: PersistedListenerState { status: ListenerStatus::Stopped, last_error: None },
+                config: config.clone(),
+            };
+
+            let info = summary.to_operator_info();
+            let round_tripped = listener_config_from_operator(&info)?;
+            assert_eq!(round_tripped, config);
         }
 
         Ok(())

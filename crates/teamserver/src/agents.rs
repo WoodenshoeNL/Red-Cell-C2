@@ -319,6 +319,10 @@ impl AgentRegistry {
         let (key, iv) = decode_crypto_material(agent_id, &info.encryption)?;
         drop(info);
 
+        if key.iter().all(|byte| *byte == 0) {
+            return Ok(plaintext.to_vec());
+        }
+
         let mut offset = entry.ctr_block_offset.lock().await;
         let (ciphertext, new_offset) = encrypt_agent_data_ctr(&key, &iv, *offset, plaintext)?;
         *offset = new_offset;
@@ -340,6 +344,10 @@ impl AgentRegistry {
         let info = entry.info.read().await;
         let (key, iv) = decode_crypto_material(agent_id, &info.encryption)?;
         drop(info);
+
+        if key.iter().all(|byte| *byte == 0) {
+            return Ok(ciphertext.to_vec());
+        }
 
         let mut offset = entry.ctr_block_offset.lock().await;
         let (plaintext, new_offset) = decrypt_agent_data_ctr(&key, &iv, *offset, ciphertext)?;
@@ -782,7 +790,9 @@ fn encode_pivot_job_payload(
 mod tests {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-    use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
+    use red_cell_common::crypto::{
+        AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_length, encrypt_agent_data_ctr,
+    };
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -1132,6 +1142,127 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn encrypt_for_agent_advances_ctr_monotonically() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let agent = sample_agent_with_crypto(
+            0x1000_0701,
+            [0x31; AGENT_KEY_LENGTH],
+            [0x41; AGENT_IV_LENGTH],
+        );
+        let first = b"first encrypted payload";
+        let second = b"second payload with a different size";
+
+        registry.insert(agent.clone()).await?;
+
+        assert_eq!(registry.ctr_offset(agent.agent_id).await?, 0);
+
+        let _ = registry.encrypt_for_agent(agent.agent_id, first).await?;
+        let first_offset = registry.ctr_offset(agent.agent_id).await?;
+        assert_eq!(first_offset, ctr_blocks_for_length(first.len()));
+
+        let _ = registry.encrypt_for_agent(agent.agent_id, second).await?;
+        let second_offset = registry.ctr_offset(agent.agent_id).await?;
+        assert_eq!(second_offset, first_offset + ctr_blocks_for_length(second.len()));
+        assert!(second_offset > first_offset);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn encrypt_and_decrypt_for_agent_round_trip_with_matching_ctr()
+    -> Result<(), TeamserverError> {
+        let sender = AgentRegistry::new(test_database().await?);
+        let receiver = AgentRegistry::new(test_database().await?);
+        let agent = sample_agent_with_crypto(
+            0x1000_0702,
+            [0x52; AGENT_KEY_LENGTH],
+            [0x62; AGENT_IV_LENGTH],
+        );
+        let plaintext = b"callback payload requiring ctr synchronisation";
+
+        sender.insert(agent.clone()).await?;
+        receiver.insert(agent.clone()).await?;
+
+        let ciphertext = sender.encrypt_for_agent(agent.agent_id, plaintext).await?;
+        let decrypted = receiver.decrypt_from_agent(agent.agent_id, &ciphertext).await?;
+        let expected_offset = ctr_blocks_for_length(plaintext.len());
+
+        assert_eq!(decrypted, plaintext);
+        assert_eq!(sender.ctr_offset(agent.agent_id).await?, expected_offset);
+        assert_eq!(receiver.ctr_offset(agent.agent_id).await?, expected_offset);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn set_ctr_offset_changes_subsequent_encrypt_keystream_position()
+    -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let key = [0x73; AGENT_KEY_LENGTH];
+        let iv = [0x83; AGENT_IV_LENGTH];
+        let agent = sample_agent_with_crypto(0x1000_0703, key, iv);
+        let starting_offset = 9;
+        let plaintext = b"offset-aware encryption";
+
+        registry.insert(agent.clone()).await?;
+        registry.set_ctr_offset(agent.agent_id, starting_offset).await?;
+
+        let ciphertext = registry.encrypt_for_agent(agent.agent_id, plaintext).await?;
+        let (expected_ciphertext, expected_offset) =
+            encrypt_agent_data_ctr(&key, &iv, starting_offset, plaintext)?;
+
+        assert_eq!(ciphertext, expected_ciphertext);
+        assert_eq!(registry.ctr_offset(agent.agent_id).await?, expected_offset);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn zero_key_agent_uses_plaintext_pass_through() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let agent = sample_agent_with_crypto(
+            0x1000_0704,
+            [0x00; AGENT_KEY_LENGTH],
+            [0x00; AGENT_IV_LENGTH],
+        );
+        let plaintext = b"plaintext transport";
+
+        registry.insert(agent.clone()).await?;
+
+        let ciphertext = registry.encrypt_for_agent(agent.agent_id, plaintext).await?;
+        let decrypted = registry.decrypt_from_agent(agent.agent_id, plaintext).await?;
+
+        assert_eq!(ciphertext, plaintext);
+        assert_eq!(decrypted, plaintext);
+        assert_eq!(registry.ctr_offset(agent.agent_id).await?, 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ctr_helpers_reject_unknown_agent_ids() {
+        let registry = AgentRegistry::new(test_database().await.expect("db"));
+        let missing_agent_id = 0x1000_07FF;
+
+        assert!(matches!(
+            registry.ctr_offset(missing_agent_id).await,
+            Err(TeamserverError::AgentNotFound { agent_id }) if agent_id == missing_agent_id
+        ));
+        assert!(matches!(
+            registry.set_ctr_offset(missing_agent_id, 4).await,
+            Err(TeamserverError::AgentNotFound { agent_id }) if agent_id == missing_agent_id
+        ));
+        assert!(matches!(
+            registry.encrypt_for_agent(missing_agent_id, b"abc").await,
+            Err(TeamserverError::AgentNotFound { agent_id }) if agent_id == missing_agent_id
+        ));
+        assert!(matches!(
+            registry.decrypt_from_agent(missing_agent_id, b"abc").await,
+            Err(TeamserverError::AgentNotFound { agent_id }) if agent_id == missing_agent_id
+        ));
     }
 
     #[tokio::test]

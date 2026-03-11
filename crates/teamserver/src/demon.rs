@@ -258,7 +258,7 @@ fn parse_init_agent(
 
     let mut decrypted_offset = 0_usize;
     let parsed_agent_id = read_u32_be(&decrypted, &mut decrypted_offset, "init agent id")?;
-    if parsed_agent_id != agent_id && agent_id != 0 {
+    if parsed_agent_id != agent_id {
         return Err(DemonParserError::InvalidInit("decrypted agent id does not match header"));
     }
 
@@ -771,5 +771,38 @@ mod tests {
             .expect_err("mismatched init should fail");
 
         assert!(matches!(error, DemonParserError::Crypto(_) | DemonParserError::InvalidInit(_)));
+    }
+
+    /// Regression test for red-cell-c2-1a5: a header `agent_id = 0` must NOT
+    /// bypass the identity mismatch check.
+    #[tokio::test]
+    async fn parse_rejects_init_with_zero_header_id_and_different_payload_id() {
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry);
+        let key = [0x55; AGENT_KEY_LENGTH];
+        let iv = [0x66; AGENT_IV_LENGTH];
+        let spoofed_id: u32 = 0xAAAA_BBBB;
+
+        let metadata = build_init_metadata(spoofed_id);
+        let encrypted = encrypt_agent_data(&key, &iv, &metadata);
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u32_be(u32::from(DemonCommand::DemonInit)));
+        payload.extend_from_slice(&u32_be(1));
+        payload.extend_from_slice(&key);
+        payload.extend_from_slice(&iv);
+        payload.extend_from_slice(&encrypted);
+
+        let packet = DemonEnvelope::new(0, payload).expect("envelope should be valid").to_bytes();
+
+        let error = parser
+            .parse_at(&packet, "203.0.113.99".to_owned(), datetime!(2026-03-10 12:00:00 UTC))
+            .await
+            .expect_err("zero-header spoofed init must be rejected");
+
+        assert!(
+            matches!(error, DemonParserError::InvalidInit(_)),
+            "expected InvalidInit error, got: {error}"
+        );
     }
 }

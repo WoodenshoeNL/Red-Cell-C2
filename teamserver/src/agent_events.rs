@@ -72,3 +72,76 @@ pub(crate) fn operator_agent_info(
         pivot_parent: parent.unwrap_or_default(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{agent_new_event, operator_agent_info};
+    use crate::PivotInfo;
+    use red_cell_common::operator::OperatorMessage;
+    use red_cell_common::{AgentEncryptionInfo, AgentInfo};
+
+    fn sample_agent(agent_id: u32) -> AgentInfo {
+        AgentInfo {
+            agent_id,
+            active: true,
+            reason: String::new(),
+            note: String::new(),
+            encryption: AgentEncryptionInfo {
+                aes_key: "YWVzLWtleQ==".to_owned(),
+                aes_iv: "YWVzLWl2".to_owned(),
+            },
+            hostname: "wkstn-01".to_owned(),
+            username: "operator".to_owned(),
+            domain_name: "REDCELL".to_owned(),
+            external_ip: "203.0.113.10".to_owned(),
+            internal_ip: "10.0.0.25".to_owned(),
+            process_name: "explorer.exe".to_owned(),
+            base_address: 0x401000,
+            process_pid: 1337,
+            process_tid: 1338,
+            process_ppid: 512,
+            process_arch: "x64".to_owned(),
+            elevated: true,
+            os_version: "Windows 11".to_owned(),
+            os_arch: "x64".to_owned(),
+            sleep_delay: 15,
+            sleep_jitter: 20,
+            kill_date: Some(1_893_456_000),
+            working_hours: Some(0b101010),
+            first_call_in: "2026-03-09T18:45:00Z".to_owned(),
+            last_call_in: "2026-03-09T18:46:00Z".to_owned(),
+        }
+    }
+
+    #[test]
+    fn operator_agent_info_preserves_parent_and_child_pivots() {
+        let agent = sample_agent(0x1112_1314);
+        let pivots =
+            PivotInfo { parent: Some(0x0102_0304), children: vec![0x2122_2324, 0x3132_3334] };
+
+        let info = operator_agent_info("smb", 0xDEAD_BEEF, &agent, &pivots);
+
+        assert_eq!(info.listener, "smb");
+        assert_eq!(info.magic_value, "deadbeef");
+        assert_eq!(info.pivots.parent.as_deref(), Some("01020304"));
+        assert_eq!(info.pivots.links, vec!["21222324".to_owned(), "31323334".to_owned()]);
+        assert_eq!(info.pivot_parent, "01020304");
+    }
+
+    #[test]
+    fn agent_new_event_uses_shared_operator_agent_info() {
+        let agent = sample_agent(0x1112_1314);
+        let pivots = PivotInfo { parent: Some(0x0102_0304), children: vec![] };
+
+        let event = agent_new_event("http-main", 0x1234_5678, &agent, &pivots);
+
+        let OperatorMessage::AgentNew(message) = event else {
+            panic!("expected AgentNew event");
+        };
+        assert_eq!(message.head.timestamp, agent.last_call_in);
+        assert_eq!(message.info.listener, "http-main");
+        assert_eq!(message.info.name_id, "11121314");
+        assert_eq!(message.info.pivots.parent.as_deref(), Some("01020304"));
+        assert_eq!(message.info.pivot_parent, "01020304");
+    }
+}

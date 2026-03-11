@@ -5002,6 +5002,7 @@ mod tests {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
+        let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
         let dispatcher = CommandDispatcher::with_builtin_handlers(
             registry.clone(),
@@ -5032,6 +5033,18 @@ mod tests {
         assert_eq!(registry.parent_of(child_id).await, Some(parent_id));
         assert_eq!(registry.children_of(parent_id).await, vec![child_id]);
         assert!(registry.get(child_id).await.is_some());
+        let event = receiver
+            .recv()
+            .await
+            .ok_or_else(|| "expected AgentNew event after pivot connect".to_owned())?;
+        let red_cell_common::operator::OperatorMessage::AgentNew(message) = event else {
+            return Err("expected AgentNew event after pivot connect".into());
+        };
+        assert_eq!(message.info.name_id, "51525354");
+        assert_eq!(message.info.listener, "smb");
+        assert_eq!(message.info.pivots.parent.as_deref(), Some("45464748"));
+        assert_eq!(message.info.pivots.links, Vec::<String>::new());
+        assert_eq!(message.info.pivot_parent, "45464748");
         Ok(())
     }
 

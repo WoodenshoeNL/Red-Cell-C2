@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PyModule, PyTuple};
+use pyo3::types::{PyDict, PyList, PyModule, PyTuple};
 use red_cell_common::AgentInfo;
 use red_cell_common::operator::{AgentTaskInfo, EventCode, Message, MessageHead, OperatorMessage};
 use serde_json::{Value, json};
@@ -606,6 +606,84 @@ fn ensure_callable(callback: &Bound<'_, PyAny>) -> PyResult<()> {
     }
 }
 
+#[derive(Debug)]
+struct RegisterCommandRequest {
+    name: String,
+    description: String,
+    callback: Py<PyAny>,
+}
+
+fn optional_kwarg<'py>(
+    kwargs: Option<&Bound<'py, PyDict>>,
+    key: &str,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    match kwargs {
+        Some(kwargs) => kwargs.get_item(key),
+        None => Ok(None),
+    }
+}
+
+fn extract_string_argument(
+    kwargs: Option<&Bound<'_, PyDict>>,
+    key: &str,
+    positional: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<String>> {
+    if let Some(value) = optional_kwarg(kwargs, key)? {
+        return value.extract::<String>().map(Some);
+    }
+
+    positional.map(Bound::extract::<String>).transpose()
+}
+
+fn parse_register_command_request(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<RegisterCommandRequest> {
+    let positional = args.iter().collect::<Vec<_>>();
+    let havoc_style = optional_kwarg(kwargs, "function")?.is_some()
+        || positional.first().is_some_and(Bound::is_callable);
+
+    if havoc_style {
+        let callback = if let Some(value) = optional_kwarg(kwargs, "function")? {
+            value
+        } else {
+            positional
+                .first()
+                .cloned()
+                .ok_or_else(|| PyValueError::new_err("RegisterCommand requires a callable"))?
+        };
+        ensure_callable(&callback)?;
+
+        let module = extract_string_argument(kwargs, "module", positional.get(1))?
+            .ok_or_else(|| PyValueError::new_err("RegisterCommand requires a module name"))?;
+        let command = extract_string_argument(kwargs, "command", positional.get(2))?
+            .ok_or_else(|| PyValueError::new_err("RegisterCommand requires a command name"))?;
+        let description = extract_string_argument(kwargs, "description", positional.get(3))?
+            .ok_or_else(|| PyValueError::new_err("RegisterCommand requires a description"))?;
+
+        let name = if module.trim().is_empty() { command } else { format!("{module} {command}") };
+
+        return Ok(RegisterCommandRequest { name, description, callback: callback.unbind() });
+    }
+
+    let callback = if let Some(value) = optional_kwarg(kwargs, "callback")? {
+        value
+    } else {
+        positional
+            .get(2)
+            .cloned()
+            .ok_or_else(|| PyValueError::new_err("RegisterCommand requires a callback"))?
+    };
+    ensure_callable(&callback)?;
+
+    let name = extract_string_argument(kwargs, "name", positional.first())?
+        .ok_or_else(|| PyValueError::new_err("RegisterCommand requires a command name"))?;
+    let description = extract_string_argument(kwargs, "description", positional.get(1))?
+        .ok_or_else(|| PyValueError::new_err("RegisterCommand requires a description"))?;
+
+    Ok(RegisterCommandRequest { name, description, callback: callback.unbind() })
+}
+
 #[pyclass(name = "Agent")]
 #[derive(Clone, Debug)]
 struct PyAgent {
@@ -871,18 +949,20 @@ fn register_callback(
 }
 
 #[pyfunction]
-#[pyo3(signature = (name, description, callback))]
+#[pyo3(signature = (*args, **kwargs))]
 fn register_command(
     py: Python<'_>,
-    name: String,
-    description: String,
-    callback: Bound<'_, PyAny>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<()> {
-    ensure_callable(&callback)?;
+    let request = parse_register_command_request(args, kwargs)?;
     let runtime = PluginRuntime::active()?;
-    let callback = callback.unbind();
     py.allow_threads(move || {
-        runtime.block_on(runtime.register_command(name, description, callback))
+        runtime.block_on(runtime.register_command(
+            request.name,
+            request.description,
+            request.callback,
+        ))
     })
     .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
     Ok(())
@@ -1147,6 +1227,75 @@ havoc.RegisterCommand("demo", "demo command", run)
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].command, 99);
         assert_eq!(queued[0].payload, b"alpha beta");
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn register_command_accepts_havoc_keyword_signature()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let (_database, registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-havoc-register-command").await?;
+        registry.insert(sample_agent(0x00AB_CDEF)).await?;
+
+        let handle = std::thread::spawn({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| -> PyResult<()> {
+                    runtime.install_api_module(py)?;
+                    let helper = PyModule::from_code(
+                        py,
+                        pyo3::ffi::c_str!(
+                            "import havoc\n\
+\n\
+def run(agent, args):\n\
+\tagent.task(100, ' '.join(args))\n\
+\n\
+havoc.RegisterCommand(\n\
+\tfunction=run,\n\
+\tmodule='situational_awareness',\n\
+\tcommand='whoami',\n\
+\tdescription='demo command',\n\
+\tbehavior=0,\n\
+\tusage='',\n\
+\texample=''\n\
+)\n"
+                        ),
+                        pyo3::ffi::c_str!("test_havoc_register_command.py"),
+                        pyo3::ffi::c_str!("test_havoc_register_command"),
+                    )?;
+                    let _ = helper;
+                    Ok(())
+                })
+            }
+        });
+        handle.join().map_err(|_| "python test thread panicked")??;
+
+        assert_eq!(runtime.command_names().await, vec!["situational_awareness whoami".to_owned()]);
+        assert_eq!(
+            runtime
+                .match_registered_command(&AgentTaskInfo {
+                    command_line: "situational_awareness whoami /all".to_owned(),
+                    ..AgentTaskInfo::default()
+                })
+                .await,
+            Some(("situational_awareness whoami".to_owned(), vec!["/all".to_owned()],))
+        );
+
+        runtime
+            .invoke_registered_command(
+                "situational_awareness whoami",
+                "operator",
+                0x00AB_CDEF,
+                vec!["/all".to_owned()],
+            )
+            .await?;
+
+        let queued = registry.dequeue_jobs(0x00AB_CDEF).await?;
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].command, 100);
+        assert_eq!(queued[0].payload, b"/all");
         Ok(())
     }
 

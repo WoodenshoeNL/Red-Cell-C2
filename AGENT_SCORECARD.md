@@ -10,9 +10,9 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 0 | 122 | 31 |
-| Bugs filed against | 0 | 18 | 9 |
-| Bug rate (bugs/task) | N/A | 0.15 | 0.29 |
-| Quality score | N/A | 85% | 71% |
+| Bugs filed against | 0 | 19 | 9 |
+| Bug rate (bugs/task) | N/A | 0.16 | 0.29 |
+| Quality score | N/A | 84% | 71% |
 
 ## Violation Breakdown
 
@@ -22,7 +22,7 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests | 0 | 2 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
 | Protocol errors | 1 | 14 | 3 |
-| Security issues | 0 | 18 | 0 |
+| Security issues | 0 | 19 | 0 |
 | Architecture drift | 0 | 13 | 0 |
 | Memory / resource leaks | 0 | 8 | 1 |
 | Startup / lifecycle regressions | 0 | 8 | 0 |
@@ -34,6 +34,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-12 11:29
+
+| Agent | Findings | Categories | Notes |
+|-------|---------:|------------|-------|
+| Claude | 0 | — | No new agent-attributed findings this run |
+| Codex | 1 | Security issues | Filed red-cell-c2-34ij |
+| Cursor | 0 | — | No new agent-attributed findings this run |
+
+Overall codebase health: drifting
+Biggest blindspot: proxy credentials (`proxy_password`) are included in the `ListenerInfo` wire format sent to all authenticated WebSocket operators regardless of RBAC role — Analyst-role operators receive credentials they should never see. The gap stems from `to_operator_info()` in listeners.rs having no field-level redaction layer and no role-aware serialisation path in `send_session_snapshot()`.
 
 ### Arch Review — 2026-03-12 09:53
 

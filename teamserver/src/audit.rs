@@ -535,11 +535,12 @@ mod tests {
     use tokio::time::timeout;
 
     use super::{
-        AuditQuery, AuditRecord, AuditResultStatus, audit_details, parameter_object,
-        parse_agent_id_filter,
+        AuditQuery, AuditRecord, AuditResultStatus, SessionActivityRecord, audit_details,
+        parameter_object, parse_agent_id_filter,
     };
     use crate::{
-        AuditLogEntry, AuditWebhookNotifier, Database, record_operator_action_with_notifications,
+        AuditLogEntry, AuditWebhookNotifier, Database, TeamserverError,
+        record_operator_action_with_notifications,
     };
     use serde_json::json;
 
@@ -568,6 +569,50 @@ mod tests {
         assert_eq!(record.agent_id.as_deref(), Some("DEADBEEF"));
         assert_eq!(record.command.as_deref(), Some("checkin"));
         assert_eq!(record.result_status, AuditResultStatus::Success);
+    }
+
+    #[test]
+    fn session_activity_record_rejects_non_operator_actions() {
+        let error = SessionActivityRecord::try_from(AuditLogEntry {
+            id: Some(7),
+            actor: "operator".to_owned(),
+            action: "agent.task".to_owned(),
+            target_kind: "agent".to_owned(),
+            target_id: Some("DEADBEEF".to_owned()),
+            details: None,
+            occurred_at: "2026-03-10T12:00:00Z".to_owned(),
+        })
+        .expect_err("non-operator action should fail");
+
+        match error {
+            TeamserverError::InvalidPersistedValue { field, message } => {
+                assert_eq!(field, "action");
+                assert!(message.contains("agent.task"));
+            }
+            other => panic!("expected invalid persisted value error, got {other}"),
+        }
+    }
+
+    #[test]
+    fn session_activity_record_requires_id() {
+        let error = SessionActivityRecord::try_from(AuditLogEntry {
+            id: None,
+            actor: "operator".to_owned(),
+            action: "operator.chat".to_owned(),
+            target_kind: "operator".to_owned(),
+            target_id: None,
+            details: None,
+            occurred_at: "2026-03-10T12:00:00Z".to_owned(),
+        })
+        .expect_err("missing id should fail");
+
+        match error {
+            TeamserverError::InvalidPersistedValue { field, message } => {
+                assert_eq!(field, "id");
+                assert_eq!(message, "audit log row was missing an id");
+            }
+            other => panic!("expected invalid persisted value error, got {other}"),
+        }
     }
 
     #[test]

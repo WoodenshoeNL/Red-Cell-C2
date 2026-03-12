@@ -121,6 +121,7 @@ fn resolve_logging_config_with_override(
 ) -> ResolvedLoggingConfig {
     let profile_logging = profile.and_then(|profile| profile.teamserver.logging.as_ref());
     let filter_directive = rust_log_override
+        .filter(|value| !value.trim().is_empty())
         .or_else(|| profile_logging.and_then(|logging| logging.level.clone()))
         .unwrap_or_else(|| if debug_logging { "debug".to_owned() } else { "info".to_owned() });
     let format = profile_logging.and_then(|logging| logging.format).unwrap_or(if debug_logging {
@@ -177,6 +178,15 @@ mod tests {
 
         assert_eq!(resolved.filter_directive, "debug");
         assert_eq!(resolved.format, LogFormat::Pretty);
+        assert_eq!(resolved.file, None);
+    }
+
+    #[test]
+    fn non_debug_defaults_to_json_info_logging() {
+        let resolved = resolve_logging_config_with_override(None, false, None);
+
+        assert_eq!(resolved.filter_directive, "info");
+        assert_eq!(resolved.format, LogFormat::Json);
         assert_eq!(resolved.file, None);
     }
 
@@ -249,5 +259,35 @@ mod tests {
         );
 
         assert_eq!(resolved.filter_directive, "warn,red_cell=debug");
+    }
+
+    #[test]
+    fn whitespace_only_override_falls_back_to_profile_level() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+              Logging {
+                Level = "info"
+              }
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let resolved =
+            resolve_logging_config_with_override(Some(&profile), false, Some("  ".to_owned()));
+
+        assert_eq!(resolved.filter_directive, "info");
+        assert_eq!(resolved.format, LogFormat::Json);
     }
 }

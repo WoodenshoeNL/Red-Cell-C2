@@ -850,11 +850,15 @@ fn parse_checkin_metadata(
     updated.sleep_delay = sleep_delay;
     updated.sleep_jitter = sleep_jitter;
     updated.kill_date = (kill_date != 0).then_some(i64::try_from(kill_date).unwrap_or(i64::MAX));
-    updated.working_hours =
-        (working_hours != 0).then_some(i32::try_from(working_hours).unwrap_or(i32::MAX));
+    updated.working_hours = decode_working_hours(working_hours);
     updated.last_call_in = timestamp.to_owned();
 
     Ok(Some(updated))
+}
+
+fn decode_working_hours(raw: u32) -> Option<i32> {
+    // Preserve the 32-bit protocol bitmask exactly, including the high bit.
+    (raw != 0).then_some(i32::from_be_bytes(raw.to_be_bytes()))
 }
 
 fn basename(path: &str) -> String {
@@ -2182,7 +2186,7 @@ async fn handle_config_callback(
             let raw = parser.read_u32("config working hours")?;
             let mut agent =
                 registry.get(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
-            agent.working_hours = (raw != 0).then(|| i32::try_from(raw).unwrap_or(i32::MAX));
+            agent.working_hours = decode_working_hours(raw);
             registry.update_agent(agent.clone()).await?;
             events.broadcast(agent_mark_event(&agent));
             if raw == 0 {
@@ -5048,6 +5052,15 @@ mod tests {
         key: [u8; AGENT_KEY_LENGTH],
         iv: [u8; AGENT_IV_LENGTH],
     ) -> Vec<u8> {
+        sample_checkin_metadata_payload_with_working_hours(agent_id, key, iv, 0x00FF_00FF)
+    }
+
+    fn sample_checkin_metadata_payload_with_working_hours(
+        agent_id: u32,
+        key: [u8; AGENT_KEY_LENGTH],
+        iv: [u8; AGENT_IV_LENGTH],
+        working_hours: u32,
+    ) -> Vec<u8> {
         let mut payload = Vec::new();
         payload.extend_from_slice(&key);
         payload.extend_from_slice(&iv);
@@ -5072,7 +5085,7 @@ mod tests {
         add_u32(&mut payload, 45);
         add_u32(&mut payload, 5);
         add_u64(&mut payload, 1_725_000_000);
-        add_u32(&mut payload, 0x00FF_00FF);
+        add_u32(&mut payload, working_hours);
         payload
     }
 
@@ -5500,6 +5513,57 @@ mod tests {
         };
         assert_eq!(message.info.agent_id, format!("{agent_id:08X}"));
         assert_eq!(message.info.marked, "Alive");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_checkin_handler_preserves_high_bit_working_hours()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database.clone(),
+            sockets,
+            None,
+        );
+        let key = [0x77; AGENT_KEY_LENGTH];
+        let iv = [0x44; AGENT_IV_LENGTH];
+        let refreshed_key = [0x12; AGENT_KEY_LENGTH];
+        let refreshed_iv = [0x34; AGENT_IV_LENGTH];
+        let agent_id = 0x1020_3041;
+        let working_hours = 0x8000_002A;
+
+        registry.insert(sample_agent_info(agent_id, key, iv)).await?;
+        let payload = sample_checkin_metadata_payload_with_working_hours(
+            agent_id,
+            refreshed_key,
+            refreshed_iv,
+            working_hours,
+        );
+
+        let response = dispatcher
+            .dispatch(agent_id, u32::from(DemonCommand::CommandCheckin), 7, &payload)
+            .await?;
+
+        assert_eq!(response, None);
+
+        let updated = registry
+            .get(agent_id)
+            .await
+            .ok_or_else(|| "agent should exist after metadata-bearing checkin".to_owned())?;
+        assert_eq!(updated.working_hours, Some(i32::from_be_bytes(working_hours.to_be_bytes())));
+
+        let persisted = database
+            .agents()
+            .get(agent_id)
+            .await?
+            .ok_or_else(|| "agent should be persisted after checkin".to_owned())?;
+        assert_eq!(persisted.working_hours, updated.working_hours);
+
         Ok(())
     }
 
@@ -8057,6 +8121,58 @@ mod tests {
             message.info.extra.get("Message"),
             Some(&Value::String("Memory file ab registered successfully".to_owned()))
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_config_handler_preserves_high_bit_working_hours()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0x5566_7799, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database.clone(),
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+        let working_hours = 0x8000_002A;
+
+        let mut config_payload = Vec::new();
+        add_u32(&mut config_payload, u32::from(DemonConfigKey::WorkingHours));
+        add_u32(&mut config_payload, working_hours);
+        dispatcher
+            .dispatch(0x5566_7799, u32::from(DemonCommand::CommandConfig), 37, &config_payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("agent update missing")?;
+        let OperatorMessage::AgentUpdate(_) = event else {
+            panic!("expected agent update event");
+        };
+        let event = receiver.recv().await.ok_or("config response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("WorkingHours has been set".to_owned()))
+        );
+        let expected = Some(i32::from_be_bytes(working_hours.to_be_bytes()));
+        assert_eq!(registry.get(0x5566_7799).await.and_then(|agent| agent.working_hours), expected);
+
+        let persisted = database
+            .agents()
+            .get(0x5566_7799)
+            .await?
+            .ok_or_else(|| "agent should be persisted after config update".to_owned())?;
+        assert_eq!(persisted.working_hours, expected);
         Ok(())
     }
 

@@ -75,20 +75,15 @@ pub struct AuthenticationSuccess {
 /// Failed login result mapped onto Havoc-compatible error responses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthenticationFailure {
-    /// Username is not present in the loaded profile.
-    UnknownUser,
-    /// Password hash does not match the loaded profile credential.
-    WrongPassword,
+    /// Submitted credentials did not authenticate an operator account.
+    InvalidCredentials,
 }
 
 impl AuthenticationFailure {
     /// Build the Havoc-compatible error message returned to the client.
     #[must_use]
     pub fn message(&self) -> &'static str {
-        match self {
-            Self::UnknownUser => "User doesn't exist",
-            Self::WrongPassword => "Wrong Password",
-        }
+        "Authentication failed"
     }
 }
 
@@ -216,13 +211,17 @@ impl AuthService {
         login: &LoginInfo,
     ) -> AuthenticationResult {
         let credentials = self.credentials.read().await;
-        let Some(account) = credentials.get(&login.user) else {
-            return AuthenticationResult::Failure(AuthenticationFailure::UnknownUser);
-        };
+        let account = credentials.get(&login.user);
+        let expected_hash =
+            account.map(|account| account.password_hash.as_str()).unwrap_or(DUMMY_PASSWORD_HASH);
 
-        if !password_hashes_match(&login.password, &account.password_hash) {
-            return AuthenticationResult::Failure(AuthenticationFailure::WrongPassword);
+        if !password_hashes_match(&login.password, expected_hash) {
+            return AuthenticationResult::Failure(AuthenticationFailure::InvalidCredentials);
         }
+
+        let Some(account) = account else {
+            return AuthenticationResult::Failure(AuthenticationFailure::InvalidCredentials);
+        };
 
         let token = Uuid::new_v4().to_string();
         let session = OperatorSession {
@@ -460,6 +459,9 @@ fn password_hashes_match(submitted: &str, expected: &str) -> bool {
     submitted.as_bytes().ct_eq(expected.as_bytes()).into()
 }
 
+const DUMMY_PASSWORD_HASH: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
+
 const fn operator_role_name(role: OperatorRole) -> &'static str {
     match role {
         OperatorRole::Admin => "Admin",
@@ -583,7 +585,10 @@ mod tests {
             )
             .await;
 
-        assert_eq!(result, AuthenticationResult::Failure(AuthenticationFailure::UnknownUser));
+        assert_eq!(
+            result,
+            AuthenticationResult::Failure(AuthenticationFailure::InvalidCredentials)
+        );
         assert_eq!(service.session_count().await, 0);
     }
 
@@ -598,7 +603,10 @@ mod tests {
             )
             .await;
 
-        assert_eq!(result, AuthenticationResult::Failure(AuthenticationFailure::WrongPassword));
+        assert_eq!(
+            result,
+            AuthenticationResult::Failure(AuthenticationFailure::InvalidCredentials)
+        );
         assert_eq!(service.session_count().await, 0);
     }
 
@@ -887,11 +895,11 @@ mod tests {
     }
 
     #[test]
-    fn login_failure_message_preserves_havoc_error_text() {
-        let message = login_failure_message("ghost", &AuthenticationFailure::UnknownUser);
+    fn login_failure_message_uses_generic_authentication_error_text() {
+        let message = login_failure_message("ghost", &AuthenticationFailure::InvalidCredentials);
         let value = serde_json::to_value(&message).expect("message should serialize");
 
         assert_eq!(value["Body"]["SubEvent"], json!(InitConnectionCode::Error.as_u32()));
-        assert_eq!(value["Body"]["Info"]["Message"], json!("User doesn't exist"));
+        assert_eq!(value["Body"]["Info"]["Message"], json!("Authentication failed"));
     }
 }

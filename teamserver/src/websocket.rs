@@ -414,7 +414,8 @@ async fn handle_authentication(
             %client_ip,
             "login rate limit exceeded — rejecting connection"
         );
-        send_login_error(socket, "", AuthenticationFailure::WrongPassword, connection_id).await;
+        send_login_error(socket, "", AuthenticationFailure::InvalidCredentials, connection_id)
+            .await;
         return Err(());
     }
 
@@ -442,7 +443,7 @@ async fn handle_authentication(
             warn!(%connection_id, frame = ?other, "operator websocket requires text login frame");
             let _ = send_operator_message(
                 socket,
-                &login_failure_message("", &AuthenticationFailure::WrongPassword),
+                &login_failure_message("", &AuthenticationFailure::InvalidCredentials),
             )
             .await;
             let _ = socket.send(WsMessage::Close(None)).await;
@@ -522,7 +523,8 @@ async fn handle_authentication(
                 ),
             )
             .await;
-            send_login_error(socket, "", AuthenticationFailure::WrongPassword, connection_id).await;
+            send_login_error(socket, "", AuthenticationFailure::InvalidCredentials, connection_id)
+                .await;
             return Err(());
         }
         Err(AuthError::InvalidMessageJson(error)) => {
@@ -547,7 +549,8 @@ async fn handle_authentication(
                 ),
             )
             .await;
-            send_login_error(socket, "", AuthenticationFailure::WrongPassword, connection_id).await;
+            send_login_error(socket, "", AuthenticationFailure::InvalidCredentials, connection_id)
+                .await;
             return Err(());
         }
         Err(
@@ -555,14 +558,16 @@ async fn handle_authentication(
         ) => {
             tokio::time::sleep(FAILED_LOGIN_DELAY).await;
             rate_limiter.record_failure(client_ip).await;
-            send_login_error(socket, "", AuthenticationFailure::WrongPassword, connection_id).await;
+            send_login_error(socket, "", AuthenticationFailure::InvalidCredentials, connection_id)
+                .await;
             return Err(());
         }
         Err(AuthError::Persistence(error)) => {
             warn!(%connection_id, %error, "operator authentication persistence failed");
             tokio::time::sleep(FAILED_LOGIN_DELAY).await;
             rate_limiter.record_failure(client_ip).await;
-            send_login_error(socket, "", AuthenticationFailure::WrongPassword, connection_id).await;
+            send_login_error(socket, "", AuthenticationFailure::InvalidCredentials, connection_id)
+                .await;
             return Err(());
         }
     };

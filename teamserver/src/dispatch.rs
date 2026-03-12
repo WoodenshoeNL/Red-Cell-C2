@@ -43,7 +43,7 @@ const DOTNET_INFO_FINISHED: u32 = 0x4;
 const DOTNET_INFO_FAILED: u32 = 0x5;
 
 #[derive(Clone, Debug)]
-struct DownloadTracker {
+pub(crate) struct DownloadTracker {
     max_download_bytes: usize,
     max_total_download_bytes: usize,
     inner: Arc<RwLock<DownloadTrackerState>>,
@@ -643,11 +643,25 @@ impl CommandDispatcher {
         plugins: Option<PluginRuntime>,
         max_download_bytes: u64,
     ) -> Self {
-        let max_download_bytes = match usize::try_from(max_download_bytes) {
-            Ok(value) => value,
-            Err(_) => usize::MAX,
-        };
-        let mut dispatcher = Self::with_max_download_bytes(max_download_bytes);
+        Self::with_builtin_handlers_and_downloads(
+            registry,
+            events,
+            database,
+            sockets,
+            plugins,
+            DownloadTracker::from_max_download_bytes(max_download_bytes),
+        )
+    }
+
+    pub(crate) fn with_builtin_handlers_and_downloads(
+        registry: AgentRegistry,
+        events: EventBus,
+        database: Database,
+        sockets: SocketRelayManager,
+        plugins: Option<PluginRuntime>,
+        downloads: DownloadTracker,
+    ) -> Self {
+        let mut dispatcher = Self::with_downloads(downloads);
         dispatcher.register_builtin_handlers(
             BuiltinHandlerDependencies {
                 registry,
@@ -661,6 +675,10 @@ impl CommandDispatcher {
         );
 
         dispatcher
+    }
+
+    fn with_downloads(downloads: DownloadTracker) -> Self {
+        Self { handlers: Arc::new(HashMap::new()), downloads }
     }
 
     /// Register or replace a handler for a raw Demon command identifier.
@@ -1128,11 +1146,19 @@ fn inner_demon_agent_id(bytes: &[u8]) -> Result<u32, DemonProtocolError> {
 }
 
 impl DownloadTracker {
-    fn new(max_download_bytes: usize) -> Self {
+    pub(crate) fn new(max_download_bytes: usize) -> Self {
         let max_total_download_bytes = max_download_bytes
             .saturating_mul(DOWNLOAD_TRACKER_AGGREGATE_CAP_MULTIPLIER)
             .max(max_download_bytes);
         Self::with_limits(max_download_bytes, max_total_download_bytes)
+    }
+
+    pub(crate) fn from_max_download_bytes(max_download_bytes: u64) -> Self {
+        let max_download_bytes = match usize::try_from(max_download_bytes) {
+            Ok(value) => value,
+            Err(_) => usize::MAX,
+        };
+        Self::new(max_download_bytes)
     }
 
     fn with_limits(max_download_bytes: usize, max_total_download_bytes: usize) -> Self {
@@ -1212,6 +1238,26 @@ impl DownloadTracker {
     async fn finish(&self, agent_id: u32, file_id: u32) -> Option<DownloadState> {
         let mut tracker = self.inner.write().await;
         self.remove_locked(&mut tracker, agent_id, file_id)
+    }
+
+    pub(crate) async fn drain_agent(&self, agent_id: u32) -> usize {
+        let mut tracker = self.inner.write().await;
+        let file_ids = tracker
+            .downloads
+            .keys()
+            .filter_map(|(download_agent_id, file_id)| {
+                (*download_agent_id == agent_id).then_some(*file_id)
+            })
+            .collect::<Vec<_>>();
+
+        let mut removed = 0;
+        for file_id in file_ids {
+            if self.remove_locked(&mut tracker, agent_id, file_id).is_some() {
+                removed += 1;
+            }
+        }
+
+        removed
     }
 
     async fn active_for_agent(&self, agent_id: u32) -> Vec<(u32, DownloadState)> {
@@ -6290,6 +6336,40 @@ mod tests {
 
         assert_eq!(tracker.active_for_agent(0xABCD_EF99).await, Vec::new());
         assert_eq!(tracker.finish(0xABCD_EF54, 0x44).await, Some(partial));
+    }
+
+    #[tokio::test]
+    async fn download_tracker_drain_agent_discards_all_partial_downloads_for_agent() {
+        let tracker = DownloadTracker::with_limits(64, 128);
+
+        for (agent_id, file_id, data) in [
+            (0xABCD_EF57, 0x70_u32, b"first".as_slice()),
+            (0xABCD_EF57, 0x71_u32, b"second".as_slice()),
+            (0xABCD_EF58, 0x72_u32, b"third".as_slice()),
+        ] {
+            tracker
+                .start(
+                    agent_id,
+                    file_id,
+                    DownloadState {
+                        request_id: file_id,
+                        remote_path: format!("C:\\Temp\\{file_id:08x}.bin"),
+                        expected_size: 32,
+                        data: Vec::new(),
+                        started_at: "2026-03-11T09:25:00Z".to_owned(),
+                    },
+                )
+                .await;
+            let state = tracker.append(agent_id, file_id, data).await.expect("chunk should append");
+            assert_eq!(state.data, data);
+        }
+
+        assert_eq!(tracker.buffered_bytes().await, 16);
+        assert_eq!(tracker.drain_agent(0xABCD_EF57).await, 2);
+        assert!(tracker.active_for_agent(0xABCD_EF57).await.is_empty());
+        assert_eq!(tracker.buffered_bytes().await, 5);
+        assert_eq!(tracker.active_for_agent(0xABCD_EF58).await.len(), 1);
+        assert_eq!(tracker.drain_agent(0xABCD_EF57).await, 0);
     }
 
     #[tokio::test]

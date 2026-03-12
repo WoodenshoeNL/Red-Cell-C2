@@ -1,7 +1,10 @@
 //! In-memory agent registry with SQLite synchronization.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -95,8 +98,11 @@ const MAX_REQUEST_CONTEXTS: usize = 10_000;
 /// Default cap on the total number of registered agents accepted by the teamserver.
 pub const DEFAULT_MAX_REGISTERED_AGENTS: usize = 10_000;
 
+type AgentCleanupFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+type AgentCleanupHook = Arc<dyn Fn(u32) -> AgentCleanupFuture + Send + Sync + 'static>;
+
 /// Thread-safe in-memory registry of active and historical agents.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AgentRegistry {
     repository: crate::database::AgentRepository,
     link_repository: crate::database::LinkRepository,
@@ -104,7 +110,23 @@ pub struct AgentRegistry {
     parent_links: Arc<RwLock<HashMap<u32, u32>>>,
     child_links: Arc<RwLock<HashMap<u32, BTreeSet<u32>>>>,
     request_contexts: Arc<RwLock<HashMap<(u32, u32), JobContext>>>,
+    cleanup_hooks: Arc<StdMutex<Vec<AgentCleanupHook>>>,
     max_registered_agents: usize,
+}
+
+impl std::fmt::Debug for AgentRegistry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentRegistry")
+            .field("repository", &self.repository)
+            .field("link_repository", &self.link_repository)
+            .field("entries", &self.entries)
+            .field("parent_links", &self.parent_links)
+            .field("child_links", &self.child_links)
+            .field("request_contexts", &self.request_contexts)
+            .field("max_registered_agents", &self.max_registered_agents)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AgentRegistry {
@@ -124,6 +146,7 @@ impl AgentRegistry {
             parent_links: Arc::new(RwLock::new(HashMap::new())),
             child_links: Arc::new(RwLock::new(HashMap::new())),
             request_contexts: Arc::new(RwLock::new(HashMap::new())),
+            cleanup_hooks: Arc::new(StdMutex::new(Vec::new())),
             max_registered_agents,
         }
     }
@@ -306,16 +329,8 @@ impl AgentRegistry {
         agent_id: u32,
         reason: impl Into<String>,
     ) -> Result<(), TeamserverError> {
-        let entry =
-            self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
         let reason = reason.into();
-
-        self.repository.set_status(agent_id, false, &reason).await?;
-
-        let mut info = entry.info.write().await;
-        info.active = false;
-        info.reason = reason;
-        drop(info);
+        self.mark_subtree_member_dead(agent_id, &reason).await?;
 
         let descendants = self.child_subtree(agent_id).await;
         for child_id in descendants {
@@ -358,9 +373,23 @@ impl AgentRegistry {
         };
 
         self.repository.delete(agent_id).await?;
+        self.run_cleanup_hooks(agent_id).await;
 
         let info = entry.info.read().await;
         Ok(info.clone())
+    }
+
+    /// Register an async cleanup hook that runs whenever an agent is marked dead or removed.
+    pub fn register_cleanup_hook<F, Fut>(&self, hook: F)
+    where
+        F: Fn(u32) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let mut cleanup_hooks = match self.cleanup_hooks.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        cleanup_hooks.push(Arc::new(move |agent_id| Box::pin(hook(agent_id))));
     }
 
     /// Return the current AES key and IV for an agent.
@@ -873,7 +902,23 @@ impl AgentRegistry {
         let mut info = entry.info.write().await;
         info.active = false;
         info.reason = reason.to_owned();
+        drop(info);
+        self.run_cleanup_hooks(agent_id).await;
         Ok(())
+    }
+
+    async fn run_cleanup_hooks(&self, agent_id: u32) {
+        let cleanup_hooks = {
+            let hooks = match self.cleanup_hooks.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            hooks.clone()
+        };
+
+        for hook in cleanup_hooks {
+            hook(agent_id).await;
+        }
     }
 }
 
@@ -1308,6 +1353,15 @@ mod tests {
         let database = test_database().await?;
         let registry = AgentRegistry::new(database.clone());
         let agent = sample_agent(0x1000_0006);
+        let cleaned = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cleanup_observer = cleaned.clone();
+        registry.register_cleanup_hook(move |agent_id| {
+            let cleaned = cleanup_observer.clone();
+            async move {
+                let mut cleaned = cleaned.lock().expect("cleanup tracker lock should succeed");
+                cleaned.push(agent_id);
+            }
+        });
         registry.insert(agent.clone()).await?;
 
         registry.mark_dead(agent.agent_id, "lost contact").await?;
@@ -1326,6 +1380,10 @@ mod tests {
             .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?;
         assert!(!persisted.active);
         assert_eq!(persisted.reason, "lost contact");
+        assert_eq!(
+            cleaned.lock().expect("cleanup tracker lock should succeed").as_slice(),
+            &[agent.agent_id]
+        );
 
         Ok(())
     }
@@ -1366,6 +1424,15 @@ mod tests {
         let database = test_database().await?;
         let registry = AgentRegistry::new(database.clone());
         let agent = sample_agent(0x1000_000D);
+        let cleaned = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cleanup_observer = cleaned.clone();
+        registry.register_cleanup_hook(move |agent_id| {
+            let cleaned = cleanup_observer.clone();
+            async move {
+                let mut cleaned = cleaned.lock().expect("cleanup tracker lock should succeed");
+                cleaned.push(agent_id);
+            }
+        });
         registry.insert(agent.clone()).await?;
 
         let removed = registry.remove(agent.agent_id).await?;
@@ -1373,6 +1440,10 @@ mod tests {
         assert_eq!(removed, agent);
         assert!(registry.get(agent.agent_id).await.is_none());
         assert_eq!(database.agents().get(agent.agent_id).await?, None);
+        assert_eq!(
+            cleaned.lock().expect("cleanup tracker lock should succeed").as_slice(),
+            &[agent.agent_id]
+        );
 
         Ok(())
     }
@@ -1384,6 +1455,15 @@ mod tests {
         let parent = sample_agent(0x1000_000D);
         let child = sample_agent(0x1000_000E);
         let grandchild = sample_agent(0x1000_000F);
+        let cleaned = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cleanup_observer = cleaned.clone();
+        registry.register_cleanup_hook(move |agent_id| {
+            let cleaned = cleanup_observer.clone();
+            async move {
+                let mut cleaned = cleaned.lock().expect("cleanup tracker lock should succeed");
+                cleaned.push(agent_id);
+            }
+        });
         registry.insert(parent.clone()).await?;
         registry.insert(child.clone()).await?;
         registry.insert(grandchild.clone()).await?;
@@ -1411,6 +1491,10 @@ mod tests {
             "pivot parent disconnected"
         );
         assert!(database.links().list().await?.is_empty());
+        assert_eq!(
+            cleaned.lock().expect("cleanup tracker lock should succeed").as_slice(),
+            &[parent.agent_id, child.agent_id, grandchild.agent_id]
+        );
         Ok(())
     }
 

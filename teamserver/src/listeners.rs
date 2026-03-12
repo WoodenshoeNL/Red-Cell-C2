@@ -49,7 +49,8 @@ use crate::{
     DemonPacketParser, ListenerRepository, ListenerStatus, ParsedDemonPacket, PersistedListener,
     PersistedListenerState, PluginRuntime, ShutdownController, SocketRelayManager, TeamserverError,
     agent_events::agent_new_event, audit_details, build_init_ack, build_reconnect_ack,
-    events::EventBus, json_error_response, parameter_object, record_operator_action,
+    dispatch::DownloadTracker, events::EventBus, json_error_response, parameter_object,
+    record_operator_action,
 };
 
 const DEFAULT_MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
@@ -408,6 +409,7 @@ pub struct ListenerManager {
     events: EventBus,
     sockets: SocketRelayManager,
     plugins: Option<PluginRuntime>,
+    downloads: DownloadTracker,
     max_download_bytes: u64,
     demon_init_rate_limiter: DemonInitRateLimiter,
     shutdown: ShutdownController,
@@ -445,12 +447,22 @@ impl ListenerManager {
         plugins: Option<PluginRuntime>,
         max_download_bytes: u64,
     ) -> Self {
+        let downloads = DownloadTracker::from_max_download_bytes(max_download_bytes);
+        let cleanup_downloads = downloads.clone();
+        agent_registry.register_cleanup_hook(move |agent_id| {
+            let downloads = cleanup_downloads.clone();
+            async move {
+                let _ = downloads.drain_agent(agent_id).await;
+            }
+        });
+
         Self {
             database,
             agent_registry,
             events,
             sockets,
             plugins,
+            downloads,
             max_download_bytes,
             demon_init_rate_limiter: DemonInitRateLimiter::new(),
             shutdown: ShutdownController::new(),
@@ -854,9 +866,10 @@ impl HttpListenerState {
         database: Database,
         sockets: SocketRelayManager,
         plugins: Option<PluginRuntime>,
+        downloads: DownloadTracker,
         demon_init_rate_limiter: DemonInitRateLimiter,
         shutdown: ShutdownController,
-        max_download_bytes: u64,
+        _max_download_bytes: u64,
     ) -> Result<Self, ListenerManagerError> {
         let method = parse_method(config)?;
         let trusted_proxy_peers = config
@@ -888,13 +901,13 @@ impl HttpListenerState {
             registry: registry.clone(),
             database: database.clone(),
             parser: DemonPacketParser::new(registry.clone()),
-            dispatcher: CommandDispatcher::with_builtin_handlers_and_max_download_bytes(
+            dispatcher: CommandDispatcher::with_builtin_handlers_and_downloads(
                 registry.clone(),
                 events.clone(),
                 database.clone(),
                 sockets,
                 plugins,
-                max_download_bytes,
+                downloads,
             ),
             events,
             demon_init_rate_limiter,
@@ -941,9 +954,10 @@ impl SmbListenerState {
         database: Database,
         sockets: SocketRelayManager,
         plugins: Option<PluginRuntime>,
+        downloads: DownloadTracker,
         demon_init_rate_limiter: DemonInitRateLimiter,
         shutdown: ShutdownController,
-        max_download_bytes: u64,
+        _max_download_bytes: u64,
     ) -> Self {
         Self {
             config: config.clone(),
@@ -953,13 +967,13 @@ impl SmbListenerState {
             events: events.clone(),
             demon_init_rate_limiter,
             shutdown,
-            dispatcher: CommandDispatcher::with_builtin_handlers_and_max_download_bytes(
+            dispatcher: CommandDispatcher::with_builtin_handlers_and_downloads(
                 registry.clone(),
                 events.clone(),
                 database,
                 sockets,
                 plugins,
-                max_download_bytes,
+                downloads,
             ),
         }
     }
@@ -1212,6 +1226,7 @@ async fn spawn_http_listener_runtime(
     database: Database,
     sockets: SocketRelayManager,
     plugins: Option<PluginRuntime>,
+    downloads: DownloadTracker,
     demon_init_rate_limiter: DemonInitRateLimiter,
     shutdown: ShutdownController,
     max_download_bytes: u64,
@@ -1223,6 +1238,7 @@ async fn spawn_http_listener_runtime(
         database,
         sockets,
         plugins,
+        downloads,
         demon_init_rate_limiter,
         shutdown,
         max_download_bytes,
@@ -1447,6 +1463,7 @@ async fn spawn_smb_listener_runtime(
     database: Database,
     sockets: SocketRelayManager,
     plugins: Option<PluginRuntime>,
+    downloads: DownloadTracker,
     demon_init_rate_limiter: DemonInitRateLimiter,
     shutdown: ShutdownController,
     max_download_bytes: u64,
@@ -1458,6 +1475,7 @@ async fn spawn_smb_listener_runtime(
         database,
         sockets,
         plugins,
+        downloads,
         demon_init_rate_limiter,
         shutdown,
         max_download_bytes,
@@ -1671,6 +1689,7 @@ impl ListenerManager {
                     self.database.clone(),
                     self.sockets.clone(),
                     self.plugins.clone(),
+                    self.downloads.clone(),
                     self.demon_init_rate_limiter.clone(),
                     self.shutdown.clone(),
                     self.max_download_bytes,
@@ -1685,6 +1704,7 @@ impl ListenerManager {
                     self.database.clone(),
                     self.sockets.clone(),
                     self.plugins.clone(),
+                    self.downloads.clone(),
                     self.demon_init_rate_limiter.clone(),
                     self.shutdown.clone(),
                     self.max_download_bytes,
@@ -1700,6 +1720,7 @@ impl ListenerManager {
                     self.database.clone(),
                     self.sockets.clone(),
                     self.plugins.clone(),
+                    self.downloads.clone(),
                     self.demon_init_rate_limiter.clone(),
                     self.shutdown.clone(),
                     self.max_download_bytes,
@@ -1873,9 +1894,10 @@ impl DnsListenerState {
         database: Database,
         sockets: SocketRelayManager,
         plugins: Option<PluginRuntime>,
+        downloads: DownloadTracker,
         demon_init_rate_limiter: DemonInitRateLimiter,
         shutdown: ShutdownController,
-        max_download_bytes: u64,
+        _max_download_bytes: u64,
     ) -> Self {
         Self {
             config: config.clone(),
@@ -1883,13 +1905,13 @@ impl DnsListenerState {
             database: database.clone(),
             parser: DemonPacketParser::new(registry.clone()),
             events: events.clone(),
-            dispatcher: CommandDispatcher::with_builtin_handlers_and_max_download_bytes(
+            dispatcher: CommandDispatcher::with_builtin_handlers_and_downloads(
                 registry.clone(),
                 events.clone(),
                 database,
                 sockets,
                 plugins,
-                max_download_bytes,
+                downloads,
             ),
             demon_init_rate_limiter,
             shutdown,
@@ -2390,6 +2412,7 @@ async fn spawn_dns_listener_runtime(
     database: Database,
     sockets: SocketRelayManager,
     plugins: Option<PluginRuntime>,
+    downloads: DownloadTracker,
     demon_init_rate_limiter: DemonInitRateLimiter,
     shutdown: ShutdownController,
     max_download_bytes: u64,
@@ -2411,6 +2434,7 @@ async fn spawn_dns_listener_runtime(
         database,
         sockets,
         plugins,
+        downloads,
         demon_init_rate_limiter,
         shutdown,
         max_download_bytes,
@@ -3022,7 +3046,7 @@ mod tests {
     use super::{
         DEMON_INIT_WINDOW_DURATION, DNS_HEADER_LEN, DNS_MAX_PENDING_UPLOADS, DNS_MAX_UPLOAD_CHUNKS,
         DNS_TYPE_A, DNS_TYPE_CNAME, DNS_TYPE_TXT, DNS_UPLOAD_TIMEOUT_SECS, DemonInitRateLimiter,
-        DnsListenerState, DnsPendingResponse, DnsPendingUpload, DnsUploadAssembly,
+        DnsListenerState, DnsPendingResponse, DnsPendingUpload, DnsUploadAssembly, DownloadTracker,
         ListenerEventAction, ListenerManager, ListenerManagerError, ListenerStatus,
         ListenerSummary, MAX_AGENT_REQUEST_BODY_LEN, MAX_DEMON_INIT_ATTEMPTS_PER_IP,
         MAX_SMB_FRAME_PAYLOAD_LEN, TrustedProxyPeer, action_from_mark, base32hex_decode,
@@ -5136,6 +5160,7 @@ mod tests {
             database,
             sockets,
             None,
+            DownloadTracker::from_max_download_bytes(super::DEFAULT_MAX_DOWNLOAD_BYTES),
             DemonInitRateLimiter::new(),
             ShutdownController::new(),
             super::DEFAULT_MAX_DOWNLOAD_BYTES,
@@ -5156,6 +5181,7 @@ mod tests {
             database,
             sockets,
             None,
+            DownloadTracker::from_max_download_bytes(super::DEFAULT_MAX_DOWNLOAD_BYTES),
             DemonInitRateLimiter::new(),
             ShutdownController::new(),
             super::DEFAULT_MAX_DOWNLOAD_BYTES,
@@ -5184,6 +5210,7 @@ mod tests {
             database,
             sockets,
             None,
+            DownloadTracker::from_max_download_bytes(super::DEFAULT_MAX_DOWNLOAD_BYTES),
             DemonInitRateLimiter::new(),
             shutdown,
             super::DEFAULT_MAX_DOWNLOAD_BYTES,
@@ -5425,6 +5452,7 @@ mod tests {
             database,
             sockets,
             None,
+            DownloadTracker::from_max_download_bytes(super::DEFAULT_MAX_DOWNLOAD_BYTES),
             DemonInitRateLimiter::new(),
             shutdown.clone(),
             super::DEFAULT_MAX_DOWNLOAD_BYTES,
@@ -5700,6 +5728,7 @@ mod tests {
             database,
             sockets,
             None,
+            DownloadTracker::from_max_download_bytes(super::DEFAULT_MAX_DOWNLOAD_BYTES),
             DemonInitRateLimiter::new(),
             ShutdownController::new(),
             super::DEFAULT_MAX_DOWNLOAD_BYTES,

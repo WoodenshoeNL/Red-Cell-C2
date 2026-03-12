@@ -21,8 +21,8 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 0 | 0 | 0 |
 | Missing tests | 0 | 2 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
-| Protocol errors | 1 | 12 | 3 |
-| Security issues | 0 | 16 | 0 |
+| Protocol errors | 1 | 13 | 3 |
+| Security issues | 0 | 18 | 0 |
 | Architecture drift | 0 | 13 | 0 |
 | Memory / resource leaks | 0 | 7 | 1 |
 | Startup / lifecycle regressions | 0 | 6 | 0 |
@@ -34,6 +34,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-12 09:53
+
+| Agent | Findings | Categories | Notes |
+|-------|---------:|------------|-------|
+| Claude | 0 | — | No new agent-attributed findings this run |
+| Codex | 3 | Protocol errors, Security issues | Filed red-cell-c2-2x0k, red-cell-c2-25uh, red-cell-c2-s7rj |
+| Cursor | 0 | — | No new agent-attributed findings this run |
+
+Overall codebase health: drifting
+Biggest blindspot: COMMAND_CHECKIN completely ignores the Havoc session-key refresh and metadata update (red-cell-c2-14fa) — real Demon agents will desync their AES-CTR keystreams on the first CHECKIN after a reconnect, breaking all subsequent callbacks silently rather than with a visible error.
 
 ### Arch Review — 2026-03-12 07:08
 

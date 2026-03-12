@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 113 | 31 |
-| Bugs filed against | 0 | 15 | 9 |
-| Bug rate (bugs/task) | N/A | 0.13 | 0.29 |
-| Quality score | N/A | 87% | 71% |
+| Tasks closed | 0 | 116 | 31 |
+| Bugs filed against | 0 | 16 | 9 |
+| Bug rate (bugs/task) | N/A | 0.14 | 0.29 |
+| Quality score | N/A | 86% | 71% |
 
 ## Violation Breakdown
 
@@ -27,7 +27,7 @@ Each loop run updates the running totals and appends a review entry.
 | Memory / resource leaks | 0 | 7 | 1 |
 | Startup / lifecycle regressions | 0 | 8 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
-| Availability / timeout regressions | 0 | 3 | 0 |
+| Availability / timeout regressions | 0 | 4 | 0 |
 
 ---
 
@@ -811,3 +811,14 @@ Notes: Reviewed twenty-five commits from `ce83234` to `df8b7a1`. Two substantive
 
 Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`, and `cargo test --workspace`)
 Notes: Reviewed five commits from `df8b7a1` to `a3473fd`. One substantive implementation commit: `2ff1c7d` (feat: add graceful teamserver shutdown). Implementation is well-structured — new `shutdown.rs` module with `ShutdownController` (Arc-wrapped atomics + `Notify`), RAII `ActiveCallbackGuard`, propagated into HTTP/SMB/DNS listeners and WebSocket handler. Two P3 bugs filed: (1) `red-cell-c2-lwd1` — SMB and DNS accept loops create a fresh `notified()` future each iteration and can miss a `notify_waiters()` fired between iterations; the websocket handler correctly pins before the loop. (2) `red-cell-c2-3phi` — `wait_for_callback_drain` has a TOCTOU window between the `active_callbacks == 0` check and `.notified()` await, potentially causing a spurious full-timeout delay. Both are low severity and don't affect correctness; the `stop()` call and count re-check after timeout handle them gracefully.
+
+### QA Review — 2026-03-12 10:35 — bec4421..3df9f52
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No activity this run |
+| Codex | 3 | 1 | Closed `red-cell-c2-2znr` (username enumeration), `red-cell-c2-1pb7` (hex ID parsing), `red-cell-c2-2nos` (Havoc compatibility test prerequisites); filed `red-cell-c2-2jf8` (test suite slowdown from Argon2 in test setup). |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: `cargo check --workspace` and `cargo clippy --workspace -- -D warnings` pass clean. `cargo test --workspace` times out (>120s) with the new Argon2 hashing in test setup — filed as `red-cell-c2-2jf8`. Individual module filters pass: `auth::` (18/18 ok, 23.8s), `api::` (50/50 ok, 7.9s with 4 threads), `agents::` (39/39 ok), `red-cell-common` (91/91 ok).
+Notes: Reviewed ten commits from `bec4421` to `3df9f52` (excluding QA checkpoint commit). Three substantive implementation commits by Codex: (1) `b74adf1` — operator login hardening: replaces bare SHA3 password digest storage with Argon2id(SHA3(password)) PHC string verifiers, adds constant-time dummy-user verification path, unifies `AuthenticationFailure` variants to `InvalidCredentials` to prevent username enumeration, adds legacy-upgrade path for existing rows via `normalize_persisted_verifier`, DB migration renames column. Implementation is correct and well-tested (new `from_profile_with_database_upgrades_legacy_runtime_operator_digests` test). One P2 regression: `from_profile` now runs Argon2 synchronously per operator, making every test that constructs `AuthService` expensive — filed as `red-cell-c2-2jf8`. (2) `fd56552` — always parse agent string IDs as hex radix-16; removes ambiguous heuristic that treated digit-only strings as decimal. Three regression tests added. Fix is correct. (3) `fc097e0` — gates Havoc compatibility test behind `havoc_compatibility_skip_reason()` which checks for `RED_CELL_HAVOC_TEAMSERVER_DIR` env var or presence of `src/Havoc/teamserver`, and also checks Go toolchain availability. Uses runtime path substitution in go.mod instead of hardcoded `/home/michel` path. Fix is correct; no new issues.

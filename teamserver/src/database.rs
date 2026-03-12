@@ -216,47 +216,23 @@ impl AgentRepository {
         agent: &AgentInfo,
         listener_name: &str,
     ) -> Result<(), TeamserverError> {
-        sqlx::query(
-            r#"
-            INSERT INTO ts_agents (
-                agent_id, active, reason, note, ctr_block_offset, aes_key, aes_iv, hostname, username, domain_name,
-                external_ip, internal_ip, process_name, base_address, process_pid, process_tid,
-                process_ppid, process_arch, elevated, os_version, os_arch, listener_name, sleep_delay,
-                sleep_jitter, kill_date, working_hours, first_call_in, last_call_in
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            "#,
-        )
-        .bind(i64::from(agent.agent_id))
-        .bind(bool_to_i64(agent.active))
-        .bind(&agent.reason)
-        .bind(&agent.note)
-        .bind(0_i64)
-        .bind(&agent.encryption.aes_key)
-        .bind(&agent.encryption.aes_iv)
-        .bind(&agent.hostname)
-        .bind(&agent.username)
-        .bind(&agent.domain_name)
-        .bind(&agent.external_ip)
-        .bind(&agent.internal_ip)
-        .bind(&agent.process_name)
-        .bind(i64_from_u64("base_address", agent.base_address)?)
-        .bind(i64::from(agent.process_pid))
-        .bind(i64::from(agent.process_tid))
-        .bind(i64::from(agent.process_ppid))
-        .bind(&agent.process_arch)
-        .bind(bool_to_i64(agent.elevated))
-        .bind(&agent.os_version)
-        .bind(&agent.os_arch)
-        .bind(listener_name)
-        .bind(i64::from(agent.sleep_delay))
-        .bind(i64::from(agent.sleep_jitter))
-        .bind(agent.kill_date)
-        .bind(agent.working_hours.map(i64::from))
-        .bind(&agent.first_call_in)
-        .bind(&agent.last_call_in)
-        .execute(&self.pool)
-        .await?;
+        self.create_with_listener_and_ctr_offset(agent, listener_name, 0).await
+    }
 
+    /// Insert a new agent row with the listener and initial CTR state for the session.
+    pub async fn create_with_listener_and_ctr_offset(
+        &self,
+        agent: &AgentInfo,
+        listener_name: &str,
+        ctr_block_offset: u64,
+    ) -> Result<(), TeamserverError> {
+        let mut transaction = self.pool.begin().await?;
+        insert_agent_row(&mut *transaction, agent, listener_name).await?;
+        if ctr_block_offset != 0 {
+            update_agent_ctr_block_offset(&mut *transaction, agent.agent_id, ctr_block_offset)
+                .await?;
+        }
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -422,14 +398,71 @@ impl AgentRepository {
         agent_id: u32,
         ctr_block_offset: u64,
     ) -> Result<(), TeamserverError> {
-        sqlx::query("UPDATE ts_agents SET ctr_block_offset = ? WHERE agent_id = ?")
-            .bind(i64_from_u64("ctr_block_offset", ctr_block_offset)?)
-            .bind(i64::from(agent_id))
-            .execute(&self.pool)
-            .await?;
-
-        Ok(())
+        update_agent_ctr_block_offset(&self.pool, agent_id, ctr_block_offset).await
     }
+}
+
+async fn insert_agent_row(
+    executor: impl sqlx::Executor<'_, Database = Sqlite>,
+    agent: &AgentInfo,
+    listener_name: &str,
+) -> Result<(), TeamserverError> {
+    sqlx::query(
+        r#"
+        INSERT INTO ts_agents (
+            agent_id, active, reason, note, ctr_block_offset, aes_key, aes_iv, hostname, username, domain_name,
+            external_ip, internal_ip, process_name, base_address, process_pid, process_tid,
+            process_ppid, process_arch, elevated, os_version, os_arch, listener_name, sleep_delay,
+            sleep_jitter, kill_date, working_hours, first_call_in, last_call_in
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(i64::from(agent.agent_id))
+    .bind(bool_to_i64(agent.active))
+    .bind(&agent.reason)
+    .bind(&agent.note)
+    .bind(0_i64)
+    .bind(&agent.encryption.aes_key)
+    .bind(&agent.encryption.aes_iv)
+    .bind(&agent.hostname)
+    .bind(&agent.username)
+    .bind(&agent.domain_name)
+    .bind(&agent.external_ip)
+    .bind(&agent.internal_ip)
+    .bind(&agent.process_name)
+    .bind(i64_from_u64("base_address", agent.base_address)?)
+    .bind(i64::from(agent.process_pid))
+    .bind(i64::from(agent.process_tid))
+    .bind(i64::from(agent.process_ppid))
+    .bind(&agent.process_arch)
+    .bind(bool_to_i64(agent.elevated))
+    .bind(&agent.os_version)
+    .bind(&agent.os_arch)
+    .bind(listener_name)
+    .bind(i64::from(agent.sleep_delay))
+    .bind(i64::from(agent.sleep_jitter))
+    .bind(agent.kill_date)
+    .bind(agent.working_hours.map(i64::from))
+    .bind(&agent.first_call_in)
+    .bind(&agent.last_call_in)
+    .execute(executor)
+    .await?;
+
+    Ok(())
+}
+
+async fn update_agent_ctr_block_offset(
+    executor: impl sqlx::Executor<'_, Database = Sqlite>,
+    agent_id: u32,
+    ctr_block_offset: u64,
+) -> Result<(), TeamserverError> {
+    sqlx::query("UPDATE ts_agents SET ctr_block_offset = ? WHERE agent_id = ?")
+        .bind(i64_from_u64("ctr_block_offset", ctr_block_offset)?)
+        .bind(i64::from(agent_id))
+        .execute(executor)
+        .await?;
+
+    Ok(())
 }
 
 /// Persisted listener record stored in SQLite.

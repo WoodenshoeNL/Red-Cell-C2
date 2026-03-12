@@ -169,7 +169,9 @@ impl DemonPacketParser {
             }
 
             let agent = parse_init_agent(envelope.header.agent_id, remaining, &external_ip, now)?;
-            self.registry.insert_with_listener(agent.clone(), listener_name).await?;
+            self.registry
+                .insert_with_listener_and_ctr_offset(agent.clone(), listener_name, 0)
+                .await?;
 
             return Ok(ParsedDemonPacket::Init(Box::new(ParsedDemonInit {
                 header: envelope.header,

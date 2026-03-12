@@ -185,6 +185,17 @@ impl AgentRegistry {
         agent: AgentInfo,
         listener_name: &str,
     ) -> Result<(), TeamserverError> {
+        self.insert_with_listener_and_ctr_offset(agent, listener_name, 0).await
+    }
+
+    /// Insert a newly registered agent and atomically persist its initial CTR state.
+    #[instrument(skip(self, agent, listener_name), fields(agent_id = format_args!("0x{:08X}", agent.agent_id), listener_name = %listener_name, ctr_block_offset))]
+    pub async fn insert_with_listener_and_ctr_offset(
+        &self,
+        agent: AgentInfo,
+        listener_name: &str,
+        ctr_block_offset: u64,
+    ) -> Result<(), TeamserverError> {
         let mut entries = self.entries.write().await;
 
         if entries.contains_key(&agent.agent_id) {
@@ -198,9 +209,13 @@ impl AgentRegistry {
             });
         }
 
-        self.repository.create_with_listener(&agent, listener_name).await?;
-        entries
-            .insert(agent.agent_id, Arc::new(AgentEntry::new(agent, listener_name.to_owned(), 0)));
+        self.repository
+            .create_with_listener_and_ctr_offset(&agent, listener_name, ctr_block_offset)
+            .await?;
+        entries.insert(
+            agent.agent_id,
+            Arc::new(AgentEntry::new(agent, listener_name.to_owned(), ctr_block_offset)),
+        );
         Ok(())
     }
 
@@ -1131,6 +1146,62 @@ mod tests {
             duplicate,
             Err(TeamserverError::DuplicateAgent { agent_id: 0x1000_0002 })
         ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn insert_with_listener_and_ctr_offset_persists_initial_transport_state()
+    -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let agent = sample_agent(0x1000_0009);
+
+        registry.insert_with_listener_and_ctr_offset(agent.clone(), "https-edge", 7).await?;
+
+        assert_eq!(registry.get(agent.agent_id).await, Some(agent));
+        assert_eq!(registry.ctr_offset(0x1000_0009).await?, 7);
+        assert_eq!(
+            database
+                .agents()
+                .get_persisted(0x1000_0009)
+                .await?
+                .ok_or(TeamserverError::AgentNotFound { agent_id: 0x1000_0009 })?
+                .ctr_block_offset,
+            7
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn insert_with_listener_and_ctr_offset_rolls_back_when_ctr_persist_fails()
+    -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        sqlx::query(
+            r#"
+            CREATE TRIGGER fail_ctr_offset_update
+            BEFORE UPDATE OF ctr_block_offset ON ts_agents
+            WHEN NEW.ctr_block_offset = 7
+            BEGIN
+                SELECT RAISE(FAIL, 'simulated ctr offset persistence failure');
+            END;
+            "#,
+        )
+        .execute(database.pool())
+        .await?;
+
+        let registry = AgentRegistry::new(database.clone());
+        let agent = sample_agent(0x1000_000A);
+        let error = registry
+            .insert_with_listener_and_ctr_offset(agent.clone(), "https-edge", 7)
+            .await
+            .expect_err("registration should fail when ctr update is rejected");
+
+        assert!(matches!(error, TeamserverError::Database(_)));
+        assert_eq!(registry.get(agent.agent_id).await, None);
+        assert_eq!(database.agents().get(agent.agent_id).await?, None);
+        assert_eq!(database.agents().get_persisted(agent.agent_id).await?, None);
 
         Ok(())
     }

@@ -41,11 +41,14 @@ impl ShutdownController {
     ///
     /// Returns immediately once shutdown has already started.
     pub async fn notified(&self) {
+        let notified = self.inner.notify.notified();
+        tokio::pin!(notified);
+
         if self.is_shutting_down() {
             return;
         }
 
-        self.inner.notify.notified().await;
+        notified.await;
     }
 
     /// Register a callback that should be allowed to finish during shutdown draining.
@@ -73,6 +76,9 @@ impl ShutdownController {
         let deadline = Instant::now() + timeout;
 
         loop {
+            let notified = self.inner.drain_notify.notified();
+            tokio::pin!(notified);
+
             if self.inner.active_callbacks.load(Ordering::SeqCst) == 0 {
                 return true;
             }
@@ -81,7 +87,7 @@ impl ShutdownController {
                 return false;
             };
 
-            if tokio::time::timeout(remaining, self.inner.drain_notify.notified()).await.is_err() {
+            if tokio::time::timeout(remaining, &mut notified).await.is_err() {
                 return self.inner.active_callbacks.load(Ordering::SeqCst) == 0;
             }
         }
@@ -153,6 +159,24 @@ mod tests {
         assert!(!controller.wait_for_callback_drain(Duration::from_millis(10)).await);
         drop(callback);
         assert!(controller.wait_for_callback_drain(Duration::from_millis(10)).await);
+    }
+
+    #[tokio::test]
+    async fn wait_for_callback_drain_returns_immediately_when_callbacks_are_already_gone() {
+        let controller = ShutdownController::new();
+        let callback = controller.try_track_callback();
+        assert!(callback.is_some());
+
+        controller.initiate();
+        drop(callback);
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(10),
+            controller.wait_for_callback_drain(Duration::from_secs(30)),
+        )
+        .await;
+
+        assert_eq!(result, Ok(true));
     }
 
     #[tokio::test]

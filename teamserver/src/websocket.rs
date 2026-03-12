@@ -999,6 +999,8 @@ async fn dispatch_operator_command<S>(
                 &registry,
                 &sockets,
                 &events,
+                &database,
+                &webhooks,
                 session,
                 sanitize_agent_remove(session, message),
             )
@@ -1247,6 +1249,8 @@ async fn handle_agent_remove(
     registry: &AgentRegistry,
     sockets: &SocketRelayManager,
     events: &EventBus,
+    database: &Database,
+    webhooks: &AuditWebhookNotifier,
     session: &crate::OperatorSession,
     message: Message<FlatInfo>,
 ) -> Result<(), AgentCommandError> {
@@ -1254,9 +1258,51 @@ async fn handle_agent_remove(
         return Err(AgentCommandError::InvalidRemovePayload);
     };
     let agent_id = parse_agent_id(&agent_id)?;
-    registry.remove(agent_id).await?;
-    let _ = sockets.remove_agent(agent_id).await;
-    events.broadcast(OperatorMessage::AgentRemove(message));
+    match registry.remove(agent_id).await {
+        Ok(_) => {
+            log_operator_action(
+                database,
+                webhooks,
+                &session.username,
+                "agent.delete",
+                "agent",
+                Some(format!("{agent_id:08X}")),
+                audit_details(
+                    AuditResultStatus::Success,
+                    Some(agent_id),
+                    Some("delete"),
+                    Some(parameter_object([(
+                        "agent_id",
+                        Value::String(format!("{agent_id:08X}")),
+                    )])),
+                ),
+            )
+            .await;
+            let _ = sockets.remove_agent(agent_id).await;
+            events.broadcast(OperatorMessage::AgentRemove(message));
+        }
+        Err(error) => {
+            log_operator_action(
+                database,
+                webhooks,
+                &session.username,
+                "agent.delete",
+                "agent",
+                Some(format!("{agent_id:08X}")),
+                audit_details(
+                    AuditResultStatus::Failure,
+                    Some(agent_id),
+                    Some("delete"),
+                    Some(parameter_object([
+                        ("agent_id", Value::String(format!("{agent_id:08X}"))),
+                        ("error", Value::String(error.to_string())),
+                    ])),
+                ),
+            )
+            .await;
+            return Err(error.into());
+        }
+    }
     debug!(
         connection_id = %session.connection_id,
         username = %session.username,
@@ -3766,6 +3812,85 @@ mod tests {
         assert!(matches!(event, OperatorMessage::AgentRemove(_)));
         assert!(registry.get(0xDEAD_BEEF).await.is_none());
         assert_eq!(sockets.list_socks_servers(0xDEAD_BEEF).await, "No active SOCKS5 servers");
+
+        socket.close(None).await.expect("close should send");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_agent_remove_records_success_audit_trail() {
+        let state = TestState::new().await;
+        let database = state.database.clone();
+        let registry = state.registry.clone();
+        registry.insert(sample_agent(0xDEAD_BEEF)).await.expect("agent should insert");
+        let (mut socket, server) = spawn_server(state).await;
+
+        login(&mut socket, "admin", "adminpass").await;
+        let _snapshot = read_operator_message(&mut socket).await;
+
+        socket
+            .send(ClientMessage::Text(agent_remove_message("admin", "DEADBEEF").into()))
+            .await
+            .expect("remove should send");
+
+        let _event = read_operator_message(&mut socket).await;
+
+        let page = query_audit_log(
+            &database,
+            &AuditQuery { action: Some("agent.delete".to_owned()), ..AuditQuery::default() },
+        )
+        .await
+        .expect("audit query should succeed");
+
+        assert!(!page.items.is_empty(), "expected at least one agent.delete audit entry");
+        let entry = &page.items[0];
+        assert_eq!(entry.actor, "admin");
+        assert_eq!(entry.action, "agent.delete");
+        assert_eq!(entry.target_kind, "agent");
+        assert_eq!(entry.target_id.as_deref(), Some("DEADBEEF"));
+        assert_eq!(entry.agent_id.as_deref(), Some("DEADBEEF"));
+        assert_eq!(entry.command.as_deref(), Some("delete"));
+        assert_eq!(entry.result_status, AuditResultStatus::Success);
+
+        socket.close(None).await.expect("close should send");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_agent_remove_missing_agent_records_failure_audit() {
+        let state = TestState::new().await;
+        let database = state.database.clone();
+        let (mut socket, server) = spawn_server(state).await;
+
+        login(&mut socket, "admin", "adminpass").await;
+
+        socket
+            .send(ClientMessage::Text(agent_remove_message("admin", "DEADBEEF").into()))
+            .await
+            .expect("remove should send");
+
+        let _error = read_operator_message(&mut socket).await;
+
+        let page = query_audit_log(
+            &database,
+            &AuditQuery { action: Some("agent.delete".to_owned()), ..AuditQuery::default() },
+        )
+        .await
+        .expect("audit query should succeed");
+
+        assert!(!page.items.is_empty(), "expected at least one agent.delete audit entry");
+        let entry = &page.items[0];
+        assert_eq!(entry.actor, "admin");
+        assert_eq!(entry.action, "agent.delete");
+        assert_eq!(entry.target_kind, "agent");
+        assert_eq!(entry.target_id.as_deref(), Some("DEADBEEF"));
+        assert_eq!(entry.agent_id.as_deref(), Some("DEADBEEF"));
+        assert_eq!(entry.command.as_deref(), Some("delete"));
+        assert_eq!(entry.result_status, AuditResultStatus::Failure);
+        let parameters =
+            entry.parameters.as_ref().expect("failure audit should include parameters");
+        assert_eq!(parameters.get("agent_id"), Some(&Value::String("DEADBEEF".to_owned())));
+        assert!(parameters.get("error").is_some(), "failure audit should include error details");
 
         socket.close(None).await.expect("close should send");
         server.abort();

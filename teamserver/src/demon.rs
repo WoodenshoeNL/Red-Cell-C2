@@ -603,6 +603,30 @@ mod tests {
         DemonEnvelope::new(agent_id, payload).expect("init envelope should be valid").to_bytes()
     }
 
+    fn build_init_packet_with_kill_date_and_working_hours(
+        agent_id: u32,
+        key: [u8; AGENT_KEY_LENGTH],
+        iv: [u8; AGENT_IV_LENGTH],
+        kill_date: u64,
+        working_hours: i32,
+    ) -> Vec<u8> {
+        let metadata = build_init_metadata_with_kill_date_and_working_hours(
+            agent_id,
+            kill_date,
+            working_hours,
+        );
+        let encrypted =
+            encrypt_agent_data(&key, &iv, &metadata).expect("metadata encryption should succeed");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u32_be(u32::from(DemonCommand::DemonInit)));
+        payload.extend_from_slice(&u32_be(7));
+        payload.extend_from_slice(&key);
+        payload.extend_from_slice(&iv);
+        payload.extend_from_slice(&encrypted);
+
+        DemonEnvelope::new(agent_id, payload).expect("init envelope should be valid").to_bytes()
+    }
+
     fn build_plaintext_zero_key_init_packet(agent_id: u32) -> Vec<u8> {
         let metadata = build_init_metadata(agent_id);
         let mut payload = Vec::new();
@@ -693,6 +717,27 @@ mod tests {
         };
 
         assert_eq!(init.agent.working_hours, Some(working_hours));
+    }
+
+    #[tokio::test]
+    async fn parse_stores_no_kill_date_when_init_kill_date_is_zero() {
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry);
+        let key = [0x51; AGENT_KEY_LENGTH];
+        let iv = [0x34; AGENT_IV_LENGTH];
+        let packet =
+            build_init_packet_with_kill_date_and_working_hours(0x1234_5678, key, iv, 0, 0b101010);
+
+        let parsed = parser
+            .parse_at(&packet, "203.0.113.10".to_owned(), datetime!(2026-03-09 19:30:00 UTC))
+            .await
+            .expect("init packet should parse");
+
+        let ParsedDemonPacket::Init(init) = parsed else {
+            panic!("expected init packet");
+        };
+
+        assert_eq!(init.agent.kill_date, None);
     }
 
     #[tokio::test]
@@ -1009,23 +1054,13 @@ mod tests {
         let agent_id = 0x1357_9BDF;
         let key = [0x21; AGENT_KEY_LENGTH];
         let iv = [0x31; AGENT_IV_LENGTH];
-        let metadata = build_init_metadata_with_kill_date_and_working_hours(
+        let packet = build_init_packet_with_kill_date_and_working_hours(
             agent_id,
-            i64::MAX as u64 + 1,
+            key,
+            iv,
+            u64::MAX,
             0b101010,
         );
-        let encrypted =
-            encrypt_agent_data(&key, &iv, &metadata).expect("metadata encryption should succeed");
-
-        let mut payload = Vec::new();
-        payload.extend_from_slice(&u32_be(u32::from(DemonCommand::DemonInit)));
-        payload.extend_from_slice(&u32_be(7));
-        payload.extend_from_slice(&key);
-        payload.extend_from_slice(&iv);
-        payload.extend_from_slice(&encrypted);
-        let packet = DemonEnvelope::new(agent_id, payload)
-            .expect("init envelope should be valid")
-            .to_bytes();
 
         let error = parser
             .parse_at(&packet, "203.0.113.77".to_owned(), datetime!(2026-03-10 10:15:00 UTC))

@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 122 | 31 |
+| Tasks closed | 0 | 127 | 31 |
 | Bugs filed against | 0 | 19 | 9 |
-| Bug rate (bugs/task) | N/A | 0.16 | 0.29 |
-| Quality score | N/A | 84% | 71% |
+| Bug rate (bugs/task) | N/A | 0.15 | 0.29 |
+| Quality score | N/A | 85% | 71% |
 
 ## Violation Breakdown
 
@@ -855,3 +855,14 @@ Notes: Reviewed eight commits from `073c2ca` to `2f10bd8` (three Codex fix commi
 
 Build: passed (`cargo check`, `cargo clippy -- -D warnings`, `cargo test` — 365+19+17+... tests ok, 32.6s)
 Notes: Reviewed eleven commits from `2f10bd8` to `2aa2a07`. Three substantive Codex fix commits: (1) `be34e67` — removes stale-timeout pruning from DownloadTracker; transfers now persist until explicitly closed via finish(). Correct fix for the inactivity bug, but removes the only cleanup path for agent-disconnected transfers — filed `red-cell-c2-pbmw`. (2) `6bfd855` — restore_running() now propagates StartFailed errors except for External listeners; surfaces real bind failures that were previously swallowed. Correct. (3) `1746585` — DNS listeners are now fully unblocked at create/update/start level; External listeners are moved to a profile-validation-time block (rejected before they can be created). Code is clean, tests updated and comprehensive. DNS runtime was already implemented; this just removes the gating layer. No lingering `unwrap()` or `todo!()` introduced.
+
+### QA Review — 2026-03-12 14:00 — 81bfe17..9daef86
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | Arch-review and test-review bookkeeping only |
+| Codex | 5 | 0 | Closed `red-cell-c2-2x0k` (working_hours signed saturation), `red-cell-c2-25uh` (operator port fallback identity leak), `red-cell-c2-s7rj` (unknown reconnect probe silent 200), `red-cell-c2-lwd1` (SMB/DNS shutdown race), `red-cell-c2-3phi` (TOCTOU drain race). |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (`cargo check`, `cargo clippy -- -D warnings`, `cargo test` — 595 tests ok, ~35s)
+Notes: Reviewed sixteen commits from `81bfe17` to `9daef86`. Five substantive Codex fix commits, all clean and well-tested: (1) `77a41cb` — DEMON_INIT working_hours now read as i32 directly via `i32::from_be_bytes(read_fixed::<4>(...))` — correct fix, signed bitmask preserved, regression test with `i32::MIN | 0x2A`. (2) `55194e6` — operator port fallback now returns `StatusCode::NOT_FOUND` with empty body instead of 501 + "not implemented" — security improvement, covered by new router test. (3) `ca00428` — unknown reconnect probes now return fake 404 + create audit entry; `DemonHttpDisposition` enum dispatches HTTP-specific path; SMB/DNS paths also pass `database` for audit logging (but return empty payload / "ack" respectively — acceptable for non-HTTP transports). (4) `fe9f080` — SMB and DNS accept loops now pin shutdown future once before the select loop instead of recreating it each iteration — prevents SIGINT from being missed between iterations; two regression tests. (5) `9daef86` — `ShutdownController::notified()` and `wait_for_callback_drain()` now register the Tokio `Notified` future before checking shared state — eliminates the window where `notify_waiters()` fires between state-check and waiter-registration. No `unwrap()`/`todo!()` in production paths. No new bugs filed.

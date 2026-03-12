@@ -25,9 +25,12 @@ impl Default for EventBus {
 
 impl EventBus {
     /// Create a new event bus with the given ring-buffer capacity.
+    ///
+    /// A `capacity` of `0` disables retained teamserver log history.
     #[must_use]
     pub fn new(capacity: usize) -> Self {
-        let (sender, _) = broadcast::channel(capacity);
+        let channel_capacity = capacity.max(1);
+        let (sender, _) = broadcast::channel(channel_capacity);
         Self {
             sender,
             recent_teamserver_logs: Arc::new(Mutex::new(VecDeque::with_capacity(capacity))),
@@ -50,6 +53,9 @@ impl EventBus {
                 Ok(history) => history,
                 Err(poisoned) => poisoned.into_inner(),
             };
+            if self.history_capacity == 0 {
+                return self.sender.send(event).unwrap_or_default();
+            }
             if history.len() == self.history_capacity {
                 history.pop_front();
             }
@@ -145,6 +151,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn new_subscription_is_not_closed() {
+        let bus = EventBus::new(8);
+        let receiver = bus.subscribe();
+
+        assert!(!receiver.is_closed());
+    }
+
+    #[tokio::test]
     async fn lagging_subscriptions_are_dropped() {
         let bus = EventBus::new(2);
         let mut receiver = bus.subscribe();
@@ -182,5 +196,13 @@ mod tests {
         assert_eq!(bus.broadcast(third.clone()), 0);
 
         assert_eq!(bus.recent_teamserver_logs(), vec![second, third]);
+    }
+
+    #[tokio::test]
+    async fn zero_capacity_history_does_not_retain_logs() {
+        let bus = EventBus::new(0);
+
+        assert_eq!(bus.broadcast(log_message("discarded")), 0);
+        assert!(bus.recent_teamserver_logs().is_empty());
     }
 }

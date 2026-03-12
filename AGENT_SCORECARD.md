@@ -9,21 +9,21 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 5 | 136 | 31 |
-| Bugs filed against | 0 | 19 | 9 |
-| Bug rate (bugs/task) | 0.00 | 0.14 | 0.29 |
-| Quality score | 100% | 86% | 71% |
+| Tasks closed | 5 | 139 | 31 |
+| Bugs filed against | 0 | 21 | 9 |
+| Bug rate (bugs/task) | 0.00 | 0.15 | 0.29 |
+| Quality score | 100% | 85% | 71% |
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 0 | 0 | 0 |
-| Missing tests | 0 | 3 | 5 |
+| Missing tests | 0 | 4 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
 | Protocol errors | 1 | 15 | 3 |
 | Security issues | 0 | 19 | 0 |
-| Architecture drift | 0 | 14 | 0 |
+| Architecture drift | 0 | 15 | 0 |
 | Memory / resource leaks | 0 | 8 | 1 |
 | Startup / lifecycle regressions | 0 | 8 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
@@ -34,6 +34,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-12 15:07 — a7cec53..d4d6017
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | — |
+| Codex | 3 | 2 | Closed red-cell-c2-pbmw (DownloadTracker memory leak), red-cell-c2-34ij (proxy_password exposure), red-cell-c2-3lpa (socket callback subcommand coverage). New bugs: red-cell-c2-3cve (dead _max_download_bytes parameter chain, P3), red-cell-c2-3oq5 (unbounded spin loop in SOCKS integration test, P3). |
+| Cursor | 0 | 0 | — |
+
+Build: passed (104 tests, 0 failures, 0 clippy warnings)
 
 ### QA Review — 2026-03-12 15:00 — 93c9947..a7cec53
 

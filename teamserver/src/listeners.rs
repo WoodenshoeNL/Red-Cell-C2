@@ -1021,7 +1021,7 @@ fn profile_listener_configs(profile: &Profile) -> Vec<ListenerConfig> {
             user_agent: config.user_agent,
             headers: config.headers,
             uris: config.uris,
-            host_header: None,
+            host_header: config.host_header,
             secure: config.secure,
             cert: config
                 .cert
@@ -2754,7 +2754,8 @@ mod tests {
         base32hex_encode, build_dns_txt_response, chunk_response_to_b32hex,
         dns_allowed_query_types, extract_external_ip, listener_config_from_operator,
         operator_requests_start, parse_dns_c2_query, parse_dns_query, parse_trusted_proxy_peer,
-        read_smb_frame, smb_local_socket_name, spawn_dns_listener_runtime,
+        profile_listener_configs, read_smb_frame, smb_local_socket_name,
+        spawn_dns_listener_runtime,
     };
     use crate::{
         AgentRegistry, Database, EventBus, Job, PersistedListenerState, SocketRelayManager,
@@ -2769,6 +2770,7 @@ mod tests {
     use interprocess::local_socket::traits::tokio::Listener as _;
     use interprocess::local_socket::traits::tokio::Stream as _;
     use red_cell_common::AgentEncryptionInfo;
+    use red_cell_common::config::Profile;
     use red_cell_common::crypto::{
         AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len, decrypt_agent_data,
         decrypt_agent_data_at_offset, encrypt_agent_data,
@@ -3962,6 +3964,51 @@ mod tests {
 
         assert_eq!(round_tripped, original);
         Ok(())
+    }
+
+    #[test]
+    fn profile_listener_configs_preserve_http_host_header() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Listeners {
+              Http {
+                Name = "edge"
+                Hosts = ["listener.local"]
+                HostBind = "127.0.0.1"
+                HostRotation = "round-robin"
+                PortBind = 8080
+                HostHeader = "front.example"
+              }
+            }
+
+            Demon {
+              TrustXForwardedFor = true
+              TrustedProxyPeers = ["127.0.0.1/32"]
+            }
+            "#,
+        )
+        .expect("profile should parse");
+
+        let listeners = profile_listener_configs(&profile);
+
+        assert_eq!(listeners.len(), 1);
+        let ListenerConfig::Http(config) = &listeners[0] else {
+            panic!("expected http listener");
+        };
+        assert_eq!(config.host_header.as_deref(), Some("front.example"));
+        assert!(config.behind_redirector);
+        assert_eq!(config.trusted_proxy_peers, vec!["127.0.0.1/32".to_owned()]);
     }
 
     #[test]

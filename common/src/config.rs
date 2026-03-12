@@ -145,6 +145,17 @@ impl Profile {
                     .push(format!("Listeners.Http \"{}\" must define HostRotation", listener.name));
             }
 
+            if listener
+                .host_header
+                .as_deref()
+                .is_some_and(|host_header| host_header.trim().is_empty())
+            {
+                errors.push(format!(
+                    "Listeners.Http \"{}\" HostHeader must not be empty when specified",
+                    listener.name
+                ));
+            }
+
             if let Some(cert) = &listener.cert {
                 if cert.cert.trim().is_empty() || cert.key.trim().is_empty() {
                     errors.push(format!(
@@ -481,6 +492,9 @@ pub struct HttpListenerConfig {
     /// Optional user-agent string.
     #[serde(rename = "UserAgent", default)]
     pub user_agent: Option<String>,
+    /// Optional override for the HTTP Host header.
+    #[serde(rename = "HostHeader", default)]
+    pub host_header: Option<String>,
     /// Optional additional request headers.
     #[serde(rename = "Headers", default)]
     pub headers: Vec<String>,
@@ -947,6 +961,7 @@ mod tests {
         assert!(!http_listener.secure);
         assert_eq!(http_listener.uris, vec!["/Collector/2.0/settings/"]);
         assert_eq!(http_listener.headers.len(), 7);
+        assert_eq!(http_listener.host_header, None);
         assert_eq!(http_listener.response.as_ref().map(|response| response.headers.len()), Some(8));
         assert_eq!(
             http_listener.response.as_ref().and_then(|response| response.body.as_deref()),
@@ -1100,6 +1115,40 @@ mod tests {
     }
 
     #[test]
+    fn parses_http_listener_host_header() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "Neo" {
+                Password = "password1234"
+              }
+            }
+
+            Listeners {
+              Http {
+                Name = "redirected listener"
+                Hosts = ["listener.local"]
+                HostBind = "127.0.0.1"
+                HostRotation = "round-robin"
+                PortBind = 8080
+                HostHeader = "front.example"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        assert_eq!(profile.listeners.http[0].host_header.as_deref(), Some("front.example"));
+    }
+
+    #[test]
     fn parses_operator_roles_and_defaults_missing_roles_to_admin() {
         let profile = Profile::parse(
             r#"
@@ -1214,6 +1263,41 @@ mod tests {
         assert!(error.errors.iter().any(|entry| entry.contains("Teamserver.Port")));
         assert!(error.errors.iter().any(|entry| entry.contains("Operators must define")));
         assert!(error.errors.iter().any(|entry| entry.contains("PortBind")));
+    }
+
+    #[test]
+    fn rejects_empty_http_listener_host_header() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Listeners {
+              Http {
+                Name = "edge"
+                Hosts = ["listener.local"]
+                HostBind = "127.0.0.1"
+                HostRotation = "round-robin"
+                PortBind = 8080
+                HostHeader = "   "
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("profile should be invalid");
+        assert!(error.errors.iter().any(|message| message.contains("HostHeader")));
     }
 
     #[test]

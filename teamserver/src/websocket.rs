@@ -792,9 +792,25 @@ async fn dispatch_operator_command<S>(
         }
         OperatorMessage::ListenerEdit(message) => {
             let name = message.info.name.clone().unwrap_or_default();
+            let parameters = serde_json::to_value(&message.info).ok();
             match listener_config_from_operator(&message.info) {
                 Ok(config) => match listeners.update(config).await {
                     Ok(summary) => {
+                        log_operator_action(
+                            &database,
+                            &webhooks,
+                            &session.username,
+                            "listener.update",
+                            "listener",
+                            Some(summary.name.clone()),
+                            audit_details(
+                                AuditResultStatus::Success,
+                                None,
+                                Some("update"),
+                                serde_json::to_value(&summary.config).ok(),
+                            ),
+                        )
+                        .await;
                         events.broadcast(listener_event_for_action(
                             &session.username,
                             &summary,
@@ -802,10 +818,46 @@ async fn dispatch_operator_command<S>(
                         ));
                     }
                     Err(error) => {
+                        log_operator_action(
+                            &database,
+                            &webhooks,
+                            &session.username,
+                            "listener.update",
+                            "listener",
+                            (!name.is_empty()).then_some(name.clone()),
+                            audit_details(
+                                AuditResultStatus::Failure,
+                                None,
+                                Some("update"),
+                                Some(parameter_object([
+                                    ("config", parameters.clone().unwrap_or(Value::Null)),
+                                    ("error", Value::String(error.to_string())),
+                                ])),
+                            ),
+                        )
+                        .await;
                         events.broadcast(listener_error_event(&session.username, &name, &error));
                     }
                 },
                 Err(error) => {
+                    log_operator_action(
+                        &database,
+                        &webhooks,
+                        &session.username,
+                        "listener.update",
+                        "listener",
+                        (!name.is_empty()).then_some(name.clone()),
+                        audit_details(
+                            AuditResultStatus::Failure,
+                            None,
+                            Some("update"),
+                            Some(parameter_object([
+                                ("config", parameters.unwrap_or(Value::Null)),
+                                ("error", Value::String(error.to_string())),
+                            ])),
+                        ),
+                    )
+                    .await;
                     events.broadcast(listener_error_event(&session.username, &name, &error));
                 }
             }
@@ -3558,6 +3610,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn websocket_listener_edit_records_audit_trail() {
+        let state = TestState::new().await;
+        let database = state.database.clone();
+        let (mut socket, server) = spawn_server(state).await;
+
+        login(&mut socket, "operator", "password1234").await;
+
+        socket
+            .send(ClientMessage::Text(
+                listener_new_message(
+                    "operator",
+                    sample_listener_info("gamma", "Online", 8443),
+                    false,
+                )
+                .into(),
+            ))
+            .await
+            .expect("listener create should send");
+
+        let _created = read_operator_message(&mut socket).await;
+        let _started = read_operator_message(&mut socket).await;
+
+        let mut updated = sample_listener_info("gamma", "Online", 9443);
+        updated.headers = Some("X-Test: updated".to_owned());
+
+        socket
+            .send(ClientMessage::Text(listener_edit_message("operator", updated).into()))
+            .await
+            .expect("listener edit should send");
+
+        let _updated = read_operator_message(&mut socket).await;
+
+        let page = query_audit_log(
+            &database,
+            &AuditQuery { action: Some("listener.update".to_owned()), ..AuditQuery::default() },
+        )
+        .await
+        .expect("audit query should succeed");
+
+        assert!(!page.items.is_empty(), "expected at least one listener.update audit entry");
+        let entry = &page.items[0];
+        assert_eq!(entry.action, "listener.update");
+        assert_eq!(entry.target_kind, "listener");
+        assert_eq!(entry.target_id.as_deref(), Some("gamma"));
+        assert_eq!(entry.result_status, AuditResultStatus::Success);
+
+        socket.close(None).await.expect("close should send");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_listener_edit_nonexistent_records_failure_audit() {
+        let state = TestState::new().await;
+        let database = state.database.clone();
+        let (mut socket, server) = spawn_server(state).await;
+
+        login(&mut socket, "operator", "password1234").await;
+
+        socket
+            .send(ClientMessage::Text(
+                listener_edit_message("operator", sample_listener_info("ghost", "Online", 9443))
+                    .into(),
+            ))
+            .await
+            .expect("listener edit should send");
+
+        let _error_msg = read_operator_message(&mut socket).await;
+
+        let page = query_audit_log(
+            &database,
+            &AuditQuery { action: Some("listener.update".to_owned()), ..AuditQuery::default() },
+        )
+        .await
+        .expect("audit query should succeed");
+
+        assert!(!page.items.is_empty(), "expected at least one listener.update audit entry");
+        let entry = &page.items[0];
+        assert_eq!(entry.action, "listener.update");
+        assert_eq!(entry.target_kind, "listener");
+        assert_eq!(entry.target_id.as_deref(), Some("ghost"));
+        assert_eq!(entry.result_status, AuditResultStatus::Failure);
+
+        socket.close(None).await.expect("close should send");
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn websocket_agent_note_updates_registry() {
         let state = TestState::new().await;
         let registry = state.registry.clone();
@@ -3844,6 +3983,19 @@ mod tests {
             info: NameInfo { name: name.to_owned() },
         }))
         .expect("listener remove should serialize")
+    }
+
+    fn listener_edit_message(user: &str, info: ListenerInfo) -> String {
+        serde_json::to_string(&OperatorMessage::ListenerEdit(Message {
+            head: MessageHead {
+                event: EventCode::Listener,
+                user: user.to_owned(),
+                timestamp: String::new(),
+                one_time: String::new(),
+            },
+            info,
+        }))
+        .expect("listener edit should serialize")
     }
 
     fn chat_message(user: &str, text: &str) -> String {

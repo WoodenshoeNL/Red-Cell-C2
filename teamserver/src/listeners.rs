@@ -45,11 +45,11 @@ use tracing::{info, instrument, warn};
 use utoipa::ToSchema;
 
 use crate::{
-    AgentRegistry, CommandDispatchError, CommandDispatcher, Database, DemonPacketParser,
-    ListenerRepository, ListenerStatus, ParsedDemonPacket, PersistedListener,
+    AgentRegistry, AuditResultStatus, CommandDispatchError, CommandDispatcher, Database,
+    DemonPacketParser, ListenerRepository, ListenerStatus, ParsedDemonPacket, PersistedListener,
     PersistedListenerState, PluginRuntime, ShutdownController, SocketRelayManager, TeamserverError,
-    agent_events::agent_new_event, build_init_ack, build_reconnect_ack, events::EventBus,
-    json_error_response,
+    agent_events::agent_new_event, audit_details, build_init_ack, build_reconnect_ack,
+    events::EventBus, json_error_response, parameter_object, record_operator_action,
 };
 
 const DEFAULT_MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
@@ -782,6 +782,7 @@ struct HttpListenerState {
     config: HttpListenerConfig,
     trusted_proxy_peers: Vec<TrustedProxyPeer>,
     registry: AgentRegistry,
+    database: Database,
     parser: DemonPacketParser,
     events: EventBus,
     dispatcher: CommandDispatcher,
@@ -816,6 +817,7 @@ struct TrustedProxyNetwork {
 struct SmbListenerState {
     config: SmbListenerConfig,
     registry: AgentRegistry,
+    database: Database,
     parser: DemonPacketParser,
     events: EventBus,
     dispatcher: CommandDispatcher,
@@ -827,6 +829,7 @@ struct SmbListenerState {
 struct ProcessedDemonResponse {
     agent_id: u32,
     payload: Vec<u8>,
+    http_disposition: DemonHttpDisposition,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -834,6 +837,12 @@ enum DemonTransportKind {
     Init,
     Reconnect,
     Callback,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DemonHttpDisposition {
+    Ok,
+    Fake404,
 }
 
 impl HttpListenerState {
@@ -877,6 +886,7 @@ impl HttpListenerState {
             config: config.clone(),
             trusted_proxy_peers,
             registry: registry.clone(),
+            database: database.clone(),
             parser: DemonPacketParser::new(registry.clone()),
             dispatcher: CommandDispatcher::with_builtin_handlers_and_max_download_bytes(
                 registry.clone(),
@@ -938,6 +948,7 @@ impl SmbListenerState {
         Self {
             config: config.clone(),
             registry: registry.clone(),
+            database: database.clone(),
             parser: DemonPacketParser::new(registry.clone()),
             events: events.clone(),
             demon_init_rate_limiter,
@@ -1275,13 +1286,14 @@ async fn build_callback_response(
 async fn process_demon_transport(
     listener_name: &str,
     registry: &AgentRegistry,
+    database: &Database,
     parser: &DemonPacketParser,
     events: &EventBus,
     dispatcher: &CommandDispatcher,
     body: &[u8],
     external_ip: String,
 ) -> Result<ProcessedDemonResponse, ListenerManagerError> {
-    match parser.parse_for_listener(body, external_ip, listener_name).await {
+    match parser.parse_for_listener(body, external_ip.as_str(), listener_name).await {
         Ok(ParsedDemonPacket::Init(init)) => {
             let response =
                 build_init_ack(registry, init.agent.agent_id).await.map_err(|error| {
@@ -1297,29 +1309,86 @@ async fn process_demon_transport(
                 &init.agent,
                 &pivots,
             ));
-            Ok(ProcessedDemonResponse { agent_id: init.agent.agent_id, payload: response })
+            Ok(ProcessedDemonResponse {
+                agent_id: init.agent.agent_id,
+                payload: response,
+                http_disposition: DemonHttpDisposition::Ok,
+            })
         }
         Ok(ParsedDemonPacket::Reconnect { header, .. }) => {
-            let payload = if registry.get(header.agent_id).await.is_some() {
-                build_reconnect_ack(registry, header.agent_id).await.map_err(|error| {
-                    ListenerManagerError::InvalidConfig {
+            let (payload, http_disposition) = if registry.get(header.agent_id).await.is_some() {
+                build_reconnect_ack(registry, header.agent_id)
+                    .await
+                    .map_err(|error| ListenerManagerError::InvalidConfig {
                         message: format!("failed to build reconnect ack: {error}"),
-                    }
-                })?
+                    })
+                    .map(|payload| (payload, DemonHttpDisposition::Ok))?
             } else {
-                Vec::new()
+                warn!(
+                    listener = listener_name,
+                    agent_id = format_args!("{:08X}", header.agent_id),
+                    external_ip,
+                    "unknown agent sent reconnect probe"
+                );
+                record_unknown_reconnect_probe(
+                    database,
+                    listener_name,
+                    header.agent_id,
+                    &external_ip,
+                )
+                .await;
+                (Vec::new(), DemonHttpDisposition::Fake404)
             };
 
-            Ok(ProcessedDemonResponse { agent_id: header.agent_id, payload })
+            Ok(ProcessedDemonResponse { agent_id: header.agent_id, payload, http_disposition })
         }
         Ok(ParsedDemonPacket::Callback { header, packages }) => {
             let payload = build_callback_response(dispatcher, header.agent_id, &packages).await?;
 
-            Ok(ProcessedDemonResponse { agent_id: header.agent_id, payload })
+            Ok(ProcessedDemonResponse {
+                agent_id: header.agent_id,
+                payload,
+                http_disposition: DemonHttpDisposition::Ok,
+            })
         }
         Err(error) => Err(ListenerManagerError::InvalidConfig {
             message: format!("failed to parse demon callback: {error}"),
         }),
+    }
+}
+
+async fn record_unknown_reconnect_probe(
+    database: &Database,
+    listener_name: &str,
+    agent_id: u32,
+    external_ip: &str,
+) {
+    let details = audit_details(
+        AuditResultStatus::Failure,
+        Some(agent_id),
+        Some("reconnect_probe"),
+        Some(parameter_object([
+            ("listener", serde_json::Value::String(listener_name.to_owned())),
+            ("external_ip", serde_json::Value::String(external_ip.to_owned())),
+        ])),
+    );
+
+    if let Err(error) = record_operator_action(
+        database,
+        "teamserver",
+        "agent.reconnect_probe",
+        "agent",
+        Some(format!("{agent_id:08X}")),
+        details,
+    )
+    .await
+    {
+        warn!(
+            listener = listener_name,
+            agent_id = format_args!("{agent_id:08X}"),
+            %error,
+            "failed to persist unknown reconnect probe audit entry"
+        );
     }
 }
 
@@ -1475,6 +1544,7 @@ async fn handle_smb_connection(state: Arc<SmbListenerState>, mut stream: LocalSo
         match process_demon_transport(
             &state.config.name,
             &state.registry,
+            &state.database,
             &state.parser,
             &state.events,
             &state.dispatcher,
@@ -1779,6 +1849,7 @@ enum DnsUploadAssembly {
 struct DnsListenerState {
     config: DnsListenerConfig,
     registry: AgentRegistry,
+    database: Database,
     parser: DemonPacketParser,
     events: EventBus,
     dispatcher: CommandDispatcher,
@@ -1806,6 +1877,7 @@ impl DnsListenerState {
         Self {
             config: config.clone(),
             registry: registry.clone(),
+            database: database.clone(),
             parser: DemonPacketParser::new(registry.clone()),
             events: events.clone(),
             dispatcher: CommandDispatcher::with_builtin_handlers_and_max_download_bytes(
@@ -1905,6 +1977,7 @@ impl DnsListenerState {
         match process_demon_transport(
             &self.config.name,
             &self.registry,
+            &self.database,
             &self.parser,
             &self.events,
             &self.dispatcher,
@@ -2490,6 +2563,7 @@ async fn http_listener_handler(
     match process_demon_transport(
         &state.config.name,
         &state.registry,
+        &state.database,
         &state.parser,
         &state.events,
         &state.dispatcher,
@@ -2498,6 +2572,9 @@ async fn http_listener_handler(
     )
     .await
     {
+        Ok(response) if response.http_disposition == DemonHttpDisposition::Fake404 => {
+            state.fake_404_response()
+        }
         Ok(response) if response.payload.is_empty() => state.callback_empty_response(),
         Ok(response) => state.callback_bytes_response(&response.payload),
         Err(error) => {
@@ -2951,8 +3028,8 @@ mod tests {
         spawn_dns_listener_runtime, spawn_managed_listener_task,
     };
     use crate::{
-        AgentRegistry, Database, EventBus, Job, PersistedListenerState, ShutdownController,
-        SocketRelayManager,
+        AgentRegistry, AuditQuery, AuditResultStatus, Database, EventBus, Job,
+        PersistedListenerState, ShutdownController, SocketRelayManager, query_audit_log,
     };
     use axum::body::Body;
     use axum::http::Request;
@@ -3520,12 +3597,12 @@ mod tests {
             .body(valid_demon_request_body(agent_id))
             .send()
             .await?;
-        assert_eq!(valid.status(), StatusCode::OK);
+        assert_eq!(valid.status(), StatusCode::NOT_FOUND);
         assert_eq!(
             valid.headers().get("server").and_then(|value| value.to_str().ok()),
             Some("ExampleFront")
         );
-        assert!(valid.bytes().await?.is_empty());
+        assert_eq!(valid.text().await?, "decoy");
 
         manager.stop("edge-http").await?;
         Ok(())
@@ -3942,6 +4019,69 @@ mod tests {
         assert_eq!(registry.ctr_offset(agent_id).await?, 1);
 
         manager.stop("edge-http-reconnect").await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn http_listener_unknown_reconnect_probe_returns_fake_404_and_audit_entry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::new(database.clone(), registry, events, sockets, None);
+        let port = available_port()?;
+        let client = Client::new();
+        let agent_id = 0xDEAD_BEEF;
+
+        manager.create(http_listener("edge-http-unknown-reconnect", port)).await?;
+        manager.start("edge-http-unknown-reconnect").await?;
+        wait_for_listener(port, false).await?;
+
+        let reconnect_response = client
+            .post(format!("http://127.0.0.1:{port}/"))
+            .body(valid_demon_request_body(agent_id))
+            .send()
+            .await?;
+
+        assert_eq!(reconnect_response.status(), StatusCode::NOT_FOUND);
+
+        let audit_page = query_audit_log(
+            &database,
+            &AuditQuery {
+                action: Some("agent.reconnect_probe".to_owned()),
+                ..AuditQuery::default()
+            },
+        )
+        .await?;
+
+        assert_eq!(audit_page.total, 1);
+        let entry = &audit_page.items[0];
+        assert_eq!(entry.actor, "teamserver");
+        assert_eq!(entry.action, "agent.reconnect_probe");
+        assert_eq!(entry.target_kind, "agent");
+        assert_eq!(entry.target_id.as_deref(), Some("DEADBEEF"));
+        assert_eq!(entry.agent_id.as_deref(), Some("DEADBEEF"));
+        assert_eq!(entry.command.as_deref(), Some("reconnect_probe"));
+        assert_eq!(entry.result_status, AuditResultStatus::Failure);
+        assert_eq!(
+            entry
+                .parameters
+                .as_ref()
+                .and_then(|value| value.get("listener"))
+                .and_then(serde_json::Value::as_str),
+            Some("edge-http-unknown-reconnect")
+        );
+        assert_eq!(
+            entry
+                .parameters
+                .as_ref()
+                .and_then(|value| value.get("external_ip"))
+                .and_then(serde_json::Value::as_str),
+            Some("127.0.0.1")
+        );
+
+        manager.stop("edge-http-unknown-reconnect").await?;
         Ok(())
     }
 

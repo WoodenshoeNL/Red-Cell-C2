@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 5 | 144 | 31 |
+| Tasks closed | 5 | 145 | 31 |
 | Bugs filed against | 0 | 21 | 9 |
-| Bug rate (bugs/task) | 0.00 | 0.15 | 0.29 |
-| Quality score | 100% | 85% | 71% |
+| Bug rate (bugs/task) | 0.00 | 0.14 | 0.29 |
+| Quality score | 100% | 86% | 71% |
 
 ## Violation Breakdown
 
@@ -34,6 +34,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-12 16:45 — fd0ab71..942cc1f
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | One prior QA checkpoint commit in range only. |
+| Codex | 1 | 0 | Closed red-cell-c2-1qr5 with RBAC session-token extractor edge-case tests in `teamserver/src/rbac.rs`; one additional claim commit (`red-cell-c2-3b1j`) correctly set the issue to `in_progress` in JSONL. No code defects found in the reviewed diff. |
+| Cursor | 0 | 0 | — |
+
+Build: skipped (`cargo check --workspace` passed; `cargo clippy --workspace -- -D warnings` and `cargo test --workspace` were blocked by concurrent local cargo locks during this review)
 
 ### QA Review — 2026-03-12 15:38 — 863aba6..2ddfd85
 

@@ -3986,7 +3986,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_listener_checkin_updates_last_call_in_and_broadcasts_agent_update()
+    async fn http_listener_checkin_refreshes_metadata_and_accepts_rotated_transport()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());
@@ -3998,14 +3998,11 @@ mod tests {
         let port = available_port()?;
         let key = [0x71; AGENT_KEY_LENGTH];
         let iv = [0x37; AGENT_IV_LENGTH];
+        let refreshed_key = [0x12; AGENT_KEY_LENGTH];
+        let refreshed_iv = [0x34; AGENT_IV_LENGTH];
         let agent_id = 0xCAFE_BABE;
 
         registry.insert(sample_agent_info(agent_id, key, iv)).await?;
-        let before = registry
-            .get(agent_id)
-            .await
-            .ok_or_else(|| "agent should exist before checkin".to_owned())?
-            .last_call_in;
 
         manager.create(http_listener("edge-http-checkin", port)).await?;
         manager.start("edge-http-checkin").await?;
@@ -4018,7 +4015,11 @@ mod tests {
                 key,
                 iv,
                 (u32::from(DemonCommand::CommandGetJob), 5, Vec::new()),
-                &[(u32::from(DemonCommand::CommandCheckin), 6, vec![0xaa, 0xbb])],
+                &[(
+                    u32::from(DemonCommand::CommandCheckin),
+                    6,
+                    sample_checkin_metadata_payload(agent_id, refreshed_key, refreshed_iv),
+                )],
             ))
             .send()
             .await?;
@@ -4028,15 +4029,22 @@ mod tests {
 
         let updated =
             registry.get(agent_id).await.ok_or_else(|| "agent should still exist".to_owned())?;
-        assert_ne!(updated.last_call_in, before);
+        assert_eq!(updated.hostname, "wkstn-02");
+        assert_eq!(updated.process_name, "cmd.exe");
+        assert_eq!(updated.sleep_delay, 45);
+        assert_eq!(updated.sleep_jitter, 5);
+        assert_eq!(updated.encryption.aes_key, BASE64_STANDARD.encode(refreshed_key));
+        assert_eq!(updated.encryption.aes_iv, BASE64_STANDARD.encode(refreshed_iv));
+        assert_eq!(registry.ctr_offset(agent_id).await?, 0);
         assert_eq!(
             database
                 .agents()
                 .get(agent_id)
                 .await?
                 .ok_or_else(|| "agent should be persisted".to_owned())?
-                .last_call_in,
-            updated.last_call_in
+                .encryption
+                .aes_key,
+            updated.encryption.aes_key
         );
 
         let event = event_receiver
@@ -4048,6 +4056,48 @@ mod tests {
         };
         assert_eq!(message.info.agent_id, format!("{agent_id:08X}"));
         assert_eq!(message.info.marked, "Alive");
+
+        registry
+            .enqueue_job(
+                agent_id,
+                Job {
+                    command: u32::from(DemonCommand::CommandSleep),
+                    request_id: 41,
+                    payload: vec![1, 2, 3, 4],
+                    command_line: "sleep 45 5".to_owned(),
+                    task_id: "task-41".to_owned(),
+                    created_at: "2026-03-12T18:00:00Z".to_owned(),
+                    operator: "operator".to_owned(),
+                },
+            )
+            .await?;
+
+        let follow_up = Client::new()
+            .post(format!("http://127.0.0.1:{port}/"))
+            .body(valid_demon_callback_body(
+                agent_id,
+                refreshed_key,
+                refreshed_iv,
+                u32::from(DemonCommand::CommandGetJob),
+                7,
+                &[],
+            ))
+            .send()
+            .await?;
+
+        assert_eq!(follow_up.status(), StatusCode::OK);
+        let bytes = follow_up.bytes().await?;
+        let message = DemonMessage::from_bytes(bytes.as_ref())?;
+        assert_eq!(message.packages.len(), 1);
+        assert_eq!(message.packages[0].command_id, u32::from(DemonCommand::CommandSleep));
+        assert_eq!(message.packages[0].request_id, 41);
+        let decrypted = decrypt_agent_data_at_offset(
+            &refreshed_key,
+            &refreshed_iv,
+            ctr_blocks_for_len(4),
+            &message.packages[0].payload,
+        )?;
+        assert_eq!(decrypted, vec![1, 2, 3, 4]);
 
         manager.stop("edge-http-checkin").await?;
         Ok(())
@@ -4768,6 +4818,58 @@ mod tests {
     fn add_length_prefixed_utf16(buf: &mut Vec<u8>, value: &str) {
         let encoded: Vec<u8> = value.encode_utf16().flat_map(u16::to_le_bytes).collect();
         add_length_prefixed_bytes(buf, &encoded);
+    }
+
+    fn add_checkin_u32(buf: &mut Vec<u8>, value: u32) {
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn add_checkin_u64(buf: &mut Vec<u8>, value: u64) {
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn add_checkin_bytes(buf: &mut Vec<u8>, bytes: &[u8]) {
+        add_checkin_u32(buf, u32::try_from(bytes.len()).unwrap_or_default());
+        buf.extend_from_slice(bytes);
+    }
+
+    fn add_checkin_utf16(buf: &mut Vec<u8>, value: &str) {
+        let mut encoded: Vec<u8> = value.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        encoded.extend_from_slice(&[0, 0]);
+        add_checkin_bytes(buf, &encoded);
+    }
+
+    fn sample_checkin_metadata_payload(
+        agent_id: u32,
+        key: [u8; AGENT_KEY_LENGTH],
+        iv: [u8; AGENT_IV_LENGTH],
+    ) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&key);
+        payload.extend_from_slice(&iv);
+        add_checkin_u32(&mut payload, agent_id);
+        add_checkin_bytes(&mut payload, b"wkstn-02");
+        add_checkin_bytes(&mut payload, b"svc-op");
+        add_checkin_bytes(&mut payload, b"research");
+        add_checkin_bytes(&mut payload, b"10.10.10.50");
+        add_checkin_utf16(&mut payload, "C:\\Windows\\System32\\cmd.exe");
+        add_checkin_u32(&mut payload, 4040);
+        add_checkin_u32(&mut payload, 5050);
+        add_checkin_u32(&mut payload, 3030);
+        add_checkin_u32(&mut payload, 1);
+        add_checkin_u32(&mut payload, 0);
+        add_checkin_u64(&mut payload, 0x401000);
+        add_checkin_u32(&mut payload, 10);
+        add_checkin_u32(&mut payload, 0);
+        add_checkin_u32(&mut payload, 1);
+        add_checkin_u32(&mut payload, 0);
+        add_checkin_u32(&mut payload, 22_621);
+        add_checkin_u32(&mut payload, 9);
+        add_checkin_u32(&mut payload, 45);
+        add_checkin_u32(&mut payload, 5);
+        add_checkin_u64(&mut payload, 1_725_000_000);
+        add_checkin_u32(&mut payload, 0x00FF_00FF);
+        payload
     }
 
     fn dns_upload_qname(agent_id: u32, seq: u16, total: u16, chunk: &[u8], domain: &str) -> String {

@@ -220,14 +220,17 @@ impl CommandDispatcher {
         let checkin_registry = registry.clone();
         let checkin_events = events.clone();
         let checkin_plugins = plugins.clone();
-        self.register_handler(u32::from(DemonCommand::CommandCheckin), move |agent_id, _, _| {
-            let registry = checkin_registry.clone();
-            let events = checkin_events.clone();
-            let plugins = checkin_plugins.clone();
-            Box::pin(
-                async move { handle_checkin(&registry, &events, plugins.as_ref(), agent_id).await },
-            )
-        });
+        self.register_handler(
+            u32::from(DemonCommand::CommandCheckin),
+            move |agent_id, _, payload| {
+                let registry = checkin_registry.clone();
+                let events = checkin_events.clone();
+                let plugins = checkin_plugins.clone();
+                Box::pin(async move {
+                    handle_checkin(&registry, &events, plugins.as_ref(), agent_id, &payload).await
+                })
+            },
+        );
 
         let proc_list_events = events.clone();
         self.register_handler(
@@ -746,9 +749,19 @@ async fn handle_checkin(
     events: &EventBus,
     plugins: Option<&PluginRuntime>,
     agent_id: u32,
+    payload: &[u8],
 ) -> Result<Option<Vec<u8>>, CommandDispatchError> {
     let timestamp = OffsetDateTime::now_utc().format(&Rfc3339)?;
-    let agent = registry.set_last_call_in(agent_id, timestamp).await?;
+    let existing =
+        registry.get(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
+    let agent =
+        if let Some(updated) = parse_checkin_metadata(existing, agent_id, payload, &timestamp)? {
+            registry.update_agent(updated).await?;
+            registry.set_ctr_offset(agent_id, 0).await?;
+            registry.get(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?
+        } else {
+            registry.set_last_call_in(agent_id, timestamp).await?
+        };
     events.broadcast(agent_mark_event(&agent));
     if let Some(plugins) = plugins
         && let Err(error) = plugins.emit_agent_checkin(agent_id).await
@@ -756,6 +769,161 @@ async fn handle_checkin(
         warn!(agent_id = format_args!("{agent_id:08X}"), %error, "failed to emit python agent_checkin event");
     }
     Ok(None)
+}
+
+fn parse_checkin_metadata(
+    existing: red_cell_common::AgentInfo,
+    agent_id: u32,
+    payload: &[u8],
+    timestamp: &str,
+) -> Result<Option<red_cell_common::AgentInfo>, CommandDispatchError> {
+    const CHECKIN_METADATA_PREFIX_LEN: usize = 32 + 16;
+
+    if payload.len() < CHECKIN_METADATA_PREFIX_LEN {
+        return Ok(None);
+    }
+
+    let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::CommandCheckin));
+    let aes_key = parser.read_fixed_bytes(32, "checkin AES key")?;
+    let aes_iv = parser.read_fixed_bytes(16, "checkin AES IV")?;
+    let parsed_agent_id = parser.read_u32("checkin agent id")?;
+
+    if parsed_agent_id != agent_id {
+        return Err(CommandDispatchError::InvalidCallbackPayload {
+            command_id: u32::from(DemonCommand::CommandCheckin),
+            message: format!(
+                "checkin agent id mismatch: expected 0x{agent_id:08X}, got 0x{parsed_agent_id:08X}"
+            ),
+        });
+    }
+
+    let hostname = parser.read_string("checkin hostname")?;
+    let username = parser.read_string("checkin username")?;
+    let domain_name = parser.read_string("checkin domain name")?;
+    let internal_ip = parser.read_string("checkin internal ip")?;
+    let process_path = parser.read_utf16("checkin process path")?;
+    let process_pid = parser.read_u32("checkin process pid")?;
+    let process_tid = parser.read_u32("checkin process tid")?;
+    let process_ppid = parser.read_u32("checkin process ppid")?;
+    let process_arch = parser.read_u32("checkin process arch")?;
+    let elevated = parser.read_bool("checkin elevated")?;
+    let base_address = parser.read_u64("checkin base address")?;
+    let os_major = parser.read_u32("checkin os major")?;
+    let os_minor = parser.read_u32("checkin os minor")?;
+    let os_product_type = parser.read_u32("checkin os product type")?;
+    let os_service_pack = parser.read_u32("checkin os service pack")?;
+    let os_build = parser.read_u32("checkin os build")?;
+    let os_arch = parser.read_u32("checkin os arch")?;
+    let sleep_delay = parser.read_u32("checkin sleep delay")?;
+    let sleep_jitter = parser.read_u32("checkin sleep jitter")?;
+    let kill_date = parser.read_u64("checkin kill date")?;
+    let working_hours = parser.read_u32("checkin working hours")?;
+
+    let mut updated = existing;
+    updated.active = true;
+    updated.reason.clear();
+    updated.encryption.aes_key = BASE64_STANDARD.encode(aes_key);
+    updated.encryption.aes_iv = BASE64_STANDARD.encode(aes_iv);
+    updated.hostname = hostname;
+    updated.username = username;
+    updated.domain_name = domain_name;
+    updated.internal_ip = internal_ip;
+    updated.process_name = basename(&process_path);
+    updated.base_address = base_address;
+    updated.process_pid = process_pid;
+    updated.process_tid = process_tid;
+    updated.process_ppid = process_ppid;
+    updated.process_arch = checkin_process_arch_label(process_arch).to_owned();
+    updated.elevated = elevated;
+    updated.os_version = checkin_windows_version_label(
+        os_major,
+        os_minor,
+        os_product_type,
+        os_service_pack,
+        os_build,
+    );
+    updated.os_arch = checkin_windows_arch_label(os_arch).to_owned();
+    updated.sleep_delay = sleep_delay;
+    updated.sleep_jitter = sleep_jitter;
+    updated.kill_date = (kill_date != 0).then_some(i64::try_from(kill_date).unwrap_or(i64::MAX));
+    updated.working_hours =
+        (working_hours != 0).then_some(i32::try_from(working_hours).unwrap_or(i32::MAX));
+    updated.last_call_in = timestamp.to_owned();
+
+    Ok(Some(updated))
+}
+
+fn basename(path: &str) -> String {
+    path.rsplit(['\\', '/']).next().unwrap_or(path).to_owned()
+}
+
+fn checkin_process_arch_label(value: u32) -> &'static str {
+    match value {
+        2 => "x64",
+        1 => "x86",
+        3 => "IA64",
+        _ => "Unknown",
+    }
+}
+
+fn checkin_windows_arch_label(value: u32) -> &'static str {
+    match value {
+        0 => "x86",
+        9 => "x64/AMD64",
+        5 => "ARM",
+        12 => "ARM64",
+        6 => "Itanium-based",
+        _ => "Unknown",
+    }
+}
+
+fn checkin_windows_version_label(
+    major: u32,
+    minor: u32,
+    product_type: u32,
+    service_pack: u32,
+    build: u32,
+) -> String {
+    const VER_NT_WORKSTATION: u32 = 1;
+
+    let mut version =
+        if major == 10 && minor == 0 && product_type != VER_NT_WORKSTATION && build == 20_348 {
+            "Windows 2022 Server 22H2".to_owned()
+        } else if major == 10 && minor == 0 && product_type != VER_NT_WORKSTATION && build == 17_763
+        {
+            "Windows 2019 Server".to_owned()
+        } else if major == 10
+            && minor == 0
+            && product_type == VER_NT_WORKSTATION
+            && (22_000..=22_621).contains(&build)
+        {
+            "Windows 11".to_owned()
+        } else if major == 10 && minor == 0 && product_type != VER_NT_WORKSTATION {
+            "Windows 2016 Server".to_owned()
+        } else if major == 10 && minor == 0 && product_type == VER_NT_WORKSTATION {
+            "Windows 10".to_owned()
+        } else if major == 6 && minor == 3 && product_type != VER_NT_WORKSTATION {
+            "Windows Server 2012 R2".to_owned()
+        } else if major == 6 && minor == 3 && product_type == VER_NT_WORKSTATION {
+            "Windows 8.1".to_owned()
+        } else if major == 6 && minor == 2 && product_type != VER_NT_WORKSTATION {
+            "Windows Server 2012".to_owned()
+        } else if major == 6 && minor == 2 && product_type == VER_NT_WORKSTATION {
+            "Windows 8".to_owned()
+        } else if major == 6 && minor == 1 && product_type != VER_NT_WORKSTATION {
+            "Windows Server 2008 R2".to_owned()
+        } else if major == 6 && minor == 1 && product_type == VER_NT_WORKSTATION {
+            "Windows 7".to_owned()
+        } else {
+            "Unknown".to_owned()
+        };
+
+    if service_pack != 0 {
+        version.push_str(" Service Pack ");
+        version.push_str(&service_pack.to_string());
+    }
+
+    version
 }
 
 async fn handle_pivot_callback(
@@ -4764,6 +4932,24 @@ impl<'a> CallbackParser<'a> {
         Ok(value)
     }
 
+    fn read_fixed_bytes(
+        &mut self,
+        len: usize,
+        context: &'static str,
+    ) -> Result<Vec<u8>, CommandDispatchError> {
+        let remaining = self.bytes.len().saturating_sub(self.offset);
+        if remaining < len {
+            return Err(CommandDispatchError::InvalidCallbackPayload {
+                command_id: self.command_id,
+                message: format!("{context}: expected {len} bytes, got {remaining}"),
+            });
+        }
+
+        let value = self.bytes[self.offset..self.offset + len].to_vec();
+        self.offset += len;
+        Ok(value)
+    }
+
     fn read_utf16(&mut self, context: &'static str) -> Result<String, CommandDispatchError> {
         let raw = self.read_bytes(context)?;
         if raw.len() % 2 != 0 {
@@ -4892,6 +5078,49 @@ mod tests {
         let mut encoded: Vec<u8> = value.encode_utf16().flat_map(u16::to_be_bytes).collect();
         encoded.extend_from_slice(&[0, 0]);
         add_length_prefixed_bytes(buf, &encoded);
+    }
+
+    fn add_checkin_string(buf: &mut Vec<u8>, value: &str) {
+        add_bytes(buf, value.as_bytes());
+    }
+
+    fn add_checkin_utf16(buf: &mut Vec<u8>, value: &str) {
+        let mut encoded: Vec<u8> = value.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        encoded.extend_from_slice(&[0, 0]);
+        add_bytes(buf, &encoded);
+    }
+
+    fn sample_checkin_metadata_payload(
+        agent_id: u32,
+        key: [u8; AGENT_KEY_LENGTH],
+        iv: [u8; AGENT_IV_LENGTH],
+    ) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&key);
+        payload.extend_from_slice(&iv);
+        add_u32(&mut payload, agent_id);
+        add_checkin_string(&mut payload, "wkstn-02");
+        add_checkin_string(&mut payload, "svc-op");
+        add_checkin_string(&mut payload, "research");
+        add_checkin_string(&mut payload, "10.10.10.50");
+        add_checkin_utf16(&mut payload, "C:\\Windows\\System32\\cmd.exe");
+        add_u32(&mut payload, 4040);
+        add_u32(&mut payload, 5050);
+        add_u32(&mut payload, 3030);
+        add_u32(&mut payload, 1);
+        add_u32(&mut payload, 0);
+        add_u64(&mut payload, 0x401000);
+        add_u32(&mut payload, 10);
+        add_u32(&mut payload, 0);
+        add_u32(&mut payload, 1);
+        add_u32(&mut payload, 0);
+        add_u32(&mut payload, 22_621);
+        add_u32(&mut payload, 9);
+        add_u32(&mut payload, 45);
+        add_u32(&mut payload, 5);
+        add_u64(&mut payload, 1_725_000_000);
+        add_u32(&mut payload, 0x00FF_00FF);
+        payload
     }
 
     fn valid_demon_init_body(
@@ -5210,6 +5439,81 @@ mod tests {
             .await
             .ok_or_else(|| "agent should exist after checkin".to_owned())?;
         assert_ne!(updated.last_call_in, before);
+
+        let event = receiver
+            .recv()
+            .await
+            .ok_or_else(|| "agent update event should be broadcast".to_owned())?;
+        let OperatorMessage::AgentUpdate(message) = event else {
+            panic!("unexpected operator event");
+        };
+        assert_eq!(message.info.agent_id, format!("{agent_id:08X}"));
+        assert_eq!(message.info.marked, "Alive");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_checkin_handler_refreshes_metadata_and_transport_state()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database.clone(),
+            sockets,
+            None,
+        );
+        let key = [0x77; AGENT_KEY_LENGTH];
+        let iv = [0x44; AGENT_IV_LENGTH];
+        let refreshed_key = [0x12; AGENT_KEY_LENGTH];
+        let refreshed_iv = [0x34; AGENT_IV_LENGTH];
+        let agent_id = 0x1020_3040;
+
+        registry.insert(sample_agent_info(agent_id, key, iv)).await?;
+        registry.set_ctr_offset(agent_id, 7).await?;
+        let payload = sample_checkin_metadata_payload(agent_id, refreshed_key, refreshed_iv);
+
+        let response = dispatcher
+            .dispatch(agent_id, u32::from(DemonCommand::CommandCheckin), 6, &payload)
+            .await?;
+
+        assert_eq!(response, None);
+
+        let updated = registry
+            .get(agent_id)
+            .await
+            .ok_or_else(|| "agent should exist after metadata-bearing checkin".to_owned())?;
+        assert_eq!(updated.hostname, "wkstn-02");
+        assert_eq!(updated.username, "svc-op");
+        assert_eq!(updated.domain_name, "research");
+        assert_eq!(updated.internal_ip, "10.10.10.50");
+        assert_eq!(updated.process_name, "cmd.exe");
+        assert_eq!(updated.process_pid, 4040);
+        assert_eq!(updated.process_tid, 5050);
+        assert_eq!(updated.process_ppid, 3030);
+        assert_eq!(updated.process_arch, "x86");
+        assert!(!updated.elevated);
+        assert_eq!(updated.base_address, 0x401000);
+        assert_eq!(updated.os_version, "Windows 11");
+        assert_eq!(updated.os_arch, "x64/AMD64");
+        assert_eq!(updated.sleep_delay, 45);
+        assert_eq!(updated.sleep_jitter, 5);
+        assert_eq!(updated.kill_date, Some(1_725_000_000));
+        assert_eq!(updated.working_hours, Some(0x00FF_00FF));
+        assert_eq!(updated.encryption.aes_key, BASE64_STANDARD.encode(refreshed_key));
+        assert_eq!(updated.encryption.aes_iv, BASE64_STANDARD.encode(refreshed_iv));
+        assert_eq!(registry.ctr_offset(agent_id).await?, 0);
+
+        let persisted = database
+            .agents()
+            .get(agent_id)
+            .await?
+            .ok_or_else(|| "agent should be persisted after checkin".to_owned())?;
+        assert_eq!(persisted, updated);
 
         let event = receiver
             .recv()

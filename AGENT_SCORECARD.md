@@ -21,9 +21,9 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 0 | 0 | 0 |
 | Missing tests | 0 | 2 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
-| Protocol errors | 1 | 8 | 3 |
-| Security issues | 0 | 14 | 0 |
-| Architecture drift | 0 | 9 | 0 |
+| Protocol errors | 1 | 10 | 3 |
+| Security issues | 0 | 15 | 0 |
+| Architecture drift | 0 | 10 | 0 |
 | Memory / resource leaks | 0 | 6 | 1 |
 | Startup / lifecycle regressions | 0 | 4 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
@@ -34,6 +34,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-12 04:06
+
+| Agent | Findings | Categories | Notes |
+|-------|---------:|------------|-------|
+| Claude | 0 | — | No new agent-attributed findings this run |
+| Codex | 3 | Security issues, Protocol errors, Architecture drift | Filed red-cell-c2-3rqy, red-cell-c2-1auz, and red-cell-c2-pu5a |
+| Cursor | 0 | — | No new agent-attributed findings this run |
+
+Overall codebase health: drifting
+Biggest blindspot: protocol-compatibility checks still focus on Red Cell's current Rust behavior, so config-path and HTTP reply-path mismatches against Havoc can stay green until an operator uses those features against a real Demon workflow.
 
 ### QA Review — 2026-03-12 04:35 — 7a16e6b..50e48a4
 

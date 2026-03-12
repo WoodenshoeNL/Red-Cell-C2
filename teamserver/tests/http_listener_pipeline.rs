@@ -83,6 +83,35 @@ async fn http_listener_pipeline_registers_agent_and_broadcasts_checkin()
     Ok(())
 }
 
+#[tokio::test]
+async fn http_listener_pipeline_rejects_plaintext_zero_key_init()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let port = available_port()?;
+    let agent_id = 0x1357_9BDF;
+
+    manager.create(http_listener("edge-http-zero-key", port)).await?;
+    manager.start("edge-http-zero-key").await?;
+    wait_for_listener(port).await?;
+
+    let client = Client::new();
+    let response = client
+        .post(format!("http://127.0.0.1:{port}/"))
+        .body(plaintext_zero_key_demon_init_body(agent_id))
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+    assert!(registry.get(agent_id).await.is_none(), "zero-key init must not register");
+
+    manager.stop("edge-http-zero-key").await?;
+    Ok(())
+}
+
 fn http_listener(name: &str, port: u16) -> ListenerConfig {
     ListenerConfig::from(HttpListenerConfig {
         name: name.to_owned(),
@@ -168,6 +197,45 @@ fn valid_demon_init_body(
 
     DemonEnvelope::new(agent_id, payload)
         .unwrap_or_else(|error| panic!("failed to build demon init request body: {error}"))
+        .to_bytes()
+}
+
+fn plaintext_zero_key_demon_init_body(agent_id: u32) -> Vec<u8> {
+    let mut metadata = Vec::new();
+    metadata.extend_from_slice(&agent_id.to_be_bytes());
+    add_length_prefixed_bytes_be(&mut metadata, b"wkstn-01");
+    add_length_prefixed_bytes_be(&mut metadata, b"operator");
+    add_length_prefixed_bytes_be(&mut metadata, b"REDCELL");
+    add_length_prefixed_bytes_be(&mut metadata, b"10.0.0.25");
+    add_length_prefixed_utf16_be(&mut metadata, "C:\\Windows\\explorer.exe");
+    metadata.extend_from_slice(&1337_u32.to_be_bytes());
+    metadata.extend_from_slice(&1338_u32.to_be_bytes());
+    metadata.extend_from_slice(&512_u32.to_be_bytes());
+    metadata.extend_from_slice(&2_u32.to_be_bytes());
+    metadata.extend_from_slice(&1_u32.to_be_bytes());
+    metadata.extend_from_slice(&0x401000_u64.to_be_bytes());
+    metadata.extend_from_slice(&10_u32.to_be_bytes());
+    metadata.extend_from_slice(&0_u32.to_be_bytes());
+    metadata.extend_from_slice(&1_u32.to_be_bytes());
+    metadata.extend_from_slice(&0_u32.to_be_bytes());
+    metadata.extend_from_slice(&22000_u32.to_be_bytes());
+    metadata.extend_from_slice(&9_u32.to_be_bytes());
+    metadata.extend_from_slice(&15_u32.to_be_bytes());
+    metadata.extend_from_slice(&20_u32.to_be_bytes());
+    metadata.extend_from_slice(&1_893_456_000_u64.to_be_bytes());
+    metadata.extend_from_slice(&0b101010_u32.to_be_bytes());
+
+    let payload = [
+        u32::from(DemonCommand::DemonInit).to_be_bytes().as_slice(),
+        7_u32.to_be_bytes().as_slice(),
+        [0_u8; AGENT_KEY_LENGTH].as_slice(),
+        [0_u8; AGENT_IV_LENGTH].as_slice(),
+        metadata.as_slice(),
+    ]
+    .concat();
+
+    DemonEnvelope::new(agent_id, payload)
+        .unwrap_or_else(|error| panic!("failed to build zero-key init request body: {error}"))
         .to_bytes()
 }
 

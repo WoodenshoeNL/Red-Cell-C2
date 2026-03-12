@@ -1739,4 +1739,45 @@ mod tests {
         let error = profile.validate().expect_err("profile should be invalid");
         assert!(error.errors.iter().any(|message| message.contains("MaxDownloadBytes")));
     }
+
+    #[test]
+    fn parse_rejects_malformed_hcl() {
+        let result = Profile::parse("{completely invalid hcl]");
+        assert!(result.is_err(), "malformed HCL must return an error");
+        assert!(
+            matches!(result.unwrap_err(), ProfileError::Parse(_)),
+            "error must be the Parse variant"
+        );
+    }
+
+    #[test]
+    fn from_file_returns_error_for_nonexistent_path() {
+        let result = Profile::from_file("/nonexistent/path/profile.yaotl");
+        assert!(result.is_err(), "missing file must return an error");
+        assert!(
+            matches!(result.unwrap_err(), ProfileError::Read { .. }),
+            "error must be the Read variant"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_hcl_missing_teamserver_block() {
+        // Valid HCL syntax but missing the required `Teamserver` block.
+        let result = Profile::parse(
+            r#"
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {}
+            "#,
+        );
+        assert!(result.is_err(), "HCL missing Teamserver block must return an error");
+        assert!(
+            matches!(result.unwrap_err(), ProfileError::Parse(_)),
+            "error must be the Parse variant"
+        );
+    }
 }

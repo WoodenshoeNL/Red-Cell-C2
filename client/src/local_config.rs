@@ -35,8 +35,14 @@ impl LocalConfig {
         let Some(path) = config_file_path() else {
             return Self::default();
         };
+        Self::load_from(&path)
+    }
 
-        match fs::read_to_string(&path) {
+    /// Load the local config from a specific path.
+    ///
+    /// Returns the default config if the file does not exist or cannot be parsed.
+    pub(crate) fn load_from(path: &std::path::Path) -> Self {
+        match fs::read_to_string(path) {
             Ok(contents) => toml::from_str(&contents).unwrap_or_default(),
             Err(_) => Self::default(),
         }
@@ -49,13 +55,19 @@ impl LocalConfig {
         let Some(path) = config_file_path() else {
             return;
         };
+        self.save_to(&path);
+    }
 
+    /// Persist the local config to a specific path.
+    ///
+    /// Creates parent directories as needed. Silently ignores write failures.
+    pub(crate) fn save_to(&self, path: &std::path::Path) {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
 
         if let Ok(contents) = toml::to_string_pretty(self) {
-            let _ = fs::write(&path, contents);
+            let _ = fs::write(path, contents);
         }
     }
 

@@ -811,6 +811,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_operator_rejects_empty_username() {
+        let service =
+            AuthService::from_profile(&profile()).expect("auth service should initialize");
+
+        let error = service
+            .create_operator("   ", "zion", red_cell_common::config::OperatorRole::Operator)
+            .await
+            .expect_err("blank usernames should be rejected");
+
+        assert_eq!(error, AuthError::EmptyUsername);
+    }
+
+    #[tokio::test]
+    async fn create_operator_rejects_empty_password() {
+        let service =
+            AuthService::from_profile(&profile()).expect("auth service should initialize");
+
+        let error = service
+            .create_operator("trinity", "   ", red_cell_common::config::OperatorRole::Operator)
+            .await
+            .expect_err("blank passwords should be rejected");
+
+        assert_eq!(error, AuthError::EmptyPassword);
+    }
+
+    #[tokio::test]
+    async fn create_operator_rejects_duplicate_username() {
+        let service =
+            AuthService::from_profile(&profile()).expect("auth service should initialize");
+        service
+            .create_operator("trinity", "zion", red_cell_common::config::OperatorRole::Operator)
+            .await
+            .expect("initial operator should be created");
+
+        let error = service
+            .create_operator("trinity", "matrix", red_cell_common::config::OperatorRole::Analyst)
+            .await
+            .expect_err("duplicate usernames should be rejected");
+
+        assert_eq!(error, AuthError::DuplicateUser { username: "trinity".to_owned() });
+    }
+
+    #[tokio::test]
     async fn from_profile_with_database_loads_persisted_runtime_operators() {
         let database = Database::connect_in_memory().await.expect("database should initialize");
         database

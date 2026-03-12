@@ -812,6 +812,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn callback_after_registry_reload_uses_persisted_crypto_material() {
+        let database =
+            Database::connect(temp_db_path()).await.expect("temp database should initialize");
+        let registry = AgentRegistry::new(database.clone());
+        let parser = DemonPacketParser::new(registry);
+        let key = [0x57; AGENT_KEY_LENGTH];
+        let iv = [0x68; AGENT_IV_LENGTH];
+        let agent_id: u32 = 0x2233_4455;
+
+        let init_packet = build_init_packet(agent_id, key, iv);
+        parser
+            .parse_at(&init_packet, "10.0.0.5".to_owned(), datetime!(2026-03-09 19:47:00 UTC))
+            .await
+            .expect("init should succeed");
+
+        let reloaded = AgentRegistry::load(database).await.expect("registry should reload");
+        let parser = DemonPacketParser::new(reloaded);
+        let callback_packet = build_callback_packet(agent_id, key, iv);
+
+        let parsed = parser
+            .parse_at(&callback_packet, "10.0.0.5".to_owned(), datetime!(2026-03-09 19:48:00 UTC))
+            .await
+            .expect("callback should parse after reload");
+
+        let ParsedDemonPacket::Callback { header, packages } = parsed else {
+            panic!("expected callback packet");
+        };
+
+        assert_eq!(header.agent_id, agent_id);
+        assert_eq!(packages.len(), 2);
+        assert_eq!(packages[0].command_id, u32::from(DemonCommand::CommandCheckin));
+        assert_eq!(packages[0].request_id, 42);
+        assert_eq!(packages[0].payload, vec![0xaa, 0xbb, 0xcc]);
+        assert_eq!(packages[1].command_id, u32::from(DemonCommand::CommandOutput));
+        assert_eq!(packages[1].request_id, 99);
+        assert_eq!(packages[1].payload, b"hello");
+    }
+
+    #[tokio::test]
     async fn build_reconnect_ack_reuses_base_iv_without_advancing_registry_state() {
         let registry = test_registry().await;
         let key = [0x56; AGENT_KEY_LENGTH];

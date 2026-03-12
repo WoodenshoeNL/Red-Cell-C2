@@ -826,6 +826,43 @@ mod tests {
     }
 
     #[test]
+    fn demon_header_rejects_buffer_shorter_than_header() {
+        let error = DemonHeader::from_bytes(&[0u8; 4])
+            .expect_err("buffer shorter than 12 bytes must be rejected");
+
+        assert_eq!(
+            error,
+            DemonProtocolError::BufferTooShort { context: "Demon header", expected: 12, actual: 4 }
+        );
+    }
+
+    #[test]
+    fn demon_envelope_rejects_buffer_shorter_than_header() {
+        let error = DemonEnvelope::from_bytes(&[0u8; 8])
+            .expect_err("buffer shorter than 12 bytes must be rejected");
+
+        assert_eq!(
+            error,
+            DemonProtocolError::BufferTooShort { context: "Demon header", expected: 12, actual: 8 }
+        );
+    }
+
+    #[test]
+    fn demon_package_rejects_buffer_too_short_for_command_id() {
+        let error = DemonPackage::from_bytes(&[0u8; 2])
+            .expect_err("buffer shorter than 4 bytes must be rejected");
+
+        assert_eq!(
+            error,
+            DemonProtocolError::BufferTooShort {
+                context: "Demon package command id",
+                expected: 4,
+                actual: 2,
+            }
+        );
+    }
+
+    #[test]
     fn enum_conversions_match_havoc_constants() {
         assert_eq!(u32::from(DemonCommand::DemonInit), 99);
         assert_eq!(u32::from(DemonCommand::CommandKerberos), 2550);

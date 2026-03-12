@@ -7,10 +7,14 @@ use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 
+use base64::Engine;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
+use red_cell_common::demon::DemonCommand;
+use red_cell_common::operator::{AgentTaskInfo, EventCode, Message, MessageHead, OperatorMessage};
 use serde_json::{Value, json};
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::warn;
 
 use crate::transport::{AgentSummary, AppState, ListenerSummary, SharedAppState};
@@ -57,14 +61,24 @@ struct ScriptRecord {
     registered_commands: BTreeSet<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ScriptTabRecord {
+    title: String,
+    script_name: String,
+    layout: String,
+    has_callback: bool,
+}
+
 #[derive(Debug)]
 struct PythonApiState {
     app_state: SharedAppState,
     commands: Mutex<BTreeMap<String, RegisteredCommand>>,
     agent_checkin_callbacks: Mutex<Vec<RegisteredAgentCheckinCallback>>,
+    script_tabs: Mutex<BTreeMap<String, ScriptTabRecord>>,
     current_script: Mutex<Option<String>>,
     output_entries: Mutex<Vec<ScriptOutputEntry>>,
     script_records: Mutex<BTreeMap<String, ScriptRecord>>,
+    outgoing_tx: Mutex<Option<UnboundedSender<OperatorMessage>>>,
 }
 
 impl PythonApiState {
@@ -155,10 +169,51 @@ impl PythonApiState {
         Ok(())
     }
 
+    fn register_tab(&self, title: String, callback: Option<Py<PyAny>>) -> PyResult<()> {
+        let script_name = self.current_script_name().ok_or_else(|| {
+            PyRuntimeError::new_err("havocui.CreateTab must be called while a script loads")
+        })?;
+        let normalized_title = normalize_tab_title(&title)?;
+        lock_mutex(&self.script_tabs).insert(
+            normalized_title.clone(),
+            ScriptTabRecord {
+                title: normalized_title,
+                script_name,
+                layout: String::new(),
+                has_callback: callback.is_some(),
+            },
+        );
+        if let Some(callback) = callback {
+            self.register_command(format!("__tab__ {title}"), None, callback)?;
+        }
+        Ok(())
+    }
+
+    fn set_tab_layout(&self, title: &str, layout: String) -> PyResult<()> {
+        let normalized_title = normalize_tab_title(title)?;
+        let script_name = self.current_script_name();
+        let mut tabs = lock_mutex(&self.script_tabs);
+        let Some(record) = tabs.get_mut(&normalized_title) else {
+            return Err(PyValueError::new_err(format!(
+                "havocui tab `{normalized_title}` has not been created"
+            )));
+        };
+        if let Some(script_name) = script_name
+            && record.script_name != script_name
+        {
+            return Err(PyValueError::new_err(format!(
+                "havocui tab `{normalized_title}` belongs to a different script"
+            )));
+        }
+        record.layout = layout;
+        Ok(())
+    }
+
     fn clear_script_bindings(&self, script_name: &str) {
         lock_mutex(&self.commands).retain(|_, command| command.script_name != script_name);
         lock_mutex(&self.agent_checkin_callbacks)
             .retain(|callback| callback.script_name != script_name);
+        lock_mutex(&self.script_tabs).retain(|_, tab| tab.script_name != script_name);
         if let Some(record) = lock_mutex(&self.script_records).get_mut(script_name) {
             record.registered_commands.clear();
         }
@@ -180,6 +235,18 @@ impl PythonApiState {
 
     fn output_entries(&self) -> Vec<ScriptOutputEntry> {
         lock_mutex(&self.output_entries).clone()
+    }
+
+    fn tab_descriptors(&self) -> Vec<ScriptTabDescriptor> {
+        lock_mutex(&self.script_tabs)
+            .values()
+            .map(|tab| ScriptTabDescriptor {
+                title: tab.title.clone(),
+                script_name: tab.script_name.clone(),
+                layout: tab.layout.clone(),
+                has_callback: tab.has_callback,
+            })
+            .collect()
     }
 
     fn push_runtime_note(&self, script_name: Option<&str>, text: &str) {
@@ -275,6 +342,21 @@ impl PythonApiState {
         state.listeners.clone()
     }
 
+    fn set_outgoing_sender(&self, sender: UnboundedSender<OperatorMessage>) {
+        *lock_mutex(&self.outgoing_tx) = Some(sender);
+    }
+
+    fn queue_task_message(&self, message: OperatorMessage) -> PyResult<()> {
+        let Some(sender) = lock_mutex(&self.outgoing_tx).clone() else {
+            return Err(PyRuntimeError::new_err(
+                "client transport is not connected for Python tasking",
+            ));
+        };
+        sender
+            .send(message)
+            .map_err(|_| PyRuntimeError::new_err("client transport task queue is closed"))
+    }
+
     fn invoke_agent_checkin_callbacks(&self, py: Python<'_>, agent_id: &str) {
         let callbacks = lock_mutex(&self.agent_checkin_callbacks).clone();
         if callbacks.is_empty() {
@@ -351,11 +433,31 @@ impl PythonApiState {
         self.end_script_execution();
         result
     }
+
+    fn activate_tab(&self, py: Python<'_>, title: &str) -> Result<(), String> {
+        let normalized_title = normalize_tab_title(title).map_err(|error| error.to_string())?;
+        let tab = {
+            let tabs = lock_mutex(&self.script_tabs);
+            tabs.get(&normalized_title).cloned()
+        }
+        .ok_or_else(|| format!("havocui tab `{normalized_title}` is not registered"))?;
+        if !tab.has_callback {
+            return Ok(());
+        }
+
+        let command_name = normalize_command_name(&format!("__tab__ {normalized_title}"));
+        self.execute_registered_command(py, &command_name, "", &normalized_title, &[])?;
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
 enum PythonThreadCommand {
     EmitAgentCheckin(String),
+    ActivateTab {
+        title: String,
+        response_tx: SyncSender<Result<(), String>>,
+    },
     ExecuteRegisteredCommand {
         command_name: String,
         command_line: String,
@@ -400,6 +502,15 @@ pub(crate) struct ScriptDescriptor {
     pub(crate) error: Option<String>,
     pub(crate) registered_commands: Vec<String>,
     pub(crate) registered_command_count: usize,
+}
+
+/// Snapshot of a custom `havocui` tab exposed by a client-side Python script.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ScriptTabDescriptor {
+    pub(crate) title: String,
+    pub(crate) script_name: String,
+    pub(crate) layout: String,
+    pub(crate) has_callback: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -453,9 +564,11 @@ impl PythonRuntime {
             app_state,
             commands: Mutex::new(BTreeMap::new()),
             agent_checkin_callbacks: Mutex::new(Vec::new()),
+            script_tabs: Mutex::new(BTreeMap::new()),
             current_script: Mutex::new(None),
             output_entries: Mutex::new(Vec::new()),
             script_records: Mutex::new(BTreeMap::new()),
+            outgoing_tx: Mutex::new(None),
         });
         *lock_mutex(active_runtime_slot()) = Some(api_state.clone());
 
@@ -494,6 +607,30 @@ impl PythonRuntime {
     /// Return captured stdout/stderr from Python scripts.
     pub(crate) fn script_output(&self) -> Vec<ScriptOutputEntry> {
         self.inner.api_state.output_entries()
+    }
+
+    /// Return the active `havocui` tabs registered by client scripts.
+    pub(crate) fn script_tabs(&self) -> Vec<ScriptTabDescriptor> {
+        self.inner.api_state.tab_descriptors()
+    }
+
+    /// Attach the current client transport sender so Python shims can queue tasks.
+    pub(crate) fn set_outgoing_sender(&self, sender: UnboundedSender<OperatorMessage>) {
+        self.inner.api_state.set_outgoing_sender(sender);
+    }
+
+    /// Run a registered `havocui` tab callback and refresh the tab layout.
+    pub(crate) fn activate_tab(&self, title: &str) -> Result<(), PythonRuntimeError> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        self.inner
+            .command_tx
+            .send(PythonThreadCommand::ActivateTab { title: title.to_owned(), response_tx })
+            .map_err(|_| PythonRuntimeError::ThreadUnavailable)?;
+        match response_rx.recv() {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(PythonRuntimeError::CommandFailed(error)),
+            Err(_) => Err(PythonRuntimeError::ThreadUnavailable),
+        }
     }
 
     /// Load a Python script from the provided path.
@@ -607,6 +744,10 @@ fn python_thread_main(
         match command {
             PythonThreadCommand::EmitAgentCheckin(agent_id) => {
                 Python::with_gil(|py| api_state.invoke_agent_checkin_callbacks(py, &agent_id));
+            }
+            PythonThreadCommand::ActivateTab { title, response_tx } => {
+                let result = Python::with_gil(|py| api_state.activate_tab(py, &title));
+                let _ = response_tx.send(result);
             }
             PythonThreadCommand::ExecuteRegisteredCommand {
                 command_name,
@@ -875,6 +1016,14 @@ fn normalize_listener_name(name: &str) -> String {
     name.trim().to_owned()
 }
 
+fn normalize_tab_title(title: &str) -> PyResult<String> {
+    let normalized = title.trim().to_owned();
+    if normalized.is_empty() {
+        return Err(PyValueError::new_err("tab title cannot be empty"));
+    }
+    Ok(normalized)
+}
+
 fn agent_summary_to_json(agent: &AgentSummary) -> Value {
     json!({
         "name_id": agent.name_id,
@@ -1009,6 +1158,15 @@ struct PyAgent {
 
 #[pymethods]
 impl PyAgent {
+    #[classattr]
+    const CONSOLE_INFO: u32 = 1;
+
+    #[classattr]
+    const CONSOLE_ERROR: u32 = 2;
+
+    #[classattr]
+    const CONSOLE_TASK: u32 = 3;
+
     #[new]
     fn new(agent_id: &Bound<'_, PyAny>) -> PyResult<Self> {
         if let Ok(value) = agent_id.extract::<String>() {
@@ -1034,12 +1192,87 @@ impl PyAgent {
         }
     }
 
-    #[pyo3(name = "ConsoleWrite", signature = (text, level=None))]
-    fn console_write(&self, text: String, level: Option<&str>) -> PyResult<()> {
+    #[pyo3(name = "ConsoleWrite", signature = (*args))]
+    fn console_write(&self, args: &Bound<'_, PyTuple>) -> PyResult<Option<String>> {
         let api_state = active_api_state()?;
-        let prefix = level.unwrap_or("INFO");
-        api_state.push_runtime_note(None, &format!("[{prefix}] {}: {text}", self.agent_id));
-        Ok(())
+        match args.len() {
+            1 => {
+                let text = args.get_item(0)?.extract::<String>()?;
+                api_state.push_runtime_note(None, &format!("[INFO] {}: {text}", self.agent_id));
+                Ok(None)
+            }
+            2 => {
+                if let Ok(kind) = args.get_item(0)?.extract::<u32>() {
+                    let text = args.get_item(1)?.extract::<String>()?;
+                    return match kind {
+                        Self::CONSOLE_INFO => {
+                            api_state.push_runtime_note(
+                                None,
+                                &format!("[INFO] {}: {text}", self.agent_id),
+                            );
+                            Ok(None)
+                        }
+                        Self::CONSOLE_ERROR => {
+                            let rendered = format!("[ERROR] {}: {text}\n", self.agent_id);
+                            let _ = api_state.push_output(
+                                None,
+                                ScriptOutputStream::Stderr,
+                                &rendered,
+                            )?;
+                            Ok(None)
+                        }
+                        Self::CONSOLE_TASK => Ok(Some(next_task_id_string())),
+                        _ => Err(PyValueError::new_err(format!(
+                            "unsupported ConsoleWrite kind `{kind}`"
+                        ))),
+                    };
+                }
+
+                let text = args.get_item(0)?.extract::<String>()?;
+                let level = args.get_item(1)?.extract::<String>()?;
+                api_state.push_runtime_note(
+                    None,
+                    &format!("[{}] {}: {text}", level.to_ascii_uppercase(), self.agent_id),
+                );
+                Ok(None)
+            }
+            _ => Err(PyValueError::new_err(
+                "ConsoleWrite expects either (text), (text, level), or (kind, text)",
+            )),
+        }
+    }
+
+    #[pyo3(name = "Command", signature = (*args))]
+    fn command(&self, args: &Bound<'_, PyTuple>) -> PyResult<()> {
+        let api_state = active_api_state()?;
+        match args.len() {
+            2 => {
+                let task_id = args.get_item(0)?.extract::<String>()?;
+                let command_line = args.get_item(1)?.extract::<String>()?;
+                let operator = current_operator_username(&api_state.app_state);
+                let message =
+                    build_console_task_message(&self.agent_id, &task_id, &command_line, &operator)
+                        .map_err(PyValueError::new_err)?;
+                api_state.queue_task_message(message)
+            }
+            3 => {
+                let task_id = args.get_item(0)?.extract::<String>()?;
+                let command = args.get_item(1)?.extract::<String>()?;
+                let command_arg = args.get_item(2)?.extract::<Vec<u8>>()?;
+                let operator = current_operator_username(&api_state.app_state);
+                let message = build_agent_command_message(
+                    &self.agent_id,
+                    &task_id,
+                    &command,
+                    &command_arg,
+                    &operator,
+                );
+                api_state.queue_task_message(message)
+            }
+            _ => Err(PyValueError::new_err(
+                "Command expects either (task_id, command_line) or (task_id, name, bytes)",
+            )),
+        }
     }
 }
 
@@ -1344,19 +1577,20 @@ fn successmessage(text: String) -> PyResult<()> {
 #[pyfunction]
 #[pyo3(signature = (title, callback=None))]
 fn createtab(title: String, callback: Option<Bound<'_, PyAny>>) -> PyResult<()> {
-    if let Some(callback) = callback {
+    let callback = if let Some(callback) = callback {
         ensure_callable(&callback)?;
-    }
+        Some(callback.unbind())
+    } else {
+        None
+    };
     let api_state = active_api_state()?;
-    api_state.push_runtime_note(None, &format!("[havocui] tab requested: {title}"));
-    Ok(())
+    api_state.register_tab(title, callback)
 }
 
 #[pyfunction]
 fn settablayout(title: String, layout: String) -> PyResult<()> {
     let api_state = active_api_state()?;
-    api_state.push_runtime_note(None, &format!("[havocui] set layout for {title}: {layout}"));
-    Ok(())
+    api_state.set_tab_layout(&title, layout)
 }
 
 fn lock_mutex<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -1370,6 +1604,208 @@ fn lock_app_state(app_state: &SharedAppState) -> std::sync::MutexGuard<'_, AppSt
     match app_state.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn current_operator_username(app_state: &SharedAppState) -> String {
+    let state = lock_app_state(app_state);
+    state.operator_info.as_ref().map(|operator| operator.username.clone()).unwrap_or_default()
+}
+
+fn build_agent_task(operator: &str, info: AgentTaskInfo) -> OperatorMessage {
+    OperatorMessage::AgentTask(Message {
+        head: MessageHead {
+            event: EventCode::Session,
+            user: operator.to_owned(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info,
+    })
+}
+
+fn next_task_id_string() -> String {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static TASK_COUNTER: AtomicU32 = AtomicU32::new(1);
+    format!("{:08X}", TASK_COUNTER.fetch_add(1, Ordering::Relaxed))
+}
+
+fn build_console_task_message(
+    agent_id: &str,
+    task_id: &str,
+    input: &str,
+    operator: &str,
+) -> Result<OperatorMessage, String> {
+    let trimmed = input.trim();
+    let mut parts = trimmed.split_whitespace();
+    let Some(command) = parts.next() else {
+        return Err("Command input is empty.".to_owned());
+    };
+    let command = command.to_ascii_lowercase();
+
+    let info = match command.as_str() {
+        "checkin" => AgentTaskInfo {
+            demon_id: agent_id.to_owned(),
+            task_id: task_id.to_owned(),
+            command_id: u32::from(DemonCommand::CommandCheckin).to_string(),
+            command_line: trimmed.to_owned(),
+            command: Some("checkin".to_owned()),
+            ..AgentTaskInfo::default()
+        },
+        "kill" | "exit" => AgentTaskInfo {
+            demon_id: agent_id.to_owned(),
+            task_id: task_id.to_owned(),
+            command_id: u32::from(DemonCommand::CommandExit).to_string(),
+            command_line: trimmed.to_owned(),
+            command: Some("kill".to_owned()),
+            arguments: parts.next().map(ToOwned::to_owned),
+            ..AgentTaskInfo::default()
+        },
+        "ps" | "proclist" => AgentTaskInfo {
+            demon_id: agent_id.to_owned(),
+            task_id: task_id.to_owned(),
+            command_id: u32::from(DemonCommand::CommandProcList).to_string(),
+            command_line: trimmed.to_owned(),
+            command: Some("ps".to_owned()),
+            ..AgentTaskInfo::default()
+        },
+        "screenshot" => AgentTaskInfo {
+            demon_id: agent_id.to_owned(),
+            task_id: task_id.to_owned(),
+            command_id: u32::from(DemonCommand::CommandScreenshot).to_string(),
+            command_line: trimmed.to_owned(),
+            command: Some("screenshot".to_owned()),
+            ..AgentTaskInfo::default()
+        },
+        "pwd" => filesystem_task(agent_id, task_id, trimmed, "pwd", None),
+        "cd" => filesystem_task(agent_id, task_id, trimmed, "cd", Some(rest_after_word(trimmed)?)),
+        "mkdir" => {
+            filesystem_task(agent_id, task_id, trimmed, "mkdir", Some(rest_after_word(trimmed)?))
+        }
+        "rm" | "del" | "remove" => {
+            filesystem_task(agent_id, task_id, trimmed, "remove", Some(rest_after_word(trimmed)?))
+        }
+        "download" => filesystem_transfer_task(
+            agent_id,
+            task_id,
+            trimmed,
+            "download",
+            &rest_after_word(trimmed)?,
+        ),
+        "cat" | "type" => {
+            filesystem_transfer_task(agent_id, task_id, trimmed, "cat", &rest_after_word(trimmed)?)
+        }
+        "proc" => process_task(agent_id, task_id, trimmed)?,
+        _ => return Err(format!("Unsupported console command `{command}`.")),
+    };
+
+    Ok(build_agent_task(operator, info))
+}
+
+fn build_agent_command_message(
+    agent_id: &str,
+    task_id: &str,
+    command: &str,
+    command_arg: &[u8],
+    operator: &str,
+) -> OperatorMessage {
+    build_agent_task(
+        operator,
+        AgentTaskInfo {
+            demon_id: agent_id.to_owned(),
+            task_id: task_id.to_owned(),
+            command_id: "0".to_owned(),
+            command_line: String::new(),
+            command: Some(command.to_owned()),
+            arguments: Some(base64::engine::general_purpose::STANDARD.encode(command_arg)),
+            extra: BTreeMap::from([(
+                "CommandArg".to_owned(),
+                Value::String(base64::engine::general_purpose::STANDARD.encode(command_arg)),
+            )]),
+            ..AgentTaskInfo::default()
+        },
+    )
+}
+
+fn filesystem_task(
+    agent_id: &str,
+    task_id: &str,
+    command_line: &str,
+    sub_command: &str,
+    arguments: Option<String>,
+) -> AgentTaskInfo {
+    AgentTaskInfo {
+        demon_id: agent_id.to_owned(),
+        task_id: task_id.to_owned(),
+        command_id: u32::from(DemonCommand::CommandFs).to_string(),
+        command_line: command_line.to_owned(),
+        command: Some("fs".to_owned()),
+        sub_command: Some(sub_command.to_owned()),
+        arguments,
+        ..AgentTaskInfo::default()
+    }
+}
+
+fn filesystem_transfer_task(
+    agent_id: &str,
+    task_id: &str,
+    command_line: &str,
+    sub_command: &str,
+    path: &str,
+) -> AgentTaskInfo {
+    let encoded = Some(base64::engine::general_purpose::STANDARD.encode(path.as_bytes()));
+    AgentTaskInfo {
+        demon_id: agent_id.to_owned(),
+        task_id: task_id.to_owned(),
+        command_id: u32::from(DemonCommand::CommandFs).to_string(),
+        command_line: command_line.to_owned(),
+        command: Some("fs".to_owned()),
+        sub_command: Some(sub_command.to_owned()),
+        arguments: encoded,
+        ..AgentTaskInfo::default()
+    }
+}
+
+fn process_task(
+    agent_id: &str,
+    task_id: &str,
+    command_line: &str,
+) -> Result<AgentTaskInfo, String> {
+    let mut parts = command_line.split_whitespace();
+    let _ = parts.next();
+    let sub_command = parts.next().ok_or_else(|| "Usage: proc kill <pid>".to_owned())?;
+    match sub_command.to_ascii_lowercase().as_str() {
+        "kill" => {
+            let pid = parts.next().ok_or_else(|| "Usage: proc kill <pid>".to_owned())?;
+            if parts.next().is_some() {
+                return Err("Usage: proc kill <pid>".to_owned());
+            }
+            let pid = pid.parse::<u32>().map_err(|_| format!("Invalid PID `{pid}`."))?;
+            Ok(AgentTaskInfo {
+                demon_id: agent_id.to_owned(),
+                task_id: task_id.to_owned(),
+                command_id: u32::from(DemonCommand::CommandProc).to_string(),
+                command_line: format!("proc kill {pid}"),
+                command: Some("proc".to_owned()),
+                sub_command: Some("kill".to_owned()),
+                arguments: Some(pid.to_string()),
+                extra: BTreeMap::from([("Args".to_owned(), Value::String(pid.to_string()))]),
+                ..AgentTaskInfo::default()
+            })
+        }
+        _ => Err("Usage: proc kill <pid>".to_owned()),
+    }
+}
+
+fn rest_after_word(input: &str) -> Result<String, String> {
+    let mut parts = input.trim().splitn(2, char::is_whitespace);
+    let _ = parts.next();
+    let rest = parts.next().map(str::trim).unwrap_or_default();
+    if rest.is_empty() {
+        Err("This command requires an argument.".to_owned())
+    } else {
+        Ok(rest.to_owned())
     }
 }
 
@@ -1730,6 +2166,88 @@ event.OnNewSession(on_new_session)\n",
 
         assert_eq!(wait_for_file_contents(&output_path).as_deref(), Some("00ABCDEF"));
         assert!(wait_for_output(&runtime, "new session for 00ABCDEF"));
+    }
+
+    #[test]
+    fn havocui_tabs_are_registered_and_can_refresh_layouts() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let script = "import havocui\n\
+def render():\n    havocui.SetTabLayout('Status', 'operator layout')\n\
+havocui.CreateTab('Status', render)\n";
+        write_script(&temp_dir.path().join("tabbed.py"), script);
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        assert_eq!(
+            runtime.script_tabs(),
+            vec![ScriptTabDescriptor {
+                title: "Status".to_owned(),
+                script_name: "tabbed".to_owned(),
+                layout: String::new(),
+                has_callback: true,
+            }]
+        );
+
+        runtime
+            .activate_tab("Status")
+            .unwrap_or_else(|error| panic!("tab activation should succeed: {error}"));
+
+        assert_eq!(
+            runtime.script_tabs(),
+            vec![ScriptTabDescriptor {
+                title: "Status".to_owned(),
+                script_name: "tabbed".to_owned(),
+                layout: "operator layout".to_owned(),
+                has_callback: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn demon_command_queues_agent_task_messages() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let script = "import havoc\n\
+def queue(agent, args):\n    demon = havoc.Demon(agent.id)\n    task_id = demon.ConsoleWrite(demon.CONSOLE_TASK, 'queued pwd')\n    demon.Command(task_id, 'pwd')\n\
+havoc.RegisterCommand(function=queue, module='ops', command='pwd', description='queue pwd')\n";
+        write_script(&temp_dir.path().join("queue_task.py"), script);
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+        {
+            let mut state = lock_app_state(&app_state);
+            state.agents.push(sample_agent("00ABCDEF"));
+            state.operator_info = Some(red_cell_common::OperatorInfo {
+                username: "operator".to_owned(),
+                password_hash: None,
+                role: None,
+                online: true,
+                last_seen: None,
+            });
+        }
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+        let (outgoing_tx, mut outgoing_rx) = tokio::sync::mpsc::unbounded_channel();
+        runtime.set_outgoing_sender(outgoing_tx);
+
+        let executed = runtime
+            .execute_registered_command("00ABCDEF", "ops pwd")
+            .unwrap_or_else(|error| panic!("registered command should run: {error}"));
+        assert!(executed);
+
+        let Some(OperatorMessage::AgentTask(message)) = outgoing_rx.blocking_recv() else {
+            panic!("expected queued agent task");
+        };
+        assert_eq!(message.head.user, "operator");
+        assert_eq!(message.info.demon_id, "00ABCDEF");
+        assert_eq!(message.info.command_id, u32::from(DemonCommand::CommandFs).to_string());
+        assert_eq!(message.info.sub_command.as_deref(), Some("pwd"));
     }
 
     #[test]

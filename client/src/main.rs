@@ -18,6 +18,7 @@ use local_config::LocalConfig;
 use login::{LoginAction, LoginState, render_login_dialog};
 use python::{
     PythonRuntime, ScriptDescriptor, ScriptLoadStatus, ScriptOutputEntry, ScriptOutputStream,
+    ScriptTabDescriptor,
 };
 use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::{
@@ -161,6 +162,7 @@ struct AgentProcessPanelState {
 #[derive(Debug, Default)]
 struct ScriptManagerState {
     selected_script: Option<String>,
+    selected_tab: Option<String>,
     status_message: Option<String>,
 }
 
@@ -437,7 +439,11 @@ impl ClientApp {
                     login_state.set_error(format!("Failed to send login: {error}"));
                     return;
                 }
-                self.outgoing_tx = Some(transport.outgoing_sender());
+                let outgoing_tx = transport.outgoing_sender();
+                if let Some(runtime) = python_runtime.as_ref() {
+                    runtime.set_outgoing_sender(outgoing_tx.clone());
+                }
+                self.outgoing_tx = Some(outgoing_tx);
 
                 self.local_config.server_url = Some(server_url);
                 self.local_config.username = Some(login_state.username.trim().to_owned());
@@ -1078,7 +1084,9 @@ impl ClientApp {
 
         let scripts = runtime.script_descriptors();
         let output = runtime.script_output();
+        let tabs = runtime.script_tabs();
         self.prune_selected_script(&scripts);
+        self.prune_selected_tab(&tabs);
 
         let loaded_count =
             scripts.iter().filter(|script| script.status == ScriptLoadStatus::Loaded).count();
@@ -1086,6 +1094,7 @@ impl ClientApp {
             scripts.iter().filter(|script| script.status == ScriptLoadStatus::Error).count();
         let command_count =
             scripts.iter().map(|script| script.registered_command_count).sum::<usize>();
+        let tab_count = tabs.len();
 
         ui.horizontal_wrapped(|ui| {
             ui.label(format!("Loaded: {loaded_count}"));
@@ -1093,6 +1102,8 @@ impl ClientApp {
             ui.label(format!("Errors: {error_count}"));
             ui.separator();
             ui.label(format!("Commands: {command_count}"));
+            ui.separator();
+            ui.label(format!("Tabs: {tab_count}"));
             if let Some(path) =
                 self.scripts_dir.clone().or_else(|| self.local_config.resolved_scripts_dir())
             {
@@ -1155,6 +1166,11 @@ impl ClientApp {
             self.render_script_list_panel(&mut columns[0], &runtime, &scripts);
             self.render_script_output_panel(&mut columns[1], &output);
         });
+
+        if !tabs.is_empty() {
+            ui.add_space(8.0);
+            self.render_script_tabs_panel(ui, &runtime, &tabs);
+        }
     }
 
     fn render_script_list_panel(
@@ -1292,6 +1308,82 @@ impl ClientApp {
             });
     }
 
+    fn render_script_tabs_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        runtime: &PythonRuntime,
+        tabs: &[ScriptTabDescriptor],
+    ) {
+        ui.heading("Script Tabs");
+        ui.separator();
+
+        ui.horizontal_wrapped(|ui| {
+            for tab in tabs {
+                let selected = self.session_panel.script_manager.selected_tab.as_deref()
+                    == Some(tab.title.as_str());
+                if ui.selectable_label(selected, &tab.title).clicked() {
+                    self.session_panel.script_manager.selected_tab = Some(tab.title.clone());
+                    if tab.has_callback {
+                        self.session_panel.script_manager.status_message =
+                            Some(match runtime.activate_tab(&tab.title) {
+                                Ok(()) => format!("Activated tab {}.", tab.title),
+                                Err(error) => {
+                                    format!("Failed to activate tab {}: {error}", tab.title)
+                                }
+                            });
+                    }
+                }
+            }
+        });
+        ui.add_space(6.0);
+
+        let selected_title = self
+            .session_panel
+            .script_manager
+            .selected_tab
+            .clone()
+            .or_else(|| tabs.first().map(|tab| tab.title.clone()));
+        let Some(selected_title) = selected_title else {
+            ui.label("No script tabs are active.");
+            return;
+        };
+        self.session_panel.script_manager.selected_tab = Some(selected_title.clone());
+
+        let Some(selected_tab) = tabs.iter().find(|tab| tab.title == selected_title) else {
+            ui.label("Selected script tab is no longer available.");
+            return;
+        };
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(&selected_tab.title).strong());
+            ui.separator();
+            ui.monospace(&selected_tab.script_name);
+            if selected_tab.has_callback && ui.button("Refresh").clicked() {
+                self.session_panel.script_manager.status_message =
+                    Some(match runtime.activate_tab(&selected_tab.title) {
+                        Ok(()) => format!("Refreshed tab {}.", selected_tab.title),
+                        Err(error) => {
+                            format!("Failed to refresh tab {}: {error}", selected_tab.title)
+                        }
+                    });
+            }
+        });
+        ui.add_space(4.0);
+
+        egui::Frame::group(ui.style()).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt(("python-script-tab-layout", selected_tab.title.as_str()))
+                .max_height(220.0)
+                .show(ui, |ui| {
+                    if selected_tab.layout.trim().is_empty() {
+                        ui.label("This tab has not published any layout yet.");
+                    } else {
+                        ui.label(RichText::new(&selected_tab.layout).monospace());
+                    }
+                });
+        });
+    }
+
     fn apply_script_action(&mut self, runtime: &PythonRuntime, action: ScriptManagerAction) {
         let result = match &action {
             ScriptManagerAction::Load(path) => runtime.load_script(path.clone()),
@@ -1343,6 +1435,20 @@ impl ClientApp {
 
         self.session_panel.script_manager.selected_script =
             scripts.first().map(|script| script.name.clone());
+    }
+
+    fn prune_selected_tab(&mut self, tabs: &[ScriptTabDescriptor]) {
+        if self
+            .session_panel
+            .script_manager
+            .selected_tab
+            .as_ref()
+            .is_some_and(|selected| tabs.iter().any(|tab| &tab.title == selected))
+        {
+            return;
+        }
+
+        self.session_panel.script_manager.selected_tab = tabs.first().map(|tab| tab.title.clone());
     }
 
     fn render_session_graph_panel(&mut self, ui: &mut egui::Ui, state: &AppState) {

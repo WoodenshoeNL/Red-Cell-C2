@@ -547,6 +547,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_removes_profile_listener_deleted_before_next_boot() {
+        let old_port = available_port().expect("ephemeral port should be available");
+        let old_profile = Profile::parse(&format!(
+            r#"
+            Teamserver {{
+              Host = "127.0.0.1"
+              Port = 40056
+            }}
+
+            Operators {{
+              user "operator" {{
+                Password = "password1234"
+              }}
+            }}
+
+            Listeners {{
+              Http = [{{
+                Name = "old-http"
+                Hosts = ["127.0.0.1"]
+                HostBind = "127.0.0.1"
+                HostRotation = "round-robin"
+                PortBind = {old_port}
+                Secure = false
+              }}]
+            }}
+
+            Demon {{}}
+            "#
+        ))
+        .expect("old profile should parse");
+        let new_profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "operator" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("new profile should parse");
+
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let listeners = ListenerManager::new(database, registry, events, sockets, None);
+
+        listeners.sync_profile(&old_profile).await.expect("old profile listeners should sync");
+        listeners
+            .repository()
+            .set_state("old-http", ListenerStatus::Running, None)
+            .await
+            .expect("old listener state should update");
+
+        listeners.sync_profile(&new_profile).await.expect("new profile listeners should sync");
+        listeners.restore_running().await.expect("restore should succeed");
+        start_new_profile_listeners(&listeners, &new_profile)
+            .await
+            .expect("startup should ignore deleted profile listeners");
+
+        assert!(matches!(
+            listeners.summary("old-http").await,
+            Err(ListenerManagerError::ListenerNotFound { .. })
+        ));
+        assert!(listeners.list().await.expect("listeners should list").is_empty());
+    }
+
+    #[tokio::test]
     async fn startup_restores_supported_listeners_when_external_restore_fails() {
         let port = available_port().expect("ephemeral port should be available");
         let profile = Profile::parse(&format!(

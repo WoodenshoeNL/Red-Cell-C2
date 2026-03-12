@@ -477,6 +477,13 @@ impl ListenerManager {
         config: ListenerConfig,
     ) -> Result<ListenerSummary, ListenerManagerError> {
         let _guard = self.operations.lock().await;
+        self.create_locked(config).await
+    }
+
+    async fn create_locked(
+        &self,
+        config: ListenerConfig,
+    ) -> Result<ListenerSummary, ListenerManagerError> {
         let repository = self.repository();
         ensure_listener_creation_supported(&config)?;
 
@@ -495,6 +502,13 @@ impl ListenerManager {
         config: ListenerConfig,
     ) -> Result<ListenerSummary, ListenerManagerError> {
         let _guard = self.operations.lock().await;
+        self.update_locked(config).await
+    }
+
+    async fn update_locked(
+        &self,
+        config: ListenerConfig,
+    ) -> Result<ListenerSummary, ListenerManagerError> {
         let repository = self.repository();
         ensure_listener_creation_supported(&config)?;
         let existing = repository.get(config.name()).await?.ok_or_else(|| {
@@ -567,14 +581,27 @@ impl ListenerManager {
         Ok(self.repository().list().await?.into_iter().map(Into::into).collect())
     }
 
-    /// Ensure listeners declared in the YAOTL profile exist in the database.
+    /// Reconcile persisted listeners against the YAOTL profile.
     #[instrument(skip(self, profile))]
     pub async fn sync_profile(&self, profile: &Profile) -> Result<(), ListenerManagerError> {
-        for config in profile_listener_configs(profile) {
-            match self.create(config.clone()).await {
+        let _guard = self.operations.lock().await;
+        let repository = self.repository();
+        let profile_listeners = profile_listener_configs(profile)
+            .into_iter()
+            .map(|config| (config.name().to_owned(), config))
+            .collect::<BTreeMap<_, _>>();
+
+        for name in repository.names().await? {
+            if !profile_listeners.contains_key(&name) {
+                self.delete_removed_profile_listener_locked(&name).await?;
+            }
+        }
+
+        for config in profile_listeners.into_values() {
+            match self.create_locked(config.clone()).await {
                 Ok(_) => {}
                 Err(ListenerManagerError::DuplicateListener { .. }) => {
-                    let _ = self.update(config).await?;
+                    let _ = self.update_locked(config).await?;
                 }
                 Err(error) => return Err(error),
             }
@@ -648,6 +675,21 @@ impl ListenerManager {
         repository.set_state(name, ListenerStatus::Stopped, None).await?;
         info!(listener = name, "listener stopped");
         self.summary(name).await
+    }
+
+    async fn delete_removed_profile_listener_locked(
+        &self,
+        name: &str,
+    ) -> Result<(), ListenerManagerError> {
+        if let Some(handle) = self.active_handles.write().await.remove(name) {
+            handle.abort();
+            let _ = handle.await;
+        }
+
+        self.repository().delete(name).await?;
+        info!(listener = name, "removed persisted listener absent from profile");
+
+        Ok(())
     }
 }
 
@@ -3058,6 +3100,58 @@ mod tests {
             message.contains("Demon payload generation does not support DNS transport")
         }));
         assert!(!manager.active_handles.read().await.contains_key("dns-gated"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sync_profile_deletes_persisted_listener_missing_from_profile()
+    -> Result<(), ListenerManagerError> {
+        let manager = manager().await?;
+        let removed_port = available_port()
+            .map_err(|error| ListenerManagerError::InvalidConfig { message: error.to_string() })?;
+        let kept_port = available_port()
+            .map_err(|error| ListenerManagerError::InvalidConfig { message: error.to_string() })?;
+        manager.create(http_listener("removed", removed_port)).await?;
+        manager.start("removed").await?;
+
+        let profile = Profile::parse(&format!(
+            r#"
+            Teamserver {{
+              Host = "127.0.0.1"
+              Port = 40056
+            }}
+
+            Operators {{
+              user "operator" {{
+                Password = "password1234"
+              }}
+            }}
+
+            Listeners {{
+              Http = [{{
+                Name = "kept"
+                Hosts = ["127.0.0.1"]
+                HostBind = "127.0.0.1"
+                HostRotation = "round-robin"
+                PortBind = {kept_port}
+                Secure = false
+              }}]
+            }}
+
+            Demon {{}}
+            "#
+        ))
+        .map_err(|error| ListenerManagerError::InvalidConfig { message: error.to_string() })?;
+
+        manager.sync_profile(&profile).await?;
+
+        assert!(matches!(
+            manager.summary("removed").await,
+            Err(ListenerManagerError::ListenerNotFound { .. })
+        ));
+        assert!(!manager.active_handles.read().await.contains_key("removed"));
+        assert_eq!(manager.summary("kept").await?.state.status, ListenerStatus::Created);
 
         Ok(())
     }

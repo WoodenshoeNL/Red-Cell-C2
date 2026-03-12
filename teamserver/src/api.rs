@@ -2612,6 +2612,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_agent_returns_not_found_for_unknown_agent() {
+        let (app, _, _) = test_router_with_registry(Some((
+            60,
+            "rest-admin",
+            "secret-admin",
+            OperatorRole::Admin,
+        )))
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/agents/DEADBEEF")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "agent_not_found");
+    }
+
+    #[tokio::test]
     async fn queue_agent_task_enqueues_job() {
         let (app, registry, _) = test_router_with_registry(Some((
             60,
@@ -2647,6 +2673,36 @@ mod tests {
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].command, u32::from(DemonCommand::CommandCheckin));
         assert_eq!(queued[0].request_id, 0x2A);
+    }
+
+    #[tokio::test]
+    async fn queue_agent_task_returns_not_found_for_unknown_agent() {
+        let (app, _, _) = test_router_with_registry(Some((
+            60,
+            "rest-admin",
+            "secret-admin",
+            OperatorRole::Admin,
+        )))
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/agents/DEADBEEF/task")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"TaskID":"2A","CommandLine":"checkin","DemonID":"DEADBEEF","CommandID":"100"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "agent_not_found");
     }
 
     #[tokio::test]
@@ -2727,6 +2783,33 @@ mod tests {
         let queued = registry.queued_jobs(0xDEAD_BEEF).await.expect("queue should load");
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].command, u32::from(DemonCommand::CommandExit));
+    }
+
+    #[tokio::test]
+    async fn delete_agent_returns_not_found_for_unknown_agent() {
+        let (app, _, _) = test_router_with_registry(Some((
+            60,
+            "rest-admin",
+            "secret-admin",
+            OperatorRole::Admin,
+        )))
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/agents/DEADBEEF")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "agent_not_found");
     }
 
     #[tokio::test]

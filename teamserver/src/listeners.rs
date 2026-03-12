@@ -2476,10 +2476,7 @@ fn extract_external_ip(
             .headers()
             .get("x-forwarded-for")
             .and_then(|value| value.to_str().ok())
-            .into_iter()
-            .flat_map(|value| value.split(','))
-            .map(str::trim)
-            .find_map(|value| value.parse::<IpAddr>().ok())
+            .and_then(|value| forwarded_for_client_ip(value, trusted_proxy_peers))
         {
             return ip;
         }
@@ -2496,6 +2493,32 @@ fn extract_external_ip(
     }
 
     peer.ip()
+}
+
+fn forwarded_for_client_ip(
+    value: &str,
+    trusted_proxy_peers: &[TrustedProxyPeer],
+) -> Option<IpAddr> {
+    let hops = value
+        .split(',')
+        .map(str::trim)
+        .map(|hop| (!hop.is_empty()).then_some(hop))
+        .collect::<Option<Vec<_>>>()?;
+    if hops.is_empty() {
+        return None;
+    }
+
+    let hops =
+        hops.into_iter().map(|hop| hop.parse::<IpAddr>().ok()).collect::<Option<Vec<_>>>()?;
+
+    for hop in hops.into_iter().rev() {
+        if peer_is_trusted_proxy(hop, trusted_proxy_peers) {
+            continue;
+        }
+        return Some(hop);
+    }
+
+    None
 }
 
 fn parse_trusted_proxy_peer(
@@ -3006,16 +3029,46 @@ mod tests {
     }
 
     #[test]
-    fn extract_external_ip_trusts_forwarded_headers_from_allowed_proxy_ip() {
+    fn extract_external_ip_uses_rightmost_untrusted_forwarded_hop() {
         let peer = SocketAddr::from(([203, 0, 113, 10], 443));
         let trusted_proxy_peers = vec![TrustedProxyPeer::Address(peer.ip())];
         let request = Request::builder()
-            .header("X-Forwarded-For", "10.0.0.77, 10.0.0.88")
+            .header("X-Forwarded-For", "10.0.0.66, 10.0.0.77")
             .body(Body::empty())
             .expect("request should build");
 
         let external_ip = extract_external_ip(true, &trusted_proxy_peers, peer, &request);
         assert_eq!(external_ip, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 77)));
+    }
+
+    #[test]
+    fn extract_external_ip_skips_trusted_proxy_chain_when_parsing_forwarded_hops() {
+        let peer = SocketAddr::from(([203, 0, 113, 10], 443));
+        let trusted_proxy_peers = vec![
+            TrustedProxyPeer::Address(peer.ip()),
+            TrustedProxyPeer::Address(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 20))),
+        ];
+        let request = Request::builder()
+            .header("X-Forwarded-For", "198.51.100.24, 203.0.113.20")
+            .body(Body::empty())
+            .expect("request should build");
+
+        let external_ip = extract_external_ip(true, &trusted_proxy_peers, peer, &request);
+        assert_eq!(external_ip, IpAddr::V4(Ipv4Addr::new(198, 51, 100, 24)));
+    }
+
+    #[test]
+    fn extract_external_ip_ignores_invalid_forwarded_for_and_falls_back_to_x_real_ip() {
+        let peer = SocketAddr::from(([203, 0, 113, 10], 443));
+        let trusted_proxy_peers = vec![TrustedProxyPeer::Address(peer.ip())];
+        let request = Request::builder()
+            .header("X-Forwarded-For", "not-an-ip, 10.0.0.77")
+            .header("X-Real-IP", "192.0.2.44")
+            .body(Body::empty())
+            .expect("request should build");
+
+        let external_ip = extract_external_ip(true, &trusted_proxy_peers, peer, &request);
+        assert_eq!(external_ip, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 44)));
     }
 
     #[test]
@@ -3553,7 +3606,7 @@ mod tests {
 
         let response = Client::new()
             .post(format!("http://127.0.0.1:{port}/"))
-            .header("X-Forwarded-For", "198.51.100.24, 127.0.0.1")
+            .header("X-Forwarded-For", "203.0.113.200, 198.51.100.24")
             .body(valid_demon_init_body(
                 0x3333_4444,
                 [0x41; AGENT_KEY_LENGTH],

@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 119 | 31 |
-| Bugs filed against | 0 | 17 | 9 |
-| Bug rate (bugs/task) | N/A | 0.14 | 0.29 |
-| Quality score | N/A | 86% | 71% |
+| Tasks closed | 0 | 122 | 31 |
+| Bugs filed against | 0 | 18 | 9 |
+| Bug rate (bugs/task) | N/A | 0.15 | 0.29 |
+| Quality score | N/A | 85% | 71% |
 
 ## Violation Breakdown
 
@@ -24,7 +24,7 @@ Each loop run updates the running totals and appends a review entry.
 | Protocol errors | 1 | 14 | 3 |
 | Security issues | 0 | 18 | 0 |
 | Architecture drift | 0 | 13 | 0 |
-| Memory / resource leaks | 0 | 7 | 1 |
+| Memory / resource leaks | 0 | 8 | 1 |
 | Startup / lifecycle regressions | 0 | 8 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
 | Availability / timeout regressions | 0 | 4 | 0 |
@@ -833,3 +833,14 @@ Notes: Reviewed ten commits from `bec4421` to `3df9f52` (excluding QA checkpoint
 
 Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`, `cargo test --workspace` — all tests pass this run, Argon2 slowdown from `red-cell-c2-2jf8` did not cause timeout in this run)
 Notes: Reviewed eight commits from `073c2ca` to `2f10bd8` (three Codex fix commits, three Codex close/claim bookkeeping commits, two prior QA/test-review bookkeeping commits). The three fixes address real protocol bugs: (1) `983789a` — COMMAND_CHECKIN now parses the full Havoc metadata packet (keys, hostname, process info, OS version, sleep config) and updates the agent registry + resets CTR offset; comprehensive round-trip test added. One new P3 bug filed: `parse_checkin_metadata` inherits the same `i32::try_from(working_hours).unwrap_or(i32::MAX)` silent-saturation pattern already flagged for DEMON_INIT in `red-cell-c2-2x0k`. (2) `f1567c4` — pivot callback dispatch now concatenates all child package responses instead of keeping only the last; covered by new unit test. (3) `a27e7db` — DNS listener `start()` now gates at the API level and sets `Error` status (instead of silently starting and breaking); two new tests validate this. The DNS close commit (`4d19bec`) correctly acknowledges the fix is partial — DNS remains blocked in the payload builder and manager create/update paths. `red-cell-c2-3ath` (restore_running hiding failed restarts) remains open; the DNS-specific restore_running path is now fixed but the general issue persists.
+
+### QA Review — 2026-03-12 13:00 — 2f10bd8..2aa2a07
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | Test-review scan bookkeeping only (scan index advanced to 20) |
+| Codex | 3 | 1 | Closed `red-cell-c2-3ilv` (download tracker inactivity), `red-cell-c2-3ath` (restore_running hides failed restarts), `red-cell-c2-15rj` (DNS listener management flows); filed `red-cell-c2-pbmw` (DownloadTracker memory leak on agent death). |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (`cargo check`, `cargo clippy -- -D warnings`, `cargo test` — 365+19+17+... tests ok, 32.6s)
+Notes: Reviewed eleven commits from `2f10bd8` to `2aa2a07`. Three substantive Codex fix commits: (1) `be34e67` — removes stale-timeout pruning from DownloadTracker; transfers now persist until explicitly closed via finish(). Correct fix for the inactivity bug, but removes the only cleanup path for agent-disconnected transfers — filed `red-cell-c2-pbmw`. (2) `6bfd855` — restore_running() now propagates StartFailed errors except for External listeners; surfaces real bind failures that were previously swallowed. Correct. (3) `1746585` — DNS listeners are now fully unblocked at create/update/start level; External listeners are moved to a profile-validation-time block (rejected before they can be created). Code is clean, tests updated and comprehensive. DNS runtime was already implemented; this just removes the gating layer. No lingering `unwrap()` or `todo!()` introduced.

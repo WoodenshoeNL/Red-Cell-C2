@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 101 | 31 |
+| Tasks closed | 0 | 104 | 31 |
 | Bugs filed against | 0 | 10 | 9 |
 | Bug rate (bugs/task) | N/A | 0.10 | 0.29 |
 | Quality score | N/A | 90% | 71% |
@@ -711,3 +711,14 @@ Notes: Reviewed one commit from `50e48a4` to `6872094`. The diff only advanced `
 
 Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`, and `cargo test --workspace`)
 Notes: Reviewed three commits from `6872094` to `1d882d3`. The committed diff only touched `.beads/qa_checkpoint`, `.beads/issues.jsonl`, and `AGENT_SCORECARD.md`; no Rust, TOML, or protocol code changed in the reviewed range, so no new QA bugs were filed. `br list --status=in_progress` and `br ready` succeeded; `br list --status=open` initially returned `database is busy` but succeeded on retry, so beads-state review was completed after transient lock contention cleared.
+
+### QA Review — 2026-03-12 05:50 — 1d882d3..051ed51
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No activity this run |
+| Codex | 3 | 0 | Closed `red-cell-c2-3rqy`, `red-cell-c2-1auz`, and `red-cell-c2-89o`. One additional claim commit (`red-cell-c2-1cb1`) remains in progress and is not closed prematurely. |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (`cargo check --workspace` and `cargo clippy --workspace -- -D warnings` against committed `HEAD` in `/tmp/red-cell-qa-8ZKUEB`); `cargo test --workspace` is still compiling in that clean worktree as of this review log entry
+Notes: Reviewed ten commits from `1d882d3` to `051ed51`, including three Codex feature/fix commits and three Codex task-close commits. No committed build, protocol, security, or architecture regressions were identified in the reviewed Rust/TOML/Markdown diff. Beads state is consistent: `red-cell-c2-1cb1` is the only active in-progress item and remains open, while `br ready` shows it correctly as ready work for follow-up.

@@ -280,7 +280,8 @@ fn parse_init_agent(
     let sleep_delay = read_u32_be(&decrypted, &mut decrypted_offset, "sleep delay")?;
     let sleep_jitter = read_u32_be(&decrypted, &mut decrypted_offset, "sleep jitter")?;
     let kill_date = read_u64_be(&decrypted, &mut decrypted_offset, "kill date")?;
-    let working_hours = read_u32_be(&decrypted, &mut decrypted_offset, "working hours")?;
+    let working_hours =
+        i32::from_be_bytes(read_fixed::<4>(&decrypted, &mut decrypted_offset, "working hours")?);
     let timestamp =
         now.format(&Rfc3339).map_err(|_| DemonParserError::InvalidInit("invalid timestamp"))?;
 
@@ -316,8 +317,7 @@ fn parse_init_agent(
         sleep_delay,
         sleep_jitter,
         kill_date: (kill_date != 0).then_some(i64::try_from(kill_date).unwrap_or(i64::MAX)),
-        working_hours: (working_hours != 0)
-            .then_some(i32::try_from(working_hours).unwrap_or(i32::MAX)),
+        working_hours: (working_hours != 0).then_some(working_hours),
         first_call_in: timestamp.clone(),
         last_call_in: timestamp,
     })
@@ -527,6 +527,10 @@ mod tests {
     }
 
     fn build_init_metadata(agent_id: u32) -> Vec<u8> {
+        build_init_metadata_with_working_hours(agent_id, 0b101010)
+    }
+
+    fn build_init_metadata_with_working_hours(agent_id: u32, working_hours: i32) -> Vec<u8> {
         let mut metadata = Vec::new();
         metadata.extend_from_slice(&u32_be(agent_id));
         add_str(&mut metadata, "wkstn-01");
@@ -549,7 +553,7 @@ mod tests {
         metadata.extend_from_slice(&u32_be(15));
         metadata.extend_from_slice(&u32_be(20));
         metadata.extend_from_slice(&u64_be(1_893_456_000));
-        metadata.extend_from_slice(&u32_be(0b101010));
+        metadata.extend_from_slice(&working_hours.to_be_bytes());
         metadata
     }
 
@@ -558,7 +562,16 @@ mod tests {
         key: [u8; AGENT_KEY_LENGTH],
         iv: [u8; AGENT_IV_LENGTH],
     ) -> Vec<u8> {
-        let metadata = build_init_metadata(agent_id);
+        build_init_packet_with_working_hours(agent_id, key, iv, 0b101010)
+    }
+
+    fn build_init_packet_with_working_hours(
+        agent_id: u32,
+        key: [u8; AGENT_KEY_LENGTH],
+        iv: [u8; AGENT_IV_LENGTH],
+        working_hours: i32,
+    ) -> Vec<u8> {
+        let metadata = build_init_metadata_with_working_hours(agent_id, working_hours);
         let encrypted =
             encrypt_agent_data(&key, &iv, &metadata).expect("metadata encryption should succeed");
         let mut payload = Vec::new();
@@ -640,6 +653,27 @@ mod tests {
         assert_eq!(registry.get(0x1234_5678).await, Some(init.agent));
 
         assert_eq!(registry.ctr_offset(0x1234_5678).await.expect("offset should be set"), 0);
+    }
+
+    #[tokio::test]
+    async fn parse_preserves_signed_working_hours_bitmask_from_demon_init() {
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry);
+        let key = [0x41; AGENT_KEY_LENGTH];
+        let iv = [0x24; AGENT_IV_LENGTH];
+        let working_hours = i32::MIN | 0x2A;
+        let packet = build_init_packet_with_working_hours(0x1234_5678, key, iv, working_hours);
+
+        let parsed = parser
+            .parse_at(&packet, "203.0.113.10".to_owned(), datetime!(2026-03-09 19:30:00 UTC))
+            .await
+            .expect("init packet should parse");
+
+        let ParsedDemonPacket::Init(init) = parsed else {
+            panic!("expected init packet");
+        };
+
+        assert_eq!(init.agent.working_hours, Some(working_hours));
     }
 
     #[tokio::test]

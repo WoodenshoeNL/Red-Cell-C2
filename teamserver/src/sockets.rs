@@ -855,6 +855,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn add_socks_server_rejects_invalid_port() -> Result<(), SocketRelayError> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        registry.insert(sample_agent(0xDEAD_BEEF)).await?;
+        let manager = SocketRelayManager::new(registry, EventBus::default());
+
+        let invalid_text = manager.add_socks_server(0xDEAD_BEEF, "not-a-port").await;
+        assert!(matches!(
+            invalid_text,
+            Err(SocketRelayError::InvalidPort { port }) if port == "not-a-port"
+        ));
+
+        let out_of_range = manager.add_socks_server(0xDEAD_BEEF, "99999").await;
+        assert!(matches!(
+            out_of_range,
+            Err(SocketRelayError::InvalidPort { port }) if port == "99999"
+        ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn add_socks_server_rejects_duplicate_server_registration() -> Result<(), SocketRelayError>
+    {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        registry.insert(sample_agent(0xDEAD_BEEF)).await?;
+        let manager = SocketRelayManager::new(registry, EventBus::default());
+
+        let duplicate_port = 0;
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            std::future::pending::<()>().await;
+        });
+        {
+            let mut state = manager.state.write().await;
+            let agent_state = state.entry(0xDEAD_BEEF).or_default();
+            agent_state.servers.insert(
+                duplicate_port,
+                SocksServerHandle {
+                    local_addr: "127.0.0.1:0".to_owned(),
+                    shutdown: Some(shutdown_tx),
+                    task,
+                },
+            );
+        }
+
+        let duplicate = manager.add_socks_server(0xDEAD_BEEF, &duplicate_port.to_string()).await;
+        assert!(matches!(
+            duplicate,
+            Err(SocketRelayError::DuplicateServer { agent_id, port })
+                if agent_id == 0xDEAD_BEEF && port == duplicate_port
+        ));
+
+        manager.clear_socks_servers(0xDEAD_BEEF).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn remove_agent_clears_tracked_socket_state() -> Result<(), SocketRelayError> {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());

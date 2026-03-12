@@ -776,14 +776,34 @@ async fn handle_checkin(
     let timestamp = OffsetDateTime::now_utc().format(&Rfc3339)?;
     let existing =
         registry.get(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
-    let agent =
-        if let Some(updated) = parse_checkin_metadata(existing, agent_id, payload, &timestamp)? {
-            registry.update_agent(updated).await?;
+    let agent = if let Some(mut updated) =
+        parse_checkin_metadata(existing.clone(), agent_id, payload, &timestamp)?
+    {
+        let key_rotation = updated.encryption != existing.encryption;
+        let pivot_parent = registry.parent_of(agent_id).await;
+
+        if key_rotation && pivot_parent.is_some() {
+            warn!(
+                agent_id = format_args!("{agent_id:08X}"),
+                pivot_parent = pivot_parent.map(|parent| format!("{parent:08X}")),
+                "refused AES session key rotation from pivot-relayed checkin payload"
+            );
+            updated.encryption = existing.encryption.clone();
+        } else if key_rotation {
+            warn!(
+                agent_id = format_args!("{agent_id:08X}"),
+                "accepting AES session key rotation from checkin payload without freshness guarantee"
+            );
+        }
+
+        registry.update_agent(updated).await?;
+        if key_rotation && pivot_parent.is_none() {
             registry.set_ctr_offset(agent_id, 0).await?;
-            registry.get(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?
-        } else {
-            registry.set_last_call_in(agent_id, timestamp).await?
-        };
+        }
+        registry.get(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?
+    } else {
+        registry.set_last_call_in(agent_id, timestamp).await?
+    };
     events.broadcast(agent_mark_event(&agent));
     if let Some(plugins) = plugins
         && let Err(error) = plugins.emit_agent_checkin(agent_id).await
@@ -5642,6 +5662,65 @@ mod tests {
             .await?
             .ok_or_else(|| "agent should be persisted after checkin".to_owned())?;
         assert_eq!(persisted.working_hours, updated.working_hours);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_checkin_handler_refuses_transport_rotation_for_pivoted_agents()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database.clone(),
+            sockets,
+            None,
+        );
+        let parent_id = 0x4546_4748;
+        let parent_key = [0x21; AGENT_KEY_LENGTH];
+        let parent_iv = [0x31; AGENT_IV_LENGTH];
+        let agent_id = 0x5152_5354;
+        let key = [0x77; AGENT_KEY_LENGTH];
+        let iv = [0x44; AGENT_IV_LENGTH];
+        let rotated_key = [0x12; AGENT_KEY_LENGTH];
+        let rotated_iv = [0x34; AGENT_IV_LENGTH];
+
+        registry.insert(sample_agent_info(parent_id, parent_key, parent_iv)).await?;
+        registry.insert_with_listener(sample_agent_info(agent_id, key, iv), "smb").await?;
+        registry.add_link(parent_id, agent_id).await?;
+        registry.set_ctr_offset(agent_id, 7).await?;
+
+        let response = dispatcher
+            .dispatch(
+                agent_id,
+                u32::from(DemonCommand::CommandCheckin),
+                7,
+                &sample_checkin_metadata_payload(agent_id, rotated_key, rotated_iv),
+            )
+            .await?;
+
+        assert_eq!(response, None);
+
+        let updated = registry
+            .get(agent_id)
+            .await
+            .ok_or_else(|| "pivoted agent should exist after checkin".to_owned())?;
+        assert_eq!(updated.hostname, "wkstn-02");
+        assert_eq!(updated.encryption.aes_key, BASE64_STANDARD.encode(key));
+        assert_eq!(updated.encryption.aes_iv, BASE64_STANDARD.encode(iv));
+        assert_eq!(registry.ctr_offset(agent_id).await?, 7);
+
+        let persisted = database
+            .agents()
+            .get(agent_id)
+            .await?
+            .ok_or_else(|| "pivoted agent should remain persisted after checkin".to_owned())?;
+        assert_eq!(persisted.encryption.aes_key, BASE64_STANDARD.encode(key));
+        assert_eq!(persisted.encryption.aes_iv, BASE64_STANDARD.encode(iv));
 
         Ok(())
     }

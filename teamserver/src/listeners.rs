@@ -640,7 +640,8 @@ impl ListenerManager {
         for listener in listeners {
             if listener.state.status == ListenerStatus::Running {
                 match self.start(&listener.name).await {
-                    Ok(_) | Err(ListenerManagerError::StartFailed { .. }) => {}
+                    Ok(_) => {}
+                    Err(error) if is_ignored_restore_start_failure(&listener.config, &error) => {}
                     Err(error) => return Err(error),
                 }
             }
@@ -1667,6 +1668,13 @@ fn ensure_listener_creation_supported(config: &ListenerConfig) -> Result<(), Lis
     }
 
     Ok(())
+}
+
+fn is_ignored_restore_start_failure(config: &ListenerConfig, error: &ListenerManagerError) -> bool {
+    matches!(
+        (config, error),
+        (ListenerConfig::External(_), ListenerManagerError::StartFailed { .. })
+    )
 }
 
 fn dns_listener_payload_generation_unavailable_message(name: &str) -> String {
@@ -3351,16 +3359,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restore_running_marks_dns_listener_as_error() -> Result<(), ListenerManagerError> {
+    async fn restore_running_propagates_dns_start_failure() -> Result<(), ListenerManagerError> {
         let manager = manager().await?;
         let repository = manager.repository();
         let port = free_udp_port();
         repository.create(&dns_listener_config("dns-runtime", port, "c2.example.com")).await?;
         repository.set_state("dns-runtime", ListenerStatus::Running, None).await?;
 
-        manager.restore_running().await?;
+        let error =
+            manager.restore_running().await.expect_err("dns restart failure should abort restore");
         let summary = manager.summary("dns-runtime").await?;
 
+        assert!(matches!(error, ListenerManagerError::StartFailed { .. }));
         assert!(
             summary.state.last_error.as_deref().is_some_and(|message| {
                 message.contains("Demon payload generation does not support DNS transport")

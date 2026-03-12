@@ -845,6 +845,74 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn startup_fails_when_restored_http_listener_cannot_bind() {
+        let occupied_listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("ephemeral port should bind");
+        let port = occupied_listener
+            .local_addr()
+            .expect("occupied listener should have local address")
+            .port();
+        let profile = Profile::parse(&format!(
+            r#"
+            Teamserver {{
+              Host = "127.0.0.1"
+              Port = 40056
+            }}
+
+            Operators {{
+              user "operator" {{
+                Password = "password1234"
+              }}
+            }}
+
+            Listeners {{
+              Http = [{{
+                Name = "http"
+                Hosts = ["127.0.0.1"]
+                HostBind = "127.0.0.1"
+                HostRotation = "round-robin"
+                PortBind = {port}
+                Secure = false
+              }}]
+            }}
+
+            Demon {{}}
+            "#
+        ))
+        .expect("profile should parse");
+
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let listeners = ListenerManager::new(database, registry, events, sockets, None);
+
+        listeners.sync_profile(&profile).await.expect("profile listeners should sync");
+        listeners
+            .repository()
+            .set_state("http", ListenerStatus::Running, None)
+            .await
+            .expect("http state should update");
+
+        let error = listeners
+            .restore_running()
+            .await
+            .expect_err("startup should fail when a restored http listener cannot bind");
+
+        assert!(matches!(error, ListenerManagerError::StartFailed { .. }));
+        let http = listeners.summary("http").await.expect("http listener should exist");
+        assert_eq!(http.state.status, ListenerStatus::Error);
+        assert!(
+            http.state.last_error.as_deref().is_some_and(|message| {
+                message.contains("failed to bind")
+                    && message.to_lowercase().contains("already in use")
+            }),
+            "expected bind error, got {:?}",
+            http.state.last_error
+        );
+    }
+
     fn available_port() -> std::io::Result<u16> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         Ok(listener.local_addr()?.port())

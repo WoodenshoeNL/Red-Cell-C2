@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 3 | 127 | 31 |
+| Tasks closed | 5 | 132 | 31 |
 | Bugs filed against | 0 | 19 | 9 |
 | Bug rate (bugs/task) | 0.00 | 0.15 | 0.29 |
 | Quality score | 100% | 85% | 71% |
@@ -34,6 +34,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-12 14:13 — ff94f05..508eef5
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed red-cell-c2-1e81 (BufferTooShort edge-case tests), red-cell-c2-16vk (crypto uniqueness/CTR overflow tests) |
+| Codex | 5 | 0 | Closed red-cell-c2-3bxx (local config fallbacks), red-cell-c2-2lf7 (working_hours bitmask fix), red-cell-c2-16sh (unknown agent REST 404s), red-cell-c2-pwc3 (single-item credential/loot endpoints), red-cell-c2-27pb (create_operator validation error paths). QA also closed red-cell-c2-16io (same fix as 2lf7, not closed by Codex). |
+| Cursor | 0 | 0 | — |
+
+Build: passed (100 tests, 0 failures, 0 clippy warnings)
 
 ### QA Review — 2026-03-12 — f39a3a..156b8e1
 

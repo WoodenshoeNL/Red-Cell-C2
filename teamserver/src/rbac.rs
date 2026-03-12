@@ -580,6 +580,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authenticated_operator_extractor_rejects_empty_bearer_tokens() {
+        let auth = AuthService::from_profile(&profile()).expect("auth service should initialize");
+        let request = Request::builder()
+            .header(AUTHORIZATION, "Bearer ")
+            .body(())
+            .expect("request should build");
+        let (mut parts, _) = request.into_parts();
+
+        let error = AuthenticatedOperator::from_request_parts(&mut parts, &TestState { auth })
+            .await
+            .expect_err("empty bearer tokens should be rejected");
+
+        assert_eq!(error, AuthorizationError::InvalidAuthorizationHeader);
+    }
+
+    #[tokio::test]
+    async fn authenticated_operator_extractor_rejects_non_utf8_authorization_headers() {
+        let auth = AuthService::from_profile(&profile()).expect("auth service should initialize");
+        let request = Request::builder()
+            .header(AUTHORIZATION, HeaderValue::from_bytes(b"Bearer \xFF").expect("header value"))
+            .body(())
+            .expect("request should build");
+        let (mut parts, _) = request.into_parts();
+
+        let error = AuthenticatedOperator::from_request_parts(&mut parts, &TestState { auth })
+            .await
+            .expect_err("non-utf8 authorization headers should be rejected");
+
+        assert_eq!(error, AuthorizationError::InvalidAuthorizationHeader);
+    }
+
+    #[tokio::test]
+    async fn authenticated_operator_extractor_prefers_authorization_header_over_session_token() {
+        let auth = AuthService::from_profile(&profile()).expect("auth service should initialize");
+
+        let operator_connection_id = Uuid::new_v4();
+        let operator_result = auth
+            .authenticate_login(
+                operator_connection_id,
+                &red_cell_common::operator::LoginInfo {
+                    user: "operator".to_owned(),
+                    password: hash_password_sha3("operatorpw"),
+                },
+            )
+            .await;
+        assert!(matches!(operator_result, crate::auth::AuthenticationResult::Success(_)));
+
+        let admin_connection_id = Uuid::new_v4();
+        let admin_result = auth
+            .authenticate_login(
+                admin_connection_id,
+                &red_cell_common::operator::LoginInfo {
+                    user: "admin".to_owned(),
+                    password: hash_password_sha3("adminpw"),
+                },
+            )
+            .await;
+        assert!(matches!(admin_result, crate::auth::AuthenticationResult::Success(_)));
+
+        let operator_session = auth
+            .session_for_connection(operator_connection_id)
+            .await
+            .expect("operator session should exist");
+        let admin_session = auth
+            .session_for_connection(admin_connection_id)
+            .await
+            .expect("admin session should exist");
+
+        let request = Request::builder()
+            .header(AUTHORIZATION, format!("Bearer {}", operator_session.token))
+            .header("x-session-token", admin_session.token.as_str())
+            .body(())
+            .expect("request should build");
+        let (mut parts, _) = request.into_parts();
+
+        let extracted = AuthenticatedOperator::from_request_parts(&mut parts, &TestState { auth })
+            .await
+            .expect("authorization header should take precedence");
+
+        assert_eq!(extracted.username, "operator");
+        assert_eq!(extracted.role, OperatorRole::Operator);
+    }
+
+    #[tokio::test]
+    async fn authenticated_operator_extractor_requires_a_session_token_header() {
+        let auth = AuthService::from_profile(&profile()).expect("auth service should initialize");
+        let request = Request::builder().body(()).expect("request should build");
+        let (mut parts, _) = request.into_parts();
+
+        let error = AuthenticatedOperator::from_request_parts(&mut parts, &TestState { auth })
+            .await
+            .expect_err("requests without a session token should be rejected");
+
+        assert_eq!(error, AuthorizationError::MissingSessionToken);
+    }
+
+    #[tokio::test]
     async fn permission_extractors_reject_insufficient_roles() {
         let auth = AuthService::from_profile(&profile()).expect("auth service should initialize");
         let connection_id = Uuid::new_v4();

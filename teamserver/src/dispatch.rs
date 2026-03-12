@@ -702,6 +702,14 @@ impl CommandDispatcher {
         agent_id: u32,
         packages: &[DemonCallbackPackage],
     ) -> Result<Vec<u8>, CommandDispatchError> {
+        self.collect_response_bytes(agent_id, packages).await
+    }
+
+    async fn collect_response_bytes(
+        &self,
+        agent_id: u32,
+        packages: &[DemonCallbackPackage],
+    ) -> Result<Vec<u8>, CommandDispatchError> {
         let mut response = Vec::new();
 
         for package in packages {
@@ -1111,18 +1119,8 @@ async fn dispatch_builtin_packages(
         },
         false,
     );
-    let mut response = None;
-
-    for package in packages {
-        let next = dispatcher
-            .dispatch(agent_id, package.command_id, package.request_id, &package.payload)
-            .await?;
-        if next.is_some() {
-            response = next;
-        }
-    }
-
-    Ok(response)
+    let response = dispatcher.collect_response_bytes(agent_id, packages).await?;
+    Ok((!response.is_empty()).then_some(response))
 }
 
 fn inner_demon_agent_id(bytes: &[u8]) -> Result<u32, DemonProtocolError> {
@@ -5225,6 +5223,29 @@ mod tests {
         ];
 
         assert_eq!(dispatcher.dispatch_packages(0x1234_5678, &packages).await?, vec![1, 2, 3, 4]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn collect_response_bytes_concatenates_all_child_package_responses()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut dispatcher = CommandDispatcher::new();
+        dispatcher.register_handler(0x1111, |_, _, _| {
+            Box::pin(async move { Ok(Some(vec![0xAA, 0xBB])) })
+        });
+        dispatcher.register_handler(0x2222, |_, _, _| {
+            Box::pin(async move { Ok(Some(vec![0xCC, 0xDD])) })
+        });
+
+        let child_packages = vec![
+            crate::DemonCallbackPackage { command_id: 0x1111, request_id: 17, payload: Vec::new() },
+            crate::DemonCallbackPackage { command_id: 0x2222, request_id: 18, payload: Vec::new() },
+        ];
+
+        assert_eq!(
+            dispatcher.collect_response_bytes(0x8765_4321, &child_packages).await?,
+            vec![0xAA, 0xBB, 0xCC, 0xDD]
+        );
         Ok(())
     }
 

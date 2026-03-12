@@ -185,14 +185,11 @@ impl Profile {
         }
 
         for listener in &self.listeners.external {
-            if listener.name.trim().is_empty() {
-                errors.push("Listeners.External.Name must not be empty".to_owned());
-            }
-
-            if listener.endpoint.trim().is_empty() {
-                errors
-                    .push(format!("Listeners.External \"{}\" must define Endpoint", listener.name));
-            }
+            let name =
+                if listener.name.trim().is_empty() { "<unnamed>" } else { listener.name.trim() };
+            errors.push(format!(
+                "Listeners.External \"{name}\" is not supported yet; remove External listeners from the profile"
+            ));
         }
 
         for listener in &self.listeners.dns {
@@ -1338,6 +1335,39 @@ mod tests {
 
         let error = profile.validate().expect_err("profile should be invalid");
         assert!(error.errors.iter().any(|message| message.contains("TrustedProxyPeers")));
+    }
+
+    #[test]
+    fn rejects_external_listener_profiles_until_transport_exists() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Listeners {
+              External {
+                Name = "bridge"
+                Endpoint = "svc"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("profile should be invalid");
+        assert!(error.errors.iter().any(|message| {
+            message.contains("Listeners.External") && message.contains("not supported yet")
+        }));
     }
 
     #[test]

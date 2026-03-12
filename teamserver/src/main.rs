@@ -11,7 +11,6 @@ use red_cell::{
     LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService, PluginRuntime,
     SocketRelayManager, TeamserverState, build_router, spawn_agent_liveness_monitor,
 };
-use red_cell_common::ListenerConfig;
 use red_cell_common::config::{Profile, ProfileValidationError};
 use red_cell_common::tls::{
     TlsKeyAlgorithm, install_default_crypto_provider, resolve_tls_identity,
@@ -266,8 +265,6 @@ async fn start_new_profile_listeners(
     for listener in new_profile_listeners {
         match listeners.start(listener.name.as_str()).await {
             Ok(_) | Err(ListenerManagerError::ListenerAlreadyRunning { .. }) => {}
-            Err(ListenerManagerError::StartFailed { .. })
-                if matches!(listener.config, ListenerConfig::External(_)) => {}
             Err(error) => return Err(error),
         }
     }
@@ -279,7 +276,6 @@ fn profile_listener_names(profile: &Profile) -> Vec<String> {
     let mut names = Vec::new();
     names.extend(profile.listeners.http.iter().map(|listener| listener.name.clone()));
     names.extend(profile.listeners.smb.iter().map(|listener| listener.name.clone()));
-    names.extend(profile.listeners.external.iter().map(|listener| listener.name.clone()));
     names.extend(profile.listeners.dns.iter().map(|listener| listener.name.clone()));
     names
 }
@@ -382,6 +378,43 @@ mod tests {
 
         assert!(message.contains("profile validation failed"));
         assert!(message.contains("Teamserver.Host"));
+    }
+
+    #[test]
+    fn load_profile_rejects_external_listener_configuration() {
+        let temp_file = NamedTempFile::new().expect("temporary file should be created");
+        std::fs::write(
+            temp_file.path(),
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "Neo" {
+                Password = "password1234"
+              }
+            }
+
+            Listeners {
+              External {
+                Name = "bridge"
+                Endpoint = "svc"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should be written");
+
+        let error = load_profile(&temp_file.path().to_path_buf()).expect_err("load should fail");
+        let message = error.to_string();
+
+        assert!(message.contains("profile validation failed"));
+        assert!(message.contains("Listeners.External"));
+        assert!(message.contains("not supported yet"));
     }
 
     #[tokio::test]
@@ -502,10 +535,6 @@ mod tests {
                 Name = "smb"
                 PipeName = "foo"
               }]
-              External = [{
-                Name = "ext"
-                Endpoint = "svc"
-              }]
               Dns = [{
                 Name = "dns"
                 HostBind = "127.0.0.1"
@@ -520,7 +549,7 @@ mod tests {
         )
         .expect("profile should parse");
 
-        assert_eq!(profile_listener_names(&profile), vec!["http", "smb", "ext", "dns"]);
+        assert_eq!(profile_listener_names(&profile), vec!["http", "smb", "dns"]);
     }
 
     #[tokio::test]
@@ -659,7 +688,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_restores_supported_listeners_when_external_restore_fails() {
+    async fn startup_restores_supported_listeners_without_external_special_cases() {
         let port = available_port().expect("ephemeral port should be available");
         let profile = Profile::parse(&format!(
             r#"
@@ -682,10 +711,6 @@ mod tests {
                 HostRotation = "round-robin"
                 PortBind = {port}
                 Secure = false
-              }}]
-              External = [{{
-                Name = "external"
-                Endpoint = "svc"
               }}]
             }}
 
@@ -706,61 +731,42 @@ mod tests {
             .set_state("http", ListenerStatus::Running, None)
             .await
             .expect("http state should update");
-        listeners
-            .repository()
-            .set_state("external", ListenerStatus::Running, None)
-            .await
-            .expect("external state should update");
 
         listeners.restore_running().await.expect("restore should continue");
         start_new_profile_listeners(&listeners, &profile)
             .await
-            .expect("startup should continue after external restore failure");
+            .expect("startup should continue for supported listeners");
 
         let http = listeners.summary("http").await.expect("http listener should exist");
-        let external = listeners.summary("external").await.expect("external listener should exist");
 
         assert_eq!(http.state.status, ListenerStatus::Running);
-        assert_eq!(external.state.status, ListenerStatus::Error);
-        assert!(external.state.last_error.as_deref().is_some_and(|message| {
-            message.contains("not implemented") && message.contains("svc")
-        }));
     }
 
     #[tokio::test]
-    async fn startup_marks_new_external_profile_listener_as_error_and_continues() {
-        let port = available_port().expect("ephemeral port should be available");
-        let profile = Profile::parse(&format!(
+    async fn sync_profile_rejects_external_listener_profiles() {
+        let profile = Profile::parse(
             r#"
-            Teamserver {{
+            Teamserver {
               Host = "127.0.0.1"
               Port = 40056
-            }}
+            }
 
-            Operators {{
-              user "operator" {{
+            Operators {
+              user "operator" {
                 Password = "password1234"
-              }}
-            }}
+              }
+            }
 
-            Listeners {{
-              Http = [{{
-                Name = "http"
-                Hosts = ["127.0.0.1"]
-                HostBind = "127.0.0.1"
-                HostRotation = "round-robin"
-                PortBind = {port}
-                Secure = false
-              }}]
-              External = [{{
+            Listeners {
+              External = [{
                 Name = "external"
                 Endpoint = "svc"
-              }}]
-            }}
+              }]
+            }
 
-            Demon {{}}
-            "#
-        ))
+            Demon {}
+            "#,
+        )
         .expect("profile should parse");
 
         let database = Database::connect_in_memory().await.expect("database should initialize");
@@ -769,19 +775,13 @@ mod tests {
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
         let listeners = ListenerManager::new(database, registry, events, sockets, None);
 
-        listeners.sync_profile(&profile).await.expect("profile listeners should sync");
-        start_new_profile_listeners(&listeners, &profile)
+        let error = listeners
+            .sync_profile(&profile)
             .await
-            .expect("startup should continue when external listeners fail to start");
+            .expect_err("external listeners should be rejected");
 
-        let http = listeners.summary("http").await.expect("http listener should exist");
-        let external = listeners.summary("external").await.expect("external listener should exist");
-
-        assert_eq!(http.state.status, ListenerStatus::Running);
-        assert_eq!(external.state.status, ListenerStatus::Error);
-        assert!(external.state.last_error.as_deref().is_some_and(|message| {
-            message.contains("not implemented") && message.contains("svc")
-        }));
+        assert!(matches!(error, ListenerManagerError::InvalidConfig { .. }));
+        assert!(error.to_string().contains("not supported yet"));
     }
 
     #[tokio::test]

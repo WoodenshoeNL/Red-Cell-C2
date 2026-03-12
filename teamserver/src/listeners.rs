@@ -1652,10 +1652,18 @@ impl ListenerManager {
 }
 
 fn ensure_listener_creation_supported(config: &ListenerConfig) -> Result<(), ListenerManagerError> {
-    if let ListenerConfig::Dns(config) = config {
-        return Err(ListenerManagerError::InvalidConfig {
-            message: dns_listener_payload_generation_unavailable_message(&config.name),
-        });
+    match config {
+        ListenerConfig::Dns(config) => {
+            return Err(ListenerManagerError::InvalidConfig {
+                message: dns_listener_payload_generation_unavailable_message(&config.name),
+            });
+        }
+        ListenerConfig::External(config) => {
+            return Err(ListenerManagerError::InvalidConfig {
+                message: external_listener_unsupported_message(&config.name),
+            });
+        }
+        ListenerConfig::Http(_) | ListenerConfig::Smb(_) => {}
     }
 
     Ok(())
@@ -1669,10 +1677,17 @@ fn unsupported_external_listener_error(config: &ExternalListenerConfig) -> Liste
     ListenerManagerError::StartFailed {
         name: config.name.clone(),
         message: format!(
-            "external/service bridge listener `{}` is not implemented; endpoint `{}` cannot be started",
-            config.name, config.endpoint
+            "{}; endpoint `{}` cannot be started",
+            external_listener_unsupported_message(&config.name),
+            config.endpoint
         ),
     }
+}
+
+fn external_listener_unsupported_message(name: &str) -> String {
+    format!(
+        "external/service bridge listener `{name}` is not supported yet; remove it from the active Red Cell listener surface"
+    )
 }
 
 // ── DNS C2 Listener ──────────────────────────────────────────────────────────
@@ -3273,20 +3288,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn external_listener_start_returns_error_and_does_not_register_runtime()
+    async fn create_rejects_external_listener_until_runtime_support_exists()
     -> Result<(), ListenerManagerError> {
         let manager = manager().await?;
-        manager.create(external_listener("external", "svc")).await?;
+        let error = manager
+            .create(external_listener("external", "svc"))
+            .await
+            .expect_err("external listener should be rejected");
 
-        let error = manager.start("external").await.expect_err("external listener should fail");
-        let summary = manager.summary("external").await?;
-
-        assert!(matches!(error, ListenerManagerError::StartFailed { .. }));
-        assert_eq!(summary.state.status, ListenerStatus::Error);
-        assert!(summary.state.last_error.as_deref().is_some_and(|message| {
-            message.contains("not implemented") && message.contains("svc")
-        }));
-        assert!(!manager.active_handles.read().await.contains_key("external"));
+        assert!(matches!(error, ListenerManagerError::InvalidConfig { .. }));
+        assert!(error.to_string().contains("not supported yet"), "unexpected error: {error}");
+        assert!(matches!(
+            manager.summary("external").await,
+            Err(ListenerManagerError::ListenerNotFound { .. })
+        ));
 
         Ok(())
     }
@@ -3372,7 +3387,7 @@ mod tests {
 
         assert_eq!(summary.state.status, ListenerStatus::Error);
         assert!(summary.state.last_error.as_deref().is_some_and(|message| {
-            message.contains("not implemented") && message.contains("svc")
+            message.contains("not supported yet") && message.contains("svc")
         }));
         assert!(!manager.active_handles.read().await.contains_key("external"));
 

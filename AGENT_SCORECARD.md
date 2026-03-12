@@ -9,8 +9,8 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 116 | 31 |
-| Bugs filed against | 0 | 16 | 9 |
+| Tasks closed | 0 | 119 | 31 |
+| Bugs filed against | 0 | 17 | 9 |
 | Bug rate (bugs/task) | N/A | 0.14 | 0.29 |
 | Quality score | N/A | 86% | 71% |
 
@@ -21,7 +21,7 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 0 | 0 | 0 |
 | Missing tests | 0 | 2 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
-| Protocol errors | 1 | 13 | 3 |
+| Protocol errors | 1 | 14 | 3 |
 | Security issues | 0 | 18 | 0 |
 | Architecture drift | 0 | 13 | 0 |
 | Memory / resource leaks | 0 | 7 | 1 |
@@ -822,3 +822,14 @@ Notes: Reviewed five commits from `df8b7a1` to `a3473fd`. One substantive implem
 
 Build: `cargo check --workspace` and `cargo clippy --workspace -- -D warnings` pass clean. `cargo test --workspace` times out (>120s) with the new Argon2 hashing in test setup — filed as `red-cell-c2-2jf8`. Individual module filters pass: `auth::` (18/18 ok, 23.8s), `api::` (50/50 ok, 7.9s with 4 threads), `agents::` (39/39 ok), `red-cell-common` (91/91 ok).
 Notes: Reviewed ten commits from `bec4421` to `3df9f52` (excluding QA checkpoint commit). Three substantive implementation commits by Codex: (1) `b74adf1` — operator login hardening: replaces bare SHA3 password digest storage with Argon2id(SHA3(password)) PHC string verifiers, adds constant-time dummy-user verification path, unifies `AuthenticationFailure` variants to `InvalidCredentials` to prevent username enumeration, adds legacy-upgrade path for existing rows via `normalize_persisted_verifier`, DB migration renames column. Implementation is correct and well-tested (new `from_profile_with_database_upgrades_legacy_runtime_operator_digests` test). One P2 regression: `from_profile` now runs Argon2 synchronously per operator, making every test that constructs `AuthService` expensive — filed as `red-cell-c2-2jf8`. (2) `fd56552` — always parse agent string IDs as hex radix-16; removes ambiguous heuristic that treated digit-only strings as decimal. Three regression tests added. Fix is correct. (3) `fc097e0` — gates Havoc compatibility test behind `havoc_compatibility_skip_reason()` which checks for `RED_CELL_HAVOC_TEAMSERVER_DIR` env var or presence of `src/Havoc/teamserver`, and also checks Go toolchain availability. Uses runtime path substitution in go.mod instead of hardcoded `/home/michel` path. Fix is correct; no new issues.
+
+### QA Review — 2026-03-12 11:00 — 073c2ca..2f10bd8
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No activity this run |
+| Codex | 3 | 1 | Closed `red-cell-c2-14fa` (COMMAND_CHECKIN metadata refresh), `red-cell-c2-1t80` (pivot callback dispatch), `red-cell-c2-21yh` (DNS listener gating); filed `red-cell-c2-2lf7` (working_hours silent saturation in parse_checkin_metadata). |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`, `cargo test --workspace` — all tests pass this run, Argon2 slowdown from `red-cell-c2-2jf8` did not cause timeout in this run)
+Notes: Reviewed eight commits from `073c2ca` to `2f10bd8` (three Codex fix commits, three Codex close/claim bookkeeping commits, two prior QA/test-review bookkeeping commits). The three fixes address real protocol bugs: (1) `983789a` — COMMAND_CHECKIN now parses the full Havoc metadata packet (keys, hostname, process info, OS version, sleep config) and updates the agent registry + resets CTR offset; comprehensive round-trip test added. One new P3 bug filed: `parse_checkin_metadata` inherits the same `i32::try_from(working_hours).unwrap_or(i32::MAX)` silent-saturation pattern already flagged for DEMON_INIT in `red-cell-c2-2x0k`. (2) `f1567c4` — pivot callback dispatch now concatenates all child package responses instead of keeping only the last; covered by new unit test. (3) `a27e7db` — DNS listener `start()` now gates at the API level and sets `Error` status (instead of silently starting and breaking); two new tests validate this. The DNS close commit (`4d19bec`) correctly acknowledges the fix is partial — DNS remains blocked in the payload builder and manager create/update paths. `red-cell-c2-3ath` (restore_running hiding failed restarts) remains open; the DNS-specific restore_running path is now fixed but the general issue persists.

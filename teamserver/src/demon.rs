@@ -284,6 +284,7 @@ fn parse_init_agent(
         i32::from_be_bytes(read_fixed::<4>(&decrypted, &mut decrypted_offset, "working hours")?);
     let timestamp =
         now.format(&Rfc3339).map_err(|_| DemonParserError::InvalidInit("invalid timestamp"))?;
+    let kill_date = parse_kill_date(kill_date)?;
 
     Ok(AgentInfo {
         agent_id: parsed_agent_id,
@@ -316,11 +317,21 @@ fn parse_init_agent(
         os_arch: windows_arch_label(os_arch).to_owned(),
         sleep_delay,
         sleep_jitter,
-        kill_date: (kill_date != 0).then_some(i64::try_from(kill_date).unwrap_or(i64::MAX)),
+        kill_date,
         working_hours: (working_hours != 0).then_some(working_hours),
         first_call_in: timestamp.clone(),
         last_call_in: timestamp,
     })
+}
+
+fn parse_kill_date(kill_date: u64) -> Result<Option<i64>, DemonParserError> {
+    if kill_date == 0 {
+        return Ok(None);
+    }
+
+    let parsed = i64::try_from(kill_date)
+        .map_err(|_| DemonParserError::InvalidInit("kill date exceeds i64 range"))?;
+    Ok(Some(parsed))
 }
 
 fn basename(path: &str) -> String {
@@ -527,10 +538,18 @@ mod tests {
     }
 
     fn build_init_metadata(agent_id: u32) -> Vec<u8> {
-        build_init_metadata_with_working_hours(agent_id, 0b101010)
+        build_init_metadata_with_kill_date_and_working_hours(agent_id, 1_893_456_000, 0b101010)
     }
 
     fn build_init_metadata_with_working_hours(agent_id: u32, working_hours: i32) -> Vec<u8> {
+        build_init_metadata_with_kill_date_and_working_hours(agent_id, 1_893_456_000, working_hours)
+    }
+
+    fn build_init_metadata_with_kill_date_and_working_hours(
+        agent_id: u32,
+        kill_date: u64,
+        working_hours: i32,
+    ) -> Vec<u8> {
         let mut metadata = Vec::new();
         metadata.extend_from_slice(&u32_be(agent_id));
         add_str(&mut metadata, "wkstn-01");
@@ -552,7 +571,7 @@ mod tests {
         metadata.extend_from_slice(&u32_be(9));
         metadata.extend_from_slice(&u32_be(15));
         metadata.extend_from_slice(&u32_be(20));
-        metadata.extend_from_slice(&u64_be(1_893_456_000));
+        metadata.extend_from_slice(&u64_be(kill_date));
         metadata.extend_from_slice(&working_hours.to_be_bytes());
         metadata
     }
@@ -981,6 +1000,40 @@ mod tests {
             "expected zero-key init rejection, got: {error}"
         );
         assert!(registry.get(0x1357_9BDF).await.is_none(), "rejected init must not register");
+    }
+
+    #[tokio::test]
+    async fn parse_rejects_init_with_kill_date_exceeding_i64_range() {
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry.clone());
+        let agent_id = 0x1357_9BDF;
+        let key = [0x21; AGENT_KEY_LENGTH];
+        let iv = [0x31; AGENT_IV_LENGTH];
+        let metadata = build_init_metadata_with_kill_date_and_working_hours(
+            agent_id,
+            i64::MAX as u64 + 1,
+            0b101010,
+        );
+        let encrypted =
+            encrypt_agent_data(&key, &iv, &metadata).expect("metadata encryption should succeed");
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u32_be(u32::from(DemonCommand::DemonInit)));
+        payload.extend_from_slice(&u32_be(7));
+        payload.extend_from_slice(&key);
+        payload.extend_from_slice(&iv);
+        payload.extend_from_slice(&encrypted);
+        let packet = DemonEnvelope::new(agent_id, payload)
+            .expect("init envelope should be valid")
+            .to_bytes();
+
+        let error = parser
+            .parse_at(&packet, "203.0.113.77".to_owned(), datetime!(2026-03-10 10:15:00 UTC))
+            .await
+            .expect_err("overflowing kill date init must be rejected");
+
+        assert!(matches!(error, DemonParserError::InvalidInit("kill date exceeds i64 range")));
+        assert!(registry.get(agent_id).await.is_none(), "rejected init must not register");
     }
 
     #[tokio::test]

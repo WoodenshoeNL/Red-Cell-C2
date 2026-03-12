@@ -887,7 +887,11 @@ fn parse_checkin_metadata(
     updated.os_arch = checkin_windows_arch_label(os_arch).to_owned();
     updated.sleep_delay = sleep_delay;
     updated.sleep_jitter = sleep_jitter;
-    updated.kill_date = (kill_date != 0).then_some(i64::try_from(kill_date).unwrap_or(i64::MAX));
+    updated.kill_date = parse_optional_kill_date(
+        kill_date,
+        u32::from(DemonCommand::CommandCheckin),
+        "checkin kill date",
+    )?;
     updated.working_hours = decode_working_hours(working_hours);
     updated.last_call_in = timestamp.to_owned();
 
@@ -897,6 +901,22 @@ fn parse_checkin_metadata(
 fn decode_working_hours(raw: u32) -> Option<i32> {
     // Preserve the 32-bit protocol bitmask exactly, including the high bit.
     (raw != 0).then_some(i32::from_be_bytes(raw.to_be_bytes()))
+}
+
+fn parse_optional_kill_date(
+    raw: u64,
+    command_id: u32,
+    field: &'static str,
+) -> Result<Option<i64>, CommandDispatchError> {
+    if raw == 0 {
+        return Ok(None);
+    }
+
+    let parsed = i64::try_from(raw).map_err(|_| CommandDispatchError::InvalidCallbackPayload {
+        command_id,
+        message: format!("{field} exceeds i64 range"),
+    })?;
+    Ok(Some(parsed))
 }
 
 fn basename(path: &str) -> String {
@@ -2239,7 +2259,11 @@ async fn handle_config_callback(
             let raw = parser.read_u64("config kill date")?;
             let mut agent =
                 registry.get(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
-            agent.kill_date = (raw != 0).then(|| i64::try_from(raw).unwrap_or(i64::MAX));
+            agent.kill_date = parse_optional_kill_date(
+                raw,
+                u32::from(DemonCommand::CommandConfig),
+                "config kill date",
+            )?;
             registry.update_agent(agent.clone()).await?;
             events.broadcast(agent_mark_event(&agent));
             if raw == 0 {
@@ -5122,13 +5146,35 @@ mod tests {
         key: [u8; AGENT_KEY_LENGTH],
         iv: [u8; AGENT_IV_LENGTH],
     ) -> Vec<u8> {
-        sample_checkin_metadata_payload_with_working_hours(agent_id, key, iv, 0x00FF_00FF)
+        sample_checkin_metadata_payload_with_kill_date_and_working_hours(
+            agent_id,
+            key,
+            iv,
+            1_725_000_000,
+            0x00FF_00FF,
+        )
     }
 
     fn sample_checkin_metadata_payload_with_working_hours(
         agent_id: u32,
         key: [u8; AGENT_KEY_LENGTH],
         iv: [u8; AGENT_IV_LENGTH],
+        working_hours: u32,
+    ) -> Vec<u8> {
+        sample_checkin_metadata_payload_with_kill_date_and_working_hours(
+            agent_id,
+            key,
+            iv,
+            1_725_000_000,
+            working_hours,
+        )
+    }
+
+    fn sample_checkin_metadata_payload_with_kill_date_and_working_hours(
+        agent_id: u32,
+        key: [u8; AGENT_KEY_LENGTH],
+        iv: [u8; AGENT_IV_LENGTH],
+        kill_date: u64,
         working_hours: u32,
     ) -> Vec<u8> {
         let mut payload = Vec::new();
@@ -5154,7 +5200,7 @@ mod tests {
         add_u32(&mut payload, 9);
         add_u32(&mut payload, 45);
         add_u32(&mut payload, 5);
-        add_u64(&mut payload, 1_725_000_000);
+        add_u64(&mut payload, kill_date);
         add_u32(&mut payload, working_hours);
         payload
     }
@@ -5583,6 +5629,63 @@ mod tests {
         };
         assert_eq!(message.info.agent_id, format!("{agent_id:08X}"));
         assert_eq!(message.info.marked, "Alive");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_checkin_handler_rejects_kill_date_exceeding_i64_range()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database,
+            sockets,
+            None,
+        );
+        let key = [0x77; AGENT_KEY_LENGTH];
+        let iv = [0x44; AGENT_IV_LENGTH];
+        let refreshed_key = [0x12; AGENT_KEY_LENGTH];
+        let refreshed_iv = [0x34; AGENT_IV_LENGTH];
+        let agent_id = 0x1020_3041;
+
+        registry.insert(sample_agent_info(agent_id, key, iv)).await?;
+        registry.set_ctr_offset(agent_id, 7).await?;
+        let payload = sample_checkin_metadata_payload_with_kill_date_and_working_hours(
+            agent_id,
+            refreshed_key,
+            refreshed_iv,
+            i64::MAX as u64 + 1,
+            0x00FF_00FF,
+        );
+
+        let error = dispatcher
+            .dispatch(agent_id, u32::from(DemonCommand::CommandCheckin), 6, &payload)
+            .await
+            .expect_err("overflowing kill date checkin must be rejected");
+
+        assert!(matches!(
+            error,
+            CommandDispatchError::InvalidCallbackPayload { command_id, ref message }
+                if command_id == u32::from(DemonCommand::CommandCheckin)
+                    && message == "checkin kill date exceeds i64 range"
+        ));
+        assert_eq!(
+            registry
+                .get(agent_id)
+                .await
+                .ok_or_else(|| "agent should remain registered".to_owned())?
+                .kill_date,
+            None
+        );
+        assert!(
+            timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),
+            "rejected checkin should not broadcast updates"
+        );
         Ok(())
     }
 
@@ -8717,6 +8820,53 @@ mod tests {
             .await?
             .ok_or_else(|| "agent should be persisted after config update".to_owned())?;
         assert_eq!(persisted.working_hours, expected);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_config_handler_rejects_kill_date_exceeding_i64_range()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0x5566_7800, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database.clone(),
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        let mut config_payload = Vec::new();
+        add_u32(&mut config_payload, u32::from(DemonConfigKey::KillDate));
+        add_u64(&mut config_payload, i64::MAX as u64 + 1);
+        let error = dispatcher
+            .dispatch(0x5566_7800, u32::from(DemonCommand::CommandConfig), 38, &config_payload)
+            .await
+            .expect_err("overflowing kill date config must be rejected");
+
+        assert!(matches!(
+            error,
+            CommandDispatchError::InvalidCallbackPayload { command_id, ref message }
+                if command_id == u32::from(DemonCommand::CommandConfig)
+                    && message == "config kill date exceeds i64 range"
+        ));
+        assert_eq!(registry.get(0x5566_7800).await.and_then(|agent| agent.kill_date), None);
+        let persisted =
+            database.agents().get(0x5566_7800).await?.ok_or_else(|| {
+                "agent should still exist after rejected config update".to_owned()
+            })?;
+        assert_eq!(persisted.kill_date, None);
+        assert!(
+            timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),
+            "rejected config update should not broadcast events"
+        );
         Ok(())
     }
 

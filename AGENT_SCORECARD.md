@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 91 | 31 |
+| Tasks closed | 0 | 96 | 31 |
 | Bugs filed against | 0 | 10 | 9 |
-| Bug rate (bugs/task) | N/A | 0.11 | 0.29 |
-| Quality score | N/A | 89% | 71% |
+| Bug rate (bugs/task) | N/A | 0.10 | 0.29 |
+| Quality score | N/A | 90% | 71% |
 
 ## Violation Breakdown
 
@@ -34,6 +34,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-12 01:09 — 98d3599..86b3c1e
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No activity this run |
+| Codex | 5 | 0 | Closed: red-aow, red-cell-c2-3bh1, red-1u6, red-2d3, red-sh4. Also added regression tests for restart-safe demon callback parsing and claimed red-rts. |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`, and `cargo test --workspace` on `86b3c1e`)
+Notes: Reviewed sixteen commits from the checkpoint to current `HEAD`; agent-authored code changes were limited to targeted regression tests plus the listener-startup fix already filed in the prior QA run and now corrected. No new QA bugs were filed. `br` intermittently returned `database is busy`, but `br ready` succeeded and the only confirmed active in-progress issue (`red-rts`) has a matching fresh claim commit, so beads state does not appear stale.
 
 ### QA Review — 2026-03-12 00:29 — bb2c902..98d3599
 

@@ -803,6 +803,14 @@ mod tests {
     use super::{SocketRelayError, SocketRelayManager, SocksServerHandle};
     use crate::{AgentRegistry, Database, EventBus};
 
+    async fn test_manager()
+    -> Result<(Database, AgentRegistry, SocketRelayManager), SocketRelayError> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let manager = SocketRelayManager::new(registry.clone(), EventBus::default());
+        Ok((database, registry, manager))
+    }
+
     fn sample_agent(agent_id: u32) -> red_cell_common::AgentInfo {
         red_cell_common::AgentInfo {
             agent_id,
@@ -838,10 +846,8 @@ mod tests {
 
     #[tokio::test]
     async fn socks_server_lifecycle_commands_track_state() -> Result<(), SocketRelayError> {
-        let database = Database::connect_in_memory().await?;
-        let registry = AgentRegistry::new(database.clone());
+        let (_database, registry, manager) = test_manager().await?;
         registry.insert(sample_agent(0xDEAD_BEEF)).await?;
-        let manager = SocketRelayManager::new(registry, EventBus::default());
 
         let start = manager.add_socks_server(0xDEAD_BEEF, "0").await;
         assert!(start.is_ok());
@@ -856,10 +862,8 @@ mod tests {
 
     #[tokio::test]
     async fn add_socks_server_rejects_invalid_port() -> Result<(), SocketRelayError> {
-        let database = Database::connect_in_memory().await?;
-        let registry = AgentRegistry::new(database.clone());
+        let (_database, registry, manager) = test_manager().await?;
         registry.insert(sample_agent(0xDEAD_BEEF)).await?;
-        let manager = SocketRelayManager::new(registry, EventBus::default());
 
         let invalid_text = manager.add_socks_server(0xDEAD_BEEF, "not-a-port").await;
         assert!(matches!(
@@ -879,10 +883,8 @@ mod tests {
     #[tokio::test]
     async fn add_socks_server_rejects_duplicate_server_registration() -> Result<(), SocketRelayError>
     {
-        let database = Database::connect_in_memory().await?;
-        let registry = AgentRegistry::new(database.clone());
+        let (_database, registry, manager) = test_manager().await?;
         registry.insert(sample_agent(0xDEAD_BEEF)).await?;
-        let manager = SocketRelayManager::new(registry, EventBus::default());
 
         let duplicate_port = 0;
         let (shutdown_tx, _shutdown_rx) = oneshot::channel::<()>();
@@ -916,10 +918,8 @@ mod tests {
 
     #[tokio::test]
     async fn remove_agent_clears_tracked_socket_state() -> Result<(), SocketRelayError> {
-        let database = Database::connect_in_memory().await?;
-        let registry = AgentRegistry::new(database.clone());
+        let (_database, registry, manager) = test_manager().await?;
         registry.insert(sample_agent(0xDEAD_BEEF)).await?;
-        let manager = SocketRelayManager::new(registry, EventBus::default());
 
         manager.add_socks_server(0xDEAD_BEEF, "0").await?;
         assert!(manager.state.read().await.contains_key(&0xDEAD_BEEF));
@@ -933,11 +933,9 @@ mod tests {
 
     #[tokio::test]
     async fn prune_stale_agents_removes_inactive_agent_state() -> Result<(), SocketRelayError> {
-        let database = Database::connect_in_memory().await?;
-        let registry = AgentRegistry::new(database.clone());
+        let (_database, registry, manager) = test_manager().await?;
         registry.insert(sample_agent(0xDEAD_BEEF)).await?;
         registry.insert(sample_agent(0xFEED_FACE)).await?;
-        let manager = SocketRelayManager::new(registry.clone(), EventBus::default());
 
         manager.add_socks_server(0xDEAD_BEEF, "0").await?;
         manager.add_socks_server(0xFEED_FACE, "0").await?;
@@ -947,6 +945,111 @@ mod tests {
         let state = manager.state.read().await;
         assert!(!state.contains_key(&0xDEAD_BEEF));
         assert!(state.contains_key(&0xFEED_FACE));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn remove_socks_server_returns_server_not_found_for_unknown_agent()
+    -> Result<(), SocketRelayError> {
+        let (_database, _registry, manager) = test_manager().await?;
+
+        let result = manager.remove_socks_server(0xDEAD_BEEF, "1080").await;
+
+        assert!(matches!(
+            result,
+            Err(SocketRelayError::ServerNotFound { agent_id, port })
+                if agent_id == 0xDEAD_BEEF && port == 1080
+        ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn remove_socks_server_returns_server_not_found_for_unknown_port()
+    -> Result<(), SocketRelayError> {
+        let (_database, registry, manager) = test_manager().await?;
+        registry.insert(sample_agent(0xDEAD_BEEF)).await?;
+        manager.add_socks_server(0xDEAD_BEEF, "0").await?;
+
+        let result = manager.remove_socks_server(0xDEAD_BEEF, "65535").await;
+
+        assert!(matches!(
+            result,
+            Err(SocketRelayError::ServerNotFound { agent_id, port })
+                if agent_id == 0xDEAD_BEEF && port == 65535
+        ));
+        manager.clear_socks_servers(0xDEAD_BEEF).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_client_data_returns_client_not_found_for_unknown_agent()
+    -> Result<(), SocketRelayError> {
+        let (_database, _registry, manager) = test_manager().await?;
+
+        let result = manager.write_client_data(0xDEAD_BEEF, 0x1234_5678, b"relay").await;
+
+        assert!(matches!(
+            result,
+            Err(SocketRelayError::ClientNotFound { agent_id, socket_id })
+                if agent_id == 0xDEAD_BEEF && socket_id == 0x1234_5678
+        ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_client_data_returns_client_not_found_for_unknown_socket()
+    -> Result<(), SocketRelayError> {
+        let (_database, registry, manager) = test_manager().await?;
+        registry.insert(sample_agent(0xDEAD_BEEF)).await?;
+        manager.add_socks_server(0xDEAD_BEEF, "0").await?;
+
+        let result = manager.write_client_data(0xDEAD_BEEF, 0x1234_5678, b"relay").await;
+
+        assert!(matches!(
+            result,
+            Err(SocketRelayError::ClientNotFound { agent_id, socket_id })
+                if agent_id == 0xDEAD_BEEF && socket_id == 0x1234_5678
+        ));
+        manager.clear_socks_servers(0xDEAD_BEEF).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn close_client_returns_client_not_found_for_unknown_agent()
+    -> Result<(), SocketRelayError> {
+        let (_database, _registry, manager) = test_manager().await?;
+
+        let result = manager.close_client(0xDEAD_BEEF, 0x1234_5678).await;
+
+        assert!(matches!(
+            result,
+            Err(SocketRelayError::ClientNotFound { agent_id, socket_id })
+                if agent_id == 0xDEAD_BEEF && socket_id == 0x1234_5678
+        ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn close_client_returns_client_not_found_for_unknown_socket()
+    -> Result<(), SocketRelayError> {
+        let (_database, registry, manager) = test_manager().await?;
+        registry.insert(sample_agent(0xDEAD_BEEF)).await?;
+        manager.add_socks_server(0xDEAD_BEEF, "0").await?;
+
+        let result = manager.close_client(0xDEAD_BEEF, 0x1234_5678).await;
+
+        assert!(matches!(
+            result,
+            Err(SocketRelayError::ClientNotFound { agent_id, socket_id })
+                if agent_id == 0xDEAD_BEEF && socket_id == 0x1234_5678
+        ));
+        manager.clear_socks_servers(0xDEAD_BEEF).await?;
 
         Ok(())
     }

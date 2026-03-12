@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 109 | 31 |
-| Bugs filed against | 0 | 11 | 9 |
-| Bug rate (bugs/task) | N/A | 0.10 | 0.29 |
-| Quality score | N/A | 90% | 71% |
+| Tasks closed | 0 | 111 | 31 |
+| Bugs filed against | 0 | 13 | 9 |
+| Bug rate (bugs/task) | N/A | 0.12 | 0.29 |
+| Quality score | N/A | 88% | 71% |
 
 ## Violation Breakdown
 
@@ -25,7 +25,7 @@ Each loop run updates the running totals and appends a review entry.
 | Security issues | 0 | 16 | 0 |
 | Architecture drift | 0 | 13 | 0 |
 | Memory / resource leaks | 0 | 7 | 1 |
-| Startup / lifecycle regressions | 0 | 5 | 0 |
+| Startup / lifecycle regressions | 0 | 6 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
 | Availability / timeout regressions | 0 | 3 | 0 |
 
@@ -778,3 +778,14 @@ Notes: Reviewed nine commits from `6d30acb` to `af12a8d`, including three Codex 
 
 Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`, and `cargo test --workspace`)
 Notes: Reviewed eleven commits from `af12a8d` to `ce83234`, including three Codex fix commits, three Codex task-close commits, two Codex claim commits, one architecture-review bookkeeping commit, one beads-sync commit, and one prior QA bookkeeping commit. The committed Rust diff is limited to [teamserver/src/listeners.rs](/home/michel/Red-Cell-C2/teamserver/src/listeners.rs) and [teamserver/src/main.rs](/home/michel/Red-Cell-C2/teamserver/src/main.rs). No additional QA defects were identified beyond the already-open architecture findings in this range. Beads state is consistent: `red-cell-c2-4row` and `red-cell-c2-1cb1` are the only active in-progress items, both still open with matching claim history, and the three close commits in range have corresponding implementation commits.
+
+### QA Review — 2026-03-12 09:30 — ce83234..df8b7a1
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No activity this run |
+| Codex | 2 | 2 | Closed `red-cell-c2-4row` (DNS unbounded tasks) and `red-cell-c2-1cb1` (listener runtime state); filed `red-cell-c2-18ek` (uncommitted okvt work breaks cargo test) and `red-cell-c2-277i` (double DB op on CTR offset init). `red-cell-c2-okvt` newly claimed and in-progress. |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: committed HEAD (`df8b7a1`) passes `cargo check --workspace` and `cargo clippy --workspace -- -D warnings`; `cargo test --workspace` cannot be run against committed HEAD because the working tree has uncommitted in-progress changes for `red-cell-c2-okvt` that reference `ShutdownController` (not yet in `lib.rs`), causing compilation failures. See `red-cell-c2-18ek`.
+Notes: Reviewed twenty-five commits from `ce83234` to `df8b7a1`. Two substantive implementation commits: `9ed44360` (fix: bound DNS listener packet handling — removes unbounded tokio::spawn per UDP packet, processes inline with backpressure comment and new burst test) and `ae329742` (fix: make agent registration CTR persistence atomic — wraps INSERT+UPDATE in a SQLite transaction, adds two comprehensive rollback tests). Both fixes look correct. The CTR atomicity commit introduces a minor inefficiency: `insert_agent_row` always inserts `ctr_block_offset=0` then issues a separate UPDATE if offset is non-zero, costing two SQL ops in a single transaction instead of one. Filed as `red-cell-c2-277i` (P3 polish). The majority of other commits are Codex claim/close bookkeeping and beads-sync operations.

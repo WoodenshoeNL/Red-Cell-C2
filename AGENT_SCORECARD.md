@@ -19,11 +19,11 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 0 | 0 | 0 |
-| Missing tests | 0 | 2 | 5 |
+| Missing tests | 0 | 3 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
-| Protocol errors | 1 | 14 | 3 |
+| Protocol errors | 1 | 15 | 3 |
 | Security issues | 0 | 19 | 0 |
-| Architecture drift | 0 | 13 | 0 |
+| Architecture drift | 0 | 14 | 0 |
 | Memory / resource leaks | 0 | 8 | 1 |
 | Startup / lifecycle regressions | 0 | 8 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
@@ -65,6 +65,17 @@ Build: passed (95 tests, 0 failures, 0 clippy warnings)
 
 Overall codebase health: drifting
 Biggest blindspot: proxy credentials (`proxy_password`) are included in the `ListenerInfo` wire format sent to all authenticated WebSocket operators regardless of RBAC role — Analyst-role operators receive credentials they should never see. The gap stems from `to_operator_info()` in listeners.rs having no field-level redaction layer and no role-aware serialisation path in `send_session_snapshot()`.
+
+### Arch Review — 2026-03-12 14:32
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 0 | — | No new agent-attributed findings |
+| Codex | 3 | Protocol errors, Architecture drift, Missing tests | Filed red-cell-c2-2njj, red-cell-c2-2aec, red-cell-c2-vwrf |
+| Cursor | 0 | — | No new agent-attributed findings |
+
+Overall codebase health: drifting
+Biggest blindspot: `kill_date` is read as a u64 from the Demon INIT payload but silently clamped to `i64::MAX` on overflow (red-cell-c2-2njj). An implant with a corrupted or intentionally-crafted kill_date field would be registered with an effectively infinite kill date, defeating an OPSEC control. No test exercises the overflow path.
 
 ### Arch Review — 2026-03-12 09:53
 

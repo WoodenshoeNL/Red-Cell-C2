@@ -23,9 +23,9 @@ Each loop run updates the running totals and appends a review entry.
 | Clippy warnings | 0 | 0 | 1 |
 | Protocol errors | 1 | 12 | 3 |
 | Security issues | 0 | 16 | 0 |
-| Architecture drift | 0 | 12 | 0 |
+| Architecture drift | 0 | 13 | 0 |
 | Memory / resource leaks | 0 | 7 | 1 |
-| Startup / lifecycle regressions | 0 | 4 | 0 |
+| Startup / lifecycle regressions | 0 | 5 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
 | Availability / timeout regressions | 0 | 3 | 0 |
 
@@ -34,6 +34,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-12 07:08
+
+| Agent | Findings | Categories | Notes |
+|-------|---------:|------------|-------|
+| Claude | 0 | — | No new agent-attributed findings this run |
+| Codex | 2 | Startup / lifecycle regressions, Architecture drift | Filed red-cell-c2-3ath and red-cell-c2-15rj |
+| Cursor | 0 | — | No new agent-attributed findings this run |
+
+Overall codebase health: drifting
+Biggest blindspot: listener edge paths still look healthier than they are because the green suite mostly exercises controlled startup and request flows, not hostile proxy/header chains or sustained listener pressure.
+Additional findings filed this run were attributed to Michel Klomp: red-cell-c2-31w8 and red-cell-c2-4row.
 
 ### Arch Review — 2026-03-12 06:07
 

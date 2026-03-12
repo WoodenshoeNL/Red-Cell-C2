@@ -915,8 +915,8 @@ impl HttpListenerState {
         response
     }
 
-    fn callback_placeholder_response(&self) -> Response {
-        build_response(StatusCode::OK, self.response_body.as_ref(), &self.response_headers)
+    fn callback_empty_response(&self) -> Response {
+        build_response(StatusCode::OK, &[], &self.response_headers)
     }
 
     fn callback_bytes_response(&self, body: &[u8]) -> Response {
@@ -2483,7 +2483,7 @@ async fn http_listener_handler(
     )
     .await
     {
-        Ok(response) if response.payload.is_empty() => state.callback_placeholder_response(),
+        Ok(response) if response.payload.is_empty() => state.callback_empty_response(),
         Ok(response) => state.callback_bytes_response(&response.payload),
         Err(error) => {
             warn!(listener = %state.config.name, %error, "failed to process demon callback");
@@ -3420,8 +3420,13 @@ mod tests {
     #[tokio::test]
     async fn http_listener_returns_fake_404_for_non_matching_requests()
     -> Result<(), Box<dyn std::error::Error>> {
-        let manager = manager().await?;
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::new(database, registry, events, sockets, None);
         let port = available_port()?;
+        let agent_id = 0x1234_5678;
         let config = ListenerConfig::from(HttpListenerConfig {
             name: "edge-http".to_owned(),
             kill_date: None,
@@ -3464,7 +3469,7 @@ mod tests {
             .post(format!("http://127.0.0.1:{port}/submit"))
             .header("User-Agent", "Agent-UA")
             .header("X-Auth", "123")
-            .body(valid_demon_request_body(0x1234_5678))
+            .body(valid_demon_request_body(agent_id))
             .send()
             .await?;
         assert_eq!(valid.status(), StatusCode::OK);
@@ -3472,7 +3477,7 @@ mod tests {
             valid.headers().get("server").and_then(|value| value.to_str().ok()),
             Some("ExampleFront")
         );
-        assert_eq!(valid.text().await?, "decoy");
+        assert!(valid.bytes().await?.is_empty());
 
         manager.stop("edge-http").await?;
         Ok(())
@@ -3481,8 +3486,15 @@ mod tests {
     #[tokio::test]
     async fn https_listener_generates_tls_and_accepts_requests()
     -> Result<(), Box<dyn std::error::Error>> {
-        let manager = manager().await?;
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::new(database, registry, events, sockets, None);
         let port = available_port()?;
+        let agent_id = 1;
+        let key = [0x41; AGENT_KEY_LENGTH];
+        let iv = [0x24; AGENT_IV_LENGTH];
         let config = ListenerConfig::from(HttpListenerConfig {
             name: "edge-https".to_owned(),
             kill_date: None,
@@ -3515,7 +3527,7 @@ mod tests {
         let client = Client::builder().danger_accept_invalid_certs(true).build()?;
         let response = client
             .post(format!("https://127.0.0.1:{port}/"))
-            .body(valid_demon_request_body(1))
+            .body(valid_demon_init_body(agent_id, key, iv))
             .send()
             .await?;
         assert_eq!(response.status(), StatusCode::OK);
@@ -3523,7 +3535,8 @@ mod tests {
             response.headers().get("server").and_then(|value| value.to_str().ok()),
             Some("TLSFront")
         );
-        assert_eq!(response.text().await?, "tls");
+        let decrypted = decrypt_agent_data(&key, &iv, &response.bytes().await?)?;
+        assert_eq!(decrypted.as_slice(), &agent_id.to_le_bytes());
 
         manager.stop("edge-https").await?;
         Ok(())
@@ -3772,6 +3785,72 @@ mod tests {
         assert!(response.bytes().await?.is_empty());
 
         manager.stop("edge-http-empty-jobs").await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn http_listener_preserves_headers_but_not_decoy_body_for_empty_successful_callbacks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+        let port = available_port()?;
+        let key = [0x31; AGENT_KEY_LENGTH];
+        let iv = [0x17; AGENT_IV_LENGTH];
+        let agent_id = 0x0BAD_F00D;
+        let config = ListenerConfig::from(HttpListenerConfig {
+            name: "edge-http-decoy-success".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["127.0.0.1".to_owned()],
+            host_bind: "127.0.0.1".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: port,
+            port_conn: Some(port),
+            method: None,
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: vec!["/".to_owned()],
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: Some(HttpListenerResponseConfig {
+                headers: vec!["Server: ExampleFront".to_owned()],
+                body: Some("decoy".to_owned()),
+            }),
+            proxy: None,
+        });
+
+        registry.insert(sample_agent_info(agent_id, key, iv)).await?;
+        manager.create(config).await?;
+        manager.start("edge-http-decoy-success").await?;
+        wait_for_listener(port, false).await?;
+
+        let response = Client::new()
+            .post(format!("http://127.0.0.1:{port}/"))
+            .body(valid_demon_callback_body(
+                agent_id,
+                key,
+                iv,
+                u32::from(DemonCommand::CommandGetJob),
+                7,
+                &[],
+            ))
+            .send()
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("server").and_then(|value| value.to_str().ok()),
+            Some("ExampleFront")
+        );
+        assert!(response.bytes().await?.is_empty());
+
+        manager.stop("edge-http-decoy-success").await?;
         Ok(())
     }
 

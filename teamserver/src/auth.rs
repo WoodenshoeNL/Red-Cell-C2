@@ -462,10 +462,47 @@ fn password_hashes_match(submitted: &str, expected: &str) -> bool {
 }
 
 pub(crate) fn password_verifier_for_sha3(password_hash: &str) -> Result<String, AuthError> {
+    #[cfg(test)]
+    return password_verifier_for_sha3_cached(password_hash);
+    #[cfg(not(test))]
+    return password_verifier_for_sha3_impl(password_hash);
+}
+
+fn password_verifier_for_sha3_impl(password_hash: &str) -> Result<String, AuthError> {
     Argon2::default()
         .hash_password(password_hash.to_ascii_lowercase().as_bytes())
         .map(|hash| hash.to_string())
         .map_err(|error| AuthError::PasswordVerifier(error.to_string()))
+}
+
+/// Test-only cached wrapper around `password_verifier_for_sha3_impl`.
+///
+/// Argon2 hashing is intentionally slow (memory-hard), which makes full test
+/// suite runs infeasible when every `AuthService::from_profile` call hashes
+/// N profile operators + 1 dummy verifier. This cache computes each Argon2
+/// verifier at most once per unique SHA3 input across the entire test process,
+/// keeping individual test setup instantaneous after the first warm-up.
+///
+/// The production path via `password_verifier_for_sha3_impl` is unaffected.
+#[cfg(test)]
+fn password_verifier_for_sha3_cached(password_hash: &str) -> Result<String, AuthError> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    let key = password_hash.to_ascii_lowercase();
+    {
+        let guard = cache.lock().unwrap();
+        if let Some(cached) = guard.get(&key) {
+            return Ok(cached.clone());
+        }
+    }
+
+    let verifier = password_verifier_for_sha3_impl(password_hash)?;
+    cache.lock().unwrap().entry(key).or_insert_with(|| verifier.clone());
+    Ok(verifier)
 }
 
 async fn normalize_persisted_verifier(

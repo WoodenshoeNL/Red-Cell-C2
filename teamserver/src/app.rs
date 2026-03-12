@@ -130,22 +130,86 @@ pub fn build_router(state: TeamserverState) -> Router {
         .with_state(state)
 }
 
-async fn agent_listener_placeholder(
-    axum::extract::State(state): axum::extract::State<TeamserverState>,
-    request: Request<Body>,
-) -> impl IntoResponse {
+async fn agent_listener_placeholder(request: Request<Body>) -> impl IntoResponse {
     tracing::debug!(
         method = %request.method(),
         path = %request.uri().path(),
-        secure_listener_count = state
-            .profile
-            .listeners
-            .http
-            .iter()
-            .filter(|listener| listener.secure)
-            .count(),
-        "agent listener placeholder hit"
+        "teamserver operator port fallback hit"
     );
 
-    (StatusCode::NOT_IMPLEMENTED, "agent listener endpoint not implemented yet")
+    StatusCode::NOT_FOUND
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use tower::ServiceExt;
+
+    use crate::{
+        AgentRegistry, AuditWebhookNotifier, AuthService, Database, EventBus, ListenerManager,
+        LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService, ShutdownController,
+        SocketRelayManager,
+    };
+
+    #[tokio::test]
+    async fn operator_port_fallback_returns_empty_not_found() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "operator" {
+                Password = "password1234"
+                Role = "Operator"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        let agent_registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(agent_registry.clone(), events.clone());
+        let state = TeamserverState {
+            profile: profile.clone(),
+            database: database.clone(),
+            auth: AuthService::from_profile(&profile).expect("auth service should initialize"),
+            api: ApiRuntime::from_profile(&profile),
+            events: events.clone(),
+            connections: OperatorConnectionManager::new(),
+            agent_registry: agent_registry.clone(),
+            listeners: ListenerManager::new(
+                database,
+                agent_registry,
+                events,
+                sockets.clone(),
+                None,
+            ),
+            payload_builder: PayloadBuilderService::disabled_for_tests(),
+            sockets,
+            webhooks: AuditWebhookNotifier::from_profile(&profile),
+            login_rate_limiter: LoginRateLimiter::new(),
+            shutdown: ShutdownController::new(),
+        };
+
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/missing")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("body should read");
+        assert!(body.is_empty());
+    }
 }

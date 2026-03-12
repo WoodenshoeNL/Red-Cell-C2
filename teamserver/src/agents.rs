@@ -139,8 +139,15 @@ impl AgentRegistry {
         database: Database,
         max_registered_agents: usize,
     ) -> Result<Self, TeamserverError> {
-        let registry = Self::with_max_registered_agents(database.clone(), max_registered_agents);
         let agents = database.agents().list_persisted().await?;
+        if agents.len() > max_registered_agents {
+            return Err(TeamserverError::MaxRegisteredAgentsExceeded {
+                max_registered_agents,
+                registered: agents.len(),
+            });
+        }
+
+        let registry = Self::with_max_registered_agents(database.clone(), max_registered_agents);
         let links = database.links().list().await?;
         let mut entries = registry.entries.write().await;
         let mut parent_links = registry.parent_links.write().await;
@@ -1080,6 +1087,28 @@ mod tests {
         ));
         assert_eq!(registry.get(second.agent_id).await, None);
         assert_eq!(database.agents().get(second.agent_id).await?, None);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn load_rejects_persisted_agents_when_registry_limit_is_exceeded()
+    -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        database.agents().create(&sample_agent(0x1000_0200)).await?;
+        database.agents().create(&sample_agent(0x1000_0201)).await?;
+
+        let error = AgentRegistry::load_with_max_registered_agents(database, 1)
+            .await
+            .expect_err("load must fail when persisted agents exceed the configured limit");
+
+        assert!(matches!(
+            error,
+            TeamserverError::MaxRegisteredAgentsExceeded {
+                max_registered_agents: 1,
+                registered: 2,
+            }
+        ));
 
         Ok(())
     }

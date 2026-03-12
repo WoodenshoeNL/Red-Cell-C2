@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 96 | 31 |
+| Tasks closed | 0 | 101 | 31 |
 | Bugs filed against | 0 | 10 | 9 |
 | Bug rate (bugs/task) | N/A | 0.10 | 0.29 |
 | Quality score | N/A | 90% | 71% |
@@ -34,6 +34,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-12 04:12 — 86b3c1e..7a16e6b
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No activity this run |
+| Codex | 5 | 0 | Closed: red-2ne, red-2d4, red-3nf, red-mwx, red-rts. Remaining activity in range was claim bookkeeping plus one startup-cap fix and two regression-test additions. |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`, and `cargo test --workspace`)
+Notes: Reviewed thirty-six commits from `86b3c1e` to `7a16e6b`. The registry-cap startup fix in [teamserver/src/agents.rs](/home/michel/Red-Cell-C2/teamserver/src/agents.rs) and the new HTTP listener regression coverage in [teamserver/src/listeners.rs](/home/michel/Red-Cell-C2/teamserver/src/listeners.rs) and [teamserver/tests/http_listener_pipeline.rs](/home/michel/Red-Cell-C2/teamserver/tests/http_listener_pipeline.rs) look correct. No new QA bugs were filed. `br list --status=in_progress` and `br list --status=open` intermittently returned `database is busy`, but `br ready` succeeded and the reviewed closures matched implementation commits, so this run treats the lock as transient tooling contention rather than a repository defect.
 
 ### QA Review — 2026-03-12 01:09 — 98d3599..86b3c1e
 

@@ -458,7 +458,7 @@ pub enum OperatorRole {
 pub struct ListenersConfig {
     /// HTTP(S) listeners.
     #[serde(rename = "Http", default, deserialize_with = "deserialize_one_or_many")]
-    pub http: Vec<HttpListenerConfig>,
+    pub http: Vec<ProfileHttpListenerConfig>,
     /// SMB listeners.
     #[serde(rename = "Smb", default, deserialize_with = "deserialize_one_or_many")]
     pub smb: Vec<SmbListenerConfig>,
@@ -472,7 +472,7 @@ pub struct ListenersConfig {
 
 /// Havoc HTTP listener profile.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct HttpListenerConfig {
+pub struct ProfileHttpListenerConfig {
     /// Display name of the listener.
     #[serde(rename = "Name")]
     pub name: String,

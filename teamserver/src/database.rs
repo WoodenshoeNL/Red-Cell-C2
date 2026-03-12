@@ -232,11 +232,7 @@ impl AgentRepository {
         ctr_block_offset: u64,
     ) -> Result<(), TeamserverError> {
         let mut transaction = self.pool.begin().await?;
-        insert_agent_row(&mut *transaction, agent, listener_name).await?;
-        if ctr_block_offset != 0 {
-            update_agent_ctr_block_offset(&mut *transaction, agent.agent_id, ctr_block_offset)
-                .await?;
-        }
+        insert_agent_row(&mut *transaction, agent, listener_name, ctr_block_offset).await?;
         transaction.commit().await?;
         Ok(())
     }
@@ -411,6 +407,7 @@ async fn insert_agent_row(
     executor: impl sqlx::Executor<'_, Database = Sqlite>,
     agent: &AgentInfo,
     listener_name: &str,
+    ctr_block_offset: u64,
 ) -> Result<(), TeamserverError> {
     sqlx::query(
         r#"
@@ -426,7 +423,7 @@ async fn insert_agent_row(
     .bind(bool_to_i64(agent.active))
     .bind(&agent.reason)
     .bind(&agent.note)
-    .bind(0_i64)
+    .bind(i64_from_u64("ctr_block_offset", ctr_block_offset)?)
     .bind(&agent.encryption.aes_key)
     .bind(&agent.encryption.aes_iv)
     .bind(&agent.hostname)

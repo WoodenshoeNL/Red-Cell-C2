@@ -1184,8 +1184,8 @@ mod tests {
         let database = test_database().await?;
         sqlx::query(
             r#"
-            CREATE TRIGGER fail_ctr_offset_update
-            BEFORE UPDATE OF ctr_block_offset ON ts_agents
+            CREATE TRIGGER fail_ctr_offset_insert
+            BEFORE INSERT ON ts_agents
             WHEN NEW.ctr_block_offset = 7
             BEGIN
                 SELECT RAISE(FAIL, 'simulated ctr offset persistence failure');
@@ -1200,7 +1200,7 @@ mod tests {
         let error = registry
             .insert_with_listener_and_ctr_offset(agent.clone(), "https-edge", 7)
             .await
-            .expect_err("registration should fail when ctr update is rejected");
+            .expect_err("registration should fail when ctr insert is rejected");
 
         assert!(matches!(error, TeamserverError::Database(_)));
         assert_eq!(registry.get(agent.agent_id).await, None);

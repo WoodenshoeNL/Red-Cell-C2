@@ -173,4 +173,18 @@ mod tests {
         assert_eq!(message.info.agent_id, "11121314");
         assert_eq!(message.info.marked, "Dead");
     }
+
+    #[test]
+    fn agent_mark_event_uses_alive_status_for_active_agents() {
+        let agent = sample_agent(0x1112_1314);
+
+        let event = agent_mark_event(&agent);
+
+        let OperatorMessage::AgentUpdate(message) = event else {
+            panic!("expected AgentUpdate event");
+        };
+        assert_eq!(message.head.timestamp, agent.last_call_in);
+        assert_eq!(message.info.agent_id, "11121314");
+        assert_eq!(message.info.marked, "Alive");
+    }
 }

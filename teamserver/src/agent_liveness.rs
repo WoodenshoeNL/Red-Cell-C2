@@ -117,20 +117,8 @@ async fn sweep_dead_agents_at(
     let mut dead_agent_ids = Vec::new();
 
     for stale_agent in stale_agents {
-        let Some(current) = registry.get(stale_agent.agent_id).await else {
-            continue;
-        };
-        if !current.active || current.last_call_in != stale_agent.last_call_in {
-            continue;
-        }
-
-        let reason =
-            format!("agent timed out after {} seconds without callback", stale_agent.timeout_secs);
-        registry.mark_dead(stale_agent.agent_id, reason).await?;
-        dead_agent_ids.push(stale_agent.agent_id);
-
-        if let Some(agent) = registry.get(stale_agent.agent_id).await {
-            events.broadcast(agent_mark_event(&agent));
+        if mark_stale_agent_if_unchanged(registry, events, &stale_agent).await? {
+            dead_agent_ids.push(stale_agent.agent_id);
         }
     }
 
@@ -140,6 +128,29 @@ async fn sweep_dead_agents_at(
 
     dead_agent_ids.sort_unstable();
     Ok(dead_agent_ids)
+}
+
+async fn mark_stale_agent_if_unchanged(
+    registry: &AgentRegistry,
+    events: &EventBus,
+    stale_agent: &StaleAgent,
+) -> Result<bool, TeamserverError> {
+    let Some(current) = registry.get(stale_agent.agent_id).await else {
+        return Ok(false);
+    };
+    if !current.active || current.last_call_in != stale_agent.last_call_in {
+        return Ok(false);
+    }
+
+    let reason =
+        format!("agent timed out after {} seconds without callback", stale_agent.timeout_secs);
+    registry.mark_dead(stale_agent.agent_id, reason).await?;
+
+    if let Some(agent) = registry.get(stale_agent.agent_id).await {
+        events.broadcast(agent_mark_event(&agent));
+    }
+
+    Ok(true)
 }
 
 async fn collect_stale_agents(
@@ -183,7 +194,10 @@ mod tests {
     use red_cell_common::config::Profile;
     use red_cell_common::operator::OperatorMessage;
 
-    use super::{AgentLivenessConfig, sweep_dead_agents_at};
+    use super::{
+        AgentLivenessConfig, collect_stale_agents, mark_stale_agent_if_unchanged,
+        sweep_dead_agents_at,
+    };
     use crate::{AgentRegistry, Database, EventBus, SocketRelayManager, TeamserverError};
 
     fn sample_agent(agent_id: u32) -> red_cell_common::AgentInfo {
@@ -331,6 +345,112 @@ mod tests {
         .await?;
 
         assert_eq!(dead, vec![agent.agent_id]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sweep_skips_agents_with_malformed_last_call_in() -> Result<(), TeamserverError> {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {
+              Sleep = 5
+            }
+            "#,
+        )
+        .expect("profile should parse");
+        let config = AgentLivenessConfig::from_profile(&profile);
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database);
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let mut agent = sample_agent(0xABCD_1234);
+        agent.last_call_in = "not-a-timestamp".to_owned();
+        registry.insert(agent.clone()).await?;
+
+        let dead = sweep_dead_agents_at(
+            &registry,
+            &sockets,
+            &events,
+            config,
+            time::macros::datetime!(2026-03-10 10:00:15 UTC),
+        )
+        .await?;
+
+        assert!(dead.is_empty());
+        let stored = registry
+            .get(agent.agent_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?;
+        assert!(stored.active);
+        assert_eq!(stored.last_call_in, "not-a-timestamp");
+        assert!(stored.reason.is_empty());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sweep_toctou_guard_skips_agents_that_check_in_during_mark_phase()
+    -> Result<(), TeamserverError> {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {
+              Sleep = 5
+            }
+            "#,
+        )
+        .expect("profile should parse");
+        let config = AgentLivenessConfig::from_profile(&profile);
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database);
+        let events = EventBus::default();
+        let mut agent = sample_agent(0xABCD_5678);
+        registry.insert(agent.clone()).await?;
+
+        let stale_agents = collect_stale_agents(
+            &registry,
+            config,
+            time::macros::datetime!(2026-03-10 10:00:15 UTC),
+        )
+        .await;
+        assert_eq!(stale_agents.len(), 1);
+        assert_eq!(stale_agents[0].agent_id, agent.agent_id);
+
+        agent.last_call_in = "2026-03-10T10:00:14Z".to_owned();
+        registry.update_agent(agent.clone()).await?;
+
+        let marked = mark_stale_agent_if_unchanged(&registry, &events, &stale_agents[0]).await?;
+
+        assert!(!marked);
+        let stored = registry
+            .get(agent.agent_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?;
+        assert!(stored.active);
+        assert_eq!(stored.last_call_in, "2026-03-10T10:00:14Z");
+        assert!(stored.reason.is_empty());
+
         Ok(())
     }
 }

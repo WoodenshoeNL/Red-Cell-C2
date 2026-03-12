@@ -414,13 +414,10 @@ fn parse_agent_id(value: &str) -> Result<u32, CommonError> {
         return Err(CommonError::InvalidAgentId { value: value.to_string() });
     }
 
-    let maybe_hex = trimmed.strip_prefix("0x").unwrap_or(trimmed);
-    let is_hex = trimmed.starts_with("0x")
-        || maybe_hex.chars().all(|character| character.is_ascii_hexdigit())
-            && maybe_hex.chars().any(|character| character.is_ascii_alphabetic());
-    let radix = if is_hex { 16 } else { 10 };
+    let maybe_hex =
+        trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")).unwrap_or(trimmed);
 
-    u32::from_str_radix(maybe_hex, radix)
+    u32::from_str_radix(maybe_hex, 16)
         .map_err(|_| CommonError::InvalidAgentId { value: value.to_string() })
 }
 
@@ -729,6 +726,101 @@ mod tests {
         let error =
             serde_json::from_value::<AgentInfo>(payload).expect_err("invalid agent id must fail");
         assert!(error.to_string().contains("invalid agent identifier"));
+    }
+
+    #[test]
+    fn agent_info_parses_digit_only_string_identifier_as_hex()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let payload = json!({
+            "AgentID": "00000010",
+            "Active": true,
+            "Hostname": "wkstn-1",
+            "Username": "operator",
+            "DomainName": "LAB",
+            "ExternalIP": "203.0.113.10",
+            "InternalIP": "10.0.0.10",
+            "ProcessName": "explorer.exe",
+            "BaseAddress": 1,
+            "ProcessPID": 1,
+            "ProcessTID": 1,
+            "ProcessPPID": 1,
+            "ProcessArch": "x64",
+            "Elevated": false,
+            "OSVersion": "Windows 10",
+            "OSArch": "x64",
+            "SleepDelay": 5,
+            "SleepJitter": 10,
+            "FirstCallIn": "09/03/2026 19:04:00",
+            "LastCallIn": "09/03/2026 19:05:00"
+        });
+
+        let info: AgentInfo = serde_json::from_value(payload)?;
+        assert_eq!(info.agent_id, 0x10);
+        assert_eq!(info.name_id(), "00000010");
+        Ok(())
+    }
+
+    #[test]
+    fn agent_info_parses_digit_only_identifier_without_prefix_as_hex()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let payload = json!({
+            "AgentID": "12345678",
+            "Active": true,
+            "Hostname": "wkstn-1",
+            "Username": "operator",
+            "DomainName": "LAB",
+            "ExternalIP": "203.0.113.10",
+            "InternalIP": "10.0.0.10",
+            "ProcessName": "explorer.exe",
+            "BaseAddress": 1,
+            "ProcessPID": 1,
+            "ProcessTID": 1,
+            "ProcessPPID": 1,
+            "ProcessArch": "x64",
+            "Elevated": false,
+            "OSVersion": "Windows 10",
+            "OSArch": "x64",
+            "SleepDelay": 5,
+            "SleepJitter": 10,
+            "FirstCallIn": "09/03/2026 19:04:00",
+            "LastCallIn": "09/03/2026 19:05:00"
+        });
+
+        let info: AgentInfo = serde_json::from_value(payload)?;
+        assert_eq!(info.agent_id, 0x1234_5678);
+        assert_eq!(info.name_id(), "12345678");
+        Ok(())
+    }
+
+    #[test]
+    fn agent_info_parses_prefixed_identifier_as_hex() -> Result<(), Box<dyn std::error::Error>> {
+        let payload = json!({
+            "AgentID": "0X00000010",
+            "Active": true,
+            "Hostname": "wkstn-1",
+            "Username": "operator",
+            "DomainName": "LAB",
+            "ExternalIP": "203.0.113.10",
+            "InternalIP": "10.0.0.10",
+            "ProcessName": "explorer.exe",
+            "BaseAddress": 1,
+            "ProcessPID": 1,
+            "ProcessTID": 1,
+            "ProcessPPID": 1,
+            "ProcessArch": "x64",
+            "Elevated": false,
+            "OSVersion": "Windows 10",
+            "OSArch": "x64",
+            "SleepDelay": 5,
+            "SleepJitter": 10,
+            "FirstCallIn": "09/03/2026 19:04:00",
+            "LastCallIn": "09/03/2026 19:05:00"
+        });
+
+        let info: AgentInfo = serde_json::from_value(payload)?;
+        assert_eq!(info.agent_id, 0x10);
+        assert_eq!(info.name_id(), "00000010");
+        Ok(())
     }
 
     #[test]

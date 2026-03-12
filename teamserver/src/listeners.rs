@@ -2807,6 +2807,34 @@ mod tests {
         })
     }
 
+    fn http_listener_with_redirector(
+        name: &str,
+        port: u16,
+        trusted_proxy_peers: Vec<String>,
+    ) -> ListenerConfig {
+        ListenerConfig::from(HttpListenerConfig {
+            name: name.to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["127.0.0.1".to_owned()],
+            host_bind: "127.0.0.1".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: port,
+            port_conn: Some(port),
+            method: None,
+            behind_redirector: true,
+            trusted_proxy_peers,
+            user_agent: None,
+            headers: Vec::new(),
+            uris: vec!["/".to_owned()],
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: None,
+            proxy: None,
+        })
+    }
+
     fn smb_listener(name: &str, pipe_name: &str) -> ListenerConfig {
         ListenerConfig::from(SmbListenerConfig {
             name: name.to_owned(),
@@ -3248,6 +3276,79 @@ mod tests {
         assert_eq!(message.info.process_name, "explorer.exe");
         assert_eq!(message.info.sleep_delay, serde_json::json!(15));
         manager.stop("edge-http-init").await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn http_listener_uses_peer_ip_when_not_behind_redirector()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+        let port = available_port()?;
+
+        manager.create(http_listener("edge-http-peer-ip", port)).await?;
+        manager.start("edge-http-peer-ip").await?;
+        wait_for_listener(port, false).await?;
+
+        let response = Client::new()
+            .post(format!("http://127.0.0.1:{port}/"))
+            .header("X-Forwarded-For", "198.51.100.24")
+            .header("X-Real-IP", "198.51.100.25")
+            .body(valid_demon_init_body(
+                0x1111_2222,
+                [0x41; AGENT_KEY_LENGTH],
+                [0x24; AGENT_IV_LENGTH],
+            ))
+            .send()
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let stored = registry.get(0x1111_2222).await.expect("agent should be registered");
+        assert_eq!(stored.external_ip, "127.0.0.1");
+
+        manager.stop("edge-http-peer-ip").await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn http_listener_trusts_forwarded_ip_from_trusted_redirector()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+        let port = available_port()?;
+
+        manager
+            .create(http_listener_with_redirector(
+                "edge-http-redirector",
+                port,
+                vec!["127.0.0.1/32".to_owned()],
+            ))
+            .await?;
+        manager.start("edge-http-redirector").await?;
+        wait_for_listener(port, false).await?;
+
+        let response = Client::new()
+            .post(format!("http://127.0.0.1:{port}/"))
+            .header("X-Forwarded-For", "198.51.100.24, 127.0.0.1")
+            .body(valid_demon_init_body(
+                0x3333_4444,
+                [0x41; AGENT_KEY_LENGTH],
+                [0x24; AGENT_IV_LENGTH],
+            ))
+            .send()
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let stored = registry.get(0x3333_4444).await.expect("agent should be registered");
+        assert_eq!(stored.external_ip, "198.51.100.24");
+
+        manager.stop("edge-http-redirector").await?;
         Ok(())
     }
 

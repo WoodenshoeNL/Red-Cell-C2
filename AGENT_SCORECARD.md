@@ -9,8 +9,8 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 104 | 31 |
-| Bugs filed against | 0 | 10 | 9 |
+| Tasks closed | 0 | 106 | 31 |
+| Bugs filed against | 0 | 11 | 9 |
 | Bug rate (bugs/task) | N/A | 0.10 | 0.29 |
 | Quality score | N/A | 90% | 71% |
 
@@ -27,7 +27,7 @@ Each loop run updates the running totals and appends a review entry.
 | Memory / resource leaks | 0 | 7 | 1 |
 | Startup / lifecycle regressions | 0 | 4 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
-| Availability / timeout regressions | 0 | 2 | 0 |
+| Availability / timeout regressions | 0 | 3 | 0 |
 
 ---
 
@@ -744,3 +744,14 @@ Notes: Reviewed ten commits from `1d882d3` to `051ed51`, including three Codex f
 
 Build: passed for `cargo check --workspace` against committed `HEAD` in `/tmp/red-cell-qa-eEtM5J`; `cargo clippy --workspace -- -D warnings` and `cargo test --workspace` were still compiling in that clean worktree at log time due shared target-lock contention
 Notes: Reviewed three commits from `051ed51` to `6d30acb`. The committed diff only touched `.beads/qa_checkpoint`, `.beads/issues.jsonl`, and `AGENT_SCORECARD.md`; no Rust, TOML, or protocol code changed in the reviewed range, so no new QA bugs were filed. Beads state is consistent: the only active in-progress items are `red-cell-c2-q2n1` and `red-cell-c2-1cb1`, and neither was closed prematurely. `br list --status=open` succeeded after one transient SQLite lock, while `br list --status=in_progress` and `br ready` completed successfully.
+
+### QA Review — 2026-03-12 06:51 — 6d30acb..af12a8d
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No activity this run |
+| Codex | 2 | 1 | Closed `red-cell-c2-34qy` and `red-cell-c2-7369`; one additional claim commit (`red-cell-c2-39z8`) remains in progress. Filed `red-cell-c2-3ilv` for the new hardcoded partial-download inactivity timeout. |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: `cargo check --workspace` passed against committed `HEAD` in `/tmp/red-cell-qa-el6bUE`; `cargo clippy --workspace -- -D warnings` is still compiling in isolated target `/tmp/red-cell-qa-el6bUE-target-clippy`, and an earlier `cargo test --workspace` attempt was blocked by shared cargo locks from other local worktrees
+Notes: Reviewed nine commits from `6d30acb` to `af12a8d`, including three Codex fix commits, two Codex task-close commits, three Codex claim commits, and one prior QA bookkeeping commit. The committed Rust diff is limited to [teamserver/src/dispatch.rs](/tmp/red-cell-qa-el6bUE/teamserver/src/dispatch.rs) and [teamserver/src/websocket.rs](/tmp/red-cell-qa-el6bUE/teamserver/src/websocket.rs). Listener edit and agent remove audit logging look correct and are covered by new websocket tests. Beads state is consistent: `red-cell-c2-39z8` and `red-cell-c2-1cb1` are the only active in-progress items seen, both still open with matching claim activity, and the two close commits in range have corresponding implementation commits. `br list --status=open` and `br ready` succeeded after transient SQLite lock contention.

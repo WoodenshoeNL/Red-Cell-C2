@@ -171,6 +171,11 @@ impl ListenerSummary {
     /// Convert the summary into the Havoc-compatible operator payload shape.
     #[must_use]
     pub fn to_operator_info(&self) -> ListenerInfo {
+        self.to_operator_info_with_redaction(true)
+    }
+
+    #[must_use]
+    fn to_operator_info_with_redaction(&self, redact_proxy_password: bool) -> ListenerInfo {
         let mut info = ListenerInfo {
             name: Some(self.name.clone()),
             protocol: Some(operator_protocol_name(&self.config)),
@@ -231,8 +236,10 @@ impl ListenerSummary {
                 info.proxy_port = config.proxy.as_ref().map(|proxy| proxy.port.to_string());
                 info.proxy_username =
                     config.proxy.as_ref().and_then(|proxy| proxy.username.clone());
-                info.proxy_password =
-                    config.proxy.as_ref().and_then(|proxy| proxy.password.clone());
+                if !redact_proxy_password {
+                    info.proxy_password =
+                        config.proxy.as_ref().and_then(|proxy| proxy.password.clone());
+                }
                 info.secure = Some(config.secure.to_string());
                 info.response_headers = config.response.as_ref().and_then(|response| {
                     (!response.headers.is_empty()).then(|| response.headers.join(", "))
@@ -345,6 +352,12 @@ impl ListenerSummary {
         }
 
         info
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    fn to_operator_info_with_secrets(&self) -> ListenerInfo {
+        self.to_operator_info_with_redaction(false)
     }
 }
 
@@ -4640,11 +4653,54 @@ mod tests {
             config: original.clone(),
         };
 
-        let info = summary.to_operator_info();
+        let info = summary.to_operator_info_with_secrets();
         let round_tripped = listener_config_from_operator(&info)?;
 
         assert_eq!(round_tripped, original);
         Ok(())
+    }
+
+    #[test]
+    fn operator_payload_redacts_http_proxy_password() {
+        let summary = ListenerSummary {
+            name: "edge".to_owned(),
+            protocol: ListenerProtocol::Http,
+            state: PersistedListenerState { status: ListenerStatus::Created, last_error: None },
+            config: ListenerConfig::from(HttpListenerConfig {
+                name: "edge".to_owned(),
+                hosts: vec!["edge.example".to_owned()],
+                host_bind: "0.0.0.0".to_owned(),
+                host_rotation: "round-robin".to_owned(),
+                port_bind: 8443,
+                port_conn: Some(443),
+                method: None,
+                behind_redirector: false,
+                trusted_proxy_peers: Vec::new(),
+                user_agent: None,
+                headers: Vec::new(),
+                uris: vec!["/".to_owned()],
+                host_header: None,
+                secure: true,
+                cert: None,
+                kill_date: None,
+                working_hours: None,
+                response: None,
+                proxy: Some(HttpListenerProxyConfig {
+                    enabled: true,
+                    proxy_type: Some("http".to_owned()),
+                    host: "127.0.0.1".to_owned(),
+                    port: 8080,
+                    username: Some("user".to_owned()),
+                    password: Some("pass".to_owned()),
+                }),
+            }),
+        };
+
+        let info = summary.to_operator_info();
+
+        assert_eq!(info.proxy_enabled.as_deref(), Some("true"));
+        assert_eq!(info.proxy_username.as_deref(), Some("user"));
+        assert_eq!(info.proxy_password, None);
     }
 
     #[test]

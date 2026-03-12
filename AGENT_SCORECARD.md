@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 5 | 149 | 31 |
+| Tasks closed | 5 | 153 | 31 |
 | Bugs filed against | 0 | 21 | 9 |
 | Bug rate (bugs/task) | 0.00 | 0.14 | 0.29 |
 | Quality score | 100% | 86% | 71% |
@@ -955,6 +955,16 @@ Biggest blindspot: AES key rotation via crafted checkin payload in a pivot chain
 |-------|-------------|------------|-------|
 | Claude | 0 | 0 | No activity in reviewed commits. |
 | Codex | 4 | 0 | Closed red-cell-c2-3b1j, red-cell-c2-1qi3, red-cell-c2-16i3, and red-cell-c2-2xrl; also claimed red-cell-c2-26lc. Reviewed changes in `teamserver/src/dispatch.rs`, `teamserver/src/sockets.rs`, and `teamserver/tests/http_listener_pipeline.rs`; closures match the implemented test/fix scope and no new defects were found. |
+| Cursor | 0 | 0 | No activity in reviewed commits. |
+
+Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`, and `cargo test --workspace`)
+
+### QA Review — 2026-03-12 17:36 — 40f278e..e95504a
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No activity in reviewed commits. |
+| Codex | 4 | 0 | Closed `red-cell-c2-26lc`, `red-cell-c2-2njj`, `red-cell-c2-2aec`, and `red-cell-c2-vwrf`; one additional claim commit (`red-cell-c2-21jl`) remains in progress and matches `br list --status=in_progress`. The Rust diff is limited to `common/src/config.rs`, `teamserver/src/demon.rs`, `teamserver/src/dispatch.rs`, and `teamserver/tests/database.rs`; fixes are correctly scoped and fully covered by new regression tests. |
 | Cursor | 0 | 0 | No activity in reviewed commits. |
 
 Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`, and `cargo test --workspace`)

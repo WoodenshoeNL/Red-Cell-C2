@@ -495,6 +495,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn websocket_server_push_messages_are_rejected_for_all_roles() {
+        let roles = [OperatorRole::Admin, OperatorRole::Operator, OperatorRole::Analyst];
+        let messages = [
+            OperatorMessage::Login(Message {
+                head: MessageHead {
+                    event: red_cell_common::operator::EventCode::InitConnection,
+                    ..message_head()
+                },
+                info: red_cell_common::operator::LoginInfo::default(),
+            }),
+            OperatorMessage::AgentNew(Box::new(Message {
+                head: MessageHead {
+                    event: red_cell_common::operator::EventCode::Session,
+                    ..message_head()
+                },
+                info: red_cell_common::operator::AgentInfo::default(),
+            })),
+            OperatorMessage::ListenerError(Message {
+                head: MessageHead {
+                    event: red_cell_common::operator::EventCode::Listener,
+                    ..message_head()
+                },
+                info: red_cell_common::operator::ListenerErrorInfo::default(),
+            }),
+            OperatorMessage::TeamserverLog(Message {
+                head: MessageHead {
+                    event: red_cell_common::operator::EventCode::Teamserver,
+                    ..message_head()
+                },
+                info: red_cell_common::operator::TeamserverLogInfo::default(),
+            }),
+        ];
+
+        for role in roles {
+            for message in &messages {
+                assert_eq!(
+                    authorize_websocket_command(&session(role), message),
+                    Err(AuthorizationError::UnsupportedWebSocketCommand)
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn authenticated_operator_extractor_accepts_bearer_tokens() {
         let auth = AuthService::from_profile(&profile()).expect("auth service should initialize");

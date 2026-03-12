@@ -1570,6 +1570,49 @@ mod tests {
     }
 
     #[test]
+    fn normalize_server_url_rejects_http_scheme() {
+        let result = normalize_server_url("http://127.0.0.1:40056");
+        assert!(
+            matches!(result, Err(TransportError::UnsupportedScheme { ref scheme }) if scheme == "http"),
+            "expected UnsupportedScheme for http://, got {result:?}",
+        );
+    }
+
+    #[test]
+    fn normalize_server_url_rejects_https_scheme() {
+        let result = normalize_server_url("https://127.0.0.1:40056");
+        assert!(
+            matches!(result, Err(TransportError::UnsupportedScheme { ref scheme }) if scheme == "https"),
+            "expected UnsupportedScheme for https://, got {result:?}",
+        );
+    }
+
+    #[test]
+    fn normalize_server_url_rejects_malformed_url() {
+        let result = normalize_server_url("not a url");
+        assert!(
+            matches!(result, Err(TransportError::InvalidUrl { .. })),
+            "expected InvalidUrl for malformed input, got {result:?}",
+        );
+    }
+
+    #[test]
+    fn normalize_server_url_appends_slash_to_havoc_path() {
+        let normalized = normalize_server_url("wss://127.0.0.1:40056/havoc")
+            .expect("url normalization should succeed");
+
+        assert_eq!(normalized, "wss://127.0.0.1:40056/havoc/");
+    }
+
+    #[test]
+    fn normalize_server_url_preserves_custom_path() {
+        let normalized = normalize_server_url("wss://127.0.0.1:40056/custom/path")
+            .expect("url normalization should succeed");
+
+        assert_eq!(normalized, "wss://127.0.0.1:40056/custom/path");
+    }
+
+    #[test]
     fn app_state_applies_listener_and_agent_updates() {
         let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
 

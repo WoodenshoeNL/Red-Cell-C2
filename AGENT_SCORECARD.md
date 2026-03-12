@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 5 | 145 | 31 |
+| Tasks closed | 5 | 149 | 31 |
 | Bugs filed against | 0 | 21 | 9 |
 | Bug rate (bugs/task) | 0.00 | 0.14 | 0.29 |
 | Quality score | 100% | 86% | 71% |
@@ -19,11 +19,11 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 0 | 0 | 0 |
-| Missing tests | 0 | 4 | 5 |
+| Missing tests | 1 | 5 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
-| Protocol errors | 1 | 15 | 3 |
-| Security issues | 0 | 19 | 0 |
-| Architecture drift | 0 | 15 | 0 |
+| Protocol errors | 3 | 16 | 3 |
+| Security issues | 1 | 20 | 0 |
+| Architecture drift | 1 | 15 | 0 |
 | Memory / resource leaks | 0 | 8 | 1 |
 | Startup / lifecycle regressions | 0 | 8 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
@@ -937,3 +937,24 @@ Notes: Reviewed eleven commits from `2f10bd8` to `2aa2a07`. Three substantive Co
 
 Build: passed (`cargo check`, `cargo clippy -- -D warnings`, `cargo test` — 595 tests ok, ~35s)
 Notes: Reviewed sixteen commits from `81bfe17` to `9daef86`. Five substantive Codex fix commits, all clean and well-tested: (1) `77a41cb` — DEMON_INIT working_hours now read as i32 directly via `i32::from_be_bytes(read_fixed::<4>(...))` — correct fix, signed bitmask preserved, regression test with `i32::MIN | 0x2A`. (2) `55194e6` — operator port fallback now returns `StatusCode::NOT_FOUND` with empty body instead of 501 + "not implemented" — security improvement, covered by new router test. (3) `ca00428` — unknown reconnect probes now return fake 404 + create audit entry; `DemonHttpDisposition` enum dispatches HTTP-specific path; SMB/DNS paths also pass `database` for audit logging (but return empty payload / "ack" respectively — acceptable for non-HTTP transports). (4) `fe9f080` — SMB and DNS accept loops now pin shutdown future once before the select loop instead of recreating it each iteration — prevents SIGINT from being missed between iterations; two regression tests. (5) `9daef86` — `ShutdownController::notified()` and `wait_for_callback_drain()` now register the Tokio `Notified` future before checking shared state — eliminates the window where `notify_waiters()` fires between state-check and waiter-registration. No `unwrap()`/`todo!()` in production paths. No new bugs filed.
+
+### Arch Review — 2026-03-12 17:05
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 5 | Security(+1), Protocol(+2), Architecture(+1), Missing tests(+1) | WebSocket no max-message-size; port() returns 0 silently; credential heuristics full-line scan false positives; AgentInfo name collision in common crate; no unit tests for credential extraction |
+| Codex | 3 | Security(+1), Protocol(+1), Missing tests(+1) | AES session key replaced from nested checkin payload without freshness check; kill_date u64→i64 silent i64::MAX fallback in 3 locations; no test for CTR key-rotation boundary |
+| Cursor | 0 | — | No new Cursor-authored code in scope |
+
+Overall codebase health: on track
+Biggest blindspot: AES key rotation via crafted checkin payload in a pivot chain (red-cell-c2-16i3) — the nested-trust assumption is not validated with any freshness mechanism; confirmed clean: timing-safe auth, SQL parameterization, clippy -D warnings enforced, all 658 tests passing.
+
+### QA Review — 2026-03-12 17:10 — 942cc1f..40f278e
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No activity in reviewed commits. |
+| Codex | 4 | 0 | Closed red-cell-c2-3b1j, red-cell-c2-1qi3, red-cell-c2-16i3, and red-cell-c2-2xrl; also claimed red-cell-c2-26lc. Reviewed changes in `teamserver/src/dispatch.rs`, `teamserver/src/sockets.rs`, and `teamserver/tests/http_listener_pipeline.rs`; closures match the implemented test/fix scope and no new defects were found. |
+| Cursor | 0 | 0 | No activity in reviewed commits. |
+
+Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`, and `cargo test --workspace`)

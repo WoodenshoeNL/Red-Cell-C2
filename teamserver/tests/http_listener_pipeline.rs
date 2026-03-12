@@ -116,6 +116,53 @@ async fn http_listener_pipeline_rejects_plaintext_zero_key_init()
     Ok(())
 }
 
+#[tokio::test]
+async fn http_listener_pipeline_rejects_callbacks_from_unregistered_agent()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let port = available_port()?;
+    let key = [0x41; AGENT_KEY_LENGTH];
+    let iv = [0x24; AGENT_IV_LENGTH];
+    let agent_id = 0xCAFE_BABE;
+
+    manager.create(http_listener("edge-http-unknown-agent", port)).await?;
+    manager.start("edge-http-unknown-agent").await?;
+    wait_for_listener(port).await?;
+
+    let client = Client::new();
+
+    for (command_id, request_id) in
+        [(u32::from(DemonCommand::CommandGetJob), 6), (u32::from(DemonCommand::CommandCheckin), 7)]
+    {
+        let response = client
+            .post(format!("http://127.0.0.1:{port}/"))
+            .body(valid_demon_callback_body(agent_id, key, iv, 0, command_id, request_id, &[]))
+            .send()
+            .await?;
+
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "unexpected status for callback command {command_id:#x}"
+        );
+        assert!(
+            registry.get(agent_id).await.is_none(),
+            "unknown callback command {command_id:#x} must not create registry state"
+        );
+        assert!(
+            registry.list_active().await.is_empty(),
+            "unknown callback command {command_id:#x} must not register an active agent"
+        );
+    }
+
+    manager.stop("edge-http-unknown-agent").await?;
+    Ok(())
+}
+
 fn http_listener(name: &str, port: u16) -> ListenerConfig {
     ListenerConfig::from(HttpListenerConfig {
         name: name.to_owned(),

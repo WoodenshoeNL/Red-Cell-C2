@@ -3152,8 +3152,40 @@ mod tests {
         assert_eq!(body["items"][0]["id"], credential_id);
         assert_eq!(body["items"][0]["content"], "Password: test");
         assert_eq!(body["items"][0]["pattern"], "password");
+    }
+
+    #[tokio::test]
+    async fn get_credential_returns_specific_record_and_not_found_error() {
+        let database = Database::connect_in_memory().await.expect("database");
+        database.agents().create(&sample_agent(0xDEAD_BEEF)).await.expect("agent should insert");
+        let credential_id = database
+            .loot()
+            .create(&LootRecord {
+                id: None,
+                agent_id: 0xDEAD_BEEF,
+                kind: "credential".to_owned(),
+                name: "credential-1".to_owned(),
+                file_path: None,
+                size_bytes: Some(12),
+                captured_at: "2026-03-10T10:00:00Z".to_owned(),
+                data: Some(b"Password: test".to_vec()),
+                metadata: Some(parameter_object([
+                    ("operator", Value::String("neo".to_owned())),
+                    ("command_line", Value::String("sekurlsa::logonpasswords".to_owned())),
+                    ("pattern", Value::String("password".to_owned())),
+                ])),
+            })
+            .await
+            .expect("loot should insert");
+
+        let (router, _, _) = test_router_with_database(
+            database,
+            Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)),
+        )
+        .await;
 
         let response = router
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri(format!("/credentials/{credential_id}"))
@@ -3166,12 +3198,30 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = read_json(response).await;
+        assert_eq!(body["id"], credential_id);
         assert_eq!(body["name"], "credential-1");
         assert_eq!(body["content"], "Password: test");
+        assert_eq!(body["operator"], "neo");
+        assert_eq!(body["pattern"], "password");
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/credentials/999999")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "credential_not_found");
     }
 
     #[tokio::test]
-    async fn loot_download_returns_stored_bytes() {
+    async fn get_loot_returns_stored_bytes_and_not_found_error() {
         let profile = test_profile(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)));
         let database = Database::connect_in_memory().await.expect("database");
         database.agents().create(&sample_agent(0xDEAD_BEEF)).await.expect("agent should insert");
@@ -3218,6 +3268,7 @@ mod tests {
         });
 
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri(format!("/loot/{loot_id}"))
@@ -3229,8 +3280,31 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).and_then(|value| value.to_str().ok()),
+            Some("application/octet-stream"),
+        );
+        assert_eq!(
+            response.headers().get(CONTENT_DISPOSITION).and_then(|value| value.to_str().ok()),
+            Some("attachment; filename=\"secret.bin\""),
+        );
         let bytes = to_bytes(response.into_body(), usize::MAX).await.expect("bytes");
         assert_eq!(bytes.as_ref(), [1, 2, 3, 4]);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/loot/999999")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "loot_not_found");
     }
 
     #[tokio::test]

@@ -89,6 +89,10 @@ impl Profile {
             errors.push("Teamserver.DrainTimeoutSecs must be greater than zero".to_owned());
         }
 
+        if self.teamserver.agent_timeout_secs == Some(0) {
+            errors.push("Teamserver.AgentTimeoutSecs must be greater than zero".to_owned());
+        }
+
         if let Some(logging) = &self.teamserver.logging {
             if logging.level.as_deref().is_some_and(|level| level.trim().is_empty()) {
                 errors.push("Teamserver.Logging.Level must not be empty when specified".to_owned());
@@ -337,6 +341,9 @@ pub struct TeamserverConfig {
     /// Graceful-shutdown drain timeout in seconds.
     #[serde(rename = "DrainTimeoutSecs", default)]
     pub drain_timeout_secs: Option<u64>,
+    /// Optional agent inactivity timeout override in seconds.
+    #[serde(rename = "AgentTimeoutSecs", default)]
+    pub agent_timeout_secs: Option<u64>,
     /// Optional structured logging settings for the teamserver runtime.
     #[serde(rename = "Logging", default)]
     pub logging: Option<LoggingConfig>,
@@ -1591,6 +1598,57 @@ mod tests {
 
         let error = profile.validate().expect_err("profile should be invalid");
         assert!(error.errors.iter().any(|message| message.contains("DrainTimeoutSecs")));
+    }
+
+    #[test]
+    fn parses_agent_timeout_secs() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+              AgentTimeoutSecs = 90
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {
+              Sleep = 5
+            }
+            "#,
+        )
+        .expect("profile should parse");
+
+        assert_eq!(profile.teamserver.agent_timeout_secs, Some(90));
+    }
+
+    #[test]
+    fn rejects_zero_agent_timeout_secs() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+              AgentTimeoutSecs = 0
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("profile should be invalid");
+        assert!(error.errors.iter().any(|message| message.contains("AgentTimeoutSecs")));
     }
 
     #[test]

@@ -571,6 +571,10 @@ impl AgentRegistry {
         let updated = {
             let mut info = entry.info.write().await;
             info.last_call_in = last_call_in.into();
+            if !info.active {
+                info.active = true;
+                info.reason.clear();
+            }
             info.clone()
         };
 
@@ -1817,6 +1821,31 @@ mod tests {
                 .last_call_in,
             "2026-03-09T21:00:00Z"
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn set_last_call_in_revives_inactive_agent_and_clears_reason()
+    -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let agent = sample_agent(0x1000_00C0);
+        registry.insert(agent.clone()).await?;
+        registry.mark_dead(agent.agent_id, "agent timed out").await?;
+
+        let updated = registry.set_last_call_in(agent.agent_id, "2026-03-09T21:05:00Z").await?;
+
+        assert!(updated.active);
+        assert!(updated.reason.is_empty());
+        assert_eq!(updated.last_call_in, "2026-03-09T21:05:00Z");
+        let persisted = database
+            .agents()
+            .get(agent.agent_id)
+            .await?
+            .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?;
+        assert!(persisted.active);
+        assert!(persisted.reason.is_empty());
 
         Ok(())
     }

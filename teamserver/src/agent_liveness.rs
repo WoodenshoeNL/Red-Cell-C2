@@ -1,0 +1,336 @@
+//! Background liveness monitoring for agent inactivity timeouts.
+
+use std::time::Duration;
+
+use red_cell_common::AgentInfo;
+use red_cell_common::config::Profile;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
+use tracing::warn;
+
+use crate::{
+    AgentRegistry, EventBus, SocketRelayManager, TeamserverError, agent_events::agent_mark_event,
+};
+
+const MIN_SWEEP_INTERVAL_SECS: u64 = 1;
+const MAX_SWEEP_INTERVAL_SECS: u64 = 30;
+
+#[derive(Clone, Copy, Debug)]
+struct AgentLivenessConfig {
+    timeout_override_secs: Option<u64>,
+    default_sleep_secs: Option<u64>,
+    sweep_interval: Duration,
+}
+
+impl AgentLivenessConfig {
+    fn from_profile(profile: &Profile) -> Self {
+        let timeout_override_secs = profile.teamserver.agent_timeout_secs;
+        let default_sleep_secs = profile.demon.sleep.filter(|sleep| *sleep > 0);
+        let effective_timeout_secs = timeout_override_secs.unwrap_or_else(|| {
+            default_sleep_secs.unwrap_or(MIN_SWEEP_INTERVAL_SECS).saturating_mul(3)
+        });
+        let sweep_secs =
+            (effective_timeout_secs / 3).clamp(MIN_SWEEP_INTERVAL_SECS, MAX_SWEEP_INTERVAL_SECS);
+
+        Self {
+            timeout_override_secs,
+            default_sleep_secs,
+            sweep_interval: Duration::from_secs(sweep_secs),
+        }
+    }
+
+    fn timeout_for(self, agent: &AgentInfo) -> u64 {
+        self.timeout_override_secs.unwrap_or_else(|| {
+            let sleep_secs = u64::from(agent.sleep_delay).max(self.default_sleep_secs.unwrap_or(0));
+            sleep_secs.max(MIN_SWEEP_INTERVAL_SECS).saturating_mul(3)
+        })
+    }
+}
+
+#[derive(Debug)]
+struct StaleAgent {
+    agent_id: u32,
+    last_call_in: String,
+    timeout_secs: u64,
+}
+
+/// Handle that owns the background agent liveness monitor task.
+#[derive(Debug)]
+pub struct AgentLivenessMonitor {
+    shutdown: Option<oneshot::Sender<()>>,
+    task: JoinHandle<()>,
+}
+
+impl Drop for AgentLivenessMonitor {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        self.task.abort();
+    }
+}
+
+/// Start a background task that marks stale agents dead and cleans up relay state.
+#[must_use]
+pub fn spawn_agent_liveness_monitor(
+    registry: AgentRegistry,
+    sockets: SocketRelayManager,
+    events: EventBus,
+    profile: &Profile,
+) -> AgentLivenessMonitor {
+    let config = AgentLivenessConfig::from_profile(profile);
+    let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+
+    let task = tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(config.sweep_interval);
+        loop {
+            tokio::select! {
+                _ = &mut shutdown_rx => break,
+                _ = ticker.tick() => {
+                    if let Err(error) = sweep_dead_agents_at(
+                        &registry,
+                        &sockets,
+                        &events,
+                        config,
+                        OffsetDateTime::now_utc(),
+                    ).await {
+                        warn!(%error, "agent liveness sweep failed");
+                    }
+                }
+            }
+        }
+    });
+
+    AgentLivenessMonitor { shutdown: Some(shutdown_tx), task }
+}
+
+async fn sweep_dead_agents_at(
+    registry: &AgentRegistry,
+    sockets: &SocketRelayManager,
+    events: &EventBus,
+    config: AgentLivenessConfig,
+    now: OffsetDateTime,
+) -> Result<Vec<u32>, TeamserverError> {
+    let stale_agents = collect_stale_agents(registry, config, now).await;
+    let mut dead_agent_ids = Vec::new();
+
+    for stale_agent in stale_agents {
+        let Some(current) = registry.get(stale_agent.agent_id).await else {
+            continue;
+        };
+        if !current.active || current.last_call_in != stale_agent.last_call_in {
+            continue;
+        }
+
+        let reason =
+            format!("agent timed out after {} seconds without callback", stale_agent.timeout_secs);
+        registry.mark_dead(stale_agent.agent_id, reason).await?;
+        dead_agent_ids.push(stale_agent.agent_id);
+
+        if let Some(agent) = registry.get(stale_agent.agent_id).await {
+            events.broadcast(agent_mark_event(&agent));
+        }
+    }
+
+    if !dead_agent_ids.is_empty() {
+        let _ = sockets.prune_stale_agents().await;
+    }
+
+    dead_agent_ids.sort_unstable();
+    Ok(dead_agent_ids)
+}
+
+async fn collect_stale_agents(
+    registry: &AgentRegistry,
+    config: AgentLivenessConfig,
+    now: OffsetDateTime,
+) -> Vec<StaleAgent> {
+    let mut stale_agents = Vec::new();
+
+    for agent in registry.list_active().await {
+        let timeout_secs = config.timeout_for(&agent);
+        let Some(last_call_in) = parse_timestamp(&agent.last_call_in) else {
+            warn!(
+                agent_id = format_args!("0x{:08X}", agent.agent_id),
+                last_call_in = %agent.last_call_in,
+                "skipping liveness timeout because last callback timestamp could not be parsed"
+            );
+            continue;
+        };
+
+        let elapsed_secs = (now - last_call_in).whole_seconds();
+        if elapsed_secs >= i64::try_from(timeout_secs).unwrap_or(i64::MAX) {
+            stale_agents.push(StaleAgent {
+                agent_id: agent.agent_id,
+                last_call_in: agent.last_call_in,
+                timeout_secs,
+            });
+        }
+    }
+
+    stale_agents
+}
+
+fn parse_timestamp(value: &str) -> Option<OffsetDateTime> {
+    OffsetDateTime::parse(value, &Rfc3339).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use red_cell_common::AgentEncryptionInfo;
+    use red_cell_common::config::Profile;
+    use red_cell_common::operator::OperatorMessage;
+
+    use super::{AgentLivenessConfig, sweep_dead_agents_at};
+    use crate::{AgentRegistry, Database, EventBus, SocketRelayManager, TeamserverError};
+
+    fn sample_agent(agent_id: u32) -> red_cell_common::AgentInfo {
+        red_cell_common::AgentInfo {
+            agent_id,
+            active: true,
+            reason: String::new(),
+            note: String::new(),
+            encryption: AgentEncryptionInfo {
+                aes_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_owned(),
+                aes_iv: "AAAAAAAAAAAAAAAAAAAAAA==".to_owned(),
+            },
+            hostname: "wkstn-01".to_owned(),
+            username: "operator".to_owned(),
+            domain_name: "LAB".to_owned(),
+            external_ip: "203.0.113.10".to_owned(),
+            internal_ip: "10.0.0.10".to_owned(),
+            process_name: "explorer.exe".to_owned(),
+            base_address: 0,
+            process_pid: 1337,
+            process_tid: 1338,
+            process_ppid: 512,
+            process_arch: "x64".to_owned(),
+            elevated: true,
+            os_version: "Windows 11".to_owned(),
+            os_arch: "x64".to_owned(),
+            sleep_delay: 5,
+            sleep_jitter: 0,
+            kill_date: None,
+            working_hours: None,
+            first_call_in: "2026-03-10T10:00:00Z".to_owned(),
+            last_call_in: "2026-03-10T10:00:00Z".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn sweep_marks_stale_agents_dead_broadcasts_and_cleans_relay_state()
+    -> Result<(), TeamserverError> {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {
+              Sleep = 5
+            }
+            "#,
+        )
+        .expect("profile should parse");
+        let config = AgentLivenessConfig::from_profile(&profile);
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent = sample_agent(0xDEAD_BEEF);
+        registry.insert(agent.clone()).await?;
+        sockets.add_socks_server(agent.agent_id, "0").await.map_err(|error| {
+            TeamserverError::InvalidPersistedValue {
+                field: "socket_relay",
+                message: error.to_string(),
+            }
+        })?;
+        let mut receiver = events.subscribe();
+
+        let dead = sweep_dead_agents_at(
+            &registry,
+            &sockets,
+            &events,
+            config,
+            time::macros::datetime!(2026-03-10 10:00:15 UTC),
+        )
+        .await?;
+
+        assert_eq!(dead, vec![agent.agent_id]);
+        let stored = registry
+            .get(agent.agent_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?;
+        assert!(!stored.active);
+        assert_eq!(stored.reason, "agent timed out after 15 seconds without callback");
+        assert_eq!(sockets.list_socks_servers(agent.agent_id).await, "No active SOCKS5 servers");
+
+        let event = receiver.recv().await.ok_or(TeamserverError::InvalidPersistedValue {
+            field: "operator_event",
+            message: "missing dead-agent event".to_owned(),
+        })?;
+        let OperatorMessage::AgentUpdate(message) = event else {
+            return Err(TeamserverError::InvalidPersistedValue {
+                field: "operator_event",
+                message: "expected AgentUpdate event".to_owned(),
+            });
+        };
+        assert_eq!(message.info.agent_id, "DEADBEEF");
+        assert_eq!(message.info.marked, "Dead");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sweep_uses_timeout_override_instead_of_sleep_delay() -> Result<(), TeamserverError> {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+              AgentTimeoutSecs = 30
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {
+              Sleep = 5
+            }
+            "#,
+        )
+        .expect("profile should parse");
+        let config = AgentLivenessConfig::from_profile(&profile);
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let mut agent = sample_agent(0xFEED_FACE);
+        agent.sleep_delay = 90;
+        registry.insert(agent.clone()).await?;
+
+        let dead = sweep_dead_agents_at(
+            &registry,
+            &sockets,
+            &events,
+            config,
+            time::macros::datetime!(2026-03-10 10:00:30 UTC),
+        )
+        .await?;
+
+        assert_eq!(dead, vec![agent.agent_id]);
+        Ok(())
+    }
+}

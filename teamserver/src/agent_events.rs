@@ -2,8 +2,8 @@
 
 use red_cell_common::AgentInfo;
 use red_cell_common::operator::{
-    AgentInfo as OperatorAgentInfo, AgentPivotsInfo, EventCode, Message, MessageHead,
-    OperatorMessage,
+    AgentInfo as OperatorAgentInfo, AgentPivotsInfo, AgentUpdateInfo, EventCode, Message,
+    MessageHead, OperatorMessage,
 };
 use serde_json::Value;
 
@@ -24,6 +24,19 @@ pub(crate) fn agent_new_event(
         },
         info: operator_agent_info(listener_name, magic_value, agent, pivots),
     }))
+}
+
+pub(crate) fn agent_mark_event(agent: &AgentInfo) -> OperatorMessage {
+    let marked = if agent.active { "Alive" } else { "Dead" };
+    OperatorMessage::AgentUpdate(Message {
+        head: MessageHead {
+            event: EventCode::Session,
+            user: "teamserver".to_owned(),
+            timestamp: agent.last_call_in.clone(),
+            one_time: String::new(),
+        },
+        info: AgentUpdateInfo { agent_id: agent.name_id(), marked: marked.to_owned() },
+    })
 }
 
 pub(crate) fn operator_agent_info(
@@ -75,7 +88,7 @@ pub(crate) fn operator_agent_info(
 
 #[cfg(test)]
 mod tests {
-    use super::{agent_new_event, operator_agent_info};
+    use super::{agent_mark_event, agent_new_event, operator_agent_info};
     use crate::PivotInfo;
     use red_cell_common::operator::OperatorMessage;
     use red_cell_common::{AgentEncryptionInfo, AgentInfo};
@@ -143,5 +156,21 @@ mod tests {
         assert_eq!(message.info.name_id, "11121314");
         assert_eq!(message.info.pivots.parent.as_deref(), Some("01020304"));
         assert_eq!(message.info.pivot_parent, "01020304");
+    }
+
+    #[test]
+    fn agent_mark_event_uses_dead_status_for_inactive_agents() {
+        let mut agent = sample_agent(0x1112_1314);
+        agent.active = false;
+        agent.reason = "timed out".to_owned();
+
+        let event = agent_mark_event(&agent);
+
+        let OperatorMessage::AgentUpdate(message) = event else {
+            panic!("expected AgentUpdate event");
+        };
+        assert_eq!(message.head.timestamp, agent.last_call_in);
+        assert_eq!(message.info.agent_id, "11121314");
+        assert_eq!(message.info.marked, "Dead");
     }
 }

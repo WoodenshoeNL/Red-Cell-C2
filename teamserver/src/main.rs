@@ -6,10 +6,10 @@ use anyhow::{Context, Result, anyhow};
 use axum_server::{Handle, tls_rustls::RustlsConfig};
 use clap::Parser;
 use red_cell::{
-    AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, DEFAULT_MAX_REGISTERED_AGENTS,
-    Database, EventBus, ListenerManager, ListenerManagerError, LoginRateLimiter,
-    OperatorConnectionManager, PayloadBuilderService, PluginRuntime, SocketRelayManager,
-    TeamserverState, build_router,
+    AgentLivenessMonitor, AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService,
+    DEFAULT_MAX_REGISTERED_AGENTS, Database, EventBus, ListenerManager, ListenerManagerError,
+    LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService, PluginRuntime,
+    SocketRelayManager, TeamserverState, build_router, spawn_agent_liveness_monitor,
 };
 use red_cell_common::ListenerConfig;
 use red_cell_common::config::{Profile, ProfileValidationError};
@@ -88,6 +88,12 @@ async fn main() -> Result<()> {
     let bind_addr = resolve_bind_addr(&profile).await?;
     install_default_crypto_provider();
     let tls_config = build_tls_config(&profile).await?;
+    let _agent_liveness_monitor: AgentLivenessMonitor = spawn_agent_liveness_monitor(
+        agent_registry.clone(),
+        sockets.clone(),
+        events.clone(),
+        &profile,
+    );
     let state = TeamserverState {
         profile: profile.clone(),
         auth: AuthService::from_profile_with_database(&profile, &database).await?,

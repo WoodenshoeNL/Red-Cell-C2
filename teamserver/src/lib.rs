@@ -1,6 +1,7 @@
 //! Red Cell teamserver library components.
 
 mod agent_events;
+mod agent_liveness;
 pub mod agents;
 pub mod api;
 pub mod app;
@@ -19,6 +20,7 @@ pub mod sockets;
 pub mod webhook;
 pub mod websocket;
 
+pub use agent_liveness::{AgentLivenessMonitor, spawn_agent_liveness_monitor};
 pub use agents::{AgentRegistry, DEFAULT_MAX_REGISTERED_AGENTS, Job, PivotInfo};
 pub use api::{
     AdminApiAccess, ApiAuthError, ApiErrorBody, ApiErrorDetail, ApiIdentity, ApiPermissionGuard,

@@ -16,7 +16,7 @@ use red_cell_common::demon::{
     DemonSocketType, DemonTokenCommand, DemonTransferCommand,
 };
 use red_cell_common::operator::{
-    AgentResponseInfo, AgentUpdateInfo, EventCode, Message, MessageHead, OperatorMessage,
+    AgentResponseInfo, EventCode, Message, MessageHead, OperatorMessage,
 };
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -27,7 +27,8 @@ use tracing::warn;
 
 use crate::{
     AgentRegistry, Database, DemonCallbackPackage, DemonPacketParser, EventBus, LootRecord,
-    PluginRuntime, SocketRelayManager, TeamserverError, agent_events::agent_new_event,
+    PluginRuntime, SocketRelayManager, TeamserverError,
+    agent_events::{agent_mark_event, agent_new_event},
 };
 
 type HandlerFuture =
@@ -748,7 +749,7 @@ async fn handle_checkin(
 ) -> Result<Option<Vec<u8>>, CommandDispatchError> {
     let timestamp = OffsetDateTime::now_utc().format(&Rfc3339)?;
     let agent = registry.set_last_call_in(agent_id, timestamp).await?;
-    events.broadcast(agent_update_event(&agent));
+    events.broadcast(agent_mark_event(&agent));
     if let Some(plugins) = plugins
         && let Err(error) = plugins.emit_agent_checkin(agent_id).await
     {
@@ -840,7 +841,7 @@ async fn handle_pivot_connect_callback(
     registry.add_link(parent_agent_id, child_agent.agent_id).await?;
     let pivots = registry.pivots(child_agent.agent_id).await;
     if existed {
-        events.broadcast(agent_update_event(&child_agent));
+        events.broadcast(agent_mark_event(&child_agent));
     } else {
         events.broadcast(agent_new_event(
             "smb",
@@ -880,7 +881,7 @@ async fn handle_pivot_disconnect_callback(
         registry.disconnect_link(parent_agent_id, child_agent_id, "Disconnected").await?;
     for agent_id in affected {
         if let Some(agent) = registry.get(agent_id).await {
-            events.broadcast(agent_update_event(&agent));
+            events.broadcast(agent_mark_event(&agent));
         }
     }
     events.broadcast(agent_response_event(
@@ -920,7 +921,7 @@ async fn handle_pivot_command_callback(
 
     let timestamp = OffsetDateTime::now_utc().format(&Rfc3339)?;
     let updated = context.registry.set_last_call_in(child_agent_id, timestamp).await?;
-    context.events.broadcast(agent_update_event(&updated));
+    context.events.broadcast(agent_mark_event(&updated));
     dispatch_builtin_packages(context, child_agent_id, &packages).await
 }
 
@@ -1616,7 +1617,7 @@ async fn mark_agent_dead_and_broadcast(
     registry.mark_dead(agent_id, message).await?;
     let _ = sockets.remove_agent(agent_id).await;
     if let Some(agent) = registry.get(agent_id).await {
-        events.broadcast(agent_update_event(&agent));
+        events.broadcast(agent_mark_event(&agent));
     }
     events
         .broadcast(agent_response_event(agent_id, command_id, request_id, "Good", message, None)?);
@@ -1776,7 +1777,7 @@ async fn handle_sleep_callback(
     agent.sleep_delay = sleep_delay;
     agent.sleep_jitter = sleep_jitter;
     registry.update_agent(agent.clone()).await?;
-    events.broadcast(agent_update_event(&agent));
+    events.broadcast(agent_mark_event(&agent));
     events.broadcast(agent_response_event(
         agent_id,
         u32::from(DemonCommand::CommandSleep),
@@ -1800,7 +1801,7 @@ async fn handle_proc_ppid_spoof_callback(
     if let Some(mut agent) = registry.get(agent_id).await {
         agent.process_ppid = ppid;
         registry.update_agent(agent.clone()).await?;
-        events.broadcast(agent_update_event(&agent));
+        events.broadcast(agent_mark_event(&agent));
     }
     events.broadcast(agent_response_event(
         agent_id,
@@ -2049,7 +2050,7 @@ async fn handle_config_callback(
                 registry.get(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
             agent.kill_date = (raw != 0).then(|| i64::try_from(raw).unwrap_or(i64::MAX));
             registry.update_agent(agent.clone()).await?;
-            events.broadcast(agent_update_event(&agent));
+            events.broadcast(agent_mark_event(&agent));
             if raw == 0 {
                 "KillDate was disabled".to_owned()
             } else {
@@ -2062,7 +2063,7 @@ async fn handle_config_callback(
                 registry.get(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
             agent.working_hours = (raw != 0).then(|| i32::try_from(raw).unwrap_or(i32::MAX));
             registry.update_agent(agent.clone()).await?;
-            events.broadcast(agent_update_event(&agent));
+            events.broadcast(agent_mark_event(&agent));
             if raw == 0 {
                 "WorkingHours was disabled".to_owned()
             } else {
@@ -4075,19 +4076,6 @@ async fn handle_socket_callback(
     }
 
     Ok(None)
-}
-
-fn agent_update_event(agent: &red_cell_common::AgentInfo) -> OperatorMessage {
-    let marked = if agent.active { "Alive" } else { "Dead" };
-    OperatorMessage::AgentUpdate(Message {
-        head: MessageHead {
-            event: EventCode::Session,
-            user: "teamserver".to_owned(),
-            timestamp: agent.last_call_in.clone(),
-            one_time: String::new(),
-        },
-        info: AgentUpdateInfo { agent_id: agent.name_id(), marked: marked.to_owned() },
-    })
 }
 
 fn agent_response_event(

@@ -1,7 +1,7 @@
 //! Agent transport cryptography helpers.
 
 use aes::Aes256;
-use cipher::{InvalidLength, KeyIvInit, StreamCipher};
+use cipher::{InvalidLength, KeyIvInit, StreamCipher, StreamCipherSeek};
 use ctr::Ctr128BE;
 use sha3::{Digest, Sha3_256};
 use thiserror::Error;
@@ -11,6 +11,7 @@ pub const AGENT_KEY_LENGTH: usize = 32;
 
 /// Agent communication IV length in bytes.
 pub const AGENT_IV_LENGTH: usize = 16;
+const AGENT_CTR_BLOCK_LEN: u64 = 16;
 
 /// Fresh AES key material assigned to an agent session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +31,12 @@ pub enum CryptoError {
     /// The supplied IV does not have the required 16-byte length.
     #[error("invalid AES IV length: expected {expected} bytes, got {actual}")]
     InvalidIvLength { expected: usize, actual: usize },
+    /// The requested CTR block offset would overflow the cipher seek position.
+    #[error("invalid AES-CTR block offset {block_offset}: seek position overflowed")]
+    InvalidCtrOffset {
+        /// The block offset that could not be represented safely.
+        block_offset: u64,
+    },
     /// Randomness for new key material could not be obtained from the OS.
     #[error("failed to generate agent key material: {0}")]
     RandomGeneration(String),
@@ -48,7 +55,17 @@ type AgentCtr = Ctr128BE<Aes256>;
 /// Havoc uses a big-endian 128-bit counter on both the teamserver and Demon sides.
 ///
 pub fn encrypt_agent_data(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
-    apply_agent_keystream(key, iv, plaintext)
+    encrypt_agent_data_at_offset(key, iv, 0, plaintext)
+}
+
+/// Encrypt agent transport data with AES-256-CTR starting from the given block offset.
+pub fn encrypt_agent_data_at_offset(
+    key: &[u8],
+    iv: &[u8],
+    block_offset: u64,
+    plaintext: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    apply_agent_keystream(key, iv, block_offset, plaintext)
 }
 
 /// Decrypt agent transport data with AES-256-CTR starting from the given IV.
@@ -57,7 +74,17 @@ pub fn decrypt_agent_data(
     iv: &[u8],
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
-    apply_agent_keystream(key, iv, ciphertext)
+    decrypt_agent_data_at_offset(key, iv, 0, ciphertext)
+}
+
+/// Decrypt agent transport data with AES-256-CTR starting from the given block offset.
+pub fn decrypt_agent_data_at_offset(
+    key: &[u8],
+    iv: &[u8],
+    block_offset: u64,
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    apply_agent_keystream(key, iv, block_offset, ciphertext)
 }
 
 /// Generate fresh per-agent AES-256-CTR key material.
@@ -88,11 +115,30 @@ pub fn hash_password_sha3(password: &str) -> String {
     hex_string
 }
 
-fn apply_agent_keystream(key: &[u8], iv: &[u8], input: &[u8]) -> Result<Vec<u8>, CryptoError> {
+/// Return the number of AES-CTR blocks consumed by `len` bytes of transport data.
+#[must_use]
+pub fn ctr_blocks_for_len(len: usize) -> u64 {
+    if len == 0 {
+        return 0;
+    }
+
+    (len as u64).div_ceil(AGENT_CTR_BLOCK_LEN)
+}
+
+fn apply_agent_keystream(
+    key: &[u8],
+    iv: &[u8],
+    block_offset: u64,
+    input: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
     validate_key_and_iv(key, iv)?;
 
     let mut output = input.to_vec();
     let mut cipher = AgentCtr::new_from_slices(key, iv)?;
+    let seek_pos = block_offset
+        .checked_mul(AGENT_CTR_BLOCK_LEN)
+        .ok_or(CryptoError::InvalidCtrOffset { block_offset })?;
+    cipher.seek(seek_pos);
     cipher.apply_keystream(&mut output);
 
     Ok(output)
@@ -118,7 +164,8 @@ mod tests {
     use hex_literal::hex;
 
     use super::{
-        AGENT_IV_LENGTH, AGENT_KEY_LENGTH, CryptoError, decrypt_agent_data, encrypt_agent_data,
+        AGENT_IV_LENGTH, AGENT_KEY_LENGTH, CryptoError, ctr_blocks_for_len, decrypt_agent_data,
+        decrypt_agent_data_at_offset, encrypt_agent_data, encrypt_agent_data_at_offset,
         generate_agent_crypto_material, hash_password_sha3,
     };
 
@@ -264,5 +311,30 @@ mod tests {
         let second = encrypt_agent_data(&key, &iv, message).expect("second encrypt");
 
         assert_eq!(first, second, "Havoc resets AES-CTR with the base IV per message");
+    }
+
+    #[test]
+    fn encrypt_agent_data_at_offset_changes_the_keystream() {
+        let key = [0x51; AGENT_KEY_LENGTH];
+        let iv = [0x34; AGENT_IV_LENGTH];
+        let plaintext = b"offset transport payload";
+
+        let base = encrypt_agent_data_at_offset(&key, &iv, 0, plaintext).expect("offset zero");
+        let advanced = encrypt_agent_data_at_offset(&key, &iv, 3, plaintext).expect("offset three");
+
+        assert_ne!(base, advanced);
+        assert_eq!(
+            decrypt_agent_data_at_offset(&key, &iv, 3, &advanced).expect("offset decrypt"),
+            plaintext
+        );
+    }
+
+    #[test]
+    fn ctr_blocks_for_len_rounds_up_to_full_blocks() {
+        assert_eq!(ctr_blocks_for_len(0), 0);
+        assert_eq!(ctr_blocks_for_len(1), 1);
+        assert_eq!(ctr_blocks_for_len(16), 1);
+        assert_eq!(ctr_blocks_for_len(17), 2);
+        assert_eq!(ctr_blocks_for_len(32), 2);
     }
 }

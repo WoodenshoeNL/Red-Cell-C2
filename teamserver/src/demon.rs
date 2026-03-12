@@ -480,7 +480,8 @@ mod tests {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use red_cell_common::crypto::{
-        AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data, encrypt_agent_data,
+        AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len, decrypt_agent_data_at_offset,
+        encrypt_agent_data, encrypt_agent_data_at_offset,
     };
     use red_cell_common::demon::{DEMON_MAGIC_VALUE, DemonCommand, DemonEnvelope};
     use red_cell_common::{AgentEncryptionInfo, AgentInfo};
@@ -586,6 +587,7 @@ mod tests {
         agent_id: u32,
         key: [u8; AGENT_KEY_LENGTH],
         iv: [u8; AGENT_IV_LENGTH],
+        ctr_offset: u64,
     ) -> Vec<u8> {
         let mut decrypted = Vec::new();
         decrypted.extend_from_slice(&u32_be(3));
@@ -595,8 +597,8 @@ mod tests {
         decrypted.extend_from_slice(&u32_be(5));
         decrypted.extend_from_slice(b"hello");
 
-        let encrypted =
-            encrypt_agent_data(&key, &iv, &decrypted).expect("callback encryption should succeed");
+        let encrypted = encrypt_agent_data_at_offset(&key, &iv, ctr_offset, &decrypted)
+            .expect("callback encryption should succeed");
         let mut payload = Vec::new();
         payload.extend_from_slice(&u32_be(u32::from(DemonCommand::CommandCheckin)));
         payload.extend_from_slice(&u32_be(42));
@@ -666,7 +668,12 @@ mod tests {
             .expect("init should succeed");
 
         let _ack = build_init_ack(&registry, 0x0102_0304).await.expect("ack should build");
-        let callback_packet = build_callback_packet(0x0102_0304, key, iv);
+        let callback_packet = build_callback_packet(
+            0x0102_0304,
+            key,
+            iv,
+            ctr_blocks_for_len(std::mem::size_of::<u32>()),
+        );
         let parsed = parser
             .parse_at(
                 &callback_packet,
@@ -782,8 +789,10 @@ mod tests {
             .expect("init should succeed");
 
         let ack = build_init_ack(&registry, agent_id).await.expect("ack should build");
-        let decrypted = decrypt_agent_data(&key, &iv, &ack).expect("ack should decrypt");
+        let decrypted =
+            decrypt_agent_data_at_offset(&key, &iv, 0, &ack).expect("ack should decrypt");
         assert_eq!(decrypted, agent_id.to_le_bytes());
+        assert_eq!(registry.ctr_offset(agent_id).await.expect("offset"), 1);
     }
 
     #[tokio::test]
@@ -807,7 +816,8 @@ mod tests {
         let reloaded = AgentRegistry::load(database).await.expect("registry should reload");
 
         let ack = build_init_ack(&reloaded, agent_id).await.expect("reconnect ack should build");
-        let decrypted = decrypt_agent_data(&key, &iv, &ack).expect("ack should decrypt");
+        let decrypted =
+            decrypt_agent_data_at_offset(&key, &iv, 1, &ack).expect("ack should decrypt");
         assert_eq!(decrypted, agent_id.to_le_bytes());
     }
 
@@ -829,7 +839,7 @@ mod tests {
 
         let reloaded = AgentRegistry::load(database).await.expect("registry should reload");
         let parser = DemonPacketParser::new(reloaded);
-        let callback_packet = build_callback_packet(agent_id, key, iv);
+        let callback_packet = build_callback_packet(agent_id, key, iv, 0);
 
         let parsed = parser
             .parse_at(&callback_packet, "10.0.0.5".to_owned(), datetime!(2026-03-09 19:48:00 UTC))
@@ -851,7 +861,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_reconnect_ack_reuses_base_iv_without_advancing_registry_state() {
+    async fn build_reconnect_ack_uses_current_ctr_offset_without_advancing_registry_state() {
         let registry = test_registry().await;
         let key = [0x56; AGENT_KEY_LENGTH];
         let iv = [0x67; AGENT_IV_LENGTH];
@@ -868,14 +878,15 @@ mod tests {
         let offset_before_reconnect = registry.ctr_offset(agent_id).await.expect("offset");
 
         let ack = build_reconnect_ack(&registry, agent_id).await.expect("reconnect ack");
-        let decrypted = decrypt_agent_data(&key, &iv, &ack).expect("ack should decrypt");
+        let decrypted = decrypt_agent_data_at_offset(&key, &iv, offset_before_reconnect, &ack)
+            .expect("ack should decrypt");
 
         assert_eq!(decrypted, agent_id.to_le_bytes());
         assert_eq!(registry.ctr_offset(agent_id).await.expect("offset"), offset_before_reconnect);
     }
 
     #[tokio::test]
-    async fn successive_messages_reuse_the_same_keystream() {
+    async fn successive_messages_advance_the_keystream() {
         let registry = test_registry().await;
         let parser = DemonPacketParser::new(registry.clone());
         let key = [0x77; AGENT_KEY_LENGTH];
@@ -892,10 +903,13 @@ mod tests {
         let ct1 = registry.encrypt_for_agent(agent_id, msg).await.expect("enc1");
         let ct2 = registry.encrypt_for_agent(agent_id, msg).await.expect("enc2");
 
-        assert_eq!(ct1, ct2, "Havoc reinitializes AES-CTR from the stored IV for each message");
+        assert_ne!(ct1, ct2, "registry should advance the stored CTR block offset");
 
-        let pt1 = decrypt_agent_data(&key, &iv, &ct1).expect("dec1");
+        let pt1 = decrypt_agent_data_at_offset(&key, &iv, 0, &ct1).expect("dec1");
+        let pt2 = decrypt_agent_data_at_offset(&key, &iv, ctr_blocks_for_len(msg.len()), &ct2)
+            .expect("dec2");
         assert_eq!(pt1, msg);
+        assert_eq!(pt2, msg);
     }
 
     #[tokio::test]

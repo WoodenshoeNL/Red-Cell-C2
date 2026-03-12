@@ -7,7 +7,8 @@ use red_cell::{
     SocketRelayManager, TeamserverState, websocket_routes,
 };
 use red_cell_common::crypto::{
-    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data, encrypt_agent_data, hash_password_sha3,
+    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len, decrypt_agent_data_at_offset,
+    encrypt_agent_data, encrypt_agent_data_at_offset, hash_password_sha3,
 };
 use red_cell_common::demon::{DemonCommand, DemonEnvelope, DemonMessage};
 use red_cell_common::operator::{
@@ -109,6 +110,7 @@ async fn mock_demon_checkin_get_job_and_output_flow() -> Result<(), Box<dyn std:
     let agent_id = 0x1234_5678;
     let key = [0x41; AGENT_KEY_LENGTH];
     let iv = [0x24; AGENT_IV_LENGTH];
+    let mut ctr_offset = 0_u64;
 
     let init_response = client
         .post(format!("http://127.0.0.1:{listener_port}/"))
@@ -117,8 +119,9 @@ async fn mock_demon_checkin_get_job_and_output_flow() -> Result<(), Box<dyn std:
         .await?;
     let init_response = init_response.error_for_status()?;
     let init_bytes = init_response.bytes().await?;
-    let init_ack = decrypt_agent_data(&key, &iv, &init_bytes)?;
+    let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
+    ctr_offset += ctr_blocks_for_len(init_bytes.len());
 
     let agent_new = read_operator_message(&mut socket).await?;
     let OperatorMessage::AgentNew(message) = agent_new else {
@@ -158,6 +161,7 @@ async fn mock_demon_checkin_get_job_and_output_flow() -> Result<(), Box<dyn std:
             agent_id,
             key,
             iv,
+            ctr_offset,
             u32::from(DemonCommand::CommandGetJob),
             5,
             &[],
@@ -171,6 +175,7 @@ async fn mock_demon_checkin_get_job_and_output_flow() -> Result<(), Box<dyn std:
     assert_eq!(message.packages[0].command_id, u32::from(DemonCommand::CommandCheckin));
     assert_eq!(message.packages[0].request_id, 0x2A);
     assert!(message.packages[0].payload.is_empty());
+    ctr_offset += ctr_blocks_for_len(4);
 
     let output_text = "hello from demon";
     let callback_response = client
@@ -179,6 +184,7 @@ async fn mock_demon_checkin_get_job_and_output_flow() -> Result<(), Box<dyn std:
             agent_id,
             key,
             iv,
+            ctr_offset,
             u32::from(DemonCommand::CommandOutput),
             0x2A,
             &command_output_payload(output_text),
@@ -339,6 +345,7 @@ fn valid_demon_callback_body(
     agent_id: u32,
     key: [u8; AGENT_KEY_LENGTH],
     iv: [u8; AGENT_IV_LENGTH],
+    ctr_offset: u64,
     command_id: u32,
     request_id: u32,
     payload: &[u8],
@@ -347,7 +354,7 @@ fn valid_demon_callback_body(
     decrypted.extend_from_slice(&u32::try_from(payload.len()).unwrap_or_default().to_be_bytes());
     decrypted.extend_from_slice(payload);
 
-    let encrypted = encrypt_agent_data(&key, &iv, &decrypted)
+    let encrypted = encrypt_agent_data_at_offset(&key, &iv, ctr_offset, &decrypted)
         .unwrap_or_else(|error| panic!("callback encrypt failed: {error}"));
     let body = [
         command_id.to_be_bytes().as_slice(),

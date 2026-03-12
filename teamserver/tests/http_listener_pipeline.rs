@@ -2,7 +2,8 @@ use std::time::Duration;
 
 use red_cell::{AgentRegistry, Database, EventBus, ListenerManager, SocketRelayManager};
 use red_cell_common::crypto::{
-    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data, encrypt_agent_data,
+    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len, decrypt_agent_data_at_offset,
+    encrypt_agent_data, encrypt_agent_data_at_offset,
 };
 use red_cell_common::demon::{DemonCommand, DemonEnvelope};
 use red_cell_common::operator::OperatorMessage;
@@ -23,6 +24,7 @@ async fn http_listener_pipeline_registers_agent_and_broadcasts_checkin()
     let key = [0x41; AGENT_KEY_LENGTH];
     let iv = [0x24; AGENT_IV_LENGTH];
     let agent_id = 0x1234_5678;
+    let mut ctr_offset = 0_u64;
 
     manager.create(http_listener("edge-http-pipeline", port)).await?;
     manager.start("edge-http-pipeline").await?;
@@ -38,8 +40,9 @@ async fn http_listener_pipeline_registers_agent_and_broadcasts_checkin()
         .error_for_status()?;
     let init_ack = init_response.bytes().await?;
 
-    let decrypted_ack = decrypt_agent_data(&key, &iv, &init_ack)?;
+    let decrypted_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_ack)?;
     assert_eq!(decrypted_ack.as_slice(), &agent_id.to_le_bytes());
+    ctr_offset += ctr_blocks_for_len(init_ack.len());
 
     let stored = registry.get(agent_id).await.ok_or("agent should be registered")?;
     let before_checkin = stored.last_call_in.clone();
@@ -60,6 +63,7 @@ async fn http_listener_pipeline_registers_agent_and_broadcasts_checkin()
             agent_id,
             key,
             iv,
+            ctr_offset,
             u32::from(DemonCommand::CommandCheckin),
             6,
             &[],
@@ -243,6 +247,7 @@ fn valid_demon_callback_body(
     agent_id: u32,
     key: [u8; AGENT_KEY_LENGTH],
     iv: [u8; AGENT_IV_LENGTH],
+    ctr_offset: u64,
     command_id: u32,
     request_id: u32,
     payload: &[u8],
@@ -251,7 +256,7 @@ fn valid_demon_callback_body(
     decrypted.extend_from_slice(&u32::try_from(payload.len()).unwrap_or_default().to_be_bytes());
     decrypted.extend_from_slice(payload);
 
-    let encrypted = encrypt_agent_data(&key, &iv, &decrypted)
+    let encrypted = encrypt_agent_data_at_offset(&key, &iv, ctr_offset, &decrypted)
         .unwrap_or_else(|error| panic!("callback encrypt failed: {error}"));
     let body = [
         command_id.to_be_bytes().as_slice(),

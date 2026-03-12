@@ -2770,7 +2770,8 @@ mod tests {
     use interprocess::local_socket::traits::tokio::Stream as _;
     use red_cell_common::AgentEncryptionInfo;
     use red_cell_common::crypto::{
-        AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data, encrypt_agent_data,
+        AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len, decrypt_agent_data,
+        decrypt_agent_data_at_offset, encrypt_agent_data,
     };
     use red_cell_common::demon::{DemonCommand, DemonEnvelope, DemonMessage};
     use red_cell_common::operator::{ListenerInfo, OperatorMessage};
@@ -3471,10 +3472,10 @@ mod tests {
 
         assert_eq!(reconnect_response.status(), StatusCode::OK);
         let reconnect_bytes = reconnect_response.bytes().await?;
-        let decrypted = decrypt_agent_data(&key, &iv, &reconnect_bytes)?;
+        let decrypted = decrypt_agent_data_at_offset(&key, &iv, 1, &reconnect_bytes)?;
 
         assert_eq!(decrypted.as_slice(), &agent_id.to_le_bytes());
-        assert_eq!(registry.ctr_offset(agent_id).await?, 0);
+        assert_eq!(registry.ctr_offset(agent_id).await?, 1);
 
         manager.stop("edge-http-reconnect").await?;
         Ok(())
@@ -3542,14 +3543,25 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let bytes = response.bytes().await?;
         let message = DemonMessage::from_bytes(bytes.as_ref())?;
+        let response_ctr_offset = ctr_blocks_for_len(4);
         assert_eq!(message.packages.len(), 2);
         assert_eq!(message.packages[0].command_id, u32::from(DemonCommand::CommandSleep));
         assert_eq!(message.packages[0].request_id, 41);
-        let pt0 = decrypt_agent_data(&key, &iv, &message.packages[0].payload)?;
+        let pt0 = decrypt_agent_data_at_offset(
+            &key,
+            &iv,
+            response_ctr_offset,
+            &message.packages[0].payload,
+        )?;
         assert_eq!(pt0, vec![1, 2, 3, 4]);
         assert_eq!(message.packages[1].command_id, u32::from(DemonCommand::CommandCheckin));
         assert_eq!(message.packages[1].request_id, 42);
-        let pt1 = decrypt_agent_data(&key, &iv, &message.packages[1].payload)?;
+        let pt1 = decrypt_agent_data_at_offset(
+            &key,
+            &iv,
+            response_ctr_offset + ctr_blocks_for_len(message.packages[0].payload.len()),
+            &message.packages[1].payload,
+        )?;
         assert_eq!(pt1, vec![5, 6, 7]);
         assert!(registry.queued_jobs(agent_id).await?.is_empty());
 
@@ -3842,14 +3854,25 @@ mod tests {
         let (response_agent_id, response_bytes) = read_test_smb_frame(&mut stream).await?;
         assert_eq!(response_agent_id, agent_id);
         let message = DemonMessage::from_bytes(response_bytes.as_ref())?;
+        let response_ctr_offset = ctr_blocks_for_len(4);
         assert_eq!(message.packages.len(), 2);
         assert_eq!(message.packages[0].command_id, u32::from(DemonCommand::CommandSleep));
         assert_eq!(message.packages[0].request_id, 41);
-        let pt0 = decrypt_agent_data(&key, &iv, &message.packages[0].payload)?;
+        let pt0 = decrypt_agent_data_at_offset(
+            &key,
+            &iv,
+            response_ctr_offset,
+            &message.packages[0].payload,
+        )?;
         assert_eq!(pt0, vec![1, 2, 3, 4]);
         assert_eq!(message.packages[1].command_id, u32::from(DemonCommand::CommandCheckin));
         assert_eq!(message.packages[1].request_id, 42);
-        let pt1 = decrypt_agent_data(&key, &iv, &message.packages[1].payload)?;
+        let pt1 = decrypt_agent_data_at_offset(
+            &key,
+            &iv,
+            response_ctr_offset + ctr_blocks_for_len(message.packages[0].payload.len()),
+            &message.packages[1].payload,
+        )?;
         assert_eq!(pt1, vec![5, 6, 7]);
         assert!(registry.queued_jobs(agent_id).await?.is_empty());
 

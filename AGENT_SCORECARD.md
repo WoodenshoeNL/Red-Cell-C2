@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 5 | 132 | 31 |
+| Tasks closed | 5 | 136 | 31 |
 | Bugs filed against | 0 | 19 | 9 |
-| Bug rate (bugs/task) | 0.00 | 0.15 | 0.29 |
-| Quality score | 100% | 85% | 71% |
+| Bug rate (bugs/task) | 0.00 | 0.14 | 0.29 |
+| Quality score | 100% | 86% | 71% |
 
 ## Violation Breakdown
 
@@ -34,6 +34,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-12 15:00 — 93c9947..a7cec53
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | — |
+| Codex | 4 | 0 | Closed red-cell-c2-2i18 (TLS error path tests), red-cell-c2-24pm (liveness sweep guard tests), red-cell-c2-3q5x (SessionActivityRecord conversion failures), red-cell-c2-2haq (alive branch test coverage). Clean refactor of mark_stale_agent_if_unchanged. |
+| Cursor | 0 | 0 | — |
+
+Build: passed (104 tests, 0 failures, 0 clippy warnings)
 
 ### QA Review — 2026-03-12 14:13 — ff94f05..508eef5
 

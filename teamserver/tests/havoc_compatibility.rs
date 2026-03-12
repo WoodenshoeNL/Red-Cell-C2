@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -19,6 +20,11 @@ use tokio::time::sleep;
 #[tokio::test]
 async fn red_cell_packets_match_havoc_at_offset_zero_and_advance_afterward()
 -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(reason) = havoc_compatibility_skip_reason() {
+        eprintln!("skipping Havoc compatibility test: {reason}");
+        return Ok(());
+    }
+
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
@@ -271,18 +277,23 @@ fn havoc_encrypt_many(
     iv: &[u8; AGENT_IV_LENGTH],
     payloads: &[Vec<u8>],
 ) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
+    let havoc_teamserver_dir = havoc_teamserver_dir().ok_or_else(|| {
+        "missing Havoc teamserver reference directory for compatibility test".to_owned()
+    })?;
     let harness_dir = tempdir()?;
     let mut go_mod = std::fs::File::create(harness_dir.path().join("go.mod"))?;
-    go_mod.write_all(
-        br#"module havoccompat
+    let go_mod_contents = format!(
+        r#"module havoccompat
 
 go 1.22.0
 
 require Havoc v0.0.0
 
-replace Havoc => /home/michel/Red-Cell-C2/src/Havoc/teamserver
+replace Havoc => {}
 "#,
-    )?;
+        go_module_path(&havoc_teamserver_dir)
+    );
+    go_mod.write_all(go_mod_contents.as_bytes())?;
     let mut harness = std::fs::File::create(harness_dir.path().join("main.go"))?;
     harness.write_all(
         br#"package main
@@ -377,4 +388,43 @@ func main() {
         .into_iter()
         .map(|ciphertext| Ok(BASE64_STANDARD.decode(ciphertext)?))
         .collect()
+}
+
+fn havoc_compatibility_skip_reason() -> Option<String> {
+    if havoc_teamserver_dir().is_none() {
+        return Some(
+            "set RED_CELL_HAVOC_TEAMSERVER_DIR or ensure src/Havoc/teamserver exists".to_owned(),
+        );
+    }
+
+    if !go_available() {
+        return Some("Go toolchain is unavailable".to_owned());
+    }
+
+    None
+}
+
+fn havoc_teamserver_dir() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("RED_CELL_HAVOC_TEAMSERVER_DIR") {
+        let candidate = PathBuf::from(path);
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+    }
+
+    let candidate = Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/Havoc/teamserver");
+    if candidate.is_dir() { Some(candidate) } else { None }
+}
+
+fn go_available() -> bool {
+    Command::new("go")
+        .arg("version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn go_module_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }

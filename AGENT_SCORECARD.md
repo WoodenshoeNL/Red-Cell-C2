@@ -21,10 +21,10 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 0 | 0 | 0 |
 | Missing tests | 0 | 2 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
-| Protocol errors | 1 | 10 | 3 |
-| Security issues | 0 | 15 | 0 |
-| Architecture drift | 0 | 10 | 0 |
-| Memory / resource leaks | 0 | 6 | 1 |
+| Protocol errors | 1 | 12 | 3 |
+| Security issues | 0 | 16 | 0 |
+| Architecture drift | 0 | 12 | 0 |
+| Memory / resource leaks | 0 | 7 | 1 |
 | Startup / lifecycle regressions | 0 | 4 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
 | Availability / timeout regressions | 0 | 2 | 0 |
@@ -34,6 +34,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-12 06:07
+
+| Agent | Findings | Categories | Notes |
+|-------|---------:|------------|-------|
+| Claude | 0 | — | No new agent-attributed findings this run |
+| Codex | 5 | Protocol errors, Security issues, Memory / resource leaks, Architecture drift | Filed red-cell-c2-14fa, red-cell-c2-1t80, red-cell-c2-q2n1, red-cell-c2-21yh, and red-cell-c2-uenz |
+| Cursor | 0 | — | No new agent-attributed findings this run |
+
+Overall codebase health: drifting
+Biggest blindspot: alternate Demon paths and advertised transport surfaces are still under-tested end to end, so callback variants like metadata-bearing COMMAND_CHECKIN and declared listener types can remain broken while the main happy-path suite stays green.
 
 ### Arch Review — 2026-03-12 04:06
 

@@ -67,6 +67,7 @@ async fn operator_session_listener_and_mock_demon_round_trip()
         sockets,
         webhooks: AuditWebhookNotifier::from_profile(&profile),
         login_rate_limiter: LoginRateLimiter::new(),
+        shutdown: red_cell::ShutdownController::new(),
     };
 
     let server_listener = TcpListener::bind("127.0.0.1:0").await?;

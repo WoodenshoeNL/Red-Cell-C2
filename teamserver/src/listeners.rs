@@ -47,7 +47,7 @@ use utoipa::ToSchema;
 use crate::{
     AgentRegistry, CommandDispatchError, CommandDispatcher, Database, DemonPacketParser,
     ListenerRepository, ListenerStatus, ParsedDemonPacket, PersistedListener,
-    PersistedListenerState, PluginRuntime, SocketRelayManager, TeamserverError,
+    PersistedListenerState, PluginRuntime, ShutdownController, SocketRelayManager, TeamserverError,
     agent_events::agent_new_event, build_init_ack, build_reconnect_ack, events::EventBus,
     json_error_response,
 };
@@ -412,6 +412,7 @@ pub struct ListenerManager {
     plugins: Option<PluginRuntime>,
     max_download_bytes: u64,
     demon_init_rate_limiter: DemonInitRateLimiter,
+    shutdown: ShutdownController,
     active_handles: Arc<RwLock<BTreeMap<String, JoinHandle<()>>>>,
     operations: Arc<Mutex<()>>,
 }
@@ -454,6 +455,7 @@ impl ListenerManager {
             plugins,
             max_download_bytes,
             demon_init_rate_limiter: DemonInitRateLimiter::new(),
+            shutdown: ShutdownController::new(),
             active_handles: Arc::new(RwLock::new(BTreeMap::new())),
             operations: Arc::new(Mutex::new(())),
         }
@@ -469,6 +471,25 @@ impl ListenerManager {
     #[must_use]
     pub fn agent_registry(&self) -> AgentRegistry {
         self.agent_registry.clone()
+    }
+
+    /// Return the shared graceful-shutdown controller used by listener runtimes.
+    #[must_use]
+    pub fn shutdown_controller(&self) -> ShutdownController {
+        self.shutdown.clone()
+    }
+
+    /// Enter shutdown mode, wait for tracked callbacks to drain, then stop active listeners.
+    pub async fn shutdown(&self, timeout: Duration) -> bool {
+        self.shutdown.initiate();
+        let drained = self.shutdown.wait_for_callback_drain(timeout).await;
+
+        let names: Vec<_> = self.active_handles.read().await.keys().cloned().collect();
+        for name in names {
+            let _ = self.stop(&name).await;
+        }
+
+        drained
     }
 
     /// Create a persisted listener configuration in the stopped state.
@@ -772,6 +793,7 @@ struct HttpListenerState {
     response_headers: Vec<(HeaderName, HeaderValue)>,
     response_body: Arc<[u8]>,
     default_fake_404_body: Arc<[u8]>,
+    shutdown: ShutdownController,
 }
 
 #[derive(Clone, Debug)]
@@ -800,6 +822,7 @@ struct SmbListenerState {
     events: EventBus,
     dispatcher: CommandDispatcher,
     demon_init_rate_limiter: DemonInitRateLimiter,
+    shutdown: ShutdownController,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -816,6 +839,7 @@ enum DemonTransportKind {
 }
 
 impl HttpListenerState {
+    #[allow(clippy::too_many_arguments)]
     fn build(
         config: &HttpListenerConfig,
         registry: AgentRegistry,
@@ -824,6 +848,7 @@ impl HttpListenerState {
         sockets: SocketRelayManager,
         plugins: Option<PluginRuntime>,
         demon_init_rate_limiter: DemonInitRateLimiter,
+        shutdown: ShutdownController,
         max_download_bytes: u64,
     ) -> Result<Self, ListenerManagerError> {
         let method = parse_method(config)?;
@@ -870,6 +895,7 @@ impl HttpListenerState {
             response_headers,
             response_body,
             default_fake_404_body: DEFAULT_FAKE_404_BODY.as_bytes().to_vec().into(),
+            shutdown,
         })
     }
 
@@ -899,6 +925,7 @@ impl HttpListenerState {
 }
 
 impl SmbListenerState {
+    #[allow(clippy::too_many_arguments)]
     fn build(
         config: &SmbListenerConfig,
         registry: AgentRegistry,
@@ -907,6 +934,7 @@ impl SmbListenerState {
         sockets: SocketRelayManager,
         plugins: Option<PluginRuntime>,
         demon_init_rate_limiter: DemonInitRateLimiter,
+        shutdown: ShutdownController,
         max_download_bytes: u64,
     ) -> Self {
         Self {
@@ -915,6 +943,7 @@ impl SmbListenerState {
             parser: DemonPacketParser::new(registry.clone()),
             events: events.clone(),
             demon_init_rate_limiter,
+            shutdown,
             dispatcher: CommandDispatcher::with_builtin_handlers_and_max_download_bytes(
                 registry.clone(),
                 events.clone(),
@@ -1166,6 +1195,7 @@ fn profile_listener_configs(profile: &Profile) -> Vec<ListenerConfig> {
     listeners
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn_http_listener_runtime(
     config: &HttpListenerConfig,
     registry: AgentRegistry,
@@ -1174,6 +1204,7 @@ async fn spawn_http_listener_runtime(
     sockets: SocketRelayManager,
     plugins: Option<PluginRuntime>,
     demon_init_rate_limiter: DemonInitRateLimiter,
+    shutdown: ShutdownController,
     max_download_bytes: u64,
 ) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
     let state = Arc::new(HttpListenerState::build(
@@ -1184,6 +1215,7 @@ async fn spawn_http_listener_runtime(
         sockets,
         plugins,
         demon_init_rate_limiter,
+        shutdown,
         max_download_bytes,
     )?);
     let address = format!("{}:{}", config.host_bind, config.port_bind);
@@ -1340,6 +1372,7 @@ async fn allow_demon_init_for_ip(
     false
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn_smb_listener_runtime(
     config: &SmbListenerConfig,
     registry: AgentRegistry,
@@ -1348,6 +1381,7 @@ async fn spawn_smb_listener_runtime(
     sockets: SocketRelayManager,
     plugins: Option<PluginRuntime>,
     demon_init_rate_limiter: DemonInitRateLimiter,
+    shutdown: ShutdownController,
     max_download_bytes: u64,
 ) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
     let state = Arc::new(SmbListenerState::build(
@@ -1358,6 +1392,7 @@ async fn spawn_smb_listener_runtime(
         sockets,
         plugins,
         demon_init_rate_limiter,
+        shutdown,
         max_download_bytes,
     ));
     let listener_name = normalized_smb_pipe_name(&config.pipe_name);
@@ -1376,18 +1411,23 @@ async fn spawn_smb_listener_runtime(
 
     Ok(Box::pin(async move {
         loop {
-            match listener.accept().await {
-                Ok(stream) => {
-                    let state = state.clone();
-                    tokio::spawn(async move {
-                        handle_smb_connection(state, stream).await;
-                    });
-                }
-                Err(error) => {
-                    return Err(format!(
-                        "smb listener `{}` on pipe `{listener_name}` exited: {error}",
-                        state.config.name
-                    ));
+            tokio::select! {
+                _ = state.shutdown.notified() => return Ok(()),
+                accept = listener.accept() => {
+                    match accept {
+                        Ok(stream) => {
+                            let state = state.clone();
+                            tokio::spawn(async move {
+                                handle_smb_connection(state, stream).await;
+                            });
+                        }
+                        Err(error) => {
+                            return Err(format!(
+                                "smb listener `{}` on pipe `{listener_name}` exited: {error}",
+                                state.config.name
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -1396,6 +1436,10 @@ async fn spawn_smb_listener_runtime(
 
 async fn handle_smb_connection(state: Arc<SmbListenerState>, mut stream: LocalSocketStream) {
     loop {
+        if state.shutdown.is_shutting_down() {
+            break;
+        }
+
         let frame = match read_smb_frame(&mut stream).await {
             Ok(Some(frame)) => frame,
             Ok(None) => break,
@@ -1413,6 +1457,10 @@ async fn handle_smb_connection(state: Arc<SmbListenerState>, mut stream: LocalSo
             );
             continue;
         }
+
+        let Some(_callback_guard) = state.shutdown.try_track_callback() else {
+            break;
+        };
 
         let client_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
         if !allow_demon_init_for_ip(
@@ -1553,6 +1601,7 @@ impl ListenerManager {
                     self.sockets.clone(),
                     self.plugins.clone(),
                     self.demon_init_rate_limiter.clone(),
+                    self.shutdown.clone(),
                     self.max_download_bytes,
                 )
                 .await
@@ -1566,6 +1615,7 @@ impl ListenerManager {
                     self.sockets.clone(),
                     self.plugins.clone(),
                     self.demon_init_rate_limiter.clone(),
+                    self.shutdown.clone(),
                     self.max_download_bytes,
                 )
                 .await
@@ -1580,6 +1630,7 @@ impl ListenerManager {
                     self.sockets.clone(),
                     self.plugins.clone(),
                     self.demon_init_rate_limiter.clone(),
+                    self.shutdown.clone(),
                     self.max_download_bytes,
                 )
                 .await
@@ -1717,6 +1768,7 @@ struct DnsListenerState {
     events: EventBus,
     dispatcher: CommandDispatcher,
     demon_init_rate_limiter: DemonInitRateLimiter,
+    shutdown: ShutdownController,
     /// Pending uploads keyed by agent ID.
     uploads: Mutex<HashMap<u32, DnsPendingUpload>>,
     /// Pending responses keyed by agent ID.
@@ -1724,6 +1776,7 @@ struct DnsListenerState {
 }
 
 impl DnsListenerState {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         config: &DnsListenerConfig,
         registry: AgentRegistry,
@@ -1732,6 +1785,7 @@ impl DnsListenerState {
         sockets: SocketRelayManager,
         plugins: Option<PluginRuntime>,
         demon_init_rate_limiter: DemonInitRateLimiter,
+        shutdown: ShutdownController,
         max_download_bytes: u64,
     ) -> Self {
         Self {
@@ -1748,6 +1802,7 @@ impl DnsListenerState {
                 max_download_bytes,
             ),
             demon_init_rate_limiter,
+            shutdown,
             uploads: Mutex::new(HashMap::new()),
             responses: Mutex::new(HashMap::new()),
         }
@@ -1806,6 +1861,10 @@ impl DnsListenerState {
             DnsUploadAssembly::Pending => return "ok",
             DnsUploadAssembly::Rejected => return "err",
             DnsUploadAssembly::Complete(assembled) => assembled,
+        };
+
+        let Some(_callback_guard) = self.shutdown.try_track_callback() else {
+            return "err";
         };
 
         if !is_valid_demon_callback_request(&assembled) {
@@ -2232,6 +2291,7 @@ fn build_dns_refused_response(query_id: u16) -> Vec<u8> {
     response
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn_dns_listener_runtime(
     config: &DnsListenerConfig,
     registry: AgentRegistry,
@@ -2240,6 +2300,7 @@ async fn spawn_dns_listener_runtime(
     sockets: SocketRelayManager,
     plugins: Option<PluginRuntime>,
     demon_init_rate_limiter: DemonInitRateLimiter,
+    shutdown: ShutdownController,
     max_download_bytes: u64,
 ) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
     if dns_allowed_query_types(&config.record_types).is_none() {
@@ -2260,6 +2321,7 @@ async fn spawn_dns_listener_runtime(
         sockets,
         plugins,
         demon_init_rate_limiter,
+        shutdown,
         max_download_bytes,
     ));
     let addr = format!("{}:{}", config.host_bind, config.port_bind);
@@ -2278,6 +2340,9 @@ async fn spawn_dns_listener_runtime(
             tokio::select! {
                 _ = cleanup_interval.tick() => {
                     state.cleanup_expired_uploads().await;
+                }
+                _ = state.shutdown.notified() => {
+                    return Ok(());
                 }
                 recv = socket.recv_from(&mut buf) => {
                     let (len, peer) = match recv {
@@ -2391,6 +2456,10 @@ async fn http_listener_handler(
     if !is_valid_demon_callback_request(&body) {
         return state.fake_404_response();
     }
+
+    let Some(_callback_guard) = state.shutdown.try_track_callback() else {
+        return state.fake_404_response();
+    };
 
     if !allow_demon_init_for_ip(
         &state.config.name,
@@ -2867,7 +2936,8 @@ mod tests {
         spawn_dns_listener_runtime, spawn_managed_listener_task,
     };
     use crate::{
-        AgentRegistry, Database, EventBus, Job, PersistedListenerState, SocketRelayManager,
+        AgentRegistry, Database, EventBus, Job, PersistedListenerState, ShutdownController,
+        SocketRelayManager,
     };
     use axum::body::Body;
     use axum::http::Request;
@@ -4693,6 +4763,7 @@ mod tests {
             sockets,
             None,
             DemonInitRateLimiter::new(),
+            ShutdownController::new(),
             super::DEFAULT_MAX_DOWNLOAD_BYTES,
         )
     }
@@ -4712,6 +4783,7 @@ mod tests {
             sockets,
             None,
             DemonInitRateLimiter::new(),
+            ShutdownController::new(),
             super::DEFAULT_MAX_DOWNLOAD_BYTES,
         )
         .await
@@ -5172,6 +5244,7 @@ mod tests {
             sockets,
             None,
             DemonInitRateLimiter::new(),
+            ShutdownController::new(),
             super::DEFAULT_MAX_DOWNLOAD_BYTES,
         )
         .await

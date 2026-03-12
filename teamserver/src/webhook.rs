@@ -1,11 +1,18 @@
 //! Outbound audit webhook delivery.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 use red_cell_common::config::Profile;
 use reqwest::StatusCode;
 use serde::Serialize;
 use thiserror::Error;
+use tokio::sync::Notify;
 use tracing::warn;
 
 use crate::{AuditRecord, AuditResultStatus};
@@ -18,6 +25,7 @@ const DISCORD_WEBHOOK_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone, Default)]
 pub struct AuditWebhookNotifier {
     discord: Option<Arc<DiscordWebhook>>,
+    delivery_state: Arc<DeliveryState>,
 }
 
 impl AuditWebhookNotifier {
@@ -34,7 +42,7 @@ impl AuditWebhookNotifier {
                 })
             });
 
-        Self { discord }
+        Self { discord, delivery_state: Arc::new(DeliveryState::default()) }
     }
 
     /// Return `true` when at least one outbound webhook is configured.
@@ -54,7 +62,13 @@ impl AuditWebhookNotifier {
 
     /// Emit a notification for a persisted audit record without blocking the caller.
     pub fn notify_audit_record_detached(&self, record: AuditRecord) {
+        if self.delivery_state.closing.load(Ordering::SeqCst) {
+            return;
+        }
+
         if let Some(discord) = self.discord.clone() {
+            self.delivery_state.pending.fetch_add(1, Ordering::SeqCst);
+            let delivery_state = self.delivery_state.clone();
             tokio::spawn(async move {
                 if let Err(error) = discord.send(&record).await {
                     warn!(
@@ -64,7 +78,48 @@ impl AuditWebhookNotifier {
                         "failed to deliver audit webhook notification"
                     );
                 }
+
+                delivery_state.pending.fetch_sub(1, Ordering::SeqCst);
+                delivery_state.notify_if_drained();
             });
+        }
+    }
+
+    /// Stop accepting new detached deliveries and wait for in-flight webhook posts to complete.
+    pub async fn shutdown(&self, timeout: Duration) -> bool {
+        self.delivery_state.closing.store(true, Ordering::SeqCst);
+        let deadline = Instant::now() + timeout;
+
+        loop {
+            if self.delivery_state.pending.load(Ordering::SeqCst) == 0 {
+                return true;
+            }
+
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return false;
+            };
+
+            if tokio::time::timeout(remaining, self.delivery_state.drained.notified())
+                .await
+                .is_err()
+            {
+                return self.delivery_state.pending.load(Ordering::SeqCst) == 0;
+            }
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct DeliveryState {
+    closing: AtomicBool,
+    pending: AtomicUsize,
+    drained: Notify,
+}
+
+impl DeliveryState {
+    fn notify_if_drained(&self) {
+        if self.pending.load(Ordering::SeqCst) == 0 {
+            self.drained.notify_waiters();
         }
     }
 }
@@ -199,6 +254,7 @@ impl DiscordField {
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
+    use std::time::Duration;
 
     use axum::{Json, Router, routing::post};
     use serde_json::{Value, json};
@@ -295,6 +351,54 @@ mod tests {
             .find(|field| field["name"] == "Command")
             .expect("command field should be present");
         assert_eq!(command_field["value"], "shell");
+    }
+
+    #[tokio::test]
+    async fn notifier_shutdown_waits_for_detached_delivery() {
+        let (address, mut receiver, server) = webhook_server().await;
+        let profile = Profile::parse(&format!(
+            r#"
+            Teamserver {{
+              Host = "127.0.0.1"
+              Port = 40056
+            }}
+
+            Operators {{
+              user "operator" {{
+                Password = "password1234"
+              }}
+            }}
+
+            WebHook {{
+              Discord {{
+                Url = "http://{address}/"
+              }}
+            }}
+
+            Demon {{}}
+            "#
+        ))
+        .expect("profile should parse");
+        let notifier = AuditWebhookNotifier::from_profile(&profile);
+
+        notifier.notify_audit_record_detached(AuditRecord {
+            id: 8,
+            actor: "operator".to_owned(),
+            action: "operator.login".to_owned(),
+            target_kind: "operator".to_owned(),
+            target_id: Some("operator".to_owned()),
+            agent_id: None,
+            command: Some("login".to_owned()),
+            parameters: None,
+            result_status: AuditResultStatus::Success,
+            occurred_at: "2026-03-12T00:00:00Z".to_owned(),
+        });
+
+        assert!(notifier.shutdown(Duration::from_secs(5)).await);
+        let payload = receiver.recv().await.expect("payload should arrive");
+        server.abort();
+
+        assert_eq!(payload["embeds"][0]["fields"][0]["value"], "operator");
     }
 
     async fn webhook_server()

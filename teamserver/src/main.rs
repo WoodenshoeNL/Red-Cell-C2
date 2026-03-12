@@ -19,8 +19,6 @@ use red_cell_common::tls::{
 use tokio::net::lookup_host;
 use tracing::{info, instrument};
 
-const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
-
 mod logging;
 
 #[derive(Debug, Clone, Parser)]
@@ -76,6 +74,8 @@ async fn main() -> Result<()> {
     plugins.attach_listener_manager(listeners.clone()).await;
     let payload_builder = PayloadBuilderService::from_profile(&profile)
         .context("failed to validate Demon build toolchain")?;
+    let shutdown = listeners.shutdown_controller();
+    let shutdown_timeout = Duration::from_secs(profile.teamserver.drain_timeout_secs.unwrap_or(30));
 
     listeners.sync_profile(&profile).await?;
     listeners.restore_running().await?;
@@ -88,7 +88,7 @@ async fn main() -> Result<()> {
     let bind_addr = resolve_bind_addr(&profile).await?;
     install_default_crypto_provider();
     let tls_config = build_tls_config(&profile).await?;
-    let router = build_router(TeamserverState {
+    let state = TeamserverState {
         profile: profile.clone(),
         auth: AuthService::from_profile_with_database(&profile, &database).await?,
         database,
@@ -101,10 +101,13 @@ async fn main() -> Result<()> {
         payload_builder,
         webhooks: AuditWebhookNotifier::from_profile(&profile),
         login_rate_limiter: LoginRateLimiter::new(),
-    });
+        shutdown: shutdown.clone(),
+    };
+    let router = build_router(state.clone());
     let handle = Handle::new();
 
-    tokio::spawn(wait_for_shutdown_signal(handle.clone()));
+    let shutdown_task =
+        tokio::spawn(wait_for_shutdown_signal(handle.clone(), shutdown, state, shutdown_timeout));
 
     info!("starting teamserver on https://{bind_addr}");
 
@@ -113,6 +116,11 @@ async fn main() -> Result<()> {
         .serve(router.into_make_service_with_connect_info::<SocketAddr>())
         .await
         .context("teamserver exited with an error")?;
+
+    shutdown_task
+        .await
+        .context("shutdown coordinator task failed to join")?
+        .context("shutdown coordinator failed")?;
 
     Ok(())
 }
@@ -178,8 +186,13 @@ fn tls_subject_alt_names(host: &str) -> Vec<String> {
     names
 }
 
-#[instrument(skip(handle))]
-async fn wait_for_shutdown_signal(handle: Handle<SocketAddr>) {
+#[instrument(skip(handle, shutdown, state))]
+async fn wait_for_shutdown_signal(
+    handle: Handle<SocketAddr>,
+    shutdown: red_cell::ShutdownController,
+    state: TeamserverState,
+    timeout: Duration,
+) -> Result<()> {
     let signal = async {
         let ctrl_c = async {
             match tokio::signal::ctrl_c().await {
@@ -208,8 +221,25 @@ async fn wait_for_shutdown_signal(handle: Handle<SocketAddr>) {
     };
 
     signal.await;
-    info!(timeout_seconds = GRACEFUL_SHUTDOWN_TIMEOUT.as_secs(), "shutdown signal received");
-    handle.graceful_shutdown(Some(GRACEFUL_SHUTDOWN_TIMEOUT));
+    info!(timeout_seconds = timeout.as_secs(), "shutdown signal received");
+    shutdown.initiate();
+    handle.graceful_shutdown(Some(timeout));
+
+    let drained = state.listeners.shutdown(timeout).await;
+    if !drained {
+        tracing::warn!(
+            active_callbacks = state.shutdown.active_callback_count(),
+            timeout_seconds = timeout.as_secs(),
+            "timed out waiting for in-flight agent callbacks to drain"
+        );
+    }
+
+    if !state.webhooks.shutdown(timeout).await {
+        tracing::warn!(timeout_seconds = timeout.as_secs(), "timed out waiting for audit webhooks");
+    }
+
+    state.database.close().await;
+    Ok(())
 }
 
 #[instrument(skip(listeners, profile), fields(listener_count = profile_listener_names(profile).len()))]
@@ -391,6 +421,7 @@ mod tests {
             webhooks: AuditWebhookNotifier::from_profile(&profile),
             profile,
             login_rate_limiter: LoginRateLimiter::new(),
+            shutdown: red_cell::ShutdownController::new(),
         };
 
         let _ = AuthService::from_ref(&state);

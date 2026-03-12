@@ -179,6 +179,11 @@ impl Database {
     pub fn operators(&self) -> OperatorRepository {
         OperatorRepository::new(self.pool.clone())
     }
+
+    /// Close the SQLite pool and wait for all checked-out connections to return.
+    pub async fn close(&self) {
+        self.pool.close().await;
+    }
 }
 
 /// CRUD operations for persisted agents.

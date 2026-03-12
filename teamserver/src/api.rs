@@ -3131,6 +3131,7 @@ mod tests {
             sockets,
             webhooks: crate::AuditWebhookNotifier::from_profile(&profile),
             login_rate_limiter: crate::LoginRateLimiter::new(),
+            shutdown: crate::ShutdownController::new(),
         });
 
         let response = app
@@ -3488,6 +3489,7 @@ mod tests {
                 sockets,
                 webhooks: crate::AuditWebhookNotifier::from_profile(&profile),
                 login_rate_limiter: crate::LoginRateLimiter::new(),
+                shutdown: crate::ShutdownController::new(),
             }),
             agent_registry,
             auth,

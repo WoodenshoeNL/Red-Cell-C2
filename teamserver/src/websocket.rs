@@ -35,8 +35,8 @@ use uuid::Uuid;
 use crate::{
     AgentRegistry, AuditResultStatus, AuditWebhookNotifier, AuthError, AuthService,
     AuthenticationFailure, AuthenticationResult, Database, EventBus, Job, ListenerEventAction,
-    ListenerManager, PayloadBuilderService, SocketRelayManager, action_from_mark,
-    agent_events::agent_new_event, audit_details, authorize_websocket_command,
+    ListenerManager, PayloadBuilderService, ShutdownController, SocketRelayManager,
+    action_from_mark, agent_events::agent_new_event, audit_details, authorize_websocket_command,
     listener_config_from_operator, listener_error_event, listener_event_for_action,
     listener_removed_event, login_failure_message, login_parameters, login_success_message,
     operator_requests_start, parameter_object, record_operator_action_with_notifications,
@@ -220,6 +220,7 @@ where
     LoginRateLimiter: FromRef<S>,
     AuditWebhookNotifier: FromRef<S>,
     Database: FromRef<S>,
+    ShutdownController: FromRef<S>,
 {
     Router::new().route("/", get(websocket_handler::<S>))
 }
@@ -243,6 +244,7 @@ where
     LoginRateLimiter: FromRef<S>,
     AuditWebhookNotifier: FromRef<S>,
     Database: FromRef<S>,
+    ShutdownController: FromRef<S>,
 {
     websocket.on_upgrade(move |socket| handle_operator_socket(state, socket, addr.ip()))
 }
@@ -260,6 +262,7 @@ where
     LoginRateLimiter: FromRef<S>,
     AuditWebhookNotifier: FromRef<S>,
     Database: FromRef<S>,
+    ShutdownController: FromRef<S>,
 {
     let connection_id = Uuid::new_v4();
     let auth = AuthService::from_ref(&state);
@@ -267,6 +270,13 @@ where
     let database = Database::from_ref(&state);
     let rate_limiter = LoginRateLimiter::from_ref(&state);
     let webhooks = AuditWebhookNotifier::from_ref(&state);
+    let shutdown = ShutdownController::from_ref(&state);
+
+    if shutdown.is_shutting_down() {
+        let _ = send_operator_message(&mut socket, &teamserver_shutdown_event()).await;
+        let _ = socket.send(WsMessage::Close(None)).await;
+        return;
+    }
 
     connections.register(connection_id).await;
 
@@ -357,8 +367,16 @@ where
         return;
     }
 
+    let shutdown_signal = shutdown.notified();
+    tokio::pin!(shutdown_signal);
+
     loop {
         tokio::select! {
+            _ = &mut shutdown_signal => {
+                let _ = send_operator_message(&mut socket, &teamserver_shutdown_event()).await;
+                let _ = socket.send(WsMessage::Close(None)).await;
+                break;
+            }
             incoming = socket.recv() => {
                 match handle_incoming_frame(&state, &mut socket, &session, incoming).await {
                     Ok(SocketLoopControl::Continue) => {}
@@ -571,6 +589,7 @@ where
     PayloadBuilderService: FromRef<S>,
     AuditWebhookNotifier: FromRef<S>,
     Database: FromRef<S>,
+    ShutdownController: FromRef<S>,
 {
     let Some(frame) = incoming else {
         return Ok(SocketLoopControl::Break);
@@ -653,6 +672,7 @@ async fn dispatch_operator_command<S>(
     PayloadBuilderService: FromRef<S>,
     AuditWebhookNotifier: FromRef<S>,
     Database: FromRef<S>,
+    ShutdownController: FromRef<S>,
 {
     let events = EventBus::from_ref(state);
     let listeners = ListenerManager::from_ref(state);
@@ -2421,6 +2441,18 @@ fn chat_message_event(user: &str, text: &str) -> OperatorMessage {
     })
 }
 
+fn teamserver_shutdown_event() -> OperatorMessage {
+    OperatorMessage::TeamserverLog(Message {
+        head: MessageHead {
+            event: EventCode::Teamserver,
+            user: "teamserver".to_owned(),
+            timestamp: OffsetDateTime::now_utc().unix_timestamp().to_string(),
+            one_time: String::new(),
+        },
+        info: TeamserverLogInfo { text: "teamserver shutting down".to_owned() },
+    })
+}
+
 async fn log_operator_action(
     database: &Database,
     webhooks: &AuditWebhookNotifier,
@@ -2517,7 +2549,8 @@ mod tests {
     };
     use crate::{
         AgentRegistry, AuditQuery, AuditResultStatus, AuditWebhookNotifier, AuthService, Database,
-        EventBus, ListenerManager, PayloadBuilderService, SocketRelayManager, query_audit_log,
+        EventBus, ListenerManager, PayloadBuilderService, ShutdownController, SocketRelayManager,
+        query_audit_log,
     };
     use red_cell_common::crypto::hash_password_sha3;
 
@@ -2533,6 +2566,7 @@ mod tests {
         sockets: SocketRelayManager,
         webhooks: AuditWebhookNotifier,
         login_rate_limiter: LoginRateLimiter,
+        shutdown: ShutdownController,
     }
 
     impl TestState {
@@ -2580,6 +2614,7 @@ mod tests {
                 sockets,
                 webhooks: AuditWebhookNotifier::from_profile(&profile),
                 login_rate_limiter: LoginRateLimiter::new(),
+                shutdown: ShutdownController::new(),
             }
         }
     }
@@ -2641,6 +2676,12 @@ mod tests {
     impl FromRef<TestState> for LoginRateLimiter {
         fn from_ref(input: &TestState) -> Self {
             input.login_rate_limiter.clone()
+        }
+    }
+
+    impl FromRef<TestState> for ShutdownController {
+        fn from_ref(input: &TestState) -> Self {
+            input.shutdown.clone()
         }
     }
 
@@ -2746,6 +2787,39 @@ mod tests {
         socket.close(None).await.expect("close should send");
         wait_for_connection_count(&connection_registry, 0).await;
         assert_eq!(auth.session_count().await, 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_notifies_authenticated_clients_before_shutdown_close() {
+        let state = TestState::new().await;
+        let shutdown = state.shutdown.clone();
+        let (mut socket, server) = spawn_server(state).await;
+
+        socket
+            .send(ClientMessage::Text(login_message("operator", "password1234").into()))
+            .await
+            .expect("login should send");
+
+        let response = read_operator_message(&mut socket).await;
+        assert!(matches!(response, OperatorMessage::InitConnectionSuccess(_)));
+        let _ = read_operator_snapshot(&mut socket).await;
+
+        shutdown.initiate();
+
+        let response = read_operator_message(&mut socket).await;
+        let OperatorMessage::TeamserverLog(message) = response else {
+            panic!("expected shutdown notice");
+        };
+        assert_eq!(message.info.text, "teamserver shutting down");
+
+        let frame = timeout(Duration::from_secs(5), socket.next())
+            .await
+            .expect("socket should close")
+            .expect("close frame should be present")
+            .expect("close frame should decode");
+        assert!(matches!(frame, ClientMessage::Close(_)));
+
         server.abort();
     }
 

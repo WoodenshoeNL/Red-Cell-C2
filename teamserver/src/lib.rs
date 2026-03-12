@@ -14,6 +14,7 @@ pub mod listeners;
 pub mod payload_builder;
 pub mod plugins;
 pub mod rbac;
+pub mod shutdown;
 pub mod sockets;
 pub mod webhook;
 pub mod websocket;
@@ -61,6 +62,7 @@ pub use rbac::{
     ReadAccess, TaskAgentAccess, authorize_permission, authorize_websocket_command,
 };
 pub use red_cell_common::crypto::hash_password_sha3;
+pub use shutdown::ShutdownController;
 pub use sockets::{SocketRelayError, SocketRelayManager};
 pub use webhook::AuditWebhookNotifier;
 pub use websocket::{

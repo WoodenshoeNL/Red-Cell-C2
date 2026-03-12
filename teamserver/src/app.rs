@@ -13,7 +13,7 @@ use red_cell_common::config::Profile;
 use crate::{
     AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
     ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
-    SocketRelayManager, api_routes, websocket_routes,
+    ShutdownController, SocketRelayManager, api_routes, websocket_routes,
 };
 
 /// Shared state injected into Axum routes and middleware.
@@ -43,6 +43,8 @@ pub struct TeamserverState {
     pub webhooks: AuditWebhookNotifier,
     /// WebSocket login rate limiter.
     pub login_rate_limiter: LoginRateLimiter,
+    /// Coordinated graceful-shutdown controller.
+    pub shutdown: ShutdownController,
 }
 
 impl FromRef<TeamserverState> for AuthService {
@@ -108,6 +110,12 @@ impl FromRef<TeamserverState> for AuditWebhookNotifier {
 impl FromRef<TeamserverState> for LoginRateLimiter {
     fn from_ref(input: &TeamserverState) -> Self {
         input.login_rate_limiter.clone()
+    }
+}
+
+impl FromRef<TeamserverState> for ShutdownController {
+    fn from_ref(input: &TeamserverState) -> Self {
+        input.shutdown.clone()
     }
 }
 

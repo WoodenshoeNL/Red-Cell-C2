@@ -63,6 +63,7 @@ async fn mock_demon_checkin_get_job_and_output_flow() -> Result<(), Box<dyn std:
         sockets,
         webhooks: AuditWebhookNotifier::from_profile(&profile),
         login_rate_limiter: LoginRateLimiter::new(),
+        shutdown: red_cell::ShutdownController::new(),
     };
 
     let server_listener = TcpListener::bind("127.0.0.1:0").await?;

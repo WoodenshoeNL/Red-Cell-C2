@@ -560,9 +560,10 @@ mod tests {
         let (mut parts, _) = request.into_parts();
         let state = TestState { auth };
 
-        let read = ReadAccess::from_request_parts(&mut parts, &state)
-            .await
-            .expect("analyst should be allowed to read");
+        let read =
+            <ReadAccess as FromRequestParts<TestState>>::from_request_parts(&mut parts, &state)
+                .await
+                .expect("analyst should be allowed to read");
         assert_eq!(read.role, OperatorRole::Analyst);
 
         let request = Request::builder()
@@ -570,9 +571,11 @@ mod tests {
             .body(())
             .expect("request should build");
         let (mut parts, _) = request.into_parts();
-        let denied = TaskAgentAccess::from_request_parts(&mut parts, &state)
-            .await
-            .expect_err("analyst should not task agents");
+        let denied = <TaskAgentAccess as FromRequestParts<TestState>>::from_request_parts(
+            &mut parts, &state,
+        )
+        .await
+        .expect_err("analyst should not task agents");
 
         assert_eq!(
             denied,
@@ -606,9 +609,12 @@ mod tests {
             .body(())
             .expect("request should build");
         let (mut parts, _) = request.into_parts();
-        let extracted = AdminAccess::from_request_parts(&mut parts, &TestState { auth })
-            .await
-            .expect("admin should be allowed");
+        let extracted = <AdminAccess as FromRequestParts<TestState>>::from_request_parts(
+            &mut parts,
+            &TestState { auth },
+        )
+        .await
+        .expect("admin should be allowed");
 
         assert_eq!(extracted.role, OperatorRole::Admin);
     }

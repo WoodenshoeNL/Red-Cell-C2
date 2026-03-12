@@ -285,6 +285,37 @@ mod tests {
         }
     }
 
+    /// Passwords are intentionally NOT trimmed before the length check — a password of spaces
+    /// is valid (the server will reject it during authentication). This test documents that
+    /// contract so that adding `trim()` to the password check in the future is a conscious,
+    /// breaking decision rather than an accidental refactor.
+    #[test]
+    fn can_submit_accepts_whitespace_only_password() {
+        let mut state = default_login_state();
+        state.username = "user".to_owned();
+        state.password = "   ".to_owned(); // three spaces — meets MIN_PASSWORD_LENGTH
+        assert!(state.can_submit());
+    }
+
+    /// `build_login_message` hashes the raw password without trimming. A password with
+    /// surrounding spaces must be hashed as-is so that the server can verify it against
+    /// the same raw value. This test documents that contract explicitly.
+    #[test]
+    fn build_login_message_does_not_trim_password() {
+        let mut state = default_login_state();
+        state.username = "operator".to_owned();
+        state.password = " secret".to_owned(); // leading space is intentional
+
+        let message = state.build_login_message();
+        match message {
+            OperatorMessage::Login(msg) => {
+                assert_eq!(msg.info.password, hash_password_sha3(" secret"));
+                assert_ne!(msg.info.password, hash_password_sha3("secret"));
+            }
+            other => panic!("expected Login variant, got {other:?}"),
+        }
+    }
+
     #[test]
     fn set_error_clears_connecting_flag() {
         let mut state = default_login_state();

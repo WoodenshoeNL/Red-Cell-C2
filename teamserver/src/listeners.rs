@@ -1,8 +1,10 @@
 //! Listener lifecycle management for the teamserver.
 
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -36,7 +38,6 @@ use red_cell_common::{
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-#[cfg(test)]
 use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
@@ -634,6 +635,7 @@ impl ListenerManager {
             .await?
             .ok_or_else(|| ListenerManagerError::ListenerNotFound { name: name.to_owned() })?;
 
+        self.prune_finished_handle(name).await;
         if self.active_handles.read().await.contains_key(name) {
             return Err(ListenerManagerError::ListenerAlreadyRunning { name: name.to_owned() });
         }
@@ -677,6 +679,17 @@ impl ListenerManager {
         self.summary(name).await
     }
 
+    async fn prune_finished_handle(&self, name: &str) {
+        let should_remove = {
+            let handles = self.active_handles.read().await;
+            handles.get(name).is_some_and(JoinHandle::is_finished)
+        };
+
+        if should_remove {
+            self.active_handles.write().await.remove(name);
+        }
+    }
+
     async fn delete_removed_profile_listener_locked(
         &self,
         name: &str,
@@ -693,6 +706,47 @@ impl ListenerManager {
     }
 }
 
+fn spawn_managed_listener_task(
+    name: String,
+    runtime: ListenerRuntimeFuture,
+    repository: ListenerRepository,
+    active_handles: Arc<RwLock<BTreeMap<String, JoinHandle<()>>>>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let outcome = runtime.await;
+        active_handles.write().await.remove(&name);
+
+        match outcome {
+            Ok(()) => {
+                if let Err(error) = repository.set_state(&name, ListenerStatus::Stopped, None).await
+                {
+                    warn!(
+                        listener = %name,
+                        %error,
+                        "listener runtime exited but stopped state could not be persisted"
+                    );
+                } else {
+                    info!(listener = %name, "listener runtime exited");
+                }
+            }
+            Err(message) => {
+                if let Err(error) =
+                    repository.set_state(&name, ListenerStatus::Error, Some(message.as_str())).await
+                {
+                    warn!(
+                        listener = %name,
+                        runtime_error = %message,
+                        %error,
+                        "listener runtime failed and error state could not be persisted"
+                    );
+                } else {
+                    warn!(listener = %name, error = %message, "listener runtime exited with error");
+                }
+            }
+        }
+    })
+}
+
 const DEFAULT_FAKE_404_BODY: &str =
     "<html><head><title>404 Not Found</title></head><body>404 Not Found</body></html>";
 const DEFAULT_HTTP_METHOD: &str = "POST";
@@ -701,6 +755,8 @@ const SMB_PIPE_PREFIX: &str = r"\\.\pipe\";
 const MAX_SMB_FRAME_PAYLOAD_LEN: usize = 16 * 1024 * 1024;
 const MAX_AGENT_REQUEST_BODY_LEN: usize = 0x01E0_0000; // ~30 MiB — matches DEMON_MAX_RESPONSE_LENGTH
 const HEADER_VALIDATION_IGNORES: [&str; 2] = ["connection", "accept-encoding"];
+type ListenerRuntimeFuture = Pin<Box<dyn Future<Output = ListenerRuntimeResult> + Send>>;
+type ListenerRuntimeResult = Result<(), String>;
 
 #[derive(Clone, Debug)]
 struct HttpListenerState {
@@ -1119,7 +1175,7 @@ async fn spawn_http_listener_runtime(
     plugins: Option<PluginRuntime>,
     demon_init_rate_limiter: DemonInitRateLimiter,
     max_download_bytes: u64,
-) -> Result<JoinHandle<()>, ListenerManagerError> {
+) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
     let state = Arc::new(HttpListenerState::build(
         config,
         registry,
@@ -1153,12 +1209,12 @@ async fn spawn_http_listener_runtime(
             }
         })?;
 
-        Ok(tokio::spawn(async move {
-            if let Err(error) =
-                server.serve(router.into_make_service_with_connect_info::<SocketAddr>()).await
-            {
-                warn!(listener = %state.config.name, %error, "https listener exited");
-            }
+        let listener_name = state.config.name.clone();
+        Ok(Box::pin(async move {
+            server
+                .serve(router.into_make_service_with_connect_info::<SocketAddr>())
+                .await
+                .map_err(|error| format!("https listener `{listener_name}` exited: {error}"))
         }))
     } else {
         let server = axum_server::from_tcp(std_listener).map_err(|error| {
@@ -1168,12 +1224,12 @@ async fn spawn_http_listener_runtime(
             }
         })?;
 
-        Ok(tokio::spawn(async move {
-            if let Err(error) =
-                server.serve(router.into_make_service_with_connect_info::<SocketAddr>()).await
-            {
-                warn!(listener = %state.config.name, %error, "http listener exited");
-            }
+        let listener_name = state.config.name.clone();
+        Ok(Box::pin(async move {
+            server
+                .serve(router.into_make_service_with_connect_info::<SocketAddr>())
+                .await
+                .map_err(|error| format!("http listener `{listener_name}` exited: {error}"))
         }))
     }
 }
@@ -1293,7 +1349,7 @@ async fn spawn_smb_listener_runtime(
     plugins: Option<PluginRuntime>,
     demon_init_rate_limiter: DemonInitRateLimiter,
     max_download_bytes: u64,
-) -> Result<JoinHandle<()>, ListenerManagerError> {
+) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
     let state = Arc::new(SmbListenerState::build(
         config,
         registry,
@@ -1318,7 +1374,7 @@ async fn spawn_smb_listener_runtime(
         }
     })?;
 
-    Ok(tokio::spawn(async move {
+    Ok(Box::pin(async move {
         loop {
             match listener.accept().await {
                 Ok(stream) => {
@@ -1328,8 +1384,10 @@ async fn spawn_smb_listener_runtime(
                     });
                 }
                 Err(error) => {
-                    warn!(listener = %state.config.name, pipe = %listener_name, %error, "smb listener exited");
-                    break;
+                    return Err(format!(
+                        "smb listener `{}` on pipe `{listener_name}` exited: {error}",
+                        state.config.name
+                    ));
                 }
             }
         }
@@ -1485,7 +1543,7 @@ impl ListenerManager {
         &self,
         config: &ListenerConfig,
     ) -> Result<JoinHandle<()>, ListenerManagerError> {
-        match config {
+        let runtime = match config {
             ListenerConfig::Http(config) => {
                 spawn_http_listener_runtime(
                     config,
@@ -1513,8 +1571,27 @@ impl ListenerManager {
                 .await
             }
             ListenerConfig::External(config) => Err(unsupported_external_listener_error(config)),
-            ListenerConfig::Dns(config) => Err(unsupported_dns_listener_error(config)),
-        }
+            ListenerConfig::Dns(config) => {
+                spawn_dns_listener_runtime(
+                    config,
+                    self.agent_registry.clone(),
+                    self.events.clone(),
+                    self.database.clone(),
+                    self.sockets.clone(),
+                    self.plugins.clone(),
+                    self.demon_init_rate_limiter.clone(),
+                    self.max_download_bytes,
+                )
+                .await
+            }
+        }?;
+
+        Ok(spawn_managed_listener_task(
+            config.name().to_owned(),
+            runtime,
+            self.repository(),
+            self.active_handles.clone(),
+        ))
     }
 }
 
@@ -1538,64 +1615,41 @@ fn unsupported_external_listener_error(config: &ExternalListenerConfig) -> Liste
     }
 }
 
-fn unsupported_dns_listener_error(config: &DnsListenerConfig) -> ListenerManagerError {
-    ListenerManagerError::StartFailed {
-        name: config.name.clone(),
-        message: DNS_LISTENER_PAYLOAD_GENERATION_UNAVAILABLE.to_owned(),
-    }
-}
-
 // ── DNS C2 Listener ──────────────────────────────────────────────────────────
 
 /// DNS wire-format header length in bytes.
-#[cfg(test)]
 const DNS_HEADER_LEN: usize = 12;
 /// DNS record type for TXT records.
-#[cfg(test)]
 const DNS_TYPE_TXT: u16 = 16;
 /// DNS record type for A records.
-#[cfg(test)]
 const DNS_TYPE_A: u16 = 1;
 /// DNS record type for CNAME records.
-#[cfg(test)]
 const DNS_TYPE_CNAME: u16 = 5;
 /// DNS record class IN.
-#[cfg(test)]
 const DNS_CLASS_IN: u16 = 1;
 /// DNS flag: Query/Response bit.
-#[cfg(test)]
 const DNS_FLAG_QR: u16 = 0x8000;
 /// DNS flag: Authoritative Answer bit.
-#[cfg(test)]
 const DNS_FLAG_AA: u16 = 0x0400;
 /// DNS RCODE: No Error.
-#[cfg(test)]
 const DNS_RCODE_NOERROR: u16 = 0;
 /// DNS RCODE: Refused.
-#[cfg(test)]
 const DNS_RCODE_REFUSED: u16 = 5;
 /// Maximum age in seconds before a pending DNS upload is discarded.
-#[cfg(test)]
 const DNS_UPLOAD_TIMEOUT_SECS: u64 = 120;
 /// How often the DNS listener prunes expired upload sessions.
-#[cfg(test)]
 const DNS_UPLOAD_CLEANUP_INTERVAL_SECS: u64 = 30;
 /// Maximum number of chunks accepted for a single DNS upload.
-#[cfg(test)]
 const DNS_MAX_UPLOAD_CHUNKS: u16 = 256;
 /// Maximum number of concurrent DNS upload sessions retained in memory.
-#[cfg(test)]
 const DNS_MAX_PENDING_UPLOADS: usize = 1000;
 /// Maximum response chunk size in bytes (encoded as base32hex in a TXT string).
 /// 200 base32hex chars × 5 bits ÷ 8 = 125 bytes.
-#[cfg(test)]
 const DNS_RESPONSE_CHUNK_BYTES: usize = 125;
 /// Base32hex alphabet (RFC 4648 §7): 0-9 followed by A-V.
-#[cfg(test)]
 const BASE32HEX_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHIJKLMNOPQRSTUV";
 
 /// In-progress multi-chunk upload reassembly buffer for a DNS C2 agent.
-#[cfg(test)]
 #[derive(Debug)]
 struct DnsPendingUpload {
     /// Received chunks indexed by sequence number.
@@ -1607,7 +1661,6 @@ struct DnsPendingUpload {
 }
 
 /// Pre-chunked C2 response ready to be polled by a DNS agent.
-#[cfg(test)]
 #[derive(Debug)]
 struct DnsPendingResponse {
     /// Base32hex-encoded response chunks.
@@ -1616,7 +1669,6 @@ struct DnsPendingResponse {
     received_at: Instant,
 }
 
-#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 enum DnsUploadAssembly {
     Pending,
@@ -1657,7 +1709,6 @@ enum DnsUploadAssembly {
 /// * `wait`              — no response queued for this agent
 /// * `<TOTAL> <B32HEX>` — total chunk count and the requested chunk
 /// * `done`              — `SEQ` is past the end of the response
-#[cfg(test)]
 #[derive(Debug)]
 struct DnsListenerState {
     config: DnsListenerConfig,
@@ -1672,7 +1723,6 @@ struct DnsListenerState {
     responses: Mutex<HashMap<u32, DnsPendingResponse>>,
 }
 
-#[cfg(test)]
 impl DnsListenerState {
     fn new(
         config: &DnsListenerConfig,
@@ -1933,7 +1983,6 @@ impl DnsListenerState {
     }
 }
 
-#[cfg(test)]
 fn dns_allowed_query_types(record_types: &[String]) -> Option<Vec<u16>> {
     let configured =
         if record_types.is_empty() { vec!["TXT".to_owned()] } else { record_types.to_vec() };
@@ -1956,7 +2005,6 @@ fn dns_allowed_query_types(record_types: &[String]) -> Option<Vec<u16>> {
 }
 
 /// A parsed DNS C2 query from a Demon agent.
-#[cfg(test)]
 enum DnsC2Query {
     /// Upload chunk: `<b32hex-data>.<seq>-<total>-<agentid>.up.<domain>`
     Upload { agent_id: u32, seq: u16, total: u16, data: Vec<u8> },
@@ -1965,7 +2013,6 @@ enum DnsC2Query {
 }
 
 /// A minimally parsed DNS query sufficient for C2 processing.
-#[cfg(test)]
 struct ParsedDnsQuery {
     id: u16,
     /// Raw wire-format QNAME bytes (including final zero label).
@@ -1978,7 +2025,6 @@ struct ParsedDnsQuery {
 /// Parse the first question from a raw DNS UDP payload.
 ///
 /// Returns `None` if the packet is malformed or has ≠ 1 question.
-#[cfg(test)]
 fn parse_dns_query(buf: &[u8]) -> Option<ParsedDnsQuery> {
     if buf.len() < DNS_HEADER_LEN {
         return None;
@@ -2035,7 +2081,6 @@ fn parse_dns_query(buf: &[u8]) -> Option<ParsedDnsQuery> {
 /// Expected formats (labels listed from leftmost to rightmost, domain stripped):
 /// * Upload:   `["<b32>", "<seq>-<total>-<aid>", "up"]`
 /// * Download: `["<seq>-<aid>",                  "dn"]`
-#[cfg(test)]
 fn parse_dns_c2_query(labels: &[String], domain: &str) -> Option<DnsC2Query> {
     // Strip the domain suffix labels from the right
     let domain_labels: Vec<&str> = domain.split('.').collect();
@@ -2081,7 +2126,6 @@ fn parse_dns_c2_query(labels: &[String], domain: &str) -> Option<DnsC2Query> {
 }
 
 /// Encode `data` as uppercase base32hex (RFC 4648 §7) with no padding.
-#[cfg(test)]
 fn base32hex_encode(data: &[u8]) -> String {
     let mut result = String::with_capacity((data.len() * 8).div_ceil(5));
     let mut buf: u32 = 0;
@@ -2106,7 +2150,6 @@ fn base32hex_encode(data: &[u8]) -> String {
 /// Decode a base32hex string (case-insensitive, no padding) into bytes.
 ///
 /// Returns `None` if any character is outside the base32hex alphabet.
-#[cfg(test)]
 fn base32hex_decode(s: &str) -> Option<Vec<u8>> {
     let mut result = Vec::with_capacity(s.len() * 5 / 8);
     let mut buf: u32 = 0;
@@ -2131,7 +2174,6 @@ fn base32hex_decode(s: &str) -> Option<Vec<u8>> {
 }
 
 /// Split a Demon response payload into base32hex-encoded chunks for DNS delivery.
-#[cfg(test)]
 fn chunk_response_to_b32hex(payload: &[u8]) -> Vec<String> {
     payload.chunks(DNS_RESPONSE_CHUNK_BYTES).map(base32hex_encode).collect()
 }
@@ -2141,7 +2183,6 @@ fn chunk_response_to_b32hex(payload: &[u8]) -> Vec<String> {
 /// The question section is reconstructed from `qname_raw` (which already includes the
 /// zero-label terminator), and a single answer TXT record is appended using a pointer
 /// back to offset 12 (the start of the question QNAME).
-#[cfg(test)]
 fn build_dns_txt_response(query_id: u16, qname_raw: &[u8], qtype: u16, txt_data: &[u8]) -> Vec<u8> {
     // Clamp TXT data to 255 bytes (single TXT string limit per RFC 1035).
     let txt_data = &txt_data[..txt_data.len().min(255)];
@@ -2181,7 +2222,6 @@ fn build_dns_txt_response(query_id: u16, qname_raw: &[u8], qtype: u16, txt_data:
 }
 
 /// Build a DNS REFUSED response for `query_id`.
-#[cfg(test)]
 fn build_dns_refused_response(query_id: u16) -> Vec<u8> {
     let mut response = vec![0u8; DNS_HEADER_LEN];
     response[0] = (query_id >> 8) as u8;
@@ -2192,7 +2232,6 @@ fn build_dns_refused_response(query_id: u16) -> Vec<u8> {
     response
 }
 
-#[cfg(test)]
 async fn spawn_dns_listener_runtime(
     config: &DnsListenerConfig,
     registry: AgentRegistry,
@@ -2202,7 +2241,7 @@ async fn spawn_dns_listener_runtime(
     plugins: Option<PluginRuntime>,
     demon_init_rate_limiter: DemonInitRateLimiter,
     max_download_bytes: u64,
-) -> Result<JoinHandle<()>, ListenerManagerError> {
+) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
     if dns_allowed_query_types(&config.record_types).is_none() {
         return Err(ListenerManagerError::StartFailed {
             name: config.name.clone(),
@@ -2232,7 +2271,7 @@ async fn spawn_dns_listener_runtime(
         })?;
     let socket = Arc::new(socket);
 
-    Ok(tokio::spawn(async move {
+    Ok(Box::pin(async move {
         let mut buf = vec![0u8; 4096];
         let mut cleanup_interval =
             tokio::time::interval(Duration::from_secs(DNS_UPLOAD_CLEANUP_INTERVAL_SECS));
@@ -2245,8 +2284,10 @@ async fn spawn_dns_listener_runtime(
                     let (len, peer) = match recv {
                         Ok(result) => result,
                         Err(error) => {
-                            warn!(listener = %state.config.name, %error, "dns listener recv error");
-                            break;
+                            return Err(format!(
+                                "dns listener `{}` recv error: {error}",
+                                state.config.name
+                            ));
                         }
                     };
 
@@ -2267,6 +2308,12 @@ async fn spawn_dns_listener_runtime(
         }
     }))
 }
+
+// Production builds must keep the DNS runtime entrypoint available so manager start paths
+// cannot silently drift back to a test-only implementation.
+const _: () = {
+    let _ = spawn_dns_listener_runtime;
+};
 
 async fn build_http_tls_config(
     config: &HttpListenerConfig,
@@ -2797,7 +2844,7 @@ mod tests {
         dns_allowed_query_types, extract_external_ip, listener_config_from_operator,
         operator_requests_start, parse_dns_c2_query, parse_dns_query, parse_trusted_proxy_peer,
         profile_listener_configs, read_smb_frame, smb_local_socket_name,
-        spawn_dns_listener_runtime,
+        spawn_dns_listener_runtime, spawn_managed_listener_task,
     };
     use crate::{
         AgentRegistry, Database, EventBus, Job, PersistedListenerState, SocketRelayManager,
@@ -3025,6 +3072,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_profile_deletes_persisted_listener_missing_from_profile()
+    -> Result<(), ListenerManagerError> {
+        let manager = manager().await?;
+        let removed_port = available_port()
+            .map_err(|error| ListenerManagerError::InvalidConfig { message: error.to_string() })?;
+        let kept_port = available_port()
+            .map_err(|error| ListenerManagerError::InvalidConfig { message: error.to_string() })?;
+        manager.create(http_listener("removed", removed_port)).await?;
+        manager.start("removed").await?;
+
+        let profile = Profile::parse(&format!(
+            r#"
+            Teamserver {{
+              Host = "127.0.0.1"
+              Port = 40056
+            }}
+
+            Operators {{
+              user "operator" {{
+                Password = "password1234"
+              }}
+            }}
+
+            Listeners {{
+              Http = [{{
+                Name = "kept"
+                Hosts = ["127.0.0.1"]
+                HostBind = "127.0.0.1"
+                HostRotation = "round-robin"
+                PortBind = {kept_port}
+                Secure = false
+              }}]
+            }}
+
+            Demon {{}}
+            "#
+        ))
+        .map_err(|error| ListenerManagerError::InvalidConfig { message: error.to_string() })?;
+
+        manager.sync_profile(&profile).await?;
+
+        assert!(matches!(
+            manager.summary("removed").await,
+            Err(ListenerManagerError::ListenerNotFound { .. })
+        ));
+        assert!(!manager.active_handles.read().await.contains_key("removed"));
+        assert_eq!(manager.summary("kept").await?.state.status, ListenerStatus::Created);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn start_records_bind_errors() -> Result<(), ListenerManagerError> {
         let blocker = tokio::net::TcpListener::bind("127.0.0.1:32003")
             .await
@@ -3086,72 +3185,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_marks_persisted_dns_listener_as_error() -> Result<(), ListenerManagerError> {
+    async fn start_runs_persisted_dns_listener_in_manager_path() -> Result<(), ListenerManagerError>
+    {
         let manager = manager().await?;
         let repository = manager.repository();
-        repository.create(&dns_listener_config("dns-gated", 5301, "c2.example.com")).await?;
+        let port = free_udp_port();
+        repository.create(&dns_listener_config("dns-runtime", port, "c2.example.com")).await?;
 
-        let error = manager.start("dns-gated").await.expect_err("dns listener should not start");
-        let summary = manager.summary("dns-gated").await?;
+        let summary = manager.start("dns-runtime").await?;
 
-        assert!(matches!(error, ListenerManagerError::StartFailed { .. }));
-        assert_eq!(summary.state.status, ListenerStatus::Error);
-        assert!(summary.state.last_error.as_deref().is_some_and(|message| {
-            message.contains("Demon payload generation does not support DNS transport")
-        }));
-        assert!(!manager.active_handles.read().await.contains_key("dns-gated"));
+        assert_eq!(summary.state.status, ListenerStatus::Running);
+        assert!(manager.active_handles.read().await.contains_key("dns-runtime"));
 
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn sync_profile_deletes_persisted_listener_missing_from_profile()
-    -> Result<(), ListenerManagerError> {
-        let manager = manager().await?;
-        let removed_port = available_port()
-            .map_err(|error| ListenerManagerError::InvalidConfig { message: error.to_string() })?;
-        let kept_port = available_port()
-            .map_err(|error| ListenerManagerError::InvalidConfig { message: error.to_string() })?;
-        manager.create(http_listener("removed", removed_port)).await?;
-        manager.start("removed").await?;
-
-        let profile = Profile::parse(&format!(
-            r#"
-            Teamserver {{
-              Host = "127.0.0.1"
-              Port = 40056
-            }}
-
-            Operators {{
-              user "operator" {{
-                Password = "password1234"
-              }}
-            }}
-
-            Listeners {{
-              Http = [{{
-                Name = "kept"
-                Hosts = ["127.0.0.1"]
-                HostBind = "127.0.0.1"
-                HostRotation = "round-robin"
-                PortBind = {kept_port}
-                Secure = false
-              }}]
-            }}
-
-            Demon {{}}
-            "#
-        ))
-        .map_err(|error| ListenerManagerError::InvalidConfig { message: error.to_string() })?;
-
-        manager.sync_profile(&profile).await?;
-
-        assert!(matches!(
-            manager.summary("removed").await,
-            Err(ListenerManagerError::ListenerNotFound { .. })
-        ));
-        assert!(!manager.active_handles.read().await.contains_key("removed"));
-        assert_eq!(manager.summary("kept").await?.state.status, ListenerStatus::Created);
+        manager.stop("dns-runtime").await?;
+        wait_for_listener_status(&manager, "dns-runtime", ListenerStatus::Stopped).await?;
+        assert!(!manager.active_handles.read().await.contains_key("dns-runtime"));
 
         Ok(())
     }
@@ -3172,6 +3220,79 @@ mod tests {
             message.contains("not implemented") && message.contains("svc")
         }));
         assert!(!manager.active_handles.read().await.contains_key("external"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_exit_clears_handle_and_marks_listener_stopped()
+    -> Result<(), ListenerManagerError> {
+        let manager = manager().await?;
+        let repository = manager.repository();
+        repository.create(&http_listener("alpha", 32004)).await?;
+        repository.set_state("alpha", ListenerStatus::Running, None).await?;
+
+        let handle = spawn_managed_listener_task(
+            "alpha".to_owned(),
+            Box::pin(async { Ok(()) }),
+            repository.clone(),
+            manager.active_handles.clone(),
+        );
+        manager.active_handles.write().await.insert("alpha".to_owned(), handle);
+
+        wait_for_listener_status(&manager, "alpha", ListenerStatus::Stopped).await?;
+        assert!(!manager.active_handles.read().await.contains_key("alpha"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_error_clears_handle_and_marks_listener_error()
+    -> Result<(), ListenerManagerError> {
+        let manager = manager().await?;
+        let repository = manager.repository();
+        repository.create(&http_listener("alpha", 32005)).await?;
+        repository.set_state("alpha", ListenerStatus::Running, None).await?;
+
+        let handle = spawn_managed_listener_task(
+            "alpha".to_owned(),
+            Box::pin(async { Err("boom".to_owned()) }),
+            repository.clone(),
+            manager.active_handles.clone(),
+        );
+        manager.active_handles.write().await.insert("alpha".to_owned(), handle);
+
+        wait_for_listener_status(&manager, "alpha", ListenerStatus::Error).await?;
+        let summary = manager.summary("alpha").await?;
+        assert_eq!(summary.state.last_error.as_deref(), Some("boom"));
+        assert!(!manager.active_handles.read().await.contains_key("alpha"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn start_prunes_finished_stale_handle_before_restart() -> Result<(), ListenerManagerError>
+    {
+        let manager = manager().await?;
+        let port = available_port()
+            .map_err(|error| ListenerManagerError::InvalidConfig { message: error.to_string() })?;
+        manager.create(http_listener("alpha", port)).await?;
+
+        let finished_handle = tokio::spawn(async {});
+        for _ in 0..20 {
+            if finished_handle.is_finished() {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+
+        manager.active_handles.write().await.insert("alpha".to_owned(), finished_handle);
+        let running = manager.start("alpha").await?;
+
+        assert_eq!(running.state.status, ListenerStatus::Running);
+        assert!(manager.active_handles.read().await.contains_key("alpha"));
+
+        manager.stop("alpha").await?;
 
         Ok(())
     }
@@ -4180,6 +4301,23 @@ mod tests {
         Ok(port)
     }
 
+    async fn wait_for_listener_status(
+        manager: &ListenerManager,
+        name: &str,
+        expected: ListenerStatus,
+    ) -> Result<(), ListenerManagerError> {
+        for _ in 0..40 {
+            if manager.summary(name).await?.state.status == expected {
+                return Ok(());
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+
+        Err(ListenerManagerError::InvalidConfig {
+            message: format!("listener `{name}` did not reach expected status {expected:?}"),
+        })
+    }
+
     async fn wait_for_listener(port: u16, secure: bool) -> Result<(), Box<dyn std::error::Error>> {
         let client = Client::builder().danger_accept_invalid_certs(true).build()?;
         let scheme = if secure { "https" } else { "http" };
@@ -4516,7 +4654,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let handle = spawn_dns_listener_runtime(
+        let runtime = spawn_dns_listener_runtime(
             &config,
             registry.clone(),
             events,
@@ -4528,6 +4666,9 @@ mod tests {
         )
         .await
         .expect("dns runtime should start");
+        let handle = tokio::spawn(async move {
+            let _ = runtime.await;
+        });
 
         (handle, registry)
     }
@@ -4933,7 +5074,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let error = spawn_dns_listener_runtime(
+        let error = match spawn_dns_listener_runtime(
             &config,
             registry,
             events,
@@ -4944,7 +5085,10 @@ mod tests {
             super::DEFAULT_MAX_DOWNLOAD_BYTES,
         )
         .await
-        .expect_err("start should fail");
+        {
+            Ok(_) => panic!("start should fail"),
+            Err(error) => error,
+        };
         assert!(
             error.to_string().contains("unsupported DNS record type configuration"),
             "unexpected error: {error}"

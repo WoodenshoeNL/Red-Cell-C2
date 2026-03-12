@@ -4995,7 +4995,7 @@ mod tests {
     };
 
     use super::{CommandDispatchError, CommandDispatcher, DownloadState, DownloadTracker};
-    use crate::{AgentRegistry, Database, EventBus, Job, SocketRelayManager};
+    use crate::{AgentRegistry, Database, EventBus, Job, SocketRelayManager, TeamserverError};
 
     fn sample_agent_info(
         agent_id: u32,
@@ -5563,6 +5563,35 @@ mod tests {
         };
         assert_eq!(message.info.agent_id, format!("{agent_id:08X}"));
         assert_eq!(message.info.marked, "Alive");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_checkin_handler_returns_agent_not_found_for_unknown_agent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+        let agent_id = 0x1020_3042;
+
+        let error = dispatcher
+            .dispatch(agent_id, u32::from(DemonCommand::CommandCheckin), 6, &[0xAA, 0xBB])
+            .await
+            .expect_err("unknown agent checkin should fail");
+
+        assert!(matches!(
+            error,
+            CommandDispatchError::Registry(TeamserverError::AgentNotFound { agent_id: missing_id })
+                if missing_id == agent_id
+        ));
+        assert!(
+            timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),
+            "unknown agent checkin should not broadcast an event"
+        );
         Ok(())
     }
 

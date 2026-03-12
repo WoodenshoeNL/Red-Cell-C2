@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -37,7 +36,6 @@ type Handler = dyn Fn(u32, u32, Vec<u8>) -> HandlerFuture + Send + Sync + 'stati
 
 const DEFAULT_MAX_DOWNLOAD_BYTES: usize = 512 * 1024 * 1024;
 const DOWNLOAD_TRACKER_AGGREGATE_CAP_MULTIPLIER: usize = 4;
-const DOWNLOAD_TRACKER_STALE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const DOTNET_INFO_PATCHED: u32 = 0x1;
 const DOTNET_INFO_NET_VERSION: u32 = 0x2;
 const DOTNET_INFO_ENTRYPOINT_EXECUTED: u32 = 0x3;
@@ -48,7 +46,6 @@ const DOTNET_INFO_FAILED: u32 = 0x5;
 struct DownloadTracker {
     max_download_bytes: usize,
     max_total_download_bytes: usize,
-    stale_timeout: Duration,
     inner: Arc<RwLock<DownloadTrackerState>>,
 }
 
@@ -61,7 +58,6 @@ struct DownloadTrackerState {
 #[derive(Clone, Debug)]
 struct TrackedDownload {
     state: DownloadState,
-    last_updated_at: Instant,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1132,37 +1128,21 @@ impl DownloadTracker {
         let max_total_download_bytes = max_download_bytes
             .saturating_mul(DOWNLOAD_TRACKER_AGGREGATE_CAP_MULTIPLIER)
             .max(max_download_bytes);
-        Self::with_limits(
-            max_download_bytes,
-            max_total_download_bytes,
-            DOWNLOAD_TRACKER_STALE_TIMEOUT,
-        )
+        Self::with_limits(max_download_bytes, max_total_download_bytes)
     }
 
-    fn with_limits(
-        max_download_bytes: usize,
-        max_total_download_bytes: usize,
-        stale_timeout: Duration,
-    ) -> Self {
+    fn with_limits(max_download_bytes: usize, max_total_download_bytes: usize) -> Self {
         Self {
             max_download_bytes,
             max_total_download_bytes: max_total_download_bytes.max(max_download_bytes),
-            stale_timeout,
             inner: Arc::new(RwLock::new(DownloadTrackerState::default())),
         }
     }
 
     async fn start(&self, agent_id: u32, file_id: u32, state: DownloadState) {
-        self.start_at(agent_id, file_id, state, Instant::now()).await;
-    }
-
-    async fn start_at(&self, agent_id: u32, file_id: u32, state: DownloadState, now: Instant) {
         let mut tracker = self.inner.write().await;
-        self.prune_stale_locked(&mut tracker, now);
         self.remove_locked(&mut tracker, agent_id, file_id);
-        tracker
-            .downloads
-            .insert((agent_id, file_id), TrackedDownload { state, last_updated_at: now });
+        tracker.downloads.insert((agent_id, file_id), TrackedDownload { state });
     }
 
     async fn append(
@@ -1172,7 +1152,6 @@ impl DownloadTracker {
         chunk: &[u8],
     ) -> Result<DownloadState, CommandDispatchError> {
         let mut tracker = self.inner.write().await;
-        self.prune_stale_locked(&mut tracker, Instant::now());
         let Some(current_len) =
             tracker.downloads.get(&(agent_id, file_id)).map(|download| download.state.data.len())
         else {
@@ -1220,7 +1199,6 @@ impl DownloadTracker {
             });
         };
         download.state.data.extend_from_slice(chunk);
-        download.last_updated_at = Instant::now();
         let updated = download.state.clone();
         let _ = download;
         tracker.total_buffered_bytes = next_total;
@@ -1229,13 +1207,11 @@ impl DownloadTracker {
 
     async fn finish(&self, agent_id: u32, file_id: u32) -> Option<DownloadState> {
         let mut tracker = self.inner.write().await;
-        self.prune_stale_locked(&mut tracker, Instant::now());
         self.remove_locked(&mut tracker, agent_id, file_id)
     }
 
     async fn active_for_agent(&self, agent_id: u32) -> Vec<(u32, DownloadState)> {
-        let mut tracker = self.inner.write().await;
-        self.prune_stale_locked(&mut tracker, Instant::now());
+        let tracker = self.inner.read().await;
         let mut downloads = tracker
             .downloads
             .iter()
@@ -1245,20 +1221,6 @@ impl DownloadTracker {
             .collect::<Vec<_>>();
         downloads.sort_by_key(|(file_id, _)| *file_id);
         downloads
-    }
-
-    fn prune_stale_locked(&self, tracker: &mut DownloadTrackerState, now: Instant) {
-        let stale_keys = tracker
-            .downloads
-            .iter()
-            .filter_map(|(key, download)| {
-                (now.duration_since(download.last_updated_at) >= self.stale_timeout).then_some(*key)
-            })
-            .collect::<Vec<_>>();
-
-        for (agent_id, file_id) in stale_keys {
-            self.remove_locked(tracker, agent_id, file_id);
-        }
     }
 
     fn remove_locked(
@@ -1276,13 +1238,6 @@ impl DownloadTracker {
     #[cfg(test)]
     async fn buffered_bytes(&self) -> usize {
         self.inner.read().await.total_buffered_bytes
-    }
-
-    #[cfg(test)]
-    async fn set_last_updated_at(&self, agent_id: u32, file_id: u32, last_updated_at: Instant) {
-        if let Some(download) = self.inner.write().await.downloads.get_mut(&(agent_id, file_id)) {
-            download.last_updated_at = last_updated_at;
-        }
     }
 }
 
@@ -6331,7 +6286,7 @@ mod tests {
 
     #[tokio::test]
     async fn download_tracker_limits_total_buffered_bytes_across_partial_downloads() {
-        let tracker = DownloadTracker::with_limits(8, 10, Duration::from_secs(300));
+        let tracker = DownloadTracker::with_limits(8, 10);
 
         for file_id in [0x50_u32, 0x51, 0x52] {
             tracker
@@ -6383,61 +6338,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn download_tracker_prunes_stale_partial_downloads_before_accepting_more_data() {
-        let tracker = DownloadTracker::with_limits(16, 12, Duration::from_secs(30));
-        let stale_age = Duration::from_secs(31);
-        let stale_time = std::time::Instant::now() - stale_age;
+    async fn download_tracker_keeps_idle_partial_downloads_until_finish() {
+        let tracker = DownloadTracker::with_limits(16, 12);
 
-        for file_id in 0x60_u32..=0x64 {
+        for file_id in [0x60_u32, 0x61] {
             tracker
                 .start(
                     0xABCD_EF56,
                     file_id,
                     DownloadState {
                         request_id: 0x90 + file_id,
-                        remote_path: format!("C:\\Temp\\stale-{file_id:08x}.bin"),
+                        remote_path: format!("C:\\Temp\\idle-{file_id:08x}.bin"),
                         expected_size: 32,
                         data: Vec::new(),
                         started_at: "2026-03-11T09:20:00Z".to_owned(),
                     },
                 )
                 .await;
-            tracker
-                .append(0xABCD_EF56, file_id, b"12")
-                .await
-                .expect("stale partial should be accepted before expiry");
         }
-        for file_id in 0x60_u32..=0x64 {
-            tracker.set_last_updated_at(0xABCD_EF56, file_id, stale_time).await;
-        }
-        assert_eq!(tracker.buffered_bytes().await, 10);
 
-        tracker
-            .start_at(
-                0xABCD_EF56,
-                0x70,
-                DownloadState {
-                    request_id: 0xA0,
-                    remote_path: "C:\\Temp\\fresh.bin".to_owned(),
-                    expected_size: 32,
-                    data: Vec::new(),
-                    started_at: "2026-03-11T09:21:00Z".to_owned(),
-                },
-                std::time::Instant::now(),
-            )
-            .await;
-        let fresh = tracker
-            .append(0xABCD_EF56, 0x70, b"fresh")
+        tracker.append(0xABCD_EF56, 0x60, b"12").await.expect("first partial should append");
+        tracker.append(0xABCD_EF56, 0x61, b"34").await.expect("second partial should append");
+        assert_eq!(tracker.buffered_bytes().await, 4);
+
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        let continued = tracker
+            .append(0xABCD_EF56, 0x60, b"56")
             .await
-            .expect("expired partials should be pruned before aggregate accounting");
-        assert_eq!(fresh.data, b"fresh");
-        assert_eq!(tracker.buffered_bytes().await, 5);
+            .expect("idle transfer should still accept more data");
+        assert_eq!(continued.data, b"1256");
+        assert_eq!(tracker.buffered_bytes().await, 6);
 
         let active = tracker.active_for_agent(0xABCD_EF56).await;
-        assert_eq!(active.len(), 1);
-        assert_eq!(active[0].0, 0x70);
-        assert_eq!(active[0].1.data, b"fresh");
-        assert_eq!(tracker.finish(0xABCD_EF56, 0x60).await, None);
+        assert_eq!(active.len(), 2);
+        assert_eq!(active[0].0, 0x60);
+        assert_eq!(active[0].1.data, b"1256");
+        assert_eq!(active[1].0, 0x61);
+        assert_eq!(active[1].1.data, b"34");
+
+        assert_eq!(
+            tracker.finish(0xABCD_EF56, 0x60).await,
+            Some(DownloadState {
+                request_id: 0xF0,
+                remote_path: "C:\\Temp\\idle-00000060.bin".to_owned(),
+                expected_size: 32,
+                data: b"1256".to_vec(),
+                started_at: "2026-03-11T09:20:00Z".to_owned(),
+            })
+        );
+        assert_eq!(tracker.buffered_bytes().await, 2);
+        assert_eq!(
+            tracker.finish(0xABCD_EF56, 0x61).await,
+            Some(DownloadState {
+                request_id: 0xF1,
+                remote_path: "C:\\Temp\\idle-00000061.bin".to_owned(),
+                expected_size: 32,
+                data: b"34".to_vec(),
+                started_at: "2026-03-11T09:20:00Z".to_owned(),
+            })
+        );
     }
 
     #[tokio::test]

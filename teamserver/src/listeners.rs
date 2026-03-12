@@ -655,6 +655,11 @@ impl ListenerManager {
             .get(name)
             .await?
             .ok_or_else(|| ListenerManagerError::ListenerNotFound { name: name.to_owned() })?;
+        if matches!(listener.config, ListenerConfig::Dns(_)) {
+            let message = dns_listener_payload_generation_unavailable_message(name);
+            repository.set_state(name, ListenerStatus::Error, Some(message.as_str())).await?;
+            return Err(ListenerManagerError::StartFailed { name: name.to_owned(), message });
+        }
 
         self.prune_finished_handle(name).await;
         if self.active_handles.read().await.contains_key(name) {
@@ -1649,11 +1654,15 @@ impl ListenerManager {
 fn ensure_listener_creation_supported(config: &ListenerConfig) -> Result<(), ListenerManagerError> {
     if let ListenerConfig::Dns(config) = config {
         return Err(ListenerManagerError::InvalidConfig {
-            message: format!("{} (`{}`)", DNS_LISTENER_PAYLOAD_GENERATION_UNAVAILABLE, config.name),
+            message: dns_listener_payload_generation_unavailable_message(&config.name),
         });
     }
 
     Ok(())
+}
+
+fn dns_listener_payload_generation_unavailable_message(name: &str) -> String {
+    format!("{DNS_LISTENER_PAYLOAD_GENERATION_UNAVAILABLE} (`{name}`)")
 }
 
 fn unsupported_external_listener_error(config: &ExternalListenerConfig) -> ListenerManagerError {
@@ -3305,20 +3314,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_runs_persisted_dns_listener_in_manager_path() -> Result<(), ListenerManagerError>
-    {
+    async fn start_rejects_persisted_dns_listener_until_payload_generation_support_exists()
+    -> Result<(), ListenerManagerError> {
         let manager = manager().await?;
         let repository = manager.repository();
         let port = free_udp_port();
         repository.create(&dns_listener_config("dns-runtime", port, "c2.example.com")).await?;
 
-        let summary = manager.start("dns-runtime").await?;
+        let error = manager.start("dns-runtime").await.expect_err("dns listener should be gated");
+        let summary = manager.summary("dns-runtime").await?;
 
-        assert_eq!(summary.state.status, ListenerStatus::Running);
-        assert!(manager.active_handles.read().await.contains_key("dns-runtime"));
+        assert!(matches!(error, ListenerManagerError::StartFailed { .. }));
+        assert!(
+            error.to_string().contains("Demon payload generation does not support DNS transport"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(summary.state.status, ListenerStatus::Error);
+        assert!(!manager.active_handles.read().await.contains_key("dns-runtime"));
 
-        manager.stop("dns-runtime").await?;
-        wait_for_listener_status(&manager, "dns-runtime", ListenerStatus::Stopped).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restore_running_marks_dns_listener_as_error() -> Result<(), ListenerManagerError> {
+        let manager = manager().await?;
+        let repository = manager.repository();
+        let port = free_udp_port();
+        repository.create(&dns_listener_config("dns-runtime", port, "c2.example.com")).await?;
+        repository.set_state("dns-runtime", ListenerStatus::Running, None).await?;
+
+        manager.restore_running().await?;
+        let summary = manager.summary("dns-runtime").await?;
+
+        assert!(
+            summary.state.last_error.as_deref().is_some_and(|message| {
+                message.contains("Demon payload generation does not support DNS transport")
+            }),
+            "unexpected error state: {:?}",
+            summary.state.last_error
+        );
+        assert_eq!(summary.state.status, ListenerStatus::Error);
         assert!(!manager.active_handles.read().await.contains_key("dns-runtime"));
 
         Ok(())

@@ -1368,6 +1368,106 @@ mod tests {
     }
 
     #[test]
+    fn pack_config_http_without_proxy_ends_after_disabled_proxy_flag()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config = serde_json::from_value::<Map<String, Value>>(json!({
+            "Sleep": "5",
+            "Jitter": "0",
+            "Sleep Technique": "WaitForSingleObjectEx",
+            "Injection": {
+                "Alloc": "Win32",
+                "Execute": "Win32",
+                "Spawn64": "a",
+                "Spawn32": "b"
+            }
+        }))?;
+        let listener = ListenerConfig::Http(Box::new(HttpListenerConfig {
+            name: "http".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["listener.local".to_owned()],
+            host_bind: "0.0.0.0".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: 8443,
+            port_conn: Some(443),
+            method: None,
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: Vec::new(),
+            host_header: None,
+            secure: true,
+            cert: None,
+            response: None,
+            proxy: None,
+        }));
+
+        let bytes = pack_config(&listener, &config)?;
+        let mut cursor = bytes.as_slice();
+        assert_eq!(read_u32(&mut cursor)?, 5);
+        assert_eq!(read_u32(&mut cursor)?, 0);
+        assert_eq!(read_u32(&mut cursor)?, 1);
+        assert_eq!(read_u32(&mut cursor)?, 1);
+        assert_eq!(read_wstring(&mut cursor)?, "a");
+        assert_eq!(read_wstring(&mut cursor)?, "b");
+        assert_eq!(read_u32(&mut cursor)?, 0);
+        assert_eq!(read_u32(&mut cursor)?, 0);
+        assert_eq!(read_u32(&mut cursor)?, 0);
+        assert_eq!(read_u32(&mut cursor)?, 0);
+        assert_eq!(read_u32(&mut cursor)?, 0);
+        assert_eq!(read_u32(&mut cursor)?, 0);
+        assert_eq!(read_u64(&mut cursor)?, 0);
+        assert_eq!(read_u32(&mut cursor)?, 0);
+        assert_eq!(read_wstring(&mut cursor)?, "POST");
+        assert_eq!(read_u32(&mut cursor)?, 0);
+        assert_eq!(read_u32(&mut cursor)?, 1);
+        assert_eq!(read_wstring(&mut cursor)?, "listener.local");
+        assert_eq!(read_u32(&mut cursor)?, 443);
+        assert_eq!(read_u32(&mut cursor)?, 1);
+        assert_eq!(read_wstring(&mut cursor)?, "");
+        assert_eq!(read_u32(&mut cursor)?, 1);
+        assert_eq!(read_wstring(&mut cursor)?, "Content-type: */*");
+        assert_eq!(read_u32(&mut cursor)?, 1);
+        assert_eq!(read_wstring(&mut cursor)?, "/");
+        assert_eq!(read_u32(&mut cursor)?, 0);
+        assert!(cursor.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn pack_config_rejects_dns_listener() -> Result<(), Box<dyn std::error::Error>> {
+        let config = serde_json::from_value::<Map<String, Value>>(json!({
+            "Sleep": "5",
+            "Jitter": "0",
+            "Sleep Technique": "WaitForSingleObjectEx",
+            "Injection": {
+                "Alloc": "Win32",
+                "Execute": "Win32",
+                "Spawn64": "a",
+                "Spawn32": "b"
+            }
+        }))?;
+        let listener = ListenerConfig::Dns(red_cell_common::DnsListenerConfig {
+            name: "dns".to_owned(),
+            host_bind: "0.0.0.0".to_owned(),
+            port_bind: 53,
+            domain: "c2.local".to_owned(),
+            record_types: vec!["TXT".to_owned()],
+            kill_date: None,
+            working_hours: None,
+        });
+
+        let error = pack_config(&listener, &config).expect_err("dns listener should be rejected");
+        assert!(matches!(
+            error,
+            PayloadBuildError::InvalidRequest { message }
+                if message == "DNS listeners are not supported for Demon payload builds"
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn parse_working_hours_encodes_expected_bitmask() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(parse_working_hours(Some("08:00-17:00"))?, 5_243_968);
         Ok(())

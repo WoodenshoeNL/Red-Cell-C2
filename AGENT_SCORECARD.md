@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 106 | 31 |
+| Tasks closed | 0 | 109 | 31 |
 | Bugs filed against | 0 | 11 | 9 |
 | Bug rate (bugs/task) | N/A | 0.10 | 0.29 |
 | Quality score | N/A | 90% | 71% |
@@ -767,3 +767,14 @@ Notes: Reviewed three commits from `051ed51` to `6d30acb`. The committed diff on
 
 Build: `cargo check --workspace` passed against committed `HEAD` in `/tmp/red-cell-qa-el6bUE`; `cargo clippy --workspace -- -D warnings` is still compiling in isolated target `/tmp/red-cell-qa-el6bUE-target-clippy`, and an earlier `cargo test --workspace` attempt was blocked by shared cargo locks from other local worktrees
 Notes: Reviewed nine commits from `6d30acb` to `af12a8d`, including three Codex fix commits, two Codex task-close commits, three Codex claim commits, and one prior QA bookkeeping commit. The committed Rust diff is limited to [teamserver/src/dispatch.rs](/tmp/red-cell-qa-el6bUE/teamserver/src/dispatch.rs) and [teamserver/src/websocket.rs](/tmp/red-cell-qa-el6bUE/teamserver/src/websocket.rs). Listener edit and agent remove audit logging look correct and are covered by new websocket tests. Beads state is consistent: `red-cell-c2-39z8` and `red-cell-c2-1cb1` are the only active in-progress items seen, both still open with matching claim activity, and the two close commits in range have corresponding implementation commits. `br list --status=open` and `br ready` succeeded after transient SQLite lock contention.
+
+### QA Review — 2026-03-12 07:18 — af12a8d..ce83234
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No activity this run |
+| Codex | 3 | 0 | Closed `red-cell-c2-39z8`, `red-cell-c2-33lj`, and `red-cell-c2-31w8`; one additional claim commit (`red-cell-c2-4row`) remains in progress. |
+| Cursor | 0 | 0 | No activity this run |
+
+Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`, and `cargo test --workspace`)
+Notes: Reviewed eleven commits from `af12a8d` to `ce83234`, including three Codex fix commits, three Codex task-close commits, two Codex claim commits, one architecture-review bookkeeping commit, one beads-sync commit, and one prior QA bookkeeping commit. The committed Rust diff is limited to [teamserver/src/listeners.rs](/home/michel/Red-Cell-C2/teamserver/src/listeners.rs) and [teamserver/src/main.rs](/home/michel/Red-Cell-C2/teamserver/src/main.rs). No additional QA defects were identified beyond the already-open architecture findings in this range. Beads state is consistent: `red-cell-c2-4row` and `red-cell-c2-1cb1` are the only active in-progress items, both still open with matching claim history, and the three close commits in range have corresponding implementation commits.

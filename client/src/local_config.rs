@@ -32,10 +32,7 @@ impl LocalConfig {
     ///
     /// Returns the default config if the file does not exist or cannot be parsed.
     pub fn load() -> Self {
-        let Some(path) = config_file_path() else {
-            return Self::default();
-        };
-        Self::load_from(&path)
+        Self::load_with_path(config_file_path())
     }
 
     /// Load the local config from a specific path.
@@ -52,10 +49,7 @@ impl LocalConfig {
     ///
     /// Silently ignores write failures (non-critical persistence).
     pub fn save(&self) {
-        let Some(path) = config_file_path() else {
-            return;
-        };
-        self.save_to(&path);
+        self.save_with_path(config_file_path());
     }
 
     /// Persist the local config to a specific path.
@@ -74,6 +68,20 @@ impl LocalConfig {
     /// Resolve the configured scripts directory, falling back to the default location.
     pub fn resolved_scripts_dir(&self) -> Option<PathBuf> {
         self.scripts_dir.clone().or_else(default_scripts_dir)
+    }
+
+    fn load_with_path(path: Option<PathBuf>) -> Self {
+        let Some(path) = path else {
+            return Self::default();
+        };
+        Self::load_from(&path)
+    }
+
+    fn save_with_path(&self, path: Option<PathBuf>) {
+        let Some(path) = path else {
+            return;
+        };
+        self.save_to(&path);
     }
 }
 
@@ -150,16 +158,40 @@ mod tests {
             cert_fingerprint: None,
         };
 
-        let contents = toml::to_string_pretty(&config)
-            .unwrap_or_else(|error| panic!("serialization should succeed: {error}"));
-        fs::write(&path, &contents).unwrap_or_else(|error| panic!("write should succeed: {error}"));
-
-        let loaded_contents = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("read should succeed: {error}"));
-        let loaded: LocalConfig = toml::from_str(&loaded_contents)
-            .unwrap_or_else(|error| panic!("deserialization should succeed: {error}"));
+        config.save_to(&path);
+        let loaded = LocalConfig::load_from(&path);
 
         assert_eq!(loaded, config);
+    }
+
+    #[test]
+    fn load_from_returns_default_for_invalid_toml() {
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("tempdir creation should succeed: {error}"));
+        let path = dir.path().join("client.toml");
+
+        fs::write(&path, "server_url = [")
+            .unwrap_or_else(|error| panic!("write should succeed: {error}"));
+
+        assert_eq!(LocalConfig::load_from(&path), LocalConfig::default());
+    }
+
+    #[test]
+    fn load_with_missing_config_dir_returns_default() {
+        assert_eq!(LocalConfig::load_with_path(None), LocalConfig::default());
+    }
+
+    #[test]
+    fn save_with_missing_config_dir_is_noop() {
+        let config = LocalConfig {
+            server_url: Some("wss://10.0.0.5:9999/havoc/".to_owned()),
+            username: Some("admin".to_owned()),
+            scripts_dir: Some(PathBuf::from("/tmp/red-cell-client/scripts")),
+            ca_cert: Some(PathBuf::from("/tmp/ca.pem")),
+            cert_fingerprint: Some("abcdef0123456789".to_owned()),
+        };
+
+        config.save_with_path(None);
     }
 
     #[test]

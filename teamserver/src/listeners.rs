@@ -1477,9 +1477,12 @@ async fn spawn_smb_listener_runtime(
     })?;
 
     Ok(Box::pin(async move {
+        let shutdown_signal = state.shutdown.notified();
+        tokio::pin!(shutdown_signal);
+
         loop {
             tokio::select! {
-                _ = state.shutdown.notified() => return Ok(()),
+                _ = &mut shutdown_signal => return Ok(()),
                 accept = listener.accept() => {
                     match accept {
                         Ok(stream) => {
@@ -2424,12 +2427,14 @@ async fn spawn_dns_listener_runtime(
         let mut buf = vec![0u8; 4096];
         let mut cleanup_interval =
             tokio::time::interval(Duration::from_secs(DNS_UPLOAD_CLEANUP_INTERVAL_SECS));
+        let shutdown_signal = state.shutdown.notified();
+        tokio::pin!(shutdown_signal);
         loop {
             tokio::select! {
                 _ = cleanup_interval.tick() => {
                     state.cleanup_expired_uploads().await;
                 }
-                _ = state.shutdown.notified() => {
+                _ = &mut shutdown_signal => {
                     return Ok(());
                 }
                 recv = socket.recv_from(&mut buf) => {
@@ -3025,7 +3030,7 @@ mod tests {
         dns_allowed_query_types, extract_external_ip, listener_config_from_operator,
         operator_requests_start, parse_dns_c2_query, parse_dns_query, parse_trusted_proxy_peer,
         profile_listener_configs, read_smb_frame, smb_local_socket_name,
-        spawn_dns_listener_runtime, spawn_managed_listener_task,
+        spawn_dns_listener_runtime, spawn_managed_listener_task, spawn_smb_listener_runtime,
     };
     use crate::{
         AgentRegistry, AuditQuery, AuditResultStatus, Database, EventBus, Job,
@@ -3056,7 +3061,7 @@ mod tests {
     use reqwest::Client;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::task::JoinHandle;
-    use tokio::time::sleep;
+    use tokio::time::{sleep, timeout};
 
     fn http_listener(name: &str, port: u16) -> ListenerConfig {
         ListenerConfig::from(HttpListenerConfig {
@@ -5164,6 +5169,28 @@ mod tests {
         (handle, registry)
     }
 
+    async fn spawn_test_smb_runtime(
+        config: red_cell_common::SmbListenerConfig,
+        shutdown: ShutdownController,
+    ) -> Result<super::ListenerRuntimeFuture, ListenerManagerError> {
+        let database = Database::connect_in_memory().await.expect("database creation failed");
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        spawn_smb_listener_runtime(
+            &config,
+            registry,
+            events,
+            database,
+            sockets,
+            None,
+            DemonInitRateLimiter::new(),
+            shutdown,
+            super::DEFAULT_MAX_DOWNLOAD_BYTES,
+        )
+        .await
+    }
+
     /// Build a minimal DNS query packet for `qname`.
     fn build_dns_query(id: u16, qname: &str, qtype: u16) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -5372,6 +5399,45 @@ mod tests {
         let rcode = buf[3] & 0x0F;
         assert_eq!(rcode, 5, "expected REFUSED RCODE");
         handle.abort();
+    }
+
+    #[tokio::test]
+    async fn dns_listener_runtime_exits_when_shutdown_started_before_first_poll() {
+        let shutdown = ShutdownController::new();
+        let port = free_udp_port();
+        let config = red_cell_common::DnsListenerConfig {
+            name: "dns-shutdown-prepoll".to_owned(),
+            host_bind: "127.0.0.1".to_owned(),
+            port_bind: port,
+            domain: "c2.example.com".to_owned(),
+            record_types: vec!["TXT".to_owned()],
+            kill_date: None,
+            working_hours: None,
+        };
+        let database = Database::connect_in_memory().await.expect("database creation failed");
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let runtime = spawn_dns_listener_runtime(
+            &config,
+            registry,
+            events,
+            database,
+            sockets,
+            None,
+            DemonInitRateLimiter::new(),
+            shutdown.clone(),
+            super::DEFAULT_MAX_DOWNLOAD_BYTES,
+        )
+        .await
+        .expect("dns runtime should start");
+
+        shutdown.initiate();
+
+        let result = timeout(Duration::from_millis(200), runtime)
+            .await
+            .expect("dns runtime should observe pre-existing shutdown");
+        assert_eq!(result, Ok(()));
     }
 
     #[tokio::test]
@@ -5586,6 +5652,28 @@ mod tests {
             u16::from_be_bytes([buf[question_qtype_offset], buf[question_qtype_offset + 1]]);
         assert_eq!(echoed_qtype, DNS_TYPE_CNAME);
         handle.abort();
+    }
+
+    #[tokio::test]
+    async fn smb_listener_runtime_exits_when_shutdown_started_before_first_poll() {
+        let shutdown = ShutdownController::new();
+        let pipe_name = unique_smb_pipe_name("shutdown-prepoll");
+        let config = red_cell_common::SmbListenerConfig {
+            name: "smb-shutdown-prepoll".to_owned(),
+            pipe_name,
+            kill_date: None,
+            working_hours: None,
+        };
+        let runtime = spawn_test_smb_runtime(config, shutdown.clone())
+            .await
+            .expect("smb runtime should start");
+
+        shutdown.initiate();
+
+        let result = timeout(Duration::from_millis(200), runtime)
+            .await
+            .expect("smb runtime should observe pre-existing shutdown");
+        assert_eq!(result, Ok(()));
     }
 
     #[tokio::test]

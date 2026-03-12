@@ -38,7 +38,13 @@ impl ShutdownController {
     }
 
     /// Subscribe to the shutdown notification.
+    ///
+    /// Returns immediately once shutdown has already started.
     pub async fn notified(&self) {
+        if self.is_shutting_down() {
+            return;
+        }
+
         self.inner.notify.notified().await;
     }
 
@@ -147,5 +153,15 @@ mod tests {
         assert!(!controller.wait_for_callback_drain(Duration::from_millis(10)).await);
         drop(callback);
         assert!(controller.wait_for_callback_drain(Duration::from_millis(10)).await);
+    }
+
+    #[tokio::test]
+    async fn notified_returns_immediately_after_shutdown_has_started() {
+        let controller = ShutdownController::new();
+        controller.initiate();
+
+        tokio::time::timeout(Duration::from_millis(10), controller.notified())
+            .await
+            .expect("notified should complete immediately once shutdown has started");
     }
 }

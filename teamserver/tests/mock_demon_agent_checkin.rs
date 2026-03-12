@@ -53,7 +53,7 @@ async fn mock_demon_checkin_get_job_and_output_flow() -> Result<(), Box<dyn std:
     let state = TeamserverState {
         profile: profile.clone(),
         database: database.clone(),
-        auth: AuthService::from_profile(&profile),
+        auth: AuthService::from_profile(&profile).expect("auth service should initialize"),
         api: ApiRuntime::from_profile(&profile),
         events,
         connections: OperatorConnectionManager::new(),

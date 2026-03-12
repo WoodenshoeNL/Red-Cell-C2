@@ -3121,7 +3121,7 @@ mod tests {
         let app = api_routes(api.clone()).with_state(TeamserverState {
             profile: profile.clone(),
             database,
-            auth: AuthService::from_profile(&profile),
+            auth: AuthService::from_profile(&profile).expect("auth service should initialize"),
             api,
             events,
             connections: OperatorConnectionManager::new(),
@@ -3270,7 +3270,10 @@ mod tests {
             .operators()
             .create(&crate::PersistedOperator {
                 username: "trinity".to_owned(),
-                password_hash: hash_password_sha3("zion"),
+                password_verifier: crate::auth::password_verifier_for_sha3(&hash_password_sha3(
+                    "zion",
+                ))
+                .expect("password verifier should be generated"),
                 role: OperatorRole::Operator,
             })
             .await

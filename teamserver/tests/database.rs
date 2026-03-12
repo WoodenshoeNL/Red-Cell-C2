@@ -120,7 +120,7 @@ async fn operator_repository_supports_runtime_operator_crud_queries() -> Result<
     let repository = database.operators();
     let operator = PersistedOperator {
         username: "trinity".to_owned(),
-        password_hash: "abc123".to_owned(),
+        password_verifier: "abc123".to_owned(),
         role: OperatorRole::Analyst,
     };
 

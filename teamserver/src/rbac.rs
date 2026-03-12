@@ -497,7 +497,7 @@ mod tests {
 
     #[tokio::test]
     async fn authenticated_operator_extractor_accepts_bearer_tokens() {
-        let auth = AuthService::from_profile(&profile());
+        let auth = AuthService::from_profile(&profile()).expect("auth service should initialize");
         let connection_id = Uuid::new_v4();
         let result = auth
             .authenticate_login(
@@ -537,7 +537,7 @@ mod tests {
 
     #[tokio::test]
     async fn permission_extractors_reject_insufficient_roles() {
-        let auth = AuthService::from_profile(&profile());
+        let auth = AuthService::from_profile(&profile()).expect("auth service should initialize");
         let connection_id = Uuid::new_v4();
         let result = auth
             .authenticate_login(
@@ -588,7 +588,7 @@ mod tests {
 
     #[tokio::test]
     async fn admin_permission_extractor_accepts_admin_sessions() {
-        let auth = AuthService::from_profile(&profile());
+        let auth = AuthService::from_profile(&profile()).expect("auth service should initialize");
         let connection_id = Uuid::new_v4();
         let result = auth
             .authenticate_login(

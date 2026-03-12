@@ -3,13 +3,14 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use argon2::password_hash::phc::PasswordHash;
+use argon2::{Argon2, PasswordHasher, PasswordVerifier};
 use red_cell_common::OperatorInfo;
 use red_cell_common::config::{OperatorRole, Profile};
 use red_cell_common::crypto::hash_password_sha3;
 use red_cell_common::operator::{
     EventCode, LoginInfo, Message, MessageHead, MessageInfo, OperatorMessage,
 };
-use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tracing::instrument;
@@ -38,6 +39,9 @@ pub enum AuthError {
     /// The submitted password was blank.
     #[error("operator password must not be empty")]
     EmptyPassword,
+    /// Password verifier generation failed.
+    #[error("password verifier error: {0}")]
+    PasswordVerifier(String),
     /// Runtime operator persistence failed.
     #[error(transparent)]
     Persistence(#[from] TeamserverError),
@@ -53,6 +57,7 @@ impl PartialEq for AuthError {
                 left == right
             }
             (Self::InvalidMessageJson(left), Self::InvalidMessageJson(right)) => left == right,
+            (Self::PasswordVerifier(left), Self::PasswordVerifier(right)) => left == right,
             (Self::Persistence(left), Self::Persistence(right)) => {
                 left.to_string() == right.to_string()
             }
@@ -140,6 +145,7 @@ impl OperatorPresence {
 #[derive(Debug, Clone)]
 pub struct AuthService {
     credentials: Arc<RwLock<BTreeMap<String, OperatorAccount>>>,
+    dummy_password_verifier: String,
     sessions: Arc<RwLock<SessionRegistry>>,
     runtime_operators: Option<OperatorRepository>,
     audit_log: Option<crate::AuditLogRepository>,
@@ -147,53 +153,24 @@ pub struct AuthService {
 
 impl AuthService {
     /// Build an authentication service from a validated profile.
-    #[must_use]
-    pub fn from_profile(profile: &Profile) -> Self {
-        let credentials = profile
-            .operators
-            .users
-            .iter()
-            .map(|(username, config)| {
-                (
-                    username.clone(),
-                    OperatorAccount {
-                        password_hash: hash_password_sha3(&config.password),
-                        role: config.role,
-                    },
-                )
-            })
-            .collect();
-
-        Self {
-            credentials: Arc::new(RwLock::new(credentials)),
+    pub fn from_profile(profile: &Profile) -> Result<Self, AuthError> {
+        Ok(Self {
+            credentials: Arc::new(RwLock::new(configured_credentials(profile)?)),
+            dummy_password_verifier: password_verifier_for_sha3(DUMMY_PASSWORD_HASH)?,
             sessions: Arc::new(RwLock::new(SessionRegistry::default())),
             runtime_operators: None,
             audit_log: None,
-        }
+        })
     }
 
     /// Build an authentication service from a validated profile and load persisted runtime users.
     pub async fn from_profile_with_database(
         profile: &Profile,
         database: &Database,
-    ) -> Result<Self, TeamserverError> {
+    ) -> Result<Self, AuthError> {
         let service = Self {
-            credentials: Arc::new(RwLock::new(
-                profile
-                    .operators
-                    .users
-                    .iter()
-                    .map(|(username, config)| {
-                        (
-                            username.clone(),
-                            OperatorAccount {
-                                password_hash: hash_password_sha3(&config.password),
-                                role: config.role,
-                            },
-                        )
-                    })
-                    .collect(),
-            )),
+            credentials: Arc::new(RwLock::new(configured_credentials(profile)?)),
+            dummy_password_verifier: password_verifier_for_sha3(DUMMY_PASSWORD_HASH)?,
             sessions: Arc::new(RwLock::new(SessionRegistry::default())),
             runtime_operators: Some(database.operators()),
             audit_log: Some(database.audit_log()),
@@ -212,10 +189,11 @@ impl AuthService {
     ) -> AuthenticationResult {
         let credentials = self.credentials.read().await;
         let account = credentials.get(&login.user);
-        let expected_hash =
-            account.map(|account| account.password_hash.as_str()).unwrap_or(DUMMY_PASSWORD_HASH);
+        let expected_verifier = account
+            .map(|account| account.password_verifier.as_str())
+            .unwrap_or(self.dummy_password_verifier.as_str());
 
-        if !password_hashes_match(&login.password, expected_hash) {
+        if !password_hashes_match(&login.password, expected_verifier) {
             return AuthenticationResult::Failure(AuthenticationFailure::InvalidCredentials);
         }
 
@@ -257,18 +235,18 @@ impl AuthService {
             return Err(AuthError::DuplicateUser { username: username.to_owned() });
         }
 
-        let password_hash = hash_password_sha3(password);
+        let password_verifier = password_verifier_for_sha3(&hash_password_sha3(password))?;
         if let Some(runtime_operators) = &self.runtime_operators {
             runtime_operators
                 .create(&PersistedOperator {
                     username: username.to_owned(),
-                    password_hash: password_hash.clone(),
+                    password_verifier: password_verifier.clone(),
                     role,
                 })
                 .await?;
         }
 
-        credentials.insert(username.to_owned(), OperatorAccount { password_hash, role });
+        credentials.insert(username.to_owned(), OperatorAccount { password_verifier, role });
         Ok(())
     }
 
@@ -361,7 +339,7 @@ impl AuthService {
         self.sessions.read().await.len()
     }
 
-    async fn load_runtime_operators(&self) -> Result<(), TeamserverError> {
+    async fn load_runtime_operators(&self) -> Result<(), AuthError> {
         let Some(runtime_operators) = &self.runtime_operators else {
             return Ok(());
         };
@@ -369,10 +347,11 @@ impl AuthService {
         let persisted = runtime_operators.list().await?;
         let mut credentials = self.credentials.write().await;
         for operator in persisted {
-            credentials.entry(operator.username).or_insert(OperatorAccount {
-                password_hash: operator.password_hash,
-                role: operator.role,
-            });
+            let password_verifier =
+                normalize_persisted_verifier(runtime_operators, &operator).await?;
+            credentials
+                .entry(operator.username)
+                .or_insert(OperatorAccount { password_verifier, role: operator.role });
         }
 
         Ok(())
@@ -381,7 +360,7 @@ impl AuthService {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OperatorAccount {
-    password_hash: String,
+    password_verifier: String,
     role: OperatorRole,
 }
 
@@ -452,11 +431,64 @@ fn login_response_head(user: &str) -> MessageHead {
     }
 }
 
+fn configured_credentials(
+    profile: &Profile,
+) -> Result<BTreeMap<String, OperatorAccount>, AuthError> {
+    profile
+        .operators
+        .users
+        .iter()
+        .map(|(username, config)| {
+            Ok((
+                username.clone(),
+                OperatorAccount {
+                    password_verifier: password_verifier_for_sha3(&hash_password_sha3(
+                        &config.password,
+                    ))?,
+                    role: config.role,
+                },
+            ))
+        })
+        .collect()
+}
+
 fn password_hashes_match(submitted: &str, expected: &str) -> bool {
     let submitted = submitted.to_ascii_lowercase();
-    let expected = expected.to_ascii_lowercase();
+    let Ok(parsed_hash) = PasswordHash::new(expected) else {
+        return false;
+    };
 
-    submitted.as_bytes().ct_eq(expected.as_bytes()).into()
+    Argon2::default().verify_password(submitted.as_bytes(), &parsed_hash).is_ok()
+}
+
+pub(crate) fn password_verifier_for_sha3(password_hash: &str) -> Result<String, AuthError> {
+    Argon2::default()
+        .hash_password(password_hash.to_ascii_lowercase().as_bytes())
+        .map(|hash| hash.to_string())
+        .map_err(|error| AuthError::PasswordVerifier(error.to_string()))
+}
+
+async fn normalize_persisted_verifier(
+    runtime_operators: &OperatorRepository,
+    operator: &PersistedOperator,
+) -> Result<String, AuthError> {
+    if is_legacy_sha3_digest(&operator.password_verifier) {
+        let password_verifier = password_verifier_for_sha3(&operator.password_verifier)?;
+        runtime_operators.update_password_verifier(&operator.username, &password_verifier).await?;
+        return Ok(password_verifier);
+    }
+
+    PasswordHash::new(&operator.password_verifier).map_err(|error| {
+        AuthError::Persistence(TeamserverError::InvalidPersistedValue {
+            field: "ts_runtime_operators.password_verifier",
+            message: format!("invalid password verifier: {error}"),
+        })
+    })?;
+    Ok(operator.password_verifier.clone())
+}
+
+fn is_legacy_sha3_digest(value: &str) -> bool {
+    value.len() == 64 && value.as_bytes().iter().all(u8::is_ascii_hexdigit)
 }
 
 const DUMMY_PASSWORD_HASH: &str =
@@ -483,7 +515,7 @@ mod tests {
 
     use super::{
         AuthError, AuthService, AuthenticationFailure, AuthenticationResult, login_failure_message,
-        login_success_message,
+        login_success_message, password_hashes_match, password_verifier_for_sha3,
     };
 
     fn profile() -> Profile {
@@ -525,7 +557,8 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_login_accepts_valid_hash_and_tracks_session() {
-        let service = AuthService::from_profile(&profile());
+        let service =
+            AuthService::from_profile(&profile()).expect("auth service should initialize");
         let connection_id = Uuid::new_v4();
 
         let result = service
@@ -572,7 +605,8 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_login_rejects_unknown_users() {
-        let service = AuthService::from_profile(&profile());
+        let service =
+            AuthService::from_profile(&profile()).expect("auth service should initialize");
         let connection_id = Uuid::new_v4();
 
         let result = service
@@ -594,7 +628,8 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_login_rejects_wrong_password_hash() {
-        let service = AuthService::from_profile(&profile());
+        let service =
+            AuthService::from_profile(&profile()).expect("auth service should initialize");
 
         let result = service
             .authenticate_login(
@@ -612,7 +647,8 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_login_accepts_uppercase_password_hash() {
-        let service = AuthService::from_profile(&profile());
+        let service =
+            AuthService::from_profile(&profile()).expect("auth service should initialize");
 
         let result = service
             .authenticate_login(
@@ -629,7 +665,8 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_message_rejects_non_login_messages() {
-        let service = AuthService::from_profile(&profile());
+        let service =
+            AuthService::from_profile(&profile()).expect("auth service should initialize");
         let payload = json!({
             "Head": { "Event": 1, "User": "operator" },
             "Body": { "SubEvent": 4, "Info": { "Any": "value" } }
@@ -645,7 +682,8 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_message_accepts_password_sha3_alias() {
-        let service = AuthService::from_profile(&profile());
+        let service =
+            AuthService::from_profile(&profile()).expect("auth service should initialize");
         let connection_id = Uuid::new_v4();
         let payload = json!({
             "Head": {
@@ -671,7 +709,8 @@ mod tests {
 
     #[tokio::test]
     async fn remove_connection_drops_associated_session() {
-        let service = AuthService::from_profile(&profile());
+        let service =
+            AuthService::from_profile(&profile()).expect("auth service should initialize");
         let connection_id = Uuid::new_v4();
 
         let result = service
@@ -697,7 +736,8 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_login_tracks_configured_role_on_session() {
-        let service = AuthService::from_profile(&profile());
+        let service =
+            AuthService::from_profile(&profile()).expect("auth service should initialize");
         let connection_id = Uuid::new_v4();
 
         let result = service
@@ -716,7 +756,8 @@ mod tests {
 
     #[tokio::test]
     async fn create_operator_adds_runtime_credentials() {
-        let service = AuthService::from_profile(&profile());
+        let service =
+            AuthService::from_profile(&profile()).expect("auth service should initialize");
         service
             .create_operator("trinity", "zion", red_cell_common::config::OperatorRole::Operator)
             .await
@@ -739,7 +780,8 @@ mod tests {
             .operators()
             .create(&PersistedOperator {
                 username: "trinity".to_owned(),
-                password_hash: hash_password_sha3("zion"),
+                password_verifier: password_verifier_for_sha3(&hash_password_sha3("zion"))
+                    .expect("password verifier should be generated"),
                 role: red_cell_common::config::OperatorRole::Operator,
             })
             .await
@@ -777,13 +819,15 @@ mod tests {
             .expect("query should succeed")
             .expect("runtime operator should be persisted");
         assert_eq!(persisted.username, "trinity");
-        assert_eq!(persisted.password_hash, hash_password_sha3("zion"));
+        assert_ne!(persisted.password_verifier, hash_password_sha3("zion"));
+        assert!(password_hashes_match(&hash_password_sha3("zion"), &persisted.password_verifier));
         assert_eq!(persisted.role, red_cell_common::config::OperatorRole::Analyst);
     }
 
     #[tokio::test]
     async fn active_sessions_returns_authenticated_operators() {
-        let service = AuthService::from_profile(&profile());
+        let service =
+            AuthService::from_profile(&profile()).expect("auth service should initialize");
         let connection_id = Uuid::new_v4();
         let result = service
             .authenticate_login(
@@ -901,5 +945,39 @@ mod tests {
 
         assert_eq!(value["Body"]["SubEvent"], json!(InitConnectionCode::Error.as_u32()));
         assert_eq!(value["Body"]["Info"]["Message"], json!("Authentication failed"));
+    }
+
+    #[tokio::test]
+    async fn from_profile_with_database_upgrades_legacy_runtime_operator_digests() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        sqlx::query(
+            "INSERT INTO ts_runtime_operators (username, password_verifier, role) VALUES (?, ?, ?)",
+        )
+        .bind("legacy")
+        .bind(hash_password_sha3("zion"))
+        .bind("Operator")
+        .execute(database.pool())
+        .await
+        .expect("legacy runtime operator should persist");
+
+        let service = AuthService::from_profile_with_database(&profile(), &database)
+            .await
+            .expect("auth service should load runtime operators");
+        let result = service
+            .authenticate_login(
+                Uuid::new_v4(),
+                &LoginInfo { user: "legacy".to_owned(), password: hash_password_sha3("zion") },
+            )
+            .await;
+        assert!(matches!(result, AuthenticationResult::Success(_)));
+
+        let persisted = database
+            .operators()
+            .get("legacy")
+            .await
+            .expect("query should succeed")
+            .expect("runtime operator should exist");
+        assert_ne!(persisted.password_verifier, hash_password_sha3("zion"));
+        assert!(password_hashes_match(&hash_password_sha3("zion"), &persisted.password_verifier));
     }
 }

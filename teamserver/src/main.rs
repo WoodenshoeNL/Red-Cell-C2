@@ -409,7 +409,7 @@ mod tests {
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(agent_registry.clone(), events.clone());
         let state = TeamserverState {
-            auth: AuthService::from_profile(&profile),
+            auth: AuthService::from_profile(&profile).expect("auth service should initialize"),
             api: ApiRuntime::from_profile(&profile),
             database: database.clone(),
             events: events.clone(),

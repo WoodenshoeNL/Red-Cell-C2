@@ -539,8 +539,8 @@ pub struct ListenerRepository {
 pub struct PersistedOperator {
     /// Operator username.
     pub username: String,
-    /// Stored SHA3-256 password hash.
-    pub password_hash: String,
+    /// Stored password verifier for the operator's Havoc-compatible SHA3 password digest.
+    pub password_verifier: String,
     /// RBAC role granted to the operator.
     pub role: OperatorRole,
 }
@@ -561,10 +561,10 @@ impl OperatorRepository {
     /// Insert a runtime operator credential row.
     pub async fn create(&self, operator: &PersistedOperator) -> Result<(), TeamserverError> {
         sqlx::query(
-            "INSERT INTO ts_runtime_operators (username, password_hash, role) VALUES (?, ?, ?)",
+            "INSERT INTO ts_runtime_operators (username, password_verifier, role) VALUES (?, ?, ?)",
         )
         .bind(&operator.username)
-        .bind(&operator.password_hash)
+        .bind(&operator.password_verifier)
         .bind(operator_role_label(operator.role))
         .execute(&self.pool)
         .await?;
@@ -575,7 +575,7 @@ impl OperatorRepository {
     /// Fetch a runtime operator by username.
     pub async fn get(&self, username: &str) -> Result<Option<PersistedOperator>, TeamserverError> {
         let row = sqlx::query_as::<_, OperatorRow>(
-            "SELECT username, password_hash, role FROM ts_runtime_operators WHERE username = ?",
+            "SELECT username, password_verifier, role FROM ts_runtime_operators WHERE username = ?",
         )
         .bind(username)
         .fetch_optional(&self.pool)
@@ -587,12 +587,27 @@ impl OperatorRepository {
     /// Return all persisted runtime operators sorted by username.
     pub async fn list(&self) -> Result<Vec<PersistedOperator>, TeamserverError> {
         let rows = sqlx::query_as::<_, OperatorRow>(
-            "SELECT username, password_hash, role FROM ts_runtime_operators ORDER BY username",
+            "SELECT username, password_verifier, role FROM ts_runtime_operators ORDER BY username",
         )
         .fetch_all(&self.pool)
         .await?;
 
         rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    /// Replace the stored verifier for a runtime operator.
+    pub async fn update_password_verifier(
+        &self,
+        username: &str,
+        password_verifier: &str,
+    ) -> Result<(), TeamserverError> {
+        sqlx::query("UPDATE ts_runtime_operators SET password_verifier = ? WHERE username = ?")
+            .bind(password_verifier)
+            .bind(username)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
     }
 }
 
@@ -1452,7 +1467,7 @@ impl TryFrom<ListenerRow> for PersistedListener {
 #[derive(Debug, FromRow)]
 struct OperatorRow {
     username: String,
-    password_hash: String,
+    password_verifier: String,
     role: String,
 }
 
@@ -1462,7 +1477,7 @@ impl TryFrom<OperatorRow> for PersistedOperator {
     fn try_from(row: OperatorRow) -> Result<Self, Self::Error> {
         Ok(Self {
             username: row.username,
-            password_hash: row.password_hash,
+            password_verifier: row.password_verifier,
             role: parse_operator_role(&row.role)?,
         })
     }

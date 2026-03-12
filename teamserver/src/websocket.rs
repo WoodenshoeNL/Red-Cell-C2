@@ -562,6 +562,14 @@ async fn handle_authentication(
                 .await;
             return Err(());
         }
+        Err(AuthError::PasswordVerifier(error)) => {
+            warn!(%connection_id, %error, "operator authentication verifier error");
+            tokio::time::sleep(FAILED_LOGIN_DELAY).await;
+            rate_limiter.record_failure(client_ip).await;
+            send_login_error(socket, "", AuthenticationFailure::InvalidCredentials, connection_id)
+                .await;
+            return Err(());
+        }
         Err(AuthError::Persistence(error)) => {
             warn!(%connection_id, %error, "operator authentication persistence failed");
             tokio::time::sleep(FAILED_LOGIN_DELAY).await;
@@ -2609,7 +2617,7 @@ mod tests {
             let sockets = SocketRelayManager::new(registry.clone(), events.clone());
 
             Self {
-                auth: AuthService::from_profile(&profile),
+                auth: AuthService::from_profile(&profile).expect("auth service should initialize"),
                 database: database.clone(),
                 events: events.clone(),
                 connections: OperatorConnectionManager::new(),

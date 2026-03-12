@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow = "1.0"
+argon2 = "0.6.0-rc.7"
 axum = { version = "0.8.8", features = ["ws"] }
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 base64 = "0.22"

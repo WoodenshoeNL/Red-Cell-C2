@@ -2269,7 +2269,6 @@ async fn spawn_dns_listener_runtime(
             name: config.name.clone(),
             message: format!("failed to bind DNS UDP socket {addr}: {error}"),
         })?;
-    let socket = Arc::new(socket);
 
     Ok(Box::pin(async move {
         let mut buf = vec![0u8; 4096];
@@ -2291,18 +2290,16 @@ async fn spawn_dns_listener_runtime(
                         }
                     };
 
-                    let packet = buf[..len].to_vec();
-                    let state = state.clone();
-                    let socket = socket.clone();
                     let peer_ip = peer.ip();
+                    let packet = &buf[..len];
 
-                    tokio::spawn(async move {
-                        if let Some(response) = state.handle_dns_packet(&packet, peer_ip).await {
-                            if let Err(error) = socket.send_to(&response, peer).await {
-                                warn!(listener = %state.config.name, %error, "dns listener send error");
-                            }
+                    // Process DNS packets on the receive loop to keep backpressure bounded by the
+                    // socket buffer instead of creating an unbounded task queue under UDP flood.
+                    if let Some(response) = state.handle_dns_packet(packet, peer_ip).await {
+                        if let Err(error) = socket.send_to(&response, peer).await {
+                            warn!(listener = %state.config.name, %error, "dns listener send error");
                         }
-                    });
+                    }
                 }
             }
         }
@@ -2849,7 +2846,7 @@ fn http_response_from_operator(info: &ListenerInfo) -> Option<HttpListenerRespon
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::io;
     use std::net::TcpListener as StdTcpListener;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -5068,6 +5065,46 @@ mod tests {
             .expect("recv failed");
 
         assert_eq!(buf[3] & 0x0F, 5, "expected REFUSED RCODE");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn dns_listener_responds_to_a_burst_of_udp_queries() {
+        let port = free_udp_port();
+        let config = red_cell_common::DnsListenerConfig {
+            name: "dns-burst".to_owned(),
+            host_bind: "127.0.0.1".to_owned(),
+            port_bind: port,
+            domain: "c2.example.com".to_owned(),
+            record_types: vec!["TXT".to_owned()],
+            kill_date: None,
+            working_hours: None,
+        };
+        let (handle, _) = spawn_test_dns_listener(config).await;
+
+        sleep(Duration::from_millis(50)).await;
+
+        let client = TokioUdpSocket::bind("127.0.0.1:0").await.expect("client bind failed");
+        client.connect(format!("127.0.0.1:{port}")).await.expect("connect failed");
+
+        for id in 0x5000..0x5010 {
+            let packet = build_dns_txt_query(id, "burst.other.domain.com");
+            client.send(&packet).await.expect("send failed");
+        }
+
+        let mut buf = vec![0u8; 512];
+        let mut seen_ids = HashSet::new();
+        for _ in 0x5000..0x5010 {
+            let received = tokio::time::timeout(Duration::from_secs(2), client.recv(&mut buf))
+                .await
+                .expect("no response received")
+                .expect("recv failed");
+            assert!(received >= DNS_HEADER_LEN, "response too short");
+            seen_ids.insert(u16::from_be_bytes([buf[0], buf[1]]));
+            assert_eq!(buf[3] & 0x0F, 5, "expected REFUSED RCODE");
+        }
+        assert_eq!(seen_ids.len(), 16, "every burst query should receive a response");
+
         handle.abort();
     }
 

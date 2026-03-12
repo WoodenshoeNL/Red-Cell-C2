@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 0 | 127 | 31 |
+| Tasks closed | 3 | 127 | 31 |
 | Bugs filed against | 0 | 19 | 9 |
-| Bug rate (bugs/task) | N/A | 0.15 | 0.29 |
-| Quality score | N/A | 85% | 71% |
+| Bug rate (bugs/task) | 0.00 | 0.15 | 0.29 |
+| Quality score | 100% | 85% | 71% |
 
 ## Violation Breakdown
 
@@ -34,6 +34,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-12 — f39a3a..156b8e1
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 0 | Closed red-cell-c2-ewin (Profile error-path tests), red-cell-c2-kn1w (normalize_server_url error-path tests), red-cell-c2-2jf8 (Argon2 test cache fix) |
+| Codex | 0 | 0 | — |
+| Cursor | 0 | 0 | — |
+
+Build: passed (95 tests, 0 failures, 0 clippy warnings)
 
 ### Arch Review — 2026-03-12 11:29
 

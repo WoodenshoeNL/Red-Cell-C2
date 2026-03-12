@@ -256,12 +256,12 @@ mod tests {
     use std::net::SocketAddr;
     use std::time::Duration;
 
-    use axum::{Json, Router, routing::post};
+    use axum::{Json, Router, http::StatusCode as HttpStatusCode, routing::post};
     use serde_json::{Value, json};
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
 
-    use super::AuditWebhookNotifier;
+    use super::{AuditWebhookNotifier, WebhookError};
     use crate::{AuditRecord, AuditResultStatus};
     use red_cell_common::config::Profile;
 
@@ -292,7 +292,7 @@ mod tests {
 
     #[tokio::test]
     async fn discord_notifier_posts_embedded_audit_payload() {
-        let (address, mut receiver, server) = webhook_server().await;
+        let (address, mut receiver, server) = webhook_server(HttpStatusCode::OK).await;
         let profile = Profile::parse(&format!(
             r#"
             Teamserver {{
@@ -355,7 +355,7 @@ mod tests {
 
     #[tokio::test]
     async fn notifier_shutdown_waits_for_detached_delivery() {
-        let (address, mut receiver, server) = webhook_server().await;
+        let (address, mut receiver, server) = webhook_server(HttpStatusCode::OK).await;
         let profile = Profile::parse(&format!(
             r#"
             Teamserver {{
@@ -401,16 +401,115 @@ mod tests {
         assert_eq!(payload["embeds"][0]["fields"][0]["value"], "operator");
     }
 
-    async fn webhook_server()
-    -> (SocketAddr, mpsc::UnboundedReceiver<Value>, tokio::task::JoinHandle<()>) {
+    #[tokio::test]
+    async fn discord_notifier_returns_unexpected_status_for_non_success_response() {
+        let (address, _receiver, server) = webhook_server(HttpStatusCode::TOO_MANY_REQUESTS).await;
+        let profile = Profile::parse(&format!(
+            r#"
+            Teamserver {{
+              Host = "127.0.0.1"
+              Port = 40056
+            }}
+
+            Operators {{
+              user "operator" {{
+                Password = "password1234"
+              }}
+            }}
+
+            WebHook {{
+              Discord {{
+                Url = "http://{address}/"
+              }}
+            }}
+
+            Demon {{}}
+            "#
+        ))
+        .expect("profile should parse");
+        let notifier = AuditWebhookNotifier::from_profile(&profile);
+
+        let result = notifier
+            .notify_audit_record(&AuditRecord {
+                id: 9,
+                actor: "operator".to_owned(),
+                action: "agent.task".to_owned(),
+                target_kind: "agent".to_owned(),
+                target_id: Some("DEADBEEF".to_owned()),
+                agent_id: Some("DEADBEEF".to_owned()),
+                command: Some("shell".to_owned()),
+                parameters: Some(json!({"command": "hostname"})),
+                result_status: AuditResultStatus::Failure,
+                occurred_at: "2026-03-12T08:00:00Z".to_owned(),
+            })
+            .await;
+        server.abort();
+
+        assert!(matches!(
+            result,
+            Err(WebhookError::UnexpectedStatus(status))
+                if status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        ));
+    }
+
+    #[tokio::test]
+    async fn notifier_shutdown_drains_detached_delivery_after_webhook_failure() {
+        let (address, _receiver, server) =
+            webhook_server(HttpStatusCode::INTERNAL_SERVER_ERROR).await;
+        let profile = Profile::parse(&format!(
+            r#"
+            Teamserver {{
+              Host = "127.0.0.1"
+              Port = 40056
+            }}
+
+            Operators {{
+              user "operator" {{
+                Password = "password1234"
+              }}
+            }}
+
+            WebHook {{
+              Discord {{
+                Url = "http://{address}/"
+              }}
+            }}
+
+            Demon {{}}
+            "#
+        ))
+        .expect("profile should parse");
+        let notifier = AuditWebhookNotifier::from_profile(&profile);
+
+        notifier.notify_audit_record_detached(AuditRecord {
+            id: 10,
+            actor: "operator".to_owned(),
+            action: "operator.login".to_owned(),
+            target_kind: "operator".to_owned(),
+            target_id: Some("operator".to_owned()),
+            agent_id: None,
+            command: Some("login".to_owned()),
+            parameters: None,
+            result_status: AuditResultStatus::Failure,
+            occurred_at: "2026-03-12T08:30:00Z".to_owned(),
+        });
+
+        assert!(notifier.shutdown(Duration::from_secs(5)).await);
+        server.abort();
+    }
+
+    async fn webhook_server(
+        response_status: HttpStatusCode,
+    ) -> (SocketAddr, mpsc::UnboundedReceiver<Value>, tokio::task::JoinHandle<()>) {
         let (sender, receiver) = mpsc::unbounded_channel();
         let app = Router::new().route(
             "/",
             post(move |Json(payload): Json<Value>| {
                 let sender = sender.clone();
+                let response_status = response_status;
                 async move {
                     let _ = sender.send(payload);
-                    Json(json!({"ok": true}))
+                    (response_status, Json(json!({"ok": true})))
                 }
             }),
         );

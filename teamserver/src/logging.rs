@@ -166,11 +166,134 @@ fn map_rotation(rotation: LogRotation) -> tracing_appender::rolling::Rotation {
 
 #[cfg(test)]
 mod tests {
+    use std::env;
     use std::path::PathBuf;
+    use std::process::Command;
 
     use red_cell_common::config::{LogFormat, LogRotation, Profile};
+    use tempfile::TempDir;
 
-    use super::resolve_logging_config_with_override;
+    use super::{LoggingInitError, init_tracing, resolve_logging_config_with_override};
+
+    const SUBPROCESS_TEST_ENV: &str = "RED_CELL_LOGGING_TEST_CASE";
+    const SUBPROCESS_LOG_DIR_ENV: &str = "RED_CELL_LOGGING_TEST_LOG_DIR";
+    const SUBPROCESS_FILTER_ENV: &str = "RED_CELL_LOGGING_TEST_FILTER";
+    const SUBPROCESS_DEBUG_ENV: &str = "RED_CELL_LOGGING_TEST_DEBUG";
+
+    fn parse_profile(input: &str) -> Profile {
+        match Profile::parse(input) {
+            Ok(profile) => profile,
+            Err(error) => panic!("profile should parse: {error}"),
+        }
+    }
+
+    fn run_init_tracing_subprocess(case: &str, envs: &[(&str, &str)]) -> std::process::Output {
+        let current_exe = match env::current_exe() {
+            Ok(path) => path,
+            Err(error) => panic!("current test binary path should resolve: {error}"),
+        };
+
+        let mut command = Command::new(current_exe);
+        command.arg("--exact").arg("logging::tests::subprocess_entrypoint").arg("--nocapture");
+        command.env(SUBPROCESS_TEST_ENV, case);
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+
+        match command.output() {
+            Ok(output) => output,
+            Err(error) => panic!("subprocess should run: {error}"),
+        }
+    }
+
+    #[test]
+    fn subprocess_entrypoint() {
+        let Ok(case) = env::var(SUBPROCESS_TEST_ENV) else {
+            return;
+        };
+
+        match case.as_str() {
+            "file_logging_happy_path" => {
+                let log_dir = match env::var(SUBPROCESS_LOG_DIR_ENV) {
+                    Ok(path) => path,
+                    Err(error) => panic!("log directory should be set: {error}"),
+                };
+                let profile = parse_profile(&format!(
+                    r#"
+                    Teamserver {{
+                      Host = "127.0.0.1"
+                      Port = 40056
+                      Logging {{
+                        Level = "info"
+                        Format = "Json"
+                        File {{
+                          Directory = "{log_dir}"
+                          Prefix = "teamserver.log"
+                          Rotation = "Never"
+                        }}
+                      }}
+                    }}
+
+                    Operators {{
+                      user "neo" {{
+                        Password = "password1234"
+                      }}
+                    }}
+
+                    Demon {{}}
+                    "#
+                ));
+
+                if let Err(error) = init_tracing(Some(&profile), false) {
+                    panic!("file logging init should succeed: {error}");
+                }
+            }
+            "invalid_filter" => {
+                let filter = match env::var(SUBPROCESS_FILTER_ENV) {
+                    Ok(filter) => filter,
+                    Err(error) => panic!("filter should be set: {error}"),
+                };
+                let profile = parse_profile(&format!(
+                    r#"
+                    Teamserver {{
+                      Host = "127.0.0.1"
+                      Port = 40056
+                      Logging {{
+                        Level = "{filter}"
+                      }}
+                    }}
+
+                    Operators {{
+                      user "neo" {{
+                        Password = "password1234"
+                      }}
+                    }}
+
+                    Demon {{}}
+                    "#
+                ));
+
+                match init_tracing(Some(&profile), false) {
+                    Err(LoggingInitError::InvalidFilter { directive, .. }) => {
+                        assert_eq!(directive, filter);
+                    }
+                    Err(error) => panic!("expected invalid filter error, got {error}"),
+                    Ok(_) => panic!("invalid filter should not initialize tracing"),
+                }
+            }
+            "default_config_once" => {
+                let debug_logging = match env::var(SUBPROCESS_DEBUG_ENV) {
+                    Ok(value) => value == "1",
+                    Err(error) => panic!("debug flag should be set: {error}"),
+                };
+
+                if let Err(error) = init_tracing(None, debug_logging) {
+                    panic!("default init should succeed: {error}");
+                }
+            }
+            other => panic!("unexpected subprocess case: {other}"),
+        }
+    }
 
     #[test]
     fn debug_mode_defaults_to_pretty_debug_logging() {
@@ -263,7 +386,7 @@ mod tests {
 
     #[test]
     fn whitespace_only_override_falls_back_to_profile_level() {
-        let profile = Profile::parse(
+        let profile = parse_profile(
             r#"
             Teamserver {
               Host = "127.0.0.1"
@@ -281,13 +404,79 @@ mod tests {
 
             Demon {}
             "#,
-        )
-        .expect("profile should parse");
+        );
 
         let resolved =
             resolve_logging_config_with_override(Some(&profile), false, Some("  ".to_owned()));
 
         assert_eq!(resolved.filter_directive, "info");
         assert_eq!(resolved.format, LogFormat::Json);
+    }
+
+    #[test]
+    fn init_tracing_succeeds_with_file_logging_enabled() {
+        let temp_dir = match TempDir::new() {
+            Ok(dir) => dir,
+            Err(error) => panic!("tempdir should be created: {error}"),
+        };
+        let log_dir = temp_dir.path().join("logs");
+        let log_dir_str = log_dir.to_string_lossy().into_owned();
+
+        let output = run_init_tracing_subprocess(
+            "file_logging_happy_path",
+            &[(SUBPROCESS_LOG_DIR_ENV, log_dir_str.as_str())],
+        );
+
+        assert!(
+            output.status.success(),
+            "subprocess should succeed, stdout: {}, stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(log_dir.is_dir(), "log directory should be created");
+        let mut entries = match std::fs::read_dir(&log_dir) {
+            Ok(entries) => entries,
+            Err(error) => panic!("log directory should be readable: {error}"),
+        };
+        assert!(entries.next().is_some(), "log file should be created");
+    }
+
+    #[test]
+    fn init_tracing_rejects_invalid_filter_directive() {
+        let output =
+            run_init_tracing_subprocess("invalid_filter", &[(SUBPROCESS_FILTER_ENV, "[invalid")]);
+
+        assert!(
+            output.status.success(),
+            "subprocess should succeed, stdout: {}, stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn init_tracing_succeeds_once_per_process_without_profile_in_debug_mode() {
+        let output =
+            run_init_tracing_subprocess("default_config_once", &[(SUBPROCESS_DEBUG_ENV, "1")]);
+
+        assert!(
+            output.status.success(),
+            "subprocess should succeed, stdout: {}, stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn init_tracing_succeeds_once_per_process_without_profile_in_non_debug_mode() {
+        let output =
+            run_init_tracing_subprocess("default_config_once", &[(SUBPROCESS_DEBUG_ENV, "0")]);
+
+        assert!(
+            output.status.success(),
+            "subprocess should succeed, stdout: {}, stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

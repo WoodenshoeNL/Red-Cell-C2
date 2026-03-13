@@ -1683,6 +1683,87 @@ mod tests {
     }
 
     #[test]
+    fn agent_remove_drops_matching_agent() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+        state.agents.push(AgentSummary {
+            name_id: "ABCD1234".to_owned(),
+            status: "Alive".to_owned(),
+            domain_name: "LAB".to_owned(),
+            username: "operator".to_owned(),
+            internal_ip: "10.0.0.10".to_owned(),
+            external_ip: "203.0.113.10".to_owned(),
+            hostname: "wkstn-1".to_owned(),
+            process_arch: "x64".to_owned(),
+            process_name: "explorer.exe".to_owned(),
+            process_pid: "1234".to_owned(),
+            elevated: true,
+            os_version: "Windows 11".to_owned(),
+            os_build: "19045".to_owned(),
+            os_arch: "x64".to_owned(),
+            sleep_delay: "5".to_owned(),
+            sleep_jitter: "10".to_owned(),
+            last_call_in: "10/03/2026 12:00:00".to_owned(),
+            note: String::new(),
+            pivot_parent: None,
+            pivot_links: Vec::new(),
+        });
+
+        let events = state.apply_operator_message(OperatorMessage::AgentRemove(Message {
+            head: head(EventCode::Session),
+            info: FlatInfo {
+                fields: BTreeMap::from([(
+                    "AgentID".to_owned(),
+                    serde_json::Value::String("abcd1234".to_owned()),
+                )]),
+            },
+        }));
+
+        assert!(events.is_empty());
+        assert!(state.agents.is_empty());
+    }
+
+    #[test]
+    fn agent_remove_ignores_unknown_agent_id() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+        state.agents.push(AgentSummary {
+            name_id: "ABCD1234".to_owned(),
+            status: "Alive".to_owned(),
+            domain_name: "LAB".to_owned(),
+            username: "operator".to_owned(),
+            internal_ip: "10.0.0.10".to_owned(),
+            external_ip: "203.0.113.10".to_owned(),
+            hostname: "wkstn-1".to_owned(),
+            process_arch: "x64".to_owned(),
+            process_name: "explorer.exe".to_owned(),
+            process_pid: "1234".to_owned(),
+            elevated: true,
+            os_version: "Windows 11".to_owned(),
+            os_build: "19045".to_owned(),
+            os_arch: "x64".to_owned(),
+            sleep_delay: "5".to_owned(),
+            sleep_jitter: "10".to_owned(),
+            last_call_in: "10/03/2026 12:00:00".to_owned(),
+            note: String::new(),
+            pivot_parent: None,
+            pivot_links: Vec::new(),
+        });
+
+        let events = state.apply_operator_message(OperatorMessage::AgentRemove(Message {
+            head: head(EventCode::Session),
+            info: FlatInfo {
+                fields: BTreeMap::from([(
+                    "AgentID".to_owned(),
+                    serde_json::Value::String("beef5678".to_owned()),
+                )]),
+            },
+        }));
+
+        assert!(events.is_empty());
+        assert_eq!(state.agents.len(), 1);
+        assert_eq!(state.agents[0].name_id, "ABCD1234");
+    }
+
+    #[test]
     fn operator_snapshot_updates_online_users_and_current_operator_metadata() {
         let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
         state.operator_info = Some(OperatorInfo {

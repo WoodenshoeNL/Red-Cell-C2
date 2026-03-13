@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 5 | 153 | 31 |
+| Tasks closed | 5 | 154 | 31 |
 | Bugs filed against | 0 | 21 | 9 |
 | Bug rate (bugs/task) | 0.00 | 0.14 | 0.29 |
 | Quality score | 100% | 86% | 71% |
@@ -968,3 +968,13 @@ Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnin
 | Cursor | 0 | 0 | No activity in reviewed commits. |
 
 Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`, and `cargo test --workspace`)
+
+### QA Review — 2026-03-13 — e95504a..49c03b4
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No activity in reviewed commits. |
+| Codex | 1 | 0 | Closed `red-cell-c2-21jl`; added 3 unit tests to `common/src/error.rs` covering display messages, field preservation, and clone/equality. Tests are correct and well-scoped. No defects found. |
+| Cursor | 0 | 0 | No activity in reviewed commits. |
+
+Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`, `cargo test --workspace` — 107 tests, 0 failed)

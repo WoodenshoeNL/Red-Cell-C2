@@ -147,6 +147,19 @@ impl OutputFormat {
 impl PayloadBuilderService {
     /// Resolve the MinGW/NASM toolchain and Havoc payload source tree from `profile`.
     pub fn from_profile(profile: &Profile) -> Result<Self, PayloadBuildError> {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .map_err(|source| PayloadBuildError::ToolchainUnavailable {
+                message: format!("failed to resolve repository root: {source}"),
+            })?;
+        Self::from_profile_with_repo_root(profile, &repo_root)
+    }
+
+    fn from_profile_with_repo_root(
+        profile: &Profile,
+        repo_root: &Path,
+    ) -> Result<Self, PayloadBuildError> {
         let build = profile.teamserver.build.as_ref();
         let toolchain = Toolchain {
             compiler_x64: resolve_executable(
@@ -160,12 +173,6 @@ impl PayloadBuilderService {
             nasm: resolve_executable(build.and_then(|config| config.nasm.as_deref()), "nasm")?,
         };
 
-        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .canonicalize()
-            .map_err(|source| PayloadBuildError::ToolchainUnavailable {
-                message: format!("failed to resolve repository root: {source}"),
-            })?;
         let source_root = repo_root.join("src/Havoc/payloads/Demon");
         let shellcode_x64_template = repo_root.join("src/Havoc/payloads/Shellcode.x64.bin");
         let shellcode_x86_template = repo_root.join("src/Havoc/payloads/Shellcode.x86.bin");
@@ -1199,9 +1206,83 @@ fn add_wstring(buffer: &mut Vec<u8>, value: &str) -> Result<(), PayloadBuildErro
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
     use super::*;
     use red_cell_common::HttpListenerProxyConfig as DomainHttpListenerProxyConfig;
     use serde_json::json;
+
+    #[test]
+    fn from_profile_resolves_toolchain_and_havoc_assets() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = TempDir::new()?;
+        let compiler_x64 = write_fake_executable(&temp.path().join("bin/x64-gcc"))?;
+        let compiler_x86 = write_fake_executable(&temp.path().join("bin/x86-gcc"))?;
+        let nasm = write_fake_executable(&temp.path().join("bin/nasm"))?;
+        create_payload_assets(temp.path())?;
+        let profile = constructor_test_profile(&compiler_x64, &compiler_x86, &nasm);
+
+        let service = PayloadBuilderService::from_profile_with_repo_root(&profile, temp.path())?;
+
+        assert_eq!(service.inner.toolchain.compiler_x64, compiler_x64.canonicalize()?);
+        assert_eq!(service.inner.toolchain.compiler_x86, compiler_x86.canonicalize()?);
+        assert_eq!(service.inner.toolchain.nasm, nasm.canonicalize()?);
+        assert_eq!(service.inner.source_root, temp.path().join("src/Havoc/payloads/Demon"));
+        assert_eq!(
+            service.inner.shellcode_x64_template,
+            temp.path().join("src/Havoc/payloads/Shellcode.x64.bin")
+        );
+        assert_eq!(
+            service.inner.shellcode_x86_template,
+            temp.path().join("src/Havoc/payloads/Shellcode.x86.bin")
+        );
+        assert_eq!(service.inner.default_demon, profile.demon);
+        Ok(())
+    }
+
+    #[test]
+    fn from_profile_rejects_missing_toolchain_binary() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        let compiler_x64 = temp.path().join("bin/missing-x64-gcc");
+        let compiler_x86 = write_fake_executable(&temp.path().join("bin/x86-gcc"))?;
+        let nasm = write_fake_executable(&temp.path().join("bin/nasm"))?;
+        create_payload_assets(temp.path())?;
+        let profile = constructor_test_profile(&compiler_x64, &compiler_x86, &nasm);
+
+        let error = PayloadBuilderService::from_profile_with_repo_root(&profile, temp.path())
+            .expect_err("missing compiler should be rejected");
+
+        assert!(matches!(
+            error,
+            PayloadBuildError::ToolchainUnavailable { message }
+                if message.contains("executable does not exist")
+                    && message.contains("missing-x64-gcc")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn from_profile_rejects_missing_payload_assets() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        let compiler_x64 = write_fake_executable(&temp.path().join("bin/x64-gcc"))?;
+        let compiler_x86 = write_fake_executable(&temp.path().join("bin/x86-gcc"))?;
+        let nasm = write_fake_executable(&temp.path().join("bin/nasm"))?;
+        create_payload_assets(temp.path())?;
+        std::fs::remove_file(temp.path().join("src/Havoc/payloads/Shellcode.x86.bin"))?;
+        let profile = constructor_test_profile(&compiler_x64, &compiler_x86, &nasm);
+
+        let error = PayloadBuilderService::from_profile_with_repo_root(&profile, temp.path())
+            .expect_err("missing asset should be rejected");
+
+        assert!(matches!(
+            error,
+            PayloadBuildError::ToolchainUnavailable { message }
+                if message.contains("required Havoc payload asset missing")
+                    && message.contains("Shellcode.x86.bin")
+        ));
+        Ok(())
+    }
 
     #[test]
     fn merged_request_config_applies_profile_defaults() -> Result<(), Box<dyn std::error::Error>> {
@@ -1578,6 +1659,74 @@ mod tests {
         let (head, tail) = cursor.split_at(len);
         *cursor = tail;
         Ok(head)
+    }
+
+    fn constructor_test_profile(compiler_x64: &Path, compiler_x86: &Path, nasm: &Path) -> Profile {
+        Profile {
+            teamserver: red_cell_common::config::TeamserverConfig {
+                host: "127.0.0.1".to_owned(),
+                port: 40056,
+                plugins_dir: None,
+                max_download_bytes: None,
+                max_registered_agents: None,
+                drain_timeout_secs: None,
+                agent_timeout_secs: None,
+                logging: None,
+                build: Some(red_cell_common::config::BuildConfig {
+                    compiler64: Some(compiler_x64.display().to_string()),
+                    compiler86: Some(compiler_x86.display().to_string()),
+                    nasm: Some(nasm.display().to_string()),
+                }),
+            },
+            operators: red_cell_common::config::OperatorsConfig {
+                users: BTreeMap::from([(
+                    "operator".to_owned(),
+                    red_cell_common::config::OperatorConfig {
+                        password: "password".to_owned(),
+                        role: red_cell_common::config::OperatorRole::Admin,
+                    },
+                )]),
+            },
+            listeners: red_cell_common::config::ListenersConfig::default(),
+            demon: DemonConfig {
+                sleep: Some(5),
+                jitter: Some(10),
+                indirect_syscall: false,
+                stack_duplication: false,
+                sleep_technique: None,
+                proxy_loading: None,
+                amsi_etw_patching: None,
+                injection: None,
+                dotnet_name_pipe: None,
+                binary: None,
+                trust_x_forwarded_for: false,
+                trusted_proxy_peers: Vec::new(),
+            },
+            service: None,
+            api: None,
+            webhook: None,
+        }
+    }
+
+    fn create_payload_assets(repo_root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let payload_root = repo_root.join("src/Havoc/payloads");
+        std::fs::create_dir_all(payload_root.join("Demon"))?;
+        std::fs::write(payload_root.join("Shellcode.x64.bin"), [0x90, 0x90])?;
+        std::fs::write(payload_root.join("Shellcode.x86.bin"), [0x90, 0x90])?;
+        Ok(())
+    }
+
+    fn write_fake_executable(path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, "#!/bin/sh\nexit 0\n")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+        }
+        Ok(path.to_path_buf())
     }
 
     #[test]

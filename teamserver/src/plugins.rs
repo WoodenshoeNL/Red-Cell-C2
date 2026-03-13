@@ -994,6 +994,7 @@ fn populate_api_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
     use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1003,6 +1004,7 @@ mod tests {
     use super::*;
 
     static TEST_GUARD: Mutex<()> = Mutex::new(());
+    const POISON_CURRENT_ENV: &str = "RED_CELL_POISON_PLUGIN_RUNTIME_CURRENT";
 
     fn unique_test_dir(label: &str) -> PathBuf {
         let suffix = SystemTime::now()
@@ -1086,6 +1088,103 @@ mod tests {
         )
         .await?;
         Ok((database, registry, events, sockets, runtime))
+    }
+
+    fn replace_active_runtime(
+        runtime: Option<PluginRuntime>,
+    ) -> Result<Option<PluginRuntime>, PluginError> {
+        let mut guard = runtime_slot().lock().map_err(|_| PluginError::MutexPoisoned)?;
+        Ok(std::mem::replace(&mut *guard, runtime))
+    }
+
+    struct ActiveRuntimeReset {
+        previous: Option<PluginRuntime>,
+    }
+
+    impl ActiveRuntimeReset {
+        fn clear() -> Result<Self, PluginError> {
+            Ok(Self { previous: replace_active_runtime(None)? })
+        }
+    }
+
+    impl Drop for ActiveRuntimeReset {
+        fn drop(&mut self) {
+            let _ = replace_active_runtime(self.previous.take());
+        }
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn current_is_none_before_initialization_and_plugins_dir_is_optional()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _reset = ActiveRuntimeReset::clear()?;
+
+        assert!(PluginRuntime::current()?.is_none());
+
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-optional-dir").await?;
+
+        assert!(runtime.plugins_dir().is_none());
+
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn initialize_sets_current_runtime_and_exposes_plugins_dir()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _reset = ActiveRuntimeReset::clear()?;
+        let temp_dir = TempDir::new()?;
+        let plugins_dir = temp_dir.path().to_path_buf();
+        let database = Database::connect(unique_test_dir("plugins-current-state")).await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+
+        let runtime = PluginRuntime::initialize(
+            database,
+            registry,
+            events,
+            sockets,
+            Some(plugins_dir.clone()),
+        )
+        .await?;
+
+        assert_eq!(runtime.plugins_dir(), Some(plugins_dir.as_path()));
+
+        let current = PluginRuntime::current()?;
+        let Some(current) = current else {
+            return Err("expected active plugin runtime".into());
+        };
+        assert!(Arc::ptr_eq(&runtime.inner, &current.inner));
+        assert_eq!(current.plugins_dir(), Some(plugins_dir.as_path()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn current_reports_mutex_poisoned_in_isolated_process() -> Result<(), Box<dyn std::error::Error>>
+    {
+        if std::env::var_os(POISON_CURRENT_ENV).is_some() {
+            let child = std::thread::spawn(|| {
+                let _guard = runtime_slot().lock().unwrap_or_else(|error| error.into_inner());
+                panic!("poison plugin runtime mutex");
+            });
+            assert!(child.join().is_err(), "child thread must panic to poison the mutex");
+            assert!(matches!(PluginRuntime::current(), Err(PluginError::MutexPoisoned)));
+            return Ok(());
+        }
+
+        let status = Command::new(std::env::current_exe()?)
+            .arg("current_reports_mutex_poisoned_in_isolated_process")
+            .arg("--nocapture")
+            .env(POISON_CURRENT_ENV, "1")
+            .status()?;
+
+        assert!(status.success(), "isolated poison harness failed");
+        Ok(())
     }
 
     #[allow(clippy::await_holding_lock)]

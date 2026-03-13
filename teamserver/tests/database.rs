@@ -13,11 +13,17 @@ use red_cell_common::{
     HttpListenerResponseConfig, ListenerConfig, ListenerTlsConfig,
 };
 use serde_json::json;
-use std::path::PathBuf;
+use sqlx::sqlite::SqliteConnectOptions;
+use std::path::{Path, PathBuf};
+use tempfile::TempDir;
 use uuid::Uuid;
 
 fn temp_db_path() -> PathBuf {
     std::env::temp_dir().join(format!("red-cell-teamserver-db-{}.sqlite", Uuid::new_v4()))
+}
+
+fn sqlite_options(path: &Path) -> SqliteConnectOptions {
+    SqliteConnectOptions::new().filename(path).create_if_missing(true).foreign_keys(true)
 }
 
 fn sample_agent(agent_id: u32) -> AgentInfo {
@@ -92,6 +98,38 @@ fn sample_listener() -> ListenerConfig {
 
 async fn test_database() -> Result<Database, TeamserverError> {
     Database::connect(temp_db_path()).await
+}
+
+#[tokio::test]
+async fn connect_with_options_migrates_fresh_database_and_reports_open_failures()
+-> Result<(), TeamserverError> {
+    let temp_dir = TempDir::new().expect("tempdir should be created");
+    let database_path = temp_dir.path().join("fresh.sqlite");
+
+    let database = Database::connect_with_options(sqlite_options(&database_path)).await?;
+    let tables: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+            .fetch_all(database.pool())
+            .await?;
+    database.close().await;
+
+    assert!(database_path.exists());
+    assert!(tables.iter().any(|name| name == "ts_agents"));
+    assert!(tables.iter().any(|name| name == "ts_listeners"));
+
+    let missing_parent_path =
+        temp_dir.path().join("missing-parent").join("nested").join("broken.sqlite");
+    let error = Database::connect_with_options(sqlite_options(&missing_parent_path))
+        .await
+        .expect_err("connect_with_options should fail when sqlite cannot open the path");
+
+    assert!(matches!(error, TeamserverError::Database(_)));
+    let TeamserverError::Database(sqlx::Error::Database(database_error)) = &error else {
+        panic!("expected sqlite database open failure");
+    };
+    assert!(database_error.message().contains("unable to open database file"));
+
+    Ok(())
 }
 
 #[tokio::test]
@@ -197,6 +235,99 @@ async fn agent_repository_supports_crud_and_status_updates() -> Result<(), Teams
 
     repository.delete(agent.agent_id).await?;
     assert!(!repository.exists(agent.agent_id).await?);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_repository_persists_listener_note_and_ctr_state_across_reload()
+-> Result<(), TeamserverError> {
+    let temp_dir = TempDir::new().expect("tempdir should be created");
+    let database_path = temp_dir.path().join("agents.sqlite");
+    let database = Database::connect(&database_path).await?;
+    let repository = database.agents();
+    let mut first = sample_agent(0x00AB_CDEF);
+    let second = sample_agent(0x00AB_CDF0);
+
+    repository.create_with_listener(&first, "http-alpha").await?;
+    repository.create_with_listener_and_ctr_offset(&second, "http-bravo", 19).await?;
+
+    first.note = "primary foothold".to_owned();
+    first.reason = "interactive".to_owned();
+    first.sleep_delay = 30;
+    first.last_call_in = "2026-03-10T08:15:00Z".to_owned();
+    repository.update_with_listener(&first, "http-charlie").await?;
+    repository.set_note(first.agent_id, &first.note).await?;
+    repository.set_ctr_block_offset(first.agent_id, 7).await?;
+
+    let persisted_first =
+        repository.get_persisted(first.agent_id).await?.expect("first agent should exist");
+    assert_eq!(persisted_first.info, first);
+    assert_eq!(persisted_first.listener_name, "http-charlie");
+    assert_eq!(persisted_first.ctr_block_offset, 7);
+
+    let persisted = repository.list_persisted().await?;
+    assert_eq!(
+        persisted.iter().map(|agent| agent.info.agent_id).collect::<Vec<_>>(),
+        vec![first.agent_id, second.agent_id]
+    );
+    assert_eq!(persisted[0].listener_name, "http-charlie");
+    assert_eq!(persisted[0].info.note, "primary foothold");
+    assert_eq!(persisted[0].ctr_block_offset, 7);
+    assert_eq!(persisted[1].listener_name, "http-bravo");
+    assert_eq!(persisted[1].ctr_block_offset, 19);
+
+    database.close().await;
+
+    let reloaded = Database::connect(&database_path).await?;
+    let reloaded_repository = reloaded.agents();
+    let reloaded_first = reloaded_repository
+        .get_persisted(first.agent_id)
+        .await?
+        .expect("first agent should persist across reload");
+    let reloaded_agents = reloaded_repository.list_persisted().await?;
+
+    assert_eq!(reloaded_first, persisted_first);
+    assert_eq!(reloaded_agents, persisted);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_repository_listener_bound_updates_fail_for_missing_agents()
+-> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let repository = database.agents();
+    let missing_agent = sample_agent(0xDEAD_BEEF);
+
+    let update_error = repository
+        .update_with_listener(&missing_agent, "http-missing")
+        .await
+        .expect_err("updating a missing agent should fail");
+    assert!(matches!(
+        update_error,
+        TeamserverError::AgentNotFound { agent_id } if agent_id == missing_agent.agent_id
+    ));
+
+    let note_error = repository
+        .set_note(missing_agent.agent_id, "missing")
+        .await
+        .expect_err("setting a note for a missing agent should fail");
+    assert!(matches!(
+        note_error,
+        TeamserverError::AgentNotFound { agent_id } if agent_id == missing_agent.agent_id
+    ));
+
+    let ctr_error = repository
+        .set_ctr_block_offset(missing_agent.agent_id, 9)
+        .await
+        .expect_err("setting CTR state for a missing agent should fail");
+    assert!(matches!(
+        ctr_error,
+        TeamserverError::AgentNotFound { agent_id } if agent_id == missing_agent.agent_id
+    ));
+
+    assert!(repository.get_persisted(missing_agent.agent_id).await?.is_none());
 
     Ok(())
 }

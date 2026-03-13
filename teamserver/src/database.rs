@@ -248,7 +248,7 @@ impl AgentRepository {
         agent: &AgentInfo,
         listener_name: &str,
     ) -> Result<(), TeamserverError> {
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             UPDATE ts_agents SET
                 active = ?, reason = ?, note = ?, aes_key = ?, aes_iv = ?, hostname = ?, username = ?,
@@ -289,6 +289,10 @@ impl AgentRepository {
         .bind(i64::from(agent.agent_id))
         .execute(&self.pool)
         .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(TeamserverError::AgentNotFound { agent_id: agent.agent_id });
+        }
 
         Ok(())
     }
@@ -362,11 +366,15 @@ impl AgentRepository {
 
     /// Update the operator-authored note for an agent.
     pub async fn set_note(&self, agent_id: u32, note: &str) -> Result<(), TeamserverError> {
-        sqlx::query("UPDATE ts_agents SET note = ? WHERE agent_id = ?")
+        let result = sqlx::query("UPDATE ts_agents SET note = ? WHERE agent_id = ?")
             .bind(note)
             .bind(i64::from(agent_id))
             .execute(&self.pool)
             .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(TeamserverError::AgentNotFound { agent_id });
+        }
 
         Ok(())
     }
@@ -458,11 +466,15 @@ async fn update_agent_ctr_block_offset(
     agent_id: u32,
     ctr_block_offset: u64,
 ) -> Result<(), TeamserverError> {
-    sqlx::query("UPDATE ts_agents SET ctr_block_offset = ? WHERE agent_id = ?")
+    let result = sqlx::query("UPDATE ts_agents SET ctr_block_offset = ? WHERE agent_id = ?")
         .bind(i64_from_u64("ctr_block_offset", ctr_block_offset)?)
         .bind(i64::from(agent_id))
         .execute(executor)
         .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(TeamserverError::AgentNotFound { agent_id });
+    }
 
     Ok(())
 }

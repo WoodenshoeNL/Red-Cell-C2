@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 6 | 161 | 31 |
+| Tasks closed | 6 | 165 | 31 |
 | Bugs filed against | 0 | 21 | 9 |
 | Bug rate (bugs/task) | 0.00 | 0.13 | 0.29 |
 | Quality score | 100% | 87% | 71% |
@@ -35,6 +35,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-13 10:00 — 8b18663..9b8c68e
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No activity in reviewed commits. |
+| Codex | 4 | 0 | Closed `red-cell-c2-1vsm` (3 unit tests for `AgentRegistry::disconnect_link` — removes parent/child relationships, no-op on missing link, cleanup hook fires), `red-cell-c2-1utu` (3 tests for `json_error_response` — status preservation, field serialization, punctuation passthrough), `red-cell-c2-3581` (tests for operator metadata: `as_operator_info` wire fields, unusual usernames, offline operator without last_seen), `red-cell-c2-2tjr` (3 integration tests for `AgentRepository` listener-bound helpers — persist+reload, missing-agent error paths, connect_with_options migration). Also notable: database.rs got correct `rows_affected() == 0` guards in `update_with_listener`, `set_note`, `update_agent_ctr_block_offset`. No defects found. |
+| Cursor | 0 | 0 | No activity in reviewed commits. |
+
+Build: **passed** — `cargo check`, `cargo clippy -D warnings`, and `cargo test` all pass cleanly. 736 tests total, 0 failures.
 
 ### Arch Review — 2026-03-13 09:45
 

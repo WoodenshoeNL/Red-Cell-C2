@@ -3,14 +3,17 @@ use red_cell_common::crypto::hash_password_sha3;
 use red_cell_common::operator::{EventCode, LoginInfo, Message, MessageHead, OperatorMessage};
 
 use crate::local_config::LocalConfig;
-use crate::transport::ConnectionStatus;
 
 const MIN_USERNAME_LENGTH: usize = 1;
 const MIN_PASSWORD_LENGTH: usize = 1;
+#[allow(dead_code)]
 const LOGIN_PANEL_WIDTH: f32 = 400.0;
+#[allow(dead_code)]
+const CONNECTING_COLOR: Color32 = Color32::from_rgb(232, 182, 83);
 
 /// Tracks which field should receive initial focus on the next frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 enum FocusRequest {
     ServerUrl,
     Username,
@@ -20,7 +23,7 @@ enum FocusRequest {
 
 /// Mutable state for the login dialog.
 #[derive(Clone, Debug)]
-pub(crate) struct LoginState {
+pub struct LoginState {
     pub server_url: String,
     pub username: String,
     pub password: String,
@@ -88,6 +91,7 @@ impl LoginState {
 
 /// Outcome of a single login dialog render pass.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) enum LoginAction {
     /// User has not yet submitted.
     Waiting,
@@ -96,6 +100,7 @@ pub(crate) enum LoginAction {
 }
 
 /// Render the login dialog into the given egui context. Returns the action taken.
+#[allow(dead_code)]
 pub(crate) fn render_login_dialog(ctx: &egui::Context, state: &mut LoginState) -> LoginAction {
     let mut action = LoginAction::Waiting;
 
@@ -166,7 +171,7 @@ pub(crate) fn render_login_dialog(ctx: &egui::Context, state: &mut LoginState) -
 
                     ui.with_layout(Layout::top_down(Align::Center), |ui| {
                         if state.connecting {
-                            ui.colored_label(ConnectionStatus::Connecting.color(), "Connecting...");
+                            ui.colored_label(CONNECTING_COLOR, "Connecting...");
                         } else {
                             let button = ui.add_enabled(
                                 state.can_submit(),

@@ -9,7 +9,7 @@ const SCRIPTS_DIR_NAME: &str = "scripts";
 
 /// Persisted client preferences loaded between sessions.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct LocalConfig {
+pub struct LocalConfig {
     /// Last-used teamserver WebSocket URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_url: Option<String>,
@@ -38,7 +38,7 @@ impl LocalConfig {
     /// Load the local config from a specific path.
     ///
     /// Returns the default config if the file does not exist or cannot be parsed.
-    pub(crate) fn load_from(path: &std::path::Path) -> Self {
+    pub fn load_from(path: &std::path::Path) -> Self {
         match fs::read_to_string(path) {
             Ok(contents) => toml::from_str(&contents).unwrap_or_default(),
             Err(_) => Self::default(),
@@ -55,7 +55,7 @@ impl LocalConfig {
     /// Persist the local config to a specific path.
     ///
     /// Creates parent directories as needed. Silently ignores write failures.
-    pub(crate) fn save_to(&self, path: &std::path::Path) {
+    pub fn save_to(&self, path: &std::path::Path) {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }

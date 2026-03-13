@@ -542,7 +542,7 @@ const fn operator_role_name(role: OperatorRole) -> &'static str {
 #[cfg(test)]
 mod tests {
     use crate::{Database, PersistedOperator};
-    use red_cell_common::config::Profile;
+    use red_cell_common::config::{OperatorRole, Profile};
     use red_cell_common::crypto::hash_password_sha3;
     use red_cell_common::operator::{
         EventCode, InitConnectionCode, LoginInfo, Message, MessageHead, OperatorMessage,
@@ -1003,6 +1003,69 @@ mod tests {
             .expect("operator entry should exist");
 
         assert_eq!(operator.last_seen.as_deref(), Some("2026-03-11T08:00:00Z"));
+    }
+
+    #[test]
+    fn operator_presence_as_operator_info_preserves_wire_fields() {
+        let presence = super::OperatorPresence {
+            username: "operator".to_owned(),
+            role: OperatorRole::Admin,
+            online: true,
+            last_seen: Some("2026-03-11T08:00:00Z".to_owned()),
+        };
+
+        let info = presence.as_operator_info();
+
+        assert_eq!(info.username, "operator");
+        assert_eq!(info.password_hash, None);
+        assert_eq!(info.role.as_deref(), Some("Admin"));
+        assert!(info.online);
+        assert_eq!(info.last_seen.as_deref(), Some("2026-03-11T08:00:00Z"));
+    }
+
+    #[test]
+    fn operator_presence_as_operator_info_keeps_unusual_username_without_password_material() {
+        let presence = super::OperatorPresence {
+            username: "MiXeD-Case_99@example.local".to_owned(),
+            role: OperatorRole::Operator,
+            online: true,
+            last_seen: Some("2026-03-12T09:30:00Z".to_owned()),
+        };
+
+        let info = presence.as_operator_info();
+        let payload = serde_json::to_value(&info).expect("operator info should serialize");
+
+        assert_eq!(info.username, "MiXeD-Case_99@example.local");
+        assert_eq!(info.role.as_deref(), Some("Operator"));
+        assert_eq!(info.last_seen.as_deref(), Some("2026-03-12T09:30:00Z"));
+        assert_eq!(payload["Username"], json!("MiXeD-Case_99@example.local"));
+        assert_eq!(payload["Role"], json!("Operator"));
+        assert_eq!(payload["Online"], json!(true));
+        assert_eq!(payload["LastSeen"], json!("2026-03-12T09:30:00Z"));
+        assert!(payload.get("PasswordHash").is_none());
+    }
+
+    #[test]
+    fn operator_presence_as_operator_info_supports_offline_operator_without_last_seen() {
+        let presence = super::OperatorPresence {
+            username: "analyst".to_owned(),
+            role: OperatorRole::Analyst,
+            online: false,
+            last_seen: None,
+        };
+
+        let info = presence.as_operator_info();
+        let payload = serde_json::to_value(&info).expect("operator info should serialize");
+
+        assert_eq!(info.username, "analyst");
+        assert_eq!(info.role.as_deref(), Some("Analyst"));
+        assert!(!info.online);
+        assert_eq!(info.last_seen, None);
+        assert_eq!(payload["Username"], json!("analyst"));
+        assert_eq!(payload["Role"], json!("Analyst"));
+        assert_eq!(payload["Online"], json!(false));
+        assert!(payload.get("LastSeen").is_none());
+        assert!(payload.get("PasswordHash").is_none());
     }
 
     #[test]

@@ -536,7 +536,7 @@ mod tests {
 
     use super::{
         AuditQuery, AuditRecord, AuditResultStatus, SessionActivityRecord, audit_details,
-        parameter_object, parse_agent_id_filter,
+        login_parameters, parameter_object, parse_agent_id_filter,
     };
     use crate::{
         AuditLogEntry, AuditWebhookNotifier, Database, TeamserverError,
@@ -619,6 +619,43 @@ mod tests {
     fn parameter_object_builds_json_object() {
         let value = parameter_object([("listener", json!("http")), ("port", json!(443))]);
         assert_eq!(value, json!({"listener":"http","port":443}));
+    }
+
+    #[test]
+    fn login_parameters_only_include_username_and_connection_id() {
+        let connection_id = uuid::Uuid::parse_str("12345678-1234-5678-9abc-1234567890ab")
+            .expect("connection id should parse");
+
+        let payload = login_parameters("operator", &connection_id);
+
+        assert_eq!(
+            payload,
+            json!({
+                "username": "operator",
+                "connection_id": "12345678-1234-5678-9abc-1234567890ab",
+            })
+        );
+
+        let object = payload.as_object().expect("payload should be a JSON object");
+        assert_eq!(object.len(), 2);
+        assert!(!object.contains_key("password"));
+        assert!(!object.contains_key("Password"));
+        assert!(!object.contains_key("password_hash"));
+        assert!(!object.contains_key("PasswordHash"));
+    }
+
+    #[test]
+    fn login_parameters_preserve_mixed_case_and_unusual_usernames_without_password_material() {
+        let connection_id = uuid::Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+            .expect("connection id should parse");
+        let username = "Op-Erator_42@example.local";
+
+        let payload = login_parameters(username, &connection_id);
+
+        assert_eq!(payload["username"], json!(username));
+        assert_eq!(payload["connection_id"], json!(connection_id.to_string()));
+        assert!(payload.get("password").is_none());
+        assert!(payload.get("password_hash").is_none());
     }
 
     #[test]

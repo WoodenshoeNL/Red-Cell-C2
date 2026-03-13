@@ -10,21 +10,21 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 7 | 181 | 31 |
-| Bugs filed against | 0 | 22 | 9 |
-| Bug rate (bugs/task) | 0.00 | 0.12 | 0.29 |
-| Quality score | 100% | 88% | 71% |
+| Bugs filed against | 1 | 27 | 9 |
+| Bug rate (bugs/task) | 0.14 | 0.15 | 0.29 |
+| Quality score | 100% | 85% | 71% |
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 0 | 0 | 0 |
-| Missing tests | 1 | 6 | 5 |
+| Missing tests | 1 | 7 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
-| Protocol errors | 3 | 17 | 3 |
-| Security issues | 2 | 21 | 0 |
+| Protocol errors | 3 | 18 | 3 |
+| Security issues | 3 | 24 | 0 |
 | Architecture drift | 1 | 17 | 0 |
-| Memory / resource leaks | 0 | 8 | 1 |
+| Memory / resource leaks | 0 | 9 | 1 |
 | Startup / lifecycle regressions | 0 | 8 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
 | Availability / timeout regressions | 0 | 4 | 0 |
@@ -36,6 +36,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-13 14:16
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 1 | Security issues | red-cell-c2-bfih: COMMAND_CHECKIN missing all-zero IV rejection and test (P1) |
+| Codex | 5 | Security issues, Memory/resource leaks, Missing tests | red-cell-c2-3qq0: DEMON_INIT no all-zero IV check (P1); red-cell-c2-2n8o: session token lookup timing oracle (P2); red-cell-c2-3hro: unbounded per-agent job queue (P2); red-cell-c2-a74c: CHECKIN key rotation no freshness guarantee (P2); red-cell-c2-2lyr: axum::serve errors silently swallowed in webhook/audit helpers (P3) |
+| Cursor | 0 | — | No new findings attributed |
+
+Overall codebase health: drifting
+Biggest blindspot: AES IV is still not validated for the all-zero case in either DEMON_INIT or COMMAND_CHECKIN, and the per-agent job queue has no depth cap — both are trivially exploitable by a compromised agent or operator.
 
 ### QA Review — 2026-03-13 13:53 — f6c7d35..446ae04
 

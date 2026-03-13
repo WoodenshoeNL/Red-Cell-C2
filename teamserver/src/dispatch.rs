@@ -1590,7 +1590,6 @@ fn extract_credentials(output: &str) -> Vec<CredentialCapture> {
 }
 
 fn looks_like_credential_line(line: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
     let separators = [":", "="];
     separators.iter().any(|separator| {
         line.split_once(separator).is_some_and(|(key, value)| {
@@ -1602,13 +1601,13 @@ fn looks_like_credential_line(line: &str) -> bool {
                     "ntlm", "lm", "ticket", "cred",
                 ]
                 .iter()
-                .any(|keyword| key.contains(keyword) || lower.contains(keyword))
+                .any(|keyword| key.contains(keyword))
         })
     })
 }
 
 fn looks_like_inline_secret(line: &str) -> bool {
-    if line.contains("://") || line.contains('\\') && !line.contains(':') {
+    if line.contains("://") || (line.contains('\\') && !line.contains(':')) {
         return false;
     }
 
@@ -5041,7 +5040,10 @@ mod tests {
         time::{Duration, timeout},
     };
 
-    use super::{CommandDispatchError, CommandDispatcher, DownloadState, DownloadTracker};
+    use super::{
+        CommandDispatchError, CommandDispatcher, DownloadState, DownloadTracker,
+        extract_credentials, looks_like_credential_line,
+    };
     use crate::{AgentRegistry, Database, EventBus, Job, SocketRelayManager, TeamserverError};
 
     fn sample_agent_info(
@@ -6131,6 +6133,38 @@ mod tests {
             "Username : alice\nPassword : Sup3rSecret!\nDomain   : LAB"
         );
         Ok(())
+    }
+
+    #[test]
+    fn looks_like_credential_line_matches_key_not_full_line() {
+        assert!(looks_like_credential_line("Password : Sup3rSecret!"));
+        assert!(looks_like_credential_line("username=alice"));
+        assert!(!looks_like_credential_line("status: password reset not required"));
+        assert!(!looks_like_credential_line("operator message: secret rotation completed"));
+    }
+
+    #[test]
+    fn extract_credentials_ignores_false_positive_keyword_values() {
+        let output = [
+            "status: password reset not required",
+            "message: domain join succeeded",
+            "operator message: secret rotation completed",
+            "Username : alice",
+            "Password : Sup3rSecret!",
+            "Domain   : LAB",
+        ]
+        .join("\n");
+
+        let captures = extract_credentials(&output);
+        assert!(!captures.is_empty());
+        assert!(captures.iter().all(|capture| {
+            capture.content != "status: password reset not required"
+                && capture.content != "message: domain join succeeded"
+                && capture.content != "operator message: secret rotation completed"
+        }));
+        assert!(captures.iter().any(|capture| capture.content == "Username : alice"));
+        assert!(captures.iter().any(|capture| capture.content == "Password : Sup3rSecret!"));
+        assert!(captures.iter().any(|capture| capture.content == "Domain   : LAB"));
     }
 
     #[tokio::test]

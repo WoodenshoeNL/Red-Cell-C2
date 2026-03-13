@@ -423,7 +423,6 @@ pub struct ListenerManager {
     sockets: SocketRelayManager,
     plugins: Option<PluginRuntime>,
     downloads: DownloadTracker,
-    max_download_bytes: u64,
     demon_init_rate_limiter: DemonInitRateLimiter,
     shutdown: ShutdownController,
     active_handles: Arc<RwLock<BTreeMap<String, JoinHandle<()>>>>,
@@ -476,7 +475,6 @@ impl ListenerManager {
             sockets,
             plugins,
             downloads,
-            max_download_bytes,
             demon_init_rate_limiter: DemonInitRateLimiter::new(),
             shutdown: ShutdownController::new(),
             active_handles: Arc::new(RwLock::new(BTreeMap::new())),
@@ -882,7 +880,6 @@ impl HttpListenerState {
         downloads: DownloadTracker,
         demon_init_rate_limiter: DemonInitRateLimiter,
         shutdown: ShutdownController,
-        _max_download_bytes: u64,
     ) -> Result<Self, ListenerManagerError> {
         let method = parse_method(config)?;
         let trusted_proxy_peers = config
@@ -970,7 +967,6 @@ impl SmbListenerState {
         downloads: DownloadTracker,
         demon_init_rate_limiter: DemonInitRateLimiter,
         shutdown: ShutdownController,
-        _max_download_bytes: u64,
     ) -> Self {
         Self {
             config: config.clone(),
@@ -1242,7 +1238,6 @@ async fn spawn_http_listener_runtime(
     downloads: DownloadTracker,
     demon_init_rate_limiter: DemonInitRateLimiter,
     shutdown: ShutdownController,
-    max_download_bytes: u64,
 ) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
     let state = Arc::new(HttpListenerState::build(
         config,
@@ -1254,7 +1249,6 @@ async fn spawn_http_listener_runtime(
         downloads,
         demon_init_rate_limiter,
         shutdown,
-        max_download_bytes,
     )?);
     let address = format!("{}:{}", config.host_bind, config.port_bind);
     let listener = TcpListener::bind(address.as_str()).await.map_err(|error| {
@@ -1479,7 +1473,6 @@ async fn spawn_smb_listener_runtime(
     downloads: DownloadTracker,
     demon_init_rate_limiter: DemonInitRateLimiter,
     shutdown: ShutdownController,
-    max_download_bytes: u64,
 ) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
     let state = Arc::new(SmbListenerState::build(
         config,
@@ -1491,7 +1484,6 @@ async fn spawn_smb_listener_runtime(
         downloads,
         demon_init_rate_limiter,
         shutdown,
-        max_download_bytes,
     ));
     let listener_name = normalized_smb_pipe_name(&config.pipe_name);
     let socket_name = smb_local_socket_name(&config.pipe_name).map_err(|error| {
@@ -1705,7 +1697,6 @@ impl ListenerManager {
                     self.downloads.clone(),
                     self.demon_init_rate_limiter.clone(),
                     self.shutdown.clone(),
-                    self.max_download_bytes,
                 )
                 .await
             }
@@ -1720,7 +1711,6 @@ impl ListenerManager {
                     self.downloads.clone(),
                     self.demon_init_rate_limiter.clone(),
                     self.shutdown.clone(),
-                    self.max_download_bytes,
                 )
                 .await
             }
@@ -1736,7 +1726,6 @@ impl ListenerManager {
                     self.downloads.clone(),
                     self.demon_init_rate_limiter.clone(),
                     self.shutdown.clone(),
-                    self.max_download_bytes,
                 )
                 .await
             }
@@ -1910,7 +1899,6 @@ impl DnsListenerState {
         downloads: DownloadTracker,
         demon_init_rate_limiter: DemonInitRateLimiter,
         shutdown: ShutdownController,
-        _max_download_bytes: u64,
     ) -> Self {
         Self {
             config: config.clone(),
@@ -2428,7 +2416,6 @@ async fn spawn_dns_listener_runtime(
     downloads: DownloadTracker,
     demon_init_rate_limiter: DemonInitRateLimiter,
     shutdown: ShutdownController,
-    max_download_bytes: u64,
 ) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
     if dns_allowed_query_types(&config.record_types).is_none() {
         return Err(ListenerManagerError::StartFailed {
@@ -2450,7 +2437,6 @@ async fn spawn_dns_listener_runtime(
         downloads,
         demon_init_rate_limiter,
         shutdown,
-        max_download_bytes,
     ));
     let addr = format!("{}:{}", config.host_bind, config.port_bind);
 
@@ -5219,7 +5205,6 @@ mod tests {
             DownloadTracker::from_max_download_bytes(super::DEFAULT_MAX_DOWNLOAD_BYTES),
             DemonInitRateLimiter::new(),
             ShutdownController::new(),
-            super::DEFAULT_MAX_DOWNLOAD_BYTES,
         )
     }
 
@@ -5240,7 +5225,6 @@ mod tests {
             DownloadTracker::from_max_download_bytes(super::DEFAULT_MAX_DOWNLOAD_BYTES),
             DemonInitRateLimiter::new(),
             ShutdownController::new(),
-            super::DEFAULT_MAX_DOWNLOAD_BYTES,
         )
         .await
         .expect("dns runtime should start");
@@ -5269,7 +5253,6 @@ mod tests {
             DownloadTracker::from_max_download_bytes(super::DEFAULT_MAX_DOWNLOAD_BYTES),
             DemonInitRateLimiter::new(),
             shutdown,
-            super::DEFAULT_MAX_DOWNLOAD_BYTES,
         )
         .await
     }
@@ -5511,7 +5494,6 @@ mod tests {
             DownloadTracker::from_max_download_bytes(super::DEFAULT_MAX_DOWNLOAD_BYTES),
             DemonInitRateLimiter::new(),
             shutdown.clone(),
-            super::DEFAULT_MAX_DOWNLOAD_BYTES,
         )
         .await
         .expect("dns runtime should start");
@@ -5787,7 +5769,6 @@ mod tests {
             DownloadTracker::from_max_download_bytes(super::DEFAULT_MAX_DOWNLOAD_BYTES),
             DemonInitRateLimiter::new(),
             ShutdownController::new(),
-            super::DEFAULT_MAX_DOWNLOAD_BYTES,
         )
         .await
         {

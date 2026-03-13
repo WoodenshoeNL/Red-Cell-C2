@@ -1499,6 +1499,157 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disconnect_link_removes_existing_parent_child_relationship()
+    -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let parent = sample_agent(0x1000_0010);
+        let child = sample_agent(0x1000_0011);
+        let grandchild = sample_agent(0x1000_0012);
+
+        registry.insert(parent.clone()).await?;
+        registry.insert(child.clone()).await?;
+        registry.insert(grandchild.clone()).await?;
+        registry.add_link(parent.agent_id, child.agent_id).await?;
+        registry.add_link(child.agent_id, grandchild.agent_id).await?;
+
+        let affected =
+            registry.disconnect_link(parent.agent_id, child.agent_id, "pivot link removed").await?;
+
+        assert_eq!(affected, vec![child.agent_id, grandchild.agent_id]);
+        assert_eq!(registry.parent_of(child.agent_id).await, None);
+        assert_eq!(registry.parent_of(grandchild.agent_id).await, None);
+        assert!(registry.children_of(parent.agent_id).await.is_empty());
+        assert!(registry.children_of(child.agent_id).await.is_empty());
+        assert_eq!(
+            registry.pivots(parent.agent_id).await,
+            super::PivotInfo { parent: None, children: Vec::new() }
+        );
+        assert_eq!(
+            registry.pivots(child.agent_id).await,
+            super::PivotInfo { parent: None, children: Vec::new() }
+        );
+        assert_eq!(
+            registry.pivots(grandchild.agent_id).await,
+            super::PivotInfo { parent: None, children: Vec::new() }
+        );
+        assert_eq!(database.links().list().await?, Vec::<LinkRecord>::new());
+        assert_eq!(
+            registry
+                .get(child.agent_id)
+                .await
+                .ok_or(TeamserverError::AgentNotFound { agent_id: child.agent_id })?
+                .reason,
+            "pivot link removed"
+        );
+        assert_eq!(
+            registry
+                .get(grandchild.agent_id)
+                .await
+                .ok_or(TeamserverError::AgentNotFound { agent_id: grandchild.agent_id })?
+                .reason,
+            "pivot link removed"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn disconnect_link_returns_empty_for_nonexistent_relationship()
+    -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let parent = sample_agent(0x1000_0013);
+        let child = sample_agent(0x1000_0014);
+        let unrelated_parent = sample_agent(0x1000_0015);
+        let unrelated_child = sample_agent(0x1000_0016);
+
+        registry.insert(parent.clone()).await?;
+        registry.insert(child.clone()).await?;
+        registry.insert(unrelated_parent.clone()).await?;
+        registry.insert(unrelated_child.clone()).await?;
+        registry.add_link(unrelated_parent.agent_id, unrelated_child.agent_id).await?;
+
+        let affected =
+            registry.disconnect_link(parent.agent_id, child.agent_id, "missing link").await?;
+
+        assert!(affected.is_empty());
+        assert_eq!(registry.parent_of(child.agent_id).await, None);
+        assert!(registry.children_of(parent.agent_id).await.is_empty());
+        assert_eq!(
+            registry.parent_of(unrelated_child.agent_id).await,
+            Some(unrelated_parent.agent_id)
+        );
+        assert_eq!(
+            registry.children_of(unrelated_parent.agent_id).await,
+            vec![unrelated_child.agent_id]
+        );
+        assert_eq!(
+            database.links().list().await?,
+            vec![LinkRecord {
+                parent_agent_id: unrelated_parent.agent_id,
+                link_agent_id: unrelated_child.agent_id,
+            }]
+        );
+        assert!(
+            registry
+                .get(unrelated_child.agent_id)
+                .await
+                .ok_or(TeamserverError::AgentNotFound { agent_id: unrelated_child.agent_id })?
+                .active
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn disconnect_link_cleans_up_final_child_and_runs_cleanup_hooks()
+    -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let parent = sample_agent(0x1000_0017);
+        let child = sample_agent(0x1000_0018);
+        let cleaned = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cleanup_observer = cleaned.clone();
+        registry.register_cleanup_hook(move |agent_id| {
+            let cleaned = cleanup_observer.clone();
+            async move {
+                let mut cleaned = cleaned.lock().expect("cleanup tracker lock should succeed");
+                cleaned.push(agent_id);
+            }
+        });
+
+        registry.insert(parent.clone()).await?;
+        registry.insert(child.clone()).await?;
+        registry.add_link(parent.agent_id, child.agent_id).await?;
+
+        let affected = registry
+            .disconnect_link(parent.agent_id, child.agent_id, "operator disconnected pivot")
+            .await?;
+
+        assert_eq!(affected, vec![child.agent_id]);
+        assert_eq!(registry.parent_of(child.agent_id).await, None);
+        assert!(registry.children_of(parent.agent_id).await.is_empty());
+        assert_eq!(
+            registry.pivots(parent.agent_id).await,
+            super::PivotInfo { parent: None, children: Vec::new() }
+        );
+        assert_eq!(database.links().list().await?, Vec::<LinkRecord>::new());
+        assert_eq!(
+            cleaned.lock().expect("cleanup tracker lock should succeed").as_slice(),
+            &[child.agent_id]
+        );
+        let child_state = registry
+            .get(child.agent_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: child.agent_id })?;
+        assert!(!child_state.active);
+        assert_eq!(child_state.reason, "operator disconnected pivot");
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn encryption_round_trips() -> Result<(), TeamserverError> {
         let database = test_database().await?;
         let registry = AgentRegistry::new(database.clone());

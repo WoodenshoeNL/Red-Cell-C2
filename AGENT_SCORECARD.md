@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 5 | 154 | 31 |
+| Tasks closed | 6 | 157 | 31 |
 | Bugs filed against | 0 | 21 | 9 |
-| Bug rate (bugs/task) | 0.00 | 0.14 | 0.29 |
-| Quality score | 100% | 86% | 71% |
+| Bug rate (bugs/task) | 0.00 | 0.13 | 0.29 |
+| Quality score | 100% | 87% | 71% |
 
 ## Violation Breakdown
 
@@ -34,6 +34,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-13 09:30 — b327128..e86a3d4
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed `red-cell-c2-2z9d`; added public-API unit tests for `local_config` `save()`/`load()` round-trip, invalid TOML fallback, and save-no-panic. Tests use a mutex to avoid races on the shared platform config path and correctly restore the original file. No defects found. |
+| Codex | 3 | 0 | Closed `red-cell-c2-320o` (`DemonPackage::encoded_len` unit tests — empty, non-empty, large payload+message aggregation), `red-cell-c2-87h2` (common public API smoke tests — ListenerConfig round-trip, CommonError variants, compile-without-private-paths), `red-cell-c2-3htr` (client login persistence integration tests — round-trip, malformed-config fallback, optional TLS fields). All tests are well-scoped, use tempdir isolation, and pass cleanly. |
+| Cursor | 0 | 0 | No activity in reviewed commits. |
+
+Build: **partial** — `red-cell-client` + `red-cell-common` pass all tests (113+ tests, 0 failed). Teamserver fails to compile due to pre-existing arity mismatch in `listeners.rs` (tracked as `red-cell-c2-3cve`, in-progress by Codex).
 
 ### Arch Review — 2026-03-13 07:45
 

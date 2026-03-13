@@ -187,7 +187,8 @@ mod tests {
 
     use super::{
         TlsError, TlsIdentity, TlsKeyAlgorithm, generate_self_signed_tls_identity,
-        load_tls_identity, load_tls_identity_from_files, resolve_tls_identity,
+        install_default_crypto_provider, load_tls_identity, load_tls_identity_from_files,
+        resolve_tls_identity,
     };
     use crate::config::HttpListenerCertConfig;
 
@@ -358,6 +359,45 @@ mod tests {
 
         assert!(resolved.certificate_pem().starts_with(b"-----BEGIN CERTIFICATE-----"));
         assert!(resolved.tls_acceptor().is_ok());
+    }
+
+    #[test]
+    fn install_default_crypto_provider_allows_tls_identity_creation_after_first_call() {
+        install_default_crypto_provider();
+
+        let identity = generate_self_signed_tls_identity(
+            &["localhost".to_owned()],
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("identity generation should succeed after provider installation");
+
+        assert!(identity.server_config().is_ok());
+    }
+
+    #[test]
+    fn install_default_crypto_provider_is_idempotent_on_repeated_calls() {
+        install_default_crypto_provider();
+        install_default_crypto_provider();
+        install_default_crypto_provider();
+
+        let identity =
+            generate_self_signed_tls_identity(&["localhost".to_owned()], TlsKeyAlgorithm::Rsa2048)
+                .expect("identity generation should succeed after repeated provider installation");
+
+        assert!(identity.server_config().is_ok());
+    }
+
+    #[test]
+    fn install_default_crypto_provider_before_server_config_keeps_rustls_setup_working() {
+        let identity = generate_self_signed_tls_identity(
+            &["listener.local".to_owned()],
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("identity generation should succeed");
+
+        install_default_crypto_provider();
+
+        assert!(identity.server_config().is_ok());
     }
 
     fn public_key_algorithm_oid(identity: &TlsIdentity) -> String {

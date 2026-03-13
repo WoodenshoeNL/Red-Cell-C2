@@ -35,6 +35,21 @@ Each loop run updates the running totals and appends a review entry.
 
 <!-- QA and arch loops append entries below this line -->
 
+### Arch Review — 2026-03-13 07:45
+
+| Agent | Findings | Categories | Notes |
+|-------|---------:|------------|-------|
+| Claude | 0 | — | No new agent-attributed findings |
+| Codex | 0 | — | No new agent-attributed findings |
+| Cursor | 0 | — | No new agent-attributed findings |
+
+3 new findings filed, all attributed to Michel Klomp (repo owner): red-cell-c2-2f9l (unknown agent callback not recorded in audit log, P2 security), red-cell-c2-355s (API key digest lookup is not constant-time, P2 security), red-cell-c2-33iq (per-agent job queue has no size cap, P2 resource). No AI agent violations this run.
+
+Overall codebase health: drifting
+Biggest blindspot: unknown agent callbacks reach the listener without any audit record — a probe loop against an HTTP or DNS listener with random agent IDs is forensically invisible, unlike unknown reconnect probes which do write to the audit log.
+
+Build: passed (679 total tests, 0 failures, 0 clippy warnings)
+
 ### QA Review — 2026-03-12 16:45 — fd0ab71..942cc1f
 
 | Agent | Tasks closed | Bugs filed | Notes |

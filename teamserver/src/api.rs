@@ -19,7 +19,7 @@ use hmac::{Hmac, Mac};
 use red_cell_common::config::{OperatorRole, Profile};
 use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::{AgentTaskInfo, EventCode, Message, MessageHead};
-use red_cell_common::{AgentInfo as DomainAgentInfo, ListenerConfig};
+use red_cell_common::{AgentRecord, ListenerConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::Sha256;
@@ -148,14 +148,14 @@ struct ApiAgentInfo {
     last_call_in: String,
 }
 
-impl From<DomainAgentInfo> for ApiAgentInfo {
-    fn from(agent: DomainAgentInfo) -> Self {
+impl From<AgentRecord> for ApiAgentInfo {
+    fn from(agent: AgentRecord) -> Self {
         Self::from(&agent)
     }
 }
 
-impl From<&DomainAgentInfo> for ApiAgentInfo {
-    fn from(agent: &DomainAgentInfo) -> Self {
+impl From<&AgentRecord> for ApiAgentInfo {
+    fn from(agent: &AgentRecord) -> Self {
         Self {
             agent_id: agent.agent_id,
             active: agent.active,
@@ -3893,8 +3893,8 @@ mod tests {
         serde_json::from_slice(&bytes).expect("json body")
     }
 
-    fn sample_agent(agent_id: u32) -> DomainAgentInfo {
-        DomainAgentInfo {
+    fn sample_agent(agent_id: u32) -> AgentRecord {
+        AgentRecord {
             agent_id,
             active: true,
             reason: "http".to_owned(),

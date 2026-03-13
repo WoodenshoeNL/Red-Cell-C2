@@ -13,7 +13,7 @@ use red_cell_common::crypto::{
     encrypt_agent_data_at_offset,
 };
 use red_cell_common::demon::{DemonCommand, DemonMessage, DemonPackage};
-use red_cell_common::{AgentEncryptionInfo, AgentInfo};
+use red_cell_common::{AgentEncryptionInfo, AgentRecord};
 use tokio::sync::{Mutex, RwLock};
 use tracing::{instrument, warn};
 
@@ -64,14 +64,14 @@ pub struct QueuedJob {
 
 #[derive(Debug)]
 struct AgentEntry {
-    info: RwLock<AgentInfo>,
+    info: RwLock<AgentRecord>,
     listener_name: RwLock<String>,
     jobs: Mutex<VecDeque<Job>>,
     ctr_block_offset: Mutex<u64>,
 }
 
 impl AgentEntry {
-    fn new(info: AgentInfo, listener_name: String, ctr_block_offset: u64) -> Self {
+    fn new(info: AgentRecord, listener_name: String, ctr_block_offset: u64) -> Self {
         Self {
             info: RwLock::new(info),
             listener_name: RwLock::new(listener_name),
@@ -197,7 +197,7 @@ impl AgentRegistry {
 
     /// Insert a newly registered agent and persist it to SQLite.
     #[instrument(skip(self, agent), fields(agent_id = format_args!("0x{:08X}", agent.agent_id)))]
-    pub async fn insert(&self, agent: AgentInfo) -> Result<(), TeamserverError> {
+    pub async fn insert(&self, agent: AgentRecord) -> Result<(), TeamserverError> {
         self.insert_with_listener(agent, "null").await
     }
 
@@ -205,7 +205,7 @@ impl AgentRegistry {
     #[instrument(skip(self, agent, listener_name), fields(agent_id = format_args!("0x{:08X}", agent.agent_id), listener_name = %listener_name))]
     pub async fn insert_with_listener(
         &self,
-        agent: AgentInfo,
+        agent: AgentRecord,
         listener_name: &str,
     ) -> Result<(), TeamserverError> {
         self.insert_with_listener_and_ctr_offset(agent, listener_name, 0).await
@@ -215,7 +215,7 @@ impl AgentRegistry {
     #[instrument(skip(self, agent, listener_name), fields(agent_id = format_args!("0x{:08X}", agent.agent_id), listener_name = %listener_name, ctr_block_offset))]
     pub async fn insert_with_listener_and_ctr_offset(
         &self,
-        agent: AgentInfo,
+        agent: AgentRecord,
         listener_name: &str,
         ctr_block_offset: u64,
     ) -> Result<(), TeamserverError> {
@@ -244,7 +244,7 @@ impl AgentRegistry {
 
     /// Fetch a cloned snapshot of an agent by identifier.
     #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id)))]
-    pub async fn get(&self, agent_id: u32) -> Option<AgentInfo> {
+    pub async fn get(&self, agent_id: u32) -> Option<AgentRecord> {
         let entry = self.entry(agent_id).await?;
         let info = entry.info.read().await;
         Some(info.clone())
@@ -252,7 +252,7 @@ impl AgentRegistry {
 
     /// Return all agents that are still marked active.
     #[instrument(skip(self))]
-    pub async fn list_active(&self) -> Vec<AgentInfo> {
+    pub async fn list_active(&self) -> Vec<AgentRecord> {
         let entries = self.entries.read().await;
         let handles: Vec<_> = entries.values().cloned().collect();
         drop(entries);
@@ -270,7 +270,7 @@ impl AgentRegistry {
 
     /// Return all tracked agents, including inactive historical entries.
     #[instrument(skip(self))]
-    pub async fn list(&self) -> Vec<AgentInfo> {
+    pub async fn list(&self) -> Vec<AgentRecord> {
         let entries = self.entries.read().await;
         let handles: Vec<_> = entries.values().cloned().collect();
         drop(entries);
@@ -295,7 +295,7 @@ impl AgentRegistry {
 
     /// Replace the stored metadata for an existing agent and persist the change.
     #[instrument(skip(self, agent), fields(agent_id = format_args!("0x{:08X}", agent.agent_id)))]
-    pub async fn update_agent(&self, agent: AgentInfo) -> Result<(), TeamserverError> {
+    pub async fn update_agent(&self, agent: AgentRecord) -> Result<(), TeamserverError> {
         let listener_name =
             self.listener_name(agent.agent_id).await.unwrap_or_else(|| "null".to_owned());
         self.update_agent_with_listener(agent, &listener_name).await
@@ -305,7 +305,7 @@ impl AgentRegistry {
     #[instrument(skip(self, agent, listener_name), fields(agent_id = format_args!("0x{:08X}", agent.agent_id), listener_name = %listener_name))]
     pub async fn update_agent_with_listener(
         &self,
-        agent: AgentInfo,
+        agent: AgentRecord,
         listener_name: &str,
     ) -> Result<(), TeamserverError> {
         let entry = self
@@ -350,7 +350,7 @@ impl AgentRegistry {
         &self,
         agent_id: u32,
         note: impl Into<String>,
-    ) -> Result<AgentInfo, TeamserverError> {
+    ) -> Result<AgentRecord, TeamserverError> {
         let entry =
             self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
         let note = note.into();
@@ -364,7 +364,7 @@ impl AgentRegistry {
 
     /// Remove an agent from memory and SQLite.
     #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id)))]
-    pub async fn remove(&self, agent_id: u32) -> Result<AgentInfo, TeamserverError> {
+    pub async fn remove(&self, agent_id: u32) -> Result<AgentRecord, TeamserverError> {
         self.clear_links_for_agent(agent_id).await?;
         self.purge_request_contexts(agent_id).await;
         let entry = {
@@ -594,7 +594,7 @@ impl AgentRegistry {
         &self,
         agent_id: u32,
         last_call_in: impl Into<String>,
-    ) -> Result<AgentInfo, TeamserverError> {
+    ) -> Result<AgentRecord, TeamserverError> {
         let entry =
             self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
         let updated = {
@@ -1028,8 +1028,8 @@ mod tests {
         std::env::temp_dir().join(format!("red-cell-agent-registry-{}.sqlite", Uuid::new_v4()))
     }
 
-    fn sample_agent(agent_id: u32) -> red_cell_common::AgentInfo {
-        red_cell_common::AgentInfo {
+    fn sample_agent(agent_id: u32) -> red_cell_common::AgentRecord {
+        red_cell_common::AgentRecord {
             agent_id,
             active: true,
             reason: String::new(),
@@ -1065,7 +1065,7 @@ mod tests {
         agent_id: u32,
         key: [u8; AGENT_KEY_LENGTH],
         iv: [u8; AGENT_IV_LENGTH],
-    ) -> red_cell_common::AgentInfo {
+    ) -> red_cell_common::AgentRecord {
         let mut agent = sample_agent(agent_id);
         agent.encryption = AgentEncryptionInfo {
             aes_key: BASE64_STANDARD.encode(key),

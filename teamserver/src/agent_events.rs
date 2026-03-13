@@ -1,6 +1,6 @@
 //! Shared builders for Havoc-compatible operator agent events.
 
-use red_cell_common::AgentInfo;
+use red_cell_common::AgentRecord;
 use red_cell_common::operator::{
     AgentInfo as OperatorAgentInfo, AgentPivotsInfo, AgentUpdateInfo, EventCode, Message,
     MessageHead, OperatorMessage,
@@ -12,7 +12,7 @@ use crate::PivotInfo;
 pub(crate) fn agent_new_event(
     listener_name: &str,
     magic_value: u32,
-    agent: &AgentInfo,
+    agent: &AgentRecord,
     pivots: &PivotInfo,
 ) -> OperatorMessage {
     OperatorMessage::AgentNew(Box::new(Message {
@@ -26,7 +26,7 @@ pub(crate) fn agent_new_event(
     }))
 }
 
-pub(crate) fn agent_mark_event(agent: &AgentInfo) -> OperatorMessage {
+pub(crate) fn agent_mark_event(agent: &AgentRecord) -> OperatorMessage {
     let marked = if agent.active { "Alive" } else { "Dead" };
     OperatorMessage::AgentUpdate(Message {
         head: MessageHead {
@@ -42,7 +42,7 @@ pub(crate) fn agent_mark_event(agent: &AgentInfo) -> OperatorMessage {
 pub(crate) fn operator_agent_info(
     listener_name: &str,
     magic_value: u32,
-    agent: &AgentInfo,
+    agent: &AgentRecord,
     pivots: &PivotInfo,
 ) -> OperatorAgentInfo {
     let parent = pivots.parent.map(|agent_id| format!("{agent_id:08X}"));
@@ -91,10 +91,10 @@ mod tests {
     use super::{agent_mark_event, agent_new_event, operator_agent_info};
     use crate::PivotInfo;
     use red_cell_common::operator::OperatorMessage;
-    use red_cell_common::{AgentEncryptionInfo, AgentInfo};
+    use red_cell_common::{AgentEncryptionInfo, AgentRecord};
 
-    fn sample_agent(agent_id: u32) -> AgentInfo {
-        AgentInfo {
+    fn sample_agent(agent_id: u32) -> AgentRecord {
+        AgentRecord {
             agent_id,
             active: true,
             reason: String::new(),

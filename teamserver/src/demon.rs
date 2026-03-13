@@ -6,7 +6,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, CryptoError, decrypt_agent_data};
 use red_cell_common::demon::{DemonCommand, DemonEnvelope, DemonHeader, DemonProtocolError};
-use red_cell_common::{AgentEncryptionInfo, AgentInfo};
+use red_cell_common::{AgentEncryptionInfo, AgentRecord};
 use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -45,7 +45,7 @@ pub struct ParsedDemonInit {
     /// Request identifier supplied by the implant.
     pub request_id: u32,
     /// Fully parsed agent metadata, including the stored transport key/IV.
-    pub agent: AgentInfo,
+    pub agent: AgentRecord,
 }
 
 /// Normalized result of parsing a Demon request.
@@ -235,7 +235,7 @@ fn parse_init_agent(
     payload: &[u8],
     external_ip: &str,
     now: OffsetDateTime,
-) -> Result<AgentInfo, DemonParserError> {
+) -> Result<AgentRecord, DemonParserError> {
     let mut offset = 0_usize;
     let key = read_fixed::<AGENT_KEY_LENGTH>(payload, &mut offset, "init AES key")?;
     let iv = read_fixed::<AGENT_IV_LENGTH>(payload, &mut offset, "init AES IV")?;
@@ -286,7 +286,7 @@ fn parse_init_agent(
         now.format(&Rfc3339).map_err(|_| DemonParserError::InvalidInit("invalid timestamp"))?;
     let kill_date = parse_kill_date(kill_date)?;
 
-    Ok(AgentInfo {
+    Ok(AgentRecord {
         agent_id: parsed_agent_id,
         active: true,
         reason: String::new(),
@@ -497,7 +497,7 @@ mod tests {
         encrypt_agent_data, encrypt_agent_data_at_offset,
     };
     use red_cell_common::demon::{DEMON_MAGIC_VALUE, DemonCommand, DemonEnvelope};
-    use red_cell_common::{AgentEncryptionInfo, AgentInfo};
+    use red_cell_common::{AgentEncryptionInfo, AgentRecord};
     use time::macros::datetime;
     use uuid::Uuid;
 
@@ -1110,7 +1110,7 @@ mod tests {
     async fn build_init_ack_rejects_zero_key_agent() {
         let registry = test_registry().await;
         let agent_id: u32 = 0x2468_ACED;
-        let agent = AgentInfo {
+        let agent = AgentRecord {
             agent_id,
             active: true,
             reason: String::new(),

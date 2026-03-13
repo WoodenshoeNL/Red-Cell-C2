@@ -24,7 +24,7 @@ use red_cell_common::operator::{
     BuildPayloadMessageInfo, BuildPayloadResponseInfo, EventCode, FlatInfo, Message, MessageHead,
     OperatorMessage, TeamserverLogInfo,
 };
-use red_cell_common::{AgentInfo, OperatorInfo};
+use red_cell_common::{AgentRecord, OperatorInfo};
 use serde_json::Value;
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -2358,7 +2358,7 @@ async fn send_session_snapshot(
 
 fn agent_snapshot_event(
     listener_name: &str,
-    agent: &AgentInfo,
+    agent: &AgentRecord,
     pivots: &crate::PivotInfo,
 ) -> OperatorMessage {
     agent_new_event(listener_name, red_cell_common::demon::DEMON_MAGIC_VALUE, agent, pivots)
@@ -4274,8 +4274,8 @@ mod tests {
         let _snapshot = read_operator_snapshot(socket).await;
     }
 
-    fn sample_agent(agent_id: u32) -> red_cell_common::AgentInfo {
-        red_cell_common::AgentInfo {
+    fn sample_agent(agent_id: u32) -> red_cell_common::AgentRecord {
+        red_cell_common::AgentRecord {
             agent_id,
             active: true,
             reason: String::new(),

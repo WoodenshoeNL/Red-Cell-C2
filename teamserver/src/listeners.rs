@@ -4940,8 +4940,8 @@ mod tests {
         agent_id: u32,
         key: [u8; AGENT_KEY_LENGTH],
         iv: [u8; AGENT_IV_LENGTH],
-    ) -> red_cell_common::AgentInfo {
-        red_cell_common::AgentInfo {
+    ) -> red_cell_common::AgentRecord {
+        red_cell_common::AgentRecord {
             agent_id,
             active: true,
             reason: String::new(),

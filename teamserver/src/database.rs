@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use red_cell_common::config::OperatorRole;
 use red_cell_common::demon::DemonProtocolError;
-use red_cell_common::{AgentInfo, ListenerConfig, ListenerProtocol};
+use red_cell_common::{AgentRecord, ListenerConfig, ListenerProtocol};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -196,7 +196,7 @@ pub struct AgentRepository {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PersistedAgent {
     /// Agent metadata mirrored into operator-facing APIs.
-    pub info: AgentInfo,
+    pub info: AgentRecord,
     /// Listener that accepted the current or most recent session.
     pub listener_name: String,
     /// Shared AES-CTR block offset tracked across decrypt/encrypt operations.
@@ -211,14 +211,14 @@ impl AgentRepository {
     }
 
     /// Insert a new agent row.
-    pub async fn create(&self, agent: &AgentInfo) -> Result<(), TeamserverError> {
+    pub async fn create(&self, agent: &AgentRecord) -> Result<(), TeamserverError> {
         self.create_with_listener(agent, "null").await
     }
 
     /// Insert a new agent row with the listener that accepted the session.
     pub async fn create_with_listener(
         &self,
-        agent: &AgentInfo,
+        agent: &AgentRecord,
         listener_name: &str,
     ) -> Result<(), TeamserverError> {
         self.create_with_listener_and_ctr_offset(agent, listener_name, 0).await
@@ -227,7 +227,7 @@ impl AgentRepository {
     /// Insert a new agent row with the listener and initial CTR state for the session.
     pub async fn create_with_listener_and_ctr_offset(
         &self,
-        agent: &AgentInfo,
+        agent: &AgentRecord,
         listener_name: &str,
         ctr_block_offset: u64,
     ) -> Result<(), TeamserverError> {
@@ -238,14 +238,14 @@ impl AgentRepository {
     }
 
     /// Update an existing agent row.
-    pub async fn update(&self, agent: &AgentInfo) -> Result<(), TeamserverError> {
+    pub async fn update(&self, agent: &AgentRecord) -> Result<(), TeamserverError> {
         self.update_with_listener(agent, "null").await
     }
 
     /// Update an existing agent row and the listener that accepted the session.
     pub async fn update_with_listener(
         &self,
-        agent: &AgentInfo,
+        agent: &AgentRecord,
         listener_name: &str,
     ) -> Result<(), TeamserverError> {
         let result = sqlx::query(
@@ -298,7 +298,7 @@ impl AgentRepository {
     }
 
     /// Fetch a single agent by identifier.
-    pub async fn get(&self, agent_id: u32) -> Result<Option<AgentInfo>, TeamserverError> {
+    pub async fn get(&self, agent_id: u32) -> Result<Option<AgentRecord>, TeamserverError> {
         let row = sqlx::query_as::<_, AgentRow>("SELECT * FROM ts_agents WHERE agent_id = ?")
             .bind(i64::from(agent_id))
             .fetch_optional(&self.pool)
@@ -308,7 +308,7 @@ impl AgentRepository {
     }
 
     /// Return all persisted agents.
-    pub async fn list(&self) -> Result<Vec<AgentInfo>, TeamserverError> {
+    pub async fn list(&self) -> Result<Vec<AgentRecord>, TeamserverError> {
         let rows = sqlx::query_as::<_, AgentRow>("SELECT * FROM ts_agents ORDER BY agent_id")
             .fetch_all(&self.pool)
             .await?;
@@ -317,7 +317,7 @@ impl AgentRepository {
     }
 
     /// Return only agents still marked active.
-    pub async fn list_active(&self) -> Result<Vec<AgentInfo>, TeamserverError> {
+    pub async fn list_active(&self) -> Result<Vec<AgentRecord>, TeamserverError> {
         let rows = sqlx::query_as::<_, AgentRow>(
             "SELECT * FROM ts_agents WHERE active = 1 ORDER BY agent_id",
         )
@@ -413,7 +413,7 @@ impl AgentRepository {
 
 async fn insert_agent_row(
     executor: impl sqlx::Executor<'_, Database = Sqlite>,
-    agent: &AgentInfo,
+    agent: &AgentRecord,
     listener_name: &str,
     ctr_block_offset: u64,
 ) -> Result<(), TeamserverError> {
@@ -1394,7 +1394,7 @@ struct AgentRow {
     last_call_in: String,
 }
 
-impl TryFrom<AgentRow> for AgentInfo {
+impl TryFrom<AgentRow> for AgentRecord {
     type Error = TeamserverError;
 
     fn try_from(row: AgentRow) -> Result<Self, Self::Error> {
@@ -1441,7 +1441,7 @@ impl TryFrom<AgentRow> for PersistedAgent {
     fn try_from(row: AgentRow) -> Result<Self, Self::Error> {
         let ctr_block_offset = u64_from_i64("ctr_block_offset", row.ctr_block_offset)?;
         let listener_name = row.listener_name.clone();
-        let info = AgentInfo::try_from(row)?;
+        let info = AgentRecord::try_from(row)?;
         Ok(Self { info, listener_name, ctr_block_offset })
     }
 }

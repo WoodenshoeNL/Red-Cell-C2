@@ -814,11 +814,11 @@ async fn handle_checkin(
 }
 
 fn parse_checkin_metadata(
-    existing: red_cell_common::AgentInfo,
+    existing: red_cell_common::AgentRecord,
     agent_id: u32,
     payload: &[u8],
     timestamp: &str,
-) -> Result<Option<red_cell_common::AgentInfo>, CommandDispatchError> {
+) -> Result<Option<red_cell_common::AgentRecord>, CommandDispatchError> {
     const CHECKIN_METADATA_PREFIX_LEN: usize = 32 + 16;
 
     if payload.len() < CHECKIN_METADATA_PREFIX_LEN {
@@ -5062,8 +5062,8 @@ mod tests {
         agent_id: u32,
         key: [u8; AGENT_KEY_LENGTH],
         iv: [u8; AGENT_IV_LENGTH],
-    ) -> red_cell_common::AgentInfo {
-        red_cell_common::AgentInfo {
+    ) -> red_cell_common::AgentRecord {
+        red_cell_common::AgentRecord {
             agent_id,
             active: true,
             reason: String::new(),

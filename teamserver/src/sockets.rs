@@ -827,8 +827,8 @@ mod tests {
         Ok((database, registry, manager))
     }
 
-    fn sample_agent(agent_id: u32) -> red_cell_common::AgentInfo {
-        red_cell_common::AgentInfo {
+    fn sample_agent(agent_id: u32) -> red_cell_common::AgentRecord {
+        red_cell_common::AgentRecord {
             agent_id,
             active: true,
             reason: String::new(),

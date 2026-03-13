@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use red_cell_common::AgentInfo;
+use red_cell_common::AgentRecord;
 use red_cell_common::config::Profile;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -41,7 +41,7 @@ impl AgentLivenessConfig {
         }
     }
 
-    fn timeout_for(self, agent: &AgentInfo) -> u64 {
+    fn timeout_for(self, agent: &AgentRecord) -> u64 {
         self.timeout_override_secs.unwrap_or_else(|| {
             let sleep_secs = u64::from(agent.sleep_delay).max(self.default_sleep_secs.unwrap_or(0));
             sleep_secs.max(MIN_SWEEP_INTERVAL_SECS).saturating_mul(3)
@@ -203,8 +203,8 @@ mod tests {
     };
     use crate::{AgentRegistry, Database, EventBus, SocketRelayManager, TeamserverError};
 
-    fn sample_agent(agent_id: u32) -> red_cell_common::AgentInfo {
-        red_cell_common::AgentInfo {
+    fn sample_agent(agent_id: u32) -> red_cell_common::AgentRecord {
+        red_cell_common::AgentRecord {
             agent_id,
             active: true,
             reason: String::new(),

@@ -9,7 +9,7 @@ use red_cell::{
 };
 use red_cell_common::config::OperatorRole;
 use red_cell_common::{
-    AgentEncryptionInfo, AgentInfo, HttpListenerConfig, HttpListenerProxyConfig,
+    AgentEncryptionInfo, AgentRecord, HttpListenerConfig, HttpListenerProxyConfig,
     HttpListenerResponseConfig, ListenerConfig, ListenerTlsConfig,
 };
 use serde_json::json;
@@ -26,8 +26,8 @@ fn sqlite_options(path: &Path) -> SqliteConnectOptions {
     SqliteConnectOptions::new().filename(path).create_if_missing(true).foreign_keys(true)
 }
 
-fn sample_agent(agent_id: u32) -> AgentInfo {
-    AgentInfo {
+fn sample_agent(agent_id: u32) -> AgentRecord {
+    AgentRecord {
         agent_id,
         active: true,
         reason: String::new(),

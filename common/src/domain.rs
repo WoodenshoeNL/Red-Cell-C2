@@ -280,7 +280,7 @@ pub struct AgentEncryptionInfo {
 
 /// Shared persisted agent/session metadata.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct AgentInfo {
+pub struct AgentRecord {
     /// Numeric agent identifier.
     #[serde(rename = "AgentID", alias = "NameID", deserialize_with = "deserialize_agent_id")]
     pub agent_id: u32,
@@ -366,7 +366,7 @@ pub struct AgentInfo {
     pub last_call_in: String,
 }
 
-impl AgentInfo {
+impl AgentRecord {
     /// Return the canonical eight-character upper-hex agent id string.
     #[must_use]
     pub fn name_id(&self) -> String {
@@ -566,7 +566,7 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        AgentInfo, ExternalListenerConfig, HttpListenerConfig, HttpListenerProxyConfig,
+        AgentRecord, ExternalListenerConfig, HttpListenerConfig, HttpListenerProxyConfig,
         HttpListenerResponseConfig, ListenerConfig, ListenerProtocol, ListenerTlsConfig,
         OperatorInfo, SmbListenerConfig,
     };
@@ -687,7 +687,7 @@ mod tests {
             "LastCallIn": "09/03/2026 19:05:00"
         });
 
-        let info: AgentInfo = serde_json::from_value(payload)?;
+        let info: AgentRecord = serde_json::from_value(payload)?;
         assert_eq!(info.agent_id, 0xABCD_1234);
         assert!(info.active);
         assert!(info.elevated);
@@ -724,7 +724,7 @@ mod tests {
         });
 
         let error =
-            serde_json::from_value::<AgentInfo>(payload).expect_err("invalid agent id must fail");
+            serde_json::from_value::<AgentRecord>(payload).expect_err("invalid agent id must fail");
         assert!(error.to_string().contains("invalid agent identifier"));
     }
 
@@ -754,7 +754,7 @@ mod tests {
             "LastCallIn": "09/03/2026 19:05:00"
         });
 
-        let info: AgentInfo = serde_json::from_value(payload)?;
+        let info: AgentRecord = serde_json::from_value(payload)?;
         assert_eq!(info.agent_id, 0x10);
         assert_eq!(info.name_id(), "00000010");
         Ok(())
@@ -786,7 +786,7 @@ mod tests {
             "LastCallIn": "09/03/2026 19:05:00"
         });
 
-        let info: AgentInfo = serde_json::from_value(payload)?;
+        let info: AgentRecord = serde_json::from_value(payload)?;
         assert_eq!(info.agent_id, 0x1234_5678);
         assert_eq!(info.name_id(), "12345678");
         Ok(())
@@ -817,7 +817,7 @@ mod tests {
             "LastCallIn": "09/03/2026 19:05:00"
         });
 
-        let info: AgentInfo = serde_json::from_value(payload)?;
+        let info: AgentRecord = serde_json::from_value(payload)?;
         assert_eq!(info.agent_id, 0x10);
         assert_eq!(info.name_id(), "00000010");
         Ok(())

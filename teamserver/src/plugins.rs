@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyModule, PyTuple};
-use red_cell_common::AgentInfo;
+use red_cell_common::AgentRecord;
 use red_cell_common::operator::{AgentTaskInfo, EventCode, Message, MessageHead, OperatorMessage};
 use serde_json::{Value, json};
 use time::OffsetDateTime;
@@ -410,11 +410,11 @@ impl PluginRuntime {
         Ok(())
     }
 
-    async fn get_agent(&self, agent_id: u32) -> Result<Option<AgentInfo>, TeamserverError> {
+    async fn get_agent(&self, agent_id: u32) -> Result<Option<AgentRecord>, TeamserverError> {
         Ok(self.inner.agents.get(agent_id).await)
     }
 
-    async fn list_agents(&self) -> Vec<AgentInfo> {
+    async fn list_agents(&self) -> Vec<AgentRecord> {
         self.inner.agents.list().await
     }
 
@@ -1012,8 +1012,8 @@ mod tests {
         std::env::temp_dir().join(format!("red-cell-{label}-{suffix}"))
     }
 
-    fn sample_agent(agent_id: u32) -> AgentInfo {
-        AgentInfo {
+    fn sample_agent(agent_id: u32) -> AgentRecord {
+        AgentRecord {
             agent_id,
             active: true,
             reason: String::new(),

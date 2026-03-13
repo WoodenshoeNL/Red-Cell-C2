@@ -147,12 +147,7 @@ impl OutputFormat {
 impl PayloadBuilderService {
     /// Resolve the MinGW/NASM toolchain and Havoc payload source tree from `profile`.
     pub fn from_profile(profile: &Profile) -> Result<Self, PayloadBuildError> {
-        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .canonicalize()
-            .map_err(|source| PayloadBuildError::ToolchainUnavailable {
-                message: format!("failed to resolve repository root: {source}"),
-            })?;
+        let repo_root = workspace_root()?;
         Self::from_profile_with_repo_root(profile, &repo_root)
     }
 
@@ -233,7 +228,7 @@ impl PayloadBuilderService {
 
     #[doc(hidden)]
     pub fn disabled_for_tests() -> Self {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         Self {
             inner: Arc::new(PayloadBuilderInner {
                 toolchain: Toolchain {
@@ -468,6 +463,20 @@ impl PayloadBuilderService {
 
         Ok(objects)
     }
+}
+
+fn workspace_root() -> Result<PathBuf, PayloadBuildError> {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root =
+        manifest_dir.parent().ok_or_else(|| PayloadBuildError::ToolchainUnavailable {
+            message: format!(
+                "failed to resolve repository root: manifest directory `{}` has no parent",
+                manifest_dir.display()
+            ),
+        })?;
+    workspace_root.canonicalize().map_err(|source| PayloadBuildError::ToolchainUnavailable {
+        message: format!("failed to resolve repository root: {source}"),
+    })
 }
 
 fn resolve_executable(
@@ -1214,8 +1223,36 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn from_profile_resolves_toolchain_and_havoc_assets() -> Result<(), Box<dyn std::error::Error>>
+    fn from_profile_resolves_workspace_root_and_toolchain() -> Result<(), Box<dyn std::error::Error>>
     {
+        let temp = TempDir::new()?;
+        let compiler_x64 = write_fake_executable(&temp.path().join("bin/x64-gcc"))?;
+        let compiler_x86 = write_fake_executable(&temp.path().join("bin/x86-gcc"))?;
+        let nasm = write_fake_executable(&temp.path().join("bin/nasm"))?;
+        let profile = constructor_test_profile(&compiler_x64, &compiler_x86, &nasm);
+        let repo_root = workspace_root()?;
+
+        let service = PayloadBuilderService::from_profile(&profile)?;
+
+        assert_eq!(service.inner.toolchain.compiler_x64, compiler_x64.canonicalize()?);
+        assert_eq!(service.inner.toolchain.compiler_x86, compiler_x86.canonicalize()?);
+        assert_eq!(service.inner.toolchain.nasm, nasm.canonicalize()?);
+        assert_eq!(service.inner.source_root, repo_root.join("src/Havoc/payloads/Demon"));
+        assert_eq!(
+            service.inner.shellcode_x64_template,
+            repo_root.join("src/Havoc/payloads/Shellcode.x64.bin")
+        );
+        assert_eq!(
+            service.inner.shellcode_x86_template,
+            repo_root.join("src/Havoc/payloads/Shellcode.x86.bin")
+        );
+        assert_eq!(service.inner.default_demon, profile.demon);
+        Ok(())
+    }
+
+    #[test]
+    fn from_profile_with_repo_root_resolves_toolchain_and_havoc_assets()
+    -> Result<(), Box<dyn std::error::Error>> {
         let temp = TempDir::new()?;
         let compiler_x64 = write_fake_executable(&temp.path().join("bin/x64-gcc"))?;
         let compiler_x86 = write_fake_executable(&temp.path().join("bin/x86-gcc"))?;

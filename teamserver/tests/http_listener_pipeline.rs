@@ -163,6 +163,80 @@ async fn http_listener_pipeline_rejects_callbacks_from_unregistered_agent()
     Ok(())
 }
 
+#[tokio::test]
+async fn http_listener_pipeline_attributes_real_ip_from_trusted_redirector()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let port = available_port()?;
+    let agent_id = 0xABCD_1234;
+
+    manager
+        .create(http_listener_with_redirector(
+            "edge-http-trusted-redirector",
+            port,
+            vec!["127.0.0.1".to_owned()],
+        ))
+        .await?;
+    manager.start("edge-http-trusted-redirector").await?;
+    wait_for_listener(port).await?;
+
+    let response = Client::new()
+        .post(format!("http://127.0.0.1:{port}/"))
+        .header("x-real-ip", "198.51.100.44")
+        .body(valid_demon_init_body(agent_id, [0x41; AGENT_KEY_LENGTH], [0x24; AGENT_IV_LENGTH]))
+        .send()
+        .await?
+        .error_for_status()?;
+    assert!(!response.bytes().await?.is_empty());
+
+    let stored = registry.get(agent_id).await.ok_or("agent should be registered")?;
+    assert_eq!(stored.external_ip, "198.51.100.44");
+
+    manager.stop("edge-http-trusted-redirector").await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn http_listener_pipeline_ignores_real_ip_from_untrusted_redirector()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let port = available_port()?;
+    let agent_id = 0xABCD_5678;
+
+    manager
+        .create(http_listener_with_redirector(
+            "edge-http-untrusted-redirector",
+            port,
+            vec!["192.0.2.1".to_owned()],
+        ))
+        .await?;
+    manager.start("edge-http-untrusted-redirector").await?;
+    wait_for_listener(port).await?;
+
+    let response = Client::new()
+        .post(format!("http://127.0.0.1:{port}/"))
+        .header("x-real-ip", "198.51.100.44")
+        .body(valid_demon_init_body(agent_id, [0x41; AGENT_KEY_LENGTH], [0x24; AGENT_IV_LENGTH]))
+        .send()
+        .await?
+        .error_for_status()?;
+    assert!(!response.bytes().await?.is_empty());
+
+    let stored = registry.get(agent_id).await.ok_or("agent should be registered")?;
+    assert_eq!(stored.external_ip, "127.0.0.1");
+
+    manager.stop("edge-http-untrusted-redirector").await?;
+    Ok(())
+}
+
 fn http_listener(name: &str, port: u16) -> ListenerConfig {
     ListenerConfig::from(HttpListenerConfig {
         name: name.to_owned(),
@@ -176,6 +250,34 @@ fn http_listener(name: &str, port: u16) -> ListenerConfig {
         method: Some("POST".to_owned()),
         behind_redirector: false,
         trusted_proxy_peers: Vec::new(),
+        user_agent: None,
+        headers: Vec::new(),
+        uris: vec!["/".to_owned()],
+        host_header: None,
+        secure: false,
+        cert: None,
+        response: None,
+        proxy: None,
+    })
+}
+
+fn http_listener_with_redirector(
+    name: &str,
+    port: u16,
+    trusted_proxy_peers: Vec<String>,
+) -> ListenerConfig {
+    ListenerConfig::from(HttpListenerConfig {
+        name: name.to_owned(),
+        kill_date: None,
+        working_hours: None,
+        hosts: vec!["127.0.0.1".to_owned()],
+        host_bind: "127.0.0.1".to_owned(),
+        host_rotation: "round-robin".to_owned(),
+        port_bind: port,
+        port_conn: Some(port),
+        method: Some("POST".to_owned()),
+        behind_redirector: true,
+        trusted_proxy_peers,
         user_agent: None,
         headers: Vec::new(),
         uris: vec!["/".to_owned()],

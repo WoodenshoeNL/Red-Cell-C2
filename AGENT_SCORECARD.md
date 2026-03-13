@@ -36,6 +36,19 @@ Each loop run updates the running totals and appends a review entry.
 
 <!-- QA and arch loops append entries below this line -->
 
+### Arch Review — 2026-03-13 12:44
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 0 | — | No new agent-attributed findings |
+| Codex | 0 | — | No new agent-attributed findings |
+| Cursor | 0 | — | No new agent-attributed findings |
+
+Overall codebase health: drifting
+Biggest blindspot: protocol and control-surface completeness still have misleading green paths — malformed `COMMAND_CHECKIN` packets can be treated as success, pivot child sessions lose listener provenance, and the published Service/External surfaces still advertise capabilities the runtime does not actually provide.
+
+Additional findings filed this run were attributed to Michel Klomp: `red-cell-c2-3ntq`, `red-cell-c2-smdw`, `red-cell-c2-30fe`, `red-cell-c2-21if`, and `red-cell-c2-35jc`.
+
 ### QA Review — 2026-03-13 12:21 — ce9f784..7f7b888
 
 | Agent | Tasks closed | Bugs filed | Notes |

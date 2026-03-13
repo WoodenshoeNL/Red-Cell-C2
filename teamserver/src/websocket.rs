@@ -109,6 +109,9 @@ const FAILED_LOGIN_DELAY: Duration = Duration::from_secs(2);
 /// Maximum time an unauthenticated socket may idle before sending the first login frame.
 const AUTHENTICATION_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Maximum operator WebSocket message size accepted by the teamserver.
+const OPERATOR_MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+
 /// Per-source-IP rate limiter for WebSocket operator login attempts.
 ///
 /// Tracks failed login attempts in a sliding window per IP address. Once the
@@ -246,7 +249,9 @@ where
     Database: FromRef<S>,
     ShutdownController: FromRef<S>,
 {
-    websocket.on_upgrade(move |socket| handle_operator_socket(state, socket, addr.ip()))
+    websocket
+        .max_message_size(OPERATOR_MAX_MESSAGE_SIZE)
+        .on_upgrade(move |socket| handle_operator_socket(state, socket, addr.ip()))
 }
 
 async fn handle_operator_socket<S>(state: S, mut socket: WebSocket, client_ip: IpAddr)
@@ -2800,6 +2805,31 @@ mod tests {
         socket.close(None).await.expect("close should send");
         wait_for_connection_count(&connection_registry, 0).await;
         assert_eq!(auth.session_count().await, 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_closes_oversized_messages() {
+        let state = TestState::new().await;
+        let connection_registry = state.connections.clone();
+        let (mut socket, server) = spawn_server(state).await;
+
+        login(&mut socket, "operator", "password1234").await;
+
+        let oversized_payload = "x".repeat(super::OPERATOR_MAX_MESSAGE_SIZE + 1);
+        socket
+            .send(ClientMessage::Text(oversized_payload.into()))
+            .await
+            .expect("oversized message should send");
+
+        let frame = timeout(Duration::from_secs(5), socket.next())
+            .await
+            .expect("socket should react to oversized message")
+            .expect("connection should close or error");
+        assert!(matches!(frame, Err(_) | Ok(ClientMessage::Close(_))));
+
+        wait_for_connection_count(&connection_registry, 0).await;
+        assert_eq!(connection_registry.authenticated_count().await, 0);
         server.abort();
     }
 

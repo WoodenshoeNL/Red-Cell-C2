@@ -188,4 +188,63 @@ mod tests {
             .await
             .expect("notified should complete immediately once shutdown has started");
     }
+
+    #[test]
+    fn is_shutting_down_stays_false_until_shutdown_is_initiated() {
+        let controller = ShutdownController::new();
+
+        assert!(!controller.is_shutting_down());
+
+        controller.initiate();
+        assert!(controller.is_shutting_down());
+
+        controller.initiate();
+        controller.initiate();
+        assert!(controller.is_shutting_down());
+    }
+
+    #[tokio::test]
+    async fn accessors_report_callback_count_before_and_after_shutdown() {
+        let controller = ShutdownController::new();
+
+        assert!(!controller.is_shutting_down());
+        assert_eq!(controller.active_callback_count(), 0);
+
+        let first = controller.try_track_callback();
+        let second = controller.try_track_callback();
+
+        assert!(first.is_some());
+        assert!(second.is_some());
+        assert_eq!(controller.active_callback_count(), 2);
+        assert!(!controller.is_shutting_down());
+
+        controller.initiate();
+
+        assert!(controller.is_shutting_down());
+        assert_eq!(controller.active_callback_count(), 2);
+
+        drop(first);
+        assert_eq!(controller.active_callback_count(), 1);
+
+        drop(second);
+        assert_eq!(controller.active_callback_count(), 0);
+        assert!(controller.wait_for_callback_drain(Duration::from_millis(10)).await);
+    }
+
+    #[tokio::test]
+    async fn active_callback_count_returns_to_zero_when_guard_drops_after_shutdown() {
+        let controller = ShutdownController::new();
+        let callback = controller.try_track_callback();
+
+        assert!(callback.is_some());
+        assert_eq!(controller.active_callback_count(), 1);
+
+        controller.initiate();
+        assert!(controller.is_shutting_down());
+        assert_eq!(controller.active_callback_count(), 1);
+
+        drop(callback);
+        assert_eq!(controller.active_callback_count(), 0);
+        assert!(controller.wait_for_callback_drain(Duration::from_millis(10)).await);
+    }
 }

@@ -41,6 +41,12 @@ pub enum SocketRelayError {
         /// Invalid port string.
         port: String,
     },
+    /// A tracked SOCKS server has an invalid local bind address.
+    #[error("invalid SOCKS5 listener address `{local_addr}`")]
+    InvalidLocalAddress {
+        /// Invalid local bind address string.
+        local_addr: String,
+    },
     /// A SOCKS server on the same port already exists for the agent.
     #[error("a SOCKS5 proxy on port {port} already exists for agent 0x{agent_id:08X}")]
     DuplicateServer {
@@ -255,7 +261,8 @@ impl SocketRelayManager {
             let handles = std::mem::take(&mut agent_state.servers)
                 .into_values()
                 .collect::<Vec<SocksServerHandle>>();
-            let ports = handles.iter().map(|handle| handle.port()).collect::<Vec<_>>();
+            let ports =
+                handles.iter().map(SocksServerHandle::port).collect::<Result<Vec<_>, _>>()?;
             drop(state);
             for port in ports {
                 self.close_clients_for_port(agent_id, port).await?;
@@ -570,8 +577,17 @@ impl SocksServerHandle {
         }
     }
 
-    fn port(&self) -> u16 {
-        self.local_addr.rsplit(':').next().and_then(|value| value.parse::<u16>().ok()).unwrap_or(0)
+    fn port(&self) -> Result<u16, SocketRelayError> {
+        self.local_addr
+            .rsplit(':')
+            .next()
+            .ok_or_else(|| SocketRelayError::InvalidLocalAddress {
+                local_addr: self.local_addr.clone(),
+            })?
+            .parse::<u16>()
+            .map_err(|_| SocketRelayError::InvalidLocalAddress {
+                local_addr: self.local_addr.clone(),
+            })
     }
 }
 
@@ -1082,6 +1098,53 @@ mod tests {
         .expect("shutdown task should finish");
         assert!(graceful_exit.load(Ordering::SeqCst));
         assert!(handle.shutdown.is_none());
+    }
+
+    #[tokio::test]
+    async fn socks_server_handle_port_returns_error_for_invalid_local_addr() {
+        let task = tokio::spawn(async move {
+            std::future::pending::<()>().await;
+        });
+        let handle =
+            SocksServerHandle { local_addr: "invalid-address".to_owned(), shutdown: None, task };
+
+        assert!(matches!(
+            handle.port(),
+            Err(SocketRelayError::InvalidLocalAddress { local_addr }) if local_addr == "invalid-address"
+        ));
+    }
+
+    #[tokio::test]
+    async fn clear_socks_servers_returns_error_for_invalid_local_addr()
+    -> Result<(), SocketRelayError> {
+        let (_database, registry, manager) = test_manager().await?;
+        registry.insert(sample_agent(0xDEAD_BEEF)).await?;
+
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            std::future::pending::<()>().await;
+        });
+        {
+            let mut state = manager.state.write().await;
+            let agent_state = state.entry(0xDEAD_BEEF).or_default();
+            agent_state.servers.insert(
+                1080,
+                SocksServerHandle {
+                    local_addr: "invalid-address".to_owned(),
+                    shutdown: Some(shutdown_tx),
+                    task,
+                },
+            );
+        }
+
+        let result = manager.clear_socks_servers(0xDEAD_BEEF).await;
+
+        assert!(matches!(
+            result,
+            Err(SocketRelayError::InvalidLocalAddress { local_addr }) if local_addr == "invalid-address"
+        ));
+
+        Ok(())
     }
 
     async fn connected_write_half_and_reader() -> io::Result<(

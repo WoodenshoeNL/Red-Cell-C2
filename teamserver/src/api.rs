@@ -2442,6 +2442,66 @@ mod tests {
     use red_cell_common::crypto::hash_password_sha3;
 
     #[tokio::test]
+    async fn json_error_response_returns_status_and_documented_body_shape() {
+        let response =
+            json_error_response(StatusCode::BAD_REQUEST, "invalid_request", "Missing listener");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_request");
+        assert_eq!(body["error"]["message"], "Missing listener");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "error": {
+                    "code": "invalid_request",
+                    "message": "Missing listener"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn json_error_response_preserves_error_fields_for_non_success_statuses() {
+        let unauthorized = json_error_response(
+            StatusCode::UNAUTHORIZED,
+            "missing_api_key",
+            "Missing API key header",
+        );
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        let unauthorized_body = read_json(unauthorized).await;
+        assert_eq!(unauthorized_body["error"]["code"], "missing_api_key");
+        assert_eq!(unauthorized_body["error"]["message"], "Missing API key header");
+
+        let server_error = json_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "listener_start_failed",
+            "Listener startup failed",
+        );
+        assert_eq!(server_error.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let server_error_body = read_json(server_error).await;
+        assert_eq!(server_error_body["error"]["code"], "listener_start_failed");
+        assert_eq!(server_error_body["error"]["message"], "Listener startup failed");
+    }
+
+    #[tokio::test]
+    async fn json_error_response_serializes_punctuation_and_mixed_case_verbatim() {
+        let response = json_error_response(
+            StatusCode::CONFLICT,
+            "Agent.State/Conflict",
+            "Mixed-Case: listener 'HTTP-01' isn't ready!",
+        );
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "Agent.State/Conflict");
+        assert_eq!(body["error"]["message"], "Mixed-Case: listener 'HTTP-01' isn't ready!");
+        assert!(body.get("error").and_then(Value::as_object).is_some());
+    }
+
+    #[tokio::test]
     async fn root_reports_versioning_and_docs_metadata() {
         let app = test_router(None).await;
 

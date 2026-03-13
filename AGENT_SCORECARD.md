@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 6 | 181 | 31 |
+| Tasks closed | 7 | 181 | 31 |
 | Bugs filed against | 0 | 22 | 9 |
 | Bug rate (bugs/task) | 0.00 | 0.12 | 0.29 |
 | Quality score | 100% | 88% | 71% |
@@ -29,12 +29,23 @@ Each loop run updates the running totals and appends a review entry.
 | Audit attribution errors | 0 | 1 | 0 |
 | Availability / timeout regressions | 0 | 4 | 0 |
 | Correctness / pagination | 0 | 0 | 1 |
+| Workflow / close-hygiene | 1 | 0 | 0 |
 
 ---
 
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-13 13:53 — f6c7d35..446ae04
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed `red-cell-c2-30fe` — `validate_checkin_transport_material` correctly rejects all-zero AES key before state mutation; regression test asserts state immutability, CTR offset preservation, no event broadcast. `red-cell-c2-16w0` (test-blocker) also resolved as a side-effect. Workflow violation noted (process issue `red-cell-c2-3uhw` filed, P4): issue was not formally closed at session end. |
+| Codex | 0 | 0 | Nine claim commits only (`red-cell-c2-33iq`, `red-cell-c2-355s`, `red-cell-c2-2f9l`, `red-cell-c2-3j7w`, `red-cell-c2-2f75`, `red-cell-c2-13qu`, `red-cell-c2-13oi`, `red-cell-c2-101f`). No code changes in range; all remain `in_progress`. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check`, `cargo clippy -- -D warnings`, `cargo test --workspace` (459 tests, 0 failures)
 
 ### QA Review — 2026-03-13 12:49 — 7f7b888..f6c7d35
 

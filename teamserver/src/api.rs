@@ -2,11 +2,12 @@
 
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
+use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::extract::{FromRequestParts, Path, Query, Request, State};
+use axum::extract::{ConnectInfo, FromRequestParts, Path, Query, Request, State};
 use axum::http::header::AUTHORIZATION;
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{HeaderMap, StatusCode, request::Parts};
@@ -61,6 +62,14 @@ type ApiKeyMac = Hmac<Sha256>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct ApiKeyDigest([u8; 32]);
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum RateLimitSubject {
+    ClientIp(IpAddr),
+    PresentedCredential(ApiKeyDigest),
+    MissingApiKey,
+    InvalidAuthorizationHeader,
+}
 
 /// Sanitized REST representation of an agent/session.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, ToSchema)]
@@ -201,7 +210,10 @@ impl Default for RateLimitWindow {
     }
 }
 
-fn prune_expired_rate_limit_windows(windows: &mut BTreeMap<String, RateLimitWindow>, now: Instant) {
+fn prune_expired_rate_limit_windows(
+    windows: &mut BTreeMap<RateLimitSubject, RateLimitWindow>,
+    now: Instant,
+) {
     windows.retain(|_, window| now.duration_since(window.started_at) < RATE_LIMIT_WINDOW);
 }
 
@@ -220,7 +232,7 @@ pub struct ApiRuntime {
     key_hash_secret: Arc<[u8; API_KEY_HASH_SECRET_SIZE]>,
     keys: Arc<BTreeMap<ApiKeyDigest, ApiIdentity>>,
     rate_limit: ApiRateLimit,
-    windows: Arc<Mutex<BTreeMap<String, RateLimitWindow>>>,
+    windows: Arc<Mutex<BTreeMap<RateLimitSubject, RateLimitWindow>>>,
 }
 
 impl ApiRuntime {
@@ -267,17 +279,36 @@ impl ApiRuntime {
         self.rate_limit
     }
 
-    async fn authenticate(&self, headers: &HeaderMap) -> Result<ApiIdentity, ApiAuthError> {
+    async fn authenticate(
+        &self,
+        headers: &HeaderMap,
+        client_ip: Option<IpAddr>,
+    ) -> Result<ApiIdentity, ApiAuthError> {
         if !self.enabled() {
             return Err(ApiAuthError::Disabled);
         }
 
-        let presented_key = extract_api_key(headers)?;
+        let presented_key = match extract_api_key(headers) {
+            Ok(key) => key,
+            Err(
+                error @ (ApiAuthError::MissingApiKey | ApiAuthError::InvalidAuthorizationHeader),
+            ) => {
+                self.check_rate_limit(&rate_limit_subject_for_failed_auth(client_ip, &error))
+                    .await?;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
+
         let presented_key_digest = Self::hash_api_key(&self.key_hash_secret, &presented_key);
+        let rate_limit_subject = client_ip
+            .map(RateLimitSubject::ClientIp)
+            .unwrap_or(RateLimitSubject::PresentedCredential(presented_key_digest));
+
+        self.check_rate_limit(&rate_limit_subject).await?;
+
         let identity =
             self.keys.get(&presented_key_digest).cloned().ok_or(ApiAuthError::InvalidApiKey)?;
-
-        self.check_rate_limit(&identity.key_id).await?;
 
         Ok(identity)
     }
@@ -302,7 +333,7 @@ impl ApiRuntime {
         bytes
     }
 
-    async fn check_rate_limit(&self, key_id: &str) -> Result<(), ApiAuthError> {
+    async fn check_rate_limit(&self, subject: &RateLimitSubject) -> Result<(), ApiAuthError> {
         if self.rate_limit.disabled() {
             return Ok(());
         }
@@ -310,7 +341,7 @@ impl ApiRuntime {
         let mut windows = self.windows.lock().await;
         let now = Instant::now();
         prune_expired_rate_limit_windows(&mut windows, now);
-        let window = windows.entry(key_id.to_owned()).or_default();
+        let window = windows.entry(subject.clone()).or_default();
 
         if now.duration_since(window.started_at) >= RATE_LIMIT_WINDOW {
             window.started_at = now;
@@ -828,7 +859,7 @@ async fn api_auth_middleware(
     mut request: Request,
     next: Next,
 ) -> Result<Response, ApiAuthError> {
-    let identity = api.authenticate(request.headers()).await?;
+    let identity = api.authenticate(request.headers(), client_ip(&request)).await?;
 
     debug!(key_id = %identity.key_id, role = ?identity.role, "authenticated rest api request");
     request.extensions_mut().insert(identity);
@@ -2174,6 +2205,21 @@ fn extract_api_key(headers: &HeaderMap) -> Result<String, ApiAuthError> {
     }
 
     Ok(token.to_owned())
+}
+
+fn client_ip(request: &Request) -> Option<IpAddr> {
+    request.extensions().get::<ConnectInfo<SocketAddr>>().map(|connect_info| connect_info.0.ip())
+}
+
+fn rate_limit_subject_for_failed_auth(
+    client_ip: Option<IpAddr>,
+    error: &ApiAuthError,
+) -> RateLimitSubject {
+    client_ip.map(RateLimitSubject::ClientIp).unwrap_or_else(|| match error {
+        ApiAuthError::MissingApiKey => RateLimitSubject::MissingApiKey,
+        ApiAuthError::InvalidAuthorizationHeader => RateLimitSubject::InvalidAuthorizationHeader,
+        _ => unreachable!("only missing/invalid header auth errors map to failed auth buckets"),
+    })
 }
 
 fn authorize_api_role(role: OperatorRole, permission: Permission) -> Result<(), ApiAuthError> {
@@ -3609,6 +3655,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rate_limiting_rejects_repeated_invalid_api_keys() {
+        let app = test_router(Some((1, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+        let client_ip = SocketAddr::from(([198, 51, 100, 10], 443));
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/listeners")
+                    .header(API_KEY_HEADER, "wrong-key")
+                    .extension(ConnectInfo(client_ip))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(first.status(), StatusCode::UNAUTHORIZED);
+        let body = read_json(first).await;
+        assert_eq!(body["error"]["code"], "invalid_api_key");
+
+        let second = app
+            .oneshot(
+                Request::builder()
+                    .uri("/listeners")
+                    .header(API_KEY_HEADER, "another-wrong-key")
+                    .extension(ConnectInfo(client_ip))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = read_json(second).await;
+        assert_eq!(body["error"]["code"], "rate_limited");
+    }
+
+    #[tokio::test]
+    async fn rate_limiting_rejects_repeated_missing_api_keys() {
+        let app = test_router(Some((1, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+        let client_ip = SocketAddr::from(([203, 0, 113, 10], 443));
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/listeners")
+                    .extension(ConnectInfo(client_ip))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(first.status(), StatusCode::UNAUTHORIZED);
+        let body = read_json(first).await;
+        assert_eq!(body["error"]["code"], "missing_api_key");
+
+        let second = app
+            .oneshot(
+                Request::builder()
+                    .uri("/listeners")
+                    .extension(ConnectInfo(client_ip))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = read_json(second).await;
+        assert_eq!(body["error"]["code"], "rate_limited");
+    }
+
+    #[tokio::test]
     async fn rate_limiting_prunes_expired_windows_for_inactive_keys() {
         let api = ApiRuntime {
             key_hash_secret: Arc::new(ApiRuntime::generate_key_hash_secret()),
@@ -3616,25 +3738,32 @@ mod tests {
             rate_limit: ApiRateLimit { requests_per_minute: 60 },
             windows: Arc::new(Mutex::new(BTreeMap::from([
                 (
-                    "expired-key".to_owned(),
+                    RateLimitSubject::MissingApiKey,
                     RateLimitWindow {
                         started_at: Instant::now() - RATE_LIMIT_WINDOW - Duration::from_secs(1),
                         request_count: 1,
                     },
                 ),
                 (
-                    "fresh-key".to_owned(),
+                    RateLimitSubject::InvalidAuthorizationHeader,
                     RateLimitWindow { started_at: Instant::now(), request_count: 1 },
                 ),
             ]))),
         };
 
-        api.check_rate_limit("new-key").await.expect("rate limit should allow request");
+        api.check_rate_limit(&RateLimitSubject::PresentedCredential(ApiRuntime::hash_api_key(
+            api.key_hash_secret.as_ref(),
+            "new-key",
+        )))
+        .await
+        .expect("rate limit should allow request");
 
         let windows = api.windows.lock().await;
-        assert!(!windows.contains_key("expired-key"));
-        assert!(windows.contains_key("fresh-key"));
-        assert!(windows.contains_key("new-key"));
+        assert!(!windows.contains_key(&RateLimitSubject::MissingApiKey));
+        assert!(windows.contains_key(&RateLimitSubject::InvalidAuthorizationHeader));
+        assert!(windows.contains_key(&RateLimitSubject::PresentedCredential(
+            ApiRuntime::hash_api_key(api.key_hash_secret.as_ref(), "new-key")
+        )));
         assert_eq!(windows.len(), 2);
     }
 

@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 6 | 157 | 31 |
+| Tasks closed | 6 | 161 | 31 |
 | Bugs filed against | 0 | 21 | 9 |
 | Bug rate (bugs/task) | 0.00 | 0.13 | 0.29 |
 | Quality score | 100% | 87% | 71% |
@@ -34,6 +34,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-13 09:45 — e86a3d4..8b18663
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | Filed 5 test-gap issues via test-review scan (red-cell-c2-13su, red-cell-c2-1dbh, red-cell-c2-24tg, red-cell-c2-8s5p, red-cell-c2-zzsx). Not attributed as agent defects. |
+| Codex | 4 | 0 | Closed `red-cell-c2-3cve` (remove dead `max_download_bytes` param chain — clean refactor across 7 call sites in listeners.rs), `red-cell-c2-3oq5` (bound socket lifecycle test with 5s timeout in dispatch.rs), `red-cell-c2-8djk` (3 unit tests for `install_default_crypto_provider` idempotency/ordering in tls.rs), `red-cell-c2-1gag` (3 tests for `spawn_agent_liveness_monitor`: startup/shutdown, aggressive timing, stale-agent cleanup side-effects). All work is solid — no defects found. |
+| Cursor | 0 | 0 | No activity in reviewed commits. |
+
+Build: **passed** — `cargo check`, `cargo clippy -D warnings`, and `cargo test` all pass cleanly. 113 library tests + 3 integration tests, 0 failures.
 
 ### QA Review — 2026-03-13 09:30 — b327128..e86a3d4
 

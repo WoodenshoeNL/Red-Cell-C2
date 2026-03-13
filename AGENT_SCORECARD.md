@@ -21,19 +21,31 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 0 | 0 | 0 |
 | Missing tests | 1 | 5 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
-| Protocol errors | 3 | 16 | 3 |
-| Security issues | 1 | 20 | 0 |
+| Protocol errors | 3 | 17 | 3 |
+| Security issues | 2 | 20 | 0 |
 | Architecture drift | 1 | 15 | 0 |
 | Memory / resource leaks | 0 | 8 | 1 |
 | Startup / lifecycle regressions | 0 | 8 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
 | Availability / timeout regressions | 0 | 4 | 0 |
+| Correctness / pagination | 0 | 0 | 1 |
 
 ---
 
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-13 09:45
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 1 | Security issues | red-cell-c2-1xzi: DNS download handler allows unauthenticated response queue depletion (P2 security) |
+| Codex | 1 | Protocol errors | red-cell-c2-3giq: CHECKIN key-rotation accepted without replay/freshness protection (P2 security) |
+| Cursor | 1 | Correctness / pagination | red-cell-c2-xbjh: query_session_activity inverts count/query order and leaves redundant in-memory filter (P3 quality) |
+
+Overall codebase health: drifting
+Biggest blindspot: the DNS C2 download endpoint (`handle_download`) has no authentication gate — an adversary who observes the C2 domain and any agent ID from DNS traffic can silently deplete queued task responses by sending a single crafted TXT query, causing the real agent to lose its next instruction without any error logged on either side.
 
 ### QA Review — 2026-03-13 09:45 — e86a3d4..8b18663
 

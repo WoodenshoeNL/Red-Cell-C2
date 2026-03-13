@@ -5023,7 +5023,10 @@ impl<'a> CallbackParser<'a> {
 mod tests {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-    use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data};
+    use red_cell_common::crypto::{
+        AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len, decrypt_agent_data,
+        encrypt_agent_data_at_offset,
+    };
     use red_cell_common::demon::{
         DemonCallback, DemonCallbackError, DemonCommand, DemonConfigKey, DemonFilesystemCommand,
         DemonInfoClass, DemonInjectError, DemonJobCommand, DemonKerberosCommand, DemonMessage,
@@ -5629,6 +5632,70 @@ mod tests {
         };
         assert_eq!(message.info.agent_id, format!("{agent_id:08X}"));
         assert_eq!(message.info.marked, "Alive");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_checkin_handler_rotates_transport_keystream_from_block_zero()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database,
+            sockets,
+            None,
+        );
+        let original_key = [0x77; AGENT_KEY_LENGTH];
+        let original_iv = [0x44; AGENT_IV_LENGTH];
+        let rotated_key = [0x12; AGENT_KEY_LENGTH];
+        let rotated_iv = [0x34; AGENT_IV_LENGTH];
+        let agent_id = 0x1020_304A;
+        let pre_rotation_plaintext = b"advance shared ctr state";
+        let post_rotation_plaintext = b"sleep 45 5";
+
+        registry.insert(sample_agent_info(agent_id, original_key, original_iv)).await?;
+
+        let pre_rotation_ciphertext =
+            encrypt_agent_data_at_offset(&original_key, &original_iv, 0, pre_rotation_plaintext)?;
+        assert_eq!(
+            registry.decrypt_from_agent(agent_id, &pre_rotation_ciphertext).await?,
+            pre_rotation_plaintext
+        );
+        let advanced_offset = registry.ctr_offset(agent_id).await?;
+        assert_eq!(advanced_offset, ctr_blocks_for_len(pre_rotation_ciphertext.len()));
+        assert!(advanced_offset > 0);
+
+        let payload = sample_checkin_metadata_payload(agent_id, rotated_key, rotated_iv);
+        let response = dispatcher
+            .dispatch(agent_id, u32::from(DemonCommand::CommandCheckin), 6, &payload)
+            .await?;
+        assert_eq!(response, None);
+        assert_eq!(registry.ctr_offset(agent_id).await?, 0);
+
+        let post_rotation_ciphertext =
+            registry.encrypt_for_agent(agent_id, post_rotation_plaintext).await?;
+        assert_eq!(
+            post_rotation_ciphertext,
+            encrypt_agent_data_at_offset(&rotated_key, &rotated_iv, 0, post_rotation_plaintext)?
+        );
+        assert_ne!(
+            post_rotation_ciphertext,
+            encrypt_agent_data_at_offset(
+                &original_key,
+                &original_iv,
+                advanced_offset,
+                post_rotation_plaintext,
+            )?
+        );
+        assert_eq!(
+            registry.ctr_offset(agent_id).await?,
+            ctr_blocks_for_len(post_rotation_ciphertext.len())
+        );
+
         Ok(())
     }
 

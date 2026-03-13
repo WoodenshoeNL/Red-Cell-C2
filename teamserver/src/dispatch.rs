@@ -1607,7 +1607,16 @@ fn looks_like_credential_line(line: &str) -> bool {
 }
 
 fn looks_like_inline_secret(line: &str) -> bool {
-    if line.contains("://") || (line.contains('\\') && !line.contains(':')) {
+    let bytes = line.as_bytes();
+    let looks_like_windows_drive_path = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/');
+
+    if line.contains("://")
+        || looks_like_windows_drive_path
+        || (line.contains('\\') && !line.contains(':'))
+    {
         return false;
     }
 
@@ -1618,7 +1627,9 @@ fn looks_like_inline_secret(line: &str) -> bool {
             && !right.is_empty()
             && !left.contains(' ')
             && !right.contains(' ')
-            && (left.contains('\\') || left.contains('@') || right.len() >= 8)
+            && (left.contains('\\')
+                || left.contains('@')
+                || (right.len() >= 8 && !looks_like_credential_line(line)))
     })
 }
 
@@ -5042,7 +5053,8 @@ mod tests {
 
     use super::{
         CommandDispatchError, CommandDispatcher, DownloadState, DownloadTracker,
-        extract_credentials, looks_like_credential_line,
+        extract_credentials, looks_like_credential_line, looks_like_inline_secret,
+        looks_like_pwdump_hash,
     };
     use crate::{AgentRegistry, Database, EventBus, Job, SocketRelayManager, TeamserverError};
 
@@ -6110,13 +6122,12 @@ mod tests {
         );
 
         let loot = database.loot().list_for_agent(0xABCD_EE01).await?;
-        assert_eq!(loot.len(), 3);
+        assert_eq!(loot.len(), 1);
         assert!(loot.iter().all(|entry| entry.kind == "credential"));
-        assert!(
-            loot.iter().any(|entry| {
-                entry.data.as_deref() == Some(b"Password : Sup3rSecret!".as_slice())
-            })
-        );
+        assert!(loot.iter().any(|entry| {
+            entry.data.as_deref()
+                == Some(b"Username : alice\nPassword : Sup3rSecret!\nDomain   : LAB".as_slice())
+        }));
         assert!(loot.iter().all(|entry| {
             entry.metadata.as_ref().and_then(|value| value.get("operator"))
                 == Some(&Value::String("operator".to_owned()))
@@ -6136,35 +6147,115 @@ mod tests {
     }
 
     #[test]
-    fn looks_like_credential_line_matches_key_not_full_line() {
-        assert!(looks_like_credential_line("Password : Sup3rSecret!"));
-        assert!(looks_like_credential_line("username=alice"));
-        assert!(!looks_like_credential_line("status: password reset not required"));
-        assert!(!looks_like_credential_line("operator message: secret rotation completed"));
+    fn looks_like_credential_line_matches_expected_patterns() {
+        let cases = [
+            ("Password : Sup3rSecret!", true),
+            ("username=alice", true),
+            ("NTLM:0123456789ABCDEF0123456789ABCDEF", true),
+            (
+                "Administrator:500:AAD3B435B51404EEAAD3B435B51404EE:32ED87BDB5FDC5E9CBA88547376818D4:::",
+                false,
+            ),
+            ("status: password reset not required", false),
+            ("operator message: secret rotation completed", false),
+            ("https://example.test/password/reset", false),
+            ("C:\\Windows\\Temp\\password.txt", false),
+        ];
+
+        for (line, expected) in cases {
+            assert_eq!(
+                looks_like_credential_line(line),
+                expected,
+                "unexpected classification for {line:?}"
+            );
+        }
     }
 
     #[test]
-    fn extract_credentials_ignores_false_positive_keyword_values() {
+    fn looks_like_inline_secret_handles_expected_and_edge_cases() {
+        let cases = [
+            ("alice@example.com:Sup3rSecret!", true),
+            ("LAB\\alice:Sup3rSecret!", true),
+            ("operator:Password123", true),
+            ("https://alice:Password123@example.test", false),
+            ("status: password rotation completed", false),
+            ("C:\\Temp\\secret.txt", false),
+            ("LAB\\alice:short", true),
+        ];
+
+        for (line, expected) in cases {
+            assert_eq!(
+                looks_like_inline_secret(line),
+                expected,
+                "unexpected inline-secret classification for {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn looks_like_pwdump_hash_matches_pwdump_format_only() {
+        let cases = [
+            (
+                "Administrator:500:AAD3B435B51404EEAAD3B435B51404EE:32ED87BDB5FDC5E9CBA88547376818D4:::",
+                true,
+            ),
+            (
+                "alice:1001:0123456789ABCDEFFEDCBA9876543210:00112233445566778899AABBCCDDEEFF:::",
+                true,
+            ),
+            ("NTLM:0123456789ABCDEF0123456789ABCDEF", false),
+            ("Administrator:500:nothex:32ED87BDB5FDC5E9CBA88547376818D4:::", false),
+            ("status: hash sync completed", false),
+        ];
+
+        for (line, expected) in cases {
+            assert_eq!(
+                looks_like_pwdump_hash(line),
+                expected,
+                "unexpected pwdump classification for {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_credentials_captures_blocks_inline_secrets_and_hashes() {
         let output = [
             "status: password reset not required",
             "message: domain join succeeded",
-            "operator message: secret rotation completed",
             "Username : alice",
             "Password : Sup3rSecret!",
             "Domain   : LAB",
+            "",
+            "alice@example.com:InlinePass123",
+            "C:\\Windows\\Temp\\password.txt",
+            "https://example.test/password/reset",
+            "Administrator:500:AAD3B435B51404EEAAD3B435B51404EE:32ED87BDB5FDC5E9CBA88547376818D4:::",
+            "operator message: secret rotation completed",
         ]
         .join("\n");
 
         let captures = extract_credentials(&output);
-        assert!(!captures.is_empty());
-        assert!(captures.iter().all(|capture| {
-            capture.content != "status: password reset not required"
-                && capture.content != "message: domain join succeeded"
-                && capture.content != "operator message: secret rotation completed"
-        }));
-        assert!(captures.iter().any(|capture| capture.content == "Username : alice"));
-        assert!(captures.iter().any(|capture| capture.content == "Password : Sup3rSecret!"));
-        assert!(captures.iter().any(|capture| capture.content == "Domain   : LAB"));
+        let actual = captures
+            .iter()
+            .map(|capture| (capture.label.as_str(), capture.pattern, capture.content.as_str()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            actual,
+            vec![
+                (
+                    "credential-block",
+                    "keyword-block",
+                    "Username : alice\nPassword : Sup3rSecret!\nDomain   : LAB",
+                ),
+                ("inline-credential", "inline-secret", "alice@example.com:InlinePass123",),
+                (
+                    "password-hash",
+                    "pwdump-hash",
+                    "Administrator:500:AAD3B435B51404EEAAD3B435B51404EE:32ED87BDB5FDC5E9CBA88547376818D4:::",
+                ),
+            ]
+        );
     }
 
     #[tokio::test]

@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 6 | 168 | 31 |
+| Tasks closed | 6 | 171 | 31 |
 | Bugs filed against | 0 | 21 | 9 |
-| Bug rate (bugs/task) | 0.00 | 0.13 | 0.29 |
-| Quality score | 100% | 87% | 71% |
+| Bug rate (bugs/task) | 0.00 | 0.12 | 0.29 |
+| Quality score | 100% | 88% | 71% |
 
 ## Violation Breakdown
 
@@ -35,6 +35,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-13 11:51 — 0168b03..ce9f784
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No implementation closes in range. Follow-up review/task commits only (`chore(qa)` and `chore(test-review)`). |
+| Codex | 3 | 0 | Closed `red-cell-c2-1hlw` (credential-line false positive fix), `red-cell-c2-1ob9` (credential extraction heuristic tests), and `red-cell-c2-2maa` (operator WebSocket max message size cap). Also claimed `red-cell-c2-x86m`, but no committed fix for it landed in this range. No defects found in the reviewed commits. |
+| Cursor | 0 | 0 | No activity in reviewed commits. |
+
+Build: **passed** — clean detached-worktree verification at `ce9f784` passed `cargo check --workspace`, `cargo clippy --workspace -- -D warnings`, and `cargo test --workspace` (745 tests, 0 failures).
 
 ### QA Review — 2026-03-13 10:20 — dda87b9..51f4ef2
 

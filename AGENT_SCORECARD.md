@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 6 | 165 | 31 |
+| Tasks closed | 6 | 168 | 31 |
 | Bugs filed against | 0 | 21 | 9 |
 | Bug rate (bugs/task) | 0.00 | 0.13 | 0.29 |
 | Quality score | 100% | 87% | 71% |
@@ -35,6 +35,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-13 10:20 — dda87b9..51f4ef2
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | QA/arch review runs only — no implementation commits. |
+| Codex | 3 | 0 | Closed `red-cell-c2-ktpf` (reject overflow kill_date — beads-only close, code landed prior), `red-cell-c2-1e2s` (fix `SocksServerHandle::port()` error propagation — no silent `unwrap_or(0)`, returns `Result`; callers updated; 2 tests added), `red-cell-c2-2puf` (AES-CTR rotation test — verifies CTR offset resets to 0 after CHECKIN, post-rotation ciphertext uses new key at block 0, comprehensive round-trip checks). No defects found. |
+| Cursor | 0 | 0 | No activity in reviewed commits. |
+
+Build: **passed** — `cargo check`, `cargo clippy -D warnings`, and `cargo test` all pass cleanly. 490 tests total across all crates, 0 failures.
 
 ### Arch Review — 2026-03-13 10:05
 

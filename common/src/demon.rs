@@ -765,6 +765,43 @@ mod tests {
     }
 
     #[test]
+    fn demon_package_encoded_len_reports_header_size_for_empty_payload() {
+        let package = DemonPackage::new(DemonCommand::CommandNoJob, 99, Vec::new());
+
+        assert_eq!(package.encoded_len(), 12);
+    }
+
+    #[test]
+    fn demon_package_encoded_len_matches_encoded_buffer_for_non_empty_payload() {
+        let package =
+            DemonPackage::new(DemonCommand::CommandCheckin, 0x1234_5678, vec![0xaa, 0xbb, 0xcc]);
+
+        let bytes = package.to_bytes().expect("package should encode");
+
+        assert_eq!(package.encoded_len(), bytes.len());
+        assert_eq!(package.encoded_len(), 12 + package.payload.len());
+    }
+
+    #[test]
+    fn demon_package_encoded_len_matches_large_payload_and_message_aggregation() {
+        let payload: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
+        let package = DemonPackage::new(DemonCommand::CommandSocket, 0x0bad_f00d, payload.clone());
+        let message = DemonMessage::new(vec![
+            DemonPackage::new(DemonCommand::CommandGetJob, 7, Vec::new()),
+            package.clone(),
+        ]);
+
+        let package_bytes = package.to_bytes().expect("package should encode");
+        let message_bytes = message.to_bytes().expect("message should encode");
+        let expected_message_len: usize =
+            message.packages.iter().map(DemonPackage::encoded_len).sum();
+
+        assert_eq!(package.encoded_len(), 12 + payload.len());
+        assert_eq!(package.encoded_len(), package_bytes.len());
+        assert_eq!(message_bytes.len(), expected_message_len);
+    }
+
+    #[test]
     fn demon_package_rejects_trailing_bytes() {
         let bytes =
             [0x5c, 0x00, 0x00, 0x00, 0x78, 0x56, 0x34, 0x12, 0x01, 0x00, 0x00, 0x00, 0xaa, 0xbb];

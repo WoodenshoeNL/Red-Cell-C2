@@ -22,8 +22,8 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests | 1 | 5 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
 | Protocol errors | 3 | 17 | 3 |
-| Security issues | 2 | 20 | 0 |
-| Architecture drift | 1 | 15 | 0 |
+| Security issues | 2 | 21 | 0 |
+| Architecture drift | 1 | 17 | 0 |
 | Memory / resource leaks | 0 | 8 | 1 |
 | Startup / lifecycle regressions | 0 | 8 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
@@ -35,6 +35,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-13 10:05
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 0 | — | No new agent-attributed findings |
+| Codex | 3 | Security issues, Architecture drift | red-cell-c2-23zy: invalid REST API keys bypass rate limiting; red-cell-c2-jowu: `AgentRegistry` transport setters mutate memory before SQLite commit; red-cell-c2-2qvk: teamserver control-plane TLS cert rotates every restart |
+| Cursor | 0 | — | No new agent-attributed findings |
+
+Overall codebase health: drifting
+Biggest blindspot: control-plane hardening still breaks down on non-happy paths — invalid API authentication is unthrottled, transport state setters are not persistence-safe on write failure, and the teamserver still lacks a durable TLS identity for the operator channel.
 
 ### QA Review — 2026-03-13 10:00 — 8b18663..9b8c68e
 

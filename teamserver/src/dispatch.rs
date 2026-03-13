@@ -7966,15 +7966,24 @@ mod tests {
 
         client.write_all(&[5, 1, 0, 1, 127, 0, 0, 1, 0x1F, 0x90]).await?;
 
-        let socket_id = loop {
-            let queued = registry.queued_jobs(0x1234_5678).await?;
-            if let Some(job) = queued.iter().find(|job| job.command_line == "socket connect") {
-                let socket_id =
-                    u32::from_le_bytes(job.payload[4..8].try_into().map_err(|_| "socket id")?);
-                break socket_id;
+        let socket_id = timeout(Duration::from_secs(5), async {
+            loop {
+                let queued = registry.queued_jobs(0x1234_5678).await?;
+                if let Some(job) = queued.iter().find(|job| job.command_line == "socket connect") {
+                    let socket_id =
+                        u32::from_le_bytes(job.payload[4..8].try_into().map_err(|_| "socket id")?);
+                    return Ok::<u32, Box<dyn std::error::Error>>(socket_id);
+                }
+                tokio::task::yield_now().await;
             }
-            tokio::task::yield_now().await;
-        };
+        })
+        .await
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "timed out waiting for socket connect job to be queued",
+            )
+        })??;
 
         let mut connect = Vec::new();
         add_u32(&mut connect, u32::from(DemonSocketCommand::Connect));

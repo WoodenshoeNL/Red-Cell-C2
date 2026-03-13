@@ -203,4 +203,121 @@ mod tests {
 
         assert_eq!(config.resolved_scripts_dir(), Some(PathBuf::from("/tmp/client-scripts")));
     }
+
+    // Mutex to serialize tests that share the platform config file.  These
+    // tests write to (and restore) the real config path, so they must not run
+    // concurrently with each other.
+    static CONFIG_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Returns the resolved config file path used by the public API, replicating
+    /// the private `config_file_path()` logic so tests can set up/tear down the
+    /// file without going through the production helpers.
+    fn resolved_config_path() -> Option<std::path::PathBuf> {
+        dirs::config_dir().map(|d| d.join(APP_DIR_NAME).join(CONFIG_FILE_NAME))
+    }
+
+    /// Exercise the full public `save()` → `load()` chain using the platform
+    /// config path.  Skips on platforms where no config directory is resolvable.
+    #[test]
+    fn public_save_and_load_round_trip() {
+        let _guard = CONFIG_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+        let Some(config_path) = resolved_config_path() else {
+            // No config directory on this platform — skip rather than fail.
+            return;
+        };
+
+        // Back up whatever is already at this path so we leave the system clean.
+        let backup = fs::read(&config_path).ok();
+
+        let config = LocalConfig {
+            server_url: Some("wss://10.0.0.1:40056/havoc/".to_owned()),
+            username: Some("operator".to_owned()),
+            scripts_dir: None,
+            ca_cert: None,
+            cert_fingerprint: None,
+        };
+
+        config.save();
+        let loaded = LocalConfig::load();
+
+        // Restore: put the original file back (or remove the one we created).
+        match backup {
+            Some(data) => {
+                let _ = fs::write(&config_path, data);
+            }
+            None => {
+                let _ = fs::remove_file(&config_path);
+            }
+        }
+
+        assert_eq!(loaded, config);
+    }
+
+    /// When the resolved config file contains invalid TOML, `load()` must
+    /// return `LocalConfig::default()` rather than panicking.
+    #[test]
+    fn public_load_returns_default_for_invalid_toml() {
+        let _guard = CONFIG_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+        let Some(config_path) = resolved_config_path() else {
+            // No config directory on this platform — skip rather than fail.
+            return;
+        };
+
+        // Back up whatever is already at this path.
+        let backup = fs::read(&config_path).ok();
+
+        // Create parent dirs then write malformed TOML.
+        if let Some(parent) = config_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        fs::write(&config_path, "server_url = [")
+            .unwrap_or_else(|e| panic!("should write invalid toml: {e}"));
+
+        let loaded = LocalConfig::load();
+
+        // Restore.
+        match backup {
+            Some(data) => {
+                let _ = fs::write(&config_path, data);
+            }
+            None => {
+                let _ = fs::remove_file(&config_path);
+            }
+        }
+
+        assert_eq!(loaded, LocalConfig::default());
+    }
+
+    /// `save()` must complete without panicking regardless of whether a config
+    /// directory is available.  When `dirs::config_dir()` returns `None` the
+    /// call is a documented silent no-op; when it returns `Some` it must also
+    /// not panic on success.  Either path is exercised here depending on the
+    /// host environment.
+    #[test]
+    fn public_save_does_not_panic() {
+        let _guard = CONFIG_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+        let config_path = resolved_config_path();
+        let backup = config_path.as_deref().and_then(|p| fs::read(p).ok());
+
+        let config = LocalConfig {
+            server_url: Some("wss://10.0.0.1:40056/havoc/".to_owned()),
+            ..LocalConfig::default()
+        };
+        config.save(); // must not panic regardless of whether a config dir exists
+
+        // Restore if we wrote anything.
+        if let Some(path) = &config_path {
+            match backup {
+                Some(data) => {
+                    let _ = fs::write(path, data);
+                }
+                None => {
+                    let _ = fs::remove_file(path);
+                }
+            }
+        }
+    }
 }

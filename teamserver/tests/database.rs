@@ -209,6 +209,53 @@ async fn operator_repository_rejects_duplicate_usernames_without_mutating_existi
 }
 
 #[tokio::test]
+async fn operator_repository_updates_password_verifier_for_existing_runtime_operator()
+-> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let repository = database.operators();
+    let operator = PersistedOperator {
+        username: "trinity".to_owned(),
+        password_verifier: "abc123".to_owned(),
+        role: OperatorRole::Analyst,
+    };
+
+    repository.create(&operator).await?;
+    repository.update_password_verifier(&operator.username, "updated-verifier").await?;
+
+    assert_eq!(
+        repository.get(&operator.username).await?,
+        Some(PersistedOperator {
+            username: operator.username,
+            password_verifier: "updated-verifier".to_owned(),
+            role: operator.role,
+        })
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn operator_repository_update_password_verifier_is_a_noop_for_missing_operator()
+-> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let repository = database.operators();
+    let existing = PersistedOperator {
+        username: "neo".to_owned(),
+        password_verifier: "keep-me".to_owned(),
+        role: OperatorRole::Operator,
+    };
+
+    repository.create(&existing).await?;
+    repository.update_password_verifier("missing", "new-verifier").await?;
+
+    assert_eq!(repository.get("missing").await?, None);
+    assert_eq!(repository.get(&existing.username).await?, Some(existing.clone()));
+    assert_eq!(repository.list().await?, vec![existing]);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn agent_repository_supports_crud_and_status_updates() -> Result<(), TeamserverError> {
     let database = test_database().await?;
     let repository = database.agents();
@@ -370,6 +417,66 @@ async fn listener_repository_supports_crud_queries() -> Result<(), TeamserverErr
 
     repository.delete(listener.name()).await?;
     assert_eq!(repository.count().await?, 0);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn listener_repository_set_state_updates_runtime_fields_without_rewriting_config()
+-> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let repository = database.listeners();
+    let listener = sample_listener();
+
+    repository.create(&listener).await?;
+    repository.set_state(listener.name(), ListenerStatus::Error, Some("bind failed")).await?;
+
+    let stored =
+        repository.get(listener.name()).await?.expect("listener should exist after set_state");
+    assert_eq!(stored.config, listener);
+    assert_eq!(
+        stored.state,
+        PersistedListenerState {
+            status: ListenerStatus::Error,
+            last_error: Some("bind failed".to_owned()),
+        }
+    );
+
+    repository.set_state(listener.name(), ListenerStatus::Running, None).await?;
+
+    let stored = repository
+        .get(listener.name())
+        .await?
+        .expect("listener should exist after clearing last_error");
+    assert_eq!(stored.config, listener);
+    assert_eq!(
+        stored.state,
+        PersistedListenerState { status: ListenerStatus::Running, last_error: None }
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn listener_repository_set_state_is_a_noop_for_missing_listener()
+-> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let repository = database.listeners();
+    let existing = sample_listener();
+
+    repository.create(&existing).await?;
+    repository.set_state("missing-listener", ListenerStatus::Stopped, Some("offline")).await?;
+
+    assert_eq!(repository.get("missing-listener").await?, None);
+    assert_eq!(
+        repository.get(existing.name()).await?,
+        Some(PersistedListener {
+            name: existing.name().to_owned(),
+            protocol: existing.protocol(),
+            config: existing.clone(),
+            state: PersistedListenerState { status: ListenerStatus::Created, last_error: None },
+        })
+    );
 
     Ok(())
 }

@@ -190,13 +190,16 @@ fn parse_timestamp(value: &str) -> Option<OffsetDateTime> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use red_cell_common::AgentEncryptionInfo;
     use red_cell_common::config::Profile;
     use red_cell_common::operator::OperatorMessage;
+    use tokio::time::timeout;
 
     use super::{
-        AgentLivenessConfig, collect_stale_agents, mark_stale_agent_if_unchanged,
-        sweep_dead_agents_at,
+        AgentLivenessConfig, AgentLivenessMonitor, collect_stale_agents,
+        mark_stale_agent_if_unchanged, spawn_agent_liveness_monitor, sweep_dead_agents_at,
     };
     use crate::{AgentRegistry, Database, EventBus, SocketRelayManager, TeamserverError};
 
@@ -231,6 +234,137 @@ mod tests {
             first_call_in: "2026-03-10T10:00:00Z".to_owned(),
             last_call_in: "2026-03-10T10:00:00Z".to_owned(),
         }
+    }
+
+    fn sample_profile(agent_timeout_secs: Option<u64>, demon_sleep_secs: u64) -> Profile {
+        let timeout_line = agent_timeout_secs
+            .map(|secs| format!("  AgentTimeoutSecs = {secs}\n"))
+            .unwrap_or_default();
+        let profile = format!(
+            r#"
+            Teamserver {{
+              Host = "127.0.0.1"
+              Port = 40056
+            {timeout_line}}}
+
+            Operators {{
+              user "neo" {{
+                Password = "password1234"
+              }}
+            }}
+
+            Demon {{
+              Sleep = {demon_sleep_secs}
+            }}
+            "#
+        );
+
+        Profile::parse(&profile).expect("profile should parse")
+    }
+
+    async fn shutdown_monitor(mut monitor: AgentLivenessMonitor) {
+        if let Some(shutdown) = monitor.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+
+        let task = std::mem::replace(&mut monitor.task, tokio::spawn(async {}));
+        let result = task.await;
+        assert!(result.is_ok(), "monitor task should exit cleanly");
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_liveness_monitor_starts_and_shuts_down_cleanly()
+    -> Result<(), TeamserverError> {
+        let profile = sample_profile(None, 5);
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database);
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+
+        let monitor = spawn_agent_liveness_monitor(registry, sockets, events, &profile);
+        tokio::task::yield_now().await;
+
+        assert!(!monitor.task.is_finished());
+        assert!(monitor.shutdown.is_some());
+        shutdown_monitor(monitor).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_liveness_monitor_handles_aggressive_timing_profile()
+    -> Result<(), TeamserverError> {
+        let profile = sample_profile(Some(1), 1);
+        let config = AgentLivenessConfig::from_profile(&profile);
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database);
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+
+        let monitor = spawn_agent_liveness_monitor(registry, sockets, events, &profile);
+        tokio::task::yield_now().await;
+
+        assert_eq!(config.sweep_interval, Duration::from_secs(1));
+        assert!(!monitor.task.is_finished());
+
+        shutdown_monitor(monitor).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_liveness_monitor_marks_stale_agents_dead_and_emits_side_effects()
+    -> Result<(), TeamserverError> {
+        let profile = sample_profile(None, 5);
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent = sample_agent(0xC0DE_CAFE);
+        registry.insert(agent.clone()).await?;
+        sockets.add_socks_server(agent.agent_id, "0").await.map_err(|error| {
+            TeamserverError::InvalidPersistedValue {
+                field: "socket_relay",
+                message: error.to_string(),
+            }
+        })?;
+        let mut receiver = events.subscribe();
+
+        let monitor = spawn_agent_liveness_monitor(
+            registry.clone(),
+            sockets.clone(),
+            events.clone(),
+            &profile,
+        );
+
+        let event = timeout(Duration::from_secs(1), receiver.recv()).await.map_err(|_| {
+            TeamserverError::InvalidPersistedValue {
+                field: "operator_event",
+                message: "timed out waiting for dead-agent event".to_owned(),
+            }
+        })?;
+        let event = event.ok_or(TeamserverError::InvalidPersistedValue {
+            field: "operator_event",
+            message: "missing dead-agent event".to_owned(),
+        })?;
+
+        let stored = registry
+            .get(agent.agent_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?;
+        assert!(!stored.active);
+        assert_eq!(stored.reason, "agent timed out after 15 seconds without callback");
+        assert_eq!(sockets.list_socks_servers(agent.agent_id).await, "No active SOCKS5 servers");
+
+        let OperatorMessage::AgentUpdate(message) = event else {
+            return Err(TeamserverError::InvalidPersistedValue {
+                field: "operator_event",
+                message: "expected AgentUpdate event".to_owned(),
+            });
+        };
+        assert_eq!(message.info.agent_id, "C0DECAFE");
+        assert_eq!(message.info.marked, "Dead");
+
+        shutdown_monitor(monitor).await;
+        Ok(())
     }
 
     #[tokio::test]

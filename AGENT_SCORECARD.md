@@ -10,9 +10,9 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 7 | 181 | 31 |
-| Bugs filed against | 1 | 27 | 9 |
-| Bug rate (bugs/task) | 0.14 | 0.15 | 0.29 |
-| Quality score | 100% | 85% | 71% |
+| Bugs filed against | 2 | 27 | 9 |
+| Bug rate (bugs/task) | 0.29 | 0.15 | 0.29 |
+| Quality score | 71% | 85% | 71% |
 
 ## Violation Breakdown
 
@@ -29,7 +29,7 @@ Each loop run updates the running totals and appends a review entry.
 | Audit attribution errors | 0 | 1 | 0 |
 | Availability / timeout regressions | 0 | 4 | 0 |
 | Correctness / pagination | 0 | 0 | 1 |
-| Workflow / close-hygiene | 1 | 0 | 0 |
+| Workflow / close-hygiene | 2 | 0 | 0 |
 
 ---
 
@@ -1121,3 +1121,14 @@ Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnin
 | Cursor | 0 | 0 | No activity in reviewed commits. |
 
 Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`, `cargo test --workspace` — 107 tests, 0 failed)
+
+### QA Review — 2026-03-14 14:25 — 446ae04..08aff95
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 1 | Arch-review, test-review scan (31 new test-quality tasks filed), ID normalization. Filed `red-cell-c2-klso` (P2): fix for `red-cell-c2-3qq0` implemented but left uncommitted in git stash — workflow violation by Ubuntu-C2-dev02-claude. |
+| Codex | 0 | 0 | No activity this run. |
+| Cursor | 0 | 0 | No activity this run. |
+
+Build: passed (`cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓; `cargo test` skipped — no Rust source changes in committed range)
+Notes: Reviewed 10 commits from `446ae04` to `08aff95`. No Rust source changes in committed state. Activity was exclusively review/bookkeeping: arch-review loop filed 6 issues; test-review loop filed 31 test-quality tasks scanning the entire teamserver test suite; two ID-normalization commits fixed mismatched `red-` prefixes in issues.jsonl; one claim commit for `red-cell-c2-3qq0` (Ubuntu-C2-dev02-claude). The actual fix for `red-cell-c2-3qq0` (all-zero AES IV rejection in `parse_init_agent` + regression test) is present but stranded in `git stash` — filed `red-cell-c2-klso` as P2 workflow bug and blocked `red-cell-c2-3qq0` on it. Two P1 security issues remain open: `red-cell-c2-3qq0` (DEMON_INIT IV check, fix ready in stash) and `red-cell-c2-bfih` (CHECKIN IV check, not started). Recommend prioritizing both before any new features.

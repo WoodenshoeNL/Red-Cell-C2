@@ -1683,6 +1683,35 @@ mod tests {
     }
 
     #[test]
+    fn agent_update_for_unknown_agent_creates_stub_entry() {
+        // AgentUpdate arrives before AgentNew (e.g. after reconnect before snapshot).
+        // The fallback path must create a minimal stub with a normalised name_id and
+        // correct status, and emit an AgentCheckin event.
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+        assert!(state.agents.is_empty());
+
+        let events = state.apply_operator_message(OperatorMessage::AgentUpdate(Message {
+            head: head(EventCode::Session),
+            info: AgentUpdateInfo {
+                agent_id: "abcd1234".to_owned(), // lowercase / un-normalised
+                marked: "Dead".to_owned(),
+            },
+        }));
+
+        assert_eq!(state.agents.len(), 1, "stub agent should be created");
+        assert_eq!(
+            state.agents[0].name_id, "ABCD1234",
+            "name_id must be the normalised (uppercase) agent ID"
+        );
+        assert_eq!(state.agents[0].status, "Dead", "stub status must match the marked field");
+        assert_eq!(
+            events,
+            vec![AppEvent::AgentCheckin("ABCD1234".to_owned())],
+            "AgentCheckin event must be emitted for the normalised ID"
+        );
+    }
+
+    #[test]
     fn agent_remove_drops_matching_agent() {
         let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
         state.agents.push(AgentSummary {

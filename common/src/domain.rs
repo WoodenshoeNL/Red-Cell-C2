@@ -19,8 +19,6 @@ pub enum ListenerProtocol {
     Http,
     /// SMB pivot transport.
     Smb,
-    /// External connector transport.
-    External,
     /// DNS C2 transport.
     Dns,
 }
@@ -33,7 +31,6 @@ impl ListenerProtocol {
                 Ok(Self::Http)
             }
             value if value.eq_ignore_ascii_case("smb") => Ok(Self::Smb),
-            value if value.eq_ignore_ascii_case("external") => Ok(Self::External),
             value if value.eq_ignore_ascii_case("dns") => Ok(Self::Dns),
             _ => Err(CommonError::UnsupportedListenerProtocol { protocol: protocol.to_string() }),
         }
@@ -45,7 +42,6 @@ impl ListenerProtocol {
         match self {
             Self::Http => "http",
             Self::Smb => "smb",
-            Self::External => "external",
             Self::Dns => "dns",
         }
     }
@@ -172,15 +168,6 @@ pub struct SmbListenerConfig {
     pub working_hours: Option<String>,
 }
 
-/// Shared external connector listener configuration.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct ExternalListenerConfig {
-    /// Listener display name.
-    pub name: String,
-    /// External service endpoint.
-    pub endpoint: String,
-}
-
 /// Shared DNS C2 listener configuration.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct DnsListenerConfig {
@@ -216,8 +203,6 @@ pub enum ListenerConfig {
     Http(Box<HttpListenerConfig>),
     /// SMB pivot listener settings.
     Smb(SmbListenerConfig),
-    /// External connector listener settings.
-    External(ExternalListenerConfig),
     /// DNS C2 listener settings.
     Dns(DnsListenerConfig),
 }
@@ -229,7 +214,6 @@ impl ListenerConfig {
         match self {
             Self::Http(config) => &config.name,
             Self::Smb(config) => &config.name,
-            Self::External(config) => &config.name,
             Self::Dns(config) => &config.name,
         }
     }
@@ -240,7 +224,6 @@ impl ListenerConfig {
         match self {
             Self::Http(_) => ListenerProtocol::Http,
             Self::Smb(_) => ListenerProtocol::Smb,
-            Self::External(_) => ListenerProtocol::External,
             Self::Dns(_) => ListenerProtocol::Dns,
         }
     }
@@ -255,12 +238,6 @@ impl From<HttpListenerConfig> for ListenerConfig {
 impl From<SmbListenerConfig> for ListenerConfig {
     fn from(config: SmbListenerConfig) -> Self {
         Self::Smb(config)
-    }
-}
-
-impl From<ExternalListenerConfig> for ListenerConfig {
-    fn from(config: ExternalListenerConfig) -> Self {
-        Self::External(config)
     }
 }
 
@@ -608,9 +585,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        AgentRecord, DnsListenerConfig, ExternalListenerConfig, HttpListenerConfig,
-        HttpListenerProxyConfig, HttpListenerResponseConfig, ListenerConfig, ListenerProtocol,
-        ListenerTlsConfig, OperatorInfo, SmbListenerConfig,
+        AgentRecord, DnsListenerConfig, HttpListenerConfig, HttpListenerProxyConfig,
+        HttpListenerResponseConfig, ListenerConfig, ListenerProtocol, ListenerTlsConfig,
+        OperatorInfo, SmbListenerConfig,
     };
     use crate::error::CommonError;
 
@@ -619,7 +596,6 @@ mod tests {
         assert_eq!(ListenerProtocol::try_from_str("Http")?, ListenerProtocol::Http);
         assert_eq!(ListenerProtocol::try_from_str("Https")?, ListenerProtocol::Http);
         assert_eq!(ListenerProtocol::try_from_str("SMB")?, ListenerProtocol::Smb);
-        assert_eq!(ListenerProtocol::try_from_str("External")?, ListenerProtocol::External);
         Ok(())
     }
 
@@ -637,6 +613,16 @@ mod tests {
         assert_eq!(
             error,
             CommonError::UnsupportedListenerProtocol { protocol: "quic".to_string() }
+        );
+    }
+
+    #[test]
+    fn listener_protocol_rejects_external_until_runtime_exists() {
+        let error =
+            ListenerProtocol::try_from_str("external").expect_err("external is not yet supported");
+        assert_eq!(
+            error,
+            CommonError::UnsupportedListenerProtocol { protocol: "external".to_string() }
         );
     }
 
@@ -881,19 +867,6 @@ mod tests {
         assert_eq!(info.password_hash.as_deref(), Some("abc123"));
         assert_eq!(info.role.as_deref(), Some("admin"));
         assert!(info.online);
-        Ok(())
-    }
-
-    #[test]
-    fn external_listener_round_trips() -> Result<(), Box<dyn std::error::Error>> {
-        let original = ListenerConfig::from(ExternalListenerConfig {
-            name: "service-bridge".to_string(),
-            endpoint: "127.0.0.1:7443".to_string(),
-        });
-
-        let encoded = serde_json::to_value(&original)?;
-        let decoded: ListenerConfig = serde_json::from_value(encoded)?;
-        assert_eq!(decoded, original);
         Ok(())
     }
 

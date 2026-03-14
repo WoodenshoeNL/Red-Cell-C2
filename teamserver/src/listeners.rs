@@ -32,8 +32,8 @@ use red_cell_common::tls::{
     TlsKeyAlgorithm, install_default_crypto_provider, resolve_tls_identity,
 };
 use red_cell_common::{
-    DnsListenerConfig, ExternalListenerConfig, HttpListenerConfig, HttpListenerProxyConfig,
-    HttpListenerResponseConfig, ListenerConfig, ListenerProtocol, SmbListenerConfig,
+    DnsListenerConfig, HttpListenerConfig, HttpListenerProxyConfig, HttpListenerResponseConfig,
+    ListenerConfig, ListenerProtocol, SmbListenerConfig,
 };
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -297,23 +297,6 @@ impl ListenerSummary {
                     config.working_hours.as_deref(),
                 );
             }
-            ListenerConfig::External(config) => {
-                info.extra.insert("Host".to_owned(), serde_json::Value::String(String::new()));
-                info.extra.insert("Port".to_owned(), serde_json::Value::String(String::new()));
-                info.extra
-                    .insert("Info".to_owned(), serde_json::Value::String(config.endpoint.clone()));
-                info.extra.insert(
-                    "Error".to_owned(),
-                    self.state.last_error.clone().map_or_else(
-                        || serde_json::Value::String(String::new()),
-                        serde_json::Value::String,
-                    ),
-                );
-                info.extra.insert(
-                    "Endpoint".to_owned(),
-                    serde_json::Value::String(config.endpoint.clone()),
-                );
-            }
             ListenerConfig::Dns(config) => {
                 info.extra
                     .insert("Host".to_owned(), serde_json::Value::String(config.host_bind.clone()));
@@ -528,7 +511,6 @@ impl ListenerManager {
         config: ListenerConfig,
     ) -> Result<ListenerSummary, ListenerManagerError> {
         let repository = self.repository();
-        ensure_listener_creation_supported(&config)?;
 
         if repository.exists(config.name()).await? {
             return Err(ListenerManagerError::DuplicateListener { name: config.name().to_owned() });
@@ -553,7 +535,6 @@ impl ListenerManager {
         config: ListenerConfig,
     ) -> Result<ListenerSummary, ListenerManagerError> {
         let repository = self.repository();
-        ensure_listener_creation_supported(&config)?;
         let existing = repository.get(config.name()).await?.ok_or_else(|| {
             ListenerManagerError::ListenerNotFound { name: config.name().to_owned() }
         })?;
@@ -662,7 +643,6 @@ impl ListenerManager {
             if listener.state.status == ListenerStatus::Running {
                 match self.start(&listener.name).await {
                     Ok(_) => {}
-                    Err(error) if is_ignored_restore_start_failure(&listener.config, &error) => {}
                     Err(error) => return Err(error),
                 }
             }
@@ -1028,10 +1008,6 @@ pub fn listener_config_from_operator(
             kill_date: optional_extra_string(info, EXTRA_KILL_DATE),
             working_hours: optional_extra_string(info, EXTRA_WORKING_HOURS),
         })),
-        Ok(ListenerProtocol::External) => Ok(ListenerConfig::from(ExternalListenerConfig {
-            name: name.to_owned(),
-            endpoint: required_extra_string(info, "Endpoint")?,
-        })),
         Ok(ListenerProtocol::Dns) => Ok(ListenerConfig::from(DnsListenerConfig {
             name: name.to_owned(),
             host_bind: info
@@ -1205,12 +1181,6 @@ fn profile_listener_configs(profile: &Profile) -> Vec<ListenerConfig> {
             pipe_name: config.pipe_name,
             kill_date: config.kill_date,
             working_hours: config.working_hours,
-        })
-    }));
-    listeners.extend(profile.listeners.external.iter().cloned().map(|config| {
-        ListenerConfig::from(ExternalListenerConfig {
-            name: config.name,
-            endpoint: config.endpoint,
         })
     }));
     listeners.extend(profile.listeners.dns.iter().cloned().map(|config| {
@@ -1763,7 +1733,6 @@ impl ListenerManager {
                 )
                 .await
             }
-            ListenerConfig::External(config) => Err(unsupported_external_listener_error(config)),
             ListenerConfig::Dns(config) => {
                 spawn_dns_listener_runtime(
                     config,
@@ -1787,43 +1756,6 @@ impl ListenerManager {
             self.active_handles.clone(),
         ))
     }
-}
-
-fn ensure_listener_creation_supported(config: &ListenerConfig) -> Result<(), ListenerManagerError> {
-    match config {
-        ListenerConfig::External(config) => {
-            return Err(ListenerManagerError::InvalidConfig {
-                message: external_listener_unsupported_message(&config.name),
-            });
-        }
-        ListenerConfig::Http(_) | ListenerConfig::Smb(_) | ListenerConfig::Dns(_) => {}
-    }
-
-    Ok(())
-}
-
-fn is_ignored_restore_start_failure(config: &ListenerConfig, error: &ListenerManagerError) -> bool {
-    matches!(
-        (config, error),
-        (ListenerConfig::External(_), ListenerManagerError::StartFailed { .. })
-    )
-}
-
-fn unsupported_external_listener_error(config: &ExternalListenerConfig) -> ListenerManagerError {
-    ListenerManagerError::StartFailed {
-        name: config.name.clone(),
-        message: format!(
-            "{}; endpoint `{}` cannot be started",
-            external_listener_unsupported_message(&config.name),
-            config.endpoint
-        ),
-    }
-}
-
-fn external_listener_unsupported_message(name: &str) -> String {
-    format!(
-        "external/service bridge listener `{name}` is not supported yet; remove it from the active Red Cell listener surface"
-    )
 }
 
 // ── DNS C2 Listener ──────────────────────────────────────────────────────────
@@ -3129,9 +3061,8 @@ mod tests {
     use red_cell_common::demon::{DemonCommand, DemonEnvelope, DemonMessage};
     use red_cell_common::operator::{ListenerInfo, OperatorMessage};
     use red_cell_common::{
-        DnsListenerConfig, ExternalListenerConfig, HttpListenerConfig, HttpListenerProxyConfig,
-        HttpListenerResponseConfig, ListenerConfig, ListenerProtocol, ListenerTlsConfig,
-        SmbListenerConfig,
+        DnsListenerConfig, HttpListenerConfig, HttpListenerProxyConfig, HttpListenerResponseConfig,
+        ListenerConfig, ListenerProtocol, ListenerTlsConfig, SmbListenerConfig,
     };
     use reqwest::Client;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -3197,13 +3128,6 @@ mod tests {
             pipe_name: pipe_name.to_owned(),
             kill_date: None,
             working_hours: None,
-        })
-    }
-
-    fn external_listener(name: &str, endpoint: &str) -> ListenerConfig {
-        ListenerConfig::from(ExternalListenerConfig {
-            name: name.to_owned(),
-            endpoint: endpoint.to_owned(),
         })
     }
 
@@ -3494,25 +3418,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_rejects_external_listener_until_runtime_support_exists()
-    -> Result<(), ListenerManagerError> {
-        let manager = manager().await?;
-        let error = manager
-            .create(external_listener("external", "svc"))
-            .await
-            .expect_err("external listener should be rejected");
-
-        assert!(matches!(error, ListenerManagerError::InvalidConfig { .. }));
-        assert!(error.to_string().contains("not supported yet"), "unexpected error: {error}");
-        assert!(matches!(
-            manager.summary("external").await,
-            Err(ListenerManagerError::ListenerNotFound { .. })
-        ));
-
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn create_accepts_dns_listener_config() -> Result<(), ListenerManagerError> {
         let manager = manager().await?;
         let summary =
@@ -3582,26 +3487,6 @@ mod tests {
         assert!(manager.active_handles.read().await.contains_key("dns-restore"));
 
         manager.stop("dns-restore").await?;
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn restore_running_marks_external_listener_as_error() -> Result<(), ListenerManagerError>
-    {
-        let manager = manager().await?;
-        let repository = manager.repository();
-        repository.create(&external_listener("external", "svc")).await?;
-        repository.set_state("external", ListenerStatus::Running, None).await?;
-
-        manager.restore_running().await?;
-        let summary = manager.summary("external").await?;
-
-        assert_eq!(summary.state.status, ListenerStatus::Error);
-        assert!(summary.state.last_error.as_deref().is_some_and(|message| {
-            message.contains("not supported yet") && message.contains("svc")
-        }));
-        assert!(!manager.active_handles.read().await.contains_key("external"));
 
         Ok(())
     }

@@ -786,7 +786,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_profile_rejects_external_listener_profiles() {
+    async fn sync_profile_ignores_external_listener_configs() {
+        // External listeners are rejected by profile.validate() before sync_profile is
+        // ever reached in production.  If an unvalidated profile somehow contains External
+        // entries, sync_profile must silently skip them rather than panicking or persisting
+        // an unsupported config.
         let profile = Profile::parse(
             r#"
             Teamserver {
@@ -818,13 +822,15 @@ mod tests {
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
         let listeners = ListenerManager::new(database, registry, events, sockets, None);
 
-        let error = listeners
+        listeners
             .sync_profile(&profile)
             .await
-            .expect_err("external listeners should be rejected");
+            .expect("sync_profile must succeed when External entries are silently skipped");
 
-        assert!(matches!(error, ListenerManagerError::InvalidConfig { .. }));
-        assert!(error.to_string().contains("not supported yet"));
+        assert!(
+            listeners.summary("external").await.is_err(),
+            "no External listener should have been persisted"
+        );
     }
 
     #[tokio::test]

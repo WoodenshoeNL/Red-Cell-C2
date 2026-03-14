@@ -971,7 +971,6 @@ struct ApiInfoResponse {
             red_cell_common::ListenerProtocol,
             red_cell_common::HttpListenerConfig,
             red_cell_common::SmbListenerConfig,
-            red_cell_common::ExternalListenerConfig,
             red_cell_common::DnsListenerConfig,
             red_cell_common::ListenerTlsConfig,
             red_cell_common::HttpListenerResponseConfig,

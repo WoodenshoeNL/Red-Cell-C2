@@ -606,11 +606,6 @@ fn pack_config(
     match listener {
         ListenerConfig::Http(http) => pack_http_listener(&mut out, http)?,
         ListenerConfig::Smb(smb) => pack_smb_listener(&mut out, smb)?,
-        ListenerConfig::External(_) => {
-            return Err(PayloadBuildError::InvalidRequest {
-                message: "External listeners are not supported for Demon payload builds".to_owned(),
-            });
-        }
         ListenerConfig::Dns(_) => {
             return Err(PayloadBuildError::InvalidRequest {
                 message: "DNS listeners are not supported for Demon payload builds".to_owned(),
@@ -716,11 +711,6 @@ fn build_defines(
     match listener.protocol() {
         ListenerProtocol::Http => defines.push("TRANSPORT_HTTP".to_owned()),
         ListenerProtocol::Smb => defines.push("TRANSPORT_SMB".to_owned()),
-        ListenerProtocol::External => {
-            return Err(PayloadBuildError::InvalidRequest {
-                message: "External listeners are not supported for Demon payload builds".to_owned(),
-            });
-        }
         ListenerProtocol::Dns => {
             return Err(PayloadBuildError::InvalidRequest {
                 message: "DNS listeners are not supported for Demon payload builds".to_owned(),

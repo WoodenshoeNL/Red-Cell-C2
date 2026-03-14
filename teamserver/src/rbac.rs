@@ -612,6 +612,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authenticated_operator_extractor_rejects_empty_x_session_token_header() {
+        let auth = AuthService::from_profile(&profile()).expect("auth service should initialize");
+        let request = Request::builder()
+            .header("x-session-token", "")
+            .body(())
+            .expect("request should build");
+        let (mut parts, _) = request.into_parts();
+
+        let error = AuthenticatedOperator::from_request_parts(&mut parts, &TestState { auth })
+            .await
+            .expect_err("empty x-session-token should be rejected");
+
+        assert_eq!(error, AuthorizationError::InvalidAuthorizationHeader);
+    }
+
+    #[tokio::test]
+    async fn authenticated_operator_extractor_rejects_non_utf8_x_session_token_header() {
+        let auth = AuthService::from_profile(&profile()).expect("auth service should initialize");
+        let request = Request::builder()
+            .header("x-session-token", HeaderValue::from_bytes(b"\xFF").expect("header value"))
+            .body(())
+            .expect("request should build");
+        let (mut parts, _) = request.into_parts();
+
+        let error = AuthenticatedOperator::from_request_parts(&mut parts, &TestState { auth })
+            .await
+            .expect_err("non-utf8 x-session-token should be rejected");
+
+        assert_eq!(error, AuthorizationError::InvalidAuthorizationHeader);
+    }
+
+    #[tokio::test]
     async fn authenticated_operator_extractor_prefers_authorization_header_over_session_token() {
         let auth = AuthService::from_profile(&profile()).expect("auth service should initialize");
 

@@ -2834,6 +2834,101 @@ mod tests {
         server.abort();
     }
 
+    // --- websocket_handler direct contract tests ---
+
+    /// Happy path: `websocket_handler` increments the connection count when a socket
+    /// is upgraded, increments the authenticated count after a valid login, and
+    /// decrements both back to zero once the client closes the connection.
+    #[tokio::test]
+    async fn websocket_handler_connection_tracking_lifecycle() {
+        let state = TestState::new().await;
+        let connections = state.connections.clone();
+        let auth = state.auth.clone();
+        let (mut socket, server) = spawn_server(state).await;
+
+        // After upgrade, exactly one connection should be registered.
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if connections.connection_count().await == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("connection count should reach 1 after upgrade");
+        assert_eq!(connections.authenticated_count().await, 0);
+
+        // After a valid login, the connection should become authenticated.
+        login(&mut socket, "operator", "password1234").await;
+        assert_eq!(connections.connection_count().await, 1);
+        assert_eq!(connections.authenticated_count().await, 1);
+        assert_eq!(auth.session_count().await, 1);
+
+        // After the client closes, both counts must return to zero.
+        socket.close(None).await.expect("close should send");
+        wait_for_connection_count(&connections, 0).await;
+        assert_eq!(connections.authenticated_count().await, 0);
+        assert_eq!(auth.session_count().await, 0);
+
+        server.abort();
+    }
+
+    /// Error path: a malformed (non-JSON) first frame causes the handler to close
+    /// the socket without leaving any stale `authenticated_count` state.
+    #[tokio::test]
+    async fn websocket_handler_malformed_first_frame_leaves_no_stale_auth_count() {
+        let state = TestState::new().await;
+        let connections = state.connections.clone();
+        let (mut socket, server) = spawn_server(state).await;
+
+        // Send binary garbage as the very first frame — not a valid login message.
+        socket
+            .send(ClientMessage::Binary(b"not valid json at all \x00\xff".to_vec().into()))
+            .await
+            .expect("send should succeed");
+
+        // The server must close the connection.
+        wait_for_connection_count(&connections, 0).await;
+
+        // No authenticated session must remain.
+        assert_eq!(connections.authenticated_count().await, 0);
+
+        server.abort();
+    }
+
+    /// Edge case: a frame larger than `OPERATOR_MAX_MESSAGE_SIZE` is rejected by the
+    /// cap set inside `websocket_handler` even when the client has not yet logged in,
+    /// and the connection closes without leaving stale state.
+    #[tokio::test]
+    async fn websocket_handler_rejects_oversized_frame_before_authentication() {
+        let state = TestState::new().await;
+        let connections = state.connections.clone();
+        let (mut socket, server) = spawn_server(state).await;
+
+        // Send an oversized frame as the very first message (no prior login).
+        let oversized = "x".repeat(super::OPERATOR_MAX_MESSAGE_SIZE + 1);
+        socket
+            .send(ClientMessage::Text(oversized.into()))
+            .await
+            .expect("oversized send should succeed at the client side");
+
+        // The server must terminate the connection (close frame or transport error).
+        let frame = timeout(Duration::from_secs(5), socket.next())
+            .await
+            .expect("socket should react to oversized pre-auth frame")
+            .expect("connection should close or error");
+        assert!(
+            matches!(frame, Err(_) | Ok(ClientMessage::Close(_))),
+            "expected close or error, got {frame:?}"
+        );
+
+        wait_for_connection_count(&connections, 0).await;
+        assert_eq!(connections.authenticated_count().await, 0);
+
+        server.abort();
+    }
+
     #[tokio::test]
     async fn websocket_notifies_authenticated_clients_before_shutdown_close() {
         let state = TestState::new().await;

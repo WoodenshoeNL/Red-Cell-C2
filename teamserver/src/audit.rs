@@ -544,6 +544,28 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn audit_result_status_as_str_success() {
+        assert_eq!(AuditResultStatus::Success.as_str(), "success");
+    }
+
+    #[test]
+    fn audit_result_status_as_str_failure() {
+        assert_eq!(AuditResultStatus::Failure.as_str(), "failure");
+    }
+
+    #[test]
+    fn audit_result_status_as_str_is_lowercase_and_stable() {
+        let success = AuditResultStatus::Success.as_str();
+        let failure = AuditResultStatus::Failure.as_str();
+
+        assert_eq!(success, success.to_lowercase(), "Success label must be lowercase");
+        assert_eq!(failure, failure.to_lowercase(), "Failure label must be lowercase");
+        assert_ne!(success, failure, "Status labels must be distinct");
+        assert_eq!(success, "success");
+        assert_eq!(failure, "failure");
+    }
+
+    #[test]
     fn audit_record_extracts_structured_details() {
         let record = AuditRecord::try_from(AuditLogEntry {
             id: Some(7),

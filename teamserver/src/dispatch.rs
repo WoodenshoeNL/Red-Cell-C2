@@ -830,7 +830,7 @@ fn parse_checkin_metadata(
     let aes_iv = parser.read_fixed_bytes(16, "checkin AES IV")?;
     let parsed_agent_id = parser.read_u32("checkin agent id")?;
 
-    validate_checkin_transport_material(agent_id, &aes_key)?;
+    validate_checkin_transport_material(agent_id, &aes_key, &aes_iv)?;
 
     if parsed_agent_id != agent_id {
         return Err(CommandDispatchError::InvalidCallbackPayload {
@@ -903,6 +903,7 @@ fn parse_checkin_metadata(
 fn validate_checkin_transport_material(
     agent_id: u32,
     aes_key: &[u8],
+    aes_iv: &[u8],
 ) -> Result<(), CommandDispatchError> {
     if aes_key.iter().all(|byte| *byte == 0) {
         warn!(
@@ -912,6 +913,17 @@ fn validate_checkin_transport_material(
         return Err(CommandDispatchError::InvalidCallbackPayload {
             command_id: u32::from(DemonCommand::CommandCheckin),
             message: "all-zero AES key is not allowed".to_owned(),
+        });
+    }
+
+    if aes_iv.iter().all(|byte| *byte == 0) {
+        warn!(
+            agent_id = format_args!("0x{agent_id:08X}"),
+            "rejecting COMMAND_CHECKIN with all-zero AES IV"
+        );
+        return Err(CommandDispatchError::InvalidCallbackPayload {
+            command_id: u32::from(DemonCommand::CommandCheckin),
+            message: "all-zero AES IV is not allowed".to_owned(),
         });
     }
 
@@ -5832,6 +5844,72 @@ mod tests {
             CommandDispatchError::InvalidCallbackPayload { command_id, ref message }
                 if command_id == u32::from(DemonCommand::CommandCheckin)
                     && message == "all-zero AES key is not allowed"
+        ));
+
+        let updated = registry
+            .get(agent_id)
+            .await
+            .ok_or_else(|| "agent should remain registered after rejected checkin".to_owned())?;
+        assert_eq!(updated, original);
+        assert_eq!(registry.ctr_offset(agent_id).await?, 7);
+
+        let persisted = database
+            .agents()
+            .get(agent_id)
+            .await?
+            .ok_or_else(|| "agent should remain persisted after rejected checkin".to_owned())?;
+        assert_eq!(persisted, original);
+
+        assert!(
+            timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),
+            "rejected checkin should not broadcast updates"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_checkin_handler_rejects_all_zero_rotated_aes_iv_without_mutating_state()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database.clone(),
+            sockets,
+            None,
+        );
+        let original_key = [0x77; AGENT_KEY_LENGTH];
+        let original_iv = [0x44; AGENT_IV_LENGTH];
+        let agent_id = 0x1020_3044;
+
+        let original = sample_agent_info(agent_id, original_key, original_iv);
+        registry.insert(original.clone()).await?;
+        registry.set_ctr_offset(agent_id, 7).await?;
+
+        let error = dispatcher
+            .dispatch(
+                agent_id,
+                u32::from(DemonCommand::CommandCheckin),
+                6,
+                &sample_checkin_metadata_payload(
+                    agent_id,
+                    [0x55; AGENT_KEY_LENGTH],
+                    [0; AGENT_IV_LENGTH],
+                ),
+            )
+            .await
+            .expect_err("all-zero IV rotation must be rejected");
+
+        assert!(matches!(
+            error,
+            CommandDispatchError::InvalidCallbackPayload { command_id, ref message }
+                if command_id == u32::from(DemonCommand::CommandCheckin)
+                    && message == "all-zero AES IV is not allowed"
         ));
 
         let updated = registry

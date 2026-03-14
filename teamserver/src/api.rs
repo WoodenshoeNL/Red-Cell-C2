@@ -7,6 +7,8 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use subtle::ConstantTimeEq;
+
 use axum::extract::{ConnectInfo, FromRequestParts, Path, Query, Request, State};
 use axum::http::header::AUTHORIZATION;
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE, RETRY_AFTER};
@@ -230,7 +232,9 @@ pub struct ApiIdentity {
 #[derive(Debug, Clone)]
 pub struct ApiRuntime {
     key_hash_secret: Arc<[u8; API_KEY_HASH_SECRET_SIZE]>,
-    keys: Arc<BTreeMap<ApiKeyDigest, ApiIdentity>>,
+    /// Stored as a flat list so lookup can always visit every entry, enabling
+    /// constant-time comparison via [`subtle::ConstantTimeEq`].
+    keys: Arc<Vec<(ApiKeyDigest, ApiIdentity)>>,
     rate_limit: ApiRateLimit,
     windows: Arc<Mutex<BTreeMap<RateLimitSubject, RateLimitWindow>>>,
 }
@@ -253,11 +257,11 @@ impl ApiRuntime {
                             ApiIdentity { key_id: name.clone(), role: key.role },
                         )
                     })
-                    .collect::<BTreeMap<_, _>>();
+                    .collect::<Vec<_>>();
 
                 (keys, config.rate_limit_per_minute)
             })
-            .unwrap_or_else(|| (BTreeMap::new(), 0));
+            .unwrap_or_else(|| (Vec::new(), 0));
 
         Self {
             key_hash_secret,
@@ -307,10 +311,29 @@ impl ApiRuntime {
 
         self.check_rate_limit(&rate_limit_subject).await?;
 
-        let identity =
-            self.keys.get(&presented_key_digest).cloned().ok_or(ApiAuthError::InvalidApiKey)?;
+        let identity = Self::lookup_key_ct(&self.keys, &presented_key_digest)
+            .ok_or(ApiAuthError::InvalidApiKey)?;
 
         Ok(identity)
+    }
+
+    /// Look up an [`ApiIdentity`] by digest using a constant-time comparison.
+    ///
+    /// Every entry in `keys` is always visited regardless of whether a match is
+    /// found, so the duration of this function does not reveal whether (or at
+    /// which index) a matching digest exists.
+    fn lookup_key_ct(
+        keys: &[(ApiKeyDigest, ApiIdentity)],
+        digest: &ApiKeyDigest,
+    ) -> Option<ApiIdentity> {
+        let mut found: Option<ApiIdentity> = None;
+        for (stored, identity) in keys {
+            // ConstantTimeEq never short-circuits on the first differing byte.
+            if stored.0.ct_eq(&digest.0).into() {
+                found = Some(identity.clone());
+            }
+        }
+        found
     }
 
     fn hash_api_key(secret: &[u8; API_KEY_HASH_SECRET_SIZE], api_key: &str) -> ApiKeyDigest {
@@ -2488,6 +2511,50 @@ mod tests {
     use red_cell_common::crypto::hash_password_sha3;
     use zeroize::Zeroizing;
 
+    // ---- lookup_key_ct unit tests ----
+
+    fn make_digest(byte: u8) -> ApiKeyDigest {
+        ApiKeyDigest([byte; 32])
+    }
+
+    fn make_identity(key_id: &str) -> ApiIdentity {
+        ApiIdentity { key_id: key_id.to_owned(), role: OperatorRole::Analyst }
+    }
+
+    #[test]
+    fn lookup_key_ct_returns_matching_identity() {
+        let keys = vec![
+            (make_digest(0xAA), make_identity("key-a")),
+            (make_digest(0xBB), make_identity("key-b")),
+        ];
+        let result = ApiRuntime::lookup_key_ct(&keys, &make_digest(0xBB));
+        assert_eq!(result.unwrap().key_id, "key-b");
+    }
+
+    #[test]
+    fn lookup_key_ct_returns_none_for_unknown_digest() {
+        let keys = vec![(make_digest(0xAA), make_identity("key-a"))];
+        let result = ApiRuntime::lookup_key_ct(&keys, &make_digest(0xFF));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn lookup_key_ct_returns_none_for_empty_key_list() {
+        let result = ApiRuntime::lookup_key_ct(&[], &make_digest(0x01));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn lookup_key_ct_scans_all_entries_and_returns_last_match() {
+        // Two entries with identical digests: the second one should win because
+        // the scan never short-circuits after finding the first match.
+        let digest = make_digest(0x42);
+        let keys = vec![(digest, make_identity("first")), (digest, make_identity("second"))];
+        let result = ApiRuntime::lookup_key_ct(&keys, &digest);
+        // Always visits every entry; last match wins.
+        assert_eq!(result.unwrap().key_id, "second");
+    }
+
     #[tokio::test]
     async fn json_error_response_returns_status_and_documented_body_shape() {
         let response =
@@ -3735,7 +3802,7 @@ mod tests {
     async fn rate_limiting_prunes_expired_windows_for_inactive_keys() {
         let api = ApiRuntime {
             key_hash_secret: Arc::new(ApiRuntime::generate_key_hash_secret()),
-            keys: Arc::new(BTreeMap::new()),
+            keys: Arc::new(Vec::new()),
             rate_limit: ApiRateLimit { requests_per_minute: 60 },
             windows: Arc::new(Mutex::new(BTreeMap::from([
                 (

@@ -192,6 +192,37 @@ async fn operator_session_listener_and_mock_demon_round_trip()
     };
     assert_agent_output(&message.info, output_text);
 
+    // --- Audit log assertions ---
+    // Verify that the WebSocket handlers persisted the expected audit entries
+    // during the session so that a regression (accidentally removing an audit
+    // call) would be caught here rather than silently skipped.
+    let audit_entries = database.audit_log().list().await?;
+
+    let login_entry = audit_entries
+        .iter()
+        .find(|e| e.action == "operator.connect" && e.actor == "operator")
+        .expect("audit log must contain an operator.connect entry for 'operator'");
+    assert_eq!(login_entry.target_kind, "operator");
+    assert_eq!(login_entry.target_id.as_deref(), Some("operator"));
+
+    let task_entry = audit_entries
+        .iter()
+        .find(|e| e.action == "agent.task" && e.actor == "operator")
+        .expect("audit log must contain an agent.task entry for 'operator'");
+    assert_eq!(task_entry.target_kind, "agent");
+    assert_eq!(task_entry.target_id.as_deref(), Some("12345678"));
+    // Confirm agent_id is also recorded inside the structured details blob.
+    let agent_id_in_details = task_entry
+        .details
+        .as_ref()
+        .and_then(|d| d.get("agent_id"))
+        .and_then(serde_json::Value::as_str);
+    assert_eq!(
+        agent_id_in_details,
+        Some("12345678"),
+        "audit details must include the agent_id for agent.task entries"
+    );
+
     socket.close(None).await?;
     listeners.stop("edge-http").await?;
     server.abort();

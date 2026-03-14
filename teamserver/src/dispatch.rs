@@ -840,8 +840,18 @@ fn parse_checkin_metadata(
 ) -> Result<Option<red_cell_common::AgentRecord>, CommandDispatchError> {
     const CHECKIN_METADATA_PREFIX_LEN: usize = 32 + 16;
 
-    if payload.len() < CHECKIN_METADATA_PREFIX_LEN {
+    if payload.is_empty() {
         return Ok(None);
+    }
+    if payload.len() < CHECKIN_METADATA_PREFIX_LEN {
+        return Err(CommandDispatchError::InvalidCallbackPayload {
+            command_id: u32::from(DemonCommand::CommandCheckin),
+            message: format!(
+                "truncated CHECKIN payload: {} byte(s) is too short for the \
+                 {CHECKIN_METADATA_PREFIX_LEN}-byte metadata prefix",
+                payload.len()
+            ),
+        });
     }
 
     let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::CommandCheckin));
@@ -5654,9 +5664,8 @@ mod tests {
             .ok_or_else(|| "agent should exist before checkin".to_owned())?
             .last_call_in;
 
-        let response = dispatcher
-            .dispatch(agent_id, u32::from(DemonCommand::CommandCheckin), 6, &[0xAA, 0xBB])
-            .await?;
+        let response =
+            dispatcher.dispatch(agent_id, u32::from(DemonCommand::CommandCheckin), 6, &[]).await?;
 
         assert_eq!(response, None);
 
@@ -5675,6 +5684,95 @@ mod tests {
         };
         assert_eq!(message.info.agent_id, format!("{agent_id:08X}"));
         assert_eq!(message.info.marked, "Alive");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_checkin_handler_rejects_truncated_metadata_payload()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Any non-empty payload shorter than the 48-byte metadata prefix must be rejected
+        // as a protocol error — not silently accepted as a heartbeat.
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database,
+            sockets,
+            None,
+        );
+        let key = [0x77; AGENT_KEY_LENGTH];
+        let iv = [0x44; AGENT_IV_LENGTH];
+        let agent_id = 0x1020_3040;
+
+        registry.insert(sample_agent_info(agent_id, key, iv)).await?;
+
+        // Test a range of truncated payload lengths: 1 byte, the boundary-minus-one (47 bytes),
+        // and a mid-range value.
+        for truncated_len in [1_usize, 16, 47] {
+            let truncated_payload = vec![0xAA; truncated_len];
+            let err = dispatcher
+                .dispatch(agent_id, u32::from(DemonCommand::CommandCheckin), 6, &truncated_payload)
+                .await
+                .expect_err("truncated CHECKIN payload must be rejected");
+            assert!(
+                matches!(
+                    err,
+                    CommandDispatchError::InvalidCallbackPayload { command_id, .. }
+                    if command_id == u32::from(DemonCommand::CommandCheckin)
+                ),
+                "expected InvalidCallbackPayload for {truncated_len}-byte payload, got {err:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_checkin_handler_truncated_payload_does_not_mutate_state()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // A truncated CHECKIN must not update last_call_in or broadcast any event.
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database,
+            sockets,
+            None,
+        );
+        let key = [0x77; AGENT_KEY_LENGTH];
+        let iv = [0x44; AGENT_IV_LENGTH];
+        let agent_id = 0x1020_3040;
+
+        registry.insert(sample_agent_info(agent_id, key, iv)).await?;
+        let before = registry
+            .get(agent_id)
+            .await
+            .ok_or_else(|| "agent should exist before checkin".to_owned())?
+            .last_call_in;
+
+        let truncated_payload = vec![0xAA; 10];
+        let _ = dispatcher
+            .dispatch(agent_id, u32::from(DemonCommand::CommandCheckin), 6, &truncated_payload)
+            .await
+            .expect_err("truncated CHECKIN payload must be rejected");
+
+        let after = registry
+            .get(agent_id)
+            .await
+            .ok_or_else(|| "agent should still exist after rejected checkin".to_owned())?
+            .last_call_in;
+
+        assert_eq!(before, after, "last_call_in must not change on rejected truncated CHECKIN");
+        assert!(
+            timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),
+            "rejected truncated CHECKIN must not broadcast an agent update event"
+        );
         Ok(())
     }
 

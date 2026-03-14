@@ -389,6 +389,41 @@ mod tests {
     }
 
     #[test]
+    fn load_profile_rejects_service_block_configuration() {
+        let temp_file = NamedTempFile::new().expect("temporary file should be created");
+        std::fs::write(
+            temp_file.path(),
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "Neo" {
+                Password = "password1234"
+              }
+            }
+
+            Service {
+              Endpoint = "service-endpoint"
+              Password = "service-password"
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should be written");
+
+        let error = load_profile(&temp_file.path().to_path_buf()).expect_err("load should fail");
+        let message = error.to_string();
+
+        assert!(message.contains("profile validation failed"));
+        assert!(message.contains("Service"));
+        assert!(message.contains("not yet supported"));
+    }
+
+    #[test]
     fn load_profile_rejects_external_listener_configuration() {
         let temp_file = NamedTempFile::new().expect("temporary file should be created");
         std::fs::write(

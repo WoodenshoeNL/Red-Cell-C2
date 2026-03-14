@@ -209,14 +209,11 @@ impl Profile {
             }
         }
 
-        if let Some(service) = &self.service {
-            if service.endpoint.trim().is_empty() {
-                errors.push("Service.Endpoint must not be empty".to_owned());
-            }
-
-            if service.password.trim().is_empty() {
-                errors.push("Service.Password must not be empty".to_owned());
-            }
+        if self.service.is_some() {
+            errors.push(
+                "Service bridge is not yet supported; remove the Service block from the profile"
+                    .to_owned(),
+            );
         }
 
         if let Some(api) = &self.api {
@@ -841,10 +838,6 @@ mod tests {
           }
         }
 
-        Service {
-          Endpoint = "service.local"
-          Password = "service-password"
-        }
     "#;
 
     const HTTP_SMB_PROFILE: &str = r#"
@@ -959,7 +952,7 @@ mod tests {
         assert!(profile.listeners.http.is_empty());
         assert!(profile.listeners.smb.is_empty());
         assert!(profile.listeners.external.is_empty());
-        assert!(profile.service.is_some());
+        assert!(profile.service.is_none());
         assert!(profile.webhook.is_none());
     }
 
@@ -1343,6 +1336,37 @@ mod tests {
 
         let error = profile.validate().expect_err("profile should be invalid");
         assert!(error.errors.iter().any(|message| message.contains("TrustedProxyPeers")));
+    }
+
+    #[test]
+    fn rejects_service_block_until_service_bridge_exists() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Service {
+              Endpoint = "service-endpoint"
+              Password = "service-password"
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("profile should be invalid");
+        assert!(error.errors.iter().any(|message| {
+            message.contains("Service") && message.contains("not yet supported")
+        }));
     }
 
     #[test]

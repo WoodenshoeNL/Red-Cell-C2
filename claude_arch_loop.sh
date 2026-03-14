@@ -17,8 +17,8 @@ LOOP_LOG="$LOG_DIR/claude_arch.log"
 PROMPT_FILE="$SCRIPT_DIR/CLAUDE_ARCH_PROMPT.md"
 
 # Interval jitter: sleep a random number of seconds between MIN and MAX
-INTERVAL_MIN=2700   # 45 minutes
-INTERVAL_MAX=5400   # 90 minutes
+INTERVAL_MIN=6300   # 105 minutes
+INTERVAL_MAX=8100   # 135 minutes
 
 MAX_LOOPS="${1:-0}"   # 0 = run forever
 LOOP_COUNT=0

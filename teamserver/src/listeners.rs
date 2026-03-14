@@ -6114,4 +6114,145 @@ mod tests {
             assert_eq!(user, "carol", "action {action:?} did not preserve user");
         }
     }
+
+    // ── ListenerManager constructor helpers and shutdown lifecycle ────────────
+
+    /// Happy path: `with_max_download_bytes` returns a manager that shares registry/shutdown
+    /// handles with the caller, and `shutdown` returns `true` after draining a started listener.
+    #[tokio::test]
+    async fn with_max_download_bytes_exposes_registry_and_shutdown_handles_and_drains_cleanly()
+    -> Result<(), ListenerManagerError> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+
+        let manager = ListenerManager::with_max_download_bytes(
+            database,
+            registry.clone(),
+            events,
+            sockets,
+            None,
+            1024 * 1024,
+        );
+
+        // agent_registry() must return the same underlying handle: an insert via the returned
+        // registry is visible through the original handle.
+        let returned_registry = manager.agent_registry();
+        let agent =
+            sample_agent_info(0xCAFE_BABE, [0x41; AGENT_KEY_LENGTH], [0x24; AGENT_IV_LENGTH]);
+        returned_registry.insert(agent).await.expect("agent insert should succeed");
+        assert!(registry.get(0xCAFE_BABE).await.is_some(), "registry handle must be shared");
+
+        // shutdown_controller() must start in the running state.
+        let ctrl = manager.shutdown_controller();
+        assert!(!ctrl.is_shutting_down(), "controller must not be shutting down before shutdown()");
+
+        // Start a real listener so shutdown() has an active handle to stop.
+        let port = available_port()
+            .map_err(|error| ListenerManagerError::InvalidConfig { message: error.to_string() })?;
+        manager.create(http_listener("alpha", port)).await?;
+        let running = manager.start("alpha").await?;
+        assert_eq!(running.state.status, ListenerStatus::Running);
+        assert!(!manager.active_handles.read().await.is_empty());
+
+        // No in-flight callbacks → drain completes immediately → shutdown returns true.
+        let drained = manager.shutdown(Duration::from_secs(1)).await;
+        assert!(drained, "drain should complete when no callbacks are tracked");
+        assert!(
+            manager.active_handles.read().await.is_empty(),
+            "all active handles must be cleared after shutdown",
+        );
+        assert!(ctrl.is_shutting_down(), "shutdown controller must reflect initiated state");
+
+        Ok(())
+    }
+
+    /// Error path: `shutdown` still stops all active listeners and returns `false` when the
+    /// callback-drain timeout is exceeded because a tracked guard is held.
+    #[tokio::test]
+    async fn shutdown_stops_active_listeners_and_returns_false_when_drain_times_out()
+    -> Result<(), ListenerManagerError> {
+        let manager = manager().await?;
+        let port = available_port()
+            .map_err(|error| ListenerManagerError::InvalidConfig { message: error.to_string() })?;
+        manager.create(http_listener("beta", port)).await?;
+        manager.start("beta").await?;
+        assert!(!manager.active_handles.read().await.is_empty());
+
+        // Acquire a callback guard before calling shutdown; this prevents the drain from
+        // completing during the short timeout window.
+        let ctrl = manager.shutdown_controller();
+        let _guard = ctrl.try_track_callback().expect("callback must be accepted before shutdown");
+
+        // A very short timeout ensures drain times out while the guard is still live.
+        let drained = manager.shutdown(Duration::from_millis(5)).await;
+        assert!(!drained, "drain should time out when an active callback guard is held");
+
+        // Even with a failed drain, the shutdown loop must have stopped every listener.
+        assert!(
+            manager.active_handles.read().await.is_empty(),
+            "active handles must be cleared even when callback drain times out",
+        );
+
+        // Release the guard so the runtime can fully wind down.
+        drop(_guard);
+        Ok(())
+    }
+
+    /// Edge case: the cleanup hook registered by `with_max_download_bytes` fires when the
+    /// registry removes an agent, draining any per-agent download state.
+    #[tokio::test]
+    async fn cleanup_hook_installed_by_with_max_download_bytes_fires_on_agent_removal()
+    -> Result<(), ListenerManagerError> {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::with_max_download_bytes(
+            database,
+            registry.clone(),
+            events,
+            sockets,
+            None,
+            1024,
+        );
+
+        // Register a spy hook after construction to confirm the full cleanup chain fires.
+        // Hooks run in registration order: the download-drain hook runs first, then the spy.
+        let observed_id = Arc::new(AtomicU32::new(0));
+        let spy_id = observed_id.clone();
+        manager.agent_registry().register_cleanup_hook(move |agent_id| {
+            let spy_id = spy_id.clone();
+            async move {
+                spy_id.store(agent_id, Ordering::SeqCst);
+            }
+        });
+
+        // Insert an agent and then remove it to trigger the cleanup chain.
+        let agent_id: u32 = 0x1234_5678;
+        let agent = sample_agent_info(agent_id, [0x41; AGENT_KEY_LENGTH], [0x24; AGENT_IV_LENGTH]);
+        registry.insert(agent).await.expect("agent insert should succeed");
+        registry.remove(agent_id).await.expect("agent removal should succeed");
+
+        // The spy hook must have been called with the correct agent_id.
+        assert_eq!(
+            observed_id.load(Ordering::SeqCst),
+            agent_id,
+            "spy hook must be called with the removed agent_id",
+        );
+
+        // The download drain hook ran before the spy (FIFO registration order). Calling
+        // drain_agent again must return 0 — nothing left to drain.
+        let remaining = manager.downloads.drain_agent(agent_id).await;
+        assert_eq!(
+            remaining, 0,
+            "download hook must have already drained all per-agent state before spy ran",
+        );
+
+        Ok(())
+    }
 }

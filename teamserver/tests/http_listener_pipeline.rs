@@ -237,6 +237,77 @@ async fn http_listener_pipeline_ignores_real_ip_from_untrusted_redirector()
     Ok(())
 }
 
+#[tokio::test]
+async fn http_listener_pipeline_rejects_duplicate_init_preserves_original_key()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let port = available_port()?;
+    let agent_id = 0xDEAD_C0DE;
+    let original_key = [0x41_u8; AGENT_KEY_LENGTH];
+    let original_iv = [0x24_u8; AGENT_IV_LENGTH];
+    let hijack_key = [0xBB_u8; AGENT_KEY_LENGTH];
+    let hijack_iv = [0xCC_u8; AGENT_IV_LENGTH];
+
+    manager.create(http_listener("edge-http-dup-init", port)).await?;
+    manager.start("edge-http-dup-init").await?;
+    wait_for_listener(port).await?;
+
+    let client = Client::new();
+
+    // First INIT — must succeed.
+    client
+        .post(format!("http://127.0.0.1:{port}/"))
+        .body(valid_demon_init_body(agent_id, original_key, original_iv))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let stored_after_first =
+        registry.get(agent_id).await.ok_or("agent should be registered after first init")?;
+    assert_eq!(stored_after_first.encryption.aes_key.as_slice(), &original_key);
+
+    // Second INIT with the same agent_id but attacker-controlled key material — must be rejected.
+    let replay_response = client
+        .post(format!("http://127.0.0.1:{port}/"))
+        .body(valid_demon_init_body(agent_id, hijack_key, hijack_iv))
+        .send()
+        .await?;
+
+    assert_eq!(
+        replay_response.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "duplicate DemonInit must be rejected with 404"
+    );
+
+    // The original key must still be in place — the hijack attempt must not overwrite it.
+    let stored_after_replay = registry
+        .get(agent_id)
+        .await
+        .ok_or("agent should still be registered after rejected replay")?;
+    assert_eq!(
+        stored_after_replay.encryption.aes_key.as_slice(),
+        &original_key,
+        "original AES key must not be overwritten by a duplicate init"
+    );
+    assert_eq!(
+        stored_after_replay.encryption.aes_iv.as_slice(),
+        &original_iv,
+        "original AES IV must not be overwritten by a duplicate init"
+    );
+
+    // No duplicate registration: exactly one active entry must exist.
+    let active = registry.list_active().await;
+    assert_eq!(active.len(), 1, "duplicate DemonInit must not create a second registry entry");
+    assert_eq!(active[0].agent_id, agent_id);
+
+    manager.stop("edge-http-dup-init").await?;
+    Ok(())
+}
+
 fn http_listener(name: &str, port: u16) -> ListenerConfig {
     ListenerConfig::from(HttpListenerConfig {
         name: name.to_owned(),

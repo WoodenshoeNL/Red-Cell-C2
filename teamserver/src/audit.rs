@@ -535,8 +535,9 @@ mod tests {
     use tokio::time::timeout;
 
     use super::{
-        AuditQuery, AuditRecord, AuditResultStatus, SessionActivityRecord, audit_details,
-        login_parameters, parameter_object, parse_agent_id_filter,
+        AuditQuery, AuditRecord, AuditResultStatus, SessionActivityQuery, SessionActivityRecord,
+        audit_details, login_parameters, parameter_object, parse_agent_id_filter,
+        query_session_activity,
     };
     use crate::{
         AuditLogEntry, AuditWebhookNotifier, Database, TeamserverError,
@@ -677,6 +678,35 @@ mod tests {
         let clamped = AuditQuery { limit: Some(500), offset: Some(4), ..AuditQuery::default() };
         assert_eq!(clamped.limit(), 200);
         assert_eq!(clamped.offset(), 4);
+    }
+
+    #[test]
+    fn session_activity_query_validates_limit_and_offset_defaults() {
+        let query = SessionActivityQuery::default();
+        assert_eq!(query.limit(), 50);
+        assert_eq!(query.offset(), 0);
+
+        let clamped = SessionActivityQuery {
+            limit: Some(500),
+            offset: Some(7),
+            ..SessionActivityQuery::default()
+        };
+        assert_eq!(clamped.limit(), 200);
+        assert_eq!(clamped.offset(), 7);
+    }
+
+    #[tokio::test]
+    async fn query_session_activity_returns_empty_page_for_unknown_activity() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        let query = SessionActivityQuery {
+            activity: Some("nonexistent".to_owned()),
+            ..SessionActivityQuery::default()
+        };
+
+        let page = query_session_activity(&database, &query).await.expect("query should succeed");
+
+        assert_eq!(page.total, 0);
+        assert!(page.items.is_empty());
     }
 
     #[tokio::test]

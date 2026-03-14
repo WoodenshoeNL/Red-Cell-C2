@@ -342,6 +342,7 @@ mod tests {
         assert_eq!(payload["username"], "Red Cell");
         assert_eq!(payload["avatar_url"], "https://example.test/red-cell.png");
         assert_eq!(payload["embeds"][0]["title"], "Red Cell audit event");
+        assert_eq!(payload["embeds"][0]["color"], json!(super::SUCCESS_COLOR));
         assert_eq!(payload["embeds"][0]["fields"][0]["name"], "Actor");
         assert_eq!(payload["embeds"][0]["fields"][0]["value"], "operator");
         let command_field = payload["embeds"][0]["fields"]
@@ -351,6 +352,56 @@ mod tests {
             .find(|field| field["name"] == "Command")
             .expect("command field should be present");
         assert_eq!(command_field["value"], "shell");
+    }
+
+    #[tokio::test]
+    async fn discord_embed_color_is_failure_color_for_failure_record() {
+        let (address, mut receiver, server) = webhook_server(HttpStatusCode::OK).await;
+        let profile = Profile::parse(&format!(
+            r#"
+            Teamserver {{
+              Host = "127.0.0.1"
+              Port = 40056
+            }}
+
+            Operators {{
+              user "operator" {{
+                Password = "password1234"
+              }}
+            }}
+
+            WebHook {{
+              Discord {{
+                Url = "http://{address}/"
+              }}
+            }}
+
+            Demon {{}}
+            "#
+        ))
+        .expect("profile should parse");
+        let notifier = AuditWebhookNotifier::from_profile(&profile);
+
+        notifier
+            .notify_audit_record(&AuditRecord {
+                id: 12,
+                actor: "operator".to_owned(),
+                action: "agent.task".to_owned(),
+                target_kind: "agent".to_owned(),
+                target_id: Some("DEADBEEF".to_owned()),
+                agent_id: Some("DEADBEEF".to_owned()),
+                command: Some("shell".to_owned()),
+                parameters: Some(json!({"command": "whoami"})),
+                result_status: AuditResultStatus::Failure,
+                occurred_at: "2026-03-14T10:00:00Z".to_owned(),
+            })
+            .await
+            .expect("webhook delivery should succeed");
+
+        let payload = receiver.recv().await.expect("payload should arrive");
+        server.abort();
+
+        assert_eq!(payload["embeds"][0]["color"], json!(super::FAILURE_COLOR));
     }
 
     #[tokio::test]

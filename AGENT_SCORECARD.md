@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 7 | 181 | 31 |
+| Tasks closed | 54 | 181 | 31 |
 | Bugs filed against | 2 | 27 | 9 |
-| Bug rate (bugs/task) | 0.29 | 0.15 | 0.29 |
-| Quality score | 71% | 85% | 71% |
+| Bug rate (bugs/task) | 0.04 | 0.15 | 0.29 |
+| Quality score | 96% | 85% | 71% |
 
 ## Violation Breakdown
 
@@ -1143,3 +1143,14 @@ Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnin
 
 Build: passed (`cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓; `cargo test` skipped — no Rust source changes in committed range)
 Notes: Reviewed 10 commits from `446ae04` to `08aff95`. No Rust source changes in committed state. Activity was exclusively review/bookkeeping: arch-review loop filed 6 issues; test-review loop filed 31 test-quality tasks scanning the entire teamserver test suite; two ID-normalization commits fixed mismatched `red-` prefixes in issues.jsonl; one claim commit for `red-cell-c2-3qq0` (Ubuntu-C2-dev02-claude). The actual fix for `red-cell-c2-3qq0` (all-zero AES IV rejection in `parse_init_agent` + regression test) is present but stranded in `git stash` — filed `red-cell-c2-klso` as P2 workflow bug and blocked `red-cell-c2-3qq0` on it. Two P1 security issues remain open: `red-cell-c2-3qq0` (DEMON_INIT IV check, fix ready in stash) and `red-cell-c2-bfih` (CHECKIN IV check, not started). Recommend prioritizing both before any new features.
+
+### QA Review — 2026-03-15 — 08aff95..896603b
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 47 | 0 | Very productive sprint: 47 issues closed across protocol fixes, security hardening, test coverage, and refactors. Key deliverables: fix(tls) cert persistence across restarts, fix(agents) persist-before-mutate for CTR offset/encryption, fix(auth) constant-time session token scan, fix(protocol) truncated CHECKIN rejection, fix(crypto) AES key/IV zeroize (bhvi), fix(agents) cycle detection arg order (cool), fix(teamserver) job queue depth cap (33iq), fix(listeners) unknown agent audit entry + DNS registry gate. Extensive test additions across sockets, auth, webhook, audit, protocol, DB cascade. No new bugs found in code review. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (125+ tests, 0 failed)
+Notes: Reviewed 113 commits from `08aff95` to `896603b`. All productive commits attributed to Ubuntu-C2-dev01-claude (Claude Sonnet 4.6). One notable admin commit `896603b` (by user+Claude) adjusts loop intervals (QA→30min, arch→105-135min) and adds service-bridge validation with tests. P2 security issues still open and now claimed: `red-cell-c2-2n8o` (timing oracle), `red-cell-c2-3hro` (unbounded queue), `red-cell-c2-a74c` (CHECKIN key rotation). `red-cell-c2-35jc` (external listener) remains in_progress. Codebase health trending strongly positive.

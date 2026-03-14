@@ -1106,7 +1106,11 @@ async fn handle_pivot_connect_callback(
     let existed = registry.get(child_agent_id).await.is_some();
     let external_ip =
         registry.get(parent_agent_id).await.map(|agent| agent.external_ip).unwrap_or_default();
-    let parsed = DemonPacketParser::new(registry.clone()).parse(&inner, external_ip).await;
+    let listener_name =
+        registry.listener_name(parent_agent_id).await.unwrap_or_else(|| "smb".to_owned());
+    let parsed = DemonPacketParser::new(registry.clone())
+        .parse_for_listener(&inner, external_ip, &listener_name)
+        .await;
     let child_agent = match parsed {
         Ok(crate::ParsedDemonPacket::Init(init)) => init.agent,
         Ok(_) => {
@@ -1129,7 +1133,7 @@ async fn handle_pivot_connect_callback(
         events.broadcast(agent_mark_event(&child_agent));
     } else {
         events.broadcast(agent_new_event(
-            "smb",
+            &listener_name,
             red_cell_common::demon::DEMON_MAGIC_VALUE,
             &child_agent,
             &pivots,
@@ -5546,7 +5550,9 @@ mod tests {
         let child_key = [0x41; AGENT_KEY_LENGTH];
         let child_iv = [0x51; AGENT_IV_LENGTH];
 
-        registry.insert(sample_agent_info(parent_id, parent_key, parent_iv)).await?;
+        registry
+            .insert_with_listener(sample_agent_info(parent_id, parent_key, parent_iv), "http-main")
+            .await?;
 
         let response = dispatcher
             .dispatch(
@@ -5569,10 +5575,56 @@ mod tests {
             return Err("expected AgentNew event after pivot connect".into());
         };
         assert_eq!(message.info.name_id, "51525354");
-        assert_eq!(message.info.listener, "smb");
+        assert_eq!(message.info.listener, "http-main");
         assert_eq!(message.info.pivots.parent.as_deref(), Some("45464748"));
         assert_eq!(message.info.pivots.links, Vec::<String>::new());
         assert_eq!(message.info.pivot_parent, "45464748");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pivot_connect_callback_child_snapshot_preserves_listener_provenance()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database,
+            sockets,
+            None,
+        );
+        let parent_id = 0xAABB_CCDD;
+        let parent_key = [0x11; AGENT_KEY_LENGTH];
+        let parent_iv = [0x22; AGENT_IV_LENGTH];
+        let child_id = 0x1122_3344;
+        let child_key = [0x33; AGENT_KEY_LENGTH];
+        let child_iv = [0x44; AGENT_IV_LENGTH];
+
+        registry
+            .insert_with_listener(
+                sample_agent_info(parent_id, parent_key, parent_iv),
+                "http-external",
+            )
+            .await?;
+
+        dispatcher
+            .dispatch(
+                parent_id,
+                u32::from(DemonCommand::CommandPivot),
+                42,
+                &pivot_connect_payload(&valid_demon_init_body(child_id, child_key, child_iv)),
+            )
+            .await?;
+
+        // The child's persisted listener_name must match the parent's — not "null".
+        assert_eq!(
+            registry.listener_name(child_id).await.as_deref(),
+            Some("http-external"),
+            "child pivot listener_name must inherit the parent's listener, not be 'null'"
+        );
         Ok(())
     }
 

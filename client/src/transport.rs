@@ -2380,6 +2380,68 @@ mod tests {
     }
 
     #[test]
+    fn listener_error_updates_existing_listener_status_and_pushes_chat() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+        // Pre-populate a listener so we can verify it is updated in-place.
+        state.listeners.push(ListenerSummary {
+            name: "http".to_owned(),
+            protocol: "Https".to_owned(),
+            status: "Online".to_owned(),
+        });
+        let chat_before = state.chat_messages.len();
+
+        state.apply_operator_message(OperatorMessage::ListenerError(Message {
+            head: head(EventCode::Listener),
+            info: ListenerErrorInfo { name: "http".to_owned(), error: "port in use".to_owned() },
+        }));
+
+        assert_eq!(state.listeners.len(), 1, "upsert should not create a duplicate");
+        let listener = &state.listeners[0];
+        assert!(
+            listener.status.starts_with("Error:"),
+            "status should start with 'Error:' but was: {:?}",
+            listener.status
+        );
+        assert!(
+            listener.status.contains("port in use"),
+            "status should contain the error text but was: {:?}",
+            listener.status
+        );
+        assert_eq!(
+            state.chat_messages.len(),
+            chat_before + 1,
+            "a chat notification should have been appended"
+        );
+        let chat = &state.chat_messages[chat_before];
+        assert!(
+            chat.message.contains("port in use"),
+            "chat message should echo the error text but was: {:?}",
+            chat.message
+        );
+    }
+
+    #[test]
+    fn listener_error_creates_new_listener_entry_when_none_exists() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+        assert!(state.listeners.is_empty());
+
+        state.apply_operator_message(OperatorMessage::ListenerError(Message {
+            head: head(EventCode::Listener),
+            info: ListenerErrorInfo { name: "smb".to_owned(), error: "bind failed".to_owned() },
+        }));
+
+        assert_eq!(state.listeners.len(), 1, "upsert should create a new entry");
+        let listener = &state.listeners[0];
+        assert_eq!(listener.name, "smb");
+        assert!(
+            listener.status.starts_with("Error:"),
+            "status should start with 'Error:' but was: {:?}",
+            listener.status
+        );
+        assert_eq!(state.chat_messages.len(), 1, "chat notification should be appended");
+    }
+
+    #[test]
     fn message_variants_used_by_transport_state_reducer_are_constructible() {
         let _ = (
             InitConnectionCode::Success,

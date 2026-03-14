@@ -1016,6 +1016,103 @@ mod tests {
     }
 
     #[test]
+    fn port_bind_rejects_value_above_u16_max() {
+        let payload = json!({
+            "name": "edge",
+            "kill_date": null,
+            "working_hours": null,
+            "hosts": [],
+            "host_bind": "0.0.0.0",
+            "host_rotation": "round-robin",
+            "port_bind": 70000,
+            "port_conn": null,
+            "method": null,
+            "behind_redirector": false,
+            "user_agent": null,
+            "headers": [],
+            "uris": [],
+            "host_header": null,
+            "secure": false,
+            "cert": null,
+            "response": null,
+            "proxy": null
+        });
+
+        let error = serde_json::from_value::<HttpListenerConfig>(payload)
+            .expect_err("port_bind 70000 must be rejected");
+        assert!(
+            error.to_string().contains("does not fit in u16"),
+            "unexpected error message: {error}"
+        );
+    }
+
+    #[test]
+    fn port_conn_rejects_string_value_above_u16_max() {
+        let payload = json!({
+            "name": "edge",
+            "kill_date": null,
+            "working_hours": null,
+            "hosts": [],
+            "host_bind": "0.0.0.0",
+            "host_rotation": "round-robin",
+            "port_bind": 443,
+            "port_conn": "99999",
+            "method": null,
+            "behind_redirector": false,
+            "user_agent": null,
+            "headers": [],
+            "uris": [],
+            "host_header": null,
+            "secure": false,
+            "cert": null,
+            "response": null,
+            "proxy": null
+        });
+
+        let error = serde_json::from_value::<HttpListenerConfig>(payload)
+            .expect_err("port_conn 99999 must be rejected");
+        assert!(
+            error.to_string().contains("does not fit in u16"),
+            "unexpected error message: {error}"
+        );
+    }
+
+    #[test]
+    fn proxy_port_rejects_string_value_above_u16_max() {
+        let payload = json!({
+            "name": "edge",
+            "kill_date": null,
+            "working_hours": null,
+            "hosts": [],
+            "host_bind": "0.0.0.0",
+            "host_rotation": "round-robin",
+            "port_bind": 443,
+            "port_conn": null,
+            "method": null,
+            "behind_redirector": false,
+            "user_agent": null,
+            "headers": [],
+            "uris": [],
+            "host_header": null,
+            "secure": false,
+            "cert": null,
+            "response": null,
+            "proxy": {
+                "enabled": true,
+                "host": "127.0.0.1",
+                "port": "99999"
+            }
+        });
+
+        let error = serde_json::from_value::<HttpListenerConfig>(payload)
+            .expect_err("proxy port 99999 must be rejected");
+        assert!(
+            error.to_string().contains("does not fit in u16"),
+            "unexpected error message: {error}"
+        );
+    }
+
+    #[test]
     fn deserialize_bool_from_any_rejects_integer_outside_zero_one() {
         let payload = json!({
             "AgentID": "ABCD1234",

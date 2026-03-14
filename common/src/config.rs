@@ -347,6 +347,14 @@ pub struct TeamserverConfig {
     /// Optional build toolchain settings.
     #[serde(rename = "Build", default)]
     pub build: Option<BuildConfig>,
+    /// Optional TLS certificate and key paths for the control-plane listener.
+    ///
+    /// When set, the teamserver loads its TLS identity from these PEM files on every
+    /// start instead of generating a fresh self-signed certificate. When absent, the
+    /// teamserver generates a self-signed certificate on the first boot and persists it
+    /// next to the profile file so that subsequent restarts reuse the same material.
+    #[serde(rename = "Cert", default)]
+    pub cert: Option<HttpListenerCertConfig>,
 }
 
 /// Teamserver tracing configuration.

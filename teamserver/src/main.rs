@@ -13,7 +13,7 @@ use red_cell::{
 };
 use red_cell_common::config::{Profile, ProfileValidationError};
 use red_cell_common::tls::{
-    TlsKeyAlgorithm, install_default_crypto_provider, resolve_tls_identity,
+    TlsKeyAlgorithm, install_default_crypto_provider, resolve_or_persist_tls_identity,
 };
 use tokio::net::lookup_host;
 use tracing::{info, instrument};
@@ -86,7 +86,7 @@ async fn main() -> Result<()> {
 
     let bind_addr = resolve_bind_addr(&profile).await?;
     install_default_crypto_provider();
-    let tls_config = build_tls_config(&profile).await?;
+    let tls_config = build_tls_config(&profile, &cli.profile).await?;
     let _agent_liveness_monitor: AgentLivenessMonitor = spawn_agent_liveness_monitor(
         agent_registry.clone(),
         sockets.clone(),
@@ -169,11 +169,19 @@ async fn resolve_bind_addr(profile: &Profile) -> Result<SocketAddr> {
     })
 }
 
-#[instrument(skip(profile), fields(bind_host = %profile.teamserver.host))]
-async fn build_tls_config(profile: &Profile) -> Result<RustlsConfig> {
+#[instrument(skip(profile, profile_path), fields(bind_host = %profile.teamserver.host))]
+async fn build_tls_config(profile: &Profile, profile_path: &Path) -> Result<RustlsConfig> {
     let subject_alt_names = tls_subject_alt_names(&profile.teamserver.host);
-    let identity = resolve_tls_identity(&subject_alt_names, None, TlsKeyAlgorithm::EcdsaP256)
-        .context("failed to resolve teamserver TLS identity")?;
+    let cert_path = profile_path.with_extension("tls.crt");
+    let key_path = profile_path.with_extension("tls.key");
+    let identity = resolve_or_persist_tls_identity(
+        &subject_alt_names,
+        profile.teamserver.cert.as_ref(),
+        &cert_path,
+        &key_path,
+        TlsKeyAlgorithm::EcdsaP256,
+    )
+    .context("failed to resolve teamserver TLS identity")?;
 
     RustlsConfig::from_pem(identity.certificate_pem().to_vec(), identity.private_key_pem().to_vec())
         .await

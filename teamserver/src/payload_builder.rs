@@ -1709,6 +1709,7 @@ mod tests {
                 drain_timeout_secs: None,
                 agent_timeout_secs: None,
                 logging: None,
+                cert: None,
                 build: Some(red_cell_common::config::BuildConfig {
                     compiler64: Some(compiler_x64.display().to_string()),
                     compiler86: Some(compiler_x86.display().to_string()),

@@ -178,6 +178,63 @@ pub fn resolve_tls_identity(
     }
 }
 
+/// Errors that can occur while persisting generated TLS material to disk.
+#[derive(Debug, Error)]
+pub enum PersistTlsError {
+    /// The underlying TLS generation or loading failed.
+    #[error(transparent)]
+    Tls(#[from] TlsError),
+    /// Writing the generated PEM files to disk failed.
+    #[error("failed to persist TLS material to {path}: {source}")]
+    WriteFile {
+        /// Path that could not be written.
+        path: String,
+        /// Underlying filesystem error.
+        source: std::io::Error,
+    },
+}
+
+/// Resolve a durable TLS identity for a long-running service.
+///
+/// Resolution order:
+/// 1. If `cert_config` is [`Some`], load from the configured PEM paths.
+/// 2. If `cert_path` and `key_path` already exist on disk, load them.
+/// 3. Otherwise generate a fresh self-signed certificate, write it to
+///    `cert_path` / `key_path`, and return it.
+///
+/// This ensures that the identity survives process restarts without requiring
+/// explicit TLS configuration in the profile: on the first boot a certificate
+/// is generated and saved; every subsequent boot reloads that same material.
+pub fn resolve_or_persist_tls_identity(
+    subject_alt_names: &[String],
+    cert_config: Option<&HttpListenerCertConfig>,
+    cert_path: impl AsRef<Path>,
+    key_path: impl AsRef<Path>,
+    algorithm: TlsKeyAlgorithm,
+) -> Result<TlsIdentity, PersistTlsError> {
+    let cert_path = cert_path.as_ref();
+    let key_path = key_path.as_ref();
+
+    if let Some(cfg) = cert_config {
+        return load_tls_identity_from_files(&cfg.cert, &cfg.key).map_err(PersistTlsError::Tls);
+    }
+
+    if cert_path.exists() && key_path.exists() {
+        return load_tls_identity_from_files(cert_path, key_path).map_err(PersistTlsError::Tls);
+    }
+
+    let identity = generate_self_signed_tls_identity(subject_alt_names, algorithm)?;
+
+    fs::write(cert_path, identity.certificate_pem()).map_err(|source| {
+        PersistTlsError::WriteFile { path: cert_path.display().to_string(), source }
+    })?;
+    fs::write(key_path, identity.private_key_pem()).map_err(|source| {
+        PersistTlsError::WriteFile { path: key_path.display().to_string(), source }
+    })?;
+
+    Ok(identity)
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::BufReader;
@@ -186,9 +243,9 @@ mod tests {
     use x509_parser::prelude::FromDer;
 
     use super::{
-        TlsError, TlsIdentity, TlsKeyAlgorithm, generate_self_signed_tls_identity,
+        PersistTlsError, TlsError, TlsIdentity, TlsKeyAlgorithm, generate_self_signed_tls_identity,
         install_default_crypto_provider, load_tls_identity, load_tls_identity_from_files,
-        resolve_tls_identity,
+        resolve_or_persist_tls_identity, resolve_tls_identity,
     };
     use crate::config::HttpListenerCertConfig;
 
@@ -464,5 +521,143 @@ mod tests {
                 other => other.to_string(),
             })
             .collect()
+    }
+
+    #[test]
+    fn resolve_or_persist_generates_and_writes_pem_files_on_first_boot() {
+        let temp_dir = tempfile::TempDir::new().expect("temporary directory should be created");
+        let cert_path = temp_dir.path().join("teamserver.tls.crt");
+        let key_path = temp_dir.path().join("teamserver.tls.key");
+
+        let identity = resolve_or_persist_tls_identity(
+            &["teamserver.local".to_owned()],
+            None,
+            &cert_path,
+            &key_path,
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("first-boot generation should succeed");
+
+        assert!(cert_path.exists(), "certificate file should be written to disk");
+        assert!(key_path.exists(), "private key file should be written to disk");
+        assert!(identity.certificate_pem().starts_with(b"-----BEGIN CERTIFICATE-----"));
+        assert!(identity.private_key_pem().starts_with(b"-----BEGIN PRIVATE KEY-----"));
+    }
+
+    #[test]
+    fn resolve_or_persist_reloads_existing_pem_files_on_subsequent_boots() {
+        let temp_dir = tempfile::TempDir::new().expect("temporary directory should be created");
+        let cert_path = temp_dir.path().join("teamserver.tls.crt");
+        let key_path = temp_dir.path().join("teamserver.tls.key");
+
+        // First boot — generates and persists.
+        let first = resolve_or_persist_tls_identity(
+            &["teamserver.local".to_owned()],
+            None,
+            &cert_path,
+            &key_path,
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("first-boot generation should succeed");
+
+        // Second boot — must reload from disk, not generate a new certificate.
+        let second = resolve_or_persist_tls_identity(
+            &["teamserver.local".to_owned()],
+            None,
+            &cert_path,
+            &key_path,
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("second-boot reload should succeed");
+
+        assert_eq!(
+            first.certificate_pem(),
+            second.certificate_pem(),
+            "certificate material must be identical across restarts"
+        );
+        assert_eq!(
+            first.private_key_pem(),
+            second.private_key_pem(),
+            "private key material must be identical across restarts"
+        );
+    }
+
+    #[test]
+    fn resolve_or_persist_prefers_configured_cert_paths_over_persisted_files() {
+        let temp_dir = tempfile::TempDir::new().expect("temporary directory should be created");
+
+        // Write one cert as the "configured" cert.
+        let configured_identity = generate_self_signed_tls_identity(
+            &["configured.local".to_owned()],
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("identity generation should succeed");
+        let configured_cert_path = temp_dir.path().join("configured.crt");
+        let configured_key_path = temp_dir.path().join("configured.key");
+        std::fs::write(&configured_cert_path, configured_identity.certificate_pem())
+            .expect("configured cert should be written");
+        std::fs::write(&configured_key_path, configured_identity.private_key_pem())
+            .expect("configured key should be written");
+
+        // Auto-persist paths (different files).
+        let auto_cert_path = temp_dir.path().join("teamserver.tls.crt");
+        let auto_key_path = temp_dir.path().join("teamserver.tls.key");
+
+        let cert_config = HttpListenerCertConfig {
+            cert: configured_cert_path.display().to_string(),
+            key: configured_key_path.display().to_string(),
+        };
+
+        let resolved = resolve_or_persist_tls_identity(
+            &["ignored.local".to_owned()],
+            Some(&cert_config),
+            &auto_cert_path,
+            &auto_key_path,
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("configured cert should be preferred");
+
+        assert_eq!(
+            resolved.certificate_pem(),
+            configured_identity.certificate_pem(),
+            "configured cert must be used instead of auto-generated one"
+        );
+        assert!(
+            !auto_cert_path.exists(),
+            "auto-persist paths should not be written when explicit cert is configured"
+        );
+    }
+
+    #[test]
+    fn resolve_or_persist_fails_when_write_directory_is_read_only() {
+        let temp_dir = tempfile::TempDir::new().expect("temporary directory should be created");
+
+        // Make the directory read-only so writes fail.
+        let mut perms =
+            std::fs::metadata(temp_dir.path()).expect("metadata should read").permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o555);
+        std::fs::set_permissions(temp_dir.path(), perms).expect("permissions should update");
+
+        let cert_path = temp_dir.path().join("teamserver.tls.crt");
+        let key_path = temp_dir.path().join("teamserver.tls.key");
+
+        let result = resolve_or_persist_tls_identity(
+            &["teamserver.local".to_owned()],
+            None,
+            &cert_path,
+            &key_path,
+            TlsKeyAlgorithm::EcdsaP256,
+        );
+
+        // Restore permissions so the temp dir can be cleaned up.
+        let mut perms =
+            std::fs::metadata(temp_dir.path()).expect("metadata should read").permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(temp_dir.path(), perms).expect("permissions should restore");
+
+        assert!(
+            matches!(result, Err(PersistTlsError::WriteFile { .. })),
+            "write failure should surface as PersistTlsError::WriteFile, got: {result:?}"
+        );
     }
 }

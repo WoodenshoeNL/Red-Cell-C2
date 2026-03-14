@@ -676,7 +676,7 @@ impl AgentRegistry {
                 message: "agent cannot pivot to itself".to_owned(),
             });
         }
-        if self.path_contains(link_agent_id, parent_agent_id).await {
+        if self.path_contains(parent_agent_id, link_agent_id).await {
             return Err(TeamserverError::InvalidPivotLink {
                 message: format!(
                     "linking 0x{parent_agent_id:08X} -> 0x{link_agent_id:08X} would create a cycle"
@@ -2284,6 +2284,47 @@ mod tests {
             .ok_or(TeamserverError::AgentNotFound { agent_id: 0x1000_0009 })?;
         assert!((30..=45).contains(&persisted.sleep_delay));
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn add_link_rejects_self_link() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database);
+        let agent = sample_agent(0x1000_00D0);
+        registry.insert(agent.clone()).await?;
+
+        let result = registry.add_link(agent.agent_id, agent.agent_id).await;
+
+        assert!(matches!(
+            result,
+            Err(TeamserverError::InvalidPivotLink { ref message }) if message.contains("itself")
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn add_link_rejects_cycle() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database);
+        let agent_a = sample_agent(0x1000_00D1);
+        let agent_b = sample_agent(0x1000_00D2);
+        let agent_c = sample_agent(0x1000_00D3);
+        registry.insert(agent_a.clone()).await?;
+        registry.insert(agent_b.clone()).await?;
+        registry.insert(agent_c.clone()).await?;
+
+        // Build A → B → C
+        registry.add_link(agent_a.agent_id, agent_b.agent_id).await?;
+        registry.add_link(agent_b.agent_id, agent_c.agent_id).await?;
+
+        // Linking C → A would close the cycle
+        let result = registry.add_link(agent_c.agent_id, agent_a.agent_id).await;
+
+        assert!(matches!(
+            result,
+            Err(TeamserverError::InvalidPivotLink { ref message }) if message.contains("cycle")
+        ));
         Ok(())
     }
 

@@ -993,6 +993,158 @@ async fn session_activity_query_returns_only_operator_session_events() -> Result
 }
 
 #[tokio::test]
+async fn agent_delete_cascades_to_loot_rows() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let agents = database.agents();
+    let loot = database.loot();
+    let agent = sample_agent(0x3300_0001);
+
+    agents.create(&agent).await?;
+
+    let record = LootRecord {
+        id: None,
+        agent_id: agent.agent_id,
+        kind: "credential".to_owned(),
+        name: "lsass.dmp".to_owned(),
+        file_path: Some("C:\\Temp\\lsass.dmp".to_owned()),
+        size_bytes: Some(512),
+        captured_at: "2026-03-14T10:00:00Z".to_owned(),
+        data: Some(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+        metadata: None,
+    };
+
+    let loot_id = loot.create(&record).await?;
+    assert!(loot.get(loot_id).await?.is_some(), "loot row should exist before agent delete");
+
+    agents.delete(agent.agent_id).await?;
+
+    assert!(
+        loot.get(loot_id).await?.is_none(),
+        "loot row should be cascade-deleted when agent is deleted"
+    );
+    assert!(
+        loot.list_for_agent(agent.agent_id).await?.is_empty(),
+        "list_for_agent should return empty after cascade delete"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_delete_cascades_to_agent_response_rows() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let agents = database.agents();
+    let responses = database.agent_responses();
+    let agent = sample_agent(0x3300_0002);
+
+    agents.create(&agent).await?;
+
+    let record = AgentResponseRecord {
+        id: None,
+        agent_id: agent.agent_id,
+        command_id: 94,
+        request_id: 0x01,
+        response_type: "Good".to_owned(),
+        message: "output".to_owned(),
+        output: "nt authority\\system".to_owned(),
+        command_line: Some("shell whoami".to_owned()),
+        task_id: Some("01".to_owned()),
+        operator: Some("neo".to_owned()),
+        received_at: "2026-03-14T10:01:00Z".to_owned(),
+        extra: None,
+    };
+
+    let response_id = responses.create(&record).await?;
+    assert!(
+        responses.get(response_id).await?.is_some(),
+        "response row should exist before agent delete"
+    );
+
+    agents.delete(agent.agent_id).await?;
+
+    assert!(
+        responses.get(response_id).await?.is_none(),
+        "response row should be cascade-deleted when agent is deleted"
+    );
+    assert!(
+        responses.list_for_agent(agent.agent_id).await?.is_empty(),
+        "list_for_agent should return empty after cascade delete"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_delete_cascades_to_link_rows() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let agents = database.agents();
+    let links = database.links();
+    let parent = sample_agent(0x3300_0003);
+    let child = sample_agent(0x3300_0004);
+
+    agents.create(&parent).await?;
+    agents.create(&child).await?;
+
+    links
+        .create(LinkRecord { parent_agent_id: parent.agent_id, link_agent_id: child.agent_id })
+        .await?;
+
+    assert!(
+        links.exists(parent.agent_id, child.agent_id).await?,
+        "link should exist before parent agent delete"
+    );
+
+    // Deleting the parent agent should cascade-delete the link.
+    agents.delete(parent.agent_id).await?;
+
+    assert!(
+        !links.exists(parent.agent_id, child.agent_id).await?,
+        "link row should be cascade-deleted when parent agent is deleted"
+    );
+    assert!(
+        links.children_of(parent.agent_id).await?.is_empty(),
+        "children_of should return empty after parent cascade delete"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn child_agent_delete_also_cascades_link_row() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let agents = database.agents();
+    let links = database.links();
+    let parent = sample_agent(0x3300_0005);
+    let child = sample_agent(0x3300_0006);
+
+    agents.create(&parent).await?;
+    agents.create(&child).await?;
+
+    links
+        .create(LinkRecord { parent_agent_id: parent.agent_id, link_agent_id: child.agent_id })
+        .await?;
+
+    assert!(
+        links.exists(parent.agent_id, child.agent_id).await?,
+        "link should exist before child agent delete"
+    );
+
+    // Deleting the child agent should also cascade-delete the link.
+    agents.delete(child.agent_id).await?;
+
+    assert!(
+        !links.exists(parent.agent_id, child.agent_id).await?,
+        "link row should be cascade-deleted when child agent is deleted"
+    );
+    assert!(
+        links.parent_of(child.agent_id).await?.is_none(),
+        "parent_of should return None after child cascade delete"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn audit_repository_tracks_latest_session_activity_per_operator()
 -> Result<(), TeamserverError> {
     let database = test_database().await?;

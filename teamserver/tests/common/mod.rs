@@ -137,6 +137,12 @@ pub async fn assert_no_operator_message(socket: &mut WsClient, wait: Duration) {
     assert!(result.is_err(), "unexpected operator message during empty session snapshot");
 }
 
+/// Bind a free TCP port on `127.0.0.1` and return it.
+pub fn available_port() -> Result<u16, Box<dyn std::error::Error>> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    Ok(listener.local_addr()?.port())
+}
+
 /// Find a free TCP port on `127.0.0.1` that is not equal to `excluded`.
 pub fn available_port_excluding(excluded: u16) -> Result<u16, Box<dyn std::error::Error>> {
     for _ in 0..32 {

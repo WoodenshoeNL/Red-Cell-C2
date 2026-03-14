@@ -544,6 +544,26 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn session_activity_query_default_limit_and_offset() {
+        let q = SessionActivityQuery { limit: None, offset: None, ..Default::default() };
+        assert_eq!(q.limit(), 50);
+        assert_eq!(q.offset(), 0);
+    }
+
+    #[test]
+    fn session_activity_query_oversized_limit_is_clamped() {
+        let q = SessionActivityQuery { limit: Some(9999), ..Default::default() };
+        assert_eq!(q.limit(), 200);
+    }
+
+    #[test]
+    fn session_activity_query_explicit_small_limit_and_nonzero_offset_are_preserved() {
+        let q = SessionActivityQuery { limit: Some(10), offset: Some(25), ..Default::default() };
+        assert_eq!(q.limit(), 10);
+        assert_eq!(q.offset(), 25);
+    }
+
+    #[test]
     fn audit_result_status_as_str_success() {
         assert_eq!(AuditResultStatus::Success.as_str(), "success");
     }

@@ -96,6 +96,18 @@ pub enum TeamserverError {
     /// Returned when an AES transport operation fails.
     #[error("agent crypto error: {0}")]
     Crypto(#[from] red_cell_common::crypto::CryptoError),
+    /// Returned when a per-agent job queue has reached its capacity limit.
+    #[error(
+        "job queue full for agent 0x{agent_id:08X}: {queued} jobs already queued (max {max_queue_depth})"
+    )]
+    QueueFull {
+        /// Agent whose job queue is at capacity.
+        agent_id: u32,
+        /// Configured upper bound for the per-agent job queue.
+        max_queue_depth: usize,
+        /// Number of jobs already queued when the enqueue was attempted.
+        queued: usize,
+    },
 }
 
 /// Connection pool and repository factory for the teamserver database.

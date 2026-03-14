@@ -96,6 +96,12 @@ pub struct PivotInfo {
 const MAX_REQUEST_CONTEXTS: usize = 10_000;
 /// Default cap on the total number of registered agents accepted by the teamserver.
 pub const DEFAULT_MAX_REGISTERED_AGENTS: usize = 10_000;
+/// Maximum number of jobs that may be queued for a single agent at any time.
+///
+/// Attempts to enqueue beyond this limit are rejected with
+/// [`TeamserverError::QueueFull`] so that a misbehaving or compromised operator
+/// cannot cause unbounded heap growth on the teamserver.
+pub const MAX_JOB_QUEUE_DEPTH: usize = 1_000;
 
 type AgentCleanupFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 type AgentCleanupHook = Arc<dyn Fn(u32) -> AgentCleanupFuture + Send + Sync + 'static>;
@@ -516,6 +522,13 @@ impl AgentRegistry {
                 .await
                 .ok_or(TeamserverError::AgentNotFound { agent_id: queue_agent_id })?;
             let mut jobs = parent_entry.jobs.lock().await;
+            if jobs.len() >= MAX_JOB_QUEUE_DEPTH {
+                return Err(TeamserverError::QueueFull {
+                    agent_id: queue_agent_id,
+                    max_queue_depth: MAX_JOB_QUEUE_DEPTH,
+                    queued: jobs.len(),
+                });
+            }
             jobs.push_back(pivot_job);
             return Ok(());
         }
@@ -523,6 +536,13 @@ impl AgentRegistry {
         let entry =
             self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
         let mut jobs = entry.jobs.lock().await;
+        if jobs.len() >= MAX_JOB_QUEUE_DEPTH {
+            return Err(TeamserverError::QueueFull {
+                agent_id,
+                max_queue_depth: MAX_JOB_QUEUE_DEPTH,
+                queued: jobs.len(),
+            });
+        }
         jobs.push_back(job);
         Ok(())
     }
@@ -1020,7 +1040,7 @@ mod tests {
     use uuid::Uuid;
     use zeroize::Zeroizing;
 
-    use super::{AgentRegistry, Job};
+    use super::{AgentRegistry, Job, MAX_JOB_QUEUE_DEPTH};
     use crate::database::{Database, LinkRecord, TeamserverError};
 
     fn temp_db_path() -> std::path::PathBuf {
@@ -2025,6 +2045,61 @@ mod tests {
             queued[0].command,
             u32::from(red_cell_common::demon::DemonCommand::CommandPivot)
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn enqueue_job_returns_queue_full_at_capacity() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let agent = sample_agent(0x1000_0200);
+        registry.insert(agent.clone()).await?;
+
+        // Fill the queue to exactly the limit.
+        for i in 0..MAX_JOB_QUEUE_DEPTH as u32 {
+            registry.enqueue_job(agent.agent_id, sample_job(i)).await?;
+        }
+
+        // One more should be rejected.
+        let err = registry
+            .enqueue_job(agent.agent_id, sample_job(MAX_JOB_QUEUE_DEPTH as u32))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                TeamserverError::QueueFull {
+                    agent_id,
+                    max_queue_depth,
+                    queued
+                } if agent_id == agent.agent_id
+                    && max_queue_depth == MAX_JOB_QUEUE_DEPTH
+                    && queued == MAX_JOB_QUEUE_DEPTH
+            ),
+            "unexpected error: {err}"
+        );
+
+        // The queue depth must not have grown beyond the limit.
+        let queued = registry.queued_jobs(agent.agent_id).await?;
+        assert_eq!(queued.len(), MAX_JOB_QUEUE_DEPTH);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn enqueue_job_accepts_job_after_dequeue_frees_space() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let agent = sample_agent(0x1000_0201);
+        registry.insert(agent.clone()).await?;
+
+        for i in 0..MAX_JOB_QUEUE_DEPTH as u32 {
+            registry.enqueue_job(agent.agent_id, sample_job(i)).await?;
+        }
+
+        // Drain one job to make room.
+        registry.dequeue_job(agent.agent_id).await?;
+
+        // Now the next enqueue must succeed.
+        registry.enqueue_job(agent.agent_id, sample_job(MAX_JOB_QUEUE_DEPTH as u32)).await?;
+        assert_eq!(registry.queued_jobs(agent.agent_id).await?.len(), MAX_JOB_QUEUE_DEPTH);
         Ok(())
     }
 

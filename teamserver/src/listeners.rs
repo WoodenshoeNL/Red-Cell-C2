@@ -2095,6 +2095,10 @@ impl DnsListenerState {
     }
 
     async fn handle_download(&self, agent_id: u32, seq: u16) -> String {
+        if self.registry.get(agent_id).await.is_none() {
+            return "wait".to_owned();
+        }
+
         let mut responses = self.responses.lock().await;
         let Some(pending) = responses.get(&agent_id) else {
             return "wait".to_owned();
@@ -5899,6 +5903,10 @@ mod tests {
     async fn dns_listener_download_done_removes_pending_response() {
         let state = dns_state("dns-cleanup").await;
         let agent_id = 0xDEAD_BEEF;
+        let key = [0x11u8; AGENT_KEY_LENGTH];
+        let iv = [0x22u8; AGENT_IV_LENGTH];
+
+        state.registry.insert(sample_agent_info(agent_id, key, iv)).await.expect("insert agent");
 
         state.responses.lock().await.insert(
             agent_id,
@@ -5914,6 +5922,31 @@ mod tests {
         assert_eq!(state.handle_download(agent_id, 2).await, "done");
         assert!(!state.responses.lock().await.contains_key(&agent_id));
         assert_eq!(state.handle_download(agent_id, 0).await, "wait");
+    }
+
+    #[tokio::test]
+    async fn dns_listener_download_rejects_unknown_agent_id() {
+        let state = dns_state("dns-auth-reject").await;
+        let agent_id = 0xDEAD_BEEF;
+        let unknown_id = 0xCAFE_BABE;
+        let key = [0x11u8; AGENT_KEY_LENGTH];
+        let iv = [0x22u8; AGENT_IV_LENGTH];
+
+        state.registry.insert(sample_agent_info(agent_id, key, iv)).await.expect("insert agent");
+
+        // Insert a queued response for the known agent using the unknown_id as the key
+        // to simulate an attacker injecting under an unregistered agent ID.
+        state.responses.lock().await.insert(
+            unknown_id,
+            DnsPendingResponse { chunks: vec!["SECRET".to_owned()], received_at: Instant::now() },
+        );
+
+        // Unknown agent should be rejected with "wait" and the queue entry must survive.
+        assert_eq!(state.handle_download(unknown_id, 0).await, "wait");
+        assert!(
+            state.responses.lock().await.contains_key(&unknown_id),
+            "queued response must not be consumed for unregistered agent"
+        );
     }
 
     #[tokio::test]

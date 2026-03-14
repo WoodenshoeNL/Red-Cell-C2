@@ -1286,4 +1286,126 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn read_socks_connect_request_rejects_non_connect_command() -> io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut client, mut server) = connected_stream_pair().await?;
+
+        // Send a BIND command (0x02) — not CONNECT.
+        let client_task = tokio::spawn(async move {
+            // version=5, command=BIND, reserved=0, atyp=IPv4, addr=0.0.0.0, port=0
+            client
+                .write_all(&[
+                    super::SOCKS_VERSION,
+                    2, // BIND
+                    0,
+                    super::SOCKS_ATYP_IPV4,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ])
+                .await?;
+            // Read the COMMAND_NOT_SUPPORTED reply sent by read_socks_connect_request.
+            let mut response = [0_u8; 10];
+            tokio::io::AsyncReadExt::read_exact(&mut client, &mut response).await?;
+            io::Result::Ok(response)
+        });
+
+        let result = super::read_socks_connect_request(&mut server).await;
+
+        assert!(result.is_err(), "BIND command should be rejected");
+        assert_eq!(
+            result.unwrap_err().kind(),
+            io::ErrorKind::Unsupported,
+            "error kind should be Unsupported for non-CONNECT command"
+        );
+
+        let response = client_task.await.map_err(|e| io::Error::other(e.to_string()))??;
+        assert_eq!(
+            response,
+            [
+                super::SOCKS_VERSION,
+                super::SOCKS_REPLY_COMMAND_NOT_SUPPORTED,
+                0,
+                super::SOCKS_ATYP_IPV4,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ],
+            "server should send COMMAND_NOT_SUPPORTED reply to client"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_socks_connect_request_rejects_unknown_atyp() -> io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut client, mut server) = connected_stream_pair().await?;
+
+        // Send a CONNECT request with an unknown address type (0xFF).
+        let client_task = tokio::spawn(async move {
+            client
+                .write_all(&[
+                    super::SOCKS_VERSION,
+                    super::SOCKS_COMMAND_CONNECT,
+                    0,
+                    0xFF, // unknown atyp
+                ])
+                .await
+        });
+
+        let result = super::read_socks_connect_request(&mut server).await;
+
+        assert!(result.is_err(), "unknown atyp should be rejected");
+        assert_eq!(
+            result.unwrap_err().kind(),
+            io::ErrorKind::InvalidData,
+            "error kind should be InvalidData for unknown address type"
+        );
+
+        let _ = client_task.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_socks_connect_request_accepts_ipv6_address() -> io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut client, mut server) = connected_stream_pair().await?;
+
+        let ipv6_addr: [u8; 16] = [
+            0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x01,
+        ];
+        let port: u16 = 443;
+
+        let client_task = tokio::spawn(async move {
+            let mut request =
+                vec![super::SOCKS_VERSION, super::SOCKS_COMMAND_CONNECT, 0, super::SOCKS_ATYP_IPV6];
+            request.extend_from_slice(&ipv6_addr);
+            request.extend_from_slice(&port.to_be_bytes());
+            client.write_all(&request).await
+        });
+
+        let result = super::read_socks_connect_request(&mut server).await;
+
+        assert!(result.is_ok(), "IPv6 CONNECT request should succeed: {:?}", result.err());
+        let req = result.unwrap();
+        assert_eq!(req.atyp, super::SOCKS_ATYP_IPV6, "atyp should be IPv6");
+        assert_eq!(req.address, ipv6_addr, "address should be the full 16-byte IPv6 address");
+        assert_eq!(req.port, port, "port should match");
+
+        let _ = client_task.await;
+        Ok(())
+    }
 }

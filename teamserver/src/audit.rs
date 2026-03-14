@@ -442,19 +442,17 @@ pub async fn query_session_activity(
     })?;
 
     let repo = database.audit_log();
-    let entries = repo.query_filtered(&filter, sql_limit, sql_offset).await?;
-    let items = entries
-        .into_iter()
-        .filter(|entry| actions.contains(&entry.action))
-        .map(TryInto::try_into)
-        .collect::<Result<Vec<SessionActivityRecord>, _>>()?;
-
     let total = usize::try_from(repo.count_filtered(&filter).await?).map_err(|_| {
         TeamserverError::InvalidPersistedValue {
             field: "total",
             message: "row count exceeds usize range".to_owned(),
         }
     })?;
+    let entries = repo.query_filtered(&filter, sql_limit, sql_offset).await?;
+    let items = entries
+        .into_iter()
+        .map(TryInto::try_into)
+        .collect::<Result<Vec<SessionActivityRecord>, _>>()?;
 
     Ok(SessionActivityPage { total, limit, offset, items })
 }

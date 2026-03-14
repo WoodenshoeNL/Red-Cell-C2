@@ -3100,13 +3100,14 @@ mod tests {
         DNS_TYPE_A, DNS_TYPE_CNAME, DNS_TYPE_TXT, DNS_UPLOAD_TIMEOUT_SECS, DemonInitRateLimiter,
         DnsListenerState, DnsPendingResponse, DnsPendingUpload, DnsUploadAssembly, DownloadTracker,
         ListenerEventAction, ListenerManager, ListenerManagerError, ListenerStatus,
-        ListenerSummary, MAX_AGENT_REQUEST_BODY_LEN, MAX_DEMON_INIT_ATTEMPTS_PER_IP,
-        MAX_SMB_FRAME_PAYLOAD_LEN, TrustedProxyPeer, action_from_mark, base32hex_decode,
-        base32hex_encode, build_dns_txt_response, chunk_response_to_b32hex,
-        dns_allowed_query_types, extract_external_ip, listener_config_from_operator,
-        operator_requests_start, parse_dns_c2_query, parse_dns_query, parse_trusted_proxy_peer,
-        profile_listener_configs, read_smb_frame, smb_local_socket_name,
-        spawn_dns_listener_runtime, spawn_managed_listener_task, spawn_smb_listener_runtime,
+        ListenerSummary, MAX_AGENT_REQUEST_BODY_LEN, MAX_DEMON_INIT_ATTEMPT_WINDOWS,
+        MAX_DEMON_INIT_ATTEMPTS_PER_IP, MAX_SMB_FRAME_PAYLOAD_LEN, TrustedProxyPeer,
+        action_from_mark, base32hex_decode, base32hex_encode, build_dns_txt_response,
+        chunk_response_to_b32hex, dns_allowed_query_types, extract_external_ip,
+        listener_config_from_operator, operator_requests_start, parse_dns_c2_query,
+        parse_dns_query, parse_trusted_proxy_peer, profile_listener_configs, read_smb_frame,
+        smb_local_socket_name, spawn_dns_listener_runtime, spawn_managed_listener_task,
+        spawn_smb_listener_runtime,
     };
     use crate::{
         AgentRegistry, AuditQuery, AuditResultStatus, Database, EventBus, Job,
@@ -3251,6 +3252,62 @@ mod tests {
         assert!(windows.contains_key(&fresh_ip));
         drop(windows);
         assert_eq!(limiter.tracked_ip_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn demon_init_rate_limiter_evicts_oldest_when_at_capacity() {
+        let limiter = DemonInitRateLimiter::new();
+
+        // Pre-populate the limiter with MAX_DEMON_INIT_ATTEMPT_WINDOWS unique IPs,
+        // each with a distinct window_start so we can identify the oldest.
+        let base_instant =
+            Instant::now() - Duration::from_secs(MAX_DEMON_INIT_ATTEMPT_WINDOWS as u64);
+        {
+            let mut windows = limiter.windows.lock().await;
+            for i in 0..MAX_DEMON_INIT_ATTEMPT_WINDOWS {
+                // Use 10.x.y.z addressing space — cycle through octets.
+                let a = (i / (256 * 256)) as u8;
+                let b = ((i / 256) % 256) as u8;
+                let c = (i % 256) as u8;
+                let ip = IpAddr::V4(Ipv4Addr::new(10, a, b, c));
+                windows.insert(
+                    ip,
+                    super::DemonInitAttemptWindow {
+                        accepted_attempts: 1,
+                        window_start: base_instant + Duration::from_secs(i as u64),
+                    },
+                );
+            }
+        }
+
+        // The oldest entry has window_start == base_instant (i == 0), i.e. 10.0.0.0.
+        let oldest_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0));
+        assert!(limiter.windows.lock().await.contains_key(&oldest_ip));
+
+        // Calling allow() for a brand-new IP must trigger eviction.
+        let new_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1));
+        assert!(limiter.allow(new_ip).await, "allow should return true for the new IP");
+
+        // After eviction the map should be at most MAX/2 + 1 (half evicted, new IP inserted).
+        let count = limiter.tracked_ip_count().await;
+        assert!(
+            count <= MAX_DEMON_INIT_ATTEMPT_WINDOWS / 2 + 1,
+            "expected at most {} entries after eviction, got {}",
+            MAX_DEMON_INIT_ATTEMPT_WINDOWS / 2 + 1,
+            count
+        );
+
+        // The new IP must be present.
+        assert!(
+            limiter.windows.lock().await.contains_key(&new_ip),
+            "new IP should be tracked after allow()"
+        );
+
+        // The oldest IP (earliest window_start) must have been evicted.
+        assert!(
+            !limiter.windows.lock().await.contains_key(&oldest_ip),
+            "oldest IP should have been evicted"
+        );
     }
 
     #[test]

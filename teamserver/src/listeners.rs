@@ -46,11 +46,11 @@ use utoipa::ToSchema;
 
 use crate::{
     AgentRegistry, AuditResultStatus, CommandDispatchError, CommandDispatcher, Database,
-    DemonPacketParser, ListenerRepository, ListenerStatus, ParsedDemonPacket, PersistedListener,
-    PersistedListenerState, PluginRuntime, ShutdownController, SocketRelayManager, TeamserverError,
-    agent_events::agent_new_event, audit_details, build_init_ack, build_reconnect_ack,
-    dispatch::DownloadTracker, events::EventBus, json_error_response, parameter_object,
-    record_operator_action,
+    DemonPacketParser, DemonParserError, ListenerRepository, ListenerStatus, ParsedDemonPacket,
+    PersistedListener, PersistedListenerState, PluginRuntime, ShutdownController,
+    SocketRelayManager, TeamserverError, agent_events::agent_new_event, audit_details,
+    build_init_ack, build_reconnect_ack, dispatch::DownloadTracker, events::EventBus,
+    json_error_response, parameter_object, record_operator_action,
 };
 
 const DEFAULT_MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
@@ -1374,6 +1374,20 @@ async fn process_demon_transport(
                 http_disposition: DemonHttpDisposition::Ok,
             })
         }
+        Err(DemonParserError::Registry(TeamserverError::AgentNotFound { agent_id })) => {
+            warn!(
+                listener = listener_name,
+                agent_id = format_args!("{:08X}", agent_id),
+                external_ip,
+                "unknown agent sent callback probe"
+            );
+            record_unknown_callback_probe(database, listener_name, agent_id, &external_ip).await;
+            Ok(ProcessedDemonResponse {
+                agent_id,
+                payload: Vec::new(),
+                http_disposition: DemonHttpDisposition::Fake404,
+            })
+        }
         Err(error) => Err(ListenerManagerError::InvalidConfig {
             message: format!("failed to parse demon callback: {error}"),
         }),
@@ -1411,6 +1425,41 @@ async fn record_unknown_reconnect_probe(
             agent_id = format_args!("{agent_id:08X}"),
             %error,
             "failed to persist unknown reconnect probe audit entry"
+        );
+    }
+}
+
+async fn record_unknown_callback_probe(
+    database: &Database,
+    listener_name: &str,
+    agent_id: u32,
+    external_ip: &str,
+) {
+    let details = audit_details(
+        AuditResultStatus::Failure,
+        Some(agent_id),
+        Some("callback_probe"),
+        Some(parameter_object([
+            ("listener", serde_json::Value::String(listener_name.to_owned())),
+            ("external_ip", serde_json::Value::String(external_ip.to_owned())),
+        ])),
+    );
+
+    if let Err(error) = record_operator_action(
+        database,
+        "teamserver",
+        "agent.callback_probe",
+        "agent",
+        Some(format!("{agent_id:08X}")),
+        details,
+    )
+    .await
+    {
+        warn!(
+            listener = listener_name,
+            agent_id = format_args!("{agent_id:08X}"),
+            %error,
+            "failed to persist unknown callback probe audit entry"
         );
     }
 }
@@ -4046,6 +4095,72 @@ mod tests {
         assert_eq!(registry.ctr_offset(agent_id).await?, 1);
 
         manager.stop("edge-http-reconnect").await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn http_listener_unknown_callback_probe_returns_fake_404_and_audit_entry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::new(database.clone(), registry, events, sockets, None);
+        let port = available_port()?;
+        let client = Client::new();
+        // Use an agent_id that is never registered so decrypt_from_agent returns AgentNotFound.
+        let agent_id = 0xCAFE_BABE;
+        let key = [0xAA; AGENT_KEY_LENGTH];
+        let iv = [0xBB; AGENT_IV_LENGTH];
+
+        manager.create(http_listener("edge-http-unknown-callback", port)).await?;
+        manager.start("edge-http-unknown-callback").await?;
+        wait_for_listener(port, false).await?;
+
+        let callback_response = client
+            .post(format!("http://127.0.0.1:{port}/"))
+            .body(valid_demon_callback_body(agent_id, key, iv, 1, 1, b"data"))
+            .send()
+            .await?;
+
+        assert_eq!(callback_response.status(), StatusCode::NOT_FOUND);
+
+        let audit_page = query_audit_log(
+            &database,
+            &AuditQuery {
+                action: Some("agent.callback_probe".to_owned()),
+                ..AuditQuery::default()
+            },
+        )
+        .await?;
+
+        assert_eq!(audit_page.total, 1);
+        let entry = &audit_page.items[0];
+        assert_eq!(entry.actor, "teamserver");
+        assert_eq!(entry.action, "agent.callback_probe");
+        assert_eq!(entry.target_kind, "agent");
+        assert_eq!(entry.target_id.as_deref(), Some("CAFEBABE"));
+        assert_eq!(entry.agent_id.as_deref(), Some("CAFEBABE"));
+        assert_eq!(entry.command.as_deref(), Some("callback_probe"));
+        assert_eq!(entry.result_status, AuditResultStatus::Failure);
+        assert_eq!(
+            entry
+                .parameters
+                .as_ref()
+                .and_then(|value| value.get("listener"))
+                .and_then(serde_json::Value::as_str),
+            Some("edge-http-unknown-callback")
+        );
+        assert_eq!(
+            entry
+                .parameters
+                .as_ref()
+                .and_then(|value| value.get("external_ip"))
+                .and_then(serde_json::Value::as_str),
+            Some("127.0.0.1")
+        );
+
+        manager.stop("edge-http-unknown-callback").await?;
         Ok(())
     }
 

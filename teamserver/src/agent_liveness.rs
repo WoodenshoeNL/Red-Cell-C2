@@ -196,6 +196,7 @@ mod tests {
     use red_cell_common::config::Profile;
     use red_cell_common::operator::OperatorMessage;
     use tokio::time::timeout;
+    use zeroize::Zeroizing;
 
     use super::{
         AgentLivenessConfig, AgentLivenessMonitor, collect_stale_agents,
@@ -210,8 +211,8 @@ mod tests {
             reason: String::new(),
             note: String::new(),
             encryption: AgentEncryptionInfo {
-                aes_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_owned(),
-                aes_iv: "AAAAAAAAAAAAAAAAAAAAAA==".to_owned(),
+                aes_key: Zeroizing::new(vec![0u8; 32]),
+                aes_iv: Zeroizing::new(vec![0u8; 16]),
             },
             hostname: "wkstn-01".to_owned(),
             username: "operator".to_owned(),

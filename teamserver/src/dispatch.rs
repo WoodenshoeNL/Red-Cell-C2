@@ -23,6 +23,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::sync::RwLock;
 use tracing::warn;
+use zeroize::Zeroizing;
 
 use crate::{
     AgentRegistry, Database, DemonCallbackPackage, DemonPacketParser, EventBus, LootRecord,
@@ -866,8 +867,8 @@ fn parse_checkin_metadata(
     let mut updated = existing;
     updated.active = true;
     updated.reason.clear();
-    updated.encryption.aes_key = BASE64_STANDARD.encode(aes_key);
-    updated.encryption.aes_iv = BASE64_STANDARD.encode(aes_iv);
+    updated.encryption.aes_key = Zeroizing::new(aes_key);
+    updated.encryption.aes_iv = Zeroizing::new(aes_iv);
     updated.hostname = hostname;
     updated.username = username;
     updated.domain_name = domain_name;
@@ -5082,6 +5083,7 @@ mod tests {
         net::TcpStream,
         time::{Duration, timeout},
     };
+    use zeroize::Zeroizing;
 
     use super::{
         CommandDispatchError, CommandDispatcher, DownloadState, DownloadTracker,
@@ -5101,8 +5103,8 @@ mod tests {
             reason: String::new(),
             note: String::new(),
             encryption: red_cell_common::AgentEncryptionInfo {
-                aes_key: BASE64_STANDARD.encode(key),
-                aes_iv: BASE64_STANDARD.encode(iv),
+                aes_key: Zeroizing::new(key.to_vec()),
+                aes_iv: Zeroizing::new(iv.to_vec()),
             },
             hostname: "wkstn-01".to_owned(),
             username: "operator".to_owned(),
@@ -5658,8 +5660,8 @@ mod tests {
         assert_eq!(updated.sleep_jitter, 5);
         assert_eq!(updated.kill_date, Some(1_725_000_000));
         assert_eq!(updated.working_hours, Some(0x00FF_00FF));
-        assert_eq!(updated.encryption.aes_key, BASE64_STANDARD.encode(refreshed_key));
-        assert_eq!(updated.encryption.aes_iv, BASE64_STANDARD.encode(refreshed_iv));
+        assert_eq!(updated.encryption.aes_key.as_slice(), refreshed_key.as_slice());
+        assert_eq!(updated.encryption.aes_iv.as_slice(), refreshed_iv.as_slice());
         assert_eq!(registry.ctr_offset(agent_id).await?, 0);
 
         let persisted = database
@@ -6058,8 +6060,8 @@ mod tests {
             .await
             .ok_or_else(|| "pivoted agent should exist after checkin".to_owned())?;
         assert_eq!(updated.hostname, "wkstn-02");
-        assert_eq!(updated.encryption.aes_key, BASE64_STANDARD.encode(key));
-        assert_eq!(updated.encryption.aes_iv, BASE64_STANDARD.encode(iv));
+        assert_eq!(updated.encryption.aes_key.as_slice(), key.as_slice());
+        assert_eq!(updated.encryption.aes_iv.as_slice(), iv.as_slice());
         assert_eq!(registry.ctr_offset(agent_id).await?, 7);
 
         let persisted = database
@@ -6067,8 +6069,8 @@ mod tests {
             .get(agent_id)
             .await?
             .ok_or_else(|| "pivoted agent should remain persisted after checkin".to_owned())?;
-        assert_eq!(persisted.encryption.aes_key, BASE64_STANDARD.encode(key));
-        assert_eq!(persisted.encryption.aes_iv, BASE64_STANDARD.encode(iv));
+        assert_eq!(persisted.encryption.aes_key.as_slice(), key.as_slice());
+        assert_eq!(persisted.encryption.aes_iv.as_slice(), iv.as_slice());
 
         Ok(())
     }

@@ -2,8 +2,6 @@
 
 use std::borrow::Cow;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, CryptoError, decrypt_agent_data};
 use red_cell_common::demon::{DemonCommand, DemonEnvelope, DemonHeader, DemonProtocolError};
 use red_cell_common::{AgentEncryptionInfo, AgentRecord};
@@ -11,6 +9,7 @@ use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tracing::warn;
+use zeroize::Zeroizing;
 
 use crate::{AgentRegistry, TeamserverError};
 
@@ -300,8 +299,8 @@ fn parse_init_agent(
         reason: String::new(),
         note: String::new(),
         encryption: AgentEncryptionInfo {
-            aes_key: BASE64_STANDARD.encode(key),
-            aes_iv: BASE64_STANDARD.encode(iv),
+            aes_key: Zeroizing::new(key.to_vec()),
+            aes_iv: Zeroizing::new(iv.to_vec()),
         },
         hostname,
         username,
@@ -498,8 +497,6 @@ fn read_length_prefixed_utf16_be(
 mod tests {
     use std::path::PathBuf;
 
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use red_cell_common::crypto::{
         AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len, decrypt_agent_data_at_offset,
         encrypt_agent_data, encrypt_agent_data_at_offset,
@@ -508,6 +505,7 @@ mod tests {
     use red_cell_common::{AgentEncryptionInfo, AgentRecord};
     use time::macros::datetime;
     use uuid::Uuid;
+    use zeroize::Zeroizing;
 
     use super::{
         DemonPacketParser, DemonParserError, ParsedDemonPacket, build_init_ack, build_reconnect_ack,
@@ -1154,8 +1152,8 @@ mod tests {
             reason: String::new(),
             note: String::new(),
             encryption: AgentEncryptionInfo {
-                aes_key: BASE64_STANDARD.encode([0; AGENT_KEY_LENGTH]),
-                aes_iv: BASE64_STANDARD.encode([0; AGENT_IV_LENGTH]),
+                aes_key: Zeroizing::new(vec![0; AGENT_KEY_LENGTH]),
+                aes_iv: Zeroizing::new(vec![0; AGENT_IV_LENGTH]),
             },
             hostname: "wkstn-01".to_owned(),
             username: "operator".to_owned(),

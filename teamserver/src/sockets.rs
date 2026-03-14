@@ -815,6 +815,7 @@ mod tests {
     use tokio::io::AsyncReadExt;
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::oneshot;
+    use zeroize::Zeroizing;
 
     use super::{SocketRelayError, SocketRelayManager, SocksServerHandle};
     use crate::{AgentRegistry, Database, EventBus};
@@ -834,8 +835,8 @@ mod tests {
             reason: String::new(),
             note: String::new(),
             encryption: AgentEncryptionInfo {
-                aes_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_owned(),
-                aes_iv: "AAAAAAAAAAAAAAAAAAAAAA==".to_owned(),
+                aes_key: Zeroizing::new(vec![0u8; 32]),
+                aes_iv: Zeroizing::new(vec![0u8; 16]),
             },
             hostname: "wkstn-01".to_owned(),
             username: "operator".to_owned(),

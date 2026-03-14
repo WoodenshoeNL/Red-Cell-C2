@@ -3062,8 +3062,6 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use axum::http::StatusCode;
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use interprocess::local_socket::ListenerOptions;
     use interprocess::local_socket::tokio::Stream as LocalSocketStream;
     use interprocess::local_socket::traits::tokio::Listener as _;
@@ -3085,6 +3083,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::task::JoinHandle;
     use tokio::time::{sleep, timeout};
+    use zeroize::Zeroizing;
 
     fn http_listener(name: &str, port: u16) -> ListenerConfig {
         ListenerConfig::from(HttpListenerConfig {
@@ -4249,8 +4248,8 @@ mod tests {
         assert_eq!(updated.process_name, "cmd.exe");
         assert_eq!(updated.sleep_delay, 45);
         assert_eq!(updated.sleep_jitter, 5);
-        assert_eq!(updated.encryption.aes_key, BASE64_STANDARD.encode(refreshed_key));
-        assert_eq!(updated.encryption.aes_iv, BASE64_STANDARD.encode(refreshed_iv));
+        assert_eq!(updated.encryption.aes_key.as_slice(), refreshed_key.as_slice());
+        assert_eq!(updated.encryption.aes_iv.as_slice(), refreshed_iv.as_slice());
         assert_eq!(registry.ctr_offset(agent_id).await?, 0);
         assert_eq!(
             database
@@ -4947,8 +4946,8 @@ mod tests {
             reason: String::new(),
             note: String::new(),
             encryption: AgentEncryptionInfo {
-                aes_key: BASE64_STANDARD.encode(key),
-                aes_iv: BASE64_STANDARD.encode(iv),
+                aes_key: Zeroizing::new(key.to_vec()),
+                aes_iv: Zeroizing::new(iv.to_vec()),
             },
             hostname: "wkstn-01".to_owned(),
             username: "operator".to_owned(),

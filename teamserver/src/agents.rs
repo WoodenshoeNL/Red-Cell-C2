@@ -6,8 +6,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use red_cell_common::crypto::{
     AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len, decrypt_agent_data_at_offset,
     encrypt_agent_data_at_offset,
@@ -16,6 +14,7 @@ use red_cell_common::demon::{DemonCommand, DemonMessage, DemonPackage};
 use red_cell_common::{AgentEncryptionInfo, AgentRecord};
 use tokio::sync::{Mutex, RwLock};
 use tracing::{instrument, warn};
+use zeroize::Zeroizing;
 
 use crate::database::{Database, LinkRecord, TeamserverError};
 
@@ -770,7 +769,8 @@ impl AgentRegistry {
             let payload = if job.payload.is_empty() {
                 Vec::new()
             } else {
-                let encrypted = encrypt_agent_data_at_offset(&key, &iv, next_offset, &job.payload)?;
+                let encrypted =
+                    encrypt_agent_data_at_offset(&key[..], &iv[..], next_offset, &job.payload)?;
                 next_offset = next_ctr_offset(next_offset, job.payload.len())?;
                 encrypted
             };
@@ -925,9 +925,10 @@ impl AgentRegistry {
 fn decode_crypto_material(
     agent_id: u32,
     encryption: &AgentEncryptionInfo,
-) -> Result<([u8; AGENT_KEY_LENGTH], [u8; AGENT_IV_LENGTH]), TeamserverError> {
-    let key = decode_fixed::<AGENT_KEY_LENGTH>(agent_id, "aes_key", encryption.aes_key.as_bytes())?;
-    let iv = decode_fixed::<AGENT_IV_LENGTH>(agent_id, "aes_iv", encryption.aes_iv.as_bytes())?;
+) -> Result<(Zeroizing<[u8; AGENT_KEY_LENGTH]>, Zeroizing<[u8; AGENT_IV_LENGTH]>), TeamserverError>
+{
+    let key = copy_fixed::<AGENT_KEY_LENGTH>(agent_id, "aes_key", &encryption.aes_key)?;
+    let iv = copy_fixed::<AGENT_IV_LENGTH>(agent_id, "aes_iv", &encryption.aes_iv)?;
     if key.iter().all(|byte| *byte == 0) {
         warn!(
             agent_id = format_args!("0x{agent_id:08X}"),
@@ -941,22 +942,21 @@ fn decode_crypto_material(
     Ok((key, iv))
 }
 
-fn decode_fixed<const N: usize>(
+/// Copy raw bytes from a `Zeroizing<Vec<u8>>` into a fixed-size array.
+///
+/// Returns an error if the slice length does not match `N`.
+fn copy_fixed<const N: usize>(
     agent_id: u32,
     field: &'static str,
-    encoded: &[u8],
-) -> Result<[u8; N], TeamserverError> {
-    let decoded = BASE64_STANDARD.decode(encoded).map_err(|error| {
-        TeamserverError::InvalidPersistedValue {
+    bytes: &Zeroizing<Vec<u8>>,
+) -> Result<Zeroizing<[u8; N]>, TeamserverError> {
+    let actual = bytes.len();
+    let array: [u8; N] =
+        bytes.as_slice().try_into().map_err(|_| TeamserverError::InvalidPersistedValue {
             field,
-            message: format!("agent 0x{agent_id:08X}: {error}"),
-        }
-    })?;
-    let actual = decoded.len();
-    decoded.try_into().map_err(|_| TeamserverError::InvalidPersistedValue {
-        field,
-        message: format!("agent 0x{agent_id:08X}: expected {N} bytes, got {actual}"),
-    })
+            message: format!("agent 0x{agent_id:08X}: expected {N} bytes, got {actual}"),
+        })?;
+    Ok(Zeroizing::new(array))
 }
 
 fn next_ctr_offset(current_offset: u64, payload_len: usize) -> Result<u64, TeamserverError> {
@@ -1010,8 +1010,6 @@ fn encode_pivot_job_payload(
 
 #[cfg(test)]
 mod tests {
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use red_cell_common::crypto::{
         AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len, encrypt_agent_data_at_offset,
     };
@@ -1020,6 +1018,7 @@ mod tests {
 
     use red_cell_common::AgentEncryptionInfo;
     use uuid::Uuid;
+    use zeroize::Zeroizing;
 
     use super::{AgentRegistry, Job};
     use crate::database::{Database, LinkRecord, TeamserverError};
@@ -1035,8 +1034,8 @@ mod tests {
             reason: String::new(),
             note: String::new(),
             encryption: AgentEncryptionInfo {
-                aes_key: "YWVzLWtleQ==".to_owned(),
-                aes_iv: "YWVzLWl2".to_owned(),
+                aes_key: Zeroizing::new(b"aes-key".to_vec()),
+                aes_iv: Zeroizing::new(b"aes-iv".to_vec()),
             },
             hostname: "wkstn-01".to_owned(),
             username: "operator".to_owned(),
@@ -1068,8 +1067,8 @@ mod tests {
     ) -> red_cell_common::AgentRecord {
         let mut agent = sample_agent(agent_id);
         agent.encryption = AgentEncryptionInfo {
-            aes_key: BASE64_STANDARD.encode(key),
-            aes_iv: BASE64_STANDARD.encode(iv),
+            aes_key: Zeroizing::new(key.to_vec()),
+            aes_iv: Zeroizing::new(iv.to_vec()),
         };
         agent
     }
@@ -1655,8 +1654,8 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let agent = sample_agent(0x1000_0007);
         let updated = AgentEncryptionInfo {
-            aes_key: "bmV3LWtleQ==".to_owned(),
-            aes_iv: "bmV3LWl2".to_owned(),
+            aes_key: Zeroizing::new(b"new-key".to_vec()),
+            aes_iv: Zeroizing::new(b"new-iv".to_vec()),
         };
         registry.insert(agent.clone()).await?;
 

@@ -2571,6 +2571,7 @@ mod tests {
         query_audit_log,
     };
     use red_cell_common::crypto::hash_password_sha3;
+    use zeroize::Zeroizing;
 
     #[derive(Clone)]
     struct TestState {
@@ -4281,8 +4282,8 @@ mod tests {
             reason: String::new(),
             note: String::new(),
             encryption: AgentEncryptionInfo {
-                aes_key: "YWVzLWtleQ==".to_owned(),
-                aes_iv: "YWVzLWl2".to_owned(),
+                aes_key: Zeroizing::new(b"aes-key".to_vec()),
+                aes_iv: Zeroizing::new(b"aes-iv".to_vec()),
             },
             hostname: "wkstn-01".to_owned(),
             username: "operator".to_owned(),

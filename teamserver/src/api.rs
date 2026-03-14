@@ -2486,6 +2486,7 @@ mod tests {
         SocketRelayManager,
     };
     use red_cell_common::crypto::hash_password_sha3;
+    use zeroize::Zeroizing;
 
     #[tokio::test]
     async fn json_error_response_returns_status_and_documented_body_shape() {
@@ -3900,8 +3901,8 @@ mod tests {
             reason: "http".to_owned(),
             note: String::new(),
             encryption: red_cell_common::AgentEncryptionInfo {
-                aes_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_owned(),
-                aes_iv: "AAAAAAAAAAAAAAAAAAAAAA==".to_owned(),
+                aes_key: Zeroizing::new(vec![0u8; 32]),
+                aes_iv: Zeroizing::new(vec![0u8; 16]),
             },
             hostname: "workstation".to_owned(),
             username: "neo".to_owned(),

@@ -2,9 +2,12 @@
 
 use std::fmt;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use serde::de::{self};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use utoipa::ToSchema;
+use zeroize::Zeroizing;
 
 use crate::error::CommonError;
 
@@ -268,14 +271,53 @@ impl From<DnsListenerConfig> for ListenerConfig {
 }
 
 /// Agent transport crypto material persisted by the teamserver.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+///
+/// Key and IV are stored as raw bytes inside [`Zeroizing`] wrappers, which
+/// guarantee that the heap memory is overwritten with zeros when the value is
+/// dropped.  Serialisation encodes them as standard base64 strings to keep
+/// wire and database formats unchanged.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct AgentEncryptionInfo {
-    /// Base64-encoded AES-256 key.
-    #[serde(rename = "AESKey")]
-    pub aes_key: String,
-    /// Base64-encoded AES-CTR counter block.
-    #[serde(rename = "AESIv")]
-    pub aes_iv: String,
+    /// AES-256 key (raw bytes, zeroized on drop).
+    #[serde(
+        rename = "AESKey",
+        serialize_with = "serialize_zeroizing_bytes_as_base64",
+        deserialize_with = "deserialize_base64_to_zeroizing_bytes"
+    )]
+    #[schema(value_type = String)]
+    pub aes_key: Zeroizing<Vec<u8>>,
+    /// AES-CTR counter block / IV (raw bytes, zeroized on drop).
+    #[serde(
+        rename = "AESIv",
+        serialize_with = "serialize_zeroizing_bytes_as_base64",
+        deserialize_with = "deserialize_base64_to_zeroizing_bytes"
+    )]
+    #[schema(value_type = String)]
+    pub aes_iv: Zeroizing<Vec<u8>>,
+}
+
+impl fmt::Debug for AgentEncryptionInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AgentEncryptionInfo")
+            .field("aes_key", &"[redacted]")
+            .field("aes_iv", &"[redacted]")
+            .finish()
+    }
+}
+
+fn serialize_zeroizing_bytes_as_base64<S: Serializer>(
+    bytes: &Zeroizing<Vec<u8>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&BASE64_STANDARD.encode(bytes.as_slice()))
+}
+
+fn deserialize_base64_to_zeroizing_bytes<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Zeroizing<Vec<u8>>, D::Error> {
+    let encoded = Zeroizing::new(String::deserialize(deserializer)?);
+    let bytes = BASE64_STANDARD.decode(encoded.as_bytes()).map_err(de::Error::custom)?;
+    Ok(Zeroizing::new(bytes))
 }
 
 /// Shared persisted agent/session metadata.

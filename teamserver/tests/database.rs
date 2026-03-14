@@ -17,6 +17,7 @@ use sqlx::sqlite::SqliteConnectOptions;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 fn temp_db_path() -> PathBuf {
     std::env::temp_dir().join(format!("red-cell-teamserver-db-{}.sqlite", Uuid::new_v4()))
@@ -33,8 +34,8 @@ fn sample_agent(agent_id: u32) -> AgentRecord {
         reason: String::new(),
         note: String::new(),
         encryption: AgentEncryptionInfo {
-            aes_key: "YWVzLWtleQ==".to_owned(),
-            aes_iv: "YWVzLWl2".to_owned(),
+            aes_key: Zeroizing::new(b"aes-key".to_vec()),
+            aes_iv: Zeroizing::new(b"aes-iv".to_vec()),
         },
         hostname: "wkstn-01".to_owned(),
         username: "operator".to_owned(),

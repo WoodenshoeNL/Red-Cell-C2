@@ -34,6 +34,7 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "json"]
 utoipa = { version = "5.4", features = ["axum_extras", "uuid"] }
 utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 uuid = { version = "1.18", features = ["v4"] }
+zeroize = "1"
 
 [dev-dependencies]
 futures-util = "0.3"

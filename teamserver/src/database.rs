@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use red_cell_common::config::OperatorRole;
 use red_cell_common::demon::DemonProtocolError;
 use red_cell_common::{AgentRecord, ListenerConfig, ListenerProtocol};
@@ -13,6 +15,7 @@ use sqlx::{FromRow, QueryBuilder, Row, Sqlite, SqlitePool};
 use thiserror::Error;
 use tracing::instrument;
 use utoipa::ToSchema;
+use zeroize::Zeroizing;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
@@ -263,8 +266,8 @@ impl AgentRepository {
         .bind(bool_to_i64(agent.active))
         .bind(&agent.reason)
         .bind(&agent.note)
-        .bind(&agent.encryption.aes_key)
-        .bind(&agent.encryption.aes_iv)
+        .bind(BASE64_STANDARD.encode(&*agent.encryption.aes_key))
+        .bind(BASE64_STANDARD.encode(&*agent.encryption.aes_iv))
         .bind(&agent.hostname)
         .bind(&agent.username)
         .bind(&agent.domain_name)
@@ -432,8 +435,8 @@ async fn insert_agent_row(
     .bind(&agent.reason)
     .bind(&agent.note)
     .bind(i64_from_u64("ctr_block_offset", ctr_block_offset)?)
-    .bind(&agent.encryption.aes_key)
-    .bind(&agent.encryption.aes_iv)
+    .bind(BASE64_STANDARD.encode(&*agent.encryption.aes_key))
+    .bind(BASE64_STANDARD.encode(&*agent.encryption.aes_iv))
     .bind(&agent.hostname)
     .bind(&agent.username)
     .bind(&agent.domain_name)
@@ -1404,8 +1407,18 @@ impl TryFrom<AgentRow> for AgentRecord {
             reason: row.reason,
             note: row.note,
             encryption: red_cell_common::AgentEncryptionInfo {
-                aes_key: row.aes_key,
-                aes_iv: row.aes_iv,
+                aes_key: Zeroizing::new(BASE64_STANDARD.decode(&row.aes_key).map_err(|e| {
+                    TeamserverError::InvalidPersistedValue {
+                        field: "aes_key",
+                        message: format!("base64 decode failed: {e}"),
+                    }
+                })?),
+                aes_iv: Zeroizing::new(BASE64_STANDARD.decode(&row.aes_iv).map_err(|e| {
+                    TeamserverError::InvalidPersistedValue {
+                        field: "aes_iv",
+                        message: format!("base64 decode failed: {e}"),
+                    }
+                })?),
             },
             hostname: row.hostname,
             username: row.username,

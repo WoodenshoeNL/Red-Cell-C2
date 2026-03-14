@@ -608,9 +608,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        AgentRecord, ExternalListenerConfig, HttpListenerConfig, HttpListenerProxyConfig,
-        HttpListenerResponseConfig, ListenerConfig, ListenerProtocol, ListenerTlsConfig,
-        OperatorInfo, SmbListenerConfig,
+        AgentRecord, DnsListenerConfig, ExternalListenerConfig, HttpListenerConfig,
+        HttpListenerProxyConfig, HttpListenerResponseConfig, ListenerConfig, ListenerProtocol,
+        ListenerTlsConfig, OperatorInfo, SmbListenerConfig,
     };
     use crate::error::CommonError;
 
@@ -973,6 +973,45 @@ mod tests {
             encoded["config"]["response"]["headers"],
             payload["config"]["response"]["headers"]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn dns_listener_config_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+        let original = ListenerConfig::from(DnsListenerConfig {
+            name: "dns-c2".to_string(),
+            host_bind: "0.0.0.0".to_string(),
+            port_bind: 53,
+            domain: "c2.example.com".to_string(),
+            record_types: vec!["TXT".to_string(), "A".to_string()],
+            kill_date: Some("2026-12-31 23:59:59".to_string()),
+            working_hours: Some("08:00-18:00".to_string()),
+        });
+
+        let encoded = serde_json::to_value(&original)?;
+        let decoded: ListenerConfig = serde_json::from_value(encoded)?;
+        assert_eq!(decoded, original);
+        Ok(())
+    }
+
+    #[test]
+    fn dns_listener_config_record_types_defaults_to_txt_when_absent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let payload = serde_json::json!({
+            "protocol": "dns",
+            "config": {
+                "name": "dns-c2",
+                "host_bind": "0.0.0.0",
+                "port_bind": 53,
+                "domain": "c2.example.com"
+            }
+        });
+
+        let config: ListenerConfig = serde_json::from_value(payload)?;
+        let ListenerConfig::Dns(dns) = config else {
+            panic!("expected Dns variant");
+        };
+        assert_eq!(dns.record_types, vec!["TXT".to_string()]);
         Ok(())
     }
 

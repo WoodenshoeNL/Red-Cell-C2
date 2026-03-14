@@ -143,6 +143,18 @@ mod tests {
     }
 
     #[test]
+    fn operator_agent_info_with_no_parent_or_children_leaves_pivot_fields_empty() {
+        let agent = sample_agent(0x1112_1314);
+        let pivots = PivotInfo { parent: None, children: vec![] };
+
+        let info = operator_agent_info("http", 0xDEAD_BEEF, &agent, &pivots);
+
+        assert!(info.pivot_parent.is_empty(), "pivot_parent must be empty string when parent is None");
+        assert!(info.pivots.parent.is_none(), "pivots.parent must be None when no parent supplied");
+        assert!(info.pivots.links.is_empty(), "pivots.links must be empty when no children supplied");
+    }
+
+    #[test]
     fn agent_new_event_uses_shared_operator_agent_info() {
         let agent = sample_agent(0x1112_1314);
         let pivots = PivotInfo { parent: Some(0x0102_0304), children: vec![] };

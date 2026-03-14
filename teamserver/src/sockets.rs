@@ -1214,4 +1214,76 @@ mod tests {
         assert_eq!(buf, 0_u32.to_le_bytes());
         Ok(())
     }
+
+    /// Returns a connected pair of `TcpStream`s: `(client, server)`.
+    async fn connected_stream_pair() -> io::Result<(TcpStream, TcpStream)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let client_task = tokio::spawn(async move { TcpStream::connect(addr).await });
+        let (server, _) = listener.accept().await?;
+        let client = client_task.await.map_err(|e| io::Error::other(e.to_string()))??;
+        Ok((client, server))
+    }
+
+    #[tokio::test]
+    async fn negotiate_socks5_rejects_wrong_version() -> io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut client, mut server) = connected_stream_pair().await?;
+
+        // Send version=4 with one method (no-auth) — wrong SOCKS version.
+        let client_task =
+            tokio::spawn(
+                async move { client.write_all(&[4, 1, super::SOCKS_METHOD_NO_AUTH]).await },
+            );
+
+        let result = super::negotiate_socks5(&mut server).await;
+
+        assert!(result.is_err(), "negotiate_socks5 should return an error for version=4");
+        assert_eq!(
+            result.unwrap_err().kind(),
+            io::ErrorKind::InvalidData,
+            "error kind should be InvalidData for wrong SOCKS version"
+        );
+
+        let _ = client_task.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn negotiate_socks5_rejects_auth_only_methods() -> io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut client, mut server) = connected_stream_pair().await?;
+
+        // Send version=5 with only method 0x02 (username/password) — no no-auth offered.
+        let client_task = tokio::spawn(async move {
+            client.write_all(&[super::SOCKS_VERSION, 1, 0x02]).await?;
+            // Read the rejection response sent by negotiate_socks5.
+            let mut response = [0_u8; 2];
+            tokio::io::AsyncReadExt::read_exact(&mut client, &mut response).await?;
+            io::Result::Ok(response)
+        });
+
+        let result = super::negotiate_socks5(&mut server).await;
+
+        assert!(
+            result.is_err(),
+            "negotiate_socks5 should return an error when no-auth is not offered"
+        );
+        assert_eq!(
+            result.unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied,
+            "error kind should be PermissionDenied when only auth methods are offered"
+        );
+
+        let response = client_task.await.map_err(|e| io::Error::other(e.to_string()))??;
+        assert_eq!(
+            response,
+            [super::SOCKS_VERSION, super::SOCKS_METHOD_NOT_ACCEPTABLE],
+            "server should send [5, 0xFF] rejection to client"
+        );
+
+        Ok(())
+    }
 }

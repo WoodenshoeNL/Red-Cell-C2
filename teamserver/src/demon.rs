@@ -501,7 +501,9 @@ mod tests {
         AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len, decrypt_agent_data_at_offset,
         encrypt_agent_data, encrypt_agent_data_at_offset,
     };
-    use red_cell_common::demon::{DEMON_MAGIC_VALUE, DemonCommand, DemonEnvelope};
+    use red_cell_common::demon::{
+        DEMON_MAGIC_VALUE, DemonCommand, DemonEnvelope, DemonProtocolError,
+    };
     use red_cell_common::{AgentEncryptionInfo, AgentRecord};
     use time::macros::datetime;
     use uuid::Uuid;
@@ -1420,5 +1422,87 @@ mod tests {
         // service_pack == 0 must not append the suffix
         let label = super::windows_version_label(6, 1, WS, 0, 7_601);
         assert!(!label.contains("Service Pack"), "unexpected suffix: {label}");
+    }
+
+    // ── truncated DEMON_INIT error-path coverage ──────────────────────────────
+
+    /// Build an init packet whose inner payload (key + IV + encrypted metadata)
+    /// is truncated to `inner_payload_len` bytes.  The envelope size field is set
+    /// consistently so that `DemonEnvelope::from_bytes` accepts the packet and
+    /// the truncation is only visible to `parse_init_agent`.
+    fn build_truncated_init_packet(
+        agent_id: u32,
+        key: [u8; AGENT_KEY_LENGTH],
+        iv: [u8; AGENT_IV_LENGTH],
+        inner_payload_len: usize,
+    ) -> Vec<u8> {
+        let metadata = build_init_metadata(agent_id);
+        let encrypted =
+            encrypt_agent_data(&key, &iv, &metadata).expect("metadata encryption should succeed");
+
+        let mut full_inner =
+            Vec::with_capacity(AGENT_KEY_LENGTH + AGENT_IV_LENGTH + encrypted.len());
+        full_inner.extend_from_slice(&key);
+        full_inner.extend_from_slice(&iv);
+        full_inner.extend_from_slice(&encrypted);
+
+        let truncated_inner = &full_inner[..inner_payload_len];
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u32_be(u32::from(DemonCommand::DemonInit)));
+        payload.extend_from_slice(&u32_be(7));
+        payload.extend_from_slice(truncated_inner);
+
+        DemonEnvelope::new(agent_id, payload).expect("init envelope should be valid").to_bytes()
+    }
+
+    /// Truncating an otherwise valid DEMON_INIT payload at several offsets must
+    /// always return a `BufferTooShort` protocol error and must never register
+    /// the agent in the registry.
+    #[tokio::test]
+    async fn parse_returns_buffer_too_short_for_truncated_demon_init_payload() {
+        let agent_id: u32 = 0xCAFE_BABE;
+        let key = [0x41_u8; AGENT_KEY_LENGTH];
+        let iv = [0x24_u8; AGENT_IV_LENGTH];
+
+        // (label, inner_payload_len)
+        // inner_payload_len is the number of bytes of (key ++ iv ++ encrypted_metadata)
+        // to include in the envelope payload after the 8-byte command/request prefix.
+        let truncation_cases: &[(&str, usize)] = &[
+            // 16 of 32 key bytes present — read_fixed::<32> fails immediately.
+            ("mid-key", AGENT_KEY_LENGTH / 2),
+            // Full key + 8 of 16 IV bytes — read_fixed::<16> fails.
+            ("mid-IV", AGENT_KEY_LENGTH + AGENT_IV_LENGTH / 2),
+            // Full key + full IV + zero encrypted bytes — decrypt_agent_data returns
+            // empty plaintext; the subsequent read_u32_be for the agent-id field fails.
+            ("no-encrypted-bytes", AGENT_KEY_LENGTH + AGENT_IV_LENGTH),
+            // Full key + full IV + 6 encrypted bytes — decrypts to 6 bytes of plaintext.
+            // The agent-id (4 bytes) reads OK; the hostname length-prefix read (4 bytes)
+            // fails because only 2 bytes remain.
+            ("mid-hostname-length-prefix-in-decrypted", AGENT_KEY_LENGTH + AGENT_IV_LENGTH + 6),
+        ];
+
+        for &(label, inner_payload_len) in truncation_cases {
+            let registry = test_registry().await;
+            let parser = DemonPacketParser::new(registry.clone());
+            let packet = build_truncated_init_packet(agent_id, key, iv, inner_payload_len);
+
+            let result = parser
+                .parse_at(&packet, "203.0.113.1".to_owned(), datetime!(2026-03-14 00:00:00 UTC))
+                .await;
+
+            assert!(
+                matches!(
+                    result,
+                    Err(DemonParserError::Protocol(DemonProtocolError::BufferTooShort { .. }))
+                ),
+                "truncation '{label}' (inner_payload_len={inner_payload_len}) must return \
+                 BufferTooShort, got: {result:?}"
+            );
+            assert!(
+                registry.get(agent_id).await.is_none(),
+                "truncation '{label}' must not register the agent in the registry"
+            );
+        }
     }
 }

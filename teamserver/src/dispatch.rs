@@ -791,9 +791,27 @@ async fn handle_checkin(
             );
             updated.encryption = existing.encryption.clone();
         } else if key_rotation {
+            // SECURITY: The Demon binary protocol does not include a nonce, timestamp, or
+            // challenge-response in the COMMAND_CHECKIN payload, so the teamserver cannot verify
+            // that this key-rotation request is fresh.  An adversary who captures a legitimate
+            // CHECKIN packet in transit can replay it against the teamserver to rotate the session
+            // key back to a known value, then decrypt subsequent agent traffic or inject spoofed
+            // commands.
+            //
+            // Adding freshness protection (e.g. a server-issued challenge that the agent signs, or
+            // a monotonic sequence counter) would require a protocol extension that is incompatible
+            // with unmodified Havoc Demon agents.  This limitation is therefore inherited from the
+            // upstream Havoc C2 design and cannot be fixed at the teamserver layer alone.
+            //
+            // Mitigation: protect the network path between agents and the teamserver with mutual
+            // TLS or a VPN so that an adversary cannot capture CHECKIN packets in the first place.
+            // Operators should also treat any unexpected key-rotation event visible in server logs
+            // as a potential indicator of replay activity.
             warn!(
                 agent_id = format_args!("{agent_id:08X}"),
-                "accepting AES session key rotation from checkin payload without freshness guarantee"
+                "AES session key rotation accepted from CHECKIN payload \
+                 — no replay/freshness protection (Havoc protocol limitation); \
+                 unexpected rotations may indicate a replay attack"
             );
         }
 

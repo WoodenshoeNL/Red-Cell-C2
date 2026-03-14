@@ -1580,4 +1580,140 @@ mod tests {
 
         Ok(())
     }
+
+    // --- Happy-path coverage for the three previously untested public lifecycle APIs ---
+
+    /// `write_client_data` forwards bytes from the agent to the local SOCKS client socket.
+    #[tokio::test]
+    async fn write_client_data_delivers_bytes_to_local_socks_client() -> io::Result<()> {
+        let (_database, registry, manager) =
+            test_manager().await.map_err(|e| io::Error::other(e.to_string()))?;
+        registry
+            .insert(sample_agent(0xDEAD_BEEF))
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        let agent_id: u32 = 0xDEAD_BEEF;
+        let socket_id: u32 = 0xCAFE_0001;
+        let (mut peer_read, _peer_write) =
+            register_pending_client(&manager, agent_id, socket_id).await?;
+
+        manager
+            .write_client_data(agent_id, socket_id, b"relay payload")
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        let mut buf = vec![0_u8; 13];
+        peer_read.read_exact(&mut buf).await?;
+        assert_eq!(
+            &buf, b"relay payload",
+            "bytes written by write_client_data must arrive at the peer reader"
+        );
+
+        Ok(())
+    }
+
+    /// `remove_socks_server` returns a close message and removes both the server entry and any
+    /// clients that were on that port from the manager state.
+    ///
+    /// `add_socks_server("0")` stores the server under key `0` (the *requested* port), so
+    /// `remove_socks_server` must also use `"0"`.  The `local_addr` field in the handle carries
+    /// the real ephemeral port assigned by the OS, which appears in the close message.
+    #[tokio::test]
+    async fn remove_socks_server_returns_close_message_and_removes_client_state() -> io::Result<()>
+    {
+        let (_database, registry, manager) =
+            test_manager().await.map_err(|e| io::Error::other(e.to_string()))?;
+        registry
+            .insert(sample_agent(0xDEAD_BEEF))
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        let agent_id: u32 = 0xDEAD_BEEF;
+
+        // Start a real listener on port "0" (OS-assigned ephemeral port).
+        // The server is stored under key 0 in the servers BTreeMap.
+        let start_msg = manager
+            .add_socks_server(agent_id, "0")
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        assert!(
+            start_msg.starts_with("Started SOCKS5 server on 127.0.0.1:"),
+            "unexpected start message: {start_msg}"
+        );
+
+        // Inject a fake client with server_port=0 so close_clients_for_port picks it up.
+        let socket_id: u32 = 0xCAFE_0002;
+        let (_, _peer_write) = register_pending_client(&manager, agent_id, socket_id).await?;
+        {
+            let mut state = manager.state.write().await;
+            let agent_state = state.get_mut(&agent_id).expect("agent state present");
+            let client = agent_state.clients.get_mut(&socket_id).expect("client present");
+            client.server_port = 0; // match the key used by add_socks_server("0")
+        }
+
+        // Remove using the same port string that was used to add.
+        let close_msg = manager
+            .remove_socks_server(agent_id, "0")
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        assert!(
+            close_msg.starts_with("Closed SOCKS5 server on 127.0.0.1:"),
+            "close message should contain the bound address, got: {close_msg}"
+        );
+
+        let state = manager.state.read().await;
+        let agent_state = state.get(&agent_id).expect("agent state still present after remove");
+        assert!(
+            !agent_state.servers.contains_key(&0_u16),
+            "server entry must be removed after remove_socks_server"
+        );
+        assert!(
+            !agent_state.clients.contains_key(&socket_id),
+            "client entry must be removed when its server is stopped"
+        );
+
+        Ok(())
+    }
+
+    /// `close_client` removes the client from state and shuts down its write half so the peer
+    /// reader sees EOF.
+    #[tokio::test]
+    async fn close_client_removes_state_and_shuts_down_writer() -> io::Result<()> {
+        let (_database, registry, manager) =
+            test_manager().await.map_err(|e| io::Error::other(e.to_string()))?;
+        registry
+            .insert(sample_agent(0xDEAD_BEEF))
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        let agent_id: u32 = 0xDEAD_BEEF;
+        let socket_id: u32 = 0xCAFE_0003;
+        let (mut peer_read, _peer_write) =
+            register_pending_client(&manager, agent_id, socket_id).await?;
+
+        manager
+            .close_client(agent_id, socket_id)
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        // The client entry must be gone from state.
+        {
+            let state = manager.state.read().await;
+            let agent_state =
+                state.get(&agent_id).expect("agent state still present after close_client");
+            assert!(
+                !agent_state.clients.contains_key(&socket_id),
+                "client entry must be removed by close_client"
+            );
+        }
+
+        // The writer shutdown must have propagated as EOF to the peer reader.
+        let mut buf = vec![0_u8; 1];
+        let n = peer_read.read(&mut buf).await?;
+        assert_eq!(n, 0, "peer reader must see EOF after close_client shuts down the writer");
+
+        Ok(())
+    }
 }

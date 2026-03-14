@@ -249,6 +249,14 @@ fn parse_init_agent(
         return Err(DemonParserError::InvalidInit("all-zero AES key is not allowed"));
     }
 
+    if iv.iter().all(|byte| *byte == 0) {
+        warn!(
+            agent_id = format_args!("0x{agent_id:08X}"),
+            "rejecting DEMON_INIT with all-zero AES IV"
+        );
+        return Err(DemonParserError::InvalidInit("all-zero AES IV is not allowed"));
+    }
+
     let decrypted = Cow::Owned(decrypt_agent_data(&key, &iv, encrypted)?);
 
     let mut decrypted_offset = 0_usize;
@@ -633,6 +641,18 @@ mod tests {
         payload.extend_from_slice(&u32_be(u32::from(DemonCommand::DemonInit)));
         payload.extend_from_slice(&u32_be(7));
         payload.extend_from_slice(&[0; AGENT_KEY_LENGTH]);
+        payload.extend_from_slice(&[0; AGENT_IV_LENGTH]);
+        payload.extend_from_slice(&metadata);
+
+        DemonEnvelope::new(agent_id, payload).expect("init envelope should be valid").to_bytes()
+    }
+
+    fn build_plaintext_zero_iv_init_packet(agent_id: u32) -> Vec<u8> {
+        let metadata = build_init_metadata(agent_id);
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u32_be(u32::from(DemonCommand::DemonInit)));
+        payload.extend_from_slice(&u32_be(7));
+        payload.extend_from_slice(&[0xAB; AGENT_KEY_LENGTH]);
         payload.extend_from_slice(&[0; AGENT_IV_LENGTH]);
         payload.extend_from_slice(&metadata);
 
@@ -1043,6 +1063,24 @@ mod tests {
         assert!(
             matches!(error, DemonParserError::InvalidInit("all-zero AES key is not allowed")),
             "expected zero-key init rejection, got: {error}"
+        );
+        assert!(registry.get(0x1357_9BDF).await.is_none(), "rejected init must not register");
+    }
+
+    #[tokio::test]
+    async fn parse_rejects_plaintext_zero_iv_init() {
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry.clone());
+        let packet = build_plaintext_zero_iv_init_packet(0x1357_9BDF);
+
+        let error = parser
+            .parse_at(&packet, "203.0.113.77".to_owned(), datetime!(2026-03-10 10:15:00 UTC))
+            .await
+            .expect_err("zero-IV init must be rejected");
+
+        assert!(
+            matches!(error, DemonParserError::InvalidInit("all-zero AES IV is not allowed")),
+            "expected zero-IV init rejection, got: {error}"
         );
         assert!(registry.get(0x1357_9BDF).await.is_none(), "rejected init must not register");
     }

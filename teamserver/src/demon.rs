@@ -1227,6 +1227,115 @@ mod tests {
         );
     }
 
+    // ── parse_callback_packages ──────────────────────────────────────────────
+
+    /// Build the raw decrypted buffer expected by `parse_callback_packages`.
+    ///
+    /// The first entry in `packages` supplies the outer `(command_id, request_id)` returned
+    /// alongside the buffer; the remainder are inlined as additional `(cmd, req, len-prefixed
+    /// payload)` tuples that exercise the multi-package `while` loop.
+    fn build_raw_callback_decrypted(packages: &[(u32, u32, &[u8])]) -> (u32, u32, Vec<u8>) {
+        assert!(!packages.is_empty(), "must supply at least one package");
+        let (first_cmd, first_req, first_payload) = packages[0];
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&u32_be(u32::try_from(first_payload.len()).unwrap()));
+        buf.extend_from_slice(first_payload);
+        for &(cmd, req, payload) in &packages[1..] {
+            buf.extend_from_slice(&u32_be(cmd));
+            buf.extend_from_slice(&u32_be(req));
+            buf.extend_from_slice(&u32_be(u32::try_from(payload.len()).unwrap()));
+            buf.extend_from_slice(payload);
+        }
+        (first_cmd, first_req, buf)
+    }
+
+    #[test]
+    fn parse_callback_packages_three_packages_all_present_in_order() {
+        let (first_cmd, first_req, buf) = build_raw_callback_decrypted(&[
+            (0x0000_0001, 0x1001, b"alpha"),
+            (0x0000_0002, 0x2002, b"beta"),
+            (0x0000_0003, 0x3003, b"gamma"),
+        ]);
+
+        let packages = super::parse_callback_packages(first_cmd, first_req, &buf)
+            .expect("three-package payload should parse");
+
+        assert_eq!(packages.len(), 3);
+        assert_eq!(packages[0].command_id, 0x0000_0001);
+        assert_eq!(packages[0].request_id, 0x1001);
+        assert_eq!(packages[0].payload, b"alpha");
+        assert_eq!(packages[1].command_id, 0x0000_0002);
+        assert_eq!(packages[1].request_id, 0x2002);
+        assert_eq!(packages[1].payload, b"beta");
+        assert_eq!(packages[2].command_id, 0x0000_0003);
+        assert_eq!(packages[2].request_id, 0x3003);
+        assert_eq!(packages[2].payload, b"gamma");
+    }
+
+    #[test]
+    fn parse_callback_packages_single_package_loop_not_entered() {
+        let (first_cmd, first_req, buf) =
+            build_raw_callback_decrypted(&[(0x0000_0042, 0xDEAD_BEEF, b"only")]);
+
+        let packages = super::parse_callback_packages(first_cmd, first_req, &buf)
+            .expect("single-package payload should parse");
+
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].command_id, 0x0000_0042);
+        assert_eq!(packages[0].request_id, 0xDEAD_BEEF);
+        assert_eq!(packages[0].payload, b"only");
+    }
+
+    #[test]
+    fn parse_callback_packages_empty_first_payload_followed_by_second() {
+        let (first_cmd, first_req, buf) = build_raw_callback_decrypted(&[
+            (0x0000_0010, 0x0001, b""),
+            (0x0000_0020, 0x0002, b"data"),
+        ]);
+
+        let packages = super::parse_callback_packages(first_cmd, first_req, &buf)
+            .expect("empty first payload should be valid");
+
+        assert_eq!(packages.len(), 2);
+        assert!(packages[0].payload.is_empty(), "first payload must be empty");
+        assert_eq!(packages[1].payload, b"data");
+    }
+
+    #[test]
+    fn parse_callback_packages_truncated_command_id_in_loop_returns_error() {
+        // First package is well-formed; then only 2 bytes follow (truncated command_id field).
+        let (first_cmd, first_req, mut buf) =
+            build_raw_callback_decrypted(&[(0x0000_0001, 0x0001, b"abcd")]);
+        buf.extend_from_slice(&[0xDE, 0xAD]); // 2 of the 4 bytes needed for command_id
+
+        let error = super::parse_callback_packages(first_cmd, first_req, &buf)
+            .expect_err("truncated command_id must be rejected");
+
+        assert!(
+            matches!(error, super::DemonParserError::Protocol(_)),
+            "expected Protocol error, got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn parse_callback_packages_truncated_payload_in_loop_returns_error() {
+        // Second package's length field claims 10 bytes but the buffer only provides 2.
+        let (first_cmd, first_req, mut buf) =
+            build_raw_callback_decrypted(&[(0x0000_0001, 0x0001, b"abcd")]);
+        buf.extend_from_slice(&u32_be(0x0000_0002)); // cmd_id
+        buf.extend_from_slice(&u32_be(0x0002)); // req_id
+        buf.extend_from_slice(&u32_be(10)); // claims 10-byte payload
+        buf.extend_from_slice(&[0xAB, 0xCD]); // only 2 bytes available
+
+        let error = super::parse_callback_packages(first_cmd, first_req, &buf)
+            .expect_err("truncated payload must be rejected");
+
+        assert!(
+            matches!(error, super::DemonParserError::Protocol(_)),
+            "expected Protocol error, got: {error:?}"
+        );
+    }
+
     // ── windows_version_label ────────────────────────────────────────────────
 
     const SERVER: u32 = 2; // any value != VER_NT_WORKSTATION (1)

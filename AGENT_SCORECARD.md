@@ -19,16 +19,16 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 0 | 0 | 0 |
-| Missing tests | 1 | 11 | 5 |
+| Missing tests | 6 | 11 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
 | Protocol errors | 3 | 22 | 3 |
-| Security issues | 4 | 30 | 0 |
-| Architecture drift | 1 | 19 | 0 |
+| Security issues | 6 | 30 | 0 |
+| Architecture drift | 2 | 21 | 0 |
 | Memory / resource leaks | 0 | 10 | 1 |
 | Startup / lifecycle regressions | 0 | 8 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
 | Availability / timeout regressions | 0 | 4 | 0 |
-| Correctness / pagination | 0 | 0 | 1 |
+| Correctness / pagination | 3 | 2 | 1 |
 | Workflow / close-hygiene | 2 | 0 | 0 |
 
 ---
@@ -36,6 +36,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-15 06:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 11 | Security (2), Missing tests (5), Correctness (3), Arch drift (1) | red-cell-c2-zroy: TLS private key not wrapped in Zeroizing<>; red-cell-c2-j8a0: API key HMAC secret from UUIDv4 (244 vs 256 bits entropy); red-cell-c2-5rtk: DEFAULT_MAX_DOWNLOAD_BYTES defined twice with different types; red-cell-c2-b44y: all-zero key/IV validation duplicated in demon.rs and dispatch.rs; red-cell-c2-0ff3: HTTP method burned into payload not validated against listener config; red-cell-c2-wey1: audit log missing agent lifecycle events (registration, death, checkin); red-cell-c2-kky2: no test verifying SOCKS5 binds only to localhost; red-cell-c2-o7z6: no test for X-Forwarded-For spoofing prevention; red-cell-c2-m8tz: no test for concurrent DemonInit at agent cap; red-cell-c2-a0oo: no test verifying QueueFull at MAX_JOB_QUEUE_DEPTH; red-cell-c2-h5a3: no test for CTR offset persistence/recovery after restart |
+| Codex | 4 | Correctness (2), Arch drift (2) | red-cell-c2-2hd9: DemonInitRateLimiter and LoginRateLimiter duplicate eviction logic verbatim; red-cell-c2-yh94: DEMON_MAX_RESPONSE_LENGTH and MAX_AGENT_REQUEST_BODY_LEN same cap in two places; red-cell-c2-cqmk: plugin API only exposes emit_agent_checkin, all other lifecycle hooks absent; red-cell-c2-rcy6: patch_payload() writes PE fields without validating MZ magic first |
+| Cursor | 0 | — | No new findings attributed |
+
+Overall codebase health: on track
+Biggest blindspot: CTR offset continuity after restart — persist-before-mutate ordering is correct but there is no test that exercises the full save/reload/encrypt cycle, leaving keystream collision (two-time-pad) after restart as an unverified regression risk.
 
 ### Arch Review — 2026-03-14 (fresh-eyes run)
 

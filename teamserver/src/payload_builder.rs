@@ -2249,4 +2249,144 @@ mod tests {
         bytes[0x80..0x84].copy_from_slice(b"PE\0\0");
         bytes
     }
+
+    /// Build a minimal source tree and return (service, listener, request).
+    ///
+    /// `nasm_script` and `gcc_script` are the shell script bodies written to the
+    /// respective stub executables. Both must be `#!/bin/sh` scripts.
+    fn setup_build_fixture(
+        temp: &TempDir,
+        nasm_script: &str,
+        gcc_script: &str,
+    ) -> Result<
+        (PayloadBuilderService, ListenerConfig, BuildPayloadRequestInfo),
+        Box<dyn std::error::Error>,
+    > {
+        let bin_dir = temp.path().join("bin");
+        let source_root = temp.path().join("src/Havoc/payloads/Demon");
+        let shellcode_root = temp.path().join("src/Havoc/payloads");
+        std::fs::create_dir_all(&bin_dir)?;
+        std::fs::create_dir_all(source_root.join("src/core"))?;
+        std::fs::create_dir_all(source_root.join("src/crypt"))?;
+        std::fs::create_dir_all(source_root.join("src/inject"))?;
+        std::fs::create_dir_all(source_root.join("src/asm"))?;
+        std::fs::create_dir_all(source_root.join("src/main"))?;
+        std::fs::create_dir_all(source_root.join("include"))?;
+        std::fs::create_dir_all(&shellcode_root)?;
+        std::fs::write(source_root.join("src/core/a.c"), "int x = 1;")?;
+        std::fs::write(source_root.join("src/asm/test.x64.asm"), "bits 64")?;
+        std::fs::write(source_root.join("src/main/MainExe.c"), "int main(void){return 0;}")?;
+        std::fs::write(source_root.join("src/main/MainSvc.c"), "int main(void){return 0;}")?;
+        std::fs::write(source_root.join("src/main/MainDll.c"), "int main(void){return 0;}")?;
+        std::fs::write(source_root.join("src/Demon.c"), "int demo = 1;")?;
+        std::fs::write(shellcode_root.join("Shellcode.x64.bin"), [0x90_u8, 0x90])?;
+        std::fs::write(shellcode_root.join("Shellcode.x86.bin"), [0x90_u8, 0x90])?;
+
+        let nasm = bin_dir.join("nasm");
+        let gcc = bin_dir.join("x86_64-w64-mingw32-gcc");
+        std::fs::write(&nasm, nasm_script)?;
+        std::fs::write(&gcc, gcc_script)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&nasm, std::fs::Permissions::from_mode(0o755))?;
+            std::fs::set_permissions(&gcc, std::fs::Permissions::from_mode(0o755))?;
+        }
+
+        let service = PayloadBuilderService::with_paths_for_tests(
+            Toolchain { compiler_x64: gcc.clone(), compiler_x86: gcc, nasm },
+            source_root,
+            shellcode_root.join("Shellcode.x64.bin"),
+            shellcode_root.join("Shellcode.x86.bin"),
+            DemonConfig {
+                sleep: None,
+                jitter: None,
+                indirect_syscall: false,
+                stack_duplication: false,
+                sleep_technique: None,
+                proxy_loading: None,
+                amsi_etw_patching: None,
+                injection: None,
+                dotnet_name_pipe: None,
+                binary: None,
+                trust_x_forwarded_for: false,
+                trusted_proxy_peers: Vec::new(),
+            },
+            None,
+        );
+
+        let request = BuildPayloadRequestInfo {
+            agent_type: "Demon".to_owned(),
+            listener: "http".to_owned(),
+            arch: "x64".to_owned(),
+            format: "Windows Exe".to_owned(),
+            config: r#"{"Sleep":"5","Jitter":"0","Sleep Technique":"WaitForSingleObjectEx","Injection":{"Alloc":"Win32","Execute":"Win32","Spawn64":"a","Spawn32":"b"}}"#.to_owned(),
+        };
+
+        let listener = ListenerConfig::Http(Box::new(HttpListenerConfig {
+            name: "http".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["listener.local".to_owned()],
+            host_bind: "0.0.0.0".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: 443,
+            port_conn: Some(443),
+            method: None,
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: Vec::new(),
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: None,
+            proxy: None,
+        }));
+
+        Ok((service, listener, request))
+    }
+
+    #[tokio::test]
+    async fn build_payload_compiler_exits_nonzero_returns_command_failed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        // nasm succeeds and writes its output file; gcc always exits 1
+        let nasm_ok = "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = \"-o\" ]; then shift; printf 'asm' > \"$1\"; break; fi; shift; done\n";
+        let gcc_fail = "#!/bin/sh\necho 'stub compiler error' >&2\nexit 1\n";
+        let (service, listener, request) = setup_build_fixture(&temp, nasm_ok, gcc_fail)?;
+
+        let error = service
+            .build_payload(&listener, &request, |_| {})
+            .await
+            .expect_err("a compiler that exits non-zero must produce an error");
+
+        assert!(
+            matches!(error, PayloadBuildError::CommandFailed { .. }),
+            "expected CommandFailed, got {error:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn build_payload_assembler_exits_nonzero_returns_command_failed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        // nasm always exits 1; gcc is never reached
+        let nasm_fail = "#!/bin/sh\necho 'stub assembler error' >&2\nexit 1\n";
+        let gcc_ok = "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = \"-o\" ]; then shift; printf 'payload' > \"$1\"; break; fi; shift; done\n";
+        let (service, listener, request) = setup_build_fixture(&temp, nasm_fail, gcc_ok)?;
+
+        let error = service
+            .build_payload(&listener, &request, |_| {})
+            .await
+            .expect_err("an assembler that exits non-zero must produce an error");
+
+        assert!(
+            matches!(error, PayloadBuildError::CommandFailed { .. }),
+            "expected CommandFailed, got {error:?}"
+        );
+        Ok(())
+    }
 }

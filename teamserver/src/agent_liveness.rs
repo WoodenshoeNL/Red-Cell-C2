@@ -534,6 +534,28 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn from_profile_zero_sleep_falls_back_to_minimum_sweep_interval() {
+        // Sleep = 0 is filtered out so effective_timeout uses MIN_SWEEP_INTERVAL_SECS * 3 = 3,
+        // giving sweep_secs = max(3/3, MIN_SWEEP_INTERVAL_SECS) = 1.
+        let profile = sample_profile(None, 0);
+        let config = AgentLivenessConfig::from_profile(&profile);
+
+        assert!(
+            config.default_sleep_secs.is_none(),
+            "zero sleep must be filtered out, got {:?}",
+            config.default_sleep_secs,
+        );
+        assert!(
+            config.sweep_interval >= Duration::from_secs(1),
+            "sweep interval must be at least MIN_SWEEP_INTERVAL_SECS (1 s), got {:?}",
+            config.sweep_interval,
+        );
+        // Confirm the zero-sleep profile did not produce a zero timeout that would immediately
+        // mark every agent dead on the first sweep tick.
+        assert_ne!(config.sweep_interval, Duration::ZERO, "sweep interval must never be zero",);
+    }
+
     #[tokio::test]
     async fn sweep_toctou_guard_skips_agents_that_check_in_during_mark_phase()
     -> Result<(), TeamserverError> {

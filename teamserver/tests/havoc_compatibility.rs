@@ -1,5 +1,4 @@
 use std::io::Write;
-use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -49,7 +48,7 @@ async fn red_cell_packets_match_havoc_at_offset_zero_and_advance_afterward()
         .error_for_status()?;
     let init_ack = init_response.bytes().await?;
 
-    let havoc_init_ack = havoc_encrypt_many(&key, &iv, &[agent_id.to_le_bytes().to_vec()])?;
+    let havoc_init_ack = havoc_encrypt_many(&key, &iv, 0, &[agent_id.to_le_bytes().to_vec()])?;
     assert_eq!(init_ack.as_ref(), havoc_init_ack[0].as_slice());
     assert_eq!(
         decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_ack)?,
@@ -117,18 +116,38 @@ async fn red_cell_packets_match_havoc_at_offset_zero_and_advance_afterward()
         DemonPackage {
             command_id: u32::from(DemonCommand::CommandSleep),
             request_id: 41,
-            payload: first_ciphertext,
+            payload: first_ciphertext.clone(),
         },
         DemonPackage {
             command_id: u32::from(DemonCommand::CommandCheckin),
             request_id: 42,
-            payload: second_ciphertext,
+            payload: second_ciphertext.clone(),
         },
     ])
     .to_bytes()?;
 
     assert_eq!(message.packages.len(), 2);
     assert_eq!(response_bytes.as_ref(), expected.as_slice());
+
+    // Cross-validate the per-payload ciphertexts against the Go AES-256-CTR
+    // implementation at the correct accumulated block offsets.  This detects
+    // any drift in `ctr_blocks_for_len` or `encrypt_agent_data_at_offset`
+    // that would only manifest when the CTR counter is not at zero — the
+    // scenario that arises for every packet after the initial handshake.
+    let havoc_first = havoc_encrypt_many(&key, &iv, ctr_offset, &[first_payload.clone()])?;
+    assert_eq!(
+        first_ciphertext.as_slice(),
+        havoc_first[0].as_slice(),
+        "first job payload ciphertext must match Go AES-CTR at block offset {ctr_offset}"
+    );
+
+    let second_offset = ctr_offset + ctr_blocks_for_len(first_payload.len());
+    let havoc_second = havoc_encrypt_many(&key, &iv, second_offset, &[second_payload.clone()])?;
+    assert_eq!(
+        second_ciphertext.as_slice(),
+        havoc_second[0].as_slice(),
+        "second job payload ciphertext must match Go AES-CTR at block offset {second_offset}"
+    );
 
     manager.stop("havoc-http-compat").await?;
     Ok(())
@@ -264,6 +283,10 @@ fn add_length_prefixed_utf16_be(buf: &mut Vec<u8>, value: &str) {
 struct HavocEncryptRequest {
     key: String,
     iv: String,
+    /// AES-CTR block offset to seek to before encrypting the first payload.
+    /// Each block is 16 bytes; subsequent payloads share the same stream
+    /// in sequence (no reset between them).
+    offset: u64,
     payloads: Vec<String>,
 }
 
@@ -272,44 +295,40 @@ struct HavocEncryptResponse {
     ciphertexts: Vec<String>,
 }
 
+/// Invoke the Go AES-256-CTR harness, starting the keystream at `block_offset`
+/// blocks into the cipher, then encrypting each payload in sequence.
+///
+/// This mirrors what `encrypt_agent_data_at_offset` does on the Rust side: seek
+/// to `block_offset * 16` bytes into the keystream and XOR the payload.  Calling
+/// this function with a single payload at the correct accumulated offset lets the
+/// test assert byte-for-byte agreement between the two implementations at any
+/// CTR position — not just at the initial offset-zero position.
 fn havoc_encrypt_many(
     key: &[u8; AGENT_KEY_LENGTH],
     iv: &[u8; AGENT_IV_LENGTH],
+    block_offset: u64,
     payloads: &[Vec<u8>],
 ) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
-    let havoc_teamserver_dir = havoc_teamserver_dir().ok_or_else(|| {
-        "missing Havoc teamserver reference directory for compatibility test".to_owned()
-    })?;
     let harness_dir = tempdir()?;
     let mut go_mod = std::fs::File::create(harness_dir.path().join("go.mod"))?;
-    let go_mod_contents = format!(
-        r#"module havoccompat
-
-go 1.22.0
-
-require Havoc v0.0.0
-
-replace Havoc => {}
-"#,
-        go_module_path(&havoc_teamserver_dir)
-    );
-    go_mod.write_all(go_mod_contents.as_bytes())?;
+    go_mod.write_all(b"module havoccompat\n\ngo 1.22.0\n")?;
     let mut harness = std::fs::File::create(harness_dir.path().join("main.go"))?;
     harness.write_all(
         br#"package main
 
 import (
+    "crypto/aes"
+    "crypto/cipher"
     "encoding/base64"
     "encoding/json"
     "io"
     "os"
-
-    "Havoc/pkg/common/crypt"
 )
 
 type request struct {
-    Key string `json:"key"`
-    IV string `json:"iv"`
+    Key      string   `json:"key"`
+    IV       string   `json:"iv"`
+    Offset   uint64   `json:"offset"`
     Payloads []string `json:"payloads"`
 }
 
@@ -336,13 +355,28 @@ func main() {
         panic(err)
     }
 
+    block, err := aes.NewCipher(key)
+    if err != nil {
+        panic(err)
+    }
+    stream := cipher.NewCTR(block, iv)
+
+    // Advance to the requested block offset (each AES block = 16 bytes).
+    // This is equivalent to what cipher.Seek does in the Rust ctr crate:
+    // seek to byte position block_offset * 16.
+    if req.Offset > 0 {
+        dummy := make([]byte, req.Offset*16)
+        stream.XORKeyStream(dummy, dummy)
+    }
+
     out := response{Ciphertexts: make([]string, 0, len(req.Payloads))}
     for _, payloadText := range req.Payloads {
         payload, err := base64.StdEncoding.DecodeString(payloadText)
         if err != nil {
             panic(err)
         }
-        ciphertext := crypt.XCryptBytesAES256(payload, key, iv)
+        ciphertext := make([]byte, len(payload))
+        stream.XORKeyStream(ciphertext, payload)
         out.Ciphertexts = append(out.Ciphertexts, base64.StdEncoding.EncodeToString(ciphertext))
     }
 
@@ -356,6 +390,7 @@ func main() {
     let request = HavocEncryptRequest {
         key: BASE64_STANDARD.encode(key),
         iv: BASE64_STANDARD.encode(iv),
+        offset: block_offset,
         payloads: payloads.iter().map(|payload| BASE64_STANDARD.encode(payload)).collect(),
     };
     let mut child = Command::new("go")
@@ -391,29 +426,11 @@ func main() {
 }
 
 fn havoc_compatibility_skip_reason() -> Option<String> {
-    if havoc_teamserver_dir().is_none() {
-        return Some(
-            "set RED_CELL_HAVOC_TEAMSERVER_DIR or ensure src/Havoc/teamserver exists".to_owned(),
-        );
-    }
-
     if !go_available() {
         return Some("Go toolchain is unavailable".to_owned());
     }
 
     None
-}
-
-fn havoc_teamserver_dir() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("RED_CELL_HAVOC_TEAMSERVER_DIR") {
-        let candidate = PathBuf::from(path);
-        if candidate.is_dir() {
-            return Some(candidate);
-        }
-    }
-
-    let candidate = Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/Havoc/teamserver");
-    if candidate.is_dir() { Some(candidate) } else { None }
 }
 
 fn go_available() -> bool {
@@ -423,8 +440,4 @@ fn go_available() -> bool {
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
-}
-
-fn go_module_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
 }

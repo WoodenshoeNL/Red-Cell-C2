@@ -1,0 +1,268 @@
+//! Shared helpers for teamserver integration tests.
+//!
+//! Import this module in each integration test file with `mod common;`.
+// Not every test file uses every helper; suppress dead_code warnings for this module.
+#![allow(dead_code)]
+
+use std::time::Duration;
+
+use futures_util::{SinkExt, StreamExt};
+use red_cell::{
+    AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
+    ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
+    SocketRelayManager, TeamserverState, websocket_routes,
+};
+use red_cell_common::OperatorInfo;
+use red_cell_common::config::Profile;
+use red_cell_common::crypto::{
+    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, encrypt_agent_data, encrypt_agent_data_at_offset,
+    hash_password_sha3,
+};
+use red_cell_common::demon::{DemonCommand, DemonEnvelope};
+use red_cell_common::operator::{EventCode, LoginInfo, Message, MessageHead, OperatorMessage};
+use tokio::net::TcpListener;
+use tokio::time::{sleep, timeout};
+use tokio_tungstenite::{WebSocketStream, tungstenite::Message as ClientMessage};
+
+/// A WebSocket client stream connected to the test teamserver.
+pub type WsClient = WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Bind a free TCP port, start a teamserver from `profile`, and return the socket address.
+pub async fn spawn_test_server(
+    profile: Profile,
+) -> Result<std::net::SocketAddr, Box<dyn std::error::Error>> {
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let listeners = ListenerManager::new(
+        database.clone(),
+        registry.clone(),
+        events.clone(),
+        sockets.clone(),
+        None,
+    );
+    let state = TeamserverState {
+        profile: profile.clone(),
+        database: database.clone(),
+        auth: AuthService::from_profile(&profile).expect("auth service should initialize"),
+        api: ApiRuntime::from_profile(&profile),
+        events,
+        connections: OperatorConnectionManager::new(),
+        agent_registry: registry.clone(),
+        listeners,
+        payload_builder: PayloadBuilderService::disabled_for_tests(),
+        sockets,
+        webhooks: AuditWebhookNotifier::from_profile(&profile),
+        login_rate_limiter: LoginRateLimiter::new(),
+        shutdown: red_cell::ShutdownController::new(),
+    };
+
+    let tcp = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = tcp.local_addr()?;
+    tokio::spawn(async move {
+        let app = websocket_routes().with_state(state);
+        let _ = axum::serve(tcp, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+            .await;
+    });
+    Ok(addr)
+}
+
+/// Authenticate over WebSocket as `"operator"` / `"password1234"` and consume the
+/// success + snapshot frames.
+pub async fn login(socket: &mut WsClient) -> Result<(), Box<dyn std::error::Error>> {
+    login_as(socket, "operator", "password1234").await
+}
+
+/// Authenticate over WebSocket as `username`/`password`; consume the success + snapshot frames.
+pub async fn login_as(
+    socket: &mut WsClient,
+    username: &str,
+    password: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let payload = serde_json::to_string(&OperatorMessage::Login(Message {
+        head: MessageHead {
+            event: EventCode::InitConnection,
+            user: username.to_owned(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info: LoginInfo { user: username.to_owned(), password: hash_password_sha3(password) },
+    }))?;
+    socket.send(ClientMessage::Text(payload.into())).await?;
+    let response = read_operator_message(socket).await?;
+    assert!(
+        matches!(response, OperatorMessage::InitConnectionSuccess(_)),
+        "expected InitConnectionSuccess, got {response:?}"
+    );
+    let _snapshot = read_operator_snapshot(socket).await?;
+    Ok(())
+}
+
+/// Read the next operator WebSocket frame, expecting a JSON [`OperatorMessage`].
+pub async fn read_operator_message(
+    socket: &mut WsClient,
+) -> Result<OperatorMessage, Box<dyn std::error::Error>> {
+    let next = timeout(Duration::from_secs(5), socket.next()).await?;
+    let frame = next.ok_or_else(|| "missing websocket frame".to_owned())??;
+    match frame {
+        ClientMessage::Text(payload) => Ok(serde_json::from_str(payload.as_str())?),
+        other => Err(format!("unexpected websocket frame: {other:?}").into()),
+    }
+}
+
+/// Read the next operator WebSocket frame and parse it as an operator snapshot
+/// (`InitConnectionInfo`), returning the list of connected operators.
+pub async fn read_operator_snapshot(
+    socket: &mut WsClient,
+) -> Result<Vec<OperatorInfo>, Box<dyn std::error::Error>> {
+    let message = read_operator_message(socket).await?;
+    let OperatorMessage::InitConnectionInfo(message) = message else {
+        return Err("expected operator snapshot event".into());
+    };
+
+    Ok(serde_json::from_value(
+        message
+            .info
+            .fields
+            .get("Operators")
+            .cloned()
+            .ok_or_else(|| "operator snapshot missing operators".to_owned())?,
+    )?)
+}
+
+/// Assert that no operator message arrives within `wait`.
+pub async fn assert_no_operator_message(socket: &mut WsClient, wait: Duration) {
+    let result = timeout(wait, socket.next()).await;
+    assert!(result.is_err(), "unexpected operator message during empty session snapshot");
+}
+
+/// Find a free TCP port on `127.0.0.1` that is not equal to `excluded`.
+pub fn available_port_excluding(excluded: u16) -> Result<u16, Box<dyn std::error::Error>> {
+    for _ in 0..32 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        drop(listener);
+        if port != excluded {
+            return Ok(port);
+        }
+    }
+
+    Err(format!("failed to allocate a port different from {excluded}").into())
+}
+
+/// Poll `http://127.0.0.1:{port}/` until the listener accepts connections (i.e. returns a
+/// status code other than `501 Not Implemented`), or return an error after 40 attempts.
+pub async fn wait_for_listener(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    let client = reqwest::Client::new();
+    for _ in 0..40 {
+        if let Ok(response) = client.get(format!("http://127.0.0.1:{port}/")).send().await {
+            if response.status() != reqwest::StatusCode::NOT_IMPLEMENTED {
+                return Ok(());
+            }
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+
+    Err(format!("listener on port {port} did not become ready").into())
+}
+
+/// Build a valid Demon `DemonInit` envelope for the given `agent_id`, `key`, and `iv`.
+///
+/// The metadata fields contain fixed test values (hostname `wkstn-01`, etc.) that the
+/// teamserver integration tests assert against.
+pub fn valid_demon_init_body(
+    agent_id: u32,
+    key: [u8; AGENT_KEY_LENGTH],
+    iv: [u8; AGENT_IV_LENGTH],
+) -> Vec<u8> {
+    let mut metadata = Vec::new();
+    metadata.extend_from_slice(&agent_id.to_be_bytes());
+    add_length_prefixed_bytes_be(&mut metadata, b"wkstn-01");
+    add_length_prefixed_bytes_be(&mut metadata, b"operator");
+    add_length_prefixed_bytes_be(&mut metadata, b"REDCELL");
+    add_length_prefixed_bytes_be(&mut metadata, b"10.0.0.25");
+    add_length_prefixed_utf16_be(&mut metadata, "C:\\Windows\\explorer.exe");
+    metadata.extend_from_slice(&1337_u32.to_be_bytes());
+    metadata.extend_from_slice(&1338_u32.to_be_bytes());
+    metadata.extend_from_slice(&512_u32.to_be_bytes());
+    metadata.extend_from_slice(&2_u32.to_be_bytes());
+    metadata.extend_from_slice(&1_u32.to_be_bytes());
+    metadata.extend_from_slice(&0x401000_u64.to_be_bytes());
+    metadata.extend_from_slice(&10_u32.to_be_bytes());
+    metadata.extend_from_slice(&0_u32.to_be_bytes());
+    metadata.extend_from_slice(&1_u32.to_be_bytes());
+    metadata.extend_from_slice(&0_u32.to_be_bytes());
+    metadata.extend_from_slice(&22000_u32.to_be_bytes());
+    metadata.extend_from_slice(&9_u32.to_be_bytes());
+    metadata.extend_from_slice(&15_u32.to_be_bytes());
+    metadata.extend_from_slice(&20_u32.to_be_bytes());
+    metadata.extend_from_slice(&1_893_456_000_u64.to_be_bytes());
+    metadata.extend_from_slice(&0b101010_u32.to_be_bytes());
+
+    let encrypted =
+        encrypt_agent_data(&key, &iv, &metadata).expect("metadata encryption should succeed");
+    let payload = [
+        u32::from(DemonCommand::DemonInit).to_be_bytes().as_slice(),
+        7_u32.to_be_bytes().as_slice(),
+        key.as_slice(),
+        iv.as_slice(),
+        encrypted.as_slice(),
+    ]
+    .concat();
+
+    DemonEnvelope::new(agent_id, payload)
+        .unwrap_or_else(|error| panic!("failed to build demon init request body: {error}"))
+        .to_bytes()
+}
+
+/// Build a valid Demon callback envelope (post-registration) for the given parameters.
+///
+/// `ctr_offset` must be the cumulative AES-CTR block offset at the time of this call.
+pub fn valid_demon_callback_body(
+    agent_id: u32,
+    key: [u8; AGENT_KEY_LENGTH],
+    iv: [u8; AGENT_IV_LENGTH],
+    ctr_offset: u64,
+    command_id: u32,
+    request_id: u32,
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut decrypted = Vec::new();
+    decrypted.extend_from_slice(&u32::try_from(payload.len()).unwrap_or_default().to_be_bytes());
+    decrypted.extend_from_slice(payload);
+
+    let encrypted = encrypt_agent_data_at_offset(&key, &iv, ctr_offset, &decrypted)
+        .unwrap_or_else(|error| panic!("callback encrypt failed: {error}"));
+    let body = [
+        command_id.to_be_bytes().as_slice(),
+        request_id.to_be_bytes().as_slice(),
+        encrypted.as_slice(),
+    ]
+    .concat();
+
+    DemonEnvelope::new(agent_id, body)
+        .unwrap_or_else(|error| panic!("failed to build demon callback request body: {error}"))
+        .to_bytes()
+}
+
+/// Serialize a `CommandOutput` payload (LE length-prefixed UTF-8 string).
+pub fn command_output_payload(output: &str) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&u32::try_from(output.len()).unwrap_or_default().to_le_bytes());
+    payload.extend_from_slice(output.as_bytes());
+    payload
+}
+
+/// Append `value` to `buffer` as a BE-length-prefixed byte slice.
+pub fn add_length_prefixed_bytes_be(buffer: &mut Vec<u8>, value: &[u8]) {
+    buffer.extend_from_slice(&u32::try_from(value.len()).unwrap_or_default().to_be_bytes());
+    buffer.extend_from_slice(value);
+}
+
+/// Append `value` to `buffer` as a BE-length-prefixed UTF-16BE string (null-terminated).
+pub fn add_length_prefixed_utf16_be(buffer: &mut Vec<u8>, value: &str) {
+    let mut encoded: Vec<u8> = value.encode_utf16().flat_map(u16::to_be_bytes).collect();
+    encoded.extend_from_slice(&[0, 0]);
+    add_length_prefixed_bytes_be(buffer, &encoded);
+}

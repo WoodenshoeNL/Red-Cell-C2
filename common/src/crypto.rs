@@ -1,4 +1,33 @@
 //! Agent transport cryptography helpers.
+//!
+//! # Security — AES-256-CTR keystream reuse (two-time-pad)
+//!
+//! The Havoc Demon protocol assigns each agent a fixed key+IV pair at registration
+//! time.  The teamserver (and Demon) reset the AES-CTR counter to zero at the start
+//! of **every** message rather than maintaining a running counter across the session.
+//! This means that every message encrypted under the same agent session is protected
+//! by an **identical keystream**.
+//!
+//! Consequence: if an adversary records two ciphertexts `C1` and `C2` produced by
+//! the same agent, `C1 ⊕ C2 = P1 ⊕ P2`.  If either plaintext is partially known
+//! (e.g. a predictable command header), the other can be recovered.  This is the
+//! classic *two-time-pad* (or *many-time-pad*) attack.
+//!
+//! **This behaviour is intentional for Havoc wire-format compatibility.**
+//! [`encrypt_agent_data`] and [`decrypt_agent_data`] deliberately reproduce it so
+//! that Red Cell can interoperate with unmodified Demon implants.
+//!
+//! ## Mitigations available to operators
+//!
+//! * **When Havoc compatibility is not required** (custom implants), use
+//!   [`encrypt_agent_data_at_offset`] and advance the `block_offset` by the return
+//!   value of [`ctr_blocks_for_len`] after each message.  Keeping a monotonically
+//!   increasing per-session counter eliminates keystream reuse.
+//! * **Use an AEAD scheme** (e.g. AES-256-GCM) for any new transport that does not
+//!   need to remain Havoc-wire-compatible.  AEAD provides both confidentiality and
+//!   ciphertext integrity, which CTR alone does not.
+//! * See [`docs/operator-security.md`](../../../docs/operator-security.md) for
+//!   deployment guidance.
 
 use aes::Aes256;
 use cipher::{InvalidLength, KeyIvInit, StreamCipher, StreamCipherSeek};
@@ -54,6 +83,20 @@ type AgentCtr = Ctr128BE<Aes256>;
 ///
 /// Havoc uses a big-endian 128-bit counter on both the teamserver and Demon sides.
 ///
+/// # Security — keystream reuse
+///
+/// This function **always** resets the AES-CTR counter to zero before encrypting.
+/// When the same `key`+`iv` pair is used for multiple messages — as it is in the
+/// Havoc Demon protocol — every message is encrypted with an **identical keystream**.
+/// Two ciphertexts produced with the same key and IV satisfy `C1 ⊕ C2 = P1 ⊕ P2`,
+/// so an adversary who can cause the agent to encrypt a known value can recover other
+/// plaintexts (two-time-pad attack).
+///
+/// This limitation is **inherited from Havoc** and is preserved here for wire-format
+/// compatibility.  When operating custom implants that do not need Havoc
+/// compatibility, prefer [`encrypt_agent_data_at_offset`] with a monotonically
+/// increasing `block_offset`, or use an AEAD scheme instead.  See the module-level
+/// documentation for guidance.
 pub fn encrypt_agent_data(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
     encrypt_agent_data_at_offset(key, iv, 0, plaintext)
 }
@@ -69,6 +112,12 @@ pub fn encrypt_agent_data_at_offset(
 }
 
 /// Decrypt agent transport data with AES-256-CTR starting from the given IV.
+///
+/// # Security — keystream reuse
+///
+/// Symmetric to [`encrypt_agent_data`]: the counter is reset to zero for every
+/// call.  See that function's documentation for the two-time-pad limitation that
+/// applies when decrypting Havoc Demon messages.
 pub fn decrypt_agent_data(
     key: &[u8],
     iv: &[u8],

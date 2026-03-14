@@ -320,6 +320,32 @@ mod tests {
     }
 
     #[test]
+    fn load_tls_identity_from_files_rejects_missing_key_when_cert_exists() {
+        let temp_dir = TempDir::new().expect("temporary directory should be created");
+        let identity = generate_self_signed_tls_identity(
+            &["localhost".to_owned()],
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("identity generation should succeed");
+        let cert_path = temp_dir.path().join("server.crt");
+        let key_path = temp_dir.path().join("missing.key");
+
+        std::fs::write(&cert_path, identity.certificate_pem())
+            .expect("certificate should be written");
+        // key file is intentionally not written
+
+        let error = load_tls_identity_from_files(&cert_path, &key_path)
+            .expect_err("missing key file must be rejected");
+
+        match error {
+            TlsError::ReadFile { path, .. } => {
+                assert_eq!(path, key_path.display().to_string());
+            }
+            other => panic!("expected ReadFile error for key path, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn resolve_tls_identity_uses_profile_cert_paths_when_present() {
         let temp_dir = TempDir::new().expect("temporary directory should be created");
         let identity = generate_self_signed_tls_identity(

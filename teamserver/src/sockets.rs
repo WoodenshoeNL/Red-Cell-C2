@@ -1408,4 +1408,176 @@ mod tests {
         let _ = client_task.await;
         Ok(())
     }
+
+    /// Build a registered `PendingClient` for `agent_id`/`socket_id` and return the read half of
+    /// the peer socket so the caller can verify what the manager writes to the client.
+    ///
+    /// The caller receives `(peer_read, peer_write)`:
+    /// - `peer_read` reads everything that the manager writes via `PendingClient.writer`
+    /// - `peer_write` keeps the connection alive so the spawned `spawn_client_reader` task does
+    ///   not see EOF prematurely
+    async fn register_pending_client(
+        manager: &SocketRelayManager,
+        agent_id: u32,
+        socket_id: u32,
+    ) -> io::Result<(tokio::net::tcp::OwnedReadHalf, tokio::net::tcp::OwnedWriteHalf)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let connect_task = tokio::spawn(async move { TcpStream::connect(addr).await });
+        let (server_stream, _) = listener.accept().await?;
+        let client_stream = connect_task.await.map_err(|e| io::Error::other(e.to_string()))??;
+        // client_stream (stream A): write_A sends to read_B, read_A receives from write_B
+        // server_stream (stream B): read_B receives what write_A sent, write_B sends to read_A
+        let (client_read, client_write) = client_stream.into_split();
+        let (server_read, server_write) = server_stream.into_split();
+
+        {
+            let mut state = manager.state.write().await;
+            let agent_state = state.entry(agent_id).or_default();
+            agent_state.clients.insert(
+                socket_id,
+                super::PendingClient {
+                    server_port: 1080,
+                    atyp: super::SOCKS_ATYP_IPV4,
+                    address: vec![127, 0, 0, 1],
+                    port: 80,
+                    connected: false,
+                    writer: Arc::new(tokio::sync::Mutex::new(client_write)),
+                    read_half: Some(client_read),
+                },
+            );
+        }
+
+        // server_read: verifies what the manager writes to PendingClient.writer (write_A → read_B)
+        // server_write: held by the caller to prevent EOF on client_read inside the reader task
+        Ok((server_read, server_write))
+    }
+
+    #[tokio::test]
+    async fn finish_connect_success_sends_succeeded_reply_and_retains_client() -> io::Result<()> {
+        let (_database, registry, manager) =
+            test_manager().await.map_err(|e| io::Error::other(e.to_string()))?;
+        registry
+            .insert(sample_agent(0xDEAD_BEEF))
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        let agent_id: u32 = 0xDEAD_BEEF;
+        let socket_id: u32 = 0x0000_0001;
+        let (mut peer_read, _peer_write) =
+            register_pending_client(&manager, agent_id, socket_id).await?;
+
+        manager
+            .finish_connect(agent_id, socket_id, true, 0)
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        // SOCKS5 reply: VER=5, REP=0(succeeded), RSV=0, ATYP=1(IPv4), ADDR=127.0.0.1,
+        // PORT=80 big-endian → [0, 80]
+        let mut response = [0_u8; 10];
+        peer_read.read_exact(&mut response).await?;
+        assert_eq!(
+            response,
+            [
+                super::SOCKS_VERSION,
+                super::SOCKS_REPLY_SUCCEEDED,
+                0,
+                super::SOCKS_ATYP_IPV4,
+                127,
+                0,
+                0,
+                1,
+                0,
+                80,
+            ],
+            "finish_connect(success=true) must send SOCKS_REPLY_SUCCEEDED to the client"
+        );
+
+        // On success the client entry must remain in the manager state so that subsequent
+        // write_client_data and close_client calls can find it.
+        let state = manager.state.read().await;
+        assert!(
+            state.get(&agent_id).is_some_and(|s| s.clients.contains_key(&socket_id)),
+            "client must remain in state after a successful connect"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn finish_connect_failure_sends_error_reply_and_removes_client() -> io::Result<()> {
+        let (_database, registry, manager) =
+            test_manager().await.map_err(|e| io::Error::other(e.to_string()))?;
+        registry
+            .insert(sample_agent(0xDEAD_BEEF))
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        let agent_id: u32 = 0xDEAD_BEEF;
+        let socket_id: u32 = 0x0000_0002;
+        let (mut peer_read, _peer_write) =
+            register_pending_client(&manager, agent_id, socket_id).await?;
+
+        // error_code=5 fits in u8, so the reply byte must be exactly 5.
+        manager
+            .finish_connect(agent_id, socket_id, false, 5)
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        let mut response = [0_u8; 10];
+        peer_read.read_exact(&mut response).await?;
+        assert_eq!(
+            response,
+            [super::SOCKS_VERSION, 5, 0, super::SOCKS_ATYP_IPV4, 127, 0, 0, 1, 0, 80],
+            "finish_connect(success=false, error_code=5) must send reply byte 5"
+        );
+
+        // On failure the client must be removed so no further relay traffic is forwarded.
+        let state = manager.state.read().await;
+        assert!(
+            !state.get(&agent_id).is_some_and(|s| s.clients.contains_key(&socket_id)),
+            "client must be removed from state after a failed connect"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn finish_connect_failure_out_of_range_error_code_uses_general_failure() -> io::Result<()>
+    {
+        let (_database, registry, manager) =
+            test_manager().await.map_err(|e| io::Error::other(e.to_string()))?;
+        registry
+            .insert(sample_agent(0xDEAD_BEEF))
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        let agent_id: u32 = 0xDEAD_BEEF;
+        let socket_id: u32 = 0x0000_0003;
+        let (mut peer_read, _peer_write) =
+            register_pending_client(&manager, agent_id, socket_id).await?;
+
+        // error_code=300 does not fit in u8; the implementation falls back to
+        // SOCKS_REPLY_GENERAL_FAILURE (1).
+        manager
+            .finish_connect(agent_id, socket_id, false, 300)
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        let mut response = [0_u8; 10];
+        peer_read.read_exact(&mut response).await?;
+        assert_eq!(
+            response[1],
+            super::SOCKS_REPLY_GENERAL_FAILURE,
+            "error_code values that do not fit in u8 must fall back to SOCKS_REPLY_GENERAL_FAILURE"
+        );
+
+        let state = manager.state.read().await;
+        assert!(
+            !state.get(&agent_id).is_some_and(|s| s.clients.contains_key(&socket_id)),
+            "client must be removed from state after a failed connect"
+        );
+
+        Ok(())
+    }
 }

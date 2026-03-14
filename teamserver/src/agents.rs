@@ -420,10 +420,10 @@ impl AgentRegistry {
     pub async fn set_ctr_offset(&self, agent_id: u32, offset: u64) -> Result<(), TeamserverError> {
         let entry =
             self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
-        let mut current = entry.ctr_block_offset.lock().await;
-        *current = offset;
-        drop(current);
+        // Persist first so that a DB failure leaves in-memory state untouched,
+        // preventing memory/database drift on reconnect.
         self.repository.set_ctr_block_offset(agent_id, offset).await?;
+        *entry.ctr_block_offset.lock().await = offset;
         Ok(())
     }
 
@@ -482,14 +482,19 @@ impl AgentRegistry {
         let entry =
             self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
 
+        // Build the updated record under a read lock so that a DB failure leaves
+        // in-memory state completely untouched, preventing memory/database drift.
         let updated = {
-            let mut info = entry.info.write().await;
-            info.encryption = encryption;
-            info.clone()
+            let info = entry.info.read().await;
+            let mut cloned = info.clone();
+            cloned.encryption = encryption.clone();
+            cloned
         };
 
         let listener_name = entry.listener_name.read().await.clone();
+        // Persist first; only mutate in-memory on success.
         self.repository.update_with_listener(&updated, &listener_name).await?;
+        entry.info.write().await.encryption = encryption;
         Ok(())
     }
 
@@ -2340,5 +2345,73 @@ mod tests {
     fn encode_pivot_job_payload_empty_input() {
         let result = super::encode_pivot_job_payload(0x1234, &[]);
         assert!(result.is_ok());
+    }
+
+    /// Closing the pool simulates a SQLite write failure for set_ctr_offset.
+    /// The in-memory CTR offset must remain at its original value when the
+    /// persistence step fails.
+    #[tokio::test]
+    async fn set_ctr_offset_no_partial_mutation_on_db_failure() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let agent = sample_agent(0x1000_F001);
+        registry.insert(agent.clone()).await?;
+
+        // Establish a known initial offset.
+        registry.set_ctr_offset(agent.agent_id, 5).await?;
+        assert_eq!(registry.ctr_offset(agent.agent_id).await?, 5);
+
+        // Closing the pool causes any subsequent writes to fail.
+        database.close().await;
+
+        let result = registry.set_ctr_offset(agent.agent_id, 99).await;
+        assert!(result.is_err(), "expected DB write to fail after pool close");
+
+        // In-memory state must not have advanced.
+        assert_eq!(
+            registry.ctr_offset(agent.agent_id).await?,
+            5,
+            "in-memory ctr_block_offset must not mutate when persistence fails"
+        );
+
+        Ok(())
+    }
+
+    /// Closing the pool simulates a SQLite write failure for set_encryption.
+    /// The in-memory AES key/IV must remain at their original values when the
+    /// persistence step fails.
+    #[tokio::test]
+    async fn set_encryption_no_partial_mutation_on_db_failure() -> Result<(), TeamserverError> {
+        use red_cell_common::AgentEncryptionInfo;
+
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let agent = sample_agent_with_crypto(
+            0x1000_F002,
+            [0xAA; AGENT_KEY_LENGTH],
+            [0xBB; AGENT_IV_LENGTH],
+        );
+        registry.insert(agent.clone()).await?;
+
+        let original_enc = registry.encryption(agent.agent_id).await?;
+
+        // Closing the pool causes any subsequent writes to fail.
+        database.close().await;
+
+        let new_enc = AgentEncryptionInfo {
+            aes_key: Zeroizing::new(vec![0xCC; AGENT_KEY_LENGTH]),
+            aes_iv: Zeroizing::new(vec![0xDD; AGENT_IV_LENGTH]),
+        };
+        let result = registry.set_encryption(agent.agent_id, new_enc).await;
+        assert!(result.is_err(), "expected DB write to fail after pool close");
+
+        // In-memory encryption must not have changed.
+        let current_enc = registry.encryption(agent.agent_id).await?;
+        assert_eq!(
+            current_enc, original_enc,
+            "in-memory encryption must not mutate when persistence fails"
+        );
+
+        Ok(())
     }
 }

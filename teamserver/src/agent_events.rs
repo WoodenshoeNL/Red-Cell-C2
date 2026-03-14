@@ -149,9 +149,15 @@ mod tests {
 
         let info = operator_agent_info("http", 0xDEAD_BEEF, &agent, &pivots);
 
-        assert!(info.pivot_parent.is_empty(), "pivot_parent must be empty string when parent is None");
+        assert!(
+            info.pivot_parent.is_empty(),
+            "pivot_parent must be empty string when parent is None"
+        );
         assert!(info.pivots.parent.is_none(), "pivots.parent must be None when no parent supplied");
-        assert!(info.pivots.links.is_empty(), "pivots.links must be empty when no children supplied");
+        assert!(
+            info.pivots.links.is_empty(),
+            "pivots.links must be empty when no children supplied"
+        );
     }
 
     #[test]

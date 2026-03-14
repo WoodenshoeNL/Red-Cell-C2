@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 54 | 181 | 31 |
+| Tasks closed | 57 | 181 | 31 |
 | Bugs filed against | 2 | 27 | 9 |
 | Bug rate (bugs/task) | 0.04 | 0.15 | 0.29 |
 | Quality score | 96% | 85% | 71% |
@@ -1165,3 +1165,14 @@ Notes: Reviewed 10 commits from `446ae04` to `08aff95`. No Rust source changes i
 
 Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (125+ tests, 0 failed)
 Notes: Reviewed 113 commits from `08aff95` to `896603b`. All productive commits attributed to Ubuntu-C2-dev01-claude (Claude Sonnet 4.6). One notable admin commit `896603b` (by user+Claude) adjusts loop intervals (QA→30min, arch→105-135min) and adds service-bridge validation with tests. P2 security issues still open and now claimed: `red-cell-c2-2n8o` (timing oracle), `red-cell-c2-3hro` (unbounded queue), `red-cell-c2-a74c` (CHECKIN key rotation). `red-cell-c2-35jc` (external listener) remains in_progress. Codebase health trending strongly positive.
+
+### QA Review — 2026-03-15 — 795c7ad..3663234
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 0 | Closed red-cell-c2-35jc (External listener removed from shared types — clean arch fix), red-cell-c2-12rd (8 listener lifecycle event payload tests), red-cell-c2-1b3x (3 ListenerManager constructor/shutdown/cleanup-hook tests). All work high quality: no unwrap, no missing coverage, correct behavior. One stashed sockets.rs test (vm2a) is in-progress. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test -p red-cell --lib` ✓ (533 tests, 0 failed)
+Notes: Reviewed 10 commits from `795c7ad` to `3663234`. All productive work attributed to Ubuntu-C2-dev01-claude (Claude Sonnet 4.6). Key highlight: `fix(protocol): remove External listener from shared domain types` cleanly excises the never-implemented External transport from all code paths (domain, listeners, payload builder, API schema, tests). Profile validation retains an explicit rejection with user-facing error. `sync_profile` now silently skips External entries — acceptable since profile.validate() gates this in production. No new bugs filed. Codebase health: strong.

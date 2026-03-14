@@ -498,6 +498,64 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn notify_detached_is_dropped_when_closing() {
+        let (address, mut receiver, server) = webhook_server(HttpStatusCode::OK).await;
+        let profile = Profile::parse(&format!(
+            r#"
+            Teamserver {{
+              Host = "127.0.0.1"
+              Port = 40056
+            }}
+
+            Operators {{
+              user "operator" {{
+                Password = "password1234"
+              }}
+            }}
+
+            WebHook {{
+              Discord {{
+                Url = "http://{address}/"
+              }}
+            }}
+
+            Demon {{}}
+            "#
+        ))
+        .expect("profile should parse");
+        let notifier = AuditWebhookNotifier::from_profile(&profile);
+
+        // Trigger shutdown — sets closing=true and returns immediately (no in-flight tasks).
+        assert!(notifier.shutdown(Duration::from_secs(5)).await);
+
+        // Any subsequent detached notification must be silently dropped.
+        notifier.notify_audit_record_detached(AuditRecord {
+            id: 11,
+            actor: "operator".to_owned(),
+            action: "operator.login".to_owned(),
+            target_kind: "operator".to_owned(),
+            target_id: Some("operator".to_owned()),
+            agent_id: None,
+            command: Some("login".to_owned()),
+            parameters: None,
+            result_status: AuditResultStatus::Success,
+            occurred_at: "2026-03-14T00:00:00Z".to_owned(),
+        });
+
+        // Yield to the executor so any erroneously-spawned tasks get a chance to run.
+        tokio::task::yield_now().await;
+
+        // No POST should have reached the mock server.
+        assert!(receiver.try_recv().is_err(), "no request should be sent after shutdown");
+
+        // A second shutdown should also return true immediately (pending count was never
+        // incremented by the dropped notification).
+        assert!(notifier.shutdown(Duration::from_secs(1)).await);
+
+        server.abort();
+    }
+
     async fn webhook_server(
         response_status: HttpStatusCode,
     ) -> (SocketAddr, mpsc::UnboundedReceiver<Value>, tokio::task::JoinHandle<()>) {

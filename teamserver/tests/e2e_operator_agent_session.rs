@@ -13,14 +13,14 @@ use red_cell_common::crypto::{
 };
 use red_cell_common::demon::{DemonCommand, DemonEnvelope, DemonMessage};
 use red_cell_common::operator::{
-    AgentResponseInfo, AgentTaskInfo, EventCode, ListenerInfo, ListenerMarkInfo, LoginInfo,
-    Message, MessageHead, OperatorMessage,
+    AgentResponseInfo, AgentTaskInfo, EventCode, FlatInfo, ListenerInfo, ListenerMarkInfo,
+    LoginInfo, Message, MessageHead, OperatorMessage,
 };
 use red_cell_common::{HttpListenerConfig, ListenerConfig, OperatorInfo};
 use reqwest::Client;
 use tokio::net::TcpListener;
 use tokio::time::{sleep, timeout};
-use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
+use tokio_tungstenite::{WebSocketStream, connect_async, tungstenite::Message as ClientMessage};
 
 #[tokio::test]
 async fn operator_session_listener_and_mock_demon_round_trip()
@@ -196,6 +196,214 @@ async fn operator_session_listener_and_mock_demon_round_trip()
     socket.close(None).await?;
     listeners.stop("edge-http").await?;
     server.abort();
+    Ok(())
+}
+
+/// Spin up a minimal teamserver with Admin, Operator, and Analyst users.
+fn multi_role_profile() -> Profile {
+    Profile::parse(
+        r#"
+        Teamserver {
+          Host = "127.0.0.1"
+          Port = 0
+        }
+
+        Operators {
+          user "admin" {
+            Password = "adminpw"
+            Role = "Admin"
+          }
+          user "operator" {
+            Password = "operatorpw"
+            Role = "Operator"
+          }
+          user "analyst" {
+            Password = "analystpw"
+            Role = "Analyst"
+          }
+        }
+
+        Demon {}
+        "#,
+    )
+    .expect("multi-role profile should parse")
+}
+
+/// Bind a free port and start a teamserver; return the socket address.
+async fn spawn_test_server(
+    profile: Profile,
+) -> Result<std::net::SocketAddr, Box<dyn std::error::Error>> {
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let listeners = ListenerManager::new(
+        database.clone(),
+        registry.clone(),
+        events.clone(),
+        sockets.clone(),
+        None,
+    );
+    let state = TeamserverState {
+        profile: profile.clone(),
+        database: database.clone(),
+        auth: AuthService::from_profile(&profile).expect("auth service"),
+        api: ApiRuntime::from_profile(&profile),
+        events,
+        connections: OperatorConnectionManager::new(),
+        agent_registry: registry.clone(),
+        listeners,
+        payload_builder: PayloadBuilderService::disabled_for_tests(),
+        sockets,
+        webhooks: AuditWebhookNotifier::from_profile(&profile),
+        login_rate_limiter: LoginRateLimiter::new(),
+        shutdown: red_cell::ShutdownController::new(),
+    };
+
+    let tcp = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = tcp.local_addr()?;
+    tokio::spawn(async move {
+        let app = websocket_routes().with_state(state);
+        let _ = axum::serve(tcp, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+            .await;
+    });
+    Ok(addr)
+}
+
+type WsClient = WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Authenticate over WebSocket as `username`/`password`; consume the success + snapshot frames.
+async fn login_as(
+    socket: &mut WsClient,
+    username: &str,
+    password: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let payload = serde_json::to_string(&OperatorMessage::Login(Message {
+        head: MessageHead {
+            event: EventCode::InitConnection,
+            user: username.to_owned(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info: LoginInfo { user: username.to_owned(), password: hash_password_sha3(password) },
+    }))?;
+    socket.send(ClientMessage::Text(payload.into())).await?;
+    let response = read_operator_message(socket).await?;
+    assert!(
+        matches!(response, OperatorMessage::InitConnectionSuccess(_)),
+        "expected InitConnectionSuccess, got {response:?}"
+    );
+    let _snapshot = read_operator_snapshot(socket).await?;
+    Ok(())
+}
+
+/// Read the next frame and assert it is a Close frame, indicating RBAC rejection.
+async fn assert_connection_closed_after_rbac_denial(
+    socket: &mut WsClient,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let next = timeout(Duration::from_secs(5), socket.next()).await?;
+    match next {
+        Some(Ok(ClientMessage::Close(_))) | None => Ok(()),
+        Some(Ok(frame)) => {
+            Err(format!("expected Close frame after RBAC denial, got {frame:?}").into())
+        }
+        Some(Err(error)) => Err(format!("websocket error after RBAC denial: {error}").into()),
+    }
+}
+
+// ---- RBAC WebSocket enforcement integration tests ----------------------------------------
+
+#[tokio::test]
+async fn analyst_cannot_send_agent_task_message() -> Result<(), Box<dyn std::error::Error>> {
+    let addr = spawn_test_server(multi_role_profile()).await?;
+    let (mut socket, _) = connect_async(format!("ws://{addr}/")).await?;
+    login_as(&mut socket, "analyst", "analystpw").await?;
+
+    let task_msg = serde_json::to_string(&OperatorMessage::AgentTask(Message {
+        head: MessageHead {
+            event: EventCode::Session,
+            user: "analyst".to_owned(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info: AgentTaskInfo {
+            task_id: "rbac-test-1".to_owned(),
+            command_line: "whoami".to_owned(),
+            demon_id: "deadbeef".to_owned(),
+            command_id: "1".to_owned(),
+            ..AgentTaskInfo::default()
+        },
+    }))?;
+    socket.send(ClientMessage::Text(task_msg.into())).await?;
+
+    assert_connection_closed_after_rbac_denial(&mut socket).await
+}
+
+#[tokio::test]
+async fn analyst_cannot_create_listener() -> Result<(), Box<dyn std::error::Error>> {
+    let addr = spawn_test_server(multi_role_profile()).await?;
+    let (mut socket, _) = connect_async(format!("ws://{addr}/")).await?;
+    login_as(&mut socket, "analyst", "analystpw").await?;
+
+    let msg = serde_json::to_string(&OperatorMessage::ListenerNew(Message {
+        head: MessageHead {
+            event: EventCode::Listener,
+            user: "analyst".to_owned(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info: ListenerInfo {
+            name: Some("evil-listener".to_owned()),
+            protocol: Some("Http".to_owned()),
+            ..ListenerInfo::default()
+        },
+    }))?;
+    socket.send(ClientMessage::Text(msg.into())).await?;
+
+    assert_connection_closed_after_rbac_denial(&mut socket).await
+}
+
+#[tokio::test]
+async fn operator_cannot_send_admin_message() -> Result<(), Box<dyn std::error::Error>> {
+    let addr = spawn_test_server(multi_role_profile()).await?;
+    let (mut socket, _) = connect_async(format!("ws://{addr}/")).await?;
+    login_as(&mut socket, "operator", "operatorpw").await?;
+
+    let msg = serde_json::to_string(&OperatorMessage::AgentRemove(Message {
+        head: MessageHead {
+            event: EventCode::Session,
+            user: "operator".to_owned(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info: FlatInfo::default(),
+    }))?;
+    socket.send(ClientMessage::Text(msg.into())).await?;
+
+    assert_connection_closed_after_rbac_denial(&mut socket).await
+}
+
+#[tokio::test]
+async fn analyst_can_send_chat_message_without_disconnection()
+-> Result<(), Box<dyn std::error::Error>> {
+    let addr = spawn_test_server(multi_role_profile()).await?;
+    let (mut socket, _) = connect_async(format!("ws://{addr}/")).await?;
+    login_as(&mut socket, "analyst", "analystpw").await?;
+
+    let msg = serde_json::to_string(&OperatorMessage::ChatMessage(Message {
+        head: MessageHead {
+            event: EventCode::Chat,
+            user: "analyst".to_owned(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info: FlatInfo::default(),
+    }))?;
+    socket.send(ClientMessage::Text(msg.into())).await?;
+
+    // The server should NOT close the connection — no frame should arrive within the window.
+    assert_no_operator_message(&mut socket, Duration::from_millis(300)).await;
+    socket.close(None).await?;
     Ok(())
 }
 

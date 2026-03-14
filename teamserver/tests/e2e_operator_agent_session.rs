@@ -384,6 +384,55 @@ async fn operator_cannot_send_admin_message() -> Result<(), Box<dyn std::error::
 }
 
 #[tokio::test]
+async fn wrong_password_receives_error_and_connection_closes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let addr = spawn_test_server(multi_role_profile()).await?;
+    let (mut socket, _) = connect_async(format!("ws://{addr}/")).await?;
+
+    // Send correct username but wrong password hash.
+    let bad_login = serde_json::to_string(&OperatorMessage::Login(Message {
+        head: MessageHead {
+            event: EventCode::InitConnection,
+            user: "operator".to_owned(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info: LoginInfo {
+            user: "operator".to_owned(),
+            password: hash_password_sha3("this-is-not-the-right-password"),
+        },
+    }))?;
+    socket.send(ClientMessage::Text(bad_login.into())).await?;
+
+    // Server imposes a 2 s delay on failed logins; use a generous timeout.
+    let response = timeout(Duration::from_secs(5), socket.next())
+        .await?
+        .ok_or("server closed connection without sending a rejection message")??;
+    let rejection: OperatorMessage = match response {
+        ClientMessage::Text(payload) => serde_json::from_str(payload.as_str())?,
+        other => return Err(format!("unexpected frame before rejection message: {other:?}").into()),
+    };
+    assert!(
+        matches!(rejection, OperatorMessage::InitConnectionError(_)),
+        "expected InitConnectionError, got {rejection:?}"
+    );
+
+    // After the rejection message the server must close the connection.
+    let next = timeout(Duration::from_secs(3), socket.next()).await?;
+    match next {
+        Some(Ok(ClientMessage::Close(_))) | None => {}
+        Some(Ok(frame)) => {
+            return Err(format!("expected Close frame after auth rejection, got {frame:?}").into());
+        }
+        Some(Err(error)) => {
+            return Err(format!("websocket error after auth rejection: {error}").into());
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn analyst_can_send_chat_message_without_disconnection()
 -> Result<(), Box<dyn std::error::Error>> {
     let addr = spawn_test_server(multi_role_profile()).await?;

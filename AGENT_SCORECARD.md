@@ -19,12 +19,12 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 0 | 0 | 0 |
-| Missing tests | 1 | 7 | 5 |
+| Missing tests | 1 | 11 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
-| Protocol errors | 3 | 18 | 3 |
-| Security issues | 3 | 24 | 0 |
-| Architecture drift | 1 | 17 | 0 |
-| Memory / resource leaks | 0 | 9 | 1 |
+| Protocol errors | 3 | 22 | 3 |
+| Security issues | 4 | 30 | 0 |
+| Architecture drift | 1 | 19 | 0 |
+| Memory / resource leaks | 0 | 10 | 1 |
 | Startup / lifecycle regressions | 0 | 8 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
 | Availability / timeout regressions | 0 | 4 | 0 |
@@ -36,6 +36,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-14 (fresh-eyes run)
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 1 | Security | red-cell-c2-8ugx: AES-256-CTR keystream reused per-message (two-time-pad), crypto.rs |
+| Codex | 16 | Security (6), Protocol (4), Missing tests (4), Arch drift (2), Resource (1) | red-cell-c2-ude5: all-zero IV accepted in DemonInit; red-cell-c2-bhvi: AES key not zeroized in memory; red-cell-c2-n950: DUMMY_PASSWORD_HASH not valid Argon2 PHC (user enum timing); red-cell-c2-35d7: build_tls_config ignores profile cert; red-cell-c2-mvcp: payload -D defines not sanitized; red-cell-c2-2me2: webhook shutdown race; red-cell-c2-q9re: API key auth not rate-limited; red-cell-c2-er7d: DNS listener absent; red-cell-c2-235t: DemonEnvelope underflow on <4 bytes; red-cell-c2-5q73: process_path aliased to process_name; red-cell-c2-lqzt: os_build always empty; red-cell-c2-xfkr: pivot list handler no-op; red-cell-c2-heg7: no RBAC WebSocket enforcement test; red-cell-c2-ipj0: havoc_compat test silently skips; red-cell-c2-5yg3: all-zero IV test missing; red-cell-c2-z3xc: LoginRateLimiter lockout untested; red-cell-c2-tyx1: listener stop errors discarded |
+| Cursor | 0 | — | No new findings attributed |
+
+Overall codebase health: drifting
+Biggest blindspot: Agent AES key material (both key and IV) is never zeroized and lives in heap simultaneously in base64 and decoded forms. Combined with per-message keystream reuse at offset 0, a teamserver memory dump would expose all agent communication keys and allow retroactive decryption of recorded traffic.
 
 ### Arch Review — 2026-03-13 14:16
 

@@ -3036,10 +3036,10 @@ mod tests {
         MAX_DEMON_INIT_ATTEMPTS_PER_IP, MAX_SMB_FRAME_PAYLOAD_LEN, TrustedProxyPeer,
         action_from_mark, base32hex_decode, base32hex_encode, build_dns_txt_response,
         chunk_response_to_b32hex, dns_allowed_query_types, extract_external_ip,
-        listener_config_from_operator, operator_requests_start, parse_dns_c2_query,
-        parse_dns_query, parse_trusted_proxy_peer, profile_listener_configs, read_smb_frame,
-        smb_local_socket_name, spawn_dns_listener_runtime, spawn_managed_listener_task,
-        spawn_smb_listener_runtime,
+        listener_config_from_operator, listener_error_event, listener_event_for_action,
+        listener_removed_event, operator_requests_start, parse_dns_c2_query, parse_dns_query,
+        parse_trusted_proxy_peer, profile_listener_configs, read_smb_frame, smb_local_socket_name,
+        spawn_dns_listener_runtime, spawn_managed_listener_task, spawn_smb_listener_runtime,
     };
     use crate::{
         AgentRegistry, AuditQuery, AuditResultStatus, Database, EventBus, Job,
@@ -5984,5 +5984,134 @@ mod tests {
         let responses = state.responses.lock().await;
         assert!(!responses.contains_key(&3));
         assert!(responses.contains_key(&4));
+    }
+
+    // --- listener lifecycle event payload helpers ---
+
+    fn minimal_http_summary(name: &str) -> ListenerSummary {
+        ListenerSummary {
+            name: name.to_owned(),
+            protocol: ListenerProtocol::Http,
+            state: PersistedListenerState { status: ListenerStatus::Created, last_error: None },
+            config: http_listener(name, 8080),
+        }
+    }
+
+    #[test]
+    fn listener_event_for_action_created_returns_listener_new() {
+        let summary = minimal_http_summary("alpha");
+        let msg = listener_event_for_action("operator1", &summary, ListenerEventAction::Created);
+        match msg {
+            OperatorMessage::ListenerNew(m) => {
+                assert_eq!(m.head.user, "operator1");
+                assert_eq!(m.info.name.as_deref(), Some("alpha"));
+            }
+            other => panic!("expected ListenerNew, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn listener_event_for_action_updated_returns_listener_edit() {
+        let summary = minimal_http_summary("beta");
+        let msg = listener_event_for_action("op", &summary, ListenerEventAction::Updated);
+        match msg {
+            OperatorMessage::ListenerEdit(m) => {
+                assert_eq!(m.head.user, "op");
+                assert_eq!(m.info.name.as_deref(), Some("beta"));
+            }
+            other => panic!("expected ListenerEdit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn listener_event_for_action_started_returns_online_mark() {
+        let summary = minimal_http_summary("gamma");
+        let msg = listener_event_for_action("op", &summary, ListenerEventAction::Started);
+        match msg {
+            OperatorMessage::ListenerMark(m) => {
+                assert_eq!(m.info.name, "gamma");
+                assert_eq!(m.info.mark, "Online");
+            }
+            other => panic!("expected ListenerMark(Online), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn listener_event_for_action_stopped_returns_offline_mark() {
+        let summary = minimal_http_summary("delta");
+        let msg = listener_event_for_action("op", &summary, ListenerEventAction::Stopped);
+        match msg {
+            OperatorMessage::ListenerMark(m) => {
+                assert_eq!(m.info.name, "delta");
+                assert_eq!(m.info.mark, "Offline");
+            }
+            other => panic!("expected ListenerMark(Offline), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn listener_error_event_preserves_name_and_error_text() {
+        let error = ListenerManagerError::StartFailed {
+            name: "epsilon".to_owned(),
+            message: "bind failed".to_owned(),
+        };
+        let msg = listener_error_event("admin", "epsilon", &error);
+        match msg {
+            OperatorMessage::ListenerError(m) => {
+                assert_eq!(m.head.user, "admin");
+                assert_eq!(m.info.name, "epsilon");
+                assert!(
+                    m.info.error.contains("bind failed"),
+                    "error text should contain the original message"
+                );
+            }
+            other => panic!("expected ListenerError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn listener_error_event_invalid_config_variant() {
+        let error = ListenerManagerError::InvalidConfig { message: "missing port".to_owned() };
+        let msg = listener_error_event("sysop", "zeta", &error);
+        match msg {
+            OperatorMessage::ListenerError(m) => {
+                assert_eq!(m.info.name, "zeta");
+                assert!(m.info.error.contains("missing port"));
+            }
+            other => panic!("expected ListenerError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn listener_removed_event_preserves_name() {
+        let msg = listener_removed_event("op", "eta");
+        match msg {
+            OperatorMessage::ListenerRemove(m) => {
+                assert_eq!(m.head.user, "op");
+                assert_eq!(m.info.name, "eta");
+            }
+            other => panic!("expected ListenerRemove, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn listener_event_for_action_head_user_is_propagated() {
+        // Verify all four actions carry the correct user in MessageHead.
+        let summary = minimal_http_summary("theta");
+        for action in [
+            ListenerEventAction::Created,
+            ListenerEventAction::Updated,
+            ListenerEventAction::Started,
+            ListenerEventAction::Stopped,
+        ] {
+            let msg = listener_event_for_action("carol", &summary, action);
+            let user = match &msg {
+                OperatorMessage::ListenerNew(m) => &m.head.user,
+                OperatorMessage::ListenerEdit(m) => &m.head.user,
+                OperatorMessage::ListenerMark(m) => &m.head.user,
+                _ => panic!("unexpected variant"),
+            };
+            assert_eq!(user, "carol", "action {action:?} did not preserve user");
+        }
     }
 }

@@ -941,6 +941,19 @@ fn patch_payload(
     architecture: Architecture,
     binary_patch: &BinaryConfig,
 ) -> Result<Vec<u8>, PayloadBuildError> {
+    // Validate PE structure before applying any patches.  A failed build step
+    // may produce an ELF, error output, or a truncated file; writing PE header
+    // fields into such a binary would silently corrupt it with no diagnostic.
+    const MZ_MAGIC: [u8; 2] = [0x4D, 0x5A];
+    if bytes.len() < 2 || bytes[..2] != MZ_MAGIC {
+        return Err(PayloadBuildError::InvalidRequest {
+            message: "payload does not start with MZ magic bytes — not a valid PE binary"
+                .to_owned(),
+        });
+    }
+    // pe_offsets validates the PE\0\0 signature at the DOS header pointer (0x3C).
+    pe_offsets(&bytes)?;
+
     let header = binary_patch.header.as_ref();
     let magic = match architecture {
         Architecture::X64 => header.and_then(|header| header.magic_mz_x64.as_deref()),
@@ -2518,6 +2531,84 @@ mod tests {
             },
         )
         .expect_err("truncated pe should fail");
+
+        assert!(matches!(error, PayloadBuildError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn patch_payload_rejects_non_mz_magic() {
+        // ELF magic — a non-PE binary that a failed cross-compile might produce.
+        let mut elf_bytes = vec![0_u8; 0x80 + 24 + 60];
+        elf_bytes[..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
+        let error = patch_payload(
+            elf_bytes,
+            Architecture::X64,
+            &BinaryConfig {
+                header: Some(red_cell_common::config::HeaderConfig {
+                    magic_mz_x64: None,
+                    magic_mz_x86: None,
+                    compile_time: Some("1".to_owned()),
+                    image_size_x64: None,
+                    image_size_x86: None,
+                }),
+                replace_strings_x64: std::collections::BTreeMap::new(),
+                replace_strings_x86: std::collections::BTreeMap::new(),
+            },
+        )
+        .expect_err("non-PE binary should be rejected");
+
+        assert!(
+            matches!(&error, PayloadBuildError::InvalidRequest { message }
+                if message.contains("MZ magic")),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn patch_payload_rejects_empty_binary() {
+        let error = patch_payload(
+            vec![],
+            Architecture::X64,
+            &BinaryConfig {
+                header: Some(red_cell_common::config::HeaderConfig {
+                    magic_mz_x64: None,
+                    magic_mz_x86: None,
+                    compile_time: Some("1".to_owned()),
+                    image_size_x64: None,
+                    image_size_x86: None,
+                }),
+                replace_strings_x64: std::collections::BTreeMap::new(),
+                replace_strings_x86: std::collections::BTreeMap::new(),
+            },
+        )
+        .expect_err("empty binary should be rejected");
+
+        assert!(matches!(error, PayloadBuildError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn patch_payload_rejects_invalid_pe_signature() {
+        // MZ magic present but PE\0\0 signature is wrong.
+        let mut bytes = vec![0_u8; 0x80 + 24 + 60];
+        bytes[..2].copy_from_slice(b"MZ");
+        bytes[0x3C..0x40].copy_from_slice(&(0x80_u32).to_le_bytes());
+        bytes[0x80..0x84].copy_from_slice(b"NE\0\0"); // wrong signature
+        let error = patch_payload(
+            bytes,
+            Architecture::X64,
+            &BinaryConfig {
+                header: Some(red_cell_common::config::HeaderConfig {
+                    magic_mz_x64: None,
+                    magic_mz_x86: None,
+                    compile_time: Some("1".to_owned()),
+                    image_size_x64: None,
+                    image_size_x86: None,
+                }),
+                replace_strings_x64: std::collections::BTreeMap::new(),
+                replace_strings_x86: std::collections::BTreeMap::new(),
+            },
+        )
+        .expect_err("invalid PE signature should be rejected");
 
         assert!(matches!(error, PayloadBuildError::InvalidRequest { .. }));
     }

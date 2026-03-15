@@ -1602,6 +1602,37 @@ mod tests {
     }
 
     #[test]
+    fn parse_working_hours_rejects_missing_separator() {
+        let err = parse_working_hours(Some("0800"));
+        assert!(matches!(
+            err,
+            Err(PayloadBuildError::InvalidRequest { message })
+                if message == "WorkingHours must use `HH:MM-HH:MM`"
+        ));
+    }
+
+    #[test]
+    fn parse_working_hours_rejects_junk_input() {
+        let err = parse_working_hours(Some("junk"));
+        assert!(matches!(
+            err,
+            Err(PayloadBuildError::InvalidRequest { message })
+                if message == "WorkingHours must use `HH:MM-HH:MM`"
+        ));
+    }
+
+    #[test]
+    fn parse_working_hours_rejects_wrong_separator_format() {
+        // Colon-separated only, no dash separator
+        let err = parse_working_hours(Some("08:00:17:00"));
+        assert!(matches!(
+            err,
+            Err(PayloadBuildError::InvalidRequest { message })
+                if message == "WorkingHours must use `HH:MM-HH:MM`"
+        ));
+    }
+
+    #[test]
     fn parse_kill_date_accepts_positive_timestamp() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(parse_kill_date(Some("1234"))?, 1234);
         Ok(())

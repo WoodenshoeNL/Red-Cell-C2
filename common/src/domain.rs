@@ -1152,39 +1152,6 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_bool_from_any_rejects_integer_outside_zero_one() {
-        let payload = json!({
-            "AgentID": "ABCD1234",
-            "Active": 2,
-            "Hostname": "wkstn-1",
-            "Username": "operator",
-            "DomainName": "LAB",
-            "ExternalIP": "203.0.113.10",
-            "InternalIP": "10.0.0.10",
-            "ProcessName": "explorer.exe",
-            "BaseAddress": 1,
-            "ProcessPID": 1,
-            "ProcessTID": 1,
-            "ProcessPPID": 1,
-            "ProcessArch": "x64",
-            "Elevated": false,
-            "OSVersion": "Windows 10",
-            "OSArch": "x64",
-            "SleepDelay": 5,
-            "SleepJitter": 10,
-            "FirstCallIn": "09/03/2026 19:04:00",
-            "LastCallIn": "09/03/2026 19:05:00"
-        });
-
-        let error = serde_json::from_value::<AgentRecord>(payload)
-            .expect_err("integer 2 for Active must be rejected");
-        assert!(
-            error.to_string().contains("invalid boolean number"),
-            "unexpected error message: {error}"
-        );
-    }
-
-    #[test]
     fn deserialize_agent_id_rejects_numeric_id_that_does_not_fit_in_u32() {
         for overflow_value in [4_294_967_296_u64, u64::MAX] {
             let payload = json!({
@@ -1217,5 +1184,38 @@ mod tests {
                 "unexpected error message for value {overflow_value}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn deserialize_bool_from_any_rejects_integer_outside_zero_one() {
+        let payload = json!({
+            "AgentID": "ABCD1234",
+            "Active": 2,
+            "Hostname": "wkstn-1",
+            "Username": "operator",
+            "DomainName": "LAB",
+            "ExternalIP": "203.0.113.10",
+            "InternalIP": "10.0.0.10",
+            "ProcessName": "explorer.exe",
+            "BaseAddress": 1,
+            "ProcessPID": 1,
+            "ProcessTID": 1,
+            "ProcessPPID": 1,
+            "ProcessArch": "x64",
+            "Elevated": false,
+            "OSVersion": "Windows 10",
+            "OSArch": "x64",
+            "SleepDelay": 5,
+            "SleepJitter": 10,
+            "FirstCallIn": "09/03/2026 19:04:00",
+            "LastCallIn": "09/03/2026 19:05:00"
+        });
+
+        let error = serde_json::from_value::<AgentRecord>(payload)
+            .expect_err("integer 2 for Active must be rejected");
+        assert!(
+            error.to_string().contains("invalid boolean number"),
+            "unexpected error message: {error}"
+        );
     }
 }

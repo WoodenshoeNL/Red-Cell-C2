@@ -362,6 +362,53 @@ mod tests {
         assert_eq!(first, second, "Havoc resets AES-CTR with the base IV per message");
     }
 
+    /// Reference vector for block offset 2, generated with Python's `cryptography`
+    /// library (AES-256-CTR, big-endian 128-bit counter):
+    ///
+    /// ```python
+    /// from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    /// key = bytes([0x42] * 32)
+    /// iv  = bytes([0x01] * 16)
+    /// # Counter for block 2: IV interpreted as big-endian u128, incremented by 2
+    /// counter2 = (int.from_bytes(iv, 'big') + 2).to_bytes(16, 'big')
+    /// cipher = Cipher(algorithms.AES(key), modes.CTR(counter2))
+    /// enc = cipher.encryptor()
+    /// ciphertext = enc.update(b"block-offset-two") + enc.finalize()
+    /// # → da077ab4f03381afab09583c83b2b271
+    /// ```
+    #[test]
+    fn encrypt_agent_data_at_offset_matches_known_reference_at_block_two() {
+        let key = [0x42_u8; AGENT_KEY_LENGTH];
+        let iv = [0x01_u8; AGENT_IV_LENGTH];
+        let plaintext = b"block-offset-two";
+        // Pre-computed with an independent Python reference (see doc comment above).
+        let expected = hex!("da077ab4f03381afab09583c83b2b271");
+
+        let ciphertext = encrypt_agent_data_at_offset(&key, &iv, 2, plaintext)
+            .expect("encryption at block offset 2 should succeed");
+
+        assert_eq!(
+            ciphertext, expected,
+            "ciphertext at block offset 2 must match the independent reference vector"
+        );
+    }
+
+    #[test]
+    fn decrypt_agent_data_at_offset_recovers_known_reference_at_block_two() {
+        let key = [0x42_u8; AGENT_KEY_LENGTH];
+        let iv = [0x01_u8; AGENT_IV_LENGTH];
+        // Same reference ciphertext as encrypt_agent_data_at_offset_matches_known_reference_at_block_two.
+        let ciphertext = hex!("da077ab4f03381afab09583c83b2b271");
+
+        let plaintext = decrypt_agent_data_at_offset(&key, &iv, 2, &ciphertext)
+            .expect("decryption at block offset 2 should succeed");
+
+        assert_eq!(
+            plaintext, b"block-offset-two",
+            "decrypting the reference ciphertext at block offset 2 must recover the original plaintext"
+        );
+    }
+
     #[test]
     fn encrypt_agent_data_at_offset_changes_the_keystream() {
         let key = [0x51; AGENT_KEY_LENGTH];

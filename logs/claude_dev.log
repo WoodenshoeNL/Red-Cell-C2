@@ -26670,3 +26670,17 @@ Done. Here's a summary of what was done for `red-cell-c2-rcy6`:
 [2026-03-15 17:03:19] [Ubuntu-C2-dev01-claude] ========================================================
 [2026-03-15 17:03:19] [Ubuntu-C2-dev01-claude] === Starting Claude dev loop iteration 1 ===
 [2026-03-15 17:03:21] [Ubuntu-C2-dev01-claude] WARNING: git pull --ff-only failed; skipping iteration until repo state is synced
+[2026-03-15 17:10:08] [Ubuntu-C2-dev01-claude] ========================================================
+[2026-03-15 17:10:08] [Ubuntu-C2-dev01-claude]   Claude development loop starting (unlimited)
+[2026-03-15 17:10:08] [Ubuntu-C2-dev01-claude]   Agent ID: Ubuntu-C2-dev01-claude
+[2026-03-15 17:10:08] [Ubuntu-C2-dev01-claude]   Prompt template: /home/michel/Red-Cell-C2/CLAUDE_DEV_PROMPT.md
+[2026-03-15 17:10:08] [Ubuntu-C2-dev01-claude]   Log: /home/michel/Red-Cell-C2/logs/claude_dev.log
+[2026-03-15 17:10:08] [Ubuntu-C2-dev01-claude] ========================================================
+[2026-03-15 17:10:08] [Ubuntu-C2-dev01-claude] === Starting Claude dev loop iteration 1 ===
+[2026-03-15 17:10:09] [Ubuntu-C2-dev01-claude] git pull --ff-only: ok
+[2026-03-15 17:10:11] [Ubuntu-C2-dev01-claude] br sync import: ok
+[2026-03-15 17:10:14] [Ubuntu-C2-dev01-claude] Selected task: red-cell-c2-44as
+[2026-03-15 17:10:18] [Ubuntu-C2-dev01-claude] Claimed red-cell-c2-44as
+[2026-03-15 17:10:18] [Ubuntu-C2-dev01-claude] Running Claude on task red-cell-c2-44as...
+Done. The `agent.checkin` audit write in `handle_checkin()` is now a background `tokio::spawn` task, matching the pattern used for `agent.dead` in `agent_liveness.rs`. The unit test was updated with two `yield_now()` calls to let the background task complete before asserting on the audit log.
+[2026-03-15 17:20:21] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-44as

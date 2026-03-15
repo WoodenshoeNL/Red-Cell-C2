@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 62 | 181 | 31 |
+| Tasks closed | 69 | 181 | 31 |
 | Bugs filed against | 2 | 27 | 9 |
 | Bug rate (bugs/task) | 0.03 | 0.15 | 0.29 |
 | Quality score | 97% | 85% | 71% |
@@ -36,6 +36,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-15 14:00 — 8c78eac..1105dc2
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 7 | 0 | Closed `red-cell-c2-7thi` (tighter zero-sleep liveness assertions: assert_eq sweep_interval==1s, timeout_for(0)==3); `red-cell-c2-2rw7` (mixed-liveness sweep test: 2 stale + 1 fresh, asserts sort order and fresh remains active); `red-cell-c2-w0g0` (webhook shutdown returns true immediately when disabled); `red-cell-c2-1w6q` (route smoke tests: /api/v1→200, /havoc→non-404; extracted build_test_state() helper); `red-cell-c2-3vns` (DNS listener validation: all 3 error paths tested); `red-cell-c2-2j3l` (bool deserializer rejects "yes"/"maybe" strings); `red-cell-c2-iiif` (deserialize_agent_id rejects 2^32 and u64::MAX with "does not fit in u32"). No defects found — all changes are test additions only. |
+| Codex | 0 | 0 | No activity in range. |
+| Cursor | 0 | 0 | No activity in range. |
+
+Build: **passed** — `cargo check`, `cargo clippy -- -D warnings`, `cargo test --workspace` (600+ tests, 0 failures)
 
 ### QA Review — 2026-03-15 12:30 — e9e4f38..828dbe7
 

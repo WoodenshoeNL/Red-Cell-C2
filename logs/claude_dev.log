@@ -26640,3 +26640,25 @@ The `agent.dead` audit write is spawned via `tokio::spawn` so it doesn't introdu
 
 `spawn_agent_liveness_monitor` gained a `Database` parameter; `main.rs` and all 12 affected tests were updated. Three new integration tests verify each new audit entry. All 618 tests pass, clippy clean, fmt clean.
 [2026-03-15 12:30:25] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-wey1
+[2026-03-15 12:30:25] [Ubuntu-C2-dev01-claude] WIP: committing uncommitted changes for red-cell-c2-wey1
+[2026-03-15 12:30:27] [Ubuntu-C2-dev01-claude] WIP: pushed
+[2026-03-15 12:30:27] [Ubuntu-C2-dev01-claude] ========================LOOP=========================
+[2026-03-15 12:30:42] [Ubuntu-C2-dev01-claude] === Starting Claude dev loop iteration 5 ===
+[2026-03-15 12:30:43] [Ubuntu-C2-dev01-claude] git pull --ff-only: ok
+[2026-03-15 12:30:43] [Ubuntu-C2-dev01-claude] br sync import: ok
+[2026-03-15 12:30:46] [Ubuntu-C2-dev01-claude] Selected task: red-cell-c2-rcy6
+[2026-03-15 12:30:50] [Ubuntu-C2-dev01-claude] Claimed red-cell-c2-rcy6
+[2026-03-15 12:30:50] [Ubuntu-C2-dev01-claude] Running Claude on task red-cell-c2-rcy6...
+Done. Here's a summary of what was done for `red-cell-c2-rcy6`:
+
+**Root cause**: `patch_payload()` had no upfront format check — it would write PE timestamps and image sizes into any binary, silently corrupting ELF files or truncated build artifacts.
+
+**Fix** (`teamserver/src/payload_builder.rs:939`):
+- Added a MZ magic check (`[0x4D, 0x5A]`) at the very start of `patch_payload()`, before the magic-bytes overwrite or any other modification
+- Added an upfront call to `pe_offsets()` to validate the PE\0\0 signature (this function already validated it internally, but only when `compile_time`/`image_size` were configured — now it runs unconditionally)
+
+**Tests added** (3 new):
+- `patch_payload_rejects_non_mz_magic` — ELF-magic binary returns `InvalidRequest` with message containing "MZ magic"
+- `patch_payload_rejects_empty_binary` — zero-byte input rejected before any read
+- `patch_payload_rejects_invalid_pe_signature` — MZ magic present but `NE\0\0` instead of `PE\0\0`
+[2026-03-15 12:34:38] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-rcy6

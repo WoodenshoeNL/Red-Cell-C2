@@ -26683,3 +26683,22 @@ Done. Here's a summary of what was done for `red-cell-c2-rcy6`:
 [2026-03-15 13:30:32] [Ubuntu-C2-dev02-claude] Running Claude on task red-cell-c2-kky2...
 [2026-03-15 13:40:33] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-kky2
 [2026-03-15 13:44:57] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-o7z6
+[2026-03-15 13:44:58] [Ubuntu-C2-dev02-claude] WIP: committing uncommitted changes for red-cell-c2-o7z6
+[2026-03-15 13:44:59] [Ubuntu-C2-dev02-claude] WIP: pushed
+[2026-03-15 13:44:59] [Ubuntu-C2-dev02-claude] ========================LOOP=========================
+[2026-03-15 13:45:14] [Ubuntu-C2-dev02-claude] === Starting Claude dev loop iteration 3 ===
+[2026-03-15 13:45:16] [Ubuntu-C2-dev02-claude] git pull --ff-only: ok
+[2026-03-15 13:45:16] [Ubuntu-C2-dev02-claude] br sync import: ok
+[2026-03-15 13:45:17] [Ubuntu-C2-dev02-claude] Selected task: red-cell-c2-m8tz
+[2026-03-15 13:45:21] [Ubuntu-C2-dev02-claude] Claimed red-cell-c2-m8tz
+[2026-03-15 13:45:22] [Ubuntu-C2-dev02-claude] Running Claude on task red-cell-c2-m8tz...
+Done. The test `concurrent_registration_at_cap_allows_exactly_one` is now in `teamserver/src/agents.rs`:
+
+- Creates a registry with cap `CAP=5`, pre-fills to `CAP-1=4` agents
+- Spawns `CAP+EXTRA=9` tasks all racing to fill the last slot via `insert_with_listener_and_ctr_offset`
+- Uses `tokio::task::JoinSet` with `multi_thread` flavor (4 workers) for genuine concurrency
+- Asserts exactly **1 success** and **8 `MaxRegisteredAgentsExceeded` errors**
+- Confirms the registry ends at exactly `CAP` entries
+
+The write-lock in `insert_with_listener_and_ctr_offset` serialises the cap check + insertion atomically, so the test passes consistently without any race condition allowing over-registration.
+[2026-03-15 13:48:07] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-m8tz

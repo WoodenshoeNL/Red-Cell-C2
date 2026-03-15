@@ -26684,3 +26684,14 @@ Done. Here's a summary of what was done for `red-cell-c2-rcy6`:
 [2026-03-15 17:10:18] [Ubuntu-C2-dev01-claude] Running Claude on task red-cell-c2-44as...
 Done. The `agent.checkin` audit write in `handle_checkin()` is now a background `tokio::spawn` task, matching the pattern used for `agent.dead` in `agent_liveness.rs`. The unit test was updated with two `yield_now()` calls to let the background task complete before asserting on the audit log.
 [2026-03-15 17:20:21] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-44as
+[2026-03-15 17:20:21] [Ubuntu-C2-dev01-claude] WIP: committing uncommitted changes for red-cell-c2-44as
+[2026-03-15 17:20:23] [Ubuntu-C2-dev01-claude] WIP: pushed
+[2026-03-15 17:20:23] [Ubuntu-C2-dev01-claude] ========================LOOP=========================
+[2026-03-15 17:20:38] [Ubuntu-C2-dev01-claude] === Starting Claude dev loop iteration 2 ===
+[2026-03-15 17:20:39] [Ubuntu-C2-dev01-claude] git pull --ff-only: ok
+[2026-03-15 17:20:39] [Ubuntu-C2-dev01-claude] br sync import: ok
+[2026-03-15 17:20:42] [Ubuntu-C2-dev01-claude] Selected task: red-cell-c2-wd91
+[2026-03-15 17:20:46] [Ubuntu-C2-dev01-claude] Claimed red-cell-c2-wd91
+[2026-03-15 17:20:46] [Ubuntu-C2-dev01-claude] Running Claude on task red-cell-c2-wd91...
+Done. The fix replaces the two `yield_now()` calls with a polling loop bounded by a 500 ms `timeout` that repeatedly calls `audit_log().list()` until the `agent.dead` entry appears. This is robust under CI load because it retries until the background task actually completes rather than guessing at the number of needed task switches.
+[2026-03-15 17:24:15] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-wd91

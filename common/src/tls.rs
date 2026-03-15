@@ -11,6 +11,7 @@ use thiserror::Error;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use zeroize::Zeroizing;
 
 use crate::config::HttpListenerCertConfig;
 
@@ -29,7 +30,9 @@ pub struct TlsIdentity {
     certificate_chain: Vec<CertificateDer<'static>>,
     private_key: PrivateKeyDer<'static>,
     certificate_pem: Vec<u8>,
-    private_key_pem: Vec<u8>,
+    /// PEM-encoded private key bytes. Wrapped in [`Zeroizing`] so the key
+    /// material is wiped from heap memory when the identity is dropped.
+    private_key_pem: Zeroizing<Vec<u8>>,
 }
 
 impl TlsIdentity {
@@ -147,7 +150,7 @@ pub fn load_tls_identity(cert_pem: &[u8], key_pem: &[u8]) -> Result<TlsIdentity,
         certificate_chain,
         private_key,
         certificate_pem: cert_pem.to_vec(),
-        private_key_pem: key_pem.to_vec(),
+        private_key_pem: Zeroizing::new(key_pem.to_vec()),
     })
 }
 

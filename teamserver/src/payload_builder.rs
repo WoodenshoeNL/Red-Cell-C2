@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
+
 use red_cell_common::config::{BinaryConfig, DemonConfig, Profile};
 use red_cell_common::operator::BuildPayloadRequestInfo;
 use red_cell_common::{
@@ -57,6 +59,138 @@ pub enum PayloadBuildError {
     CommandFailed { command: String },
 }
 
+/// Content-addressed on-disk cache for compiled Demon payload artifacts.
+///
+/// Cache entries live at `<cache_dir>/<sha256_hex>.<ext>` and are keyed by a
+/// SHA-256 hash that covers the teamserver version, target architecture, output
+/// format, packed binary config, and binary-patch configuration.
+///
+/// All cache errors are non-fatal: a miss or a write failure is logged and the
+/// builder falls through to a full compilation.
+#[derive(Clone, Debug)]
+pub struct PayloadCache {
+    cache_dir: PathBuf,
+}
+
+impl PayloadCache {
+    fn new(cache_dir: PathBuf) -> Self {
+        Self { cache_dir }
+    }
+
+    fn artifact_path(&self, key: &CacheKey) -> PathBuf {
+        self.cache_dir.join(format!("{}{}", key.hex, key.ext))
+    }
+
+    /// Look up a cache entry. Returns `None` on miss or any I/O error.
+    async fn get(&self, key: &CacheKey) -> Option<Vec<u8>> {
+        let path = self.artifact_path(key);
+        match tokio::fs::read(&path).await {
+            Ok(bytes) => {
+                tracing::debug!(path = %path.display(), "payload cache hit");
+                Some(bytes)
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "payload cache read failed; treating as cache miss"
+                );
+                None
+            }
+        }
+    }
+
+    /// Persist bytes in the cache. Errors are logged but not propagated.
+    async fn put(&self, key: &CacheKey, bytes: &[u8]) {
+        if let Err(err) = tokio::fs::create_dir_all(&self.cache_dir).await {
+            tracing::warn!(
+                dir = %self.cache_dir.display(),
+                error = %err,
+                "could not create payload cache directory; skipping cache write"
+            );
+            return;
+        }
+        let path = self.artifact_path(key);
+        match tokio::fs::write(&path, bytes).await {
+            Ok(()) => tracing::debug!(
+                path = %path.display(),
+                bytes = bytes.len(),
+                "payload artifact cached"
+            ),
+            Err(err) => tracing::warn!(
+                path = %path.display(),
+                error = %err,
+                "failed to write payload cache entry"
+            ),
+        }
+    }
+
+    /// Remove every file in the cache directory and return the count removed.
+    ///
+    /// Returns `Ok(0)` if the cache directory does not exist.
+    /// Per-entry removal errors are logged but do not stop the flush.
+    pub async fn flush(&self) -> std::io::Result<u64> {
+        let mut dir = match tokio::fs::read_dir(&self.cache_dir).await {
+            Ok(dir) => dir,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(err) => return Err(err),
+        };
+        let mut count = 0u64;
+        while let Some(entry) = dir.next_entry().await? {
+            match tokio::fs::remove_file(entry.path()).await {
+                Ok(()) => count += 1,
+                Err(err) => tracing::warn!(
+                    path = %entry.path().display(),
+                    error = %err,
+                    "failed to remove payload cache entry during flush"
+                ),
+            }
+        }
+        Ok(count)
+    }
+}
+
+/// Internal cache key used to address a compiled artifact.
+struct CacheKey {
+    /// Lower-case hex SHA-256 digest of all build inputs.
+    hex: String,
+    /// File extension for this artifact type (e.g. `.exe`).
+    ext: &'static str,
+}
+
+/// Compute a content-addressed cache key for a Demon payload build.
+///
+/// The hash covers every input that determines the compiled output:
+/// - Teamserver version (from `CARGO_PKG_VERSION`)
+/// - Target architecture
+/// - Output format
+/// - Packed binary config bytes embedded in the PE
+/// - Binary-patch configuration applied after compilation
+fn compute_cache_key(
+    arch: Architecture,
+    format: OutputFormat,
+    config_bytes: &[u8],
+    binary_patch: Option<&BinaryConfig>,
+) -> CacheKey {
+    let mut hasher = Sha256::new();
+    hasher.update(env!("CARGO_PKG_VERSION").as_bytes());
+    hasher.update(b"\x00");
+    hasher.update(arch.suffix().as_bytes());
+    hasher.update(b"\x00");
+    hasher.update(format.file_extension().as_bytes());
+    hasher.update(b"\x00");
+    hasher.update(config_bytes);
+    hasher.update(b"\x00");
+    if let Some(patch) = binary_patch {
+        // serde_json serialization is deterministic for the same data.
+        let patch_json = serde_json::to_string(patch).unwrap_or_default();
+        hasher.update(patch_json.as_bytes());
+    }
+    let hex = format!("{:x}", hasher.finalize());
+    CacheKey { hex, ext: format.file_extension() }
+}
+
 /// Teamserver service responsible for compiling Havoc-compatible Demon payloads.
 #[derive(Clone, Debug)]
 pub struct PayloadBuilderService {
@@ -71,6 +205,7 @@ struct PayloadBuilderInner {
     shellcode_x86_template: PathBuf,
     default_demon: DemonConfig,
     binary_patch: Option<BinaryConfig>,
+    cache: PayloadCache,
 }
 
 /// Parsed semantic version reported by a toolchain binary.
@@ -253,6 +388,8 @@ impl PayloadBuilderService {
             }
         }
 
+        let cache = PayloadCache::new(repo_root.join("target/payload-cache"));
+
         Ok(Self {
             inner: Arc::new(PayloadBuilderInner {
                 toolchain,
@@ -261,11 +398,15 @@ impl PayloadBuilderService {
                 shellcode_x86_template,
                 default_demon: profile.demon.clone(),
                 binary_patch: profile.demon.binary.clone(),
+                cache,
             }),
         })
     }
 
     /// Compile a Demon payload for `listener` using the operator `request`.
+    ///
+    /// If a cached artifact exists for the same inputs, the compilation is
+    /// skipped and the cached bytes are returned immediately.
     pub async fn build_payload<F>(
         &self,
         listener: &ListenerConfig,
@@ -285,6 +426,30 @@ impl PayloadBuilderService {
         let format = OutputFormat::parse(&request.format)?;
         let config = merged_request_config(&request.config, &self.inner.default_demon)?;
 
+        // Compute the packed config bytes that will be embedded in the compiled
+        // binary. Using these as part of the cache key ensures that any change
+        // to the listener or demon configuration produces a distinct cache entry.
+        let config_bytes = pack_config(listener, &config)?;
+        let cache_key = compute_cache_key(
+            architecture,
+            format,
+            &config_bytes,
+            self.inner.binary_patch.as_ref(),
+        );
+
+        if let Some(cached) = self.inner.cache.get(&cache_key).await {
+            progress(BuildProgress {
+                level: "Info".to_owned(),
+                message: "cache hit — returning cached artifact".to_owned(),
+            });
+            let file_name = format!("demon{}{}", architecture.suffix(), format.file_extension());
+            return Ok(PayloadArtifact {
+                bytes: cached,
+                file_name,
+                format: request.format.clone(),
+            });
+        }
+
         progress(BuildProgress { level: "Info".to_owned(), message: "starting build".to_owned() });
 
         let temp_dir = TempDir::new()?;
@@ -293,7 +458,14 @@ impl PayloadBuilderService {
             .await?;
         let file_name = format!("demon{}{}", architecture.suffix(), format.file_extension());
 
+        self.inner.cache.put(&cache_key, &compiled).await;
+
         Ok(PayloadArtifact { bytes: compiled, file_name, format: request.format.clone() })
+    }
+
+    /// Return a reference to the payload artifact cache.
+    pub fn cache(&self) -> &PayloadCache {
+        &self.inner.cache
     }
 
     #[doc(hidden)]
@@ -329,6 +501,7 @@ impl PayloadBuilderService {
                     trusted_proxy_peers: Vec::new(),
                 },
                 binary_patch: None,
+                cache: PayloadCache::new(PathBuf::from("/nonexistent/payload-cache")),
             }),
         }
     }
@@ -341,6 +514,7 @@ impl PayloadBuilderService {
         shellcode_x86_template: PathBuf,
         default_demon: DemonConfig,
         binary_patch: Option<BinaryConfig>,
+        cache_dir: PathBuf,
     ) -> Self {
         Self {
             inner: Arc::new(PayloadBuilderInner {
@@ -350,6 +524,7 @@ impl PayloadBuilderService {
                 shellcode_x86_template,
                 default_demon,
                 binary_patch,
+                cache: PayloadCache::new(cache_dir),
             }),
         }
     }
@@ -2563,6 +2738,7 @@ mod tests {
         let bin_dir = temp.path().join("bin");
         let source_root = temp.path().join("src/Havoc/payloads/Demon");
         let shellcode_root = temp.path().join("src/Havoc/payloads");
+        let cache_dir = temp.path().join("payload-cache");
         std::fs::create_dir_all(&bin_dir)?;
         std::fs::create_dir_all(source_root.join("src/core"))?;
         std::fs::create_dir_all(source_root.join("src/crypt"))?;
@@ -2626,6 +2802,7 @@ mod tests {
                 trusted_proxy_peers: Vec::new(),
             },
             None,
+            cache_dir,
         );
         let request = BuildPayloadRequestInfo {
             agent_type: "Demon".to_owned(),
@@ -2672,6 +2849,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = TempDir::new()?;
         let bin_dir = temp.path().join("bin");
+        let cache_dir = temp.path().join("payload-cache");
         let source_root = temp.path().join("src/Havoc/payloads/Demon");
         let shellcode_root = temp.path().join("src/Havoc/payloads");
         let nasm_args = temp.path().join("nasm.args");
@@ -2755,6 +2933,7 @@ mod tests {
                 trusted_proxy_peers: Vec::new(),
             },
             None,
+            cache_dir,
         );
         let request = BuildPayloadRequestInfo {
             agent_type: "Demon".to_owned(),
@@ -2974,6 +3153,7 @@ mod tests {
         Box<dyn std::error::Error>,
     > {
         let bin_dir = temp.path().join("bin");
+        let cache_dir = temp.path().join("payload-cache");
         let source_root = temp.path().join("src/Havoc/payloads/Demon");
         let shellcode_root = temp.path().join("src/Havoc/payloads");
         std::fs::create_dir_all(&bin_dir)?;
@@ -3033,6 +3213,7 @@ mod tests {
                 trusted_proxy_peers: Vec::new(),
             },
             None,
+            cache_dir,
         );
 
         let request = BuildPayloadRequestInfo {
@@ -3108,5 +3289,122 @@ mod tests {
             "expected CommandFailed, got {error:?}"
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn build_payload_returns_cached_artifact_on_second_request()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        // The compiler writes "payload" the first time; we can detect a cache
+        // hit if the artifact is returned without re-invoking the compiler.
+        let nasm_ok = "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = \"-o\" ]; then shift; printf 'asm' > \"$1\"; break; fi; shift; done\n";
+        let gcc_ok = "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = \"-o\" ]; then shift; printf 'payload' > \"$1\"; break; fi; shift; done\n";
+        let (service, listener, request) = setup_build_fixture(&temp, nasm_ok, gcc_ok)?;
+
+        // First build — cache miss, runs the compiler.
+        let first = service.build_payload(&listener, &request, |_| {}).await?;
+        assert_eq!(first.bytes, b"payload");
+
+        // Second build with identical inputs — cache hit, no recompilation.
+        let mut hit_messages = Vec::new();
+        let second = service
+            .build_payload(&listener, &request, |m| hit_messages.push(m.message.clone()))
+            .await?;
+        assert_eq!(second.bytes, b"payload");
+        assert!(
+            hit_messages.iter().any(|m| m.contains("cache hit")),
+            "expected a cache-hit progress message, got: {hit_messages:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn build_payload_cache_miss_on_different_architecture()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        // Different architectures use different compilers but the important
+        // thing is that they must not share a cache entry.
+        let nasm_ok = "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = \"-o\" ]; then shift; printf 'asm' > \"$1\"; break; fi; shift; done\n";
+        let gcc_ok = "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = \"-o\" ]; then shift; printf 'payload' > \"$1\"; break; fi; shift; done\n";
+        let (service, listener, request_x64) = setup_build_fixture(&temp, nasm_ok, gcc_ok)?;
+        let request_x86 = BuildPayloadRequestInfo { arch: "x86".to_owned(), ..request_x64.clone() };
+
+        let first = service.build_payload(&listener, &request_x64, |_| {}).await?;
+        assert_eq!(first.bytes, b"payload");
+
+        // x86 build should NOT return the x64 cached artifact.
+        let mut hit_messages = Vec::new();
+        service
+            .build_payload(&listener, &request_x86, |m| hit_messages.push(m.message.clone()))
+            .await
+            .ok(); // may fail due to stub compiler, but we just need to check messages
+        assert!(
+            !hit_messages.iter().any(|m| m.contains("cache hit")),
+            "x86 build should not hit the x64 cache entry, got: {hit_messages:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn payload_cache_flush_removes_all_entries() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        let cache_dir = temp.path().join("payload-cache");
+        tokio::fs::create_dir_all(&cache_dir).await?;
+
+        // Write a few fake entries.
+        tokio::fs::write(cache_dir.join("aabbcc.exe"), b"artifact-1").await?;
+        tokio::fs::write(cache_dir.join("ddeeff.dll"), b"artifact-2").await?;
+        tokio::fs::write(cache_dir.join("112233.bin"), b"artifact-3").await?;
+
+        let cache = PayloadCache::new(cache_dir.clone());
+        let removed = cache.flush().await?;
+        assert_eq!(removed, 3, "flush should remove all three entries");
+
+        let mut dir = tokio::fs::read_dir(&cache_dir).await?;
+        assert!(dir.next_entry().await?.is_none(), "cache directory should be empty after flush");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn payload_cache_flush_returns_zero_for_nonexistent_dir()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cache = PayloadCache::new(PathBuf::from("/nonexistent/no/such/cache-dir"));
+        let removed = cache.flush().await?;
+        assert_eq!(removed, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn compute_cache_key_differs_by_architecture() {
+        let config_bytes = b"config";
+        let key_x64 = compute_cache_key(Architecture::X64, OutputFormat::Exe, config_bytes, None);
+        let key_x86 = compute_cache_key(Architecture::X86, OutputFormat::Exe, config_bytes, None);
+        assert_ne!(key_x64.hex, key_x86.hex, "x64 and x86 must produce different cache keys");
+    }
+
+    #[test]
+    fn compute_cache_key_differs_by_format() {
+        let config_bytes = b"config";
+        let key_exe = compute_cache_key(Architecture::X64, OutputFormat::Exe, config_bytes, None);
+        let key_dll = compute_cache_key(Architecture::X64, OutputFormat::Dll, config_bytes, None);
+        assert_ne!(key_exe.hex, key_dll.hex, "Exe and Dll must produce different cache keys");
+    }
+
+    #[test]
+    fn compute_cache_key_differs_by_config_bytes() {
+        let key_a = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"config-a", None);
+        let key_b = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"config-b", None);
+        assert_ne!(
+            key_a.hex, key_b.hex,
+            "different config bytes must produce different cache keys"
+        );
+    }
+
+    #[test]
+    fn compute_cache_key_ext_matches_format() {
+        let key_exe = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"c", None);
+        let key_bin = compute_cache_key(Architecture::X64, OutputFormat::Shellcode, b"c", None);
+        assert_eq!(key_exe.ext, ".exe");
+        assert_eq!(key_bin.ext, ".bin");
     }
 }

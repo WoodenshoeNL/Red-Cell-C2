@@ -956,6 +956,7 @@ pub fn api_routes(api: ApiRuntime) -> Router<TeamserverState> {
         .route("/listeners/{name}/stop", put(stop_listener))
         .route("/listeners/{name}/mark", post(mark_listener))
         .route("/webhooks/stats", get(get_webhook_stats))
+        .route("/payload-cache", post(flush_payload_cache))
         .route_layer(middleware::from_fn_with_state(api, api_auth_middleware));
 
     Router::new()
@@ -1029,7 +1030,8 @@ struct ApiInfoResponse {
         start_listener,
         stop_listener,
         mark_listener,
-        get_webhook_stats
+        get_webhook_stats,
+        flush_payload_cache
     ),
     components(
         schemas(
@@ -1038,6 +1040,7 @@ struct ApiInfoResponse {
             ApiInfoResponse,
             WebhookStats,
             DiscordWebhookStats,
+            FlushPayloadCacheResponse,
             AgentTaskQueuedResponse,
             AuditPage,
             SessionActivityPage,
@@ -1080,7 +1083,8 @@ struct ApiInfoResponse {
         (name = "loot", description = "Captured loot listing and download endpoints"),
         (name = "operators", description = "Administrative operator-management endpoints"),
         (name = "listeners", description = "Listener lifecycle management endpoints"),
-        (name = "webhooks", description = "Outbound webhook delivery statistics")
+        (name = "webhooks", description = "Outbound webhook delivery statistics"),
+        (name = "payload_cache", description = "Payload build artifact cache management")
     )
 )]
 struct ApiDoc;
@@ -2625,6 +2629,47 @@ async fn get_webhook_stats(
     };
 
     Json(WebhookStats { discord })
+}
+
+/// Response returned after flushing the payload build artifact cache.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+struct FlushPayloadCacheResponse {
+    /// Number of cache entries removed.
+    flushed: u64,
+}
+
+#[utoipa::path(
+    post,
+    path = "/payload-cache",
+    context_path = "/api/v1",
+    tag = "payload_cache",
+    security(("api_key" = [])),
+    responses(
+        (status = 200, description = "Cache flushed", body = FlushPayloadCacheResponse),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
+        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody),
+        (status = 500, description = "Failed to flush cache", body = ApiErrorBody)
+    )
+)]
+async fn flush_payload_cache(
+    State(state): State<TeamserverState>,
+    _identity: AdminApiAccess,
+) -> Response {
+    match state.payload_builder.cache().flush().await {
+        Ok(flushed) => {
+            tracing::info!(flushed, "payload cache flushed via REST endpoint");
+            Json(FlushPayloadCacheResponse { flushed }).into_response()
+        }
+        Err(err) => {
+            tracing::error!(error = %err, "failed to flush payload cache");
+            json_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cache_flush_failed",
+                err.to_string(),
+            )
+        }
+    }
 }
 
 #[cfg(test)]
@@ -5030,5 +5075,47 @@ mod tests {
         assert_eq!(super::parse_api_agent_id("  DEADBEEF  ")?, 0xDEAD_BEEF);
         assert_eq!(super::parse_api_agent_id(" 0x10 ")?, 0x10);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn flush_payload_cache_returns_flushed_count_for_admin() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/payload-cache")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        // The disabled-for-tests service uses a nonexistent cache dir, so 0 entries flushed.
+        assert_eq!(body["flushed"], 0);
+    }
+
+    #[tokio::test]
+    async fn flush_payload_cache_requires_admin_role() {
+        let app =
+            test_router(Some((60, "rest-operator", "secret-op", OperatorRole::Operator))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/payload-cache")
+                    .header(API_KEY_HEADER, "secret-op")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }

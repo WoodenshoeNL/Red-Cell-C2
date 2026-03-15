@@ -67,7 +67,7 @@ pub use listeners::{
     listener_event_for_action, listener_removed_event, operator_requests_start,
 };
 pub use payload_builder::{
-    BuildProgress, PayloadArtifact, PayloadBuildError, PayloadBuilderService,
+    BuildProgress, PayloadArtifact, PayloadBuildError, PayloadBuilderService, PayloadCache,
 };
 pub use plugins::{PluginError, PluginEvent, PluginRuntime};
 pub use rbac::{

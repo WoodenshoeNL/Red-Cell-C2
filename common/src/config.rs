@@ -681,7 +681,7 @@ pub struct ProcessInjectionConfig {
 }
 
 /// Binary patching options for generated payloads.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct BinaryConfig {
     /// PE header overrides.
     #[serde(rename = "Header", default)]
@@ -695,7 +695,7 @@ pub struct BinaryConfig {
 }
 
 /// PE header customization options.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct HeaderConfig {
     /// DOS header magic for x64 payloads.
     #[serde(rename = "MagicMz-x64", default)]

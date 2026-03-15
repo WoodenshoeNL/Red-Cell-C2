@@ -62,12 +62,22 @@ impl AuditWebhookNotifier {
 
     /// Emit a notification for a persisted audit record without blocking the caller.
     pub fn notify_audit_record_detached(&self, record: AuditRecord) {
-        if self.delivery_state.closing.load(Ordering::SeqCst) {
-            return;
-        }
-
         if let Some(discord) = self.discord.clone() {
+            // Increment pending *before* checking the closing flag so that shutdown()
+            // cannot observe pending==0 and return between our flag-check and our
+            // fetch_add.  If we then discover that closing was set concurrently we
+            // undo the increment (and wake any waiting shutdown()) and discard the
+            // record instead of spawning.
             self.delivery_state.pending.fetch_add(1, Ordering::SeqCst);
+
+            if self.delivery_state.closing.load(Ordering::SeqCst) {
+                self.delivery_state.pending.fetch_sub(1, Ordering::SeqCst);
+                // Wake shutdown() if it started waiting between our fetch_add and our
+                // load of closing.
+                self.delivery_state.notify_if_drained();
+                return;
+            }
+
             let delivery_state = self.delivery_state.clone();
             tokio::spawn(async move {
                 if let Err(error) = discord.send(&record).await {
@@ -639,6 +649,87 @@ mod tests {
         .expect("shutdown should complete well before the outer timeout");
 
         assert!(result, "shutdown should return true when notifier is disabled");
+    }
+
+    /// Regression test for the shutdown race described in red-cell-c2-2me2.
+    ///
+    /// Verifies that `shutdown` returning `true` means *all* deliveries that were
+    /// accepted (i.e. that incremented pending) have fully completed, even when
+    /// `shutdown` is called concurrently with `notify_audit_record_detached`.
+    #[tokio::test]
+    async fn shutdown_does_not_return_true_while_delivery_still_pending() {
+        // Use a slow webhook server: the handler sleeps briefly so the spawned
+        // task is guaranteed to be in-flight when shutdown is called.
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<Value>();
+        let app = Router::new().route(
+            "/",
+            post(move |Json(payload): Json<Value>| {
+                let sender = sender.clone();
+                async move {
+                    // Small delay to keep the task in-flight long enough.
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    let _ = sender.send(payload);
+                    (HttpStatusCode::OK, Json(json!({"ok": true})))
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener should bind");
+        let address = listener.local_addr().expect("listener address should resolve");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("test webhook server should not fail");
+        });
+
+        let profile = Profile::parse(&format!(
+            r#"
+            Teamserver {{
+              Host = "127.0.0.1"
+              Port = 40056
+            }}
+
+            Operators {{
+              user "operator" {{
+                Password = "password1234"
+              }}
+            }}
+
+            WebHook {{
+              Discord {{
+                Url = "http://{address}/"
+              }}
+            }}
+
+            Demon {{}}
+            "#
+        ))
+        .expect("profile should parse");
+        let notifier = AuditWebhookNotifier::from_profile(&profile);
+
+        // Fire a detached notification so it is in-flight (pending > 0).
+        notifier.notify_audit_record_detached(AuditRecord {
+            id: 20,
+            actor: "operator".to_owned(),
+            action: "operator.login".to_owned(),
+            target_kind: "operator".to_owned(),
+            target_id: None,
+            agent_id: None,
+            command: None,
+            parameters: None,
+            result_status: AuditResultStatus::Success,
+            occurred_at: "2026-03-15T00:00:00Z".to_owned(),
+        });
+
+        // shutdown must wait until the in-flight delivery finishes.
+        let drained = notifier.shutdown(Duration::from_secs(5)).await;
+        assert!(drained, "shutdown should report all deliveries complete");
+
+        // The delivery must have actually reached the mock server.
+        let mut rx = receiver;
+        assert!(
+            rx.try_recv().is_ok(),
+            "webhook delivery must complete before shutdown returns true"
+        );
+
+        server.abort();
     }
 
     async fn webhook_server(

@@ -21,8 +21,8 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 0 | 0 | 0 |
 | Missing tests | 6 | 11 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
-| Protocol errors | 4 | 22 | 3 |
-| Security issues | 7 | 31 | 0 |
+| Protocol errors | 5 | 22 | 3 |
+| Security issues | 9 | 31 | 0 |
 | Architecture drift | 2 | 21 | 0 |
 | Memory / resource leaks | 0 | 10 | 1 |
 | Startup / lifecycle regressions | 0 | 8 | 0 |
@@ -30,13 +30,24 @@ Each loop run updates the running totals and appends a review entry.
 | Availability / timeout regressions | 0 | 4 | 0 |
 | Correctness / pagination | 4 | 2 | 1 |
 | Workflow / close-hygiene | 3 | 0 | 0 |
-| Code reuse / duplication | 1 | 0 | 0 |
+| Code reuse / duplication | 2 | 0 | 0 |
 
 ---
 
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-15 16:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 5 | Security (2), Protocol (1), Docs (1), Maintainability (1) | red-cell-c2-dbve: CTR desync attack — garbage callback advances offset before parse succeeds, permanently breaking session (P1); red-cell-c2-a55z: 30 MiB body buffered pre-magic-check, memory DoS via concurrent connections (P1); red-cell-c2-t6dz: reconnect ack encrypted without advancing offset — post-reconnect callback path has no end-to-end test and protocol intent undocumented (P2); red-cell-c2-bp5w: crypto.rs module comment states CTR resets to 0 per message but production code uses advancing offsets (P3); red-cell-c2-ime3: dispatch.rs at 9 800 lines, split into per-command-family modules (P3) |
+| Codex | 0 | — | No new findings attributed |
+| Cursor | 0 | — | No new findings attributed |
+
+Overall codebase health: on track
+Biggest blindspot: CTR desync attack (red-cell-c2-dbve) — an adversary knowing any active agent_id (visible in plaintext packet headers) can permanently break that agent's session by sending a crafted packet with valid magic and garbage payload. No rate limiter covers callbacks and the CTR offset advances before protocol parsing succeeds.
 
 ### QA Review — 2026-03-15 14:15 — 1105dc2..897414b
 

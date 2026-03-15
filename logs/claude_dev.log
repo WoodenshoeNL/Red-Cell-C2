@@ -26764,3 +26764,13 @@ Done. The fix was a one-line removal in `listeners.rs:896` — `set_default_head
 [2026-03-15 14:17:02] [Ubuntu-C2-dev02-claude] Running Claude on task red-cell-c2-0bm2...
 Done. The fix was a one-character change: `{demon_id:<08x}` → `{demon_id:08x}` at `dispatch.rs:1184`. The `<` alignment specifier was causing padding zeros to appear on the right (left-aligned), so `0x1` rendered as `10000000` instead of `00000001`. Added a regression test using `demon_id=0x1` that would have caught this — the existing tests used full 8-digit values and never exercised the padding path.
 [2026-03-15 14:19:31] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-0bm2
+[2026-03-15 14:19:31] [Ubuntu-C2-dev02-claude] WIP: committing uncommitted changes for red-cell-c2-0bm2
+[2026-03-15 14:19:33] [Ubuntu-C2-dev02-claude] WIP: pushed
+[2026-03-15 14:19:33] [Ubuntu-C2-dev02-claude] ========================LOOP=========================
+[2026-03-15 14:19:48] [Ubuntu-C2-dev02-claude] === Starting Claude dev loop iteration 10 ===
+[2026-03-15 14:19:49] [Ubuntu-C2-dev02-claude] git pull --ff-only: ok
+[2026-03-15 14:19:49] [Ubuntu-C2-dev02-claude] br sync import: ok
+[2026-03-15 14:19:51] [Ubuntu-C2-dev02-claude] Selected task: red-cell-c2-psa8
+[2026-03-15 14:19:54] [Ubuntu-C2-dev02-claude] Claimed red-cell-c2-psa8
+[2026-03-15 14:19:55] [Ubuntu-C2-dev02-claude] Running Claude on task red-cell-c2-psa8...
+[2026-03-15 14:27:47] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-psa8

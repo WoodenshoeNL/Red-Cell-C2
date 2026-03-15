@@ -5,6 +5,13 @@ use thiserror::Error;
 /// Transport magic value used by Havoc Demon packets.
 pub const DEMON_MAGIC_VALUE: u32 = 0xDEAD_BEEF;
 
+/// Minimum number of bytes required to begin parsing a [`DemonEnvelope`].
+///
+/// A valid envelope must contain at least the 4-byte `Size` field before any
+/// further decoding can proceed.  Buffers shorter than this value are rejected
+/// by [`DemonEnvelope::from_bytes`] before any arithmetic is attempted.
+pub const MIN_ENVELOPE_SIZE: usize = 4;
+
 macro_rules! protocol_enum {
     (
         $(#[$meta:meta])*
@@ -476,6 +483,13 @@ impl DemonEnvelope {
 
     /// Parse a transport packet from the wire format used by the Demon transport.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, DemonProtocolError> {
+        if bytes.len() < MIN_ENVELOPE_SIZE {
+            return Err(DemonProtocolError::BufferTooShort {
+                context: "DemonEnvelope",
+                expected: MIN_ENVELOPE_SIZE,
+                actual: bytes.len(),
+            });
+        }
         let header = DemonHeader::from_bytes(bytes)?;
         let declared =
             usize::try_from(header.size).map_err(|_| DemonProtocolError::SizeMismatch {
@@ -643,7 +657,7 @@ mod tests {
     use super::{
         DEMON_MAGIC_VALUE, DemonCallback, DemonCommand, DemonEnvelope, DemonHeader,
         DemonInjectError, DemonMessage, DemonPackage, DemonProtocolError, DemonSocketCommand,
-        DemonSocketType, DemonTransferCommand,
+        DemonSocketType, DemonTransferCommand, MIN_ENVELOPE_SIZE,
     };
 
     #[test]
@@ -881,6 +895,66 @@ mod tests {
         assert_eq!(
             error,
             DemonProtocolError::BufferTooShort { context: "Demon header", expected: 12, actual: 8 }
+        );
+    }
+
+    #[test]
+    fn demon_envelope_rejects_empty_buffer() {
+        let error =
+            DemonEnvelope::from_bytes(&[]).expect_err("empty buffer must be rejected early");
+
+        assert_eq!(
+            error,
+            DemonProtocolError::BufferTooShort {
+                context: "DemonEnvelope",
+                expected: MIN_ENVELOPE_SIZE,
+                actual: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn demon_envelope_rejects_one_byte_buffer() {
+        let error =
+            DemonEnvelope::from_bytes(&[0xde]).expect_err("1-byte buffer must be rejected early");
+
+        assert_eq!(
+            error,
+            DemonProtocolError::BufferTooShort {
+                context: "DemonEnvelope",
+                expected: MIN_ENVELOPE_SIZE,
+                actual: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn demon_envelope_rejects_two_byte_buffer() {
+        let error = DemonEnvelope::from_bytes(&[0xde, 0xad])
+            .expect_err("2-byte buffer must be rejected early");
+
+        assert_eq!(
+            error,
+            DemonProtocolError::BufferTooShort {
+                context: "DemonEnvelope",
+                expected: MIN_ENVELOPE_SIZE,
+                actual: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn demon_envelope_rejects_three_byte_buffer() {
+        let error = DemonEnvelope::from_bytes(&[0xde, 0xad, 0xbe])
+            .expect_err("3-byte buffer must be rejected early");
+
+        assert_eq!(
+            error,
+            DemonProtocolError::BufferTooShort {
+                context: "DemonEnvelope",
+                expected: MIN_ENVELOPE_SIZE,
+                actual: 3,
+            }
         );
     }
 

@@ -11,8 +11,9 @@ use tokio::task::JoinHandle;
 use tracing::warn;
 
 use crate::{
-    AgentRegistry, EventBus, PluginRuntime, SocketRelayManager, TeamserverError,
-    agent_events::agent_mark_event,
+    AgentRegistry, AuditResultStatus, Database, EventBus, PluginRuntime, SocketRelayManager,
+    TeamserverError, agent_events::agent_mark_event, audit_details, parameter_object,
+    record_operator_action,
 };
 
 const MIN_SWEEP_INTERVAL_SECS: u64 = 1;
@@ -79,6 +80,7 @@ pub fn spawn_agent_liveness_monitor(
     registry: AgentRegistry,
     sockets: SocketRelayManager,
     events: EventBus,
+    database: Database,
     profile: &Profile,
 ) -> AgentLivenessMonitor {
     let config = AgentLivenessConfig::from_profile(profile);
@@ -94,6 +96,7 @@ pub fn spawn_agent_liveness_monitor(
                         &registry,
                         &sockets,
                         &events,
+                        &database,
                         config,
                         OffsetDateTime::now_utc(),
                     ).await {
@@ -111,6 +114,7 @@ async fn sweep_dead_agents_at(
     registry: &AgentRegistry,
     sockets: &SocketRelayManager,
     events: &EventBus,
+    database: &Database,
     config: AgentLivenessConfig,
     now: OffsetDateTime,
 ) -> Result<Vec<u32>, TeamserverError> {
@@ -118,7 +122,7 @@ async fn sweep_dead_agents_at(
     let mut dead_agent_ids = Vec::new();
 
     for stale_agent in stale_agents {
-        if mark_stale_agent_if_unchanged(registry, events, &stale_agent).await? {
+        if mark_stale_agent_if_unchanged(registry, events, database, &stale_agent).await? {
             dead_agent_ids.push(stale_agent.agent_id);
         }
     }
@@ -134,6 +138,7 @@ async fn sweep_dead_agents_at(
 async fn mark_stale_agent_if_unchanged(
     registry: &AgentRegistry,
     events: &EventBus,
+    database: &Database,
     stale_agent: &StaleAgent,
 ) -> Result<bool, TeamserverError> {
     let Some(current) = registry.get(stale_agent.agent_id).await else {
@@ -145,10 +150,39 @@ async fn mark_stale_agent_if_unchanged(
 
     let reason =
         format!("agent timed out after {} seconds without callback", stale_agent.timeout_secs);
-    registry.mark_dead(stale_agent.agent_id, reason).await?;
+    registry.mark_dead(stale_agent.agent_id, reason.clone()).await?;
 
     if let Some(agent) = registry.get(stale_agent.agent_id).await {
         events.broadcast(agent_mark_event(&agent));
+
+        // Spawn the audit write as a background task so we don't introduce an
+        // additional await point between the event broadcast and the socket
+        // pruning that follows in sweep_dead_agents_at.
+        let agent_id = stale_agent.agent_id;
+        let db = database.clone();
+        let external_ip = agent.external_ip.clone();
+        tokio::spawn(async move {
+            if let Err(error) = record_operator_action(
+                &db,
+                "teamserver",
+                "agent.dead",
+                "agent",
+                Some(format!("{agent_id:08X}")),
+                audit_details(
+                    AuditResultStatus::Success,
+                    Some(agent_id),
+                    Some("dead"),
+                    Some(parameter_object([
+                        ("reason", serde_json::Value::String(reason)),
+                        ("external_ip", serde_json::Value::String(external_ip)),
+                    ])),
+                ),
+            )
+            .await
+            {
+                warn!(agent_id = format_args!("{agent_id:08X}"), %error, "failed to persist agent.dead audit entry");
+            }
+        });
     }
 
     if let Ok(Some(plugins)) = PluginRuntime::current() {
@@ -287,11 +321,11 @@ mod tests {
     -> Result<(), TeamserverError> {
         let profile = sample_profile(None, 5);
         let database = Database::connect_in_memory().await?;
-        let registry = AgentRegistry::new(database);
+        let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
 
-        let monitor = spawn_agent_liveness_monitor(registry, sockets, events, &profile);
+        let monitor = spawn_agent_liveness_monitor(registry, sockets, events, database, &profile);
         tokio::task::yield_now().await;
 
         assert!(!monitor.task.is_finished());
@@ -306,11 +340,11 @@ mod tests {
         let profile = sample_profile(Some(1), 1);
         let config = AgentLivenessConfig::from_profile(&profile);
         let database = Database::connect_in_memory().await?;
-        let registry = AgentRegistry::new(database);
+        let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
 
-        let monitor = spawn_agent_liveness_monitor(registry, sockets, events, &profile);
+        let monitor = spawn_agent_liveness_monitor(registry, sockets, events, database, &profile);
         tokio::task::yield_now().await;
 
         assert_eq!(config.sweep_interval, Duration::from_secs(1));
@@ -342,6 +376,7 @@ mod tests {
             registry.clone(),
             sockets.clone(),
             events.clone(),
+            database.clone(),
             &profile,
         );
 
@@ -418,6 +453,7 @@ mod tests {
             &registry,
             &sockets,
             &events,
+            &database,
             config,
             time::macros::datetime!(2026-03-10 10:00:15 UTC),
         )
@@ -483,6 +519,7 @@ mod tests {
             &registry,
             &sockets,
             &events,
+            &database,
             config,
             time::macros::datetime!(2026-03-10 10:00:30 UTC),
         )
@@ -515,7 +552,7 @@ mod tests {
         .expect("profile should parse");
         let config = AgentLivenessConfig::from_profile(&profile);
         let database = Database::connect_in_memory().await?;
-        let registry = AgentRegistry::new(database);
+        let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
         let mut agent = sample_agent(0xABCD_1234);
@@ -526,6 +563,7 @@ mod tests {
             &registry,
             &sockets,
             &events,
+            &database,
             config,
             time::macros::datetime!(2026-03-10 10:00:15 UTC),
         )
@@ -581,7 +619,7 @@ mod tests {
         let profile = sample_profile(None, 5); // sleep=5 → timeout=15 s
         let config = AgentLivenessConfig::from_profile(&profile);
         let database = Database::connect_in_memory().await?;
-        let registry = AgentRegistry::new(database);
+        let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
 
@@ -602,7 +640,8 @@ mod tests {
         registry.insert(fresh.clone()).await?;
 
         let now = time::macros::datetime!(2026-03-10 10:00:16 UTC);
-        let dead = sweep_dead_agents_at(&registry, &sockets, &events, config, now).await?;
+        let dead =
+            sweep_dead_agents_at(&registry, &sockets, &events, &database, config, now).await?;
 
         // Only the two stale agents must be returned, in ascending sorted order.
         assert_eq!(dead, vec![stale_low.agent_id, stale_high.agent_id]);
@@ -654,7 +693,7 @@ mod tests {
         .expect("profile should parse");
         let config = AgentLivenessConfig::from_profile(&profile);
         let database = Database::connect_in_memory().await?;
-        let registry = AgentRegistry::new(database);
+        let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let mut agent = sample_agent(0xABCD_5678);
         registry.insert(agent.clone()).await?;
@@ -671,7 +710,8 @@ mod tests {
         agent.last_call_in = "2026-03-10T10:00:14Z".to_owned();
         registry.update_agent(agent.clone()).await?;
 
-        let marked = mark_stale_agent_if_unchanged(&registry, &events, &stale_agents[0]).await?;
+        let marked =
+            mark_stale_agent_if_unchanged(&registry, &events, &database, &stale_agents[0]).await?;
 
         assert!(!marked);
         let stored = registry
@@ -691,7 +731,7 @@ mod tests {
         let profile = sample_profile(None, 5);
         let config = AgentLivenessConfig::from_profile(&profile);
         let database = Database::connect_in_memory().await?;
-        let registry = AgentRegistry::new(database);
+        let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let agent = sample_agent(0x1234_ABCD);
         registry.insert(agent.clone()).await?;
@@ -719,7 +759,8 @@ mod tests {
         // emitted by mark_stale_agent_if_unchanged itself.
         let mut receiver = events.subscribe();
 
-        let marked = mark_stale_agent_if_unchanged(&registry, &events, &stale_agents[0]).await?;
+        let marked =
+            mark_stale_agent_if_unchanged(&registry, &events, &database, &stale_agents[0]).await?;
 
         // The guard must detect active=false and bail out without double-marking.
         assert!(!marked);
@@ -740,6 +781,56 @@ mod tests {
             .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?;
         assert!(!stored_after.active);
         assert_eq!(stored_after.reason, "operator killed");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sweep_records_agent_dead_audit_entry() -> Result<(), TeamserverError> {
+        // Verify that marking a stale agent dead via the sweep writes an
+        // agent.dead audit log entry with actor="teamserver".
+        let profile = sample_profile(None, 5);
+        let config = AgentLivenessConfig::from_profile(&profile);
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent = sample_agent(0xDEAD_CAFE);
+        registry.insert(agent.clone()).await?;
+
+        let dead = sweep_dead_agents_at(
+            &registry,
+            &sockets,
+            &events,
+            &database,
+            config,
+            time::macros::datetime!(2026-03-10 10:00:15 UTC),
+        )
+        .await?;
+
+        assert_eq!(dead, vec![agent.agent_id]);
+
+        // The audit write is spawned as a background task; yield to let it complete.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        let entries = database.audit_log().list().await?;
+        let dead_entry = entries.iter().find(|e| e.action == "agent.dead").ok_or(
+            TeamserverError::InvalidPersistedValue {
+                field: "audit_log",
+                message: "expected agent.dead audit entry".to_owned(),
+            },
+        )?;
+        assert_eq!(dead_entry.actor, "teamserver");
+        assert_eq!(dead_entry.target_kind, "agent");
+        assert_eq!(dead_entry.target_id.as_deref(), Some("DEADCAFE"));
+        let details =
+            dead_entry.details.as_ref().ok_or(TeamserverError::InvalidPersistedValue {
+                field: "details",
+                message: "agent.dead audit entry must include details".to_owned(),
+            })?;
+        assert_eq!(details["result_status"], "success");
+        assert_eq!(details["command"], "dead");
 
         Ok(())
     }

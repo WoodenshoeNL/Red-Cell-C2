@@ -27,9 +27,10 @@ use tracing::warn;
 use zeroize::Zeroizing;
 
 use crate::{
-    AgentRegistry, Database, DemonCallbackPackage, DemonPacketParser, EventBus, LootRecord,
-    PluginRuntime, SocketRelayManager, TeamserverError,
+    AgentRegistry, AuditResultStatus, Database, DemonCallbackPackage, DemonPacketParser, EventBus,
+    LootRecord, PluginRuntime, SocketRelayManager, TeamserverError,
     agent_events::{agent_mark_event, agent_new_event},
+    audit_details, parameter_object, record_operator_action,
 };
 
 type HandlerFuture =
@@ -220,15 +221,25 @@ impl CommandDispatcher {
 
         let checkin_registry = registry.clone();
         let checkin_events = events.clone();
+        let checkin_database = database.clone();
         let checkin_plugins = plugins.clone();
         self.register_handler(
             u32::from(DemonCommand::CommandCheckin),
             move |agent_id, _, payload| {
                 let registry = checkin_registry.clone();
                 let events = checkin_events.clone();
+                let database = checkin_database.clone();
                 let plugins = checkin_plugins.clone();
                 Box::pin(async move {
-                    handle_checkin(&registry, &events, plugins.as_ref(), agent_id, &payload).await
+                    handle_checkin(
+                        &registry,
+                        &events,
+                        &database,
+                        plugins.as_ref(),
+                        agent_id,
+                        &payload,
+                    )
+                    .await
                 })
             },
         );
@@ -816,6 +827,7 @@ async fn handle_get_job(
 async fn handle_checkin(
     registry: &AgentRegistry,
     events: &EventBus,
+    database: &Database,
     plugins: Option<&PluginRuntime>,
     agent_id: u32,
     payload: &[u8],
@@ -856,6 +868,26 @@ async fn handle_checkin(
         registry.set_last_call_in(agent_id, timestamp).await?
     };
     events.broadcast(agent_mark_event(&agent));
+    if let Err(error) = record_operator_action(
+        database,
+        "teamserver",
+        "agent.checkin",
+        "agent",
+        Some(format!("{agent_id:08X}")),
+        audit_details(
+            AuditResultStatus::Success,
+            Some(agent_id),
+            Some("checkin"),
+            Some(parameter_object([(
+                "external_ip",
+                serde_json::Value::String(agent.external_ip.clone()),
+            )])),
+        ),
+    )
+    .await
+    {
+        warn!(agent_id = format_args!("{agent_id:08X}"), %error, "failed to persist agent.checkin audit entry");
+    }
     if let Some(plugins) = plugins
         && let Err(error) = plugins.emit_agent_checkin(agent_id).await
     {
@@ -9914,5 +9946,41 @@ mod tests {
         // Build in Windows 11 range but wrong product type for 2022 or 2019
         let label = checkin_windows_version_label(99, 0, 1, 0, 0);
         assert_eq!(label, "Unknown");
+    }
+
+    #[tokio::test]
+    async fn builtin_checkin_handler_records_agent_checkin_audit_entry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database.clone(),
+            sockets,
+            None,
+        );
+        let key = [0x77; AGENT_KEY_LENGTH];
+        let iv = [0x44; AGENT_IV_LENGTH];
+        let agent_id = 0xABCD_1234_u32;
+
+        registry.insert(sample_agent_info(agent_id, key, iv)).await?;
+        dispatcher.dispatch(agent_id, u32::from(DemonCommand::CommandCheckin), 6, &[]).await?;
+
+        let entries = database.audit_log().list().await?;
+        let checkin_entry = entries.iter().find(|e| e.action == "agent.checkin").expect(
+            "a checkin audit entry with action=\"agent.checkin\" should have been persisted",
+        );
+        assert_eq!(checkin_entry.actor, "teamserver");
+        assert_eq!(checkin_entry.target_kind, "agent");
+        assert_eq!(checkin_entry.target_id.as_deref(), Some("ABCD1234"));
+        let details =
+            checkin_entry.details.as_ref().expect("checkin audit entry must include details");
+        assert_eq!(details["result_status"], "success");
+        assert_eq!(details["command"], "checkin");
+        assert_eq!(details["agent_id"], "ABCD1234");
+        Ok(())
     }
 }

@@ -1274,6 +1274,33 @@ async fn process_demon_transport(
                 &pivots,
             ));
             let agent_id = init.agent.agent_id;
+            let external_ip_for_audit = external_ip.clone();
+            let listener_name_for_audit = listener_name.to_owned();
+            if let Err(error) = record_operator_action(
+                database,
+                "teamserver",
+                "agent.registered",
+                "agent",
+                Some(format!("{agent_id:08X}")),
+                audit_details(
+                    AuditResultStatus::Success,
+                    Some(agent_id),
+                    Some("registered"),
+                    Some(parameter_object([
+                        ("listener", serde_json::Value::String(listener_name_for_audit)),
+                        ("external_ip", serde_json::Value::String(external_ip_for_audit)),
+                    ])),
+                ),
+            )
+            .await
+            {
+                warn!(
+                    listener = listener_name,
+                    agent_id = format_args!("{agent_id:08X}"),
+                    %error,
+                    "failed to persist agent.registered audit entry"
+                );
+            }
             if let Ok(Some(plugins)) = PluginRuntime::current() {
                 if let Err(error) = plugins.emit_agent_registered(agent_id).await {
                     tracing::warn!(
@@ -3846,6 +3873,52 @@ mod tests {
         assert_eq!(message.info.process_path, "C:\\Windows\\explorer.exe");
         assert_eq!(message.info.sleep_delay, serde_json::json!(15));
         manager.stop("edge-http-init").await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn http_listener_demon_init_records_agent_registered_audit_entry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager =
+            ListenerManager::new(database.clone(), registry.clone(), events, sockets, None);
+        let port = available_port()?;
+
+        manager.create(http_listener("edge-http-audit-init", port)).await?;
+        manager.start("edge-http-audit-init").await?;
+        wait_for_listener(port, false).await?;
+
+        let key = [0x41; AGENT_KEY_LENGTH];
+        let iv = [0x24; AGENT_IV_LENGTH];
+        let agent_id = 0xDEAD_CAFE_u32;
+        let response = Client::new()
+            .post(format!("http://127.0.0.1:{port}/"))
+            .body(valid_demon_init_body(agent_id, key, iv))
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let page = query_audit_log(
+            &database,
+            &AuditQuery { action: Some("agent.registered".to_owned()), ..AuditQuery::default() },
+        )
+        .await
+        .expect("audit query should succeed");
+
+        assert!(!page.items.is_empty(), "expected at least one agent.registered audit entry");
+        let entry = &page.items[0];
+        assert_eq!(entry.actor, "teamserver");
+        assert_eq!(entry.action, "agent.registered");
+        assert_eq!(entry.target_kind, "agent");
+        assert_eq!(entry.target_id.as_deref(), Some("DEADCAFE"));
+        assert_eq!(entry.result_status, AuditResultStatus::Success);
+        let params = entry.parameters.as_ref().expect("parameters must be present");
+        assert_eq!(params["listener"], "edge-http-audit-init");
+
+        manager.stop("edge-http-audit-init").await?;
         Ok(())
     }
 

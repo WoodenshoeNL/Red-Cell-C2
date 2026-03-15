@@ -91,6 +91,7 @@ async fn main() -> Result<()> {
         agent_registry.clone(),
         sockets.clone(),
         events.clone(),
+        database.clone(),
         &profile,
     );
     let state = TeamserverState {

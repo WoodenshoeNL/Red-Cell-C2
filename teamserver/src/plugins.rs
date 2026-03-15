@@ -1278,6 +1278,37 @@ havoc.RegisterCommand("demo", "demo command", run)
 
     #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "multi_thread")]
+    async fn load_plugins_returns_python_error_on_syntax_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let temp_dir = TempDir::new()?;
+        let plugin_path = temp_dir.path().join("bad_plugin.py");
+        // Deliberate Python syntax error: unmatched parenthesis.
+        std::fs::write(&plugin_path, "def broken(\n    pass\n")?;
+
+        let database = Database::connect(unique_test_dir("plugins-syntax-error")).await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let runtime = PluginRuntime::initialize(
+            database,
+            registry,
+            events,
+            sockets,
+            Some(temp_dir.path().to_path_buf()),
+        )
+        .await?;
+
+        let result = runtime.load_plugins().await;
+        assert!(
+            matches!(result, Err(PluginError::Python(_))),
+            "expected Err(PluginError::Python), got {result:?}",
+        );
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
     async fn registered_command_callbacks_can_queue_agent_jobs()
     -> Result<(), Box<dyn std::error::Error>> {
         let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;

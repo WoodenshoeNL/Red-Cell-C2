@@ -35,7 +35,7 @@ type HandlerFuture =
     Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>, CommandDispatchError>> + Send>>;
 type Handler = dyn Fn(u32, u32, Vec<u8>) -> HandlerFuture + Send + Sync + 'static;
 
-const DEFAULT_MAX_DOWNLOAD_BYTES: usize = 512 * 1024 * 1024;
+use crate::DEFAULT_MAX_DOWNLOAD_BYTES;
 const DOWNLOAD_TRACKER_AGGREGATE_CAP_MULTIPLIER: usize = 4;
 const DOTNET_INFO_PATCHED: u32 = 0x1;
 const DOTNET_INFO_NET_VERSION: u32 = 0x2;
@@ -187,7 +187,10 @@ impl CommandDispatcher {
     /// Create an empty dispatcher with no registered handlers.
     #[must_use]
     pub fn new() -> Self {
-        Self::with_max_download_bytes(DEFAULT_MAX_DOWNLOAD_BYTES)
+        Self {
+            handlers: Arc::new(HashMap::new()),
+            downloads: DownloadTracker::from_max_download_bytes(DEFAULT_MAX_DOWNLOAD_BYTES),
+        }
     }
 
     #[must_use]
@@ -630,7 +633,7 @@ impl CommandDispatcher {
             database,
             sockets,
             plugins,
-            u64::try_from(DEFAULT_MAX_DOWNLOAD_BYTES).unwrap_or(u64::MAX),
+            DEFAULT_MAX_DOWNLOAD_BYTES,
         )
     }
 

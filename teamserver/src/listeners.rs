@@ -53,7 +53,7 @@ use crate::{
     json_error_response, parameter_object, record_operator_action,
 };
 
-const DEFAULT_MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
+use crate::DEFAULT_MAX_DOWNLOAD_BYTES;
 const MAX_DEMON_INIT_ATTEMPTS_PER_IP: u32 = 5;
 const DEMON_INIT_WINDOW_DURATION: Duration = Duration::from_secs(60);
 const MAX_DEMON_INIT_ATTEMPT_WINDOWS: usize = 10_000;

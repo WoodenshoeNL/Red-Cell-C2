@@ -3638,6 +3638,24 @@ mod tests {
     }
 
     #[test]
+    fn build_job_rejects_unknown_filesystem_subcommand() {
+        let err = build_job(&AgentTaskInfo {
+            task_id: "48".to_owned(),
+            command_line: "fs cat_dog".to_owned(),
+            demon_id: "DEADBEEF".to_owned(),
+            command_id: u32::from(DemonCommand::CommandFs).to_string(),
+            sub_command: Some("cat_dog".to_owned()),
+            ..AgentTaskInfo::default()
+        })
+        .expect_err("unknown filesystem subcommand should be rejected");
+
+        assert!(
+            matches!(err, AgentCommandError::UnsupportedFilesystemSubcommand { .. }),
+            "expected UnsupportedFilesystemSubcommand, got {err:?}"
+        );
+    }
+
+    #[test]
     fn build_job_encodes_token_privs_list_payload_from_extra_subcommand_string() {
         let job = build_job(&AgentTaskInfo {
             task_id: "2F".to_owned(),

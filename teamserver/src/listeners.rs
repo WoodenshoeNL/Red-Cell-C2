@@ -490,7 +490,9 @@ impl ListenerManager {
 
         let names: Vec<_> = self.active_handles.read().await.keys().cloned().collect();
         for name in names {
-            let _ = self.stop(&name).await;
+            if let Err(e) = self.stop(&name).await {
+                warn!(listener = %name, error = %e, "listener stop failed during shutdown");
+            }
         }
 
         drained

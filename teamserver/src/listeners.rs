@@ -893,7 +893,6 @@ impl HttpListenerState {
         let headers = response.headers_mut();
         set_default_header(headers, "server", "nginx");
         set_default_header(headers, "content-type", "text/html");
-        set_default_header(headers, "x-havoc", "true");
         response
     }
 
@@ -3667,6 +3666,10 @@ mod tests {
 
         let invalid = client.get(format!("http://127.0.0.1:{port}/nope")).send().await?;
         assert_eq!(invalid.status(), StatusCode::NOT_FOUND);
+        assert!(
+            invalid.headers().get("x-havoc").is_none(),
+            "fake 404 must not expose x-havoc fingerprinting header"
+        );
         assert_eq!(invalid.text().await?, "decoy");
 
         let valid = client

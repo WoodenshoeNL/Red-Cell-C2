@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::warn;
 
-use crate::transport::{AgentSummary, AppState, ListenerSummary, SharedAppState};
+use crate::transport::{AgentSummary, AppState, ListenerSummary, LootItem, SharedAppState};
 
 static ACTIVE_RUNTIME: OnceLock<Mutex<Option<Arc<PythonApiState>>>> = OnceLock::new();
 const MAX_SCRIPT_OUTPUT_ENTRIES: usize = 512;
@@ -340,6 +340,32 @@ impl PythonApiState {
     fn listener_snapshots(&self) -> Vec<ListenerSummary> {
         let state = lock_app_state(&self.app_state);
         state.listeners.clone()
+    }
+
+    fn loot_snapshots(
+        &self,
+        agent_id: Option<&str>,
+        loot_type: Option<&str>,
+    ) -> Vec<crate::transport::LootItem> {
+        let state = lock_app_state(&self.app_state);
+        state
+            .loot
+            .iter()
+            .filter(|item| {
+                if let Some(id) = agent_id {
+                    if item.agent_id != normalize_agent_id(id) {
+                        return false;
+                    }
+                }
+                if let Some(ty) = loot_type {
+                    if !item.kind.label().eq_ignore_ascii_case(ty) {
+                        return false;
+                    }
+                }
+                true
+            })
+            .cloned()
+            .collect()
     }
 
     fn set_outgoing_sender(&self, sender: UnboundedSender<OperatorMessage>) {
@@ -949,16 +975,19 @@ fn populate_api_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(agents, module)?)?;
     module.add_function(wrap_pyfunction!(listener, module)?)?;
     module.add_function(wrap_pyfunction!(listeners, module)?)?;
+    module.add_function(wrap_pyfunction!(get_loot, module)?)?;
     module.add_class::<PyAgent>()?;
     module.add_class::<PyCommandContext>()?;
     module.add_class::<PyEventRegistrar>()?;
     module.add_class::<PyListener>()?;
+    module.add_class::<PyLootItem>()?;
     module.add("RegisterCommand", module.getattr("register_command")?)?;
     module.add("RegisterCallback", module.getattr("register_callback")?)?;
     module.add("GetAgent", module.getattr("agent")?)?;
     module.add("GetAgents", module.getattr("agents")?)?;
     module.add("GetListener", module.getattr("listener")?)?;
     module.add("GetListeners", module.getattr("listeners")?)?;
+    module.add("GetLoot", module.getattr("get_loot")?)?;
     module.add("Demon", module.getattr("Agent")?)?;
     module.add("Event", module.getattr("Event")?)?;
     Ok(())
@@ -1375,6 +1404,77 @@ impl PyListener {
     }
 }
 
+/// A single loot item returned by `red_cell.get_loot()`.
+#[pyclass(name = "LootItem", frozen)]
+#[derive(Clone, Debug)]
+struct PyLootItem {
+    id: Option<i64>,
+    agent_id: String,
+    loot_type: String,
+    data: Option<String>,
+    timestamp: String,
+    name: String,
+}
+
+impl PyLootItem {
+    fn from_loot_item(item: &LootItem) -> Self {
+        Self {
+            id: item.id,
+            agent_id: item.agent_id.clone(),
+            loot_type: item.kind.label().to_owned(),
+            data: item.content_base64.clone().or_else(|| item.preview.clone()),
+            timestamp: item.collected_at.clone(),
+            name: item.name.clone(),
+        }
+    }
+}
+
+#[pymethods]
+impl PyLootItem {
+    /// The database ID of this loot item, or `None` if not yet known.
+    #[getter]
+    fn id(&self) -> Option<i64> {
+        self.id
+    }
+
+    /// The hex identifier of the agent that captured this loot.
+    #[getter]
+    fn agent_id(&self) -> String {
+        self.agent_id.clone()
+    }
+
+    /// The loot type label: `"Credential"`, `"File"`, `"Screenshot"`, or `"Other"`.
+    #[getter(r#type)]
+    fn loot_type(&self) -> String {
+        self.loot_type.clone()
+    }
+
+    /// The loot content: base64-encoded bytes for files, plain text for credentials.
+    #[getter]
+    fn data(&self) -> Option<String> {
+        self.data.clone()
+    }
+
+    /// ISO-8601 timestamp when the loot was captured.
+    #[getter]
+    fn timestamp(&self) -> String {
+        self.timestamp.clone()
+    }
+
+    /// Human-readable name of this loot item.
+    #[getter]
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "LootItem(id={:?}, agent_id={:?}, type={:?}, name={:?}, timestamp={:?})",
+            self.id, self.agent_id, self.loot_type, self.name, self.timestamp,
+        )
+    }
+}
+
 #[pyclass]
 struct PyOutputSink {
     stream: ScriptOutputStream,
@@ -1544,6 +1644,27 @@ fn listeners(py: Python<'_>) -> PyResult<Vec<Py<PyListener>>> {
         .listener_snapshots()
         .into_iter()
         .map(|listener| Py::new(py, PyListener { name: listener.name }))
+        .collect()
+}
+
+/// Return loot items from the client's local cache, optionally filtered.
+///
+/// # Arguments
+/// * `agent_id`  – hex agent identifier; omit or pass `None` to return loot from all agents.
+/// * `loot_type` – one of `"Credential"`, `"File"`, `"Screenshot"`, `"Other"`;
+///                 omit or pass `None` to return all types (case-insensitive).
+#[pyfunction]
+#[pyo3(signature = (agent_id=None, loot_type=None))]
+fn get_loot(
+    py: Python<'_>,
+    agent_id: Option<String>,
+    loot_type: Option<String>,
+) -> PyResult<Vec<Py<PyLootItem>>> {
+    let api_state = active_api_state()?;
+    api_state
+        .loot_snapshots(agent_id.as_deref(), loot_type.as_deref())
+        .iter()
+        .map(|item| Py::new(py, PyLootItem::from_loot_item(item)))
         .collect()
 }
 
@@ -1813,6 +1934,7 @@ fn rest_after_word(input: &str) -> Result<String, String> {
 mod tests {
     use std::time::{Duration, Instant};
 
+    use pyo3::types::IntoPyDict;
     use tempfile::TempDir;
 
     use super::*;
@@ -1849,6 +1971,26 @@ mod tests {
             name: name.to_owned(),
             protocol: "https".to_owned(),
             status: "Online".to_owned(),
+        }
+    }
+
+    fn sample_loot_item(
+        agent_id: &str,
+        kind: crate::transport::LootKind,
+        name: &str,
+        content: Option<&str>,
+    ) -> LootItem {
+        LootItem {
+            id: Some(42),
+            kind,
+            name: name.to_owned(),
+            agent_id: agent_id.to_owned(),
+            source: "operator".to_owned(),
+            collected_at: "2026-03-15T12:00:00Z".to_owned(),
+            file_path: None,
+            size_bytes: None,
+            content_base64: content.map(ToOwned::to_owned),
+            preview: None,
         }
     }
 
@@ -2344,5 +2486,129 @@ havoc.RegisterCommand(function=queue, module='ops', command='pwd', description='
         .unwrap_or_else(|error| panic!("havoc alias lookup should succeed: {error}"));
 
         assert_eq!(result, ("wkstn-01".to_owned(), 1, "Online".to_owned(), 1));
+    }
+
+    #[test]
+    fn get_loot_returns_all_items_when_no_filter() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        write_script(&temp_dir.path().join("noop.py"), "import red_cell\n");
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+        {
+            let mut state = lock_app_state(&app_state);
+            state.loot.push(sample_loot_item(
+                "00AABBCC",
+                crate::transport::LootKind::Credential,
+                "cred-1",
+                Some("dXNlcjpwYXNz"),
+            ));
+            state.loot.push(sample_loot_item(
+                "00DDEEFF",
+                crate::transport::LootKind::File,
+                "file-1",
+                Some("ZmlsZWNvbnRlbnQ="),
+            ));
+        }
+        let _runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        let (count, first_agent_id, first_type, first_id, first_timestamp) =
+            Python::with_gil(|py| -> PyResult<(usize, String, String, Option<i64>, String)> {
+                install_api_module(py)?;
+                let module = py.import("red_cell")?;
+                let items = module.call_method0("get_loot")?;
+                let count = items.len()?;
+                let first = items.get_item(0)?;
+                let agent_id = first.getattr("agent_id")?.extract::<String>()?;
+                let loot_type = first.getattr("type")?.extract::<String>()?;
+                let id = first.getattr("id")?.extract::<Option<i64>>()?;
+                let timestamp = first.getattr("timestamp")?.extract::<String>()?;
+                Ok((count, agent_id, loot_type, id, timestamp))
+            })
+            .unwrap_or_else(|error| panic!("get_loot should succeed: {error}"));
+
+        assert_eq!(count, 2);
+        assert_eq!(first_agent_id, "00AABBCC");
+        assert_eq!(first_type, "Credential");
+        assert_eq!(first_id, Some(42));
+        assert_eq!(first_timestamp, "2026-03-15T12:00:00Z");
+    }
+
+    #[test]
+    fn get_loot_filters_by_agent_id_and_type() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        write_script(&temp_dir.path().join("noop.py"), "import red_cell\n");
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+        {
+            let mut state = lock_app_state(&app_state);
+            state.loot.push(sample_loot_item(
+                "00AABBCC",
+                crate::transport::LootKind::Credential,
+                "cred-1",
+                Some("dXNlcjpwYXNz"),
+            ));
+            state.loot.push(sample_loot_item(
+                "00AABBCC",
+                crate::transport::LootKind::File,
+                "file-1",
+                Some("ZmlsZWNvbnRlbnQ="),
+            ));
+            state.loot.push(sample_loot_item(
+                "00DDEEFF",
+                crate::transport::LootKind::Credential,
+                "cred-2",
+                None,
+            ));
+        }
+        let _runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        // Filter by agent_id only.
+        let agent_filtered_count = Python::with_gil(|py| -> PyResult<usize> {
+            install_api_module(py)?;
+            let module = py.import("red_cell")?;
+            module
+                .call_method("get_loot", (), Some(&[("agent_id", "00AABBCC")].into_py_dict(py)?))?
+                .len()
+        })
+        .unwrap_or_else(|error| panic!("get_loot with agent_id filter should succeed: {error}"));
+        assert_eq!(agent_filtered_count, 2);
+
+        // Filter by loot_type only.
+        let type_filtered_count = Python::with_gil(|py| -> PyResult<usize> {
+            install_api_module(py)?;
+            let module = py.import("red_cell")?;
+            module
+                .call_method(
+                    "get_loot",
+                    (),
+                    Some(&[("loot_type", "credential")].into_py_dict(py)?),
+                )?
+                .len()
+        })
+        .unwrap_or_else(|error| panic!("get_loot with type filter should succeed: {error}"));
+        assert_eq!(type_filtered_count, 2);
+
+        // Filter by both agent_id and loot_type.
+        let both_filtered = Python::with_gil(|py| -> PyResult<(usize, Option<String>)> {
+            install_api_module(py)?;
+            let module = py.import("red_cell")?;
+            let items = module.call_method(
+                "get_loot",
+                (),
+                Some(&[("agent_id", "00AABBCC"), ("loot_type", "Credential")].into_py_dict(py)?),
+            )?;
+            let count = items.len()?;
+            let data = items.get_item(0)?.getattr("data")?.extract::<Option<String>>()?;
+            Ok((count, data))
+        })
+        .unwrap_or_else(|error| panic!("get_loot with both filters should succeed: {error}"));
+        assert_eq!(both_filtered.0, 1);
+        assert_eq!(both_filtered.1.as_deref(), Some("dXNlcjpwYXNz"));
     }
 }

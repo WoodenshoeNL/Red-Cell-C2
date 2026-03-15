@@ -4149,6 +4149,7 @@ mod tests {
     #[test]
     fn loot_filter_matches_type_agent_and_text() {
         let item = LootItem {
+            id: None,
             kind: LootKind::Screenshot,
             name: "desktop.png".to_owned(),
             agent_id: "ABCD1234".to_owned(),

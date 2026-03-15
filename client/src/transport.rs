@@ -202,6 +202,7 @@ impl LootKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LootItem {
+    pub(crate) id: Option<i64>,
     pub(crate) kind: LootKind,
     pub(crate) name: String,
     pub(crate) agent_id: String,
@@ -1184,6 +1185,7 @@ fn loot_item_from_response(
     );
 
     Some(LootItem {
+        id: extra_i64(&info.extra, "LootID"),
         kind,
         name,
         agent_id: normalize_agent_id(&info.demon_id),
@@ -1237,6 +1239,14 @@ fn extra_u64(extra: &BTreeMap<String, serde_json::Value>, key: &str) -> Option<u
     })
 }
 
+fn extra_i64(extra: &BTreeMap<String, serde_json::Value>, key: &str) -> Option<i64> {
+    extra.get(key).and_then(|value| match value {
+        serde_json::Value::Number(number) => number.as_i64(),
+        serde_json::Value::String(string) => string.parse::<i64>().ok(),
+        _ => None,
+    })
+}
+
 fn loot_item_from_flat_info(info: &FlatInfo, fallback_kind: LootKind) -> Option<LootItem> {
     let name = flat_info_string(info, &["Name", "FileName", "LootName"])?;
     let agent_id = flat_info_string(info, &["DemonID", "AgentID"])
@@ -1252,6 +1262,7 @@ fn loot_item_from_flat_info(info: &FlatInfo, fallback_kind: LootKind) -> Option<
     );
 
     Some(LootItem {
+        id: flat_info_i64(info, &["LootID", "ID"]),
         kind: if matches!(kind, LootKind::Other) { fallback_kind } else { kind },
         name,
         agent_id,
@@ -1270,6 +1281,16 @@ fn flat_info_u64(info: &FlatInfo, keys: &[&str]) -> Option<u64> {
         info.fields.get(*key).and_then(|value| match value {
             serde_json::Value::Number(number) => number.as_u64(),
             serde_json::Value::String(string) => string.parse::<u64>().ok(),
+            _ => None,
+        })
+    })
+}
+
+fn flat_info_i64(info: &FlatInfo, keys: &[&str]) -> Option<i64> {
+    keys.iter().find_map(|key| {
+        info.fields.get(*key).and_then(|value| match value {
+            serde_json::Value::Number(number) => number.as_i64(),
+            serde_json::Value::String(string) => string.parse::<i64>().ok(),
             _ => None,
         })
     })

@@ -62,7 +62,7 @@ pub(crate) fn operator_agent_info(
         magic_value: format!("{magic_value:08x}"),
         name_id: agent.name_id(),
         os_arch: agent.os_arch.clone(),
-        os_build: String::new(),
+        os_build: agent.os_build.to_string(),
         os_version: agent.os_version.clone(),
         pivots: AgentPivotsInfo { parent: parent.clone(), links },
         port_fwds: Vec::new(),
@@ -118,6 +118,7 @@ mod tests {
             process_arch: "x64".to_owned(),
             elevated: true,
             os_version: "Windows 11".to_owned(),
+            os_build: 22000,
             os_arch: "x64".to_owned(),
             sleep_delay: 15,
             sleep_jitter: 20,
@@ -217,6 +218,28 @@ mod tests {
         assert_eq!(message.head.timestamp, agent.last_call_in);
         assert_eq!(message.info.agent_id, "11121314");
         assert_eq!(message.info.marked, "Alive");
+    }
+
+    #[test]
+    fn operator_agent_info_os_build_is_populated_from_agent_record() {
+        let mut agent = sample_agent(0x1112_1314);
+        agent.os_build = 22000;
+        let pivots = PivotInfo { parent: None, children: vec![] };
+
+        let info = operator_agent_info("http", 0xDEAD_BEEF, &agent, &pivots);
+
+        assert_eq!(info.os_build, "22000", "os_build must be the build number string");
+    }
+
+    #[test]
+    fn operator_agent_info_os_build_zero_serializes_as_zero_string() {
+        let mut agent = sample_agent(0x1112_1314);
+        agent.os_build = 0;
+        let pivots = PivotInfo { parent: None, children: vec![] };
+
+        let info = operator_agent_info("http", 0xDEAD_BEEF, &agent, &pivots);
+
+        assert_eq!(info.os_build, "0");
     }
 
     #[test]

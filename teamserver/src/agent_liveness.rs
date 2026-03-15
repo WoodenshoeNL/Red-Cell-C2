@@ -228,6 +228,7 @@ mod tests {
             process_arch: "x64".to_owned(),
             elevated: true,
             os_version: "Windows 11".to_owned(),
+            os_build: 0,
             os_arch: "x64".to_owned(),
             sleep_delay: 5,
             sleep_jitter: 0,

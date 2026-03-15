@@ -357,6 +357,9 @@ pub struct AgentRecord {
     /// Operating system version string.
     #[serde(rename = "OSVersion")]
     pub os_version: String,
+    /// Operating system build number (e.g. 22000 for Windows 11 21H2).
+    #[serde(rename = "OSBuild", deserialize_with = "deserialize_u32_from_any", default)]
+    pub os_build: u32,
     /// Operating system architecture label.
     #[serde(rename = "OSArch")]
     pub os_arch: String,

@@ -902,6 +902,7 @@ fn parse_checkin_metadata(
         os_service_pack,
         os_build,
     );
+    updated.os_build = os_build;
     updated.os_arch = checkin_windows_arch_label(os_arch).to_owned();
     updated.sleep_delay = sleep_delay;
     updated.sleep_jitter = sleep_jitter;
@@ -5139,6 +5140,7 @@ mod tests {
             process_arch: "x64".to_owned(),
             elevated: true,
             os_version: "Windows 11".to_owned(),
+            os_build: 0,
             os_arch: "x64".to_owned(),
             sleep_delay: 10,
             sleep_jitter: 25,

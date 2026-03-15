@@ -269,7 +269,7 @@ impl AgentRepository {
                 active = ?, reason = ?, note = ?, aes_key = ?, aes_iv = ?, hostname = ?, username = ?,
                 domain_name = ?, external_ip = ?, internal_ip = ?, process_name = ?, process_path = ?,
                 base_address = ?, process_pid = ?, process_tid = ?, process_ppid = ?,
-                process_arch = ?, elevated = ?, os_version = ?, os_arch = ?, listener_name = ?, sleep_delay = ?,
+                process_arch = ?, elevated = ?, os_version = ?, os_build = ?, os_arch = ?, listener_name = ?, sleep_delay = ?,
                 sleep_jitter = ?, kill_date = ?, working_hours = ?, first_call_in = ?,
                 last_call_in = ?
             WHERE agent_id = ?
@@ -294,6 +294,7 @@ impl AgentRepository {
         .bind(&agent.process_arch)
         .bind(bool_to_i64(agent.elevated))
         .bind(&agent.os_version)
+        .bind(i64::from(agent.os_build))
         .bind(&agent.os_arch)
         .bind(listener_name)
         .bind(i64::from(agent.sleep_delay))
@@ -438,9 +439,9 @@ async fn insert_agent_row(
         INSERT INTO ts_agents (
             agent_id, active, reason, note, ctr_block_offset, aes_key, aes_iv, hostname, username, domain_name,
             external_ip, internal_ip, process_name, process_path, base_address, process_pid, process_tid,
-            process_ppid, process_arch, elevated, os_version, os_arch, listener_name, sleep_delay,
+            process_ppid, process_arch, elevated, os_version, os_build, os_arch, listener_name, sleep_delay,
             sleep_jitter, kill_date, working_hours, first_call_in, last_call_in
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(i64::from(agent.agent_id))
@@ -464,6 +465,7 @@ async fn insert_agent_row(
     .bind(&agent.process_arch)
     .bind(bool_to_i64(agent.elevated))
     .bind(&agent.os_version)
+    .bind(i64::from(agent.os_build))
     .bind(&agent.os_arch)
     .bind(listener_name)
     .bind(i64::from(agent.sleep_delay))
@@ -1402,6 +1404,7 @@ struct AgentRow {
     process_arch: String,
     elevated: i64,
     os_version: String,
+    os_build: i64,
     os_arch: String,
     listener_name: String,
     sleep_delay: i64,
@@ -1449,6 +1452,7 @@ impl TryFrom<AgentRow> for AgentRecord {
             process_arch: row.process_arch,
             elevated: bool_from_i64("elevated", row.elevated)?,
             os_version: row.os_version,
+            os_build: u32_from_i64("os_build", row.os_build)?,
             os_arch: row.os_arch,
             sleep_delay: u32_from_i64("sleep_delay", row.sleep_delay)?,
             sleep_jitter: u32_from_i64("sleep_jitter", row.sleep_jitter)?,

@@ -127,6 +127,9 @@ struct ApiAgentInfo {
     /// Operating system version string.
     #[serde(rename = "OSVersion")]
     os_version: String,
+    /// Operating system build number (e.g. 22000 for Windows 11 21H2).
+    #[serde(rename = "OSBuild")]
+    os_build: u32,
     /// Operating system architecture label.
     #[serde(rename = "OSArch")]
     os_arch: String,
@@ -176,6 +179,7 @@ impl From<&AgentRecord> for ApiAgentInfo {
             process_arch: agent.process_arch.clone(),
             elevated: agent.elevated,
             os_version: agent.os_version.clone(),
+            os_build: agent.os_build,
             os_arch: agent.os_arch.clone(),
             sleep_delay: agent.sleep_delay,
             sleep_jitter: agent.sleep_jitter,
@@ -3984,6 +3988,7 @@ mod tests {
             process_arch: "x64".to_owned(),
             elevated: true,
             os_version: "Windows 11".to_owned(),
+            os_build: 0,
             os_arch: "x64".to_owned(),
             sleep_delay: 5,
             sleep_jitter: 10,

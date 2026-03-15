@@ -9,8 +9,8 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 145 | 181 | 31 |
-| Bugs filed against | 14 | 28 | 9 |
+| Tasks closed | 149 | 181 | 31 |
+| Bugs filed against | 15 | 28 | 9 |
 | Bug rate (bugs/task) | 0.10 | 0.15 | 0.29 |
 | Quality score | 90% | 85% | 71% |
 
@@ -18,7 +18,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
-| unwrap / expect in production | 0 | 0 | 0 |
+| unwrap / expect in production | 1 | 0 | 0 |
 | Missing tests | 9 | 11 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
 | Protocol errors | 5 | 22 | 3 |
@@ -1409,3 +1409,14 @@ Notes: High-output, high-quality run. Payload builder epic fully delivered (tool
 
 Build: **passed on HEAD** — `cargo check --workspace` ✓ on committed code. Working tree broken (in-progress s7nz: `AppEvent::ListenerChanged` and `AppEvent::LootCaptured` referenced before enum variants declared — normal mid-task state).
 Notes: The two delivered Python API features (`get_loot`, `task_agent`/`get_task_result`) are well-designed and well-tested overall. The channel-based result delivery with GIL release is correct. Teamserver correctly propagates `TaskID` in extra fields (verified in dispatch/mod.rs:1121). Two minor issues: sender-map cleanup on timeout, and a vacuous test assertion that masks message-dispatch coverage.
+
+### QA Review — 2026-03-15 21:25 — a25b935..d214c7b
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 4 | 1 | Closed `red-cell-c2-ouhj` (vacuous assertion fix: real channel receive check), `red-cell-c2-agjc` (sender leak fix: cleanup after get_task_result timeout), `red-cell-c2-34ns` (rich command context: CommandOption type, per-agent history capped at 100, havocui.RegisterCommand with 2/4-arg forms), `red-cell-c2-s7nz` (event callbacks: on_command_response, on_loot_captured, on_listener_changed wired through AppEvent + WS receive loop). Filed `red-cell-c2-e3p5` (P4): expect() in production path of parse_havocui_register_command_request — guarded by is_some_and so cannot panic, but violates style rule; fix with filter()+if-let. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (686 tests, 0 failures)
+Notes: Solid, well-tested run. All four tasks include comprehensive unit tests for the new paths. The event callback system (command response, loot, listener-change) follows the existing registration pattern cleanly. Transport AppEvent variants are correct. One minor style violation filed (P4 expect()). Bug rate holds at 0.10.

@@ -293,8 +293,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        Cli, load_profile, profile_listener_names, resolve_bind_addr, resolve_database_path,
-        start_new_profile_listeners, tls_subject_alt_names,
+        Cli, build_tls_config, load_profile, profile_listener_names, resolve_bind_addr,
+        resolve_database_path, start_new_profile_listeners, tls_subject_alt_names,
     };
     use axum::extract::FromRef;
     use clap::Parser;
@@ -304,6 +304,7 @@ mod tests {
         OperatorConnectionManager, PayloadBuilderService, SocketRelayManager, TeamserverState,
     };
     use red_cell_common::config::{OperatorRole, Profile};
+    use red_cell_common::tls::{TlsKeyAlgorithm, generate_self_signed_tls_identity};
     use tempfile::NamedTempFile;
 
     #[test]
@@ -965,5 +966,133 @@ mod tests {
     fn available_port() -> std::io::Result<u16> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         Ok(listener.local_addr()?.port())
+    }
+
+    #[tokio::test]
+    async fn build_tls_config_generates_and_persists_self_signed_cert_when_no_cert_configured() {
+        let temp_dir = tempfile::TempDir::new().expect("temporary directory should be created");
+        let profile_path = temp_dir.path().join("teamserver.yaotl");
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "Neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        red_cell_common::tls::install_default_crypto_provider();
+        let _config = build_tls_config(&profile, &profile_path)
+            .await
+            .expect("build_tls_config should succeed with no cert configured");
+
+        let cert_path = profile_path.with_extension("tls.crt");
+        let key_path = profile_path.with_extension("tls.key");
+        assert!(cert_path.exists(), "generated certificate should be persisted to disk");
+        assert!(key_path.exists(), "generated private key should be persisted to disk");
+    }
+
+    #[tokio::test]
+    async fn build_tls_config_reloads_persisted_cert_on_subsequent_calls() {
+        let temp_dir = tempfile::TempDir::new().expect("temporary directory should be created");
+        let profile_path = temp_dir.path().join("teamserver.yaotl");
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "Neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        red_cell_common::tls::install_default_crypto_provider();
+        let _first =
+            build_tls_config(&profile, &profile_path).await.expect("first call should succeed");
+
+        let cert_path = profile_path.with_extension("tls.crt");
+        let cert_material_after_first = std::fs::read(&cert_path).expect("cert should exist");
+
+        let _second =
+            build_tls_config(&profile, &profile_path).await.expect("second call should succeed");
+
+        let cert_material_after_second =
+            std::fs::read(&cert_path).expect("cert should still exist");
+        assert_eq!(
+            cert_material_after_first, cert_material_after_second,
+            "cert material must be stable across restarts when no explicit cert is configured"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_tls_config_uses_configured_cert_paths_from_profile() {
+        let temp_dir = tempfile::TempDir::new().expect("temporary directory should be created");
+        let profile_path = temp_dir.path().join("teamserver.yaotl");
+
+        // Write a pre-existing cert/key that should be used.
+        let configured_identity = generate_self_signed_tls_identity(
+            &["127.0.0.1".to_owned()],
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("identity generation should succeed");
+        let configured_cert = temp_dir.path().join("custom.crt");
+        let configured_key = temp_dir.path().join("custom.key");
+        std::fs::write(&configured_cert, configured_identity.certificate_pem())
+            .expect("cert should be written");
+        std::fs::write(&configured_key, configured_identity.private_key_pem())
+            .expect("key should be written");
+
+        let profile = Profile::parse(&format!(
+            r#"
+            Teamserver {{
+              Host = "127.0.0.1"
+              Port = 40056
+              Cert {{
+                Cert = "{cert}"
+                Key = "{key}"
+              }}
+            }}
+
+            Operators {{
+              user "Neo" {{
+                Password = "password1234"
+              }}
+            }}
+
+            Demon {{}}
+            "#,
+            cert = configured_cert.display(),
+            key = configured_key.display(),
+        ))
+        .expect("profile with cert block should parse");
+
+        red_cell_common::tls::install_default_crypto_provider();
+        let _config = build_tls_config(&profile, &profile_path)
+            .await
+            .expect("build_tls_config should succeed with configured cert paths");
+
+        // The auto-persist paths must not be created when explicit cert is configured.
+        let auto_cert_path = profile_path.with_extension("tls.crt");
+        assert!(
+            !auto_cert_path.exists(),
+            "auto-persist cert should not be written when explicit cert is configured"
+        );
     }
 }

@@ -26742,3 +26742,14 @@ The write-lock in `insert_with_listener_and_ctr_offset` serialises the cap check
 [2026-03-15 13:59:27] [Ubuntu-C2-dev02-claude] Claimed red-cell-c2-da0m
 [2026-03-15 13:59:28] [Ubuntu-C2-dev02-claude] Running Claude on task red-cell-c2-da0m...
 [2026-03-15 14:12:14] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-da0m
+[2026-03-15 14:12:14] [Ubuntu-C2-dev02-claude] WIP: committing uncommitted changes for red-cell-c2-da0m
+[2026-03-15 14:12:16] [Ubuntu-C2-dev02-claude] WIP: pushed
+[2026-03-15 14:12:16] [Ubuntu-C2-dev02-claude] ========================LOOP=========================
+[2026-03-15 14:12:31] [Ubuntu-C2-dev02-claude] === Starting Claude dev loop iteration 8 ===
+[2026-03-15 14:12:33] [Ubuntu-C2-dev02-claude] git pull --ff-only: ok
+[2026-03-15 14:12:33] [Ubuntu-C2-dev02-claude] br sync import: ok
+[2026-03-15 14:12:34] [Ubuntu-C2-dev02-claude] Selected task: red-cell-c2-k00o
+[2026-03-15 14:12:38] [Ubuntu-C2-dev02-claude] Claimed red-cell-c2-k00o
+[2026-03-15 14:12:38] [Ubuntu-C2-dev02-claude] Running Claude on task red-cell-c2-k00o...
+Done. The fix was a one-line removal in `listeners.rs:896` — `set_default_header(headers, "x-havoc", "true")` was deleted from `fake_404_response()`. An assertion was added to the existing `http_listener_returns_fake_404_for_non_matching_requests` test to verify the header is absent. All checks pass (check, test, clippy, fmt).
+[2026-03-15 14:16:38] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-k00o

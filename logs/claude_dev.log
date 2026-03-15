@@ -26777,3 +26777,23 @@ Done. The fix replaces the two `yield_now()` calls with a polling loop bounded b
 [2026-03-15 19:11:29] [Ubuntu-C2-dev01-claude] Running Claude on task red-cell-c2-feto...
 [2026-03-15 19:44:45] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-feto
 [2026-03-15 19:59:46] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-28lb
+[2026-03-15 20:56:10] [Ubuntu-C2-dev02-claude] ========================================================
+[2026-03-15 20:56:10] [Ubuntu-C2-dev02-claude]   Claude development loop starting (unlimited)
+[2026-03-15 20:56:10] [Ubuntu-C2-dev02-claude]   Agent ID: Ubuntu-C2-dev02-claude
+[2026-03-15 20:56:10] [Ubuntu-C2-dev02-claude]   Prompt template: /home/michel/Red-Cell-C2/CLAUDE_DEV_PROMPT.md
+[2026-03-15 20:56:10] [Ubuntu-C2-dev02-claude]   Log: /home/michel/Red-Cell-C2/logs/claude_dev.log
+[2026-03-15 20:56:11] [Ubuntu-C2-dev02-claude] ========================================================
+[2026-03-15 20:56:11] [Ubuntu-C2-dev02-claude] STOP signal detected (.stop file exists). Exiting.
+[2026-03-15 20:56:19] [Ubuntu-C2-dev02-claude] ========================================================
+[2026-03-15 20:56:19] [Ubuntu-C2-dev02-claude]   Claude development loop starting (unlimited)
+[2026-03-15 20:56:19] [Ubuntu-C2-dev02-claude]   Agent ID: Ubuntu-C2-dev02-claude
+[2026-03-15 20:56:19] [Ubuntu-C2-dev02-claude]   Prompt template: /home/michel/Red-Cell-C2/CLAUDE_DEV_PROMPT.md
+[2026-03-15 20:56:19] [Ubuntu-C2-dev02-claude]   Log: /home/michel/Red-Cell-C2/logs/claude_dev.log
+[2026-03-15 20:56:19] [Ubuntu-C2-dev02-claude] ========================================================
+[2026-03-15 20:56:19] [Ubuntu-C2-dev02-claude] === Starting Claude dev loop iteration 1 ===
+[2026-03-15 20:56:20] [Ubuntu-C2-dev02-claude] git pull --ff-only: ok
+[2026-03-15 20:56:20] [Ubuntu-C2-dev02-claude] br sync import: ok
+[2026-03-15 20:56:22] [Ubuntu-C2-dev02-claude] Selected task: red-cell-c2-3h7
+[2026-03-15 20:56:26] [Ubuntu-C2-dev02-claude] Claimed red-cell-c2-3h7
+[2026-03-15 20:56:26] [Ubuntu-C2-dev02-claude] Running Claude on task red-cell-c2-3h7...
+[2026-03-15 21:04:57] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-3h7

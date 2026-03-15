@@ -1403,6 +1403,52 @@ mod tests {
     }
 
     #[test]
+    fn rejects_invalid_dns_listener_configuration() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Listeners {
+              Dns {
+                Name = ""
+                Domain = ""
+                PortBind = 0
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("profile should be invalid");
+        assert!(
+            error.errors.iter().any(|m| m.contains("Listeners.Dns.Name must not be empty")),
+            "expected name-empty error; got: {:?}",
+            error.errors
+        );
+        assert!(
+            error.errors.iter().any(|m| m.contains("must define Domain")),
+            "expected domain-empty error; got: {:?}",
+            error.errors
+        );
+        assert!(
+            error.errors.iter().any(|m| m.contains("must define a PortBind greater than zero")),
+            "expected port-bind-zero error; got: {:?}",
+            error.errors
+        );
+    }
+
+    #[test]
     fn parses_rest_api_configuration() {
         let profile = Profile::parse(
             r#"

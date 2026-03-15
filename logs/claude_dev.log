@@ -26774,3 +26774,14 @@ Done. The fix was a one-character change: `{demon_id:<08x}` → `{demon_id:08x}`
 [2026-03-15 14:19:54] [Ubuntu-C2-dev02-claude] Claimed red-cell-c2-psa8
 [2026-03-15 14:19:55] [Ubuntu-C2-dev02-claude] Running Claude on task red-cell-c2-psa8...
 [2026-03-15 14:27:47] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-psa8
+[2026-03-15 14:27:48] [Ubuntu-C2-dev02-claude] WIP: committing uncommitted changes for red-cell-c2-psa8
+[2026-03-15 14:27:49] [Ubuntu-C2-dev02-claude] WIP: pushed
+[2026-03-15 14:27:49] [Ubuntu-C2-dev02-claude] ========================LOOP=========================
+[2026-03-15 14:28:04] [Ubuntu-C2-dev02-claude] === Starting Claude dev loop iteration 11 ===
+[2026-03-15 14:28:06] [Ubuntu-C2-dev02-claude] git pull --ff-only: ok
+[2026-03-15 14:28:06] [Ubuntu-C2-dev02-claude] br sync import: ok
+[2026-03-15 14:28:07] [Ubuntu-C2-dev02-claude] Selected task: red-cell-c2-t4ml
+[2026-03-15 14:28:11] [Ubuntu-C2-dev02-claude] Claimed red-cell-c2-t4ml
+[2026-03-15 14:28:12] [Ubuntu-C2-dev02-claude] Running Claude on task red-cell-c2-t4ml...
+Done. The fix was a one-liner on `payload_builder.rs:643`: `add_wstring(out, &method.to_ascii_uppercase())?`. The test now asserts byte-level equality between `"post"` and `"POST"` output to prevent regression.
+[2026-03-15 14:31:19] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-t4ml

@@ -1207,3 +1207,14 @@ Notes: Reviewed 113 commits from `08aff95` to `896603b`. All productive commits 
 
 Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test -p red-cell --lib` ✓ (533 tests, 0 failed)
 Notes: Reviewed 10 commits from `795c7ad` to `3663234`. All productive work attributed to Ubuntu-C2-dev01-claude (Claude Sonnet 4.6). Key highlight: `fix(protocol): remove External listener from shared domain types` cleanly excises the never-implemented External transport from all code paths (domain, listeners, payload builder, API schema, tests). Profile validation retains an explicit rejection with user-facing error. `sync_profile` now silently skips External entries — acceptable since profile.validate() gates this in production. No new bugs filed. Codebase health: strong.
+
+### QA Review — 2026-03-15 14:30 — 897414b..19b96f8
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No new dev commits in range. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (3 tests, 0 failed)
+Notes: Only commit in range was the previous QA checkpoint itself. 14 issues remain stuck `in_progress` (wf2d, mut8, s3a9, 1x9h, 2u74, 3bdz, 2qfs, 3inc, 11aj, 2tru, 35k0, 3uhe, 2z11, 2h4n) — agent claiming but not completing. Workflow bug `red-cell-c2-olwt` remains open. No scorecard changes this run.

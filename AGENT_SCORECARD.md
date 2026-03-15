@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 91 | 181 | 31 |
+| Tasks closed | 97 | 181 | 31 |
 | Bugs filed against | 3 | 28 | 9 |
 | Bug rate (bugs/task) | 0.03 | 0.15 | 0.29 |
 | Quality score | 97% | 85% | 71% |
@@ -1276,3 +1276,14 @@ Overall codebase health: good — zero production unwraps/expects/todos, all use
 Biggest blindspot: CTR offset continuity after crash-restart remains unverified (red-cell-c2-h5a3, red-cell-c2-3qbl still open). Keystream collision after restart would silently expose all traffic for the affected agent with no server-side warning.
 Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (914 tests, 0 failures)
 Notes: Full codebase audit (security, protocol correctness, error handling, architectural drift, test coverage, consistency, completeness). One net-new issue filed: `red-cell-c2-k00o` — x-havoc OPSEC header leak introduced by Codex in commit 8460d624. All other previously identified risks (da0m, h5a3, 3qbl) remain correctly tracked and unchanged.
+
+### QA Review — 2026-03-15 — 904ead4..bdf61d3
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 6 | 0 | Closed `red-cell-c2-n950` (replace all-zero DUMMY_PASSWORD_HASH with random Argon2 PHC verifier + OnceLock test cache), `red-cell-c2-35d7` (three TLS config tests: auto-generate+persist, reload stable on restart, use configured cert paths), `red-cell-c2-mvcp` (validate_define() sanitizes all compiler -D defines against injection), `red-cell-c2-ipj0` (gate havoc_compatibility behind `havoc-compat` feature; panic on missing Go instead of silent Ok(())), `red-cell-c2-235t` (MIN_ENVELOPE_SIZE guard + 4 short-buffer unit tests in DemonEnvelope::from_bytes), `red-cell-c2-5yg3` (all-zero IV DemonInit test, recognized pre-existing fix in commit 6770ac9). Production changes: auth.rs, payload_builder.rs, common/src/demon.rs, teamserver/tests/havoc_compatibility.rs, teamserver/Cargo.toml. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (931 tests, 0 failures)
+Notes: Excellent quality cycle. All 5 substantive fixes are correct, well-scoped, and accompanied by targeted tests. validate_define() properly validates only the NAME portion of compiler defines (not the value), avoiding false rejections of CONFIG_BYTES hex values. generate_dummy_verifier() correctly uses Uuid::new_v4() as entropy input for Argon2 hashing, with OnceLock cache for test performance. The havoc-compat feature gate is the right approach — silent Ok(()) was masking missing Go toolchain. No unwrap()/expect() in new production paths. No hardcoded secrets. AES key material not logged. No bugs filed.

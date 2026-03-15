@@ -484,28 +484,8 @@ Solid cycle. Four clean refactoring tasks delivered with proper tests — `rate_
 [2026-03-15 12:07:23] ========================LOOP=========================
 
 [2026-03-15 12:07:23] Next review in 1800s (12:37:23)...
-[2026-03-15 14:03:01] ========================================================
-[2026-03-15 14:03:01]   Claude QA loop starting
-[2026-03-15 14:03:01]   Prompt: /home/michel/Red-Cell-C2/CLAUDE_PROMPT.md
-[2026-03-15 14:03:01]   Log:    /home/michel/Red-Cell-C2/logs/claude_qa.log
-[2026-03-15 14:03:01]   Sleep:  1800s between reviews
-[2026-03-15 14:03:01] ========================================================
-[2026-03-15 14:03:01] === Starting Claude QA review ===
-[2026-03-15 14:03:02] WARNING: git pull failed, reviewing local state
-[2026-03-15 14:09:53] Claude review completed successfully
+[2026-03-15 12:42:12] Claude review completed successfully
 
-[2026-03-15 14:09:53] ========================LOOP=========================
+[2026-03-15 12:42:12] ========================LOOP=========================
 
-[2026-03-15 14:09:53] Next review in 1800s (14:39:53)...
-[2026-03-15 14:39:53] === Starting Claude QA review ===
-[2026-03-15 14:39:53] WARNING: git pull failed, reviewing local state
-[2026-03-15 14:45:16] Claude review completed successfully
-
-[2026-03-15 14:45:16] ========================LOOP=========================
-
-[2026-03-15 14:45:16] Next review in 1800s (15:15:16)...
-[2026-03-15 15:19:30] Claude review completed successfully
-
-[2026-03-15 15:19:30] ========================LOOP=========================
-
-[2026-03-15 15:19:30] Next review in 1800s (15:49:30)...
+[2026-03-15 12:42:12] Next review in 1800s (13:12:12)...

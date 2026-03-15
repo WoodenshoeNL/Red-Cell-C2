@@ -675,4 +675,63 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn sweep_toctou_guard_skips_agent_already_marked_dead_before_mark_phase()
+    -> Result<(), TeamserverError> {
+        let profile = sample_profile(None, 5);
+        let config = AgentLivenessConfig::from_profile(&profile);
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database);
+        let events = EventBus::default();
+        let agent = sample_agent(0x1234_ABCD);
+        registry.insert(agent.clone()).await?;
+
+        // Collect stale agents — the agent qualifies (last_call_in is 15 s in the past).
+        let stale_agents = collect_stale_agents(
+            &registry,
+            config,
+            time::macros::datetime!(2026-03-10 10:00:15 UTC),
+        )
+        .await;
+        assert_eq!(stale_agents.len(), 1);
+        assert_eq!(stale_agents[0].agent_id, agent.agent_id);
+
+        // Simulate another mechanism (e.g., operator manual kill) marking the agent dead
+        // between the collect and mark phases.
+        registry.mark_dead(agent.agent_id, "operator killed").await?;
+        let stored_before = registry
+            .get(agent.agent_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?;
+        assert!(!stored_before.active, "agent should already be dead before mark phase");
+
+        // Subscribe after the manual kill so the only event we can receive is one
+        // emitted by mark_stale_agent_if_unchanged itself.
+        let mut receiver = events.subscribe();
+
+        let marked = mark_stale_agent_if_unchanged(&registry, &events, &stale_agents[0]).await?;
+
+        // The guard must detect active=false and bail out without double-marking.
+        assert!(!marked);
+
+        // No spurious AgentUpdate should have been broadcast by mark_stale_agent_if_unchanged.
+        // A very short timeout is sufficient because mark_stale_agent_if_unchanged is synchronous
+        // from the perspective of the event bus — any emission would already be queued.
+        let no_event = timeout(Duration::from_millis(50), receiver.recv()).await;
+        assert!(
+            no_event.is_err(),
+            "mark_stale_agent_if_unchanged must not emit an event when the agent is already dead"
+        );
+
+        // The stored record should still reflect the earlier manual kill, not a second write.
+        let stored_after = registry
+            .get(agent.agent_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?;
+        assert!(!stored_after.active);
+        assert_eq!(stored_after.reason, "operator killed");
+
+        Ok(())
+    }
 }

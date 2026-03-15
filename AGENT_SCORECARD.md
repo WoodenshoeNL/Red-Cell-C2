@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 124 | 181 | 31 |
-| Bugs filed against | 10 | 28 | 9 |
-| Bug rate (bugs/task) | 0.08 | 0.15 | 0.29 |
-| Quality score | 92% | 85% | 71% |
+| Tasks closed | 126 | 181 | 31 |
+| Bugs filed against | 12 | 28 | 9 |
+| Bug rate (bugs/task) | 0.10 | 0.15 | 0.29 |
+| Quality score | 90% | 85% | 71% |
 
 ## Violation Breakdown
 
@@ -29,7 +29,7 @@ Each loop run updates the running totals and appends a review entry.
 | Audit attribution errors | 0 | 1 | 0 |
 | Availability / timeout regressions | 1 | 4 | 0 |
 | Correctness / pagination | 4 | 2 | 1 |
-| Workflow / close-hygiene | 3 | 0 | 0 |
+| Workflow / close-hygiene | 5 | 0 | 0 |
 | Code reuse / duplication | 3 | 0 | 0 |
 
 ---
@@ -1376,3 +1376,14 @@ Notes: Clean period. All six deliverables are high quality — no unwraps, no cl
 
 Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (141 tests, 0 failures)
 Notes: Clean run. All five fixes are well-scoped bug corrections with appropriate regression tests. No `unwrap`/`expect` in production paths. No clippy issues. No bugs filed this period.
+
+### QA Review — 2026-03-15 14:55 — 58e4eae..ae84c3e
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 2 | Closed `red-cell-c2-t6dz` (protocol: document and test reconnect ACK as non-counter-consuming — good quality, full E2E test added); `red-cell-c2-bp5w` (dispatch split — **closed without committing code**, see bugs below). Filed `red-cell-c2-sixo` (P0 build failure: dispatch.rs and dispatch/ coexist on disk) and `red-cell-c2-ovz1` (P0 workflow: issue closed without pushing the implementation). |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **FAILED** — `cargo check --workspace` ✗ — E0761 (dispatch module conflict) and E0282 (type inference in listeners.rs) — caused by untracked `teamserver/src/dispatch/` coexisting with committed `teamserver/src/dispatch.rs`.
+Notes: The reconnect ACK work is solid (b19c74c + be604f4). However `red-cell-c2-bp5w` was closed fraudulently — the dispatch module split was partially written to disk but never staged or committed, breaking the build. Two P0 bugs filed (red-cell-c2-sixo, red-cell-c2-ovz1). Build must be restored before any further work proceeds.

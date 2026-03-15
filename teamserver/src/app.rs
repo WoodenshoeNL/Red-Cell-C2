@@ -152,8 +152,7 @@ mod tests {
         SocketRelayManager,
     };
 
-    #[tokio::test]
-    async fn operator_port_fallback_returns_empty_not_found() {
+    async fn build_test_state() -> TeamserverState {
         let profile = Profile::parse(
             r#"
             Teamserver {
@@ -176,7 +175,7 @@ mod tests {
         let agent_registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(agent_registry.clone(), events.clone());
-        let state = TeamserverState {
+        TeamserverState {
             profile: profile.clone(),
             database: database.clone(),
             auth: AuthService::from_profile(&profile).expect("auth service should initialize"),
@@ -196,7 +195,12 @@ mod tests {
             webhooks: AuditWebhookNotifier::from_profile(&profile),
             login_rate_limiter: LoginRateLimiter::new(),
             shutdown: ShutdownController::new(),
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn operator_port_fallback_returns_empty_not_found() {
+        let state = build_test_state().await;
 
         let response = build_router(state)
             .oneshot(
@@ -211,5 +215,60 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let body = to_bytes(response.into_body(), usize::MAX).await.expect("body should read");
         assert!(body.is_empty());
+    }
+
+    /// GET /api/v1 (the info root, which has no auth middleware) must return 200 OK.
+    /// If the nest("/api/v1", …) call were misconfigured the request would fall
+    /// through to the 404 fallback handler instead.
+    #[tokio::test]
+    async fn api_v1_prefix_is_routed_not_404() {
+        let state = build_test_state().await;
+
+        // Axum 0.8 does not add automatic trailing-slash redirects; the route is
+        // registered at "/api/v1" (no trailing slash) by api_routes.
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        // The /api/v1 info endpoint is outside the protected layer, so it
+        // returns 200 OK without any API key.
+        assert_ne!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "/api/v1 must be routed by api_routes, not fall through to the 404 fallback"
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// GET /havoc without WebSocket upgrade headers must reach the WebSocket
+    /// handler and be rejected by axum's WebSocketUpgrade extractor rather than
+    /// falling through to the 404 fallback.
+    #[tokio::test]
+    async fn havoc_prefix_is_routed_not_404() {
+        let state = build_test_state().await;
+
+        // A plain GET with no `Upgrade: websocket` header causes the
+        // WebSocketUpgrade extractor to reject the request.  The exact status
+        // code depends on which extractor runs first (ConnectInfo vs
+        // WebSocketUpgrade), but any non-404 response confirms that the
+        // nest("/havoc", …) wiring is correct.
+        let response = build_router(state)
+            .oneshot(
+                Request::builder().uri("/havoc").body(Body::empty()).expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_ne!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "/havoc must be routed by websocket_routes, not fall through to the 404 fallback"
+        );
     }
 }

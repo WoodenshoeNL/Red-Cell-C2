@@ -1830,12 +1830,22 @@ mod tests {
 
     #[test]
     fn from_file_returns_error_for_nonexistent_path() {
-        let result = Profile::from_file("/nonexistent/path/profile.yaotl");
+        let temp_dir = tempfile::TempDir::new().expect("temporary directory should be created");
+        let missing_path = temp_dir.path().join("does_not_exist.yaotl");
+
+        let result = Profile::from_file(&missing_path);
         assert!(result.is_err(), "missing file must return an error");
-        assert!(
-            matches!(result.unwrap_err(), ProfileError::Read { .. }),
-            "error must be the Read variant"
-        );
+
+        match result.unwrap_err() {
+            ProfileError::Read { path, .. } => {
+                assert_eq!(
+                    path,
+                    missing_path.display().to_string(),
+                    "error must carry the path that failed to open"
+                );
+            }
+            other => panic!("expected ProfileError::Read, got {other:?}"),
+        }
     }
 
     #[test]

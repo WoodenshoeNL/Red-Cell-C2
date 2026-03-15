@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 99 | 181 | 31 |
-| Bugs filed against | 3 | 28 | 9 |
-| Bug rate (bugs/task) | 0.03 | 0.15 | 0.29 |
-| Quality score | 97% | 85% | 71% |
+| Tasks closed | 104 | 181 | 31 |
+| Bugs filed against | 5 | 28 | 9 |
+| Bug rate (bugs/task) | 0.05 | 0.15 | 0.29 |
+| Quality score | 95% | 85% | 71% |
 
 ## Violation Breakdown
 
@@ -28,8 +28,9 @@ Each loop run updates the running totals and appends a review entry.
 | Startup / lifecycle regressions | 0 | 8 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
 | Availability / timeout regressions | 0 | 4 | 0 |
-| Correctness / pagination | 3 | 2 | 1 |
+| Correctness / pagination | 4 | 2 | 1 |
 | Workflow / close-hygiene | 3 | 0 | 0 |
+| Code reuse / duplication | 1 | 0 | 0 |
 
 ---
 
@@ -1298,3 +1299,14 @@ Notes: Excellent quality cycle. All 5 substantive fixes are correct, well-scoped
 
 Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (937 tests, 0 failures)
 Notes: Both fixes are correct and complete. DB migrations use `NOT NULL DEFAULT` for safe column addition. New fields properly thread through domain → DB → protocol → API layers. Three targeted tests added in `agent_events.rs` covering `os_build` population, zero-value case, and `process_path` ≠ `process_name` invariant. No unwrap()/expect() in production paths. No hardcoded secrets. No bugs filed. Main concern: stashed-but-uncommitted `dispatch.rs` changes implementing `red-cell-c2-xfkr` (pivot list callback with two integration tests) — code quality is good but it will be lost if the stash is dropped.
+
+### QA Review — 2026-03-15 16:00 — 24869d7..8ac42f5
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 5 | 2 | Closed `red-cell-c2-xfkr` (pivot list callback), `red-cell-c2-2me2` (webhook shutdown race), `red-cell-c2-q9re` (auth rate limiter), `red-cell-c2-zroy` (TLS key zeroization), `red-cell-c2-j8a0` (getrandom HMAC secret). Filed `red-cell-c2-0bm2` (P3): pivot list uses `{:<08x}` — left-aligned zero-padding puts zeros on the right for short demon IDs; should be `{:08x}`. Filed `red-cell-c2-psa8` (P3): auth failure rate limiter in api.rs re-implements `FailedApiAuthWindow`/prune/evict helpers instead of reusing the generic `rate_limiter.rs` module, adding a third eviction-pattern copy. Also: HEAD commit 8ac42f5 claims already-closed issue `red-cell-c2-5rtk` — ongoing instance of red-cell-c2-olwt. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (659 tests, 0 failures)
+Notes: All five fixes are substantively correct and include tests. The shutdown race fix (webhook.rs) is particularly well done — the increment-before-check pattern correctly closes the race window and the new test exercises the concurrent code path with a real HTTP server. The auth rate limiter is functionally sound but reintroduces eviction code that already lives in rate_limiter.rs. The pivot list formatting bug is subtle and only manifests for demon IDs with fewer than 8 hex digits. No unwrap()/expect() in production paths. No hardcoded secrets.

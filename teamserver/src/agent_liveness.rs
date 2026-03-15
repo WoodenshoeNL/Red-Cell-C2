@@ -546,14 +546,22 @@ mod tests {
             "zero sleep must be filtered out, got {:?}",
             config.default_sleep_secs,
         );
-        assert!(
-            config.sweep_interval >= Duration::from_secs(1),
-            "sweep interval must be at least MIN_SWEEP_INTERVAL_SECS (1 s), got {:?}",
+        assert_eq!(
+            config.sweep_interval,
+            Duration::from_secs(1),
+            "sweep interval must be exactly MIN_SWEEP_INTERVAL_SECS (1 s), got {:?}",
             config.sweep_interval,
         );
-        // Confirm the zero-sleep profile did not produce a zero timeout that would immediately
-        // mark every agent dead on the first sweep tick.
-        assert_ne!(config.sweep_interval, Duration::ZERO, "sweep interval must never be zero",);
+
+        // An agent with sleep_delay = 0 must fall back to MIN_SWEEP_INTERVAL_SECS * 3 = 3 s,
+        // not zero — otherwise every agent would be marked dead on the very first sweep tick.
+        let mut agent = sample_agent(0x0000_0001);
+        agent.sleep_delay = 0;
+        assert_eq!(
+            config.timeout_for(&agent),
+            3,
+            "timeout_for an agent with sleep_delay=0 must return 3 (MIN_SWEEP_INTERVAL_SECS * 3)",
+        );
     }
 
     #[tokio::test]

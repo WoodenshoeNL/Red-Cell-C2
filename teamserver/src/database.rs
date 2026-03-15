@@ -1673,6 +1673,9 @@ mod tests {
     #[test]
     fn bool_from_i64_rejects_out_of_range_values() {
         assert!(bool_from_i64("active", 2).is_err());
+        assert!(bool_from_i64("active", -1).is_err());
+        assert!(bool_from_i64("active", i64::MIN).is_err());
+        assert!(bool_from_i64("active", i64::MAX).is_err());
     }
 
     #[test]

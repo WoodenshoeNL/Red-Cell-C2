@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 69 | 181 | 31 |
-| Bugs filed against | 2 | 27 | 9 |
-| Bug rate (bugs/task) | 0.03 | 0.15 | 0.29 |
-| Quality score | 97% | 85% | 71% |
+| Tasks closed | 72 | 181 | 31 |
+| Bugs filed against | 3 | 27 | 9 |
+| Bug rate (bugs/task) | 0.04 | 0.15 | 0.29 |
+| Quality score | 96% | 85% | 71% |
 
 ## Violation Breakdown
 
@@ -29,13 +29,24 @@ Each loop run updates the running totals and appends a review entry.
 | Audit attribution errors | 0 | 1 | 0 |
 | Availability / timeout regressions | 0 | 4 | 0 |
 | Correctness / pagination | 3 | 2 | 1 |
-| Workflow / close-hygiene | 2 | 0 | 0 |
+| Workflow / close-hygiene | 3 | 0 | 0 |
 
 ---
 
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-15 14:15 — 1105dc2..897414b
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 1 | Closed `red-cell-c2-l2vk` (Profile::from_file now asserts path in ProfileError::Read via tempfile::TempDir), `red-cell-c2-24yz` (two AES-256-CTR reference vector tests at block_offset=2 pinned against independent Python reference; also reordered duplicate test in domain.rs), `red-cell-c2-37xa` (TLS cert-present/key-missing error path test). All changes are test-only — no production code touched. Filed `red-cell-c2-olwt` (P2): agent loop re-claims already in_progress issues on restart, generating 28 redundant claim commits for 14 issues in this range. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` (607 tests, 0 failures)
+Notes: 14 issues remain stuck in_progress (wf2d, mut8, s3a9, 1x9h, 2u74, 3bdz, 2qfs, 3inc, 11aj, 2tru, 35k0, 3uhe, 2z11, 2h4n) — agent is claiming but not completing within a loop run. Workflow bug `red-cell-c2-olwt` filed for duplicate claim pattern.
 
 ### QA Review — 2026-03-15 14:00 — 8c78eac..1105dc2
 

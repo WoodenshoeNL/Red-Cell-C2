@@ -26816,3 +26816,14 @@ Done. The fix was a one-liner on `payload_builder.rs:643`: `add_wstring(out, &me
 [2026-03-15 15:23:02] [Ubuntu-C2-dev02-claude] Claimed red-cell-c2-ovz1
 [2026-03-15 15:23:03] [Ubuntu-C2-dev02-claude] Running Claude on task red-cell-c2-ovz1...
 [2026-03-15 15:27:02] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-ovz1
+[2026-03-15 15:27:02] [Ubuntu-C2-dev02-claude] WIP: committing uncommitted changes for red-cell-c2-ovz1
+[2026-03-15 15:27:03] [Ubuntu-C2-dev02-claude] WIP: pushed
+[2026-03-15 15:27:03] [Ubuntu-C2-dev02-claude] ========================LOOP=========================
+[2026-03-15 15:27:18] [Ubuntu-C2-dev02-claude] === Starting Claude dev loop iteration 16 ===
+[2026-03-15 15:27:20] [Ubuntu-C2-dev02-claude] git pull --ff-only: ok
+[2026-03-15 15:27:20] [Ubuntu-C2-dev02-claude] br sync import: ok
+[2026-03-15 15:27:21] [Ubuntu-C2-dev02-claude] Selected task: red-cell-c2-mcm8
+[2026-03-15 15:27:25] [Ubuntu-C2-dev02-claude] Claimed red-cell-c2-mcm8
+[2026-03-15 15:27:26] [Ubuntu-C2-dev02-claude] Running Claude on task red-cell-c2-mcm8...
+Done. The fix was a simple reorder: emit the plugin event before `enqueue_job` so `job` can be moved instead of cloned, eliminating one `Vec<u8>` heap allocation per task dispatch.
+[2026-03-15 15:30:49] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-mcm8

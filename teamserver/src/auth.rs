@@ -808,6 +808,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_registry_replaces_old_session_on_same_connection_id() {
+        let service =
+            AuthService::from_profile(&profile()).expect("auth service should initialize");
+        let connection_id = Uuid::new_v4();
+
+        // First authentication on the connection.
+        let first = service
+            .authenticate_login(
+                connection_id,
+                &LoginInfo {
+                    user: "operator".to_owned(),
+                    password: hash_password_sha3("password1234"),
+                },
+            )
+            .await;
+        let AuthenticationResult::Success(first_success) = first else {
+            panic!("expected successful first authentication");
+        };
+        assert_eq!(service.session_count().await, 1);
+
+        // Second authentication on the same connection (re-auth / protocol reconnect).
+        let second = service
+            .authenticate_login(
+                connection_id,
+                &LoginInfo {
+                    user: "operator".to_owned(),
+                    password: hash_password_sha3("password1234"),
+                },
+            )
+            .await;
+        let AuthenticationResult::Success(second_success) = second else {
+            panic!("expected successful second authentication");
+        };
+
+        // Session count must remain 1 — the old entry must have been evicted.
+        assert_eq!(service.session_count().await, 1);
+
+        // The old token must no longer be in the registry.
+        assert!(
+            service.session_for_token(&first_success.token).await.is_none(),
+            "stale token must not be retrievable after re-authentication"
+        );
+
+        // The new token must be retrievable and bound to the same connection.
+        let new_session = service
+            .session_for_token(&second_success.token)
+            .await
+            .expect("new token must be retrievable");
+        assert_eq!(new_session.connection_id, connection_id);
+        assert_eq!(new_session.username, "operator");
+    }
+
+    #[tokio::test]
     async fn authenticate_login_tracks_configured_role_on_session() {
         let service =
             AuthService::from_profile(&profile()).expect("auth service should initialize");

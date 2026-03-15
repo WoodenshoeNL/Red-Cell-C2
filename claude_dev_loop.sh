@@ -16,9 +16,10 @@ LOG_FILE="$LOG_DIR/claude_dev.log"
 DEV_PROMPT_FILE="$SCRIPT_DIR/CLAUDE_DEV_PROMPT.md"
 RUNTIME_PROMPT_DIR="/tmp"
 CLAIM_LOCK_FILE="$SCRIPT_DIR/.agent-claim.lock"
-SLEEP_ON_NO_WORK=60   # seconds to wait when no tasks are ready
-SLEEP_BETWEEN_TASKS=15 # seconds between task iterations
-STALE_THRESHOLD=7200  # seconds before an in_progress task is considered stuck (2h)
+SLEEP_ON_NO_WORK=60      # seconds to wait when no tasks are ready
+SLEEP_BETWEEN_TASKS=15   # seconds between task iterations
+SLEEP_ON_TOKEN_LIMIT=1200 # seconds to wait after a token-limit exit (20 minutes)
+STALE_THRESHOLD=7200     # seconds before an in_progress task is considered stuck (2h)
 
 # Unique identity for this agent instance — used in git commit messages and logs
 # so it is always clear which machine/agent did what.
@@ -361,19 +362,64 @@ HEREDOC
 
     log "Running Claude on task $NEXT_ID..."
 
+    RUN_OUTPUT_TMP="/tmp/claude_run_${$}_${NEXT_ID}.out"
     cat "$RUNTIME_PROMPT" | claude -p \
         --dangerously-skip-permissions \
         --verbose \
-        2>&1 | tee -a "$LOG_FILE"
+        2>&1 | tee -a "$LOG_FILE" | tee "$RUN_OUTPUT_TMP"
 
     CLAUDE_EXIT=${PIPESTATUS[0]}
+
+    # Detect token/context limit via Claude's hard-stop message
+    TOKEN_LIMIT_HIT=0
+    if grep -q "Context limit reached" "$RUN_OUTPUT_TMP" 2>/dev/null; then
+        TOKEN_LIMIT_HIT=1
+        log "Token limit hit during $NEXT_ID"
+    fi
+    rm -f "$RUN_OUTPUT_TMP"
+
     if [ "$CLAUDE_EXIT" -ne 0 ]; then
         log "WARNING: Claude exited with code $CLAUDE_EXIT for task $NEXT_ID"
     else
         log "Claude completed task $NEXT_ID"
     fi
 
+    # ── Post-run cleanup ───────────────────────────────────────────────────────
+    # Commit and push any uncommitted changes left behind (e.g. token exhaustion)
+    git -C "$SCRIPT_DIR" add -A 2>/dev/null || true
+    if ! git -C "$SCRIPT_DIR" diff --cached --quiet 2>/dev/null; then
+        log "WIP: committing uncommitted changes for $NEXT_ID"
+        if git -C "$SCRIPT_DIR" commit -m "wip: interrupted $NEXT_ID [$AGENT_ID]" --quiet 2>/dev/null; then
+            git -C "$SCRIPT_DIR" push --quiet 2>/dev/null \
+                && log "WIP: pushed" \
+                || log "WARNING: WIP push failed"
+        else
+            log "WARNING: WIP commit failed — unstaging"
+            git -C "$SCRIPT_DIR" restore --staged . 2>/dev/null || true
+        fi
+    fi
+
+    # If the issue is still in_progress after Claude ran, reset it to open
+    FINAL_STATUS="$(issue_status_from_jsonl "$NEXT_ID")"
+    if [ "$FINAL_STATUS" = "in_progress" ]; then
+        log "Task $NEXT_ID still in_progress after Claude ran — resetting to open"
+        br update "$NEXT_ID" --status=open 2>/dev/null || true
+        br sync --flush-only --quiet 2>/dev/null || true
+        if ! git -C "$SCRIPT_DIR" diff --quiet -- .beads/issues.jsonl 2>/dev/null; then
+            git -C "$SCRIPT_DIR" add .beads/issues.jsonl
+            git -C "$SCRIPT_DIR" commit -m "chore: reset $NEXT_ID to open after interrupted run [$AGENT_ID]" --quiet 2>/dev/null || true
+            git -C "$SCRIPT_DIR" push --quiet 2>/dev/null \
+                && log "Reset $NEXT_ID to open — pushed" \
+                || log "WARNING: reset push failed"
+        fi
+    fi
+
     rm -f "$RUNTIME_PROMPT"
     log "========================LOOP========================="
-    sleep "$SLEEP_BETWEEN_TASKS"
+    if [ "$TOKEN_LIMIT_HIT" -eq 1 ]; then
+        log "Sleeping ${SLEEP_ON_TOKEN_LIMIT}s after token limit (next iteration at $(date -d "+${SLEEP_ON_TOKEN_LIMIT} seconds" '+%H:%M:%S' 2>/dev/null || echo '20 min from now'))..."
+        sleep "$SLEEP_ON_TOKEN_LIMIT"
+    else
+        sleep "$SLEEP_BETWEEN_TASKS"
+    fi
 done

@@ -2060,6 +2060,37 @@ red_cell.register_command('demo', demo)\n",
     }
 
     #[test]
+    fn execute_registered_command_returns_false_for_unknown_command() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        write_script(
+            &temp_dir.path().join("demo.py"),
+            "import red_cell\nred_cell.register_command('demo', lambda agent, args: 'ok')\n",
+        );
+
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+        {
+            let mut state = lock_app_state(&app_state);
+            state.agents.push(sample_agent("00ABCDEF"));
+        }
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        let executed = runtime
+            .execute_registered_command("00ABCDEF", "unknown_command")
+            .unwrap_or_else(|error| panic!("execute_registered_command should not error: {error}"));
+
+        assert!(!executed, "unknown command should return false");
+        assert!(
+            runtime.script_output().is_empty(),
+            "no output should be generated for an unknown command"
+        );
+    }
+
+    #[test]
     fn runtime_accepts_havoc_style_command_registration_and_context_callbacks() {
         let _guard = lock_mutex(&TEST_GUARD);
         let temp_dir =

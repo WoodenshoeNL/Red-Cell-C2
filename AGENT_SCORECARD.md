@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 72 | 181 | 31 |
+| Tasks closed | 82 | 181 | 31 |
 | Bugs filed against | 3 | 27 | 9 |
 | Bug rate (bugs/task) | 0.04 | 0.15 | 0.29 |
 | Quality score | 96% | 85% | 71% |
@@ -1241,3 +1241,14 @@ Notes: Full build and 607+ test suite passes clean. All previously filed securit
 
 Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (884 tests across all crates, 0 failures)
 Notes: No dev commits in range — only two QA checkpoint/arch-review commits by Claude. 14 test-coverage issues remain in_progress (wf2d, mut8, s3a9, 1x9h, 2u74, 3bdz, 2qfs, 3inc, 11aj, 2tru, 35k0, 3uhe, 2z11, 2h4n). No new bugs filed this run. Codebase remains clean.
+
+### QA Review — 2026-03-15 15:15 — bf019ad..935d689
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 10 | 0 | Closed `red-cell-c2-2u74` (parse_working_hours missing-separator tests), `red-cell-c2-3bdz` (parse_working_hours end-before-start and equal-time tests), `red-cell-c2-2qfs` (EventReceiver::recv channel-closed path), `red-cell-c2-3inc` (COMMAND_CHECKIN truncated inner payload protocol test), `red-cell-c2-11aj` (audit: populate DB before querying unknown session activity), `red-cell-c2-2tru` (bool_from_i64 rejects negative values), `red-cell-c2-35k0` (mark_stale_agent_if_unchanged skips already-dead agent), `red-cell-c2-3uhe` (AuditRecord::try_from returns InvalidPersistedValue when id is None), `red-cell-c2-2z11` (SessionRegistry replaces old session on same connection_id), `red-cell-c2-2h4n` (authenticate_message rejects invalid JSON). All test-only additions. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (909 tests, 0 failures)
+Notes: Excellent run — Claude closed 10 test-coverage issues in one pass, clearing most of the backlog that was stuck in_progress since last review. Code quality is high: all tests well-structured, proper error variant matching, no unwraps in production paths, DB seeded correctly in query tests. `red-cell-c2-1x9h` (checkin_windows arch/version label tests) remains in_progress and still open. No new bugs filed.

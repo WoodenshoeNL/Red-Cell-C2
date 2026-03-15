@@ -26848,3 +26848,18 @@ Done. Here's a summary of what was implemented for `red-cell-c2-34ns`:
 
 **5 new tests** covering: options exposed via context, history empty on first invocation and grows, history scoped per-agent, havocui 2-arg compat, havocui 4-arg form with description and options.
 [2026-03-15 22:06:30] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-34ns
+[2026-03-15 22:06:30] [Ubuntu-C2-dev02-claude] WIP: committing uncommitted changes for red-cell-c2-34ns
+[2026-03-15 22:06:32] [Ubuntu-C2-dev02-claude] WIP: pushed
+[2026-03-15 22:06:32] [Ubuntu-C2-dev02-claude] ========================LOOP=========================
+[2026-03-15 22:06:47] [Ubuntu-C2-dev02-claude] === Starting Claude dev loop iteration 6 ===
+[2026-03-15 22:06:48] [Ubuntu-C2-dev02-claude] git pull --ff-only: ok
+[2026-03-15 22:06:49] [Ubuntu-C2-dev02-claude] br sync import: ok
+[2026-03-15 22:06:50] [Ubuntu-C2-dev02-claude] Selected task: red-cell-c2-agjc
+[2026-03-15 22:06:54] [Ubuntu-C2-dev02-claude] Claimed red-cell-c2-agjc
+[2026-03-15 22:06:55] [Ubuntu-C2-dev02-claude] Running Claude on task red-cell-c2-agjc...
+Done. The fix is two-part:
+
+1. **`get_task_result`** (`client/src/python.rs:2292`): In the `None` (timeout) arm, added `lock_mutex(&api_state.task_result_senders).remove(&task_id)` to clean up the orphaned sender immediately.
+
+2. **New test** `get_task_result_times_out_and_returns_none`: Extended to assert `task_result_senders` no longer contains the entry after timeout, verifying the leak is fixed.
+[2026-03-15 22:09:52] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-agjc

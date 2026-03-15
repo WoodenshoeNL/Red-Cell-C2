@@ -26863,3 +26863,14 @@ Done. The fix is two-part:
 
 2. **New test** `get_task_result_times_out_and_returns_none`: Extended to assert `task_result_senders` no longer contains the entry after timeout, verifying the leak is fixed.
 [2026-03-15 22:09:52] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-agjc
+[2026-03-15 22:09:52] [Ubuntu-C2-dev02-claude] WIP: committing uncommitted changes for red-cell-c2-agjc
+[2026-03-15 22:09:54] [Ubuntu-C2-dev02-claude] WIP: pushed
+[2026-03-15 22:09:54] [Ubuntu-C2-dev02-claude] ========================LOOP=========================
+[2026-03-15 22:10:09] [Ubuntu-C2-dev02-claude] === Starting Claude dev loop iteration 7 ===
+[2026-03-15 22:10:10] [Ubuntu-C2-dev02-claude] git pull --ff-only: ok
+[2026-03-15 22:10:10] [Ubuntu-C2-dev02-claude] br sync import: ok
+[2026-03-15 22:10:12] [Ubuntu-C2-dev02-claude] Selected task: red-cell-c2-ouhj
+[2026-03-15 22:10:16] [Ubuntu-C2-dev02-claude] Claimed red-cell-c2-ouhj
+[2026-03-15 22:10:16] [Ubuntu-C2-dev02-claude] Running Claude on task red-cell-c2-ouhj...
+Done. Fixed the vacuous assertion by replacing it with `rx.try_recv()` (and adding `mut` to the `rx` binding). The test now actually fails if `task_agent` doesn't enqueue a message.
+[2026-03-15 22:11:32] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-ouhj

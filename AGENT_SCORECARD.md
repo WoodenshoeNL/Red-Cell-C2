@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 97 | 181 | 31 |
+| Tasks closed | 99 | 181 | 31 |
 | Bugs filed against | 3 | 28 | 9 |
 | Bug rate (bugs/task) | 0.03 | 0.15 | 0.29 |
 | Quality score | 97% | 85% | 71% |
@@ -1287,3 +1287,14 @@ Notes: Full codebase audit (security, protocol correctness, error handling, arch
 
 Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (931 tests, 0 failures)
 Notes: Excellent quality cycle. All 5 substantive fixes are correct, well-scoped, and accompanied by targeted tests. validate_define() properly validates only the NAME portion of compiler defines (not the value), avoiding false rejections of CONFIG_BYTES hex values. generate_dummy_verifier() correctly uses Uuid::new_v4() as entropy input for Argon2 hashing, with OnceLock cache for test performance. The havoc-compat feature gate is the right approach — silent Ok(()) was masking missing Go toolchain. No unwrap()/expect() in new production paths. No hardcoded secrets. AES key material not logged. No bugs filed.
+
+### QA Review — 2026-03-15 13:30 — c98ea0f..26f1378
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed `red-cell-c2-5q73` (populate `process_path` from full binary path in `AgentRecord`, fixes `demon.rs`/`dispatch.rs`/`database.rs` + migration), `red-cell-c2-lqzt` (surface `os_build` in `AgentRecord` and `OperatorAgentInfo`, fixes `agent_events.rs`/`database.rs`/`api.rs` + migration). Also 14 claim commits for new issues. **Warning**: uncommitted implementation of `red-cell-c2-xfkr` (pivot list callback) present in local working tree stash — must be committed before session end to avoid loss. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (937 tests, 0 failures)
+Notes: Both fixes are correct and complete. DB migrations use `NOT NULL DEFAULT` for safe column addition. New fields properly thread through domain → DB → protocol → API layers. Three targeted tests added in `agent_events.rs` covering `os_build` population, zero-value case, and `process_path` ≠ `process_name` invariant. No unwrap()/expect() in production paths. No hardcoded secrets. No bugs filed. Main concern: stashed-but-uncommitted `dispatch.rs` changes implementing `red-cell-c2-xfkr` (pivot list callback with two integration tests) — code quality is good but it will be lost if the stash is dropped.

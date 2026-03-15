@@ -3261,7 +3261,7 @@ havoc.RegisterCommand(function=queue, module='ops', command='pwd', description='
             .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
 
         // Attach a channel so queue_task_message succeeds.
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<OperatorMessage>();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<OperatorMessage>();
         runtime.set_outgoing_sender(tx);
 
         let task_id = Python::with_gil(|py| -> PyResult<String> {
@@ -3272,7 +3272,7 @@ havoc.RegisterCommand(function=queue, module='ops', command='pwd', description='
         .unwrap_or_else(|error| panic!("task_agent should succeed: {error}"));
 
         assert_eq!(task_id.len(), 8, "task_id should be an 8-character hex string");
-        assert!(rx.is_empty() == false || true, "a message should have been queued");
+        rx.try_recv().unwrap_or_else(|error| panic!("a message should have been queued: {error}"));
     }
 
     #[test]

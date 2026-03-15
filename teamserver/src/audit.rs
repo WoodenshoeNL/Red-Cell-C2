@@ -760,15 +760,35 @@ mod tests {
     #[tokio::test]
     async fn query_session_activity_returns_empty_page_for_unknown_activity() {
         let database = Database::connect_in_memory().await.expect("database should initialize");
+
+        // Populate the DB with known-good session activity rows so that a
+        // missing early-return (issuing `action_in = []` to SQL) would
+        // silently return these rows instead of an empty page.
+        for action in ["operator.connect", "operator.disconnect", "operator.chat"] {
+            database
+                .audit_log()
+                .create(&AuditLogEntry {
+                    id: None,
+                    actor: "operator".to_owned(),
+                    action: action.to_owned(),
+                    target_kind: "operator".to_owned(),
+                    target_id: None,
+                    details: None,
+                    occurred_at: "2026-03-10T12:00:00Z".to_owned(),
+                })
+                .await
+                .expect("seed row should insert");
+        }
+
         let query = SessionActivityQuery {
-            activity: Some("nonexistent".to_owned()),
+            activity: Some("hack".to_owned()),
             ..SessionActivityQuery::default()
         };
 
         let page = query_session_activity(&database, &query).await.expect("query should succeed");
 
-        assert_eq!(page.total, 0);
-        assert!(page.items.is_empty());
+        assert_eq!(page.total, 0, "unrecognized activity should yield zero total");
+        assert!(page.items.is_empty(), "unrecognized activity should yield no items");
     }
 
     #[tokio::test]

@@ -26705,3 +26705,4 @@ Done. The fix replaces the two `yield_now()` calls with a polling loop bounded b
 [2026-03-15 17:24:40] [Ubuntu-C2-dev01-claude] Claimed red-cell-c2-120
 [2026-03-15 17:24:40] [Ubuntu-C2-dev01-claude] Running Claude on task red-cell-c2-120...
 [2026-03-15 17:39:24] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-120
+[2026-03-15 17:47:20] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-m5a

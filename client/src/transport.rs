@@ -132,6 +132,7 @@ impl Drop for ClientTransport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AppEvent {
     AgentCheckin(String),
+    AgentTaskResult { task_id: String, agent_id: String, output: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -475,7 +476,7 @@ impl AppState {
                 }
             }
             OperatorMessage::AgentResponse(message) => {
-                self.handle_agent_response(message);
+                events.extend(self.handle_agent_response(message));
             }
             OperatorMessage::TeamserverLog(message) => {
                 self.push_chat_message("teamserver", message.head.timestamp, message.info.text);
@@ -619,8 +620,9 @@ impl AppState {
         }
     }
 
-    fn handle_agent_response(&mut self, message: Message<AgentResponseInfo>) {
+    fn handle_agent_response(&mut self, message: Message<AgentResponseInfo>) -> Vec<AppEvent> {
         let agent_id = normalize_agent_id(&message.info.demon_id);
+        let mut events = Vec::new();
         self.update_file_browser_state(&agent_id, &message.info);
         self.update_process_list_state(&agent_id, &message);
 
@@ -628,12 +630,20 @@ impl AppState {
             if let Some(loot_item) = loot_item_from_response(&message.info) {
                 self.upsert_loot(loot_item);
             }
-            return;
+            return events;
         }
 
         let output = sanitize_output(&message.info.output);
         if output.is_empty() {
-            return;
+            return events;
+        }
+
+        if let Some(task_id) = extra_string(&message.info.extra, "TaskID") {
+            events.push(AppEvent::AgentTaskResult {
+                task_id,
+                agent_id: agent_id.clone(),
+                output: output.clone(),
+            });
         }
 
         self.agent_consoles.entry(agent_id).or_default().push(AgentConsoleEntry {
@@ -643,6 +653,7 @@ impl AppState {
             received_at: message.head.timestamp,
             output,
         });
+        events
     }
 
     fn update_process_list_state(&mut self, agent_id: &str, message: &Message<AgentResponseInfo>) {
@@ -897,6 +908,9 @@ async fn run_receive_loop(
                                         if let Err(error) = runtime.emit_agent_checkin(agent_id) {
                                             warn!(error = %error, "failed to deliver python agent checkin event");
                                         }
+                                    }
+                                    AppEvent::AgentTaskResult { task_id, agent_id, output } => {
+                                        runtime.notify_task_result(task_id, agent_id, output);
                                     }
                                 }
                             }

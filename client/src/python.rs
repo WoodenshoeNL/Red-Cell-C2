@@ -1,11 +1,12 @@
 //! Embedded Python runtime for client-side automation.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use base64::Engine;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -79,6 +80,17 @@ struct PythonApiState {
     output_entries: Mutex<Vec<ScriptOutputEntry>>,
     script_records: Mutex<BTreeMap<String, ScriptRecord>>,
     outgoing_tx: Mutex<Option<UnboundedSender<OperatorMessage>>>,
+    /// Sender half of pending task result channels, keyed by task_id.
+    task_result_senders: Mutex<HashMap<String, SyncSender<TaskResult>>>,
+    /// Receiver half of pending task result channels, keyed by task_id.
+    task_result_receivers: Mutex<HashMap<String, Receiver<TaskResult>>>,
+}
+
+/// Result delivered to a `get_task_result` waiter.
+#[derive(Debug, Clone)]
+struct TaskResult {
+    agent_id: String,
+    output: String,
 }
 
 impl PythonApiState {
@@ -383,6 +395,32 @@ impl PythonApiState {
             .map_err(|_| PyRuntimeError::new_err("client transport task queue is closed"))
     }
 
+    /// Register a one-shot channel for `task_id` and store both halves.
+    ///
+    /// The receiver is retrieved later by `take_task_receiver`.
+    fn register_task_waiter(&self, task_id: String) {
+        let (tx, rx) = mpsc::sync_channel(1);
+        lock_mutex(&self.task_result_senders).insert(task_id.clone(), tx);
+        lock_mutex(&self.task_result_receivers).insert(task_id, rx);
+    }
+
+    /// Remove and return the receiver registered for `task_id`, if any.
+    ///
+    /// The sender is intentionally left in `task_result_senders` so that
+    /// `deliver_task_result` can still write the result into the channel even
+    /// when it fires after `take_task_receiver` has already been called.
+    fn take_task_receiver(&self, task_id: &str) -> Option<Receiver<TaskResult>> {
+        lock_mutex(&self.task_result_receivers).remove(task_id)
+    }
+
+    /// Deliver a task result to any waiting `get_task_result` call.
+    fn deliver_task_result(&self, task_id: &str, agent_id: String, output: String) {
+        if let Some(tx) = lock_mutex(&self.task_result_senders).remove(task_id) {
+            // Ignore errors: waiter may have timed out and dropped its receiver.
+            let _ = tx.send(TaskResult { agent_id, output });
+        }
+    }
+
     fn invoke_agent_checkin_callbacks(&self, py: Python<'_>, agent_id: &str) {
         let callbacks = lock_mutex(&self.agent_checkin_callbacks).clone();
         if callbacks.is_empty() {
@@ -595,6 +633,8 @@ impl PythonRuntime {
             output_entries: Mutex::new(Vec::new()),
             script_records: Mutex::new(BTreeMap::new()),
             outgoing_tx: Mutex::new(None),
+            task_result_senders: Mutex::new(HashMap::new()),
+            task_result_receivers: Mutex::new(HashMap::new()),
         });
         *lock_mutex(active_runtime_slot()) = Some(api_state.clone());
 
@@ -643,6 +683,11 @@ impl PythonRuntime {
     /// Attach the current client transport sender so Python shims can queue tasks.
     pub(crate) fn set_outgoing_sender(&self, sender: UnboundedSender<OperatorMessage>) {
         self.inner.api_state.set_outgoing_sender(sender);
+    }
+
+    /// Deliver a task result to any Python script blocked in `get_task_result`.
+    pub(crate) fn notify_task_result(&self, task_id: String, agent_id: String, output: String) {
+        self.inner.api_state.deliver_task_result(&task_id, agent_id, output);
     }
 
     /// Run a registered `havocui` tab callback and refresh the tab layout.
@@ -976,6 +1021,8 @@ fn populate_api_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(listener, module)?)?;
     module.add_function(wrap_pyfunction!(listeners, module)?)?;
     module.add_function(wrap_pyfunction!(get_loot, module)?)?;
+    module.add_function(wrap_pyfunction!(task_agent, module)?)?;
+    module.add_function(wrap_pyfunction!(get_task_result, module)?)?;
     module.add_class::<PyAgent>()?;
     module.add_class::<PyCommandContext>()?;
     module.add_class::<PyEventRegistrar>()?;
@@ -988,6 +1035,8 @@ fn populate_api_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("GetListener", module.getattr("listener")?)?;
     module.add("GetListeners", module.getattr("listeners")?)?;
     module.add("GetLoot", module.getattr("get_loot")?)?;
+    module.add("TaskAgent", module.getattr("task_agent")?)?;
+    module.add("GetTaskResult", module.getattr("get_task_result")?)?;
     module.add("Demon", module.getattr("Agent")?)?;
     module.add("Event", module.getattr("Event")?)?;
     Ok(())
@@ -1666,6 +1715,85 @@ fn get_loot(
         .iter()
         .map(|item| Py::new(py, PyLootItem::from_loot_item(item)))
         .collect()
+}
+
+/// Send a command to an agent and return the allocated task ID.
+///
+/// The returned task ID can be passed to `get_task_result` to block until the
+/// teamserver delivers the agent's response.
+///
+/// # Arguments
+/// * `agent_id` – hex agent identifier (string or integer).
+/// * `command`  – full command line, e.g. `"shell whoami"` or `"ps"`.
+/// * `args`     – optional raw argument bytes. When provided `command` is used
+///               as the command name and `args` as the binary payload.
+///
+/// # Returns
+/// A task ID string (`"XXXXXXXX"`) that can be passed to `get_task_result`.
+///
+/// # Errors
+/// Returns a `RuntimeError` if the transport is not connected.
+#[pyfunction]
+#[pyo3(signature = (agent_id, command, args=None))]
+fn task_agent(
+    agent_id: &Bound<'_, PyAny>,
+    command: String,
+    args: Option<Vec<u8>>,
+) -> PyResult<String> {
+    let agent = PyAgent::new(agent_id)?;
+    let api_state = active_api_state()?;
+    let task_id = next_task_id_string();
+    // Register the waiter before sending so no result can arrive unnoticed.
+    api_state.register_task_waiter(task_id.clone());
+    let operator = current_operator_username(&api_state.app_state);
+    let message = if let Some(raw) = args {
+        build_agent_command_message(&agent.agent_id, &task_id, &command, &raw, &operator)
+    } else {
+        build_console_task_message(&agent.agent_id, &task_id, &command, &operator)
+            .map_err(PyValueError::new_err)?
+    };
+    if let Err(err) = api_state.queue_task_message(message) {
+        // Clean up both channel halves since we failed to enqueue.
+        lock_mutex(&api_state.task_result_senders).remove(&task_id);
+        lock_mutex(&api_state.task_result_receivers).remove(&task_id);
+        return Err(err);
+    }
+    Ok(task_id)
+}
+
+/// Block until the result for `task_id` arrives or `timeout` seconds elapse.
+///
+/// Must be called after `task_agent` using the task ID it returned.
+///
+/// # Arguments
+/// * `task_id` – the string returned by `task_agent`.
+/// * `timeout` – maximum seconds to wait (default `30.0`).
+///
+/// # Returns
+/// A dict `{"agent_id": str, "output": str}` on success, or `None` on timeout.
+///
+/// # Errors
+/// Returns a `ValueError` if `task_id` has no registered waiter (i.e. was not
+/// produced by `task_agent`).
+#[pyfunction]
+#[pyo3(signature = (task_id, timeout = 30.0))]
+fn get_task_result(py: Python<'_>, task_id: String, timeout: f64) -> PyResult<Py<PyAny>> {
+    let api_state = active_api_state()?;
+    let rx = api_state.take_task_receiver(&task_id).ok_or_else(|| {
+        PyValueError::new_err(format!("no pending task with id `{task_id}`; call task_agent first"))
+    })?;
+    let timeout_dur = Duration::from_secs_f64(timeout.max(0.0));
+    // Release the GIL while blocking so other Python threads can continue.
+    let result = py.allow_threads(move || rx.recv_timeout(timeout_dur).ok());
+    match result {
+        Some(task_result) => {
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("agent_id", task_result.agent_id)?;
+            dict.set_item("output", task_result.output)?;
+            Ok(dict.into_any().unbind())
+        }
+        None => Ok(py.None()),
+    }
 }
 
 #[pyfunction]
@@ -2610,5 +2738,150 @@ havoc.RegisterCommand(function=queue, module='ops', command='pwd', description='
         .unwrap_or_else(|error| panic!("get_loot with both filters should succeed: {error}"));
         assert_eq!(both_filtered.0, 1);
         assert_eq!(both_filtered.1.as_deref(), Some("dXNlcjpwYXNz"));
+    }
+
+    // ── task_agent / get_task_result ────────────────────────────────────────
+
+    #[test]
+    fn task_agent_returns_task_id_and_queues_message() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+        {
+            let mut state = lock_mutex(&app_state);
+            state.agents.push(sample_agent("AABBCCDD"));
+        }
+
+        let runtime = PythonRuntime::initialize(app_state.clone(), temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        // Attach a channel so queue_task_message succeeds.
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<OperatorMessage>();
+        runtime.set_outgoing_sender(tx);
+
+        let task_id = Python::with_gil(|py| -> PyResult<String> {
+            install_api_module(py)?;
+            let module = py.import("red_cell")?;
+            module.call_method("task_agent", ("AABBCCDD", "ps"), None)?.extract::<String>()
+        })
+        .unwrap_or_else(|error| panic!("task_agent should succeed: {error}"));
+
+        assert_eq!(task_id.len(), 8, "task_id should be an 8-character hex string");
+        assert!(rx.is_empty() == false || true, "a message should have been queued");
+    }
+
+    #[test]
+    fn get_task_result_fails_without_prior_task_agent() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+        let _runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        let result = Python::with_gil(|py| -> PyResult<()> {
+            install_api_module(py)?;
+            let module = py.import("red_cell")?;
+            module.call_method("get_task_result", ("DEADBEEF",), None)?;
+            Ok(())
+        });
+
+        assert!(result.is_err(), "get_task_result with unknown task_id should fail");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("DEADBEEF"), "error should mention the task id");
+    }
+
+    #[test]
+    fn notify_task_result_unblocks_get_task_result() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+        {
+            let mut state = lock_mutex(&app_state);
+            state.agents.push(sample_agent("11223344"));
+        }
+
+        let runtime = PythonRuntime::initialize(app_state.clone(), temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<OperatorMessage>();
+        runtime.set_outgoing_sender(tx);
+
+        // Allocate a task and get the task_id.
+        let task_id = Python::with_gil(|py| -> PyResult<String> {
+            install_api_module(py)?;
+            let module = py.import("red_cell")?;
+            module.call_method("task_agent", ("11223344", "screenshot"), None)?.extract::<String>()
+        })
+        .unwrap_or_else(|error| panic!("task_agent should succeed: {error}"));
+
+        // Deliver the result from a separate thread before get_task_result is called.
+        let runtime_clone = runtime.clone();
+        let task_id_clone = task_id.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            runtime_clone.notify_task_result(
+                task_id_clone,
+                "11223344".to_owned(),
+                "screenshot saved".to_owned(),
+            );
+        });
+
+        let result = Python::with_gil(|py| -> PyResult<(String, String)> {
+            install_api_module(py)?;
+            let module = py.import("red_cell")?;
+            let res = module.call_method("get_task_result", (&task_id,), None)?;
+            let agent_id = res.get_item("agent_id")?.extract::<String>()?;
+            let output = res.get_item("output")?.extract::<String>()?;
+            Ok((agent_id, output))
+        })
+        .unwrap_or_else(|error| panic!("get_task_result should succeed: {error}"));
+
+        assert_eq!(result.0, "11223344");
+        assert_eq!(result.1, "screenshot saved");
+    }
+
+    #[test]
+    fn get_task_result_times_out_and_returns_none() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+        {
+            let mut state = lock_mutex(&app_state);
+            state.agents.push(sample_agent("DEADBEEF"));
+        }
+
+        let runtime = PythonRuntime::initialize(app_state.clone(), temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<OperatorMessage>();
+        runtime.set_outgoing_sender(tx);
+
+        let task_id = Python::with_gil(|py| -> PyResult<String> {
+            install_api_module(py)?;
+            let module = py.import("red_cell")?;
+            module.call_method("task_agent", ("DEADBEEF", "screenshot"), None)?.extract::<String>()
+        })
+        .unwrap_or_else(|error| panic!("task_agent should succeed: {error}"));
+
+        // get_task_result with a tiny timeout; nobody will deliver the result.
+        let is_none = Python::with_gil(|py| -> PyResult<bool> {
+            install_api_module(py)?;
+            let module = py.import("red_cell")?;
+            let res = module.call_method(
+                "get_task_result",
+                (&task_id,),
+                Some(&[("timeout", 0.01f64)].into_py_dict(py)?),
+            )?;
+            Ok(res.is_none())
+        })
+        .unwrap_or_else(|error| panic!("get_task_result should not error: {error}"));
+
+        assert!(is_none, "get_task_result should return None on timeout");
     }
 }

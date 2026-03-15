@@ -1,0 +1,1 @@
+ALTER TABLE ts_agents ADD COLUMN process_path TEXT NOT NULL DEFAULT '';

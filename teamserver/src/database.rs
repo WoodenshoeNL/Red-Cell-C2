@@ -267,7 +267,7 @@ impl AgentRepository {
             r#"
             UPDATE ts_agents SET
                 active = ?, reason = ?, note = ?, aes_key = ?, aes_iv = ?, hostname = ?, username = ?,
-                domain_name = ?, external_ip = ?, internal_ip = ?, process_name = ?,
+                domain_name = ?, external_ip = ?, internal_ip = ?, process_name = ?, process_path = ?,
                 base_address = ?, process_pid = ?, process_tid = ?, process_ppid = ?,
                 process_arch = ?, elevated = ?, os_version = ?, os_arch = ?, listener_name = ?, sleep_delay = ?,
                 sleep_jitter = ?, kill_date = ?, working_hours = ?, first_call_in = ?,
@@ -286,6 +286,7 @@ impl AgentRepository {
         .bind(&agent.external_ip)
         .bind(&agent.internal_ip)
         .bind(&agent.process_name)
+        .bind(&agent.process_path)
         .bind(i64_from_u64("base_address", agent.base_address)?)
         .bind(i64::from(agent.process_pid))
         .bind(i64::from(agent.process_tid))
@@ -436,10 +437,10 @@ async fn insert_agent_row(
         r#"
         INSERT INTO ts_agents (
             agent_id, active, reason, note, ctr_block_offset, aes_key, aes_iv, hostname, username, domain_name,
-            external_ip, internal_ip, process_name, base_address, process_pid, process_tid,
+            external_ip, internal_ip, process_name, process_path, base_address, process_pid, process_tid,
             process_ppid, process_arch, elevated, os_version, os_arch, listener_name, sleep_delay,
             sleep_jitter, kill_date, working_hours, first_call_in, last_call_in
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(i64::from(agent.agent_id))
@@ -455,6 +456,7 @@ async fn insert_agent_row(
     .bind(&agent.external_ip)
     .bind(&agent.internal_ip)
     .bind(&agent.process_name)
+    .bind(&agent.process_path)
     .bind(i64_from_u64("base_address", agent.base_address)?)
     .bind(i64::from(agent.process_pid))
     .bind(i64::from(agent.process_tid))
@@ -1392,6 +1394,7 @@ struct AgentRow {
     external_ip: String,
     internal_ip: String,
     process_name: String,
+    process_path: String,
     base_address: i64,
     process_pid: i64,
     process_tid: i64,
@@ -1438,6 +1441,7 @@ impl TryFrom<AgentRow> for AgentRecord {
             external_ip: row.external_ip,
             internal_ip: row.internal_ip,
             process_name: row.process_name,
+            process_path: row.process_path,
             base_address: u64_from_i64("base_address", row.base_address)?,
             process_pid: u32_from_i64("process_pid", row.process_pid)?,
             process_tid: u32_from_i64("process_tid", row.process_tid)?,

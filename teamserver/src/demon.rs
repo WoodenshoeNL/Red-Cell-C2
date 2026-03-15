@@ -308,6 +308,7 @@ fn parse_init_agent(
         external_ip: external_ip.to_owned(),
         internal_ip,
         process_name: basename(&process_path),
+        process_path,
         base_address,
         process_pid,
         process_tid,
@@ -707,6 +708,7 @@ mod tests {
         assert_eq!(init.agent.agent_id, 0x1234_5678);
         assert_eq!(init.agent.hostname, "wkstn-01");
         assert_eq!(init.agent.process_name, "explorer.exe");
+        assert_eq!(init.agent.process_path, "C:\\Windows\\explorer.exe");
         assert_eq!(init.agent.os_version, "Windows 11");
         assert_eq!(init.agent.os_arch, "x64/AMD64");
         assert_eq!(init.agent.external_ip, "203.0.113.10");
@@ -1163,6 +1165,7 @@ mod tests {
             external_ip: "203.0.113.1".to_owned(),
             internal_ip: "10.0.0.10".to_owned(),
             process_name: "explorer.exe".to_owned(),
+            process_path: "C:\\Windows\\explorer.exe".to_owned(),
             base_address: 0x401000,
             process_pid: 1337,
             process_tid: 1338,

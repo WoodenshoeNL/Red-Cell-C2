@@ -4605,6 +4605,7 @@ mod tests {
             external_ip: "203.0.113.10".to_owned(),
             internal_ip: "10.0.0.25".to_owned(),
             process_name: "explorer.exe".to_owned(),
+            process_path: "C:\\Windows\\explorer.exe".to_owned(),
             base_address: 0x401000,
             process_pid: 1337,
             process_tid: 1338,

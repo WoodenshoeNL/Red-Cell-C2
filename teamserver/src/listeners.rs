@@ -3774,6 +3774,7 @@ mod tests {
         assert_eq!(message.info.name_id, "12345678");
         assert_eq!(message.info.listener, "edge-http-init");
         assert_eq!(message.info.process_name, "explorer.exe");
+        assert_eq!(message.info.process_path, "C:\\Windows\\explorer.exe");
         assert_eq!(message.info.sleep_delay, serde_json::json!(15));
         manager.stop("edge-http-init").await?;
         Ok(())
@@ -4984,6 +4985,7 @@ mod tests {
             external_ip: "203.0.113.10".to_owned(),
             internal_ip: "10.0.0.25".to_owned(),
             process_name: "explorer.exe".to_owned(),
+            process_path: "C:\\Windows\\explorer.exe".to_owned(),
             base_address: 0x401000,
             process_pid: 1337,
             process_tid: 1338,

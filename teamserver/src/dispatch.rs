@@ -888,6 +888,7 @@ fn parse_checkin_metadata(
     updated.domain_name = domain_name;
     updated.internal_ip = internal_ip;
     updated.process_name = basename(&process_path);
+    updated.process_path = process_path;
     updated.base_address = base_address;
     updated.process_pid = process_pid;
     updated.process_tid = process_tid;
@@ -5130,6 +5131,7 @@ mod tests {
             external_ip: "127.0.0.1".to_owned(),
             internal_ip: "10.0.0.25".to_owned(),
             process_name: "explorer.exe".to_owned(),
+            process_path: "C:\\Windows\\explorer.exe".to_owned(),
             base_address: 0x1000,
             process_pid: 1337,
             process_tid: 7331,
@@ -5802,6 +5804,7 @@ mod tests {
         assert_eq!(updated.domain_name, "research");
         assert_eq!(updated.internal_ip, "10.10.10.50");
         assert_eq!(updated.process_name, "cmd.exe");
+        assert_eq!(updated.process_path, "C:\\Windows\\System32\\cmd.exe");
         assert_eq!(updated.process_pid, 4040);
         assert_eq!(updated.process_tid, 5050);
         assert_eq!(updated.process_ppid, 3030);

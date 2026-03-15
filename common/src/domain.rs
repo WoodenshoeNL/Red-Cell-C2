@@ -330,9 +330,12 @@ pub struct AgentRecord {
     /// Internal workstation IP.
     #[serde(rename = "InternalIP")]
     pub internal_ip: String,
-    /// Process executable name.
+    /// Process executable name (basename only).
     #[serde(rename = "ProcessName")]
     pub process_name: String,
+    /// Full path to the process executable.
+    #[serde(rename = "ProcessPath", default)]
+    pub process_path: String,
     /// Remote process base address.
     #[serde(rename = "BaseAddress", deserialize_with = "deserialize_u64_from_any")]
     pub base_address: u64,

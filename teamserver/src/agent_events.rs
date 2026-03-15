@@ -70,7 +70,7 @@ pub(crate) fn operator_agent_info(
         process_name: agent.process_name.clone(),
         process_pid: agent.process_pid.to_string(),
         process_ppid: agent.process_ppid.to_string(),
-        process_path: agent.process_name.clone(),
+        process_path: agent.process_path.clone(),
         reason: agent.reason.clone(),
         note: agent.note.clone(),
         sleep_delay: Value::from(agent.sleep_delay),
@@ -110,6 +110,7 @@ mod tests {
             external_ip: "203.0.113.10".to_owned(),
             internal_ip: "10.0.0.25".to_owned(),
             process_name: "explorer.exe".to_owned(),
+            process_path: "C:\\Windows\\explorer.exe".to_owned(),
             base_address: 0x401000,
             process_pid: 1337,
             process_tid: 1338,
@@ -216,5 +217,20 @@ mod tests {
         assert_eq!(message.head.timestamp, agent.last_call_in);
         assert_eq!(message.info.agent_id, "11121314");
         assert_eq!(message.info.marked, "Alive");
+    }
+
+    #[test]
+    fn operator_agent_info_process_path_differs_from_process_name() {
+        let agent = sample_agent(0x1112_1314);
+        let pivots = PivotInfo { parent: None, children: vec![] };
+
+        let info = operator_agent_info("http", 0xDEAD_BEEF, &agent, &pivots);
+
+        assert_eq!(info.process_name, "explorer.exe");
+        assert_eq!(info.process_path, "C:\\Windows\\explorer.exe");
+        assert_ne!(
+            info.process_path, info.process_name,
+            "process_path must be the full path, not the basename"
+        );
     }
 }

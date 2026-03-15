@@ -2,7 +2,10 @@
 
 use std::borrow::Cow;
 
-use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, CryptoError, decrypt_agent_data};
+use red_cell_common::crypto::{
+    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, CryptoError, decrypt_agent_data, is_weak_aes_iv,
+    is_weak_aes_key,
+};
 use red_cell_common::demon::{DemonCommand, DemonEnvelope, DemonHeader, DemonProtocolError};
 use red_cell_common::{AgentEncryptionInfo, AgentRecord};
 use thiserror::Error;
@@ -240,7 +243,7 @@ fn parse_init_agent(
     let iv = read_fixed::<AGENT_IV_LENGTH>(payload, &mut offset, "init AES IV")?;
     let encrypted = &payload[offset..];
 
-    if key.iter().all(|byte| *byte == 0) {
+    if is_weak_aes_key(&key) {
         warn!(
             agent_id = format_args!("0x{agent_id:08X}"),
             "rejecting DEMON_INIT with all-zero AES key"
@@ -248,7 +251,7 @@ fn parse_init_agent(
         return Err(DemonParserError::InvalidInit("all-zero AES key is not allowed"));
     }
 
-    if iv.iter().all(|byte| *byte == 0) {
+    if is_weak_aes_iv(&iv) {
         warn!(
             agent_id = format_args!("0x{agent_id:08X}"),
             "rejecting DEMON_INIT with all-zero AES IV"

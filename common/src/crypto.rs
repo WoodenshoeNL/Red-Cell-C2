@@ -136,6 +136,28 @@ pub fn decrypt_agent_data_at_offset(
     apply_agent_keystream(key, iv, block_offset, ciphertext)
 }
 
+/// Returns `true` if every byte in `key` is zero.
+///
+/// An all-zero key is a trivially weak value that a misconfigured or
+/// unauthenticated agent might send.  Both the DemonInit parser and the
+/// COMMAND_CHECKIN handler use this predicate to reject such material before
+/// it can be installed as a live session key.
+#[must_use]
+pub fn is_weak_aes_key(key: &[u8]) -> bool {
+    key.iter().all(|&b| b == 0)
+}
+
+/// Returns `true` if every byte in `iv` is zero.
+///
+/// An all-zero IV combined with a non-zero key is technically valid for
+/// AES-CTR but is a strong indicator of uninitialized or replayed key
+/// material.  Both the DemonInit parser and the COMMAND_CHECKIN handler
+/// reject this condition for the same reason as [`is_weak_aes_key`].
+#[must_use]
+pub fn is_weak_aes_iv(iv: &[u8]) -> bool {
+    iv.iter().all(|&b| b == 0)
+}
+
 /// Generate fresh per-agent AES-256-CTR key material.
 pub fn generate_agent_crypto_material() -> Result<AgentCryptoMaterial, CryptoError> {
     let mut key = [0_u8; AGENT_KEY_LENGTH];
@@ -215,8 +237,44 @@ mod tests {
     use super::{
         AGENT_IV_LENGTH, AGENT_KEY_LENGTH, CryptoError, ctr_blocks_for_len, decrypt_agent_data,
         decrypt_agent_data_at_offset, encrypt_agent_data, encrypt_agent_data_at_offset,
-        generate_agent_crypto_material, hash_password_sha3,
+        generate_agent_crypto_material, hash_password_sha3, is_weak_aes_iv, is_weak_aes_key,
     };
+
+    #[test]
+    fn is_weak_aes_key_detects_all_zero_key() {
+        assert!(is_weak_aes_key(&[0u8; AGENT_KEY_LENGTH]));
+    }
+
+    #[test]
+    fn is_weak_aes_key_accepts_nonzero_key() {
+        let mut key = [0u8; AGENT_KEY_LENGTH];
+        key[0] = 1;
+        assert!(!is_weak_aes_key(&key));
+    }
+
+    #[test]
+    fn is_weak_aes_key_accepts_empty_slice() {
+        // An empty slice has no non-zero bytes; all() over an empty iterator returns true.
+        // Document the edge-case behaviour explicitly.
+        assert!(is_weak_aes_key(&[]));
+    }
+
+    #[test]
+    fn is_weak_aes_iv_detects_all_zero_iv() {
+        assert!(is_weak_aes_iv(&[0u8; AGENT_IV_LENGTH]));
+    }
+
+    #[test]
+    fn is_weak_aes_iv_accepts_nonzero_iv() {
+        let mut iv = [0u8; AGENT_IV_LENGTH];
+        iv[AGENT_IV_LENGTH - 1] = 0xff;
+        assert!(!is_weak_aes_iv(&iv));
+    }
+
+    #[test]
+    fn is_weak_aes_iv_accepts_empty_slice() {
+        assert!(is_weak_aes_iv(&[]));
+    }
 
     #[test]
     fn encrypt_agent_data_matches_reference_ciphertext() {

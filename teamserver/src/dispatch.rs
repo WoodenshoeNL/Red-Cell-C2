@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use red_cell_common::crypto::{is_weak_aes_iv, is_weak_aes_key};
 use red_cell_common::demon::{
     DemonCallback, DemonCallbackError, DemonCommand, DemonConfigKey, DemonFilesystemCommand,
     DemonInfoClass, DemonInjectError, DemonJobCommand, DemonKerberosCommand, DemonMessage,
@@ -925,7 +926,7 @@ fn validate_checkin_transport_material(
     aes_key: &[u8],
     aes_iv: &[u8],
 ) -> Result<(), CommandDispatchError> {
-    if aes_key.iter().all(|byte| *byte == 0) {
+    if is_weak_aes_key(aes_key) {
         warn!(
             agent_id = format_args!("0x{agent_id:08X}"),
             "rejecting COMMAND_CHECKIN with all-zero AES key"
@@ -936,7 +937,7 @@ fn validate_checkin_transport_material(
         });
     }
 
-    if aes_iv.iter().all(|byte| *byte == 0) {
+    if is_weak_aes_iv(aes_iv) {
         warn!(
             agent_id = format_args!("0x{agent_id:08X}"),
             "rejecting COMMAND_CHECKIN with all-zero AES IV"

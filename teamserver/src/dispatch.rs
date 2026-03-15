@@ -1181,7 +1181,7 @@ async fn handle_pivot_list_callback(
         let count = entries.len();
         let mut data = String::from(" DemonID    Named Pipe\n --------   -----------\n");
         for (demon_id, named_pipe) in entries {
-            data.push_str(&format!(" {demon_id:<08x}   {named_pipe}\n"));
+            data.push_str(&format!(" {demon_id:08x}   {named_pipe}\n"));
         }
         ("Info", format!("Pivot List [{count}]:"), Some(data.trim_end().to_owned()))
     };
@@ -5794,6 +5794,56 @@ mod tests {
             payload.extend_from_slice(&utf16_bytes);
         }
         payload
+    }
+
+    #[tokio::test]
+    async fn pivot_list_callback_demon_id_is_zero_padded_on_left()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database,
+            sockets,
+            None,
+        );
+        let agent_id = 0xAAAA_BBBB;
+        let key = [0x11; AGENT_KEY_LENGTH];
+        let iv = [0x22; AGENT_IV_LENGTH];
+        registry.insert(sample_agent_info(agent_id, key, iv)).await?;
+
+        // demon_id = 0x1 is only 1 hex digit — must be padded to "00000001", not "10000000"
+        let response = dispatcher
+            .dispatch(
+                agent_id,
+                u32::from(DemonCommand::CommandPivot),
+                100,
+                &pivot_list_payload(&[(0x1, "\\\\.\\pipe\\test")]),
+            )
+            .await?;
+
+        assert_eq!(response, None);
+        let event = receiver
+            .recv()
+            .await
+            .ok_or_else(|| "expected AgentResponse event after pivot list".to_owned())?;
+        let OperatorMessage::AgentResponse(msg) = event else {
+            return Err("expected AgentResponse".into());
+        };
+        let output = &msg.info.output;
+        assert!(
+            output.contains("00000001"),
+            "demon id 0x1 must be right-aligned zero-padded to '00000001', got: {output}"
+        );
+        assert!(
+            !output.contains("10000000"),
+            "demon id 0x1 must NOT be left-aligned to '10000000', got: {output}"
+        );
+        Ok(())
     }
 
     #[tokio::test]

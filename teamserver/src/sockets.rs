@@ -1718,4 +1718,82 @@ mod tests {
 
         Ok(())
     }
+
+    /// The SOCKS5 server must bind exclusively to the loopback interface (`127.0.0.1`) and must
+    /// NOT advertise itself on any external or wildcard address (`0.0.0.0`).
+    ///
+    /// # Security boundary — no authentication
+    ///
+    /// The SOCKS5 relay uses `NO_AUTH` (method 0x00) by design: only operators who already have
+    /// an authenticated WebSocket session with the teamserver are expected to obtain a SOCKS5 port
+    /// (via the `COMMAND_SOCKET` task response), and the port is never exposed outside
+    /// `127.0.0.1`.  Localhost-only binding is therefore the **sole** access-control layer for
+    /// this tunnel.  This is a known, intentional security boundary: any local OS process that
+    /// learns the ephemeral port could connect without further authentication.  Accept this
+    /// trade-off consciously — do not relax the loopback-only constraint without adding an
+    /// authentication layer.
+    #[tokio::test]
+    async fn socks5_server_binds_to_localhost_only() -> io::Result<()> {
+        let (_database, registry, manager) =
+            test_manager().await.map_err(|e| io::Error::other(e.to_string()))?;
+        registry
+            .insert(sample_agent(0xDEAD_BEEF))
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        // Start the server on an OS-assigned ephemeral port.
+        let start_msg = manager
+            .add_socks_server(0xDEAD_BEEF, "0")
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        // The reported bind address must be on the loopback interface, not a wildcard.
+        assert!(
+            start_msg.contains("127.0.0.1:"),
+            "SOCKS5 server must report a 127.0.0.1 bind address, got: {start_msg}"
+        );
+        assert!(
+            !start_msg.contains("0.0.0.0:"),
+            "SOCKS5 server must not bind to the wildcard address, got: {start_msg}"
+        );
+
+        // Extract the port from the reported address so we can attempt an external connection.
+        let bound_port: u16 = start_msg
+            .trim_start_matches("Started SOCKS5 server on 127.0.0.1:")
+            .trim()
+            .parse()
+            .map_err(|e| {
+                io::Error::other(format!("could not parse port from '{start_msg}': {e}"))
+            })?;
+
+        // If this machine has a non-loopback IP, a connection to it on `bound_port` must be
+        // refused — the listener is bound only to 127.0.0.1 so external interfaces are not
+        // reachable.  We discover the outbound IP with a connected UDP socket (no packet is
+        // actually sent; connecting UDP just populates the kernel routing table entry).
+        // `192.0.2.1` is TEST-NET-1 (RFC 5737) — routable but unassigned, safe to use here.
+        let non_loopback_ip: Option<std::net::IpAddr> = (|| {
+            use std::net::UdpSocket;
+            let udp = UdpSocket::bind("0.0.0.0:0").ok()?;
+            udp.connect("192.0.2.1:80").ok()?;
+            let ip = udp.local_addr().ok()?.ip();
+            if ip.is_loopback() { None } else { Some(ip) }
+        })();
+
+        if let Some(ext_ip) = non_loopback_ip {
+            let external_connect = TcpStream::connect(format!("{ext_ip}:{bound_port}")).await;
+            assert!(
+                external_connect.is_err(),
+                "connection to {ext_ip}:{bound_port} must be refused — SOCKS5 must not be \
+                 reachable on non-loopback addresses"
+            );
+        }
+
+        // A connection to 127.0.0.1 on the same port must succeed, confirming the server is
+        // reachable only via loopback.
+        TcpStream::connect(format!("127.0.0.1:{bound_port}")).await.map_err(|e| {
+            io::Error::other(format!("loopback connection to 127.0.0.1:{bound_port} failed: {e}"))
+        })?;
+
+        Ok(())
+    }
 }

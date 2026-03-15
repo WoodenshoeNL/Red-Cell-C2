@@ -625,7 +625,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener should bind");
         let address = listener.local_addr().expect("listener address should resolve");
         let server = tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
+            axum::serve(listener, app).await.expect("test webhook server should not fail");
         });
 
         (address, receiver, server)

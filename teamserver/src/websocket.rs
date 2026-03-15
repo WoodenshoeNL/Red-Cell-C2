@@ -4155,11 +4155,12 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener should bind");
         let addr = listener.local_addr().expect("listener should expose addr");
         let server = tokio::spawn(async move {
-            let _ = axum::serve(
+            axum::serve(
                 listener,
                 app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
             )
-            .await;
+            .await
+            .expect("test websocket server should not fail");
         });
         let (socket, _) =
             connect_async(format!("ws://{addr}/")).await.expect("websocket should connect");

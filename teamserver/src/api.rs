@@ -562,12 +562,35 @@ where
 
     async fn from_request_parts(
         parts: &mut Parts,
-        _state: &TeamserverState,
+        state: &TeamserverState,
     ) -> Result<Self, Self::Rejection> {
         let identity =
             parts.extensions.get::<ApiIdentity>().cloned().ok_or(ApiAuthError::MissingIdentity)?;
 
-        authorize_api_role(identity.role, P::PERMISSION)?;
+        if let Err(error) = authorize_api_role(identity.role, P::PERMISSION) {
+            if let Err(audit_error) = record_operator_action_with_notifications(
+                &state.database,
+                &state.webhooks,
+                &identity.key_id,
+                "api.permission_denied",
+                "api_key",
+                Some(identity.key_id.clone()),
+                audit_details(
+                    AuditResultStatus::Failure,
+                    None,
+                    Some("permission_denied"),
+                    Some(parameter_object([
+                        ("required", Value::String(P::PERMISSION.as_str().to_owned())),
+                        ("role", Value::String(format!("{:?}", identity.role))),
+                    ])),
+                ),
+            )
+            .await
+            {
+                tracing::warn!(%audit_error, "failed to persist api permission-denied audit record");
+            }
+            return Err(error);
+        }
 
         Ok(Self { identity, _marker: PhantomData })
     }
@@ -2834,6 +2857,53 @@ mod tests {
 
         let body = read_json(post_response).await;
         assert_eq!(body["error"]["code"], "forbidden");
+    }
+
+    #[tokio::test]
+    async fn permission_denied_audit_record_created_when_analyst_key_attempts_write() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let (app, _, _) = test_router_with_database(
+            database.clone(),
+            Some((60, "rest-analyst", "secret-analyst", OperatorRole::Analyst)),
+        )
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/listeners")
+                    .header(API_KEY_HEADER, "secret-analyst")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"protocol":"smb","config":{"name":"pivot","pipe_name":"pivot-pipe"}}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let page = crate::query_audit_log(
+            &database,
+            &crate::AuditQuery {
+                action: Some("api.permission_denied".to_owned()),
+                actor: Some("rest-analyst".to_owned()),
+                ..crate::AuditQuery::default()
+            },
+        )
+        .await
+        .expect("audit query should succeed");
+
+        assert_eq!(page.total, 1, "one api.permission_denied record expected");
+        let record = &page.items[0];
+        assert_eq!(record.action, "api.permission_denied");
+        assert_eq!(record.actor, "rest-analyst");
+        assert_eq!(record.result_status, crate::AuditResultStatus::Failure);
+        let required =
+            record.parameters.as_ref().and_then(|p| p.get("required")).and_then(|v| v.as_str());
+        assert!(required.is_some(), "permission_denied record should include required permission");
     }
 
     #[tokio::test]

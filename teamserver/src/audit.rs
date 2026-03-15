@@ -413,6 +413,8 @@ pub async fn query_session_activity(
     let mut actions =
         BTreeSet::from(["operator.connect".to_owned(), "operator.disconnect".to_owned()]);
     actions.insert("operator.chat".to_owned());
+    actions.insert("operator.session_timeout".to_owned());
+    actions.insert("operator.permission_denied".to_owned());
 
     if let Some(ref action) =
         query.activity.as_deref().map(|activity| format!("operator.{activity}"))
@@ -790,6 +792,50 @@ mod tests {
 
         assert_eq!(page.total, 0, "unrecognized activity should yield zero total");
         assert!(page.items.is_empty(), "unrecognized activity should yield no items");
+    }
+
+    #[tokio::test]
+    async fn query_session_activity_includes_session_timeout_and_permission_denied_events() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+
+        for action in [
+            "operator.connect",
+            "operator.disconnect",
+            "operator.chat",
+            "operator.session_timeout",
+            "operator.permission_denied",
+        ] {
+            database
+                .audit_log()
+                .create(&AuditLogEntry {
+                    id: None,
+                    actor: "operator".to_owned(),
+                    action: action.to_owned(),
+                    target_kind: "operator".to_owned(),
+                    target_id: None,
+                    details: None,
+                    occurred_at: "2026-03-10T12:00:00Z".to_owned(),
+                })
+                .await
+                .expect("seed row should insert");
+        }
+
+        // Querying without an activity filter should return all five event types.
+        let page = query_session_activity(&database, &SessionActivityQuery::default())
+            .await
+            .expect("query should succeed");
+        assert_eq!(page.total, 5, "all five session activity types should be returned");
+
+        // Filtering by the new activity types should return exactly one record each.
+        for activity in ["session_timeout", "permission_denied"] {
+            let q = SessionActivityQuery {
+                activity: Some(activity.to_owned()),
+                ..SessionActivityQuery::default()
+            };
+            let p = query_session_activity(&database, &q).await.expect("query should succeed");
+            assert_eq!(p.total, 1, "filtering by `{activity}` should return exactly one record");
+            assert_eq!(p.items[0].activity, activity);
+        }
     }
 
     #[tokio::test]

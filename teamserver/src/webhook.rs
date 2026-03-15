@@ -607,6 +607,40 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn shutdown_returns_true_immediately_when_notifier_is_disabled() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "operator" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let notifier = AuditWebhookNotifier::from_profile(&profile);
+        assert!(!notifier.is_enabled(), "notifier should be disabled");
+
+        // shutdown should resolve immediately — wrap in a tight timeout to catch any hang
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            notifier.shutdown(Duration::from_secs(1)),
+        )
+        .await
+        .expect("shutdown should complete well before the outer timeout");
+
+        assert!(result, "shutdown should return true when notifier is disabled");
+    }
+
     async fn webhook_server(
         response_status: HttpStatusCode,
     ) -> (SocketAddr, mpsc::UnboundedReceiver<Value>, tokio::task::JoinHandle<()>) {

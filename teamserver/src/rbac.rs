@@ -304,8 +304,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        AdminAccess, AuthenticatedOperator, AuthorizationError, Permission, ReadAccess,
-        TaskAgentAccess, authorize_permission, authorize_websocket_command,
+        AdminAccess, AuthenticatedOperator, AuthorizationError, ListenerManagementAccess,
+        Permission, ReadAccess, TaskAgentAccess, authorize_permission, authorize_websocket_command,
     };
     use crate::auth::{AuthService, OperatorSession};
     use red_cell_common::crypto::hash_password_sha3;
@@ -757,6 +757,109 @@ mod tests {
                 required: Permission::TaskAgents.as_str(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn listener_management_access_extractor_accepts_operator_and_rejects_analyst() {
+        let auth = AuthService::from_profile(&profile()).expect("auth service should initialize");
+
+        let operator_id = Uuid::new_v4();
+        assert!(matches!(
+            auth.authenticate_login(
+                operator_id,
+                &red_cell_common::operator::LoginInfo {
+                    user: "operator".to_owned(),
+                    password: hash_password_sha3("operatorpw"),
+                },
+            )
+            .await,
+            crate::auth::AuthenticationResult::Success(_)
+        ));
+        let operator_session =
+            auth.session_for_connection(operator_id).await.expect("operator session should exist");
+
+        let analyst_id = Uuid::new_v4();
+        assert!(matches!(
+            auth.authenticate_login(
+                analyst_id,
+                &red_cell_common::operator::LoginInfo {
+                    user: "analyst".to_owned(),
+                    password: hash_password_sha3("analystpw"),
+                },
+            )
+            .await,
+            crate::auth::AuthenticationResult::Success(_)
+        ));
+        let analyst_session =
+            auth.session_for_connection(analyst_id).await.expect("analyst session should exist");
+
+        let state = TestState { auth };
+
+        // Operator must be allowed to manage listeners.
+        let request = Request::builder()
+            .header("x-session-token", operator_session.token.as_str())
+            .body(())
+            .expect("request should build");
+        let (mut parts, _) = request.into_parts();
+        let extracted =
+            <ListenerManagementAccess as FromRequestParts<TestState>>::from_request_parts(
+                &mut parts, &state,
+            )
+            .await
+            .expect("operator should be allowed to manage listeners");
+        assert_eq!(extracted.role, OperatorRole::Operator);
+
+        // Analyst must be denied listener management.
+        let request = Request::builder()
+            .header("x-session-token", analyst_session.token.as_str())
+            .body(())
+            .expect("request should build");
+        let (mut parts, _) = request.into_parts();
+        let denied = <ListenerManagementAccess as FromRequestParts<TestState>>::from_request_parts(
+            &mut parts, &state,
+        )
+        .await
+        .expect_err("analyst should not be allowed to manage listeners");
+        assert_eq!(
+            denied,
+            AuthorizationError::PermissionDenied {
+                role: OperatorRole::Analyst,
+                required: Permission::ManageListeners.as_str(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn task_agent_access_extractor_accepts_operator() {
+        let auth = AuthService::from_profile(&profile()).expect("auth service should initialize");
+        let connection_id = Uuid::new_v4();
+        assert!(matches!(
+            auth.authenticate_login(
+                connection_id,
+                &red_cell_common::operator::LoginInfo {
+                    user: "operator".to_owned(),
+                    password: hash_password_sha3("operatorpw"),
+                },
+            )
+            .await,
+            crate::auth::AuthenticationResult::Success(_)
+        ));
+
+        let stored =
+            auth.session_for_connection(connection_id).await.expect("session should exist");
+        let request = Request::builder()
+            .header("x-session-token", stored.token.as_str())
+            .body(())
+            .expect("request should build");
+        let (mut parts, _) = request.into_parts();
+        let extracted = <TaskAgentAccess as FromRequestParts<TestState>>::from_request_parts(
+            &mut parts,
+            &TestState { auth },
+        )
+        .await
+        .expect("operator should be allowed to task agents");
+
+        assert_eq!(extracted.role, OperatorRole::Operator);
     }
 
     #[tokio::test]

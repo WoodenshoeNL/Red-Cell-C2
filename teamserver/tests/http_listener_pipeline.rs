@@ -255,6 +255,95 @@ async fn http_listener_pipeline_ignores_real_ip_from_untrusted_redirector()
 }
 
 #[tokio::test]
+async fn http_listener_pipeline_ignores_forwarded_for_when_not_behind_redirector()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let port = common::available_port()?;
+    let agent_id = 0xF0F0_A0D1_u32;
+
+    // Listener with behind_redirector=false — no proxy headers should ever be trusted.
+    manager.create(http_listener("edge-http-xff-no-redirector", port)).await?;
+    manager.start("edge-http-xff-no-redirector").await?;
+    common::wait_for_listener(port).await?;
+
+    let response = Client::new()
+        .post(format!("http://127.0.0.1:{port}/"))
+        // Attacker-injected X-Forwarded-For header claiming a spoofed source IP.
+        .header("x-forwarded-for", "1.2.3.4")
+        .body(common::valid_demon_init_body(
+            agent_id,
+            [0x41; AGENT_KEY_LENGTH],
+            [0x24; AGENT_IV_LENGTH],
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+    assert!(!response.bytes().await?.is_empty());
+
+    let stored = registry.get(agent_id).await.ok_or("agent should be registered")?;
+    assert_eq!(
+        stored.external_ip, "127.0.0.1",
+        "X-Forwarded-For must be ignored when behind_redirector=false; got {}",
+        stored.external_ip
+    );
+
+    manager.stop("edge-http-xff-no-redirector").await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn http_listener_pipeline_ignores_forwarded_for_from_untrusted_peer()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let port = common::available_port()?;
+    let agent_id = 0xF0F0_B0D2_u32;
+
+    // Listener with behind_redirector=true but TrustedProxyPeers set to a *different* address
+    // (192.0.2.1), so the connecting peer (127.0.0.1) is untrusted.
+    manager
+        .create(http_listener_with_redirector(
+            "edge-http-xff-untrusted-peer",
+            port,
+            vec!["192.0.2.1".to_owned()],
+        ))
+        .await?;
+    manager.start("edge-http-xff-untrusted-peer").await?;
+    common::wait_for_listener(port).await?;
+
+    let response = Client::new()
+        .post(format!("http://127.0.0.1:{port}/"))
+        // Attacker-injected X-Forwarded-For header from an untrusted peer.
+        .header("x-forwarded-for", "1.2.3.4")
+        .body(common::valid_demon_init_body(
+            agent_id,
+            [0x41; AGENT_KEY_LENGTH],
+            [0x24; AGENT_IV_LENGTH],
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+    assert!(!response.bytes().await?.is_empty());
+
+    let stored = registry.get(agent_id).await.ok_or("agent should be registered")?;
+    assert_eq!(
+        stored.external_ip, "127.0.0.1",
+        "X-Forwarded-For must be ignored when peer is not in TrustedProxyPeers; got {}",
+        stored.external_ip
+    );
+
+    manager.stop("edge-http-xff-untrusted-peer").await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn http_listener_pipeline_rejects_duplicate_init_preserves_original_key()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;

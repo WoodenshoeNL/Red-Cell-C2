@@ -6399,6 +6399,10 @@ mod tests {
         registry.insert(sample_agent_info(agent_id, key, iv)).await?;
         dispatcher.dispatch(agent_id, u32::from(DemonCommand::CommandCheckin), 6, &[]).await?;
 
+        // The audit write is spawned as a background task; yield to let it complete.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
         let entries = database.audit_log().list().await?;
         let checkin_entry = entries.iter().find(|e| e.action == "agent.checkin").expect(
             "a checkin audit entry with action=\"agent.checkin\" should have been persisted",

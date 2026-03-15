@@ -132,7 +132,24 @@ impl Drop for ClientTransport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AppEvent {
     AgentCheckin(String),
-    AgentTaskResult { task_id: String, agent_id: String, output: String },
+    AgentTaskResult {
+        task_id: String,
+        agent_id: String,
+        output: String,
+    },
+    /// Fires whenever any non-empty agent command output arrives.
+    CommandResponse {
+        agent_id: String,
+        task_id: String,
+        output: String,
+    },
+    /// Fires when a loot item (credential, file, screenshot, etc.) is captured.
+    LootCaptured(LootItem),
+    /// Fires when a listener is started, stopped, or edited.
+    ListenerChanged {
+        name: String,
+        action: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -382,11 +399,20 @@ impl AppState {
             OperatorMessage::InitConnectionInfo(message) => {
                 self.handle_operator_snapshot(message.info);
             }
-            OperatorMessage::ListenerNew(message) | OperatorMessage::ListenerEdit(message) => {
+            OperatorMessage::ListenerNew(message) => {
+                let name = message.info.name.clone().unwrap_or_default();
                 self.upsert_listener(listener_summary_from_info(&message.info));
+                events.push(AppEvent::ListenerChanged { name, action: "start".to_owned() });
+            }
+            OperatorMessage::ListenerEdit(message) => {
+                let name = message.info.name.clone().unwrap_or_default();
+                self.upsert_listener(listener_summary_from_info(&message.info));
+                events.push(AppEvent::ListenerChanged { name, action: "edit".to_owned() });
             }
             OperatorMessage::ListenerRemove(message) => {
+                let name = message.info.name.clone();
                 self.listeners.retain(|listener| listener.name != message.info.name);
+                events.push(AppEvent::ListenerChanged { name, action: "stop".to_owned() });
             }
             OperatorMessage::ListenerMark(message) => {
                 self.mark_listener(&message.info);
@@ -420,7 +446,8 @@ impl AppState {
             OperatorMessage::CredentialsAdd(message)
             | OperatorMessage::CredentialsEdit(message) => {
                 if let Some(item) = loot_item_from_flat_info(&message.info, LootKind::Credential) {
-                    self.upsert_loot(item);
+                    self.upsert_loot(item.clone());
+                    events.push(AppEvent::LootCaptured(item));
                 }
             }
             OperatorMessage::CredentialsRemove(message) => {
@@ -428,7 +455,8 @@ impl AppState {
             }
             OperatorMessage::HostFileAdd(message) => {
                 if let Some(item) = loot_item_from_flat_info(&message.info, LootKind::File) {
-                    self.upsert_loot(item);
+                    self.upsert_loot(item.clone());
+                    events.push(AppEvent::LootCaptured(item));
                 }
             }
             OperatorMessage::HostFileRemove(message) => {
@@ -628,7 +656,8 @@ impl AppState {
 
         if response_is_loot_notification(&message.info) {
             if let Some(loot_item) = loot_item_from_response(&message.info) {
-                self.upsert_loot(loot_item);
+                self.upsert_loot(loot_item.clone());
+                events.push(AppEvent::LootCaptured(loot_item));
             }
             return events;
         }
@@ -638,13 +667,19 @@ impl AppState {
             return events;
         }
 
-        if let Some(task_id) = extra_string(&message.info.extra, "TaskID") {
+        let task_id = extra_string(&message.info.extra, "TaskID").unwrap_or_default();
+        if !task_id.is_empty() {
             events.push(AppEvent::AgentTaskResult {
-                task_id,
+                task_id: task_id.clone(),
                 agent_id: agent_id.clone(),
                 output: output.clone(),
             });
         }
+        events.push(AppEvent::CommandResponse {
+            agent_id: agent_id.clone(),
+            task_id,
+            output: output.clone(),
+        });
 
         self.agent_consoles.entry(agent_id).or_default().push(AgentConsoleEntry {
             kind: AgentConsoleEntryKind::from_command_id(&message.info.command_id),
@@ -911,6 +946,25 @@ async fn run_receive_loop(
                                     }
                                     AppEvent::AgentTaskResult { task_id, agent_id, output } => {
                                         runtime.notify_task_result(task_id, agent_id, output);
+                                    }
+                                    AppEvent::CommandResponse { agent_id, task_id, output } => {
+                                        if let Err(error) =
+                                            runtime.emit_command_response(agent_id, task_id, output)
+                                        {
+                                            warn!(error = %error, "failed to deliver python command response event");
+                                        }
+                                    }
+                                    AppEvent::LootCaptured(loot_item) => {
+                                        if let Err(error) = runtime.emit_loot_captured(loot_item) {
+                                            warn!(error = %error, "failed to deliver python loot captured event");
+                                        }
+                                    }
+                                    AppEvent::ListenerChanged { name, action } => {
+                                        if let Err(error) =
+                                            runtime.emit_listener_changed(name, action)
+                                        {
+                                            warn!(error = %error, "failed to deliver python listener changed event");
+                                        }
                                     }
                                 }
                             }
@@ -1712,7 +1766,10 @@ mod tests {
         assert_eq!(state.agents[0].status, "Alive");
         assert!(state.agents[0].pivot_parent.is_none());
         assert!(state.agents[0].pivot_links.is_empty());
-        assert!(listener_events.is_empty());
+        assert_eq!(
+            listener_events,
+            vec![AppEvent::ListenerChanged { name: "http".to_owned(), action: "start".to_owned() }]
+        );
         assert_eq!(new_events, vec![AppEvent::AgentCheckin("ABCD1234".to_owned())]);
         assert_eq!(update_events, vec![AppEvent::AgentCheckin("ABCD1234".to_owned())]);
     }

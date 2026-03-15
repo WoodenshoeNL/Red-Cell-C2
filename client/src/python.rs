@@ -41,6 +41,13 @@ struct RegisteredAgentCheckinCallback {
     callback: Arc<Py<PyAny>>,
 }
 
+/// Generic callback record used for event callbacks with no variant-specific metadata.
+#[derive(Clone, Debug)]
+struct EventCallback {
+    script_name: String,
+    callback: Arc<Py<PyAny>>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct MatchedCommand {
     name: String,
@@ -75,6 +82,9 @@ struct PythonApiState {
     app_state: SharedAppState,
     commands: Mutex<BTreeMap<String, RegisteredCommand>>,
     agent_checkin_callbacks: Mutex<Vec<RegisteredAgentCheckinCallback>>,
+    command_response_callbacks: Mutex<Vec<EventCallback>>,
+    loot_captured_callbacks: Mutex<Vec<EventCallback>>,
+    listener_changed_callbacks: Mutex<Vec<EventCallback>>,
     script_tabs: Mutex<BTreeMap<String, ScriptTabRecord>>,
     current_script: Mutex<Option<String>>,
     output_entries: Mutex<Vec<ScriptOutputEntry>>,
@@ -181,6 +191,37 @@ impl PythonApiState {
         Ok(())
     }
 
+    fn register_command_response_callback(&self, callback: Py<PyAny>) -> PyResult<()> {
+        let script_name = self.current_script_name().ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "red_cell.on_command_response must be called while a script loads",
+            )
+        })?;
+        lock_mutex(&self.command_response_callbacks)
+            .push(EventCallback { script_name, callback: Arc::new(callback) });
+        Ok(())
+    }
+
+    fn register_loot_captured_callback(&self, callback: Py<PyAny>) -> PyResult<()> {
+        let script_name = self.current_script_name().ok_or_else(|| {
+            PyRuntimeError::new_err("red_cell.on_loot_captured must be called while a script loads")
+        })?;
+        lock_mutex(&self.loot_captured_callbacks)
+            .push(EventCallback { script_name, callback: Arc::new(callback) });
+        Ok(())
+    }
+
+    fn register_listener_changed_callback(&self, callback: Py<PyAny>) -> PyResult<()> {
+        let script_name = self.current_script_name().ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "red_cell.on_listener_changed must be called while a script loads",
+            )
+        })?;
+        lock_mutex(&self.listener_changed_callbacks)
+            .push(EventCallback { script_name, callback: Arc::new(callback) });
+        Ok(())
+    }
+
     fn register_tab(&self, title: String, callback: Option<Py<PyAny>>) -> PyResult<()> {
         let script_name = self.current_script_name().ok_or_else(|| {
             PyRuntimeError::new_err("havocui.CreateTab must be called while a script loads")
@@ -224,6 +265,12 @@ impl PythonApiState {
     fn clear_script_bindings(&self, script_name: &str) {
         lock_mutex(&self.commands).retain(|_, command| command.script_name != script_name);
         lock_mutex(&self.agent_checkin_callbacks)
+            .retain(|callback| callback.script_name != script_name);
+        lock_mutex(&self.command_response_callbacks)
+            .retain(|callback| callback.script_name != script_name);
+        lock_mutex(&self.loot_captured_callbacks)
+            .retain(|callback| callback.script_name != script_name);
+        lock_mutex(&self.listener_changed_callbacks)
             .retain(|callback| callback.script_name != script_name);
         lock_mutex(&self.script_tabs).retain(|_, tab| tab.script_name != script_name);
         if let Some(record) = lock_mutex(&self.script_records).get_mut(script_name) {
@@ -454,6 +501,81 @@ impl PythonApiState {
         }
     }
 
+    fn invoke_command_response_callbacks(
+        &self,
+        py: Python<'_>,
+        agent_id: &str,
+        task_id: &str,
+        output: &str,
+    ) {
+        let callbacks = lock_mutex(&self.command_response_callbacks).clone();
+        for callback in callbacks {
+            self.begin_script_execution(&callback.script_name);
+            let call_result = callback.callback.bind(py).call1((agent_id, task_id, output));
+            if let Err(error) = call_result {
+                let message = format!("command response callback failed: {error}\n");
+                let _ = self.push_output(
+                    Some(&callback.script_name),
+                    ScriptOutputStream::Stderr,
+                    &message,
+                );
+                warn!(agent_id, task_id, error = %error, "python command response callback failed");
+            }
+            self.end_script_execution();
+        }
+    }
+
+    fn invoke_loot_captured_callbacks(
+        &self,
+        py: Python<'_>,
+        loot_item: &crate::transport::LootItem,
+    ) {
+        let callbacks = lock_mutex(&self.loot_captured_callbacks).clone();
+        if callbacks.is_empty() {
+            return;
+        }
+        let py_loot = match Py::new(py, PyLootItem::from_loot_item(loot_item)) {
+            Ok(item) => item,
+            Err(error) => {
+                warn!(error = %error, "failed to construct python loot item proxy");
+                return;
+            }
+        };
+        for callback in callbacks {
+            self.begin_script_execution(&callback.script_name);
+            let call_result =
+                callback.callback.bind(py).call1((&loot_item.agent_id, py_loot.clone_ref(py)));
+            if let Err(error) = call_result {
+                let message = format!("loot captured callback failed: {error}\n");
+                let _ = self.push_output(
+                    Some(&callback.script_name),
+                    ScriptOutputStream::Stderr,
+                    &message,
+                );
+                warn!(error = %error, "python loot captured callback failed");
+            }
+            self.end_script_execution();
+        }
+    }
+
+    fn invoke_listener_changed_callbacks(&self, py: Python<'_>, listener_name: &str, action: &str) {
+        let callbacks = lock_mutex(&self.listener_changed_callbacks).clone();
+        for callback in callbacks {
+            self.begin_script_execution(&callback.script_name);
+            let call_result = callback.callback.bind(py).call1((listener_name, action));
+            if let Err(error) = call_result {
+                let message = format!("listener changed callback failed: {error}\n");
+                let _ = self.push_output(
+                    Some(&callback.script_name),
+                    ScriptOutputStream::Stderr,
+                    &message,
+                );
+                warn!(listener_name, action, error = %error, "python listener changed callback failed");
+            }
+            self.end_script_execution();
+        }
+    }
+
     fn execute_registered_command(
         &self,
         py: Python<'_>,
@@ -518,6 +640,16 @@ impl PythonApiState {
 #[derive(Debug)]
 enum PythonThreadCommand {
     EmitAgentCheckin(String),
+    EmitCommandResponse {
+        agent_id: String,
+        task_id: String,
+        output: String,
+    },
+    EmitLootCaptured(crate::transport::LootItem),
+    EmitListenerChanged {
+        name: String,
+        action: String,
+    },
     ActivateTab {
         title: String,
         response_tx: SyncSender<Result<(), String>>,
@@ -628,6 +760,9 @@ impl PythonRuntime {
             app_state,
             commands: Mutex::new(BTreeMap::new()),
             agent_checkin_callbacks: Mutex::new(Vec::new()),
+            command_response_callbacks: Mutex::new(Vec::new()),
+            loot_captured_callbacks: Mutex::new(Vec::new()),
+            listener_changed_callbacks: Mutex::new(Vec::new()),
             script_tabs: Mutex::new(BTreeMap::new()),
             current_script: Mutex::new(None),
             output_entries: Mutex::new(Vec::new()),
@@ -731,6 +866,42 @@ impl PythonRuntime {
             .map_err(|_| PythonRuntimeError::ThreadUnavailable)
     }
 
+    /// Queue a command-response callback dispatch on the Python thread.
+    pub(crate) fn emit_command_response(
+        &self,
+        agent_id: String,
+        task_id: String,
+        output: String,
+    ) -> Result<(), PythonRuntimeError> {
+        self.inner
+            .command_tx
+            .send(PythonThreadCommand::EmitCommandResponse { agent_id, task_id, output })
+            .map_err(|_| PythonRuntimeError::ThreadUnavailable)
+    }
+
+    /// Queue a loot-captured callback dispatch on the Python thread.
+    pub(crate) fn emit_loot_captured(
+        &self,
+        loot_item: crate::transport::LootItem,
+    ) -> Result<(), PythonRuntimeError> {
+        self.inner
+            .command_tx
+            .send(PythonThreadCommand::EmitLootCaptured(loot_item))
+            .map_err(|_| PythonRuntimeError::ThreadUnavailable)
+    }
+
+    /// Queue a listener-changed callback dispatch on the Python thread.
+    pub(crate) fn emit_listener_changed(
+        &self,
+        name: String,
+        action: String,
+    ) -> Result<(), PythonRuntimeError> {
+        self.inner
+            .command_tx
+            .send(PythonThreadCommand::EmitListenerChanged { name, action })
+            .map_err(|_| PythonRuntimeError::ThreadUnavailable)
+    }
+
     /// Execute a script-registered command if the console input matches one.
     pub(crate) fn execute_registered_command(
         &self,
@@ -815,6 +986,21 @@ fn python_thread_main(
         match command {
             PythonThreadCommand::EmitAgentCheckin(agent_id) => {
                 Python::with_gil(|py| api_state.invoke_agent_checkin_callbacks(py, &agent_id));
+            }
+            PythonThreadCommand::EmitCommandResponse { agent_id, task_id, output } => {
+                Python::with_gil(|py| {
+                    api_state.invoke_command_response_callbacks(py, &agent_id, &task_id, &output);
+                });
+            }
+            PythonThreadCommand::EmitLootCaptured(loot_item) => {
+                Python::with_gil(|py| {
+                    api_state.invoke_loot_captured_callbacks(py, &loot_item);
+                });
+            }
+            PythonThreadCommand::EmitListenerChanged { name, action } => {
+                Python::with_gil(|py| {
+                    api_state.invoke_listener_changed_callbacks(py, &name, &action);
+                });
             }
             PythonThreadCommand::ActivateTab { title, response_tx } => {
                 let result = Python::with_gil(|py| api_state.activate_tab(py, &title));
@@ -1016,6 +1202,9 @@ fn populate_api_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(register_command, module)?)?;
     module.add_function(wrap_pyfunction!(register_callback, module)?)?;
     module.add_function(wrap_pyfunction!(on_agent_checkin, module)?)?;
+    module.add_function(wrap_pyfunction!(on_command_response, module)?)?;
+    module.add_function(wrap_pyfunction!(on_loot_captured, module)?)?;
+    module.add_function(wrap_pyfunction!(on_listener_changed, module)?)?;
     module.add_function(wrap_pyfunction!(agent, module)?)?;
     module.add_function(wrap_pyfunction!(agents, module)?)?;
     module.add_function(wrap_pyfunction!(listener, module)?)?;
@@ -1419,6 +1608,24 @@ impl PyEventRegistrar {
     fn on_agent_checkin(&self, callback: Bound<'_, PyAny>) -> PyResult<()> {
         self.on_new_session(callback)
     }
+
+    #[pyo3(name = "OnCommandResponse")]
+    fn on_command_response(&self, callback: Bound<'_, PyAny>) -> PyResult<()> {
+        ensure_callable(&callback)?;
+        active_api_state()?.register_command_response_callback(callback.unbind())
+    }
+
+    #[pyo3(name = "OnLootCaptured")]
+    fn on_loot_captured(&self, callback: Bound<'_, PyAny>) -> PyResult<()> {
+        ensure_callable(&callback)?;
+        active_api_state()?.register_loot_captured_callback(callback.unbind())
+    }
+
+    #[pyo3(name = "OnListenerChanged")]
+    fn on_listener_changed(&self, callback: Bound<'_, PyAny>) -> PyResult<()> {
+        ensure_callable(&callback)?;
+        active_api_state()?.register_listener_changed_callback(callback.unbind())
+    }
 }
 
 #[pyclass(name = "Listener")]
@@ -1664,6 +1871,35 @@ fn on_agent_checkin(callback: Bound<'_, PyAny>) -> PyResult<()> {
     ensure_callable(&callback)?;
     let api_state = active_api_state()?;
     api_state.register_agent_checkin_callback(callback.unbind(), AgentCheckinCallbackMode::Agent)
+}
+
+/// Register a callback that fires whenever any command output arrives from an agent.
+///
+/// The callback receives `(agent_id: str, task_id: str, output: str)`.
+/// `task_id` is empty when the response does not belong to a tracked task.
+#[pyfunction]
+fn on_command_response(callback: Bound<'_, PyAny>) -> PyResult<()> {
+    ensure_callable(&callback)?;
+    active_api_state()?.register_command_response_callback(callback.unbind())
+}
+
+/// Register a callback that fires when a loot item (credential, file, etc.) is captured.
+///
+/// The callback receives `(agent_id: str, loot: LootItem)`.
+#[pyfunction]
+fn on_loot_captured(callback: Bound<'_, PyAny>) -> PyResult<()> {
+    ensure_callable(&callback)?;
+    active_api_state()?.register_loot_captured_callback(callback.unbind())
+}
+
+/// Register a callback that fires when a listener is started, stopped, or edited.
+///
+/// The callback receives `(listener_id: str, action: str)` where `action` is one of
+/// `"start"`, `"stop"`, or `"edit"`.
+#[pyfunction]
+fn on_listener_changed(callback: Bound<'_, PyAny>) -> PyResult<()> {
+    ensure_callable(&callback)?;
+    active_api_state()?.register_listener_changed_callback(callback.unbind())
 }
 
 #[pyfunction]
@@ -2883,5 +3119,130 @@ havoc.RegisterCommand(function=queue, module='ops', command='pwd', description='
         .unwrap_or_else(|error| panic!("get_task_result should not error: {error}"));
 
         assert!(is_none, "get_task_result should return None on timeout");
+    }
+
+    #[test]
+    fn runtime_dispatches_command_response_callbacks() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let output_path = temp_dir.path().join("response.txt");
+        let script = format!(
+            "import pathlib\nimport red_cell\n\
+def on_resp(agent_id, task_id, output):\n    pathlib.Path({output:?}).write_text(agent_id + ':' + task_id + ':' + output)\n\
+red_cell.on_command_response(on_resp)\n",
+            output = output_path.display().to_string()
+        );
+        write_script(&temp_dir.path().join("resp.py"), &script);
+
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        runtime
+            .emit_command_response(
+                "AABBCCDD".to_owned(),
+                "TASKID01".to_owned(),
+                "whoami output".to_owned(),
+            )
+            .unwrap_or_else(|error| panic!("emit_command_response should succeed: {error}"));
+
+        assert_eq!(
+            wait_for_file_contents(&output_path).as_deref(),
+            Some("AABBCCDD:TASKID01:whoami output")
+        );
+    }
+
+    #[test]
+    fn runtime_dispatches_loot_captured_callbacks() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let output_path = temp_dir.path().join("loot.txt");
+        let script = format!(
+            "import pathlib\nimport red_cell\n\
+def on_loot(agent_id, loot):\n    pathlib.Path({output:?}).write_text(agent_id + ':' + loot.type + ':' + loot.name)\n\
+red_cell.on_loot_captured(on_loot)\n",
+            output = output_path.display().to_string()
+        );
+        write_script(&temp_dir.path().join("loot.py"), &script);
+
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        let loot_item = sample_loot_item(
+            "AABBCCDD",
+            crate::transport::LootKind::Credential,
+            "domain\\user:pass",
+            Some("dXNlcjpwYXNz"),
+        );
+        runtime
+            .emit_loot_captured(loot_item)
+            .unwrap_or_else(|error| panic!("emit_loot_captured should succeed: {error}"));
+
+        assert_eq!(
+            wait_for_file_contents(&output_path).as_deref(),
+            Some("AABBCCDD:Credential:domain\\user:pass")
+        );
+    }
+
+    #[test]
+    fn runtime_dispatches_listener_changed_callbacks() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let output_path = temp_dir.path().join("listener.txt");
+        let script = format!(
+            "import pathlib\nimport red_cell\n\
+def on_listener(listener_id, action):\n    pathlib.Path({output:?}).write_text(listener_id + ':' + action)\n\
+red_cell.on_listener_changed(on_listener)\n",
+            output = output_path.display().to_string()
+        );
+        write_script(&temp_dir.path().join("listener_cb.py"), &script);
+
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        runtime
+            .emit_listener_changed("https-listener".to_owned(), "start".to_owned())
+            .unwrap_or_else(|error| panic!("emit_listener_changed should succeed: {error}"));
+
+        assert_eq!(wait_for_file_contents(&output_path).as_deref(), Some("https-listener:start"));
+    }
+
+    #[test]
+    fn event_registrar_exposes_new_event_methods() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let output_path = temp_dir.path().join("event_registrar.txt");
+        let script = format!(
+            "import pathlib\nimport havoc\n\
+event = havoc.Event('test')\n\
+def on_resp(agent_id, task_id, output):\n    pathlib.Path({output:?}).write_text('resp:' + agent_id)\n\
+event.OnCommandResponse(on_resp)\n",
+            output = output_path.display().to_string()
+        );
+        write_script(&temp_dir.path().join("event_reg.py"), &script);
+
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        runtime
+            .emit_command_response("DEADBEEF".to_owned(), String::new(), "output".to_owned())
+            .unwrap_or_else(|error| panic!("emit_command_response should succeed: {error}"));
+
+        assert_eq!(wait_for_file_contents(&output_path).as_deref(), Some("resp:DEADBEEF"));
     }
 }

@@ -640,7 +640,7 @@ fn pack_http_listener(
             ),
         });
     }
-    add_wstring(out, method)?;
+    add_wstring(out, &method.to_ascii_uppercase())?;
     add_u32(out, if config.host_rotation.eq_ignore_ascii_case("round-robin") { 0 } else { 1 });
 
     add_u32(
@@ -1693,8 +1693,19 @@ mod tests {
     #[test]
     fn pack_config_accepts_post_method_case_insensitive() -> Result<(), Box<dyn std::error::Error>>
     {
-        let listener = http_listener_with_method(Some("post"));
-        pack_config(&listener, &minimal_config_json()).expect("lowercase post should be accepted");
+        let canonical = {
+            let listener = http_listener_with_method(Some("POST"));
+            pack_config(&listener, &minimal_config_json()).expect("POST should be accepted")
+        };
+        let normalised = {
+            let listener = http_listener_with_method(Some("post"));
+            pack_config(&listener, &minimal_config_json())
+                .expect("lowercase post should be accepted")
+        };
+        assert_eq!(
+            canonical, normalised,
+            "method=post must produce identical bytes to method=POST after case normalisation"
+        );
         Ok(())
     }
 

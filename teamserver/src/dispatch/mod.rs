@@ -513,6 +513,20 @@ impl CommandDispatcher {
             },
         );
 
+        let inline_execute_events = events.clone();
+        self.register_handler(
+            u32::from(DemonCommand::CommandInlineExecute),
+            move |agent_id, request_id, payload| {
+                let events = inline_execute_events.clone();
+                Box::pin(async move {
+                    assembly::handle_inline_execute_callback(
+                        &events, agent_id, request_id, &payload,
+                    )
+                    .await
+                })
+            },
+        );
+
         let assembly_events = events.clone();
         self.register_handler(
             u32::from(DemonCommand::CommandAssemblyInlineExecute),
@@ -6212,6 +6226,117 @@ mod tests {
         );
         assert!(message.info.output.contains("v2.0.50727"));
         assert!(message.info.output.contains("v4.0.30319"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn inline_execute_bof_output_broadcasts_agent_response()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0xB0B1B2B3, [0x11; AGENT_KEY_LENGTH], [0x22; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        // BOF_CALLBACK_OUTPUT (0x00): standard output from the BOF
+        let mut payload = Vec::new();
+        add_u32(&mut payload, 0x00);
+        add_bytes(&mut payload, b"hello from BOF");
+        dispatcher
+            .dispatch(0xB0B1B2B3, u32::from(DemonCommand::CommandInlineExecute), 1, &payload)
+            .await?;
+        let event = receiver.recv().await.ok_or("bof output response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Type"),
+            Some(&Value::String("Output".to_owned()))
+        );
+        assert_eq!(message.info.extra.get("Message"), Some(&Value::String("hello from BOF".to_owned())));
+
+        // BOF_RAN_OK (3): completion confirmation
+        let mut ran_ok = Vec::new();
+        add_u32(&mut ran_ok, 3);
+        dispatcher
+            .dispatch(0xB0B1B2B3, u32::from(DemonCommand::CommandInlineExecute), 2, &ran_ok)
+            .await?;
+        let event = receiver.recv().await.ok_or("bof ran-ok response missing")?;
+        let OperatorMessage::AgentResponse(ok_message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            ok_message.info.extra.get("Message"),
+            Some(&Value::String("BOF execution completed".to_owned()))
+        );
+
+        // BOF_EXCEPTION (1): exception code + address
+        let mut exc = Vec::new();
+        add_u32(&mut exc, 1);
+        add_u32(&mut exc, 0xC000_0005_u32); // STATUS_ACCESS_VIOLATION
+        add_u64(&mut exc, 0x0000_7FF7_DEAD_BEEF_u64);
+        dispatcher
+            .dispatch(0xB0B1B2B3, u32::from(DemonCommand::CommandInlineExecute), 3, &exc)
+            .await?;
+        let event = receiver.recv().await.ok_or("bof exception response missing")?;
+        let OperatorMessage::AgentResponse(exc_message) = event else {
+            panic!("expected agent response event");
+        };
+        assert!(
+            exc_message
+                .info
+                .extra
+                .get("Message")
+                .and_then(|v| v.as_str())
+                .map(|s| s.contains("0xC0000005") && s.contains("0x00007FF7DEADBEEF"))
+                .unwrap_or(false),
+            "exception message must include code and address"
+        );
+
+        // BOF_SYMBOL_NOT_FOUND (2): missing symbol name
+        let mut sym = Vec::new();
+        add_u32(&mut sym, 2);
+        add_bytes(&mut sym, b"kernel32.VirtualAllocEx");
+        dispatcher
+            .dispatch(0xB0B1B2B3, u32::from(DemonCommand::CommandInlineExecute), 4, &sym)
+            .await?;
+        let event = receiver.recv().await.ok_or("bof symbol-not-found response missing")?;
+        let OperatorMessage::AgentResponse(sym_message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            sym_message.info.extra.get("Message"),
+            Some(&Value::String(
+                "Symbol not found: kernel32.VirtualAllocEx".to_owned()
+            ))
+        );
+
+        // BOF_COULD_NOT_RUN (4): loader failed to start
+        let mut no_run = Vec::new();
+        add_u32(&mut no_run, 4);
+        dispatcher
+            .dispatch(0xB0B1B2B3, u32::from(DemonCommand::CommandInlineExecute), 5, &no_run)
+            .await?;
+        let event = receiver.recv().await.ok_or("bof could-not-run response missing")?;
+        let OperatorMessage::AgentResponse(no_run_message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            no_run_message.info.extra.get("Message"),
+            Some(&Value::String("Failed to execute object file".to_owned()))
+        );
+
         Ok(())
     }
 

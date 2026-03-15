@@ -36,10 +36,14 @@ use crate::{
     AgentRegistry, AuditResultStatus, AuditWebhookNotifier, AuthError, AuthService,
     AuthenticationFailure, AuthenticationResult, Database, EventBus, Job, ListenerEventAction,
     ListenerManager, PayloadBuilderService, ShutdownController, SocketRelayManager,
-    action_from_mark, agent_events::agent_new_event, audit_details, authorize_websocket_command,
-    listener_config_from_operator, listener_error_event, listener_event_for_action,
-    listener_removed_event, login_failure_message, login_parameters, login_success_message,
-    operator_requests_start, parameter_object, record_operator_action_with_notifications,
+    action_from_mark,
+    agent_events::agent_new_event,
+    audit_details, authorize_websocket_command, listener_config_from_operator,
+    listener_error_event, listener_event_for_action, listener_removed_event, login_failure_message,
+    login_parameters, login_success_message, operator_requests_start, parameter_object,
+    rate_limiter::AttemptWindow,
+    rate_limiter::{evict_oldest_windows, prune_expired_windows},
+    record_operator_action_with_notifications,
 };
 
 const DEMON_MAX_RESPONSE_LENGTH: usize = 0x01E0_0000;
@@ -119,19 +123,7 @@ const OPERATOR_MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 /// rejected until the window expires.
 #[derive(Debug, Clone, Default)]
 pub struct LoginRateLimiter {
-    windows: Arc<tokio::sync::Mutex<HashMap<IpAddr, LoginAttemptWindow>>>,
-}
-
-#[derive(Debug)]
-struct LoginAttemptWindow {
-    failed_attempts: u32,
-    window_start: Instant,
-}
-
-impl Default for LoginAttemptWindow {
-    fn default() -> Self {
-        Self { failed_attempts: 0, window_start: Instant::now() }
-    }
+    windows: Arc<tokio::sync::Mutex<HashMap<IpAddr, AttemptWindow>>>,
 }
 
 impl LoginRateLimiter {
@@ -153,7 +145,7 @@ impl LoginRateLimiter {
             return true;
         }
 
-        window.failed_attempts < MAX_FAILED_LOGIN_ATTEMPTS
+        window.attempts < MAX_FAILED_LOGIN_ATTEMPTS
     }
 
     /// Record a failed login attempt from the given IP.
@@ -161,18 +153,18 @@ impl LoginRateLimiter {
         let mut windows = self.windows.lock().await;
         let now = Instant::now();
 
-        prune_expired_login_windows(&mut windows, now);
+        prune_expired_windows(&mut windows, LOGIN_WINDOW_DURATION, now);
         if !windows.contains_key(&ip) && windows.len() >= MAX_LOGIN_ATTEMPT_WINDOWS {
-            evict_oldest_login_windows(&mut windows, MAX_LOGIN_ATTEMPT_WINDOWS / 2);
+            evict_oldest_windows(&mut windows, MAX_LOGIN_ATTEMPT_WINDOWS / 2);
         }
 
         let window = windows.entry(ip).or_default();
 
         if now.duration_since(window.window_start) >= LOGIN_WINDOW_DURATION {
-            window.failed_attempts = 1;
+            window.attempts = 1;
             window.window_start = now;
         } else {
-            window.failed_attempts += 1;
+            window.attempts += 1;
         }
     }
 
@@ -185,27 +177,6 @@ impl LoginRateLimiter {
     #[cfg(test)]
     async fn tracked_ip_count(&self) -> usize {
         self.windows.lock().await.len()
-    }
-}
-
-fn prune_expired_login_windows(windows: &mut HashMap<IpAddr, LoginAttemptWindow>, now: Instant) {
-    windows.retain(|_, window| now.duration_since(window.window_start) < LOGIN_WINDOW_DURATION);
-}
-
-fn evict_oldest_login_windows(
-    windows: &mut HashMap<IpAddr, LoginAttemptWindow>,
-    target_size: usize,
-) {
-    if windows.len() <= target_size {
-        return;
-    }
-
-    let to_remove = windows.len() - target_size;
-    let mut entries: Vec<_> =
-        windows.iter().map(|(ip, window)| (*ip, window.window_start)).collect();
-    entries.sort_unstable_by_key(|(_, window_start)| *window_start);
-    for (ip, _) in entries.into_iter().take(to_remove) {
-        windows.remove(&ip);
     }
 }
 
@@ -4718,8 +4689,8 @@ mod tests {
             let mut windows = limiter.windows.lock().await;
             windows.insert(
                 expired_ip,
-                super::LoginAttemptWindow {
-                    failed_attempts: 3,
+                crate::rate_limiter::AttemptWindow {
+                    attempts: 3,
                     window_start: Instant::now()
                         - super::LOGIN_WINDOW_DURATION
                         - Duration::from_secs(1),
@@ -4745,8 +4716,8 @@ mod tests {
             for i in 0..super::MAX_LOGIN_ATTEMPT_WINDOWS {
                 windows.insert(
                     IpAddr::from(std::net::Ipv4Addr::from(i as u32)),
-                    super::LoginAttemptWindow {
-                        failed_attempts: 1,
+                    crate::rate_limiter::AttemptWindow {
+                        attempts: 1,
                         window_start: now
                             - Duration::from_secs((super::MAX_LOGIN_ATTEMPT_WINDOWS - i) as u64),
                     },

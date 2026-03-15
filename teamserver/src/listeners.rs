@@ -48,9 +48,15 @@ use crate::{
     AgentRegistry, AuditResultStatus, CommandDispatchError, CommandDispatcher, Database,
     DemonPacketParser, DemonParserError, ListenerRepository, ListenerStatus, ParsedDemonPacket,
     PersistedListener, PersistedListenerState, PluginRuntime, ShutdownController,
-    SocketRelayManager, TeamserverError, agent_events::agent_new_event, audit_details,
-    build_init_ack, build_reconnect_ack, dispatch::DownloadTracker, events::EventBus,
-    json_error_response, parameter_object, record_operator_action,
+    SocketRelayManager, TeamserverError,
+    agent_events::agent_new_event,
+    audit_details, build_init_ack, build_reconnect_ack,
+    dispatch::DownloadTracker,
+    events::EventBus,
+    json_error_response, parameter_object,
+    rate_limiter::AttemptWindow,
+    rate_limiter::{evict_oldest_windows, prune_expired_windows},
+    record_operator_action,
 };
 
 use crate::DEFAULT_MAX_DOWNLOAD_BYTES;
@@ -68,19 +74,7 @@ const EXTRA_WORKING_HOURS: &str = "WorkingHours";
 
 #[derive(Clone, Debug, Default)]
 struct DemonInitRateLimiter {
-    windows: Arc<Mutex<HashMap<IpAddr, DemonInitAttemptWindow>>>,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct DemonInitAttemptWindow {
-    accepted_attempts: u32,
-    window_start: Instant,
-}
-
-impl Default for DemonInitAttemptWindow {
-    fn default() -> Self {
-        Self { accepted_attempts: 0, window_start: Instant::now() }
-    }
+    windows: Arc<Mutex<HashMap<IpAddr, AttemptWindow>>>,
 }
 
 impl DemonInitRateLimiter {
@@ -93,53 +87,28 @@ impl DemonInitRateLimiter {
         let mut windows = self.windows.lock().await;
         let now = Instant::now();
 
-        prune_expired_demon_init_windows(&mut windows, now);
+        prune_expired_windows(&mut windows, DEMON_INIT_WINDOW_DURATION, now);
         if !windows.contains_key(&ip) && windows.len() >= MAX_DEMON_INIT_ATTEMPT_WINDOWS {
-            evict_oldest_demon_init_windows(&mut windows, MAX_DEMON_INIT_ATTEMPT_WINDOWS / 2);
+            evict_oldest_windows(&mut windows, MAX_DEMON_INIT_ATTEMPT_WINDOWS / 2);
         }
 
         let window = windows.entry(ip).or_default();
         if now.duration_since(window.window_start) >= DEMON_INIT_WINDOW_DURATION {
-            window.accepted_attempts = 0;
+            window.attempts = 0;
             window.window_start = now;
         }
 
-        if window.accepted_attempts >= MAX_DEMON_INIT_ATTEMPTS_PER_IP {
+        if window.attempts >= MAX_DEMON_INIT_ATTEMPTS_PER_IP {
             return false;
         }
 
-        window.accepted_attempts += 1;
+        window.attempts += 1;
         true
     }
 
     #[cfg(test)]
     async fn tracked_ip_count(&self) -> usize {
         self.windows.lock().await.len()
-    }
-}
-
-fn prune_expired_demon_init_windows(
-    windows: &mut HashMap<IpAddr, DemonInitAttemptWindow>,
-    now: Instant,
-) {
-    windows
-        .retain(|_, window| now.duration_since(window.window_start) < DEMON_INIT_WINDOW_DURATION);
-}
-
-fn evict_oldest_demon_init_windows(
-    windows: &mut HashMap<IpAddr, DemonInitAttemptWindow>,
-    target_size: usize,
-) {
-    if windows.len() <= target_size {
-        return;
-    }
-
-    let to_remove = windows.len() - target_size;
-    let mut entries: Vec<_> =
-        windows.iter().map(|(ip, window)| (*ip, window.window_start)).collect();
-    entries.sort_unstable_by_key(|(_, window_start)| *window_start);
-    for (ip, _) in entries.into_iter().take(to_remove) {
-        windows.remove(&ip);
     }
 }
 
@@ -3163,8 +3132,8 @@ mod tests {
             let mut windows = limiter.windows.lock().await;
             windows.insert(
                 stale_ip,
-                super::DemonInitAttemptWindow {
-                    accepted_attempts: 1,
+                crate::rate_limiter::AttemptWindow {
+                    attempts: 1,
                     window_start: Instant::now()
                         - DEMON_INIT_WINDOW_DURATION
                         - Duration::from_secs(1),
@@ -3198,8 +3167,8 @@ mod tests {
                 let ip = IpAddr::V4(Ipv4Addr::new(10, a, b, c));
                 windows.insert(
                     ip,
-                    super::DemonInitAttemptWindow {
-                        accepted_attempts: 1,
+                    crate::rate_limiter::AttemptWindow {
+                        attempts: 1,
                         window_start: base_instant + Duration::from_secs(i as u64),
                     },
                 );

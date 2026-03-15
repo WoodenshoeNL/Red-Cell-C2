@@ -613,6 +613,28 @@ mod tests {
     }
 
     #[test]
+    fn audit_record_requires_id() {
+        let error = AuditRecord::try_from(AuditLogEntry {
+            id: None,
+            actor: "operator".to_owned(),
+            action: "agent.task".to_owned(),
+            target_kind: "agent".to_owned(),
+            target_id: Some("DEADBEEF".to_owned()),
+            details: None,
+            occurred_at: "2026-03-10T12:00:00Z".to_owned(),
+        })
+        .expect_err("missing id should fail");
+
+        match error {
+            TeamserverError::InvalidPersistedValue { field, message } => {
+                assert_eq!(field, "id");
+                assert_eq!(message, "audit log row was missing an id");
+            }
+            other => panic!("expected invalid persisted value error, got {other}"),
+        }
+    }
+
+    #[test]
     fn session_activity_record_rejects_non_operator_actions() {
         let error = SessionActivityRecord::try_from(AuditLogEntry {
             id: Some(7),

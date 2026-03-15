@@ -46,7 +46,7 @@ use crate::{
     record_operator_action_with_notifications,
 };
 
-const DEMON_MAX_RESPONSE_LENGTH: usize = 0x01E0_0000;
+use crate::MAX_AGENT_MESSAGE_LEN;
 
 /// Tracks currently connected operator WebSocket clients.
 #[derive(Debug, Clone, Default)]
@@ -1445,7 +1445,7 @@ fn build_upload_jobs(
     let memfile_id = random_u32();
     let mut jobs = Vec::new();
 
-    for chunk in content.chunks(DEMON_MAX_RESPONSE_LENGTH) {
+    for chunk in content.chunks(MAX_AGENT_MESSAGE_LEN) {
         let mut payload = Vec::new();
         write_u32(&mut payload, memfile_id);
         write_u64(&mut payload, u64::try_from(content.len()).unwrap_or_default());
@@ -2532,7 +2532,7 @@ mod tests {
     use std::net::IpAddr;
 
     use super::{
-        AgentCommandError, DEMON_MAX_RESPONSE_LENGTH, LoginRateLimiter, OperatorConnectionManager,
+        AgentCommandError, LoginRateLimiter, MAX_AGENT_MESSAGE_LEN, OperatorConnectionManager,
         build_job, build_jobs, encode_utf16, routes, teamserver_log_event,
         write_len_prefixed_bytes, write_u32,
     };
@@ -3669,7 +3669,7 @@ mod tests {
 
     #[test]
     fn build_jobs_splits_upload_into_memfile_chunks_and_final_fs_job() {
-        let content = vec![0x41; DEMON_MAX_RESPONSE_LENGTH + 16];
+        let content = vec![0x41; MAX_AGENT_MESSAGE_LEN + 16];
         let jobs = build_jobs(
             &AgentTaskInfo {
                 task_id: "2F".to_owned(),

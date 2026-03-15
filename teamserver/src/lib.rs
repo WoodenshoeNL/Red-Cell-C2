@@ -52,6 +52,13 @@ pub use demon::{
 /// Default maximum bytes allowed for a single agent download.
 pub const DEFAULT_MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 
+/// Maximum bytes for a single agent↔teamserver message in either direction.
+///
+/// Applied as:
+/// - the HTTP body limit in [`listeners`] (agent → teamserver)
+/// - the WebSocket chunk size in [`websocket`] (teamserver → operator console)
+pub const MAX_AGENT_MESSAGE_LEN: usize = 0x01E0_0000; // 30 MiB
+
 pub use dispatch::{CommandDispatchError, CommandDispatcher};
 pub use events::{EventBus, EventReceiver};
 pub use listeners::{

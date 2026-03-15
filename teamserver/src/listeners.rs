@@ -746,7 +746,7 @@ const DEFAULT_HTTP_METHOD: &str = "POST";
 const MINIMUM_DEMON_CALLBACK_BYTES: usize = DemonHeader::SERIALIZED_LEN + 8;
 const SMB_PIPE_PREFIX: &str = r"\\.\pipe\";
 const MAX_SMB_FRAME_PAYLOAD_LEN: usize = 16 * 1024 * 1024;
-const MAX_AGENT_REQUEST_BODY_LEN: usize = 0x01E0_0000; // ~30 MiB — matches DEMON_MAX_RESPONSE_LENGTH
+use crate::MAX_AGENT_MESSAGE_LEN;
 const HEADER_VALIDATION_IGNORES: [&str; 2] = ["connection", "accept-encoding"];
 type ListenerRuntimeFuture = Pin<Box<dyn Future<Output = ListenerRuntimeResult> + Send>>;
 type ListenerRuntimeResult = Result<(), String>;
@@ -2521,7 +2521,7 @@ async fn http_listener_handler(
         &request,
     );
     let (_, body) = request.into_parts();
-    let Ok(body) = to_bytes(body, MAX_AGENT_REQUEST_BODY_LEN).await else {
+    let Ok(body) = to_bytes(body, MAX_AGENT_MESSAGE_LEN).await else {
         return state.fake_404_response();
     };
 
@@ -3003,7 +3003,7 @@ mod tests {
         DNS_TYPE_A, DNS_TYPE_CNAME, DNS_TYPE_TXT, DNS_UPLOAD_TIMEOUT_SECS, DemonInitRateLimiter,
         DnsListenerState, DnsPendingResponse, DnsPendingUpload, DnsUploadAssembly, DownloadTracker,
         ListenerEventAction, ListenerManager, ListenerManagerError, ListenerStatus,
-        ListenerSummary, MAX_AGENT_REQUEST_BODY_LEN, MAX_DEMON_INIT_ATTEMPT_WINDOWS,
+        ListenerSummary, MAX_AGENT_MESSAGE_LEN, MAX_DEMON_INIT_ATTEMPT_WINDOWS,
         MAX_DEMON_INIT_ATTEMPTS_PER_IP, MAX_SMB_FRAME_PAYLOAD_LEN, TrustedProxyPeer,
         action_from_mark, base32hex_decode, base32hex_encode, build_dns_txt_response,
         chunk_response_to_b32hex, dns_allowed_query_types, extract_external_ip,
@@ -3694,7 +3694,7 @@ mod tests {
         manager.start("edge-http-oversize").await?;
         wait_for_listener(port, false).await?;
 
-        let oversized = vec![0xAA_u8; MAX_AGENT_REQUEST_BODY_LEN + 1];
+        let oversized = vec![0xAA_u8; MAX_AGENT_MESSAGE_LEN + 1];
         let response =
             Client::new().post(format!("http://127.0.0.1:{port}/")).body(oversized).send().await?;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);

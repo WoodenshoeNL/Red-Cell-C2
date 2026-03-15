@@ -2550,4 +2550,67 @@ mod tests {
 
         Ok(())
     }
+
+    /// Fire N+1 concurrent registrations at a registry that is one slot away from its cap.
+    ///
+    /// The write lock inside `insert_with_listener_and_ctr_offset` serialises the cap check and
+    /// the insertion atomically, so exactly one of the N+1 tasks must succeed and the remaining
+    /// N must return `TooManyAgents` (i.e. `MaxRegisteredAgentsExceeded`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_registration_at_cap_allows_exactly_one() -> Result<(), TeamserverError> {
+        const CAP: usize = 5;
+        const EXTRA: usize = 4; // N+1 racers = CAP + EXTRA, where EXTRA > 0
+
+        let database = test_database().await?;
+        let registry = Arc::new(AgentRegistry::with_max_registered_agents(database, CAP));
+
+        // Pre-fill the registry so it is one slot away from the limit.
+        for index in 0..(CAP - 1) as u32 {
+            let agent_id = 0x3300_0000 + index;
+            registry.insert(sample_agent(agent_id)).await?;
+        }
+        assert_eq!(registry.list().await.len(), CAP - 1);
+
+        // Spawn CAP - 1 + EXTRA + 1 = CAP + EXTRA tasks that all race to fill the last slot.
+        let racer_count = CAP + EXTRA; // one more than the cap
+        let mut tasks = tokio::task::JoinSet::new();
+        for index in 0..racer_count as u32 {
+            let registry = Arc::clone(&registry);
+            tasks.spawn(async move {
+                let agent_id = 0x3300_1000 + index;
+                registry
+                    .insert_with_listener_and_ctr_offset(sample_agent(agent_id), "http-race", 0)
+                    .await
+            });
+        }
+
+        let mut successes = 0u32;
+        let mut too_many = 0u32;
+        while let Some(outcome) = tasks.join_next().await {
+            match outcome.expect("task must not panic") {
+                Ok(()) => successes += 1,
+                Err(TeamserverError::MaxRegisteredAgentsExceeded { .. }) => too_many += 1,
+                Err(other) => {
+                    return Err(other);
+                }
+            }
+        }
+
+        assert_eq!(
+            successes, 1,
+            "exactly one concurrent registration must succeed when the cap is one slot away"
+        );
+        assert_eq!(
+            too_many,
+            racer_count as u32 - 1,
+            "all remaining racers must receive MaxRegisteredAgentsExceeded"
+        );
+        assert_eq!(
+            registry.list().await.len(),
+            CAP,
+            "registry must be exactly at the cap after the race"
+        );
+
+        Ok(())
+    }
 }

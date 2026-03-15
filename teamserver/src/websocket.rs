@@ -35,8 +35,8 @@ use uuid::Uuid;
 use crate::{
     AgentRegistry, AuditResultStatus, AuditWebhookNotifier, AuthError, AuthService,
     AuthenticationFailure, AuthenticationResult, Database, EventBus, Job, ListenerEventAction,
-    ListenerManager, PayloadBuilderService, ShutdownController, SocketRelayManager,
-    action_from_mark,
+    ListenerManager, PayloadBuildError, PayloadBuilderService, ShutdownController,
+    SocketRelayManager, action_from_mark,
     agent_events::agent_new_event,
     audit_details, authorize_websocket_command, listener_config_from_operator,
     listener_error_event, listener_event_for_action, listener_removed_event, login_failure_message,
@@ -1081,9 +1081,14 @@ async fn dispatch_operator_command<S>(
             let events = events.clone();
             let listeners = listeners.clone();
             let payload_builder = payload_builder.clone();
+            let database = database.clone();
+            let webhooks = webhooks.clone();
+            let listener_name = message.info.listener.clone();
+            let arch = message.info.arch.clone();
+            let format = message.info.format.clone();
 
             tokio::spawn(async move {
-                let summary = match listeners.summary(&message.info.listener).await {
+                let summary = match listeners.summary(&listener_name).await {
                     Ok(summary) => summary,
                     Err(error) => {
                         events.broadcast(build_payload_message_event(
@@ -1112,13 +1117,81 @@ async fn dispatch_operator_command<S>(
                             &artifact.format,
                             artifact.bytes.as_slice(),
                         ));
+                        log_operator_action(
+                            &database,
+                            &webhooks,
+                            &actor,
+                            "payload.build",
+                            "payload",
+                            Some(listener_name.clone()),
+                            audit_details(
+                                AuditResultStatus::Success,
+                                None,
+                                None,
+                                Some(parameter_object([
+                                    ("listener", Value::String(listener_name)),
+                                    ("arch", Value::String(arch)),
+                                    ("format", Value::String(format)),
+                                ])),
+                            ),
+                        )
+                        .await;
                     }
                     Err(error) => {
+                        // Forward the human-readable error summary to the operator console.
                         events.broadcast(build_payload_message_event(
                             &actor,
                             "Error",
                             &error.to_string(),
                         ));
+
+                        // When the compiler exited with structured diagnostics, send each
+                        // diagnostic as its own progress message for source-context display.
+                        let diagnostic_params =
+                            if let PayloadBuildError::CommandFailed { ref diagnostics, .. } = error
+                            {
+                                for diag in diagnostics {
+                                    events.broadcast(build_payload_message_event(
+                                        &actor,
+                                        match diag.severity.as_str() {
+                                            "error" | "fatal error" => "Error",
+                                            "warning" => "Warning",
+                                            _ => "Info",
+                                        },
+                                        &format_diagnostic(diag),
+                                    ));
+                                }
+                                serde_json::to_value(diagnostics).ok()
+                            } else {
+                                None
+                            };
+
+                        log_operator_action(
+                            &database,
+                            &webhooks,
+                            &actor,
+                            "payload.build",
+                            "payload",
+                            Some(listener_name.clone()),
+                            audit_details(
+                                AuditResultStatus::Failure,
+                                None,
+                                None,
+                                Some(parameter_object(
+                                    [
+                                        ("listener", Value::String(listener_name)),
+                                        ("arch", Value::String(arch)),
+                                        ("format", Value::String(format)),
+                                        ("error", Value::String(error.to_string())),
+                                    ]
+                                    .into_iter()
+                                    .chain(
+                                        diagnostic_params.into_iter().map(|d| ("diagnostics", d)),
+                                    ),
+                                )),
+                            ),
+                        )
+                        .await;
                     }
                 }
             });
@@ -2313,6 +2386,19 @@ fn teamserver_log_event(user: &str, text: &str) -> OperatorMessage {
         },
         info: TeamserverLogInfo { text: text.to_owned() },
     })
+}
+
+/// Format a [`CompilerDiagnostic`] as a single human-readable string.
+///
+/// Produces output compatible with what GCC/NASM print natively:
+/// `filename:line[:col]: severity: message`
+fn format_diagnostic(diag: &red_cell_common::operator::CompilerDiagnostic) -> String {
+    let loc = match diag.column {
+        Some(col) => format!("{}:{}:{}", diag.filename, diag.line, col),
+        None => format!("{}:{}", diag.filename, diag.line),
+    };
+    let code_suffix = diag.error_code.as_deref().map(|c| format!(" [{c}]")).unwrap_or_default();
+    format!("{loc}: {}: {}{code_suffix}", diag.severity, diag.message)
 }
 
 fn build_payload_message_event(user: &str, level: &str, text: &str) -> OperatorMessage {

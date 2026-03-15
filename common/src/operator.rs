@@ -507,6 +507,26 @@ pub struct BuildPayloadMessageInfo {
     pub message: String,
 }
 
+/// A single structured diagnostic extracted from compiler (GCC or NASM) output.
+///
+/// Used to return machine-readable build errors to the operator client so they
+/// can be displayed with file/line source context.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CompilerDiagnostic {
+    /// Source file name as reported by the compiler.
+    pub filename: String,
+    /// 1-based line number.
+    pub line: u32,
+    /// 1-based column number, if reported by the compiler.
+    pub column: Option<u32>,
+    /// Severity label: `error`, `fatal error`, `warning`, or `note`.
+    pub severity: String,
+    /// Optional flag or code associated with the diagnostic (e.g. `-Wunused-variable`).
+    pub error_code: Option<String>,
+    /// Diagnostic message text.
+    pub message: String,
+}
+
 /// Service agent registration payload.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceAgentRegistrationInfo {

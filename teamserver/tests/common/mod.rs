@@ -252,6 +252,23 @@ pub fn valid_demon_callback_body(
         .to_bytes()
 }
 
+/// Build a valid Demon reconnect probe envelope for the given `agent_id`.
+///
+/// A reconnect probe is a `DEMON_INIT` packet with an empty payload — it carries no
+/// encrypted metadata.  The server recognises the empty body as a reconnect signal and
+/// responds with [`build_reconnect_ack`] rather than treating it as a fresh init.
+pub fn valid_demon_reconnect_body(agent_id: u32) -> Vec<u8> {
+    let payload = [
+        u32::from(DemonCommand::DemonInit).to_be_bytes().as_slice(),
+        7_u32.to_be_bytes().as_slice(),
+    ]
+    .concat();
+
+    DemonEnvelope::new(agent_id, payload)
+        .unwrap_or_else(|error| panic!("failed to build demon reconnect request body: {error}"))
+        .to_bytes()
+}
+
 /// Serialize a `CommandOutput` payload (LE length-prefixed UTF-8 string).
 pub fn command_output_payload(output: &str) -> Vec<u8> {
     let mut payload = Vec::new();

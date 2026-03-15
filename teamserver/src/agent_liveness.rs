@@ -565,6 +565,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sweep_mixed_liveness_only_marks_stale_agents_dead() -> Result<(), TeamserverError> {
+        // Two stale agents (IDs inserted in descending order to exercise the sort) and one
+        // recently-active agent.  Only the stale pair must appear in `dead_agent_ids`; the
+        // fresh agent must remain active = true in the registry.
+        let profile = sample_profile(None, 5); // sleep=5 → timeout=15 s
+        let config = AgentLivenessConfig::from_profile(&profile);
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database);
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+
+        // Stale: last_call_in is 20 s before `now` — exceeds the 15 s timeout.
+        let mut stale_high = sample_agent(0x0000_0200);
+        stale_high.last_call_in = "2026-03-10T09:59:56Z".to_owned();
+        registry.insert(stale_high.clone()).await?;
+
+        // Stale: same old timestamp, lower ID — inserted after stale_high so the returned
+        // Vec would be unsorted if sort_unstable() were omitted.
+        let mut stale_low = sample_agent(0x0000_0100);
+        stale_low.last_call_in = "2026-03-10T09:59:56Z".to_owned();
+        registry.insert(stale_low.clone()).await?;
+
+        // Fresh: last_call_in is 10 s before `now` — within the 15 s timeout.
+        let mut fresh = sample_agent(0x0000_0300);
+        fresh.last_call_in = "2026-03-10T10:00:06Z".to_owned();
+        registry.insert(fresh.clone()).await?;
+
+        let now = time::macros::datetime!(2026-03-10 10:00:16 UTC);
+        let dead = sweep_dead_agents_at(&registry, &sockets, &events, config, now).await?;
+
+        // Only the two stale agents must be returned, in ascending sorted order.
+        assert_eq!(dead, vec![stale_low.agent_id, stale_high.agent_id]);
+
+        let stored_low = registry
+            .get(stale_low.agent_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: stale_low.agent_id })?;
+        assert!(!stored_low.active);
+
+        let stored_high = registry
+            .get(stale_high.agent_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: stale_high.agent_id })?;
+        assert!(!stored_high.active);
+
+        // The recently-active agent must still be alive.
+        let stored_fresh = registry
+            .get(fresh.agent_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: fresh.agent_id })?;
+        assert!(stored_fresh.active);
+        assert!(stored_fresh.reason.is_empty());
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn sweep_toctou_guard_skips_agents_that_check_in_during_mark_phase()
     -> Result<(), TeamserverError> {
         let profile = Profile::parse(

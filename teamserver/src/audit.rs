@@ -528,13 +528,14 @@ mod tests {
     use axum::{Json, Router, routing::post};
     use red_cell_common::config::Profile;
     use serde_json::Value;
+    use sqlx::Row as _;
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
     use tokio::time::timeout;
 
     use super::{
         AuditQuery, AuditRecord, AuditResultStatus, SessionActivityQuery, SessionActivityRecord,
-        audit_details, login_parameters, parameter_object, parse_agent_id_filter,
+        audit_details, login_parameters, parameter_object, parse_agent_id_filter, query_audit_log,
         query_session_activity,
     };
     use crate::{
@@ -943,5 +944,112 @@ mod tests {
         });
 
         (address, server)
+    }
+
+    /// Collect the names of all indexes on `ts_audit_log` via SQLite PRAGMA.
+    async fn audit_log_index_names(database: &Database) -> Vec<String> {
+        let rows = sqlx::query("PRAGMA index_list(ts_audit_log)")
+            .fetch_all(database.pool())
+            .await
+            .expect("PRAGMA index_list should succeed");
+        rows.into_iter().map(|row| row.get::<String, _>("name")).collect()
+    }
+
+    #[tokio::test]
+    async fn audit_log_actor_timestamp_composite_index_exists() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        let names = audit_log_index_names(&database).await;
+        assert!(
+            names.iter().any(|n| n == "idx_ts_audit_log_actor_ts"),
+            "expected idx_ts_audit_log_actor_ts, found: {names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_log_action_timestamp_composite_index_exists() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        let names = audit_log_index_names(&database).await;
+        assert!(
+            names.iter().any(|n| n == "idx_ts_audit_log_action_ts"),
+            "expected idx_ts_audit_log_action_ts, found: {names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_log_agent_id_timestamp_expression_index_exists() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        let names = audit_log_index_names(&database).await;
+        assert!(
+            names.iter().any(|n| n == "idx_ts_audit_log_agent_id_ts"),
+            "expected idx_ts_audit_log_agent_id_ts, found: {names:?}"
+        );
+    }
+
+    /// Seed `count` audit rows across two actors, two actions, and one agent id.
+    async fn seed_audit_rows(database: &Database, count: usize) {
+        let repo = database.audit_log();
+        for i in 0..count {
+            let actor = if i % 2 == 0 { "alice" } else { "bob" };
+            let action = if i % 3 == 0 { "agent.task" } else { "listener.create" };
+            let agent_id = if i % 5 == 0 { Some(0xDEAD_BEEFu32) } else { None };
+            let occurred_at = format!("2026-01-{:02}T{:02}:00:00Z", (i % 28) + 1, i % 24);
+            let details = audit_details(AuditResultStatus::Success, agent_id, Some("test"), None);
+            repo.create(&AuditLogEntry {
+                id: None,
+                actor: actor.to_owned(),
+                action: action.to_owned(),
+                target_kind: "agent".to_owned(),
+                target_id: None,
+                details: Some(serde_json::to_value(&details).expect("details should serialize")),
+                occurred_at,
+            })
+            .await
+            .expect("seed row should insert");
+        }
+    }
+
+    #[tokio::test]
+    async fn filtered_query_by_actor_returns_correct_subset_at_scale() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_audit_rows(&database, 500).await;
+
+        let query = AuditQuery { actor: Some("alice".to_owned()), ..AuditQuery::default() };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        assert!(page.total > 0, "alice rows should be present");
+        assert!(
+            page.items.iter().all(|r| r.actor == "alice"),
+            "only alice rows should be returned"
+        );
+    }
+
+    #[tokio::test]
+    async fn filtered_query_by_action_returns_correct_subset_at_scale() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_audit_rows(&database, 500).await;
+
+        let query = AuditQuery { action: Some("agent.task".to_owned()), ..AuditQuery::default() };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        assert!(page.total > 0, "agent.task rows should be present");
+        assert!(
+            page.items.iter().all(|r| r.action.contains("agent.task")),
+            "only agent.task rows should be returned"
+        );
+    }
+
+    #[tokio::test]
+    async fn filtered_query_by_agent_id_returns_correct_subset_at_scale() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_audit_rows(&database, 500).await;
+
+        let query = AuditQuery { agent_id: Some("DEADBEEF".to_owned()), ..AuditQuery::default() };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        assert!(page.total > 0, "DEADBEEF rows should be present");
+        assert!(
+            page.items.iter().all(|r| r.agent_id.as_deref() == Some("DEADBEEF")),
+            "only DEADBEEF rows should be returned"
+        );
     }
 }

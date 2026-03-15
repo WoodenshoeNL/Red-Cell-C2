@@ -173,6 +173,35 @@ claim_task() {
     return 1
 }
 
+# Find an in-progress task that this agent previously claimed (via git log).
+# Returns the task ID on stdout if found, nothing if not found.
+# Used to resume interrupted tasks without creating a second claim commit.
+find_resumable_task() {
+    local in_progress_ids
+    in_progress_ids=$(br list --status=in_progress --json 2>/dev/null | python3 -c "
+import sys, json
+try:
+    issues = json.load(sys.stdin)
+    for issue in issues:
+        print(issue['id'])
+except Exception:
+    pass
+" 2>/dev/null || true)
+
+    [ -n "$in_progress_ids" ] || return 0
+
+    while IFS= read -r task_id; do
+        [ -n "$task_id" ] || continue
+        # Look for a prior claim commit by this agent in git history.
+        if git -C "$SCRIPT_DIR" log --oneline \
+            --grep="chore: claim $task_id \[$AGENT_ID\]" \
+            --max-count=1 -- 2>/dev/null | grep -q .; then
+            echo "$task_id"
+            return 0
+        fi
+    done <<< "$in_progress_ids"
+}
+
 # Reset any tasks that have been stuck in_progress longer than STALE_THRESHOLD
 reset_stuck_tasks() {
     local stuck
@@ -275,8 +304,16 @@ while true; do
     # ── Reset stuck tasks ──────────────────────────────────────────────────────
     reset_stuck_tasks
 
-    # ── Pick next task ─────────────────────────────────────────────────────────
-    READY_CANDIDATES=$(br ready --json 2>/dev/null | python3 -c "
+    # ── Resume own in-progress task (no re-claim) ──────────────────────────────
+    # If this agent already claimed a task in a prior session and it is still
+    # in_progress (i.e. Claude was interrupted before closing it), resume that
+    # task directly — no new claim commit needed.
+    NEXT_ID="$(find_resumable_task)"
+    if [ -n "$NEXT_ID" ]; then
+        log "Resuming previously claimed task $NEXT_ID (skipping re-claim)"
+    else
+        # ── Pick next task ──────────────────────────────────────────────────────
+        READY_CANDIDATES=$(br ready --json 2>/dev/null | python3 -c "
 import sys, json
 try:
     issues = json.load(sys.stdin)
@@ -288,31 +325,31 @@ except Exception:
     pass
 " 2>/dev/null || true)
 
-    if [ -z "$READY_CANDIDATES" ]; then
-        log "No ready work found. Sleeping ${SLEEP_ON_NO_WORK}s..."
-        flock -u 9
-        sleep "$SLEEP_ON_NO_WORK"
-        continue
-    fi
-
-    # ── Claim with optimistic locking ──────────────────────────────────────────
-    NEXT_ID=""
-    while IFS= read -r candidate_id; do
-        [ -n "$candidate_id" ] || continue
-
-        if [ "$(issue_status_from_jsonl "$candidate_id")" = "in_progress" ]; then
-            log "Skipping candidate already in_progress in JSONL: $candidate_id"
+        if [ -z "$READY_CANDIDATES" ]; then
+            log "No ready work found. Sleeping ${SLEEP_ON_NO_WORK}s..."
+            flock -u 9
+            sleep "$SLEEP_ON_NO_WORK"
             continue
         fi
 
-        log "Selected task: $candidate_id"
-        if claim_task "$candidate_id"; then
-            NEXT_ID="$candidate_id"
-            break
-        fi
-    done << EOF
+        # ── Claim with optimistic locking ──────────────────────────────────────
+        while IFS= read -r candidate_id; do
+            [ -n "$candidate_id" ] || continue
+
+            if [ "$(issue_status_from_jsonl "$candidate_id")" = "in_progress" ]; then
+                log "Skipping candidate already in_progress in JSONL: $candidate_id"
+                continue
+            fi
+
+            log "Selected task: $candidate_id"
+            if claim_task "$candidate_id"; then
+                NEXT_ID="$candidate_id"
+                break
+            fi
+        done << EOF
 $READY_CANDIDATES
 EOF
+    fi
 
     if [ -z "$NEXT_ID" ]; then
         flock -u 9
@@ -399,19 +436,14 @@ HEREDOC
         fi
     fi
 
-    # If the issue is still in_progress after Claude ran, reset it to open
+    # If the issue is still in_progress after Claude ran, leave it as-is.
+    # find_resumable_task() will detect it at the top of the next iteration and
+    # resume without creating a duplicate claim commit.  reset_stuck_tasks() will
+    # clean it up automatically after STALE_THRESHOLD seconds if it is genuinely
+    # abandoned (e.g. the agent is taken offline for good).
     FINAL_STATUS="$(issue_status_from_jsonl "$NEXT_ID")"
     if [ "$FINAL_STATUS" = "in_progress" ]; then
-        log "Task $NEXT_ID still in_progress after Claude ran — resetting to open"
-        br update "$NEXT_ID" --status=open 2>/dev/null || true
-        br sync --flush-only --quiet 2>/dev/null || true
-        if ! git -C "$SCRIPT_DIR" diff --quiet -- .beads/issues.jsonl 2>/dev/null; then
-            git -C "$SCRIPT_DIR" add .beads/issues.jsonl
-            git -C "$SCRIPT_DIR" commit -m "chore: reset $NEXT_ID to open after interrupted run [$AGENT_ID]" --quiet 2>/dev/null || true
-            git -C "$SCRIPT_DIR" push --quiet 2>/dev/null \
-                && log "Reset $NEXT_ID to open — pushed" \
-                || log "WARNING: reset push failed"
-        fi
+        log "Task $NEXT_ID still in_progress after Claude ran — will resume on next iteration"
     fi
 
     rm -f "$RUNTIME_PROMPT"

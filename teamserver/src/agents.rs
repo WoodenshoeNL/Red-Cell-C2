@@ -469,7 +469,49 @@ impl AgentRegistry {
         let info = entry.info.read().await;
         let (key, iv) = decode_crypto_material(agent_id, &info.encryption)?;
         drop(info);
-        self.decrypt_payload_with_ctr_offset(agent_id, &entry, &key, &iv, ciphertext).await
+        self.decrypt_payload_with_ctr_offset(agent_id, &entry, &key, &iv, ciphertext, true).await
+    }
+
+    /// Decrypt a ciphertext payload without advancing the stored CTR offset.
+    ///
+    /// Use this when the plaintext must be validated before the offset is committed — for
+    /// example when decrypting an agent callback before parsing the Demon protocol, so that a
+    /// garbage payload from an attacker cannot permanently desync the keystream offset.
+    /// Call [`AgentRegistry::advance_ctr_for_agent`] after successful validation.
+    #[instrument(skip(self, ciphertext), fields(agent_id = format_args!("0x{:08X}", agent_id), len = ciphertext.len()))]
+    pub(crate) async fn decrypt_from_agent_without_advancing(
+        &self,
+        agent_id: u32,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, TeamserverError> {
+        let entry =
+            self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
+        let info = entry.info.read().await;
+        let (key, iv) = decode_crypto_material(agent_id, &info.encryption)?;
+        drop(info);
+        self.decrypt_payload_with_ctr_offset(agent_id, &entry, &key, &iv, ciphertext, false).await
+    }
+
+    /// Advance the CTR block offset for an agent by `byte_len` bytes.
+    ///
+    /// Called after [`AgentRegistry::decrypt_from_agent_without_advancing`] succeeds and the
+    /// decrypted payload has been validated, so that a failed parse cannot desync the offset.
+    #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id), byte_len))]
+    pub(crate) async fn advance_ctr_for_agent(
+        &self,
+        agent_id: u32,
+        byte_len: usize,
+    ) -> Result<(), TeamserverError> {
+        let entry =
+            self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
+        let mut ctr_offset = entry.ctr_block_offset.lock().await;
+        let current_offset = *ctr_offset;
+        let next_offset = next_ctr_offset(current_offset, byte_len)?;
+        if next_offset != current_offset {
+            self.repository.set_ctr_block_offset(agent_id, next_offset).await?;
+            *ctr_offset = next_offset;
+        }
+        Ok(())
     }
 
     /// Update the AES key and IV for an agent and persist the new values.
@@ -848,15 +890,18 @@ impl AgentRegistry {
         key: &[u8; AGENT_KEY_LENGTH],
         iv: &[u8; AGENT_IV_LENGTH],
         ciphertext: &[u8],
+        advance: bool,
     ) -> Result<Vec<u8>, TeamserverError> {
         let mut ctr_offset = entry.ctr_block_offset.lock().await;
         let current_offset = *ctr_offset;
         let plaintext = decrypt_agent_data_at_offset(key, iv, current_offset, ciphertext)?;
-        let next_offset = next_ctr_offset(current_offset, ciphertext.len())?;
 
-        if next_offset != current_offset {
-            self.repository.set_ctr_block_offset(agent_id, next_offset).await?;
-            *ctr_offset = next_offset;
+        if advance {
+            let next_offset = next_ctr_offset(current_offset, ciphertext.len())?;
+            if next_offset != current_offset {
+                self.repository.set_ctr_block_offset(agent_id, next_offset).await?;
+                *ctr_offset = next_offset;
+            }
         }
 
         Ok(plaintext)
@@ -1797,6 +1842,95 @@ mod tests {
 
         assert_eq!(ciphertext, expected_ciphertext);
         assert_eq!(registry.ctr_offset(agent.agent_id).await?, starting_offset);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn decrypt_from_agent_without_advancing_keeps_ctr_unchanged()
+    -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let key = [0x75; AGENT_KEY_LENGTH];
+        let iv = [0x85; AGENT_IV_LENGTH];
+        let agent = sample_agent_with_crypto(0x1000_0706, key, iv);
+        let starting_offset = 7;
+        let plaintext = b"decrypt-without-advance payload";
+
+        registry.insert(agent.clone()).await?;
+        registry.set_ctr_offset(agent.agent_id, starting_offset).await?;
+
+        let ciphertext = encrypt_agent_data_at_offset(&key, &iv, starting_offset, plaintext)?;
+        let decrypted =
+            registry.decrypt_from_agent_without_advancing(agent.agent_id, &ciphertext).await?;
+
+        assert_eq!(decrypted, plaintext);
+        // Offset must NOT have advanced.
+        assert_eq!(registry.ctr_offset(agent.agent_id).await?, starting_offset);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn advance_ctr_for_agent_commits_offset_correctly() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let key = [0x76; AGENT_KEY_LENGTH];
+        let iv = [0x86; AGENT_IV_LENGTH];
+        let agent = sample_agent_with_crypto(0x1000_0707, key, iv);
+        let starting_offset = 3;
+        let payload = b"advance-ctr test payload";
+
+        registry.insert(agent.clone()).await?;
+        registry.set_ctr_offset(agent.agent_id, starting_offset).await?;
+
+        let ciphertext = encrypt_agent_data_at_offset(&key, &iv, starting_offset, payload)?;
+
+        // Decrypt without advancing, then advance explicitly.
+        let decrypted =
+            registry.decrypt_from_agent_without_advancing(agent.agent_id, &ciphertext).await?;
+        assert_eq!(decrypted, payload);
+        assert_eq!(registry.ctr_offset(agent.agent_id).await?, starting_offset);
+
+        registry.advance_ctr_for_agent(agent.agent_id, ciphertext.len()).await?;
+        assert_eq!(
+            registry.ctr_offset(agent.agent_id).await?,
+            starting_offset + ctr_blocks_for_len(ciphertext.len())
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn decrypt_without_advancing_then_advance_matches_single_step_decrypt()
+    -> Result<(), TeamserverError> {
+        // Verify that split decrypt+advance produces the same final offset as the normal
+        // decrypt_from_agent (which advances atomically in one step).
+        let registry_split = AgentRegistry::new(test_database().await?);
+        let registry_atomic = AgentRegistry::new(test_database().await?);
+        let key = [0x77; AGENT_KEY_LENGTH];
+        let iv = [0x87; AGENT_IV_LENGTH];
+        let agent = sample_agent_with_crypto(0x1000_0708, key, iv);
+        let plaintext = b"split vs atomic ctr advance";
+
+        registry_split.insert(agent.clone()).await?;
+        registry_atomic.insert(agent.clone()).await?;
+
+        let ciphertext = encrypt_agent_data_at_offset(&key, &iv, 0, plaintext)?;
+
+        // Split path.
+        let dec_split = registry_split
+            .decrypt_from_agent_without_advancing(agent.agent_id, &ciphertext)
+            .await?;
+        registry_split.advance_ctr_for_agent(agent.agent_id, ciphertext.len()).await?;
+
+        // Atomic path.
+        let dec_atomic = registry_atomic.decrypt_from_agent(agent.agent_id, &ciphertext).await?;
+
+        assert_eq!(dec_split, plaintext);
+        assert_eq!(dec_atomic, plaintext);
+        assert_eq!(
+            registry_split.ctr_offset(agent.agent_id).await?,
+            registry_atomic.ctr_offset(agent.agent_id).await?
+        );
 
         Ok(())
     }

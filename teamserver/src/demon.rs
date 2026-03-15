@@ -182,9 +182,23 @@ impl DemonPacketParser {
             })));
         }
 
-        let decrypted =
-            self.registry.decrypt_from_agent(envelope.header.agent_id, remaining).await?;
+        // Decrypt without advancing the CTR offset first.  AES-CTR has no authentication tag, so
+        // decryption always "succeeds" regardless of whether the ciphertext is genuine.  If we
+        // advanced the offset unconditionally and the Demon protocol parse below then failed (e.g.
+        // because an attacker sent a crafted packet with a valid agent_id but garbage payload),
+        // the stored offset would be permanently desynced and the real agent's next legitimate
+        // callback would be decrypted at the wrong keystream position — breaking the session.
+        //
+        // By deferring the advance until after a successful parse we ensure the offset is only
+        // committed when we have confirmed the payload was valid Demon data.
+        let decrypted = self
+            .registry
+            .decrypt_from_agent_without_advancing(envelope.header.agent_id, remaining)
+            .await?;
         let packages = parse_callback_packages(command_id, request_id, &decrypted)?;
+
+        // Parse succeeded: advance the offset now that we know the payload was genuine.
+        self.registry.advance_ctr_for_agent(envelope.header.agent_id, remaining.len()).await?;
 
         Ok(ParsedDemonPacket::Callback { header: envelope.header, packages })
     }
@@ -984,6 +998,92 @@ mod tests {
         assert_eq!(packages[1].command_id, u32::from(DemonCommand::CommandOutput));
         assert_eq!(packages[1].request_id, 99);
         assert_eq!(packages[1].payload, b"hello");
+    }
+
+    /// Build a callback packet whose encrypted payload decrypts to bytes that will fail
+    /// `parse_callback_packages` — simulating an adversary who sends a crafted packet with a
+    /// valid header but garbage payload (CTR desync attack).
+    fn build_garbage_callback_packet(
+        agent_id: u32,
+        key: [u8; AGENT_KEY_LENGTH],
+        iv: [u8; AGENT_IV_LENGTH],
+        ctr_offset: u64,
+    ) -> Vec<u8> {
+        // Encrypting a single byte: when decrypted, `read_length_prefixed_bytes_be` will attempt
+        // to read a 4-byte u32 length prefix and fail with BufferTooShort.
+        let garbage_plaintext = b"\xFF";
+        let encrypted = encrypt_agent_data_at_offset(&key, &iv, ctr_offset, garbage_plaintext)
+            .expect("garbage encryption should succeed");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u32_be(u32::from(DemonCommand::CommandCheckin)));
+        payload.extend_from_slice(&u32_be(42));
+        payload.extend_from_slice(&encrypted);
+
+        DemonEnvelope::new(agent_id, payload)
+            .expect("garbage callback envelope should be valid")
+            .to_bytes()
+    }
+
+    #[tokio::test]
+    async fn garbage_callback_does_not_advance_ctr_offset() {
+        // Reproduces the CTR desync attack: an adversary observes a valid agent_id from the
+        // plaintext packet header, crafts a packet with the correct DEMON_MAGIC_VALUE and
+        // agent_id, but encrypts garbage as the payload.  Before this fix, `decrypt_from_agent`
+        // would advance the CTR offset unconditionally, permanently breaking the legitimate
+        // agent's next callback.
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry.clone());
+        let agent_id = 0xDEAD_BEEF_u32;
+        let key = [0xAA; AGENT_KEY_LENGTH];
+        let iv = [0xBB; AGENT_IV_LENGTH];
+
+        // Register the agent.
+        let init_packet = build_init_packet(agent_id, key, iv);
+        parser
+            .parse_at(&init_packet, "203.0.113.50".to_owned(), datetime!(2026-03-15 10:00:00 UTC))
+            .await
+            .expect("init should succeed");
+
+        // Advance the CTR offset by sending the init ack (simulates the server's normal response).
+        let _ack = build_init_ack(&registry, agent_id).await.expect("ack should build");
+        let offset_after_ack = registry.ctr_offset(agent_id).await.expect("offset should exist");
+        assert_eq!(offset_after_ack, 1, "offset should be 1 after init ack");
+
+        // Send a garbage callback packet at the current offset.
+        let garbage_packet = build_garbage_callback_packet(agent_id, key, iv, offset_after_ack);
+        let result = parser
+            .parse_at(
+                &garbage_packet,
+                "203.0.113.50".to_owned(),
+                datetime!(2026-03-15 10:00:01 UTC),
+            )
+            .await;
+        assert!(result.is_err(), "garbage callback must be rejected, got: {result:?}");
+
+        // The CTR offset must NOT have advanced — the desync attack must fail.
+        let offset_after_garbage =
+            registry.ctr_offset(agent_id).await.expect("offset should exist");
+        assert_eq!(
+            offset_after_garbage, offset_after_ack,
+            "CTR offset must not advance on a failed callback parse"
+        );
+
+        // The real agent's next callback at the correct offset must still succeed.
+        let legitimate_packet = build_callback_packet(agent_id, key, iv, offset_after_ack);
+        let parsed = parser
+            .parse_at(
+                &legitimate_packet,
+                "203.0.113.50".to_owned(),
+                datetime!(2026-03-15 10:00:02 UTC),
+            )
+            .await
+            .expect("legitimate callback must succeed after a rejected garbage packet");
+
+        let ParsedDemonPacket::Callback { packages, .. } = parsed else {
+            panic!("expected callback packet");
+        };
+        assert_eq!(packages[0].command_id, u32::from(DemonCommand::CommandCheckin));
+        assert_eq!(packages[0].payload, vec![0xaa, 0xbb, 0xcc]);
     }
 
     #[tokio::test]

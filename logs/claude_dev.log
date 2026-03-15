@@ -26695,3 +26695,13 @@ Done. The `agent.checkin` audit write in `handle_checkin()` is now a background 
 [2026-03-15 17:20:46] [Ubuntu-C2-dev01-claude] Running Claude on task red-cell-c2-wd91...
 Done. The fix replaces the two `yield_now()` calls with a polling loop bounded by a 500 ms `timeout` that repeatedly calls `audit_log().list()` until the `agent.dead` entry appears. This is robust under CI load because it retries until the background task actually completes rather than guessing at the number of needed task switches.
 [2026-03-15 17:24:15] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-wd91
+[2026-03-15 17:24:15] [Ubuntu-C2-dev01-claude] WIP: committing uncommitted changes for red-cell-c2-wd91
+[2026-03-15 17:24:17] [Ubuntu-C2-dev01-claude] WIP: pushed
+[2026-03-15 17:24:17] [Ubuntu-C2-dev01-claude] ========================LOOP=========================
+[2026-03-15 17:24:32] [Ubuntu-C2-dev01-claude] === Starting Claude dev loop iteration 3 ===
+[2026-03-15 17:24:33] [Ubuntu-C2-dev01-claude] git pull --ff-only: ok
+[2026-03-15 17:24:33] [Ubuntu-C2-dev01-claude] br sync import: ok
+[2026-03-15 17:24:36] [Ubuntu-C2-dev01-claude] Selected task: red-cell-c2-120
+[2026-03-15 17:24:40] [Ubuntu-C2-dev01-claude] Claimed red-cell-c2-120
+[2026-03-15 17:24:40] [Ubuntu-C2-dev01-claude] Running Claude on task red-cell-c2-120...
+[2026-03-15 17:39:24] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-120

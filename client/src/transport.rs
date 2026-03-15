@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -41,8 +41,33 @@ use url::Url;
 use crate::python::PythonRuntime;
 
 const MAX_CHAT_MESSAGES: usize = 200;
+const MAX_OPERATOR_ACTIVITY: usize = 20;
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
+
+/// A single command dispatched by an operator, recorded for the activity feed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OperatorActivityEntry {
+    /// Timestamp of the command dispatch.
+    pub(crate) timestamp: String,
+    /// Target agent ID (normalised to uppercase eight-char hex).
+    pub(crate) agent_id: String,
+    /// Full command line as typed by the operator.
+    pub(crate) command_line: String,
+}
+
+/// Presence, role, and recent activity state for a connected operator.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ConnectedOperatorState {
+    /// Optional RBAC role name (e.g. `"Admin"`, `"Operator"`, `"ReadOnly"`).
+    pub(crate) role: Option<String>,
+    /// Whether the operator is currently online.
+    pub(crate) online: bool,
+    /// Timestamp of the operator's most recent activity or connect event.
+    pub(crate) last_seen: Option<String>,
+    /// Most recent commands dispatched by this operator, newest first.
+    pub(crate) recent_commands: VecDeque<OperatorActivityEntry>,
+}
 
 pub(crate) type SharedAppState = Arc<Mutex<AppState>>;
 
@@ -351,7 +376,10 @@ pub(crate) struct AppState {
     pub(crate) listeners: Vec<ListenerSummary>,
     pub(crate) loot: Vec<LootItem>,
     pub(crate) chat_messages: Vec<ChatMessage>,
+    /// Usernames of operators currently seen online (used by the chat panel).
     pub(crate) online_operators: BTreeSet<String>,
+    /// Per-operator presence, role, and activity state, keyed by username.
+    pub(crate) connected_operators: BTreeMap<String, ConnectedOperatorState>,
 }
 
 impl AppState {
@@ -368,6 +396,7 @@ impl AppState {
             loot: Vec::new(),
             chat_messages: Vec::new(),
             online_operators: BTreeSet::new(),
+            connected_operators: BTreeMap::new(),
         }
     }
 
@@ -523,12 +552,19 @@ impl AppState {
                     format!("Built {}", message.info.file_name),
                 );
             }
+            OperatorMessage::AgentTask(message) => {
+                self.record_operator_activity(
+                    &message.head.user,
+                    message.head.timestamp,
+                    normalize_agent_id(&message.info.demon_id),
+                    message.info.command_line,
+                );
+            }
             OperatorMessage::Login(_)
             | OperatorMessage::InitConnectionProfile(_)
             | OperatorMessage::BuildPayloadStaged(_)
             | OperatorMessage::BuildPayloadRequest(_)
             | OperatorMessage::BuildPayloadMsOffice(_)
-            | OperatorMessage::AgentTask(_)
             | OperatorMessage::ServiceAgentRegister(_)
             | OperatorMessage::ServiceListenerRegister(_)
             | OperatorMessage::TeamserverProfile(_) => {}
@@ -604,6 +640,18 @@ impl AppState {
             format!("{} {}", chat_user.user, action),
         );
 
+        // Update connected_operators presence state.
+        let entry = self.connected_operators.entry(chat_user.user.clone()).or_insert_with(|| {
+            ConnectedOperatorState {
+                role: None,
+                online,
+                last_seen: Some(timestamp.clone()),
+                recent_commands: VecDeque::new(),
+            }
+        });
+        entry.online = online;
+        entry.last_seen = Some(timestamp.clone());
+
         match &mut self.operator_info {
             Some(operator) if operator.username == chat_user.user => {
                 operator.online = online;
@@ -637,6 +685,23 @@ impl AppState {
             .map(|operator| operator.username.clone())
             .collect();
 
+        // Merge snapshot data into connected_operators, preserving existing activity entries.
+        for op in &operators {
+            let entry = self.connected_operators.entry(op.username.clone()).or_insert_with(|| {
+                ConnectedOperatorState {
+                    role: op.role.clone(),
+                    online: op.online,
+                    last_seen: op.last_seen.clone(),
+                    recent_commands: VecDeque::new(),
+                }
+            });
+            entry.role = op.role.clone();
+            entry.online = op.online;
+            if op.last_seen.is_some() {
+                entry.last_seen = op.last_seen.clone();
+            }
+        }
+
         if let Some(current_username) =
             self.operator_info.as_ref().map(|info| info.username.clone())
         {
@@ -645,6 +710,36 @@ impl AppState {
             {
                 self.operator_info = Some(snapshot);
             }
+        }
+    }
+
+    /// Records a command dispatch into the operator's activity feed.
+    fn record_operator_activity(
+        &mut self,
+        username: &str,
+        timestamp: String,
+        agent_id: String,
+        command_line: String,
+    ) {
+        if username.is_empty() {
+            return;
+        }
+        let entry = self.connected_operators.entry(username.to_owned()).or_insert_with(|| {
+            ConnectedOperatorState {
+                role: None,
+                online: true,
+                last_seen: Some(timestamp.clone()),
+                recent_commands: VecDeque::new(),
+            }
+        });
+        entry.last_seen = Some(timestamp.clone());
+        entry.recent_commands.push_front(OperatorActivityEntry {
+            timestamp,
+            agent_id,
+            command_line,
+        });
+        if entry.recent_commands.len() > MAX_OPERATOR_ACTIVITY {
+            entry.recent_commands.pop_back();
         }
     }
 
@@ -2583,5 +2678,206 @@ mod tests {
         }));
 
         assert!(matches!(result, Err(TransportError::OutgoingQueueClosed)));
+    }
+
+    #[test]
+    fn agent_task_records_activity_in_connected_operators() {
+        use red_cell_common::operator::AgentTaskInfo;
+
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        state.apply_operator_message(OperatorMessage::AgentTask(Message {
+            head: MessageHead {
+                event: EventCode::Session,
+                user: "alice".to_owned(),
+                timestamp: "10/03/2026 12:00:00".to_owned(),
+                one_time: String::new(),
+            },
+            info: AgentTaskInfo {
+                task_id: "1".to_owned(),
+                command_line: "shell whoami".to_owned(),
+                demon_id: "abcd1234".to_owned(),
+                command_id: "9".to_owned(),
+                ..AgentTaskInfo::default()
+            },
+        }));
+        state.apply_operator_message(OperatorMessage::AgentTask(Message {
+            head: MessageHead {
+                event: EventCode::Session,
+                user: "alice".to_owned(),
+                timestamp: "10/03/2026 12:01:00".to_owned(),
+                one_time: String::new(),
+            },
+            info: AgentTaskInfo {
+                task_id: "2".to_owned(),
+                command_line: "ps".to_owned(),
+                demon_id: "beef5678".to_owned(),
+                command_id: "35".to_owned(),
+                ..AgentTaskInfo::default()
+            },
+        }));
+
+        let alice = state
+            .connected_operators
+            .get("alice")
+            .unwrap_or_else(|| panic!("alice should be in connected_operators"));
+        assert_eq!(alice.recent_commands.len(), 2, "both commands should be recorded");
+        // Newest first.
+        assert_eq!(alice.recent_commands[0].command_line, "ps");
+        assert_eq!(alice.recent_commands[0].agent_id, "BEEF5678");
+        assert_eq!(alice.recent_commands[1].command_line, "shell whoami");
+        assert_eq!(alice.recent_commands[1].agent_id, "ABCD1234");
+        assert_eq!(
+            alice.last_seen.as_deref(),
+            Some("10/03/2026 12:01:00"),
+            "last_seen should reflect most recent command timestamp"
+        );
+    }
+
+    #[test]
+    fn agent_task_with_empty_user_is_ignored() {
+        use red_cell_common::operator::AgentTaskInfo;
+
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        state.apply_operator_message(OperatorMessage::AgentTask(Message {
+            head: MessageHead {
+                event: EventCode::Session,
+                user: String::new(),
+                timestamp: "10/03/2026 12:00:00".to_owned(),
+                one_time: String::new(),
+            },
+            info: AgentTaskInfo {
+                task_id: "1".to_owned(),
+                command_line: "shell whoami".to_owned(),
+                demon_id: "abcd1234".to_owned(),
+                command_id: "9".to_owned(),
+                ..AgentTaskInfo::default()
+            },
+        }));
+
+        assert!(
+            state.connected_operators.is_empty(),
+            "empty-username task should not create an operator entry"
+        );
+    }
+
+    #[test]
+    fn activity_feed_capped_at_max_operator_activity() {
+        use red_cell_common::operator::AgentTaskInfo;
+
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        for i in 0..=(MAX_OPERATOR_ACTIVITY + 5) {
+            state.apply_operator_message(OperatorMessage::AgentTask(Message {
+                head: MessageHead {
+                    event: EventCode::Session,
+                    user: "bob".to_owned(),
+                    timestamp: format!("ts-{i}"),
+                    one_time: String::new(),
+                },
+                info: AgentTaskInfo {
+                    task_id: i.to_string(),
+                    command_line: format!("cmd-{i}"),
+                    demon_id: "abcd1234".to_owned(),
+                    command_id: "9".to_owned(),
+                    ..AgentTaskInfo::default()
+                },
+            }));
+        }
+
+        let bob = state
+            .connected_operators
+            .get("bob")
+            .unwrap_or_else(|| panic!("bob should be in connected_operators"));
+        assert_eq!(
+            bob.recent_commands.len(),
+            MAX_OPERATOR_ACTIVITY,
+            "activity feed must not exceed MAX_OPERATOR_ACTIVITY entries"
+        );
+    }
+
+    #[test]
+    fn operator_snapshot_populates_connected_operators_with_role_and_presence() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        state.apply_operator_message(OperatorMessage::InitConnectionInfo(Message {
+            head: head(EventCode::InitConnection),
+            info: FlatInfo {
+                fields: BTreeMap::from([(
+                    "Operators".to_owned(),
+                    serde_json::json!([
+                        {
+                            "Username": "operator",
+                            "Role": "Operator",
+                            "Online": true,
+                            "LastSeen": "2026-03-10T12:00:00Z"
+                        },
+                        {
+                            "Username": "admin",
+                            "Role": "Admin",
+                            "Online": false,
+                            "LastSeen": null
+                        }
+                    ]),
+                )]),
+            },
+        }));
+
+        let op = state
+            .connected_operators
+            .get("operator")
+            .unwrap_or_else(|| panic!("operator should be in connected_operators"));
+        assert_eq!(op.role.as_deref(), Some("Operator"));
+        assert!(op.online);
+        assert_eq!(op.last_seen.as_deref(), Some("2026-03-10T12:00:00Z"));
+
+        let admin = state
+            .connected_operators
+            .get("admin")
+            .unwrap_or_else(|| panic!("admin should be in connected_operators"));
+        assert_eq!(admin.role.as_deref(), Some("Admin"));
+        assert!(!admin.online);
+    }
+
+    #[test]
+    fn chat_user_presence_updates_connected_operators() {
+        use red_cell_common::operator::{ChatCode, ChatUserInfo};
+
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        // Connect alice.
+        state.apply_operator_message(OperatorMessage::ChatUserConnected(Message {
+            head: MessageHead {
+                event: EventCode::Chat,
+                user: String::new(),
+                timestamp: "10/03/2026 12:00:00".to_owned(),
+                one_time: String::new(),
+            },
+            info: ChatUserInfo { user: "alice".to_owned() },
+        }));
+        let alice = state
+            .connected_operators
+            .get("alice")
+            .unwrap_or_else(|| panic!("alice should appear on connect"));
+        assert!(alice.online);
+        assert_eq!(alice.last_seen.as_deref(), Some("10/03/2026 12:00:00"));
+
+        // Disconnect alice.
+        state.apply_operator_message(OperatorMessage::ChatUserDisconnected(Message {
+            head: MessageHead {
+                event: EventCode::Chat,
+                user: String::new(),
+                timestamp: "10/03/2026 12:05:00".to_owned(),
+                one_time: String::new(),
+            },
+            info: ChatUserInfo { user: "alice".to_owned() },
+        }));
+        let alice = state
+            .connected_operators
+            .get("alice")
+            .unwrap_or_else(|| panic!("alice should still be present after disconnect"));
+        assert!(!alice.online);
+        assert_eq!(alice.last_seen.as_deref(), Some("10/03/2026 12:05:00"));
     }
 }

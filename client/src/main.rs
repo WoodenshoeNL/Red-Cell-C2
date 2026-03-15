@@ -27,8 +27,8 @@ use red_cell_common::operator::{
 use rfd::FileDialog;
 use transport::{
     AgentConsoleEntry, AgentConsoleEntryKind, AgentFileBrowserState, AgentProcessListState,
-    AppState, ClientTransport, ConnectionStatus, FileBrowserEntry, LootItem, LootKind,
-    ProcessEntry, SharedAppState, TlsVerification,
+    AppState, ClientTransport, ConnectedOperatorState, ConnectionStatus, FileBrowserEntry,
+    LootItem, LootKind, ProcessEntry, SharedAppState, TlsVerification,
 };
 
 const WINDOW_TITLE: &str = "Red Cell Client";
@@ -521,16 +521,44 @@ impl ClientApp {
         ui.heading("Operator");
         ui.separator();
 
+        // --- My session ---
         if let Some(operator) = &state.operator_info {
-            ui.label(format!("Username: {}", operator.username));
-            ui.label(format!("Online: {}", yes_no(operator.online)));
-            ui.label(format!("Role: {}", operator.role.as_deref().unwrap_or("unassigned")));
+            ui.horizontal(|ui| {
+                ui.strong(&operator.username);
+                role_badge(ui, operator.role.as_deref());
+            });
             ui.label(format!(
                 "Last seen: {}",
                 operator.last_seen.as_deref().unwrap_or("not available")
             ));
         } else {
             ui.label("No operator session is active.");
+        }
+
+        // --- Connected operators ---
+        ui.add_space(6.0);
+        ui.separator();
+        ui.strong("Connected operators");
+
+        let has_peers = state
+            .connected_operators
+            .values()
+            .any(|op| op.online || !op.recent_commands.is_empty());
+
+        if !has_peers {
+            ui.label("None");
+        } else {
+            egui::ScrollArea::vertical().id_salt("operator_panel_scroll").max_height(300.0).show(
+                ui,
+                |ui| {
+                    for (username, op) in &state.connected_operators {
+                        if !op.online && op.recent_commands.is_empty() {
+                            continue;
+                        }
+                        render_operator_entry(ui, username, op);
+                    }
+                },
+            );
         }
     }
 
@@ -2642,8 +2670,63 @@ fn launch_client(cli: Cli) -> Result<()> {
     .map_err(|error| anyhow!("failed to start egui application: {error}"))
 }
 
-fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
+/// Returns the display colour for an operator role badge.
+fn role_badge_color(role: Option<&str>) -> Color32 {
+    match role.map(|r| r.to_ascii_lowercase()).as_deref() {
+        Some("admin") => Color32::from_rgb(220, 80, 60),
+        Some("operator") => Color32::from_rgb(60, 130, 220),
+        Some("readonly") | Some("read-only") | Some("analyst") => Color32::from_rgb(100, 180, 100),
+        _ => Color32::from_rgb(140, 140, 140),
+    }
+}
+
+/// Renders a small coloured role badge inline.
+fn role_badge(ui: &mut egui::Ui, role: Option<&str>) {
+    let label = role.unwrap_or("unassigned");
+    let color = role_badge_color(role);
+    let text = RichText::new(label).color(Color32::WHITE).small().strong();
+    let frame = egui::Frame::new()
+        .fill(color)
+        .inner_margin(egui::Margin::symmetric(4, 2))
+        .corner_radius(egui::CornerRadius::same(4));
+    frame.show(ui, |ui| {
+        ui.label(text);
+    });
+}
+
+/// Renders a single operator entry in the connected-operators list.
+fn render_operator_entry(ui: &mut egui::Ui, username: &str, op: &ConnectedOperatorState) {
+    egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 2)).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            let status_color = if op.online {
+                Color32::from_rgb(80, 200, 120)
+            } else {
+                Color32::from_rgb(160, 160, 160)
+            };
+            ui.colored_label(status_color, "●");
+            ui.strong(username);
+            role_badge(ui, op.role.as_deref());
+        });
+        if let Some(ts) = &op.last_seen {
+            ui.label(RichText::new(format!("last seen: {ts}")).small().weak());
+        }
+        if !op.recent_commands.is_empty() {
+            ui.label(RichText::new("Recent commands:").small().italics());
+            for cmd in op.recent_commands.iter().take(5) {
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "[{}] {} — {}",
+                            cmd.agent_id, cmd.command_line, cmd.timestamp
+                        ))
+                        .small()
+                        .weak(),
+                    );
+                });
+            }
+        }
+    });
 }
 
 fn script_status_label(status: ScriptLoadStatus) -> &'static str {

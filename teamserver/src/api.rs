@@ -39,6 +39,7 @@ use crate::agents::QueuedJob;
 use crate::app::TeamserverState;
 use crate::database::LootFilter;
 use crate::listeners::{ListenerManagerError, ListenerMarkRequest, ListenerSummary};
+use crate::rate_limiter::{AttemptWindow, evict_oldest_windows, prune_expired_windows};
 use crate::rbac::{
     CanAdminister, CanManageListeners, CanRead, CanTaskAgents, Permission, PermissionMarker,
 };
@@ -227,38 +228,6 @@ fn prune_expired_rate_limit_windows(
     windows.retain(|_, window| now.duration_since(window.started_at) < RATE_LIMIT_WINDOW);
 }
 
-/// Sliding-window state for per-IP failed API-key authentication attempts.
-#[derive(Debug)]
-struct FailedApiAuthWindow {
-    failed_attempts: u32,
-    window_start: Instant,
-}
-
-impl Default for FailedApiAuthWindow {
-    fn default() -> Self {
-        Self { failed_attempts: 0, window_start: Instant::now() }
-    }
-}
-
-fn prune_expired_api_auth_failure_windows(
-    windows: &mut HashMap<IpAddr, FailedApiAuthWindow>,
-    now: Instant,
-) {
-    windows.retain(|_, w| now.duration_since(w.window_start) < RATE_LIMIT_WINDOW);
-}
-
-fn evict_oldest_api_auth_failure_windows(
-    windows: &mut HashMap<IpAddr, FailedApiAuthWindow>,
-    target_size: usize,
-) {
-    let mut entries: Vec<(IpAddr, Instant)> =
-        windows.iter().map(|(ip, w)| (*ip, w.window_start)).collect();
-    entries.sort_by_key(|(_, start)| *start);
-    for (ip, _) in entries.into_iter().take(windows.len().saturating_sub(target_size)) {
-        windows.remove(&ip);
-    }
-}
-
 /// Authenticated REST API identity derived from an API key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiIdentity {
@@ -278,7 +247,7 @@ pub struct ApiRuntime {
     rate_limit: ApiRateLimit,
     windows: Arc<Mutex<BTreeMap<RateLimitSubject, RateLimitWindow>>>,
     /// Per-IP sliding windows tracking failed API-key auth attempts (wrong key presented).
-    auth_failure_windows: Arc<Mutex<HashMap<IpAddr, FailedApiAuthWindow>>>,
+    auth_failure_windows: Arc<Mutex<HashMap<IpAddr, AttemptWindow>>>,
 }
 
 impl ApiRuntime {
@@ -390,23 +359,23 @@ impl ApiRuntime {
             windows.remove(&ip);
             return true;
         }
-        window.failed_attempts < MAX_FAILED_API_AUTH_ATTEMPTS
+        window.attempts < MAX_FAILED_API_AUTH_ATTEMPTS
     }
 
     /// Record a failed API-key auth attempt from the given IP.
     async fn record_auth_failure(&self, ip: IpAddr) {
         let mut windows = self.auth_failure_windows.lock().await;
         let now = Instant::now();
-        prune_expired_api_auth_failure_windows(&mut windows, now);
+        prune_expired_windows(&mut windows, RATE_LIMIT_WINDOW, now);
         if !windows.contains_key(&ip) && windows.len() >= MAX_API_AUTH_FAILURE_WINDOWS {
-            evict_oldest_api_auth_failure_windows(&mut windows, MAX_API_AUTH_FAILURE_WINDOWS / 2);
+            evict_oldest_windows(&mut windows, MAX_API_AUTH_FAILURE_WINDOWS / 2);
         }
         let window = windows.entry(ip).or_default();
         if now.duration_since(window.window_start) >= RATE_LIMIT_WINDOW {
-            window.failed_attempts = 1;
+            window.attempts = 1;
             window.window_start = now;
         } else {
-            window.failed_attempts += 1;
+            window.attempts += 1;
         }
     }
 

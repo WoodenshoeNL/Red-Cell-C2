@@ -1,6 +1,6 @@
 //! Versioned REST API framework for the Red Cell teamserver.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::marker::PhantomData;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
@@ -58,6 +58,10 @@ const DOCS_ROUTE: &str = "/docs";
 const API_KEY_HEADER: &str = "x-api-key";
 const BEARER_PREFIX: &str = "Bearer ";
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+/// Maximum number of failed API-key auth attempts from one IP before that IP is blocked.
+const MAX_FAILED_API_AUTH_ATTEMPTS: u32 = 5;
+/// Maximum number of per-IP auth-failure windows retained before the oldest are evicted.
+const MAX_API_AUTH_FAILURE_WINDOWS: usize = 10_000;
 const API_KEY_HASH_SECRET_SIZE: usize = 32;
 
 type ApiKeyMac = Hmac<Sha256>;
@@ -223,6 +227,38 @@ fn prune_expired_rate_limit_windows(
     windows.retain(|_, window| now.duration_since(window.started_at) < RATE_LIMIT_WINDOW);
 }
 
+/// Sliding-window state for per-IP failed API-key authentication attempts.
+#[derive(Debug)]
+struct FailedApiAuthWindow {
+    failed_attempts: u32,
+    window_start: Instant,
+}
+
+impl Default for FailedApiAuthWindow {
+    fn default() -> Self {
+        Self { failed_attempts: 0, window_start: Instant::now() }
+    }
+}
+
+fn prune_expired_api_auth_failure_windows(
+    windows: &mut HashMap<IpAddr, FailedApiAuthWindow>,
+    now: Instant,
+) {
+    windows.retain(|_, w| now.duration_since(w.window_start) < RATE_LIMIT_WINDOW);
+}
+
+fn evict_oldest_api_auth_failure_windows(
+    windows: &mut HashMap<IpAddr, FailedApiAuthWindow>,
+    target_size: usize,
+) {
+    let mut entries: Vec<(IpAddr, Instant)> =
+        windows.iter().map(|(ip, w)| (*ip, w.window_start)).collect();
+    entries.sort_by_key(|(_, start)| *start);
+    for (ip, _) in entries.into_iter().take(windows.len().saturating_sub(target_size)) {
+        windows.remove(&ip);
+    }
+}
+
 /// Authenticated REST API identity derived from an API key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiIdentity {
@@ -241,6 +277,8 @@ pub struct ApiRuntime {
     keys: Arc<Vec<(ApiKeyDigest, ApiIdentity)>>,
     rate_limit: ApiRateLimit,
     windows: Arc<Mutex<BTreeMap<RateLimitSubject, RateLimitWindow>>>,
+    /// Per-IP sliding windows tracking failed API-key auth attempts (wrong key presented).
+    auth_failure_windows: Arc<Mutex<HashMap<IpAddr, FailedApiAuthWindow>>>,
 }
 
 impl ApiRuntime {
@@ -272,6 +310,7 @@ impl ApiRuntime {
             keys: Arc::new(keys),
             rate_limit: ApiRateLimit { requests_per_minute },
             windows: Arc::new(Mutex::new(BTreeMap::new())),
+            auth_failure_windows: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -296,6 +335,16 @@ impl ApiRuntime {
             return Err(ApiAuthError::Disabled);
         }
 
+        // Block IPs that have exceeded the failed-auth threshold before performing
+        // any HMAC work. This prevents brute-forcing the key store at HMAC throughput.
+        if let Some(ip) = client_ip {
+            if !self.is_auth_failure_allowed(ip).await {
+                return Err(ApiAuthError::RateLimited {
+                    retry_after_seconds: RATE_LIMIT_WINDOW.as_secs(),
+                });
+            }
+        }
+
         let presented_key = match extract_api_key(headers) {
             Ok(key) => key,
             Err(
@@ -315,10 +364,55 @@ impl ApiRuntime {
 
         self.check_rate_limit(&rate_limit_subject).await?;
 
-        let identity = Self::lookup_key_ct(&self.keys, &presented_key_digest)
-            .ok_or(ApiAuthError::InvalidApiKey)?;
+        match Self::lookup_key_ct(&self.keys, &presented_key_digest) {
+            Some(identity) => {
+                if let Some(ip) = client_ip {
+                    self.record_auth_success(ip).await;
+                }
+                Ok(identity)
+            }
+            None => {
+                if let Some(ip) = client_ip {
+                    self.record_auth_failure(ip).await;
+                }
+                Err(ApiAuthError::InvalidApiKey)
+            }
+        }
+    }
 
-        Ok(identity)
+    /// Return `true` if the given IP has not exceeded the failed-auth attempt threshold.
+    async fn is_auth_failure_allowed(&self, ip: IpAddr) -> bool {
+        let mut windows = self.auth_failure_windows.lock().await;
+        let Some(window) = windows.get_mut(&ip) else {
+            return true;
+        };
+        if window.window_start.elapsed() >= RATE_LIMIT_WINDOW {
+            windows.remove(&ip);
+            return true;
+        }
+        window.failed_attempts < MAX_FAILED_API_AUTH_ATTEMPTS
+    }
+
+    /// Record a failed API-key auth attempt from the given IP.
+    async fn record_auth_failure(&self, ip: IpAddr) {
+        let mut windows = self.auth_failure_windows.lock().await;
+        let now = Instant::now();
+        prune_expired_api_auth_failure_windows(&mut windows, now);
+        if !windows.contains_key(&ip) && windows.len() >= MAX_API_AUTH_FAILURE_WINDOWS {
+            evict_oldest_api_auth_failure_windows(&mut windows, MAX_API_AUTH_FAILURE_WINDOWS / 2);
+        }
+        let window = windows.entry(ip).or_default();
+        if now.duration_since(window.window_start) >= RATE_LIMIT_WINDOW {
+            window.failed_attempts = 1;
+            window.window_start = now;
+        } else {
+            window.failed_attempts += 1;
+        }
+    }
+
+    /// Clear the failure counter for an IP after a successful authentication.
+    async fn record_auth_success(&self, ip: IpAddr) {
+        self.auth_failure_windows.lock().await.remove(&ip);
     }
 
     /// Look up an [`ApiIdentity`] by digest using a constant-time comparison.
@@ -3820,6 +3914,7 @@ mod tests {
                     RateLimitWindow { started_at: Instant::now(), request_count: 1 },
                 ),
             ]))),
+            auth_failure_windows: Arc::new(Mutex::new(HashMap::new())),
         };
 
         api.check_rate_limit(&RateLimitSubject::PresentedCredential(ApiRuntime::hash_api_key(
@@ -3836,6 +3931,129 @@ mod tests {
             ApiRuntime::hash_api_key(api.key_hash_secret.as_ref(), "new-key")
         )));
         assert_eq!(windows.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn auth_failure_rate_limiter_blocks_after_max_failed_attempts() {
+        // Use a high per-request limit so only the auth-failure limiter fires.
+        let app =
+            test_router(Some((1000, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+        let client_ip = SocketAddr::from(([192, 0, 2, 42], 1234));
+
+        // Exhaust the allowed failure budget.
+        for _ in 0..MAX_FAILED_API_AUTH_ATTEMPTS {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/listeners")
+                        .header(API_KEY_HEADER, "wrong-key")
+                        .extension(ConnectInfo(client_ip))
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let body = read_json(response).await;
+            assert_eq!(body["error"]["code"], "invalid_api_key");
+        }
+
+        // The next attempt must be blocked before any HMAC work.
+        let blocked = app
+            .oneshot(
+                Request::builder()
+                    .uri("/listeners")
+                    .header(API_KEY_HEADER, "yet-another-wrong-key")
+                    .extension(ConnectInfo(client_ip))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(blocked.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = read_json(blocked).await;
+        assert_eq!(body["error"]["code"], "rate_limited");
+    }
+
+    #[tokio::test]
+    async fn auth_failure_rate_limiter_resets_on_successful_auth() {
+        let app =
+            test_router(Some((1000, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+        let client_ip = SocketAddr::from(([192, 0, 2, 43], 1234));
+
+        // Record some failures but stay below the threshold.
+        for _ in 0..MAX_FAILED_API_AUTH_ATTEMPTS - 1 {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/listeners")
+                        .header(API_KEY_HEADER, "wrong-key")
+                        .extension(ConnectInfo(client_ip))
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        // Successful auth clears the failure counter.
+        let ok = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/listeners")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .extension(ConnectInfo(client_ip))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(ok.status(), StatusCode::OK);
+
+        // After the reset, a full fresh budget is available — the first wrong attempt is allowed.
+        let after_reset = app
+            .oneshot(
+                Request::builder()
+                    .uri("/listeners")
+                    .header(API_KEY_HEADER, "wrong-key-after-reset")
+                    .extension(ConnectInfo(client_ip))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(after_reset.status(), StatusCode::UNAUTHORIZED);
+        let body = read_json(after_reset).await;
+        assert_eq!(body["error"]["code"], "invalid_api_key");
+    }
+
+    #[tokio::test]
+    async fn auth_failure_rate_limiter_is_not_applied_without_client_ip() {
+        // Without a ConnectInfo extension there is no IP to track.  A series of
+        // unique wrong keys should each produce invalid_api_key, not rate_limited.
+        let app =
+            test_router(Some((1000, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        for i in 0..MAX_FAILED_API_AUTH_ATTEMPTS + 1 {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/listeners")
+                        .header(API_KEY_HEADER, format!("unique-wrong-key-{i}"))
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let body = read_json(response).await;
+            assert_eq!(body["error"]["code"], "invalid_api_key");
+        }
     }
 
     #[tokio::test]

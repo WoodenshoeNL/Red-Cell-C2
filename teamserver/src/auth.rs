@@ -157,7 +157,7 @@ impl AuthService {
     pub fn from_profile(profile: &Profile) -> Result<Self, AuthError> {
         Ok(Self {
             credentials: Arc::new(RwLock::new(configured_credentials(profile)?)),
-            dummy_password_verifier: password_verifier_for_sha3(DUMMY_PASSWORD_HASH)?,
+            dummy_password_verifier: generate_dummy_verifier()?,
             sessions: Arc::new(RwLock::new(SessionRegistry::default())),
             runtime_operators: None,
             audit_log: None,
@@ -171,7 +171,7 @@ impl AuthService {
     ) -> Result<Self, AuthError> {
         let service = Self {
             credentials: Arc::new(RwLock::new(configured_credentials(profile)?)),
-            dummy_password_verifier: password_verifier_for_sha3(DUMMY_PASSWORD_HASH)?,
+            dummy_password_verifier: generate_dummy_verifier()?,
             sessions: Arc::new(RwLock::new(SessionRegistry::default())),
             runtime_operators: Some(database.operators()),
             audit_log: Some(database.audit_log()),
@@ -544,8 +544,46 @@ fn is_legacy_sha3_digest(value: &str) -> bool {
     value.len() == 64 && value.as_bytes().iter().all(u8::is_ascii_hexdigit)
 }
 
-const DUMMY_PASSWORD_HASH: &str =
-    "0000000000000000000000000000000000000000000000000000000000000000";
+/// Generate a one-time Argon2id PHC hash from random bytes for timing equalization.
+///
+/// When a login attempt uses an unknown username the service verifies the submitted
+/// credential against this dummy hash instead of returning immediately.  The hash
+/// must be a syntactically valid Argon2 PHC string so that [`password_hashes_match`]
+/// runs the full Argon2 computation rather than failing on a parse error in
+/// microseconds — which would otherwise expose user-enumeration via timing.
+///
+/// The password material is 16 bytes from the OS CSPRNG (via [`Uuid::new_v4`]), so
+/// the resulting hash is unpredictable and cannot be precomputed by an attacker.
+fn generate_dummy_verifier() -> Result<String, AuthError> {
+    #[cfg(test)]
+    return generate_dummy_verifier_cached();
+    #[cfg(not(test))]
+    return generate_dummy_verifier_impl();
+}
+
+fn generate_dummy_verifier_impl() -> Result<String, AuthError> {
+    let random_bytes = Uuid::new_v4();
+    Argon2::default()
+        .hash_password(random_bytes.as_bytes())
+        .map(|h| h.to_string())
+        .map_err(|e| AuthError::PasswordVerifier(e.to_string()))
+}
+
+/// Test-only cached wrapper around [`generate_dummy_verifier_impl`].
+///
+/// The dummy hash must be a valid Argon2 PHC string, but its exact value is
+/// irrelevant for correctness tests — reusing one across the test process avoids
+/// paying the Argon2 memory-hard cost on every [`AuthService`] construction.
+#[cfg(test)]
+fn generate_dummy_verifier_cached() -> Result<String, AuthError> {
+    use std::sync::OnceLock;
+    static DUMMY: OnceLock<Result<String, String>> = OnceLock::new();
+    DUMMY
+        .get_or_init(|| generate_dummy_verifier_impl().map_err(|e| e.to_string()))
+        .as_ref()
+        .cloned()
+        .map_err(|e| AuthError::PasswordVerifier(e.clone()))
+}
 
 const fn operator_role_name(role: OperatorRole) -> &'static str {
     match role {
@@ -567,8 +605,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        AuthError, AuthService, AuthenticationFailure, AuthenticationResult, login_failure_message,
-        login_success_message, password_hashes_match, password_verifier_for_sha3,
+        AuthError, AuthService, AuthenticationFailure, AuthenticationResult,
+        generate_dummy_verifier, login_failure_message, login_success_message,
+        password_hashes_match, password_verifier_for_sha3,
     };
 
     fn profile() -> Profile {
@@ -605,6 +644,21 @@ mod tests {
         assert_eq!(
             hash_password_sha3("password1234"),
             "2f7d3e77d0786c5d305c0afadd4c1a2a6869a3210956c963ad2420c52e797022"
+        );
+    }
+
+    /// Regression test: the dummy verifier used for unknown-username timing equalization must be
+    /// a syntactically valid Argon2 PHC string so that `password_hashes_match` always runs the
+    /// full Argon2 computation rather than returning `false` immediately on a PHC parse error.
+    #[test]
+    fn dummy_verifier_is_valid_argon2_phc_string() {
+        use argon2::password_hash::phc::PasswordHash;
+
+        let verifier = generate_dummy_verifier().expect("dummy verifier should be generated");
+        PasswordHash::new(&verifier).expect("dummy verifier must be a valid Argon2 PHC string");
+        assert!(
+            verifier.starts_with("$argon2"),
+            "dummy verifier must use the argon2 algorithm family"
         );
     }
 

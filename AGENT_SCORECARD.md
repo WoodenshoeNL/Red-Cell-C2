@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 119 | 181 | 31 |
+| Tasks closed | 124 | 181 | 31 |
 | Bugs filed against | 10 | 28 | 9 |
 | Bug rate (bugs/task) | 0.08 | 0.15 | 0.29 |
 | Quality score | 92% | 85% | 71% |
@@ -1365,3 +1365,14 @@ Notes: Four refactoring tasks are clean and well-executed. `rate_limiter.rs` is 
 
 Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (141 unit tests + integration tests, 0 failures)
 Notes: Clean period. All six deliverables are high quality — no unwraps, no clippy violations, no protocol issues. The loop re-claim fix is correct and well-designed. Test coverage additions are thorough and well-documented. No bugs filed this period.
+
+### QA Review — 2026-03-15 13:50 — b2a57a4..58e4eae
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 5 | 0 | Closed `red-cell-c2-da0m` (auth: constant-time token scan with global/per-account session caps, 3 tests); `red-cell-c2-k00o` (listeners: remove x-havoc fingerprinting header from fake_404_response, test assertion added); `red-cell-c2-0bm2` (dispatch: fix pivot list zero-padding — `:<08x` → `:08x`, test added); `red-cell-c2-psa8` (api: deduplicate FailedApiAuthWindow into shared AttemptWindow, code reuse); `red-cell-c2-t4ml` (protocol: normalise HTTP method to uppercase in payload builder, byte-for-byte equality test). |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (141 tests, 0 failures)
+Notes: Clean run. All five fixes are well-scoped bug corrections with appropriate regression tests. No `unwrap`/`expect` in production paths. No clippy issues. No bugs filed this period.

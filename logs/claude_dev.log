@@ -26615,3 +26615,28 @@ Done. Here's a summary of what was implemented:
 [2026-03-15 11:58:47] [Ubuntu-C2-dev01-claude] Claimed red-cell-c2-a55z
 [2026-03-15 11:58:47] [Ubuntu-C2-dev01-claude] Running Claude on task red-cell-c2-a55z...
 [2026-03-15 12:10:01] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-a55z
+[2026-03-15 12:10:01] [Ubuntu-C2-dev01-claude] WIP: committing uncommitted changes for red-cell-c2-a55z
+[2026-03-15 12:10:03] [Ubuntu-C2-dev01-claude] WIP: pushed
+[2026-03-15 12:10:03] [Ubuntu-C2-dev01-claude] ========================LOOP=========================
+[2026-03-15 12:10:18] [Ubuntu-C2-dev01-claude] === Starting Claude dev loop iteration 4 ===
+[2026-03-15 12:10:19] [Ubuntu-C2-dev01-claude] git pull --ff-only: ok
+[2026-03-15 12:10:19] [Ubuntu-C2-dev01-claude] br sync import: ok
+[2026-03-15 12:10:22] [Ubuntu-C2-dev01-claude] Selected task: red-cell-c2-wey1
+[2026-03-15 12:10:26] [Ubuntu-C2-dev01-claude] Claimed red-cell-c2-wey1
+[2026-03-15 12:10:26] [Ubuntu-C2-dev01-claude] Running Claude on task red-cell-c2-wey1...
+Done. Here's what was implemented:
+
+**Bug fix: `red-cell-c2-wey1` — agent lifecycle audit events**
+
+Three new `teamserver`-actor audit entries are now written:
+
+| Event | Action label | Where | Key parameters |
+|---|---|---|---|
+| DemonInit registration | `agent.registered` | `listeners.rs:process_demon_transport` | `listener`, `external_ip` |
+| COMMAND_CHECKIN callback | `agent.checkin` | `dispatch.rs:handle_checkin` | `external_ip` |
+| Liveness-sweep death | `agent.dead` | `agent_liveness.rs:mark_stale_agent_if_unchanged` | `reason`, `external_ip` |
+
+The `agent.dead` audit write is spawned via `tokio::spawn` so it doesn't introduce an await point between the event broadcast and socket pruning (which would break the existing race-sensitive tests).
+
+`spawn_agent_liveness_monitor` gained a `Database` parameter; `main.rs` and all 12 affected tests were updated. Three new integration tests verify each new audit entry. All 618 tests pass, clippy clean, fmt clean.
+[2026-03-15 12:30:25] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-wey1

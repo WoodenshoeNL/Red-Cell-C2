@@ -11,6 +11,7 @@ use red_cell_common::crypto::hash_password_sha3;
 use red_cell_common::operator::{
     EventCode, LoginInfo, Message, MessageHead, MessageInfo, OperatorMessage,
 };
+use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tracing::instrument;
@@ -391,8 +392,23 @@ impl SessionRegistry {
         self.by_token.get(token)
     }
 
+    /// Retrieve a session by its token using a constant-time byte comparison.
+    ///
+    /// `BTreeMap::get` short-circuits on the first unequal byte, which can leak
+    /// timing information allowing an attacker to enumerate valid tokens. This
+    /// implementation performs a linear scan comparing every token with
+    /// [`subtle::ConstantTimeEq`] so that the per-byte comparison time does not
+    /// depend on where the mismatch occurs.
     fn get_by_token(&self, token: &str) -> Option<&OperatorSession> {
-        self.by_token.get(token)
+        let token_bytes = token.as_bytes();
+        let mut found: Option<&OperatorSession> = None;
+        for session in self.by_token.values() {
+            let is_match: bool = session.token.as_bytes().ct_eq(token_bytes).into();
+            if is_match {
+                found = Some(session);
+            }
+        }
+        found
     }
 
     fn len(&self) -> usize {
@@ -1122,5 +1138,96 @@ mod tests {
             .expect("runtime operator should exist");
         assert_ne!(persisted.password_verifier, hash_password_sha3("zion"));
         assert!(password_hashes_match(&hash_password_sha3("zion"), &persisted.password_verifier));
+    }
+
+    #[tokio::test]
+    async fn session_for_token_returns_none_for_unknown_token() {
+        let service =
+            AuthService::from_profile(&profile()).expect("auth service should initialize");
+        let result = service
+            .authenticate_login(
+                Uuid::new_v4(),
+                &LoginInfo {
+                    user: "operator".to_owned(),
+                    password: hash_password_sha3("password1234"),
+                },
+            )
+            .await;
+        assert!(matches!(result, AuthenticationResult::Success(_)));
+
+        // A token that is the right length but wrong value must not match.
+        let fake_token = "00000000-0000-0000-0000-000000000000";
+        assert!(service.session_for_token(fake_token).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn session_for_token_returns_none_for_wrong_length_token() {
+        let service =
+            AuthService::from_profile(&profile()).expect("auth service should initialize");
+        let result = service
+            .authenticate_login(
+                Uuid::new_v4(),
+                &LoginInfo {
+                    user: "operator".to_owned(),
+                    password: hash_password_sha3("password1234"),
+                },
+            )
+            .await;
+        assert!(matches!(result, AuthenticationResult::Success(_)));
+
+        // Tokens shorter or longer than a UUID must not match any session.
+        assert!(service.session_for_token("short").await.is_none());
+        assert!(
+            service
+                .session_for_token("this-is-a-much-longer-string-that-is-not-a-uuid-token")
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn session_for_token_returns_matching_session_across_multiple_sessions() {
+        let service =
+            AuthService::from_profile(&profile()).expect("auth service should initialize");
+
+        let conn_a = Uuid::new_v4();
+        let conn_b = Uuid::new_v4();
+
+        let result_a = service
+            .authenticate_login(
+                conn_a,
+                &LoginInfo {
+                    user: "operator".to_owned(),
+                    password: hash_password_sha3("password1234"),
+                },
+            )
+            .await;
+        let AuthenticationResult::Success(success_a) = result_a else {
+            panic!("expected successful authentication for operator");
+        };
+
+        let result_b = service
+            .authenticate_login(
+                conn_b,
+                &LoginInfo { user: "admin".to_owned(), password: hash_password_sha3("adminpw") },
+            )
+            .await;
+        let AuthenticationResult::Success(success_b) = result_b else {
+            panic!("expected successful authentication for admin");
+        };
+
+        let session_a = service
+            .session_for_token(&success_a.token)
+            .await
+            .expect("operator session should be found");
+        assert_eq!(session_a.username, "operator");
+        assert_eq!(session_a.connection_id, conn_a);
+
+        let session_b = service
+            .session_for_token(&success_b.token)
+            .await
+            .expect("admin session should be found");
+        assert_eq!(session_b.username, "admin");
+        assert_eq!(session_b.connection_id, conn_b);
     }
 }

@@ -781,44 +781,30 @@ async fn handle_checkin(
         parse_checkin_metadata(existing.clone(), agent_id, payload, &timestamp)?
     {
         let key_rotation = updated.encryption != existing.encryption;
-        let pivot_parent = registry.parent_of(agent_id).await;
 
-        if key_rotation && pivot_parent.is_some() {
+        if key_rotation {
+            // SECURITY: The Demon binary protocol includes no nonce, timestamp, or
+            // challenge-response in the COMMAND_CHECKIN payload, so the teamserver cannot
+            // distinguish a fresh rotation from a replayed packet carrying a known key.  An
+            // adversary who captures a CHECKIN frame can replay it to push the session key to a
+            // value they control and then decrypt subsequent traffic or inject spoofed commands.
+            //
+            // To close the replay window entirely, key rotation is refused for all agents
+            // regardless of whether they are direct or pivot-relayed.  Agents that genuinely need
+            // new key material must go through a full DEMON_INIT re-registration, which is
+            // protected by the mutual-auth handshake.
+            let pivot_parent = registry.parent_of(agent_id).await.map(|p| format!("{p:08X}"));
             warn!(
                 agent_id = format_args!("{agent_id:08X}"),
-                pivot_parent = pivot_parent.map(|parent| format!("{parent:08X}")),
-                "refused AES session key rotation from pivot-relayed checkin payload"
+                pivot_parent,
+                "refused AES session key rotation from CHECKIN payload — \
+                 no replay/freshness guarantee in the Demon protocol; \
+                 re-init required for legitimate key rotation"
             );
             updated.encryption = existing.encryption.clone();
-        } else if key_rotation {
-            // SECURITY: The Demon binary protocol does not include a nonce, timestamp, or
-            // challenge-response in the COMMAND_CHECKIN payload, so the teamserver cannot verify
-            // that this key-rotation request is fresh.  An adversary who captures a legitimate
-            // CHECKIN packet in transit can replay it against the teamserver to rotate the session
-            // key back to a known value, then decrypt subsequent agent traffic or inject spoofed
-            // commands.
-            //
-            // Adding freshness protection (e.g. a server-issued challenge that the agent signs, or
-            // a monotonic sequence counter) would require a protocol extension that is incompatible
-            // with unmodified Havoc Demon agents.  This limitation is therefore inherited from the
-            // upstream Havoc C2 design and cannot be fixed at the teamserver layer alone.
-            //
-            // Mitigation: protect the network path between agents and the teamserver with mutual
-            // TLS or a VPN so that an adversary cannot capture CHECKIN packets in the first place.
-            // Operators should also treat any unexpected key-rotation event visible in server logs
-            // as a potential indicator of replay activity.
-            warn!(
-                agent_id = format_args!("{agent_id:08X}"),
-                "AES session key rotation accepted from CHECKIN payload \
-                 — no replay/freshness protection (Havoc protocol limitation); \
-                 unexpected rotations may indicate a replay attack"
-            );
         }
 
         registry.update_agent(updated).await?;
-        if key_rotation && pivot_parent.is_none() {
-            registry.set_ctr_offset(agent_id, 0).await?;
-        }
         registry.get(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?
     } else {
         registry.set_last_call_in(agent_id, timestamp).await?
@@ -5828,9 +5814,11 @@ mod tests {
         assert_eq!(updated.sleep_jitter, 5);
         assert_eq!(updated.kill_date, Some(1_725_000_000));
         assert_eq!(updated.working_hours, Some(0x00FF_00FF));
-        assert_eq!(updated.encryption.aes_key.as_slice(), refreshed_key.as_slice());
-        assert_eq!(updated.encryption.aes_iv.as_slice(), refreshed_iv.as_slice());
-        assert_eq!(registry.ctr_offset(agent_id).await?, 0);
+        // Key rotation from CHECKIN is rejected — original key material must be preserved.
+        assert_eq!(updated.encryption.aes_key.as_slice(), key.as_slice());
+        assert_eq!(updated.encryption.aes_iv.as_slice(), iv.as_slice());
+        // CTR offset must not be reset when rotation is refused.
+        assert_eq!(registry.ctr_offset(agent_id).await?, 7);
 
         let persisted = database
             .agents()
@@ -5852,7 +5840,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builtin_checkin_handler_rotates_transport_keystream_from_block_zero()
+    async fn builtin_checkin_handler_rejects_key_rotation_and_preserves_ctr_offset()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());
@@ -5867,49 +5855,59 @@ mod tests {
         );
         let original_key = [0x77; AGENT_KEY_LENGTH];
         let original_iv = [0x44; AGENT_IV_LENGTH];
-        let rotated_key = [0x12; AGENT_KEY_LENGTH];
-        let rotated_iv = [0x34; AGENT_IV_LENGTH];
+        let attempted_key = [0x12; AGENT_KEY_LENGTH];
+        let attempted_iv = [0x34; AGENT_IV_LENGTH];
         let agent_id = 0x1020_304A;
-        let pre_rotation_plaintext = b"advance shared ctr state";
-        let post_rotation_plaintext = b"sleep 45 5";
+        let pre_checkin_plaintext = b"advance shared ctr state";
+        let post_checkin_plaintext = b"sleep 45 5";
 
         registry.insert(sample_agent_info(agent_id, original_key, original_iv)).await?;
 
-        let pre_rotation_ciphertext =
-            encrypt_agent_data_at_offset(&original_key, &original_iv, 0, pre_rotation_plaintext)?;
+        // Advance the CTR offset to a non-zero value before the CHECKIN.
+        let pre_checkin_ciphertext =
+            encrypt_agent_data_at_offset(&original_key, &original_iv, 0, pre_checkin_plaintext)?;
         assert_eq!(
-            registry.decrypt_from_agent(agent_id, &pre_rotation_ciphertext).await?,
-            pre_rotation_plaintext
+            registry.decrypt_from_agent(agent_id, &pre_checkin_ciphertext).await?,
+            pre_checkin_plaintext
         );
         let advanced_offset = registry.ctr_offset(agent_id).await?;
-        assert_eq!(advanced_offset, ctr_blocks_for_len(pre_rotation_ciphertext.len()));
+        assert_eq!(advanced_offset, ctr_blocks_for_len(pre_checkin_ciphertext.len()));
         assert!(advanced_offset > 0);
 
-        let payload = sample_checkin_metadata_payload(agent_id, rotated_key, rotated_iv);
+        // Dispatch a CHECKIN that attempts to rotate to a different key.
+        let payload = sample_checkin_metadata_payload(agent_id, attempted_key, attempted_iv);
         let response = dispatcher
             .dispatch(agent_id, u32::from(DemonCommand::CommandCheckin), 6, &payload)
             .await?;
         assert_eq!(response, None);
-        assert_eq!(registry.ctr_offset(agent_id).await?, 0);
 
-        let post_rotation_ciphertext =
-            registry.encrypt_for_agent(agent_id, post_rotation_plaintext).await?;
+        // The rotation must be refused: CTR offset preserved, original key still active.
+        assert_eq!(registry.ctr_offset(agent_id).await?, advanced_offset);
         assert_eq!(
-            post_rotation_ciphertext,
-            encrypt_agent_data_at_offset(&rotated_key, &rotated_iv, 0, post_rotation_plaintext)?
+            registry.get(agent_id).await.unwrap().encryption.aes_key.as_slice(),
+            original_key.as_slice()
         );
-        assert_ne!(
-            post_rotation_ciphertext,
+        assert_eq!(
+            registry.get(agent_id).await.unwrap().encryption.aes_iv.as_slice(),
+            original_iv.as_slice()
+        );
+
+        // Subsequent encryption must still use the original key at the preserved offset.
+        let post_checkin_ciphertext =
+            registry.encrypt_for_agent(agent_id, post_checkin_plaintext).await?;
+        assert_eq!(
+            post_checkin_ciphertext,
             encrypt_agent_data_at_offset(
                 &original_key,
                 &original_iv,
                 advanced_offset,
-                post_rotation_plaintext,
+                post_checkin_plaintext,
             )?
         );
-        assert_eq!(
-            registry.ctr_offset(agent_id).await?,
-            ctr_blocks_for_len(post_rotation_ciphertext.len())
+        // Must NOT encrypt with the attempted rotated key.
+        assert_ne!(
+            post_checkin_ciphertext,
+            encrypt_agent_data_at_offset(&attempted_key, &attempted_iv, 0, post_checkin_plaintext)?
         );
 
         Ok(())

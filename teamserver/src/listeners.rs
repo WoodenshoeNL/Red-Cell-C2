@@ -4262,7 +4262,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_listener_checkin_refreshes_metadata_and_accepts_rotated_transport()
+    async fn http_listener_checkin_refreshes_metadata_and_rejects_key_rotation()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());
@@ -4274,8 +4274,9 @@ mod tests {
         let port = available_port()?;
         let key = [0x71; AGENT_KEY_LENGTH];
         let iv = [0x37; AGENT_IV_LENGTH];
-        let refreshed_key = [0x12; AGENT_KEY_LENGTH];
-        let refreshed_iv = [0x34; AGENT_IV_LENGTH];
+        // A different key/IV that the agent embeds in its CHECKIN — must be rejected.
+        let attempted_key = [0x12; AGENT_KEY_LENGTH];
+        let attempted_iv = [0x34; AGENT_IV_LENGTH];
         let agent_id = 0xCAFE_BABE;
 
         registry.insert(sample_agent_info(agent_id, key, iv)).await?;
@@ -4284,6 +4285,8 @@ mod tests {
         manager.start("edge-http-checkin").await?;
         wait_for_listener(port, false).await?;
 
+        let checkin_payload =
+            sample_checkin_metadata_payload(agent_id, attempted_key, attempted_iv);
         let response = Client::new()
             .post(format!("http://127.0.0.1:{port}/"))
             .body(valid_demon_multi_callback_body(
@@ -4291,11 +4294,7 @@ mod tests {
                 key,
                 iv,
                 (u32::from(DemonCommand::CommandGetJob), 5, Vec::new()),
-                &[(
-                    u32::from(DemonCommand::CommandCheckin),
-                    6,
-                    sample_checkin_metadata_payload(agent_id, refreshed_key, refreshed_iv),
-                )],
+                &[(u32::from(DemonCommand::CommandCheckin), 6, checkin_payload.clone())],
             ))
             .send()
             .await?;
@@ -4309,9 +4308,17 @@ mod tests {
         assert_eq!(updated.process_name, "cmd.exe");
         assert_eq!(updated.sleep_delay, 45);
         assert_eq!(updated.sleep_jitter, 5);
-        assert_eq!(updated.encryption.aes_key.as_slice(), refreshed_key.as_slice());
-        assert_eq!(updated.encryption.aes_iv.as_slice(), refreshed_iv.as_slice());
-        assert_eq!(registry.ctr_offset(agent_id).await?, 0);
+        // Key rotation must be refused — original key material preserved.
+        assert_eq!(updated.encryption.aes_key.as_slice(), key.as_slice());
+        assert_eq!(updated.encryption.aes_iv.as_slice(), iv.as_slice());
+        // CTR must NOT be reset since the rotation was rejected.
+        //
+        // The multi-callback body encrypts:
+        //   4 bytes (first payload len=0) + 4 (CheckIn cmd) + 4 (req_id) + 4 (payload len) +
+        //   checkin_payload
+        let first_request_encrypted_len = 4 + 4 + 4 + 4 + checkin_payload.len();
+        let expected_ctr_after_first = ctr_blocks_for_len(first_request_encrypted_len);
+        assert_eq!(registry.ctr_offset(agent_id).await?, expected_ctr_after_first);
         assert_eq!(
             database
                 .agents()
@@ -4319,8 +4326,9 @@ mod tests {
                 .await?
                 .ok_or_else(|| "agent should be persisted".to_owned())?
                 .encryption
-                .aes_key,
-            updated.encryption.aes_key
+                .aes_key
+                .as_slice(),
+            key.as_slice()
         );
 
         let event = event_receiver
@@ -4332,48 +4340,6 @@ mod tests {
         };
         assert_eq!(message.info.agent_id, format!("{agent_id:08X}"));
         assert_eq!(message.info.marked, "Alive");
-
-        registry
-            .enqueue_job(
-                agent_id,
-                Job {
-                    command: u32::from(DemonCommand::CommandSleep),
-                    request_id: 41,
-                    payload: vec![1, 2, 3, 4],
-                    command_line: "sleep 45 5".to_owned(),
-                    task_id: "task-41".to_owned(),
-                    created_at: "2026-03-12T18:00:00Z".to_owned(),
-                    operator: "operator".to_owned(),
-                },
-            )
-            .await?;
-
-        let follow_up = Client::new()
-            .post(format!("http://127.0.0.1:{port}/"))
-            .body(valid_demon_callback_body(
-                agent_id,
-                refreshed_key,
-                refreshed_iv,
-                u32::from(DemonCommand::CommandGetJob),
-                7,
-                &[],
-            ))
-            .send()
-            .await?;
-
-        assert_eq!(follow_up.status(), StatusCode::OK);
-        let bytes = follow_up.bytes().await?;
-        let message = DemonMessage::from_bytes(bytes.as_ref())?;
-        assert_eq!(message.packages.len(), 1);
-        assert_eq!(message.packages[0].command_id, u32::from(DemonCommand::CommandSleep));
-        assert_eq!(message.packages[0].request_id, 41);
-        let decrypted = decrypt_agent_data_at_offset(
-            &refreshed_key,
-            &refreshed_iv,
-            ctr_blocks_for_len(4),
-            &message.packages[0].payload,
-        )?;
-        assert_eq!(decrypted, vec![1, 2, 3, 4]);
 
         manager.stop("edge-http-checkin").await?;
         Ok(())

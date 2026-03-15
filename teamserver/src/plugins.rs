@@ -18,7 +18,7 @@ use tokio::sync::RwLock;
 use tracing::{instrument, warn};
 
 use crate::{
-    AgentRegistry, Database, EventBus, Job, ListenerManager, ListenerManagerError,
+    AgentRegistry, Database, EventBus, Job, ListenerManager, ListenerManagerError, LootRecord,
     PersistedListener, SocketRelayManager, TeamserverError,
 };
 
@@ -82,22 +82,38 @@ pub enum PluginError {
 pub enum PluginEvent {
     /// Agent check-in callback notifications.
     AgentCheckin,
+    /// Agent registration (DemonInit) callback notifications.
+    AgentRegistered,
+    /// Agent death or stale timeout callback notifications.
+    AgentDead,
     /// Agent command output callback notifications.
     CommandOutput,
+    /// Loot (download, screenshot, credential) captured callback notifications.
+    LootCaptured,
+    /// Task queued for an agent callback notifications.
+    TaskCreated,
 }
 
 impl PluginEvent {
     fn as_str(self) -> &'static str {
         match self {
             Self::AgentCheckin => "agent_checkin",
+            Self::AgentRegistered => "agent_registered",
+            Self::AgentDead => "agent_dead",
             Self::CommandOutput => "command_output",
+            Self::LootCaptured => "loot_captured",
+            Self::TaskCreated => "task_created",
         }
     }
 
     fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "agent_checkin" => Some(Self::AgentCheckin),
+            "agent_registered" => Some(Self::AgentRegistered),
+            "agent_dead" => Some(Self::AgentDead),
             "command_output" => Some(Self::CommandOutput),
+            "loot_captured" => Some(Self::LootCaptured),
+            "task_created" => Some(Self::TaskCreated),
             _ => None,
         }
     }
@@ -241,6 +257,58 @@ impl PluginRuntime {
         self.invoke_callbacks(PluginEvent::CommandOutput, payload).await
     }
 
+    /// Dispatch an agent registration (DemonInit) event to subscribed Python callbacks.
+    #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id)))]
+    pub async fn emit_agent_registered(&self, agent_id: u32) -> Result<(), PluginError> {
+        let Some(agent) = self.inner.agents.get(agent_id).await else {
+            return Ok(());
+        };
+        let payload = serde_json::to_value(agent)?;
+        self.invoke_callbacks(PluginEvent::AgentRegistered, payload).await
+    }
+
+    /// Dispatch an agent death/timeout event to subscribed Python callbacks.
+    #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id)))]
+    pub async fn emit_agent_dead(&self, agent_id: u32) -> Result<(), PluginError> {
+        let Some(agent) = self.inner.agents.get(agent_id).await else {
+            return Ok(());
+        };
+        let payload = serde_json::to_value(agent)?;
+        self.invoke_callbacks(PluginEvent::AgentDead, payload).await
+    }
+
+    /// Dispatch a loot-captured event to subscribed Python callbacks.
+    ///
+    /// Binary `data` is omitted from the payload to avoid serialising large blobs.
+    #[instrument(skip(self, loot), fields(agent_id = format_args!("0x{:08X}", loot.agent_id), kind = %loot.kind))]
+    pub async fn emit_loot_captured(&self, loot: &LootRecord) -> Result<(), PluginError> {
+        let payload = json!({
+            "agent_id": loot.agent_id,
+            "id": loot.id,
+            "kind": loot.kind,
+            "name": loot.name,
+            "file_path": loot.file_path,
+            "size_bytes": loot.size_bytes,
+            "captured_at": loot.captured_at,
+        });
+        self.invoke_callbacks(PluginEvent::LootCaptured, payload).await
+    }
+
+    /// Dispatch a task-created event to subscribed Python callbacks.
+    #[instrument(skip(self, job), fields(agent_id = format_args!("0x{:08X}", agent_id), request_id = job.request_id))]
+    pub async fn emit_task_created(&self, agent_id: u32, job: &Job) -> Result<(), PluginError> {
+        let payload = json!({
+            "agent_id": agent_id,
+            "request_id": job.request_id,
+            "command": job.command,
+            "command_line": job.command_line,
+            "task_id": job.task_id,
+            "created_at": job.created_at,
+            "operator": job.operator,
+        });
+        self.invoke_callbacks(PluginEvent::TaskCreated, payload).await
+    }
+
     /// Return the active process-wide plugin runtime when initialized.
     pub fn current() -> Result<Option<Self>, PluginError> {
         let lock = runtime_slot();
@@ -380,11 +448,11 @@ impl PluginRuntime {
                 runtime.install_api_module(py)?;
 
                 let agent_id = match event {
-                    PluginEvent::AgentCheckin => payload
+                    PluginEvent::AgentCheckin | PluginEvent::AgentRegistered | PluginEvent::AgentDead => payload
                         .get("AgentID")
                         .and_then(Value::as_u64)
                         .and_then(|value| u32::try_from(value).ok()),
-                    PluginEvent::CommandOutput => payload
+                    PluginEvent::CommandOutput | PluginEvent::LootCaptured | PluginEvent::TaskCreated => payload
                         .get("agent_id")
                         .and_then(Value::as_u64)
                         .and_then(|value| u32::try_from(value).ok()),
@@ -933,6 +1001,54 @@ fn on_command_output(py: Python<'_>, callback: Bound<'_, PyAny>) -> PyResult<()>
 }
 
 #[pyfunction]
+fn on_agent_registered(py: Python<'_>, callback: Bound<'_, PyAny>) -> PyResult<()> {
+    ensure_callable(&callback)?;
+    let runtime = PluginRuntime::active()?;
+    let callback = callback.unbind();
+    py.allow_threads(move || {
+        runtime.block_on(runtime.register_callback(PluginEvent::AgentRegistered, callback))
+    })
+    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    Ok(())
+}
+
+#[pyfunction]
+fn on_agent_dead(py: Python<'_>, callback: Bound<'_, PyAny>) -> PyResult<()> {
+    ensure_callable(&callback)?;
+    let runtime = PluginRuntime::active()?;
+    let callback = callback.unbind();
+    py.allow_threads(move || {
+        runtime.block_on(runtime.register_callback(PluginEvent::AgentDead, callback))
+    })
+    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    Ok(())
+}
+
+#[pyfunction]
+fn on_loot_captured(py: Python<'_>, callback: Bound<'_, PyAny>) -> PyResult<()> {
+    ensure_callable(&callback)?;
+    let runtime = PluginRuntime::active()?;
+    let callback = callback.unbind();
+    py.allow_threads(move || {
+        runtime.block_on(runtime.register_callback(PluginEvent::LootCaptured, callback))
+    })
+    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    Ok(())
+}
+
+#[pyfunction]
+fn on_task_created(py: Python<'_>, callback: Bound<'_, PyAny>) -> PyResult<()> {
+    ensure_callable(&callback)?;
+    let runtime = PluginRuntime::active()?;
+    let callback = callback.unbind();
+    py.allow_threads(move || {
+        runtime.block_on(runtime.register_callback(PluginEvent::TaskCreated, callback))
+    })
+    .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    Ok(())
+}
+
+#[pyfunction]
 fn register_callback(
     py: Python<'_>,
     event_type: String,
@@ -976,7 +1092,11 @@ fn populate_api_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(list_listeners, module)?)?;
     module.add_function(wrap_pyfunction!(get_listeners, module)?)?;
     module.add_function(wrap_pyfunction!(on_agent_checkin, module)?)?;
+    module.add_function(wrap_pyfunction!(on_agent_registered, module)?)?;
+    module.add_function(wrap_pyfunction!(on_agent_dead, module)?)?;
     module.add_function(wrap_pyfunction!(on_command_output, module)?)?;
+    module.add_function(wrap_pyfunction!(on_loot_captured, module)?)?;
+    module.add_function(wrap_pyfunction!(on_task_created, module)?)?;
     module.add_function(wrap_pyfunction!(register_callback, module)?)?;
     module.add_function(wrap_pyfunction!(register_command, module)?)?;
     module.add_class::<PyAgent>()?;
@@ -1661,6 +1781,192 @@ havoc.RegisterCommand(\n\
 
         let count = tokio::task::spawn_blocking(move || tracker_len(tracker)).await?;
         assert_eq!(count, 1, "good callback must still fire after bad callback raises");
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn emit_agent_registered_invokes_registered_callbacks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let (_database, registry, _events, _sockets, runtime) =
+            runtime_fixture("emit-registered").await?;
+        registry.insert(sample_agent(0x00AB_CDEF)).await?;
+
+        let (tracker, callback) = tokio::task::spawn_blocking({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| {
+                    make_tracker_and_callback(
+                        &runtime,
+                        py,
+                        pyo3::ffi::c_str!(
+                            "(lambda t: lambda event: t.append(event.event_type))(_tracker)"
+                        ),
+                    )
+                })
+            }
+        })
+        .await??;
+
+        runtime.register_callback(PluginEvent::AgentRegistered, callback).await?;
+        runtime.emit_agent_registered(0x00AB_CDEF).await?;
+
+        let (count, event_type) = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<(usize, String)> {
+                let list = tracker.bind(py);
+                let count = list.len();
+                let first = list.get_item(0)?.extract::<String>()?;
+                Ok((count, first))
+            })
+        })
+        .await??;
+        assert_eq!(count, 1);
+        assert_eq!(event_type, "agent_registered");
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn emit_agent_dead_invokes_registered_callbacks() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let (_database, registry, _events, _sockets, runtime) =
+            runtime_fixture("emit-dead").await?;
+        registry.insert(sample_agent(0x00AB_CDEF)).await?;
+
+        let (tracker, callback) = tokio::task::spawn_blocking({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| {
+                    make_tracker_and_callback(
+                        &runtime,
+                        py,
+                        pyo3::ffi::c_str!(
+                            "(lambda t: lambda event: t.append(event.event_type))(_tracker)"
+                        ),
+                    )
+                })
+            }
+        })
+        .await??;
+
+        runtime.register_callback(PluginEvent::AgentDead, callback).await?;
+        runtime.emit_agent_dead(0x00AB_CDEF).await?;
+
+        let (count, event_type) = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<(usize, String)> {
+                let list = tracker.bind(py);
+                let count = list.len();
+                let first = list.get_item(0)?.extract::<String>()?;
+                Ok((count, first))
+            })
+        })
+        .await??;
+        assert_eq!(count, 1);
+        assert_eq!(event_type, "agent_dead");
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn emit_loot_captured_invokes_registered_callbacks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("emit-loot").await?;
+
+        let (tracker, callback) = tokio::task::spawn_blocking({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| {
+                    make_tracker_and_callback(
+                        &runtime,
+                        py,
+                        pyo3::ffi::c_str!(
+                            "(lambda t: lambda event: t.append(event.data['kind']))(_tracker)"
+                        ),
+                    )
+                })
+            }
+        })
+        .await??;
+
+        runtime.register_callback(PluginEvent::LootCaptured, callback).await?;
+        let loot = LootRecord {
+            id: Some(1),
+            agent_id: 0x00AB_CDEF,
+            kind: "screenshot".to_owned(),
+            name: "Desktop_01.01.2026.png".to_owned(),
+            file_path: None,
+            size_bytes: Some(12345),
+            captured_at: "2026-03-15T00:00:00Z".to_owned(),
+            data: None,
+            metadata: None,
+        };
+        runtime.emit_loot_captured(&loot).await?;
+
+        let (count, kind) = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<(usize, String)> {
+                let list = tracker.bind(py);
+                let count = list.len();
+                let first = list.get_item(0)?.extract::<String>()?;
+                Ok((count, first))
+            })
+        })
+        .await??;
+        assert_eq!(count, 1);
+        assert_eq!(kind, "screenshot");
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn emit_task_created_invokes_registered_callbacks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("emit-task").await?;
+
+        let (tracker, callback) = tokio::task::spawn_blocking({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| {
+                    make_tracker_and_callback(
+                        &runtime,
+                        py,
+                        pyo3::ffi::c_str!(
+                            "(lambda t: lambda event: t.append(event.data['command_line']))(_tracker)"
+                        ),
+                    )
+                })
+            }
+        })
+        .await??;
+
+        runtime.register_callback(PluginEvent::TaskCreated, callback).await?;
+        let job = Job {
+            command: 10,
+            request_id: 42,
+            payload: vec![],
+            command_line: "shell whoami".to_owned(),
+            task_id: "task-001".to_owned(),
+            created_at: "2026-03-15T00:00:00Z".to_owned(),
+            operator: "admin".to_owned(),
+        };
+        runtime.emit_task_created(0x00AB_CDEF, &job).await?;
+
+        let (count, cmd_line) = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<(usize, String)> {
+                let list = tracker.bind(py);
+                let count = list.len();
+                let first = list.get_item(0)?.extract::<String>()?;
+                Ok((count, first))
+            })
+        })
+        .await??;
+        assert_eq!(count, 1);
+        assert_eq!(cmd_line, "shell whoami");
         Ok(())
     }
 }

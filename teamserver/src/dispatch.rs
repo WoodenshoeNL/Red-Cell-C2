@@ -261,6 +261,7 @@ impl CommandDispatcher {
         let fs_events = events.clone();
         let fs_downloads = downloads.clone();
         let fs_registry = registry.clone();
+        let fs_plugins = plugins.clone();
         self.register_handler(
             u32::from(DemonCommand::CommandFs),
             move |agent_id, request_id, payload| {
@@ -268,9 +269,17 @@ impl CommandDispatcher {
                 let database = fs_database.clone();
                 let events = fs_events.clone();
                 let downloads = fs_downloads.clone();
+                let plugins = fs_plugins.clone();
                 Box::pin(async move {
                     handle_filesystem_callback(
-                        &registry, &database, &events, &downloads, agent_id, request_id, &payload,
+                        &registry,
+                        &database,
+                        &events,
+                        &downloads,
+                        plugins.as_ref(),
+                        agent_id,
+                        request_id,
+                        &payload,
                     )
                     .await
                 })
@@ -377,15 +386,23 @@ impl CommandDispatcher {
         let exit_registry = registry.clone();
         let exit_sockets = sockets.clone();
         let exit_events = events.clone();
+        let exit_plugins = plugins.clone();
         self.register_handler(
             u32::from(DemonCommand::CommandExit),
             move |agent_id, request_id, payload| {
                 let registry = exit_registry.clone();
                 let sockets = exit_sockets.clone();
                 let events = exit_events.clone();
+                let plugins = exit_plugins.clone();
                 Box::pin(async move {
                     handle_exit_callback(
-                        &registry, &sockets, &events, agent_id, request_id, &payload,
+                        &registry,
+                        &sockets,
+                        &events,
+                        plugins.as_ref(),
+                        agent_id,
+                        request_id,
+                        &payload,
                     )
                     .await
                 })
@@ -395,15 +412,23 @@ impl CommandDispatcher {
         let kill_date_registry = registry.clone();
         let kill_date_sockets = sockets.clone();
         let kill_date_events = events.clone();
+        let kill_date_plugins = plugins.clone();
         self.register_handler(
             u32::from(DemonCommand::CommandKillDate),
             move |agent_id, request_id, payload| {
                 let registry = kill_date_registry.clone();
                 let sockets = kill_date_sockets.clone();
                 let events = kill_date_events.clone();
+                let plugins = kill_date_plugins.clone();
                 Box::pin(async move {
                     handle_kill_date_callback(
-                        &registry, &sockets, &events, agent_id, request_id, &payload,
+                        &registry,
+                        &sockets,
+                        &events,
+                        plugins.as_ref(),
+                        agent_id,
+                        request_id,
+                        &payload,
                     )
                     .await
                 })
@@ -425,6 +450,7 @@ impl CommandDispatcher {
         let beacon_events = events.clone();
         let beacon_downloads = downloads.clone();
         let beacon_registry = registry.clone();
+        let beacon_plugins = plugins.clone();
         self.register_handler(
             u32::from(DemonCommand::BeaconOutput),
             move |agent_id, request_id, payload| {
@@ -432,9 +458,17 @@ impl CommandDispatcher {
                 let database = beacon_database.clone();
                 let events = beacon_events.clone();
                 let downloads = beacon_downloads.clone();
+                let plugins = beacon_plugins.clone();
                 Box::pin(async move {
                     handle_beacon_output_callback(
-                        &registry, &database, &events, &downloads, agent_id, request_id, &payload,
+                        &registry,
+                        &database,
+                        &events,
+                        &downloads,
+                        plugins.as_ref(),
+                        agent_id,
+                        request_id,
+                        &payload,
                     )
                     .await
                 })
@@ -514,15 +548,23 @@ impl CommandDispatcher {
         let screenshot_database = database.clone();
         let screenshot_events = events.clone();
         let screenshot_registry = registry.clone();
+        let screenshot_plugins = plugins.clone();
         self.register_handler(
             u32::from(DemonCommand::CommandScreenshot),
             move |agent_id, request_id, payload| {
                 let registry = screenshot_registry.clone();
                 let database = screenshot_database.clone();
                 let events = screenshot_events.clone();
+                let plugins = screenshot_plugins.clone();
                 Box::pin(async move {
                     handle_screenshot_callback(
-                        &registry, &database, &events, agent_id, request_id, &payload,
+                        &registry,
+                        &database,
+                        &events,
+                        plugins.as_ref(),
+                        agent_id,
+                        request_id,
+                        &payload,
                     )
                     .await
                 })
@@ -1740,6 +1782,7 @@ fn looks_like_pwdump_hash(line: &str) -> bool {
 async fn persist_credentials_from_output(
     database: &Database,
     events: &EventBus,
+    plugins: Option<&PluginRuntime>,
     agent_id: u32,
     command_id: u32,
     request_id: u32,
@@ -1771,6 +1814,11 @@ async fn persist_credentials_from_output(
         .await?;
         events.broadcast(loot_new_event(&record, command_id, request_id, context)?);
         broadcast_credential_event(events, agent_id, &credential, context)?;
+        if let Some(plugins) = plugins
+            && let Err(error) = plugins.emit_loot_captured(&record).await
+        {
+            warn!(agent_id = format_args!("{agent_id:08X}"), %error, "failed to emit python loot_captured event");
+        }
     }
 
     Ok(())
@@ -1809,6 +1857,7 @@ async fn handle_command_output_callback(
     persist_credentials_from_output(
         database,
         events,
+        plugins,
         agent_id,
         u32::from(DemonCommand::CommandOutput),
         request_id,
@@ -1876,6 +1925,7 @@ async fn handle_exit_callback(
     registry: &AgentRegistry,
     sockets: &SocketRelayManager,
     events: &EventBus,
+    plugins: Option<&PluginRuntime>,
     agent_id: u32,
     request_id: u32,
     payload: &[u8],
@@ -1892,6 +1942,7 @@ async fn handle_exit_callback(
         registry,
         sockets,
         events,
+        plugins,
         agent_id,
         u32::from(DemonCommand::CommandExit),
         request_id,
@@ -1904,6 +1955,7 @@ async fn handle_kill_date_callback(
     registry: &AgentRegistry,
     sockets: &SocketRelayManager,
     events: &EventBus,
+    plugins: Option<&PluginRuntime>,
     agent_id: u32,
     request_id: u32,
     _payload: &[u8],
@@ -1912,6 +1964,7 @@ async fn handle_kill_date_callback(
         registry,
         sockets,
         events,
+        plugins,
         agent_id,
         u32::from(DemonCommand::CommandKillDate),
         request_id,
@@ -1924,6 +1977,7 @@ async fn mark_agent_dead_and_broadcast(
     registry: &AgentRegistry,
     sockets: &SocketRelayManager,
     events: &EventBus,
+    plugins: Option<&PluginRuntime>,
     agent_id: u32,
     command_id: u32,
     request_id: u32,
@@ -1936,6 +1990,11 @@ async fn mark_agent_dead_and_broadcast(
     }
     events
         .broadcast(agent_response_event(agent_id, command_id, request_id, "Good", message, None)?);
+    if let Some(plugins) = plugins
+        && let Err(error) = plugins.emit_agent_dead(agent_id).await
+    {
+        warn!(agent_id = format_args!("{agent_id:08X}"), %error, "failed to emit python agent_dead event");
+    }
     Ok(None)
 }
 
@@ -2599,6 +2658,7 @@ async fn handle_beacon_output_callback(
     database: &Database,
     events: &EventBus,
     downloads: &DownloadTracker,
+    plugins: Option<&PluginRuntime>,
     agent_id: u32,
     request_id: u32,
     payload: &[u8],
@@ -2634,6 +2694,7 @@ async fn handle_beacon_output_callback(
                 persist_credentials_from_output(
                     database,
                     events,
+                    plugins,
                     agent_id,
                     u32::from(DemonCommand::BeaconOutput),
                     request_id,
@@ -2664,6 +2725,7 @@ async fn handle_beacon_output_callback(
                 persist_credentials_from_output(
                     database,
                     events,
+                    plugins,
                     agent_id,
                     u32::from(DemonCommand::BeaconOutput),
                     request_id,
@@ -2694,6 +2756,7 @@ async fn handle_beacon_output_callback(
                 persist_credentials_from_output(
                     database,
                     events,
+                    plugins,
                     agent_id,
                     u32::from(DemonCommand::BeaconOutput),
                     request_id,
@@ -2766,6 +2829,11 @@ async fn handle_beacon_output_callback(
                     file_id,
                     &state,
                 )?);
+                if let Some(plugins) = plugins
+                    && let Err(error) = plugins.emit_loot_captured(&record).await
+                {
+                    warn!(agent_id = format_args!("{agent_id:08X}"), %error, "failed to emit python loot_captured event");
+                }
             }
         }
     }
@@ -2778,6 +2846,7 @@ async fn handle_filesystem_callback(
     database: &Database,
     events: &EventBus,
     downloads: &DownloadTracker,
+    plugins: Option<&PluginRuntime>,
     agent_id: u32,
     request_id: u32,
     payload: &[u8],
@@ -2982,6 +3051,11 @@ async fn handle_filesystem_callback(
                                 file_id,
                                 &state,
                             )?);
+                            if let Some(plugins) = plugins
+                                && let Err(error) = plugins.emit_loot_captured(&record).await
+                            {
+                                warn!(agent_id = format_args!("{agent_id:08X}"), %error, "failed to emit python loot_captured event");
+                            }
                         } else {
                             events.broadcast(download_progress_event(
                                 agent_id,
@@ -4032,6 +4106,7 @@ async fn handle_screenshot_callback(
     registry: &AgentRegistry,
     database: &Database,
     events: &EventBus,
+    plugins: Option<&PluginRuntime>,
     agent_id: u32,
     request_id: u32,
     payload: &[u8],
@@ -4108,6 +4183,12 @@ async fn handle_screenshot_callback(
         request_id,
         &context,
     )?);
+
+    if let Some(plugins) = plugins
+        && let Err(error) = plugins.emit_loot_captured(&record).await
+    {
+        warn!(agent_id = format_args!("{agent_id:08X}"), %error, "failed to emit python loot_captured event");
+    }
 
     events.broadcast(agent_response_event_with_extra(
         agent_id,

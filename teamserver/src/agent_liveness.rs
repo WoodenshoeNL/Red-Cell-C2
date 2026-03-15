@@ -11,7 +11,8 @@ use tokio::task::JoinHandle;
 use tracing::warn;
 
 use crate::{
-    AgentRegistry, EventBus, SocketRelayManager, TeamserverError, agent_events::agent_mark_event,
+    AgentRegistry, EventBus, PluginRuntime, SocketRelayManager, TeamserverError,
+    agent_events::agent_mark_event,
 };
 
 const MIN_SWEEP_INTERVAL_SECS: u64 = 1;
@@ -148,6 +149,12 @@ async fn mark_stale_agent_if_unchanged(
 
     if let Some(agent) = registry.get(stale_agent.agent_id).await {
         events.broadcast(agent_mark_event(&agent));
+    }
+
+    if let Ok(Some(plugins)) = PluginRuntime::current() {
+        if let Err(error) = plugins.emit_agent_dead(stale_agent.agent_id).await {
+            warn!(agent_id = format_args!("{:08X}", stale_agent.agent_id), %error, "failed to emit python agent_dead event");
+        }
     }
 
     Ok(true)

@@ -1244,7 +1244,16 @@ pub(crate) async fn execute_agent_task(
             let jobs = build_jobs(&message.info, actor)?;
             let queued_jobs = jobs.len();
             for job in jobs {
-                registry.enqueue_job(agent_id, job).await?;
+                registry.enqueue_job(agent_id, job.clone()).await?;
+                if let Ok(Some(plugins)) = crate::PluginRuntime::current() {
+                    if let Err(error) = plugins.emit_task_created(agent_id, &job).await {
+                        tracing::warn!(
+                            agent_id = format_args!("{agent_id:08X}"),
+                            %error,
+                            "failed to emit python task_created event"
+                        );
+                    }
+                }
             }
             queued_jobs
         }

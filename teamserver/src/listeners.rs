@@ -1273,8 +1273,18 @@ async fn process_demon_transport(
                 &init.agent,
                 &pivots,
             ));
+            let agent_id = init.agent.agent_id;
+            if let Ok(Some(plugins)) = PluginRuntime::current() {
+                if let Err(error) = plugins.emit_agent_registered(agent_id).await {
+                    tracing::warn!(
+                        agent_id = format_args!("{agent_id:08X}"),
+                        %error,
+                        "failed to emit python agent_registered event"
+                    );
+                }
+            }
             Ok(ProcessedDemonResponse {
-                agent_id: init.agent.agent_id,
+                agent_id,
                 payload: response,
                 http_disposition: DemonHttpDisposition::Ok,
             })

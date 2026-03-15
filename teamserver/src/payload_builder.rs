@@ -73,11 +73,56 @@ struct PayloadBuilderInner {
     binary_patch: Option<BinaryConfig>,
 }
 
+/// Parsed semantic version reported by a toolchain binary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolchainVersion {
+    /// Major version component.
+    pub major: u32,
+    /// Minor version component.
+    pub minor: u32,
+    /// Patch version component.
+    pub patch: u32,
+    /// Raw version string as extracted from the tool's output.
+    pub raw: String,
+}
+
+impl std::fmt::Display for ToolchainVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.raw)
+    }
+}
+
+/// Minimum version requirement (major.minor) for a toolchain binary.
+struct VersionRequirement {
+    major: u32,
+    minor: u32,
+}
+
+impl VersionRequirement {
+    fn is_satisfied_by(&self, version: &ToolchainVersion) -> bool {
+        (version.major, version.minor) >= (self.major, self.minor)
+    }
+}
+
+/// Minimum GCC version required for MinGW cross-compilation (10.0+).
+const GCC_MIN_VERSION: VersionRequirement = VersionRequirement { major: 10, minor: 0 };
+
+/// Minimum NASM version required for Win32/Win64 object output (2.14+).
+const NASM_MIN_VERSION: VersionRequirement = VersionRequirement { major: 2, minor: 14 };
+
 #[derive(Clone, Debug)]
 struct Toolchain {
     compiler_x64: PathBuf,
+    // Version fields are used by the tracing log at startup and in tests; the
+    // dead_code lint does not track macro-argument usage.
+    #[allow(dead_code)]
+    compiler_x64_version: ToolchainVersion,
     compiler_x86: PathBuf,
+    #[allow(dead_code)]
+    compiler_x86_version: ToolchainVersion,
     nasm: PathBuf,
+    #[allow(dead_code)]
+    nasm_version: ToolchainVersion,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,16 +201,41 @@ impl PayloadBuilderService {
         repo_root: &Path,
     ) -> Result<Self, PayloadBuildError> {
         let build = profile.teamserver.build.as_ref();
+
+        let compiler_x64 = resolve_executable(
+            build.and_then(|config| config.compiler64.as_deref()),
+            "x86_64-w64-mingw32-gcc",
+        )?;
+        let compiler_x64_version =
+            verify_tool_version(&compiler_x64, parse_gcc_version, &GCC_MIN_VERSION)?;
+
+        let compiler_x86 = resolve_executable(
+            build.and_then(|config| config.compiler86.as_deref()),
+            "i686-w64-mingw32-gcc",
+        )?;
+        let compiler_x86_version =
+            verify_tool_version(&compiler_x86, parse_gcc_version, &GCC_MIN_VERSION)?;
+
+        let nasm = resolve_executable(build.and_then(|config| config.nasm.as_deref()), "nasm")?;
+        let nasm_version = verify_tool_version(&nasm, parse_nasm_version, &NASM_MIN_VERSION)?;
+
+        tracing::info!(
+            compiler_x64 = %compiler_x64.display(),
+            compiler_x64_version = %compiler_x64_version,
+            compiler_x86 = %compiler_x86.display(),
+            compiler_x86_version = %compiler_x86_version,
+            nasm = %nasm.display(),
+            nasm_version = %nasm_version,
+            "payload build toolchain discovered and verified"
+        );
+
         let toolchain = Toolchain {
-            compiler_x64: resolve_executable(
-                build.and_then(|config| config.compiler64.as_deref()),
-                "x86_64-w64-mingw32-gcc",
-            )?,
-            compiler_x86: resolve_executable(
-                build.and_then(|config| config.compiler86.as_deref()),
-                "i686-w64-mingw32-gcc",
-            )?,
-            nasm: resolve_executable(build.and_then(|config| config.nasm.as_deref()), "nasm")?,
+            compiler_x64,
+            compiler_x64_version,
+            compiler_x86,
+            compiler_x86_version,
+            nasm,
+            nasm_version,
         };
 
         let source_root = repo_root.join("src/Havoc/payloads/Demon");
@@ -229,12 +299,17 @@ impl PayloadBuilderService {
     #[doc(hidden)]
     pub fn disabled_for_tests() -> Self {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let unknown_version =
+            ToolchainVersion { major: 0, minor: 0, patch: 0, raw: "0.0.0".to_owned() };
         Self {
             inner: Arc::new(PayloadBuilderInner {
                 toolchain: Toolchain {
                     compiler_x64: PathBuf::from("/nonexistent/x64-gcc"),
+                    compiler_x64_version: unknown_version.clone(),
                     compiler_x86: PathBuf::from("/nonexistent/x86-gcc"),
+                    compiler_x86_version: unknown_version.clone(),
                     nasm: PathBuf::from("/nonexistent/nasm"),
+                    nasm_version: unknown_version,
                 },
                 source_root: root.join("src/Havoc/payloads/Demon"),
                 shellcode_x64_template: root.join("src/Havoc/payloads/Shellcode.x64.bin"),
@@ -485,9 +560,12 @@ fn resolve_executable(
 ) -> Result<PathBuf, PayloadBuildError> {
     let candidate = configured
         .map(PathBuf::from)
-        .or_else(|| find_in_path(fallback_name))
+        .or_else(|| find_in_path_or_common_locations(fallback_name))
         .ok_or_else(|| PayloadBuildError::ToolchainUnavailable {
-            message: format!("required executable `{fallback_name}` was not found"),
+            message: format!(
+                "required executable `{fallback_name}` was not found in PATH or common \
+                 toolchain locations (/usr/bin, /usr/local/bin, /opt/mingw)"
+            ),
         })?;
 
     if candidate.is_file() {
@@ -504,6 +582,113 @@ fn resolve_executable(
 fn find_in_path(program: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path).map(|dir| dir.join(program)).find(|candidate| candidate.is_file())
+}
+
+/// Search PATH then well-known toolchain install locations for `program`.
+///
+/// Checked directories beyond PATH: `/usr/bin`, `/usr/local/bin`, `/opt/mingw/bin`,
+/// `/opt/mingw64/bin`, `/usr/x86_64-w64-mingw32/bin`, `/usr/i686-w64-mingw32/bin`.
+fn find_in_path_or_common_locations(program: &str) -> Option<PathBuf> {
+    if let Some(found) = find_in_path(program) {
+        return Some(found);
+    }
+    const EXTRA_DIRS: &[&str] = &[
+        "/usr/bin",
+        "/usr/local/bin",
+        "/opt/mingw/bin",
+        "/opt/mingw64/bin",
+        "/usr/x86_64-w64-mingw32/bin",
+        "/usr/i686-w64-mingw32/bin",
+    ];
+    EXTRA_DIRS.iter().map(|dir| std::path::Path::new(dir).join(program)).find(|p| p.is_file())
+}
+
+/// Parse `major.minor.patch` triples from a version token.
+fn parse_version_triple(token: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = token.splitn(3, '.');
+    let major = parts.next()?.parse::<u32>().ok()?;
+    let minor = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+    let patch = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+/// Extract a version from GCC `--version` output.
+///
+/// GCC emits a first line like:
+/// `x86_64-w64-mingw32-gcc (GCC) 12.2.0 20220819 (Release)`
+fn parse_gcc_version(output: &str, path: &Path) -> Result<ToolchainVersion, PayloadBuildError> {
+    let first_line = output.lines().next().unwrap_or("").trim();
+    let token = first_line
+        .split_whitespace()
+        .find(|t| t.chars().next().is_some_and(|c| c.is_ascii_digit()) && t.contains('.'))
+        .ok_or_else(|| PayloadBuildError::ToolchainUnavailable {
+            message: format!(
+                "could not parse version from `{} --version` output: {:?}",
+                path.display(),
+                first_line
+            ),
+        })?;
+    let (major, minor, patch) =
+        parse_version_triple(token).ok_or_else(|| PayloadBuildError::ToolchainUnavailable {
+            message: format!(
+                "invalid version string `{token}` from `{} --version`",
+                path.display()
+            ),
+        })?;
+    Ok(ToolchainVersion { major, minor, patch, raw: token.to_owned() })
+}
+
+/// Extract a version from NASM `--version` output.
+///
+/// NASM emits a first line like: `NASM version 2.16.01 compiled on ...`
+fn parse_nasm_version(output: &str, path: &Path) -> Result<ToolchainVersion, PayloadBuildError> {
+    let first_line = output.lines().next().unwrap_or("").trim();
+    let token = first_line
+        .split_whitespace()
+        .find(|t| t.chars().next().is_some_and(|c| c.is_ascii_digit()) && t.contains('.'))
+        .ok_or_else(|| PayloadBuildError::ToolchainUnavailable {
+            message: format!(
+                "could not parse version from `{} --version` output: {:?}",
+                path.display(),
+                first_line
+            ),
+        })?;
+    let (major, minor, patch) =
+        parse_version_triple(token).ok_or_else(|| PayloadBuildError::ToolchainUnavailable {
+            message: format!(
+                "invalid version string `{token}` from `{} --version`",
+                path.display()
+            ),
+        })?;
+    Ok(ToolchainVersion { major, minor, patch, raw: token.to_owned() })
+}
+
+/// Run `path --version`, parse with `parse_fn`, and enforce `requirement`.
+fn verify_tool_version(
+    path: &Path,
+    parse_fn: fn(&str, &Path) -> Result<ToolchainVersion, PayloadBuildError>,
+    requirement: &VersionRequirement,
+) -> Result<ToolchainVersion, PayloadBuildError> {
+    let output = std::process::Command::new(path).arg("--version").output().map_err(|err| {
+        PayloadBuildError::ToolchainUnavailable {
+            message: format!("failed to run `{} --version`: {err}", path.display()),
+        }
+    })?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let version = parse_fn(&stdout, path)?;
+    if requirement.is_satisfied_by(&version) {
+        Ok(version)
+    } else {
+        Err(PayloadBuildError::ToolchainUnavailable {
+            message: format!(
+                "`{}` version {} is below the minimum required {}.{}",
+                path.display(),
+                version,
+                requirement.major,
+                requirement.minor,
+            ),
+        })
+    }
 }
 
 fn merged_request_config(
@@ -1285,9 +1470,9 @@ mod tests {
     fn from_profile_resolves_workspace_root_and_toolchain() -> Result<(), Box<dyn std::error::Error>>
     {
         let temp = TempDir::new()?;
-        let compiler_x64 = write_fake_executable(&temp.path().join("bin/x64-gcc"))?;
-        let compiler_x86 = write_fake_executable(&temp.path().join("bin/x86-gcc"))?;
-        let nasm = write_fake_executable(&temp.path().join("bin/nasm"))?;
+        let compiler_x64 = write_fake_gcc(&temp.path().join("bin/x64-gcc"))?;
+        let compiler_x86 = write_fake_gcc(&temp.path().join("bin/x86-gcc"))?;
+        let nasm = write_fake_nasm(&temp.path().join("bin/nasm"))?;
         let profile = constructor_test_profile(&compiler_x64, &compiler_x86, &nasm);
         let repo_root = workspace_root()?;
 
@@ -1296,6 +1481,8 @@ mod tests {
         assert_eq!(service.inner.toolchain.compiler_x64, compiler_x64.canonicalize()?);
         assert_eq!(service.inner.toolchain.compiler_x86, compiler_x86.canonicalize()?);
         assert_eq!(service.inner.toolchain.nasm, nasm.canonicalize()?);
+        assert_eq!(service.inner.toolchain.compiler_x64_version.major, 12);
+        assert_eq!(service.inner.toolchain.nasm_version.major, 2);
         assert_eq!(service.inner.source_root, repo_root.join("src/Havoc/payloads/Demon"));
         assert_eq!(
             service.inner.shellcode_x64_template,
@@ -1313,9 +1500,9 @@ mod tests {
     fn from_profile_with_repo_root_resolves_toolchain_and_havoc_assets()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = TempDir::new()?;
-        let compiler_x64 = write_fake_executable(&temp.path().join("bin/x64-gcc"))?;
-        let compiler_x86 = write_fake_executable(&temp.path().join("bin/x86-gcc"))?;
-        let nasm = write_fake_executable(&temp.path().join("bin/nasm"))?;
+        let compiler_x64 = write_fake_gcc(&temp.path().join("bin/x64-gcc"))?;
+        let compiler_x86 = write_fake_gcc(&temp.path().join("bin/x86-gcc"))?;
+        let nasm = write_fake_nasm(&temp.path().join("bin/nasm"))?;
         create_payload_assets(temp.path())?;
         let profile = constructor_test_profile(&compiler_x64, &compiler_x86, &nasm);
 
@@ -1324,6 +1511,18 @@ mod tests {
         assert_eq!(service.inner.toolchain.compiler_x64, compiler_x64.canonicalize()?);
         assert_eq!(service.inner.toolchain.compiler_x86, compiler_x86.canonicalize()?);
         assert_eq!(service.inner.toolchain.nasm, nasm.canonicalize()?);
+        assert_eq!(
+            service.inner.toolchain.compiler_x64_version,
+            ToolchainVersion { major: 12, minor: 2, patch: 0, raw: "12.2.0".to_owned() }
+        );
+        assert_eq!(
+            service.inner.toolchain.compiler_x86_version,
+            ToolchainVersion { major: 12, minor: 2, patch: 0, raw: "12.2.0".to_owned() }
+        );
+        assert_eq!(
+            service.inner.toolchain.nasm_version,
+            ToolchainVersion { major: 2, minor: 16, patch: 1, raw: "2.16.01".to_owned() }
+        );
         assert_eq!(service.inner.source_root, temp.path().join("src/Havoc/payloads/Demon"));
         assert_eq!(
             service.inner.shellcode_x64_template,
@@ -1341,8 +1540,8 @@ mod tests {
     fn from_profile_rejects_missing_toolchain_binary() -> Result<(), Box<dyn std::error::Error>> {
         let temp = TempDir::new()?;
         let compiler_x64 = temp.path().join("bin/missing-x64-gcc");
-        let compiler_x86 = write_fake_executable(&temp.path().join("bin/x86-gcc"))?;
-        let nasm = write_fake_executable(&temp.path().join("bin/nasm"))?;
+        let compiler_x86 = write_fake_gcc(&temp.path().join("bin/x86-gcc"))?;
+        let nasm = write_fake_nasm(&temp.path().join("bin/nasm"))?;
         create_payload_assets(temp.path())?;
         let profile = constructor_test_profile(&compiler_x64, &compiler_x86, &nasm);
 
@@ -1361,9 +1560,9 @@ mod tests {
     #[test]
     fn from_profile_rejects_missing_payload_assets() -> Result<(), Box<dyn std::error::Error>> {
         let temp = TempDir::new()?;
-        let compiler_x64 = write_fake_executable(&temp.path().join("bin/x64-gcc"))?;
-        let compiler_x86 = write_fake_executable(&temp.path().join("bin/x86-gcc"))?;
-        let nasm = write_fake_executable(&temp.path().join("bin/nasm"))?;
+        let compiler_x64 = write_fake_gcc(&temp.path().join("bin/x64-gcc"))?;
+        let compiler_x86 = write_fake_gcc(&temp.path().join("bin/x86-gcc"))?;
+        let nasm = write_fake_nasm(&temp.path().join("bin/nasm"))?;
         create_payload_assets(temp.path())?;
         std::fs::remove_file(temp.path().join("src/Havoc/payloads/Shellcode.x86.bin"))?;
         let profile = constructor_test_profile(&compiler_x64, &compiler_x86, &nasm);
@@ -1378,6 +1577,101 @@ mod tests {
                     && message.contains("Shellcode.x86.bin")
         ));
         Ok(())
+    }
+
+    #[test]
+    fn from_profile_rejects_outdated_gcc() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        let compiler_x64 = write_fake_executable_with_output(
+            &temp.path().join("bin/x64-gcc"),
+            "x86_64-w64-mingw32-gcc (GCC) 8.3.0 (Release)",
+        )?;
+        let compiler_x86 = write_fake_gcc(&temp.path().join("bin/x86-gcc"))?;
+        let nasm = write_fake_nasm(&temp.path().join("bin/nasm"))?;
+        create_payload_assets(temp.path())?;
+        let profile = constructor_test_profile(&compiler_x64, &compiler_x86, &nasm);
+
+        let error = PayloadBuilderService::from_profile_with_repo_root(&profile, temp.path())
+            .expect_err("outdated gcc should be rejected");
+
+        assert!(matches!(
+            error,
+            PayloadBuildError::ToolchainUnavailable { message }
+                if message.contains("below the minimum required")
+                    && message.contains("8.3.0")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn from_profile_rejects_outdated_nasm() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        let compiler_x64 = write_fake_gcc(&temp.path().join("bin/x64-gcc"))?;
+        let compiler_x86 = write_fake_gcc(&temp.path().join("bin/x86-gcc"))?;
+        let nasm = write_fake_executable_with_output(
+            &temp.path().join("bin/nasm"),
+            "NASM version 2.10.07 compiled on Jan  1 2015",
+        )?;
+        create_payload_assets(temp.path())?;
+        let profile = constructor_test_profile(&compiler_x64, &compiler_x86, &nasm);
+
+        let error = PayloadBuilderService::from_profile_with_repo_root(&profile, temp.path())
+            .expect_err("outdated nasm should be rejected");
+
+        assert!(matches!(
+            error,
+            PayloadBuildError::ToolchainUnavailable { message }
+                if message.contains("below the minimum required")
+                    && message.contains("2.10.07")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn parse_gcc_version_extracts_version_triple() -> Result<(), Box<dyn std::error::Error>> {
+        let output = "x86_64-w64-mingw32-gcc (GCC) 12.2.0 20220819 (Release)\n";
+        let path = Path::new("/usr/bin/x86_64-w64-mingw32-gcc");
+        let ver = parse_gcc_version(output, path)?;
+        assert_eq!(
+            ver,
+            ToolchainVersion { major: 12, minor: 2, patch: 0, raw: "12.2.0".to_owned() }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_nasm_version_extracts_version_triple() -> Result<(), Box<dyn std::error::Error>> {
+        let output = "NASM version 2.16.01 compiled on Jan  1 2023\n";
+        let path = Path::new("/usr/bin/nasm");
+        let ver = parse_nasm_version(output, path)?;
+        assert_eq!(
+            ver,
+            ToolchainVersion { major: 2, minor: 16, patch: 1, raw: "2.16.01".to_owned() }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_gcc_version_rejects_unparseable_output() {
+        let path = Path::new("/usr/bin/gcc");
+        let err = parse_gcc_version("not a version string", path)
+            .expect_err("unparseable output should be rejected");
+        assert!(matches!(err, PayloadBuildError::ToolchainUnavailable { .. }));
+    }
+
+    #[test]
+    fn find_in_path_or_common_locations_returns_none_for_missing_program() {
+        // A program with this name cannot plausibly exist anywhere.
+        let found = find_in_path_or_common_locations("__red_cell_nonexistent_tool_zzz__");
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn find_in_path_or_common_locations_finds_sh_from_path() {
+        // /bin/sh is present on every POSIX system and in PATH; confirms that
+        // PATH search works without mutating the global environment.
+        let found = find_in_path_or_common_locations("sh");
+        assert!(found.is_some(), "sh should be discoverable via PATH");
     }
 
     #[test]
@@ -2057,17 +2351,34 @@ mod tests {
         Ok(())
     }
 
-    fn write_fake_executable(path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    /// Write a fake executable that prints `output` on stdout then exits 0.
+    fn write_fake_executable_with_output(
+        path: &Path,
+        output: &str,
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(path, "#!/bin/sh\nexit 0\n")?;
+        std::fs::write(path, format!("#!/bin/sh\nprintf '%s\\n' '{}'\nexit 0\n", output))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
         }
         Ok(path.to_path_buf())
+    }
+
+    /// Write a fake MinGW GCC that reports version 12.2.0.
+    fn write_fake_gcc(path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        write_fake_executable_with_output(
+            path,
+            "x86_64-w64-mingw32-gcc (GCC) 12.2.0 20220819 (Release)",
+        )
+    }
+
+    /// Write a fake NASM that reports version 2.16.01.
+    fn write_fake_nasm(path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        write_fake_executable_with_output(path, "NASM version 2.16.01 compiled on Jan  1 2023")
     }
 
     #[test]
@@ -2286,8 +2597,17 @@ mod tests {
             std::fs::set_permissions(&gcc, std::fs::Permissions::from_mode(0o755))?;
         }
 
+        let unknown_version =
+            ToolchainVersion { major: 0, minor: 0, patch: 0, raw: "0.0.0".to_owned() };
         let service = PayloadBuilderService::with_paths_for_tests(
-            Toolchain { compiler_x64: gcc.clone(), compiler_x86: gcc, nasm },
+            Toolchain {
+                compiler_x64: gcc.clone(),
+                compiler_x64_version: unknown_version.clone(),
+                compiler_x86: gcc,
+                compiler_x86_version: unknown_version.clone(),
+                nasm,
+                nasm_version: unknown_version,
+            },
             source_root,
             shellcode_root.join("Shellcode.x64.bin"),
             shellcode_root.join("Shellcode.x86.bin"),
@@ -2406,8 +2726,17 @@ mod tests {
             std::fs::set_permissions(&gcc_x86, std::fs::Permissions::from_mode(0o755))?;
         }
 
+        let unknown_version =
+            ToolchainVersion { major: 0, minor: 0, patch: 0, raw: "0.0.0".to_owned() };
         let service = PayloadBuilderService::with_paths_for_tests(
-            Toolchain { compiler_x64: gcc_x64, compiler_x86: gcc_x86, nasm },
+            Toolchain {
+                compiler_x64: gcc_x64,
+                compiler_x64_version: unknown_version.clone(),
+                compiler_x86: gcc_x86,
+                compiler_x86_version: unknown_version.clone(),
+                nasm,
+                nasm_version: unknown_version,
+            },
             source_root,
             shellcode_root.join("Shellcode.x64.bin"),
             shellcode_root.join("Shellcode.x86.bin"),
@@ -2675,8 +3004,17 @@ mod tests {
             std::fs::set_permissions(&gcc, std::fs::Permissions::from_mode(0o755))?;
         }
 
+        let unknown_version =
+            ToolchainVersion { major: 0, minor: 0, patch: 0, raw: "0.0.0".to_owned() };
         let service = PayloadBuilderService::with_paths_for_tests(
-            Toolchain { compiler_x64: gcc.clone(), compiler_x86: gcc, nasm },
+            Toolchain {
+                compiler_x64: gcc.clone(),
+                compiler_x64_version: unknown_version.clone(),
+                compiler_x86: gcc,
+                compiler_x86_version: unknown_version.clone(),
+                nasm,
+                nasm_version: unknown_version,
+            },
             source_root,
             shellcode_root.join("Shellcode.x64.bin"),
             shellcode_root.join("Shellcode.x86.bin"),

@@ -4762,6 +4762,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn login_rate_limiter_window_reset_allows_after_expiry() {
+        let limiter = LoginRateLimiter::new();
+        let ip: IpAddr = "198.51.100.7".parse().expect("valid IP");
+
+        // Lock the IP out.
+        for _ in 0..super::MAX_FAILED_LOGIN_ATTEMPTS {
+            limiter.record_failure(ip).await;
+        }
+        assert!(!limiter.is_allowed(ip).await, "should be locked out after max failures");
+
+        // Manually expire the window by backdating its start time.
+        {
+            let mut windows = limiter.windows.lock().await;
+            let window = windows.get_mut(&ip).expect("window should exist");
+            window.window_start =
+                Instant::now() - super::LOGIN_WINDOW_DURATION - Duration::from_secs(1);
+        }
+
+        // is_allowed must detect the expired window and reset, allowing the IP again.
+        assert!(limiter.is_allowed(ip).await, "should be allowed after window expiry");
+        assert_eq!(limiter.tracked_ip_count().await, 0, "expired window should be removed");
+    }
+
+    #[tokio::test]
     async fn websocket_rejects_login_after_too_many_failures() {
         let state = TestState::new().await;
         let rate_limiter = state.login_rate_limiter.clone();

@@ -178,6 +178,17 @@ mod tests {
     }
 
     #[test]
+    fn operator_agent_info_with_inactive_agent_serializes_active_field_as_false() {
+        let mut agent = sample_agent(0x1112_1314);
+        agent.active = false;
+        let pivots = PivotInfo { parent: None, children: vec![] };
+
+        let info = operator_agent_info("http", 0xDEAD_BEEF, &agent, &pivots);
+
+        assert_eq!(info.active, "false");
+    }
+
+    #[test]
     fn agent_mark_event_uses_dead_status_for_inactive_agents() {
         let mut agent = sample_agent(0x1112_1314);
         agent.active = false;

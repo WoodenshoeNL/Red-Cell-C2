@@ -1,6 +1,6 @@
 //! Embedded Python runtime for client-side automation.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
@@ -22,6 +22,7 @@ use crate::transport::{AgentSummary, AppState, ListenerSummary, LootItem, Shared
 
 static ACTIVE_RUNTIME: OnceLock<Mutex<Option<Arc<PythonApiState>>>> = OnceLock::new();
 const MAX_SCRIPT_OUTPUT_ENTRIES: usize = 512;
+const MAX_COMMAND_HISTORY: usize = 100;
 
 fn active_runtime_slot() -> &'static Mutex<Option<Arc<PythonApiState>>> {
     ACTIVE_RUNTIME.get_or_init(|| Mutex::new(None))
@@ -31,6 +32,7 @@ fn active_runtime_slot() -> &'static Mutex<Option<Arc<PythonApiState>>> {
 struct RegisteredCommand {
     script_name: String,
     description: Option<String>,
+    options: Vec<CommandOption>,
     callback: Arc<Py<PyAny>>,
 }
 
@@ -53,6 +55,45 @@ struct MatchedCommand {
     name: String,
     command_line: String,
     arguments: Vec<String>,
+}
+
+/// The data type of a command option parameter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommandOptionType {
+    String,
+    Int,
+    Bool,
+    File,
+}
+
+impl CommandOptionType {
+    fn from_str(s: &str) -> pyo3::PyResult<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "string" | "str" => Ok(Self::String),
+            "int" | "integer" => Ok(Self::Int),
+            "bool" | "boolean" => Ok(Self::Bool),
+            "file" => Ok(Self::File),
+            _ => Err(pyo3::exceptions::PyValueError::new_err(format!("unknown option type `{s}`"))),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::String => "string",
+            Self::Int => "int",
+            Self::Bool => "bool",
+            Self::File => "file",
+        }
+    }
+}
+
+/// A declared parameter for a registered command.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CommandOption {
+    name: String,
+    option_type: CommandOptionType,
+    required: bool,
+    default: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,6 +135,8 @@ struct PythonApiState {
     task_result_senders: Mutex<HashMap<String, SyncSender<TaskResult>>>,
     /// Receiver half of pending task result channels, keyed by task_id.
     task_result_receivers: Mutex<HashMap<String, Receiver<TaskResult>>>,
+    /// Per-agent command history, keyed by (agent_id, command_name).
+    command_history: Mutex<HashMap<(String, String), VecDeque<String>>>,
 }
 
 /// Result delivered to a `get_task_result` waiter.
@@ -154,6 +197,7 @@ impl PythonApiState {
         &self,
         name: String,
         description: Option<String>,
+        options: Vec<CommandOption>,
         callback: Py<PyAny>,
     ) -> PyResult<()> {
         let script_name = self.current_script_name().ok_or_else(|| {
@@ -166,6 +210,7 @@ impl PythonApiState {
             RegisteredCommand {
                 script_name: script_name.clone(),
                 description,
+                options,
                 callback: Arc::new(callback),
             },
         );
@@ -237,7 +282,7 @@ impl PythonApiState {
             },
         );
         if let Some(callback) = callback {
-            self.register_command(format!("__tab__ {title}"), None, callback)?;
+            self.register_command(format!("__tab__ {title}"), None, Vec::new(), callback)?;
         }
         Ok(())
     }
@@ -592,6 +637,19 @@ impl PythonApiState {
             return Ok(false);
         };
 
+        // Snapshot prior history, then record this invocation.
+        let history_snapshot = {
+            let key = (normalize_agent_id(agent_id), command_name.to_owned());
+            let mut history = lock_mutex(&self.command_history);
+            let agent_history = history.entry(key).or_default();
+            let snapshot: Vec<String> = agent_history.iter().cloned().collect();
+            agent_history.push_back(command_line.to_owned());
+            while agent_history.len() > MAX_COMMAND_HISTORY {
+                agent_history.pop_front();
+            }
+            snapshot
+        };
+
         let agent = Py::new(py, PyAgent { agent_id: normalize_agent_id(agent_id) })
             .map_err(|error| error.to_string())?;
         let command_context = Py::new(
@@ -601,6 +659,8 @@ impl PythonApiState {
                 command_line: command_line.to_owned(),
                 arguments: arguments.to_vec(),
                 description: registered.description.clone(),
+                options: registered.options.clone(),
+                history: history_snapshot,
                 agent: agent.clone_ref(py),
             },
         )
@@ -770,6 +830,7 @@ impl PythonRuntime {
             outgoing_tx: Mutex::new(None),
             task_result_senders: Mutex::new(HashMap::new()),
             task_result_receivers: Mutex::new(HashMap::new()),
+            command_history: Mutex::new(HashMap::new()),
         });
         *lock_mutex(active_runtime_slot()) = Some(api_state.clone());
 
@@ -1214,6 +1275,7 @@ fn populate_api_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(get_task_result, module)?)?;
     module.add_class::<PyAgent>()?;
     module.add_class::<PyCommandContext>()?;
+    module.add_class::<PyCommandOption>()?;
     module.add_class::<PyEventRegistrar>()?;
     module.add_class::<PyListener>()?;
     module.add_class::<PyLootItem>()?;
@@ -1238,6 +1300,7 @@ fn populate_havocui_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(successmessage, module)?)?;
     module.add_function(wrap_pyfunction!(createtab, module)?)?;
     module.add_function(wrap_pyfunction!(settablayout, module)?)?;
+    module.add_function(wrap_pyfunction!(havocui_register_command, module)?)?;
     module.add_class::<PyLogger>()?;
     module.add("MessageBox", module.getattr("messagebox")?)?;
     module.add("ErrorMessage", module.getattr("errormessage")?)?;
@@ -1245,6 +1308,7 @@ fn populate_havocui_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("SuccessMessage", module.getattr("successmessage")?)?;
     module.add("CreateTab", module.getattr("createtab")?)?;
     module.add("SetTabLayout", module.getattr("settablayout")?)?;
+    module.add("RegisterCommand", module.getattr("register_command")?)?;
     Ok(())
 }
 
@@ -1550,6 +1614,8 @@ struct PyCommandContext {
     command_line: String,
     arguments: Vec<String>,
     description: Option<String>,
+    options: Vec<CommandOption>,
+    history: Vec<String>,
     agent: Py<PyAgent>,
 }
 
@@ -1575,9 +1641,81 @@ impl PyCommandContext {
         self.description.clone()
     }
 
+    /// The declared options for this command.
+    #[getter]
+    fn options(&self, py: Python<'_>) -> PyResult<Vec<Py<PyCommandOption>>> {
+        self.options
+            .iter()
+            .map(|opt| {
+                Py::new(
+                    py,
+                    PyCommandOption {
+                        name: opt.name.clone(),
+                        option_type: opt.option_type,
+                        required: opt.required,
+                        default: opt.default.clone(),
+                    },
+                )
+            })
+            .collect::<PyResult<Vec<_>>>()
+    }
+
+    /// Previous invocations of this command for the same agent, oldest first.
+    #[getter]
+    fn history(&self) -> Vec<String> {
+        self.history.clone()
+    }
+
     #[getter]
     fn agent(&self, py: Python<'_>) -> Py<PyAgent> {
         self.agent.clone_ref(py)
+    }
+}
+
+/// A declared parameter exposed by a registered command.
+#[pyclass(name = "CommandOption", frozen)]
+#[derive(Clone, Debug)]
+struct PyCommandOption {
+    name: String,
+    option_type: CommandOptionType,
+    required: bool,
+    default: Option<String>,
+}
+
+#[pymethods]
+impl PyCommandOption {
+    /// The parameter name.
+    #[getter]
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+
+    /// The parameter type label: `"string"`, `"int"`, `"bool"`, or `"file"`.
+    #[getter(r#type)]
+    fn option_type(&self) -> &'static str {
+        self.option_type.label()
+    }
+
+    /// Whether this parameter must be supplied.
+    #[getter]
+    fn required(&self) -> bool {
+        self.required
+    }
+
+    /// Default value string, or `None` if no default was declared.
+    #[getter]
+    fn default(&self) -> Option<String> {
+        self.default.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "CommandOption(name={:?}, type={:?}, required={}, default={:?})",
+            self.name,
+            self.option_type.label(),
+            self.required,
+            self.default,
+        )
     }
 }
 
@@ -1778,6 +1916,7 @@ impl PyOutputSink {
 struct RegisterCommandRequest {
     name: String,
     description: Option<String>,
+    options: Vec<CommandOption>,
     callback: Py<PyAny>,
 }
 
@@ -1800,6 +1939,46 @@ fn extract_string_argument(
         return value.extract::<String>().map(Some);
     }
     positional.map(Bound::extract::<String>).transpose()
+}
+
+/// Parse a Python value (list of dicts) into a `Vec<CommandOption>`.
+fn parse_options(value: &Bound<'_, PyAny>) -> PyResult<Vec<CommandOption>> {
+    if value.is_none() {
+        return Ok(Vec::new());
+    }
+    let list = value.try_iter().map_err(|_| {
+        PyValueError::new_err(
+            "options must be a list of dicts with 'name', 'type', 'required', 'default'",
+        )
+    })?;
+    let mut options = Vec::new();
+    for item in list {
+        let item = item?;
+        let dict = item.downcast::<PyDict>().map_err(|_| {
+            PyValueError::new_err(
+                "each option must be a dict with 'name', 'type', 'required', 'default'",
+            )
+        })?;
+        let name = dict
+            .get_item("name")?
+            .ok_or_else(|| PyValueError::new_err("option is missing 'name'"))?
+            .extract::<String>()?;
+        let type_str = match dict.get_item("type")? {
+            Some(v) => v.extract::<String>()?,
+            None => "string".to_owned(),
+        };
+        let option_type = CommandOptionType::from_str(&type_str)?;
+        let required = match dict.get_item("required")? {
+            Some(v) => v.extract::<bool>()?,
+            None => false,
+        };
+        let default = match dict.get_item("default")? {
+            Some(v) if !v.is_none() => Some(v.extract::<String>()?),
+            _ => None,
+        };
+        options.push(CommandOption { name, option_type, required, default });
+    }
+    Ok(options)
 }
 
 fn parse_register_command_request(
@@ -1825,8 +2004,18 @@ fn parse_register_command_request(
         let command = extract_string_argument(kwargs, "command", positional.get(2))?
             .ok_or_else(|| PyValueError::new_err("RegisterCommand requires a command name"))?;
         let description = extract_string_argument(kwargs, "description", positional.get(3))?;
+        let options = optional_kwarg(kwargs, "options")?
+            .as_ref()
+            .map(parse_options)
+            .transpose()?
+            .unwrap_or_default();
         let name = if module.trim().is_empty() { command } else { format!("{module} {command}") };
-        return Ok(RegisterCommandRequest { name, description, callback: callback.unbind() });
+        return Ok(RegisterCommandRequest {
+            name,
+            description,
+            options,
+            callback: callback.unbind(),
+        });
     }
 
     let callback = if let Some(value) = optional_kwarg(kwargs, "callback")? {
@@ -1841,7 +2030,12 @@ fn parse_register_command_request(
     let name = extract_string_argument(kwargs, "name", positional.first())?
         .ok_or_else(|| PyValueError::new_err("register_command requires a command name"))?;
     let description = extract_string_argument(kwargs, "description", positional.get(2))?;
-    Ok(RegisterCommandRequest { name, description, callback: callback.unbind() })
+    let options = if let Some(value) = optional_kwarg(kwargs, "options")? {
+        parse_options(&value)?
+    } else {
+        positional.get(3).map(parse_options).transpose()?.unwrap_or_default()
+    };
+    Ok(RegisterCommandRequest { name, description, options, callback: callback.unbind() })
 }
 
 #[pyfunction]
@@ -1849,7 +2043,74 @@ fn parse_register_command_request(
 fn register_command(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
     let request = parse_register_command_request(args, kwargs)?;
     let api_state = active_api_state()?;
-    api_state.register_command(request.name, request.description, request.callback)
+    api_state.register_command(request.name, request.description, request.options, request.callback)
+}
+
+/// Parse a `havocui.RegisterCommand` call.
+///
+/// Supported forms:
+/// - `(name, callback)` — 2-arg backward-compatible
+/// - `(name, description, options, callback)` — full 4-arg form
+/// - keyword arguments: `name=`, `description=`, `options=`, `callback=`
+fn parse_havocui_register_command_request(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<RegisterCommandRequest> {
+    let positional = args.iter().collect::<Vec<_>>();
+
+    // Prefer explicit keyword form for any argument.
+    let callback = if let Some(value) = optional_kwarg(kwargs, "callback")? {
+        value
+    } else if positional.last().is_some_and(Bound::is_callable) {
+        positional.last().cloned().expect("last checked above")
+    } else {
+        return Err(PyValueError::new_err(
+            "havocui.RegisterCommand requires a callable as the last positional argument or `callback=`",
+        ));
+    };
+    ensure_callable(&callback)?;
+
+    let name = extract_string_argument(kwargs, "name", positional.first())?
+        .ok_or_else(|| PyValueError::new_err("havocui.RegisterCommand requires a command name"))?;
+
+    // 2-arg form: (name, callback) — no description or options.
+    // 4-arg form: (name, description, options, callback).
+    let (description, options) = if positional.len() == 4 {
+        let desc = extract_string_argument(kwargs, "description", positional.get(1))?;
+        let opts = match positional.get(2) {
+            Some(v) => parse_options(v)?,
+            None => Vec::new(),
+        };
+        (desc, opts)
+    } else {
+        let desc = extract_string_argument(kwargs, "description", None)?;
+        let opts = optional_kwarg(kwargs, "options")?
+            .as_ref()
+            .map(parse_options)
+            .transpose()?
+            .unwrap_or_default();
+        (desc, opts)
+    };
+
+    Ok(RegisterCommandRequest { name, description, options, callback: callback.unbind() })
+}
+
+/// Register a command via the `havocui` module.
+///
+/// Supported forms:
+/// - `havocui.RegisterCommand(name, callback)` — backward-compatible 2-arg form
+/// - `havocui.RegisterCommand(name, description, options, callback)` — full form
+/// - keyword arguments: `name=`, `description=`, `options=`, `callback=`
+#[pyfunction]
+#[pyo3(name = "register_command")]
+#[pyo3(signature = (*args, **kwargs))]
+fn havocui_register_command(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<()> {
+    let request = parse_havocui_register_command_request(args, kwargs)?;
+    let api_state = active_api_state()?;
+    api_state.register_command(request.name, request.description, request.options, request.callback)
 }
 
 #[pyfunction]
@@ -3244,5 +3505,216 @@ event.OnCommandResponse(on_resp)\n",
             .unwrap_or_else(|error| panic!("emit_command_response should succeed: {error}"));
 
         assert_eq!(wait_for_file_contents(&output_path).as_deref(), Some("resp:DEADBEEF"));
+    }
+
+    // ── options & history ────────────────────────────────────────────────────
+
+    #[test]
+    fn register_command_accepts_options_and_exposes_them_via_context() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let output_path = temp_dir.path().join("opts.txt");
+        let script = format!(
+            "import json\nimport pathlib\nimport red_cell\n\
+def cmd(context):\n    opts = [dict(name=o.name, type=o.type, required=o.required, default=o.default) for o in context.options]\n    pathlib.Path({output:?}).write_text(json.dumps(opts))\n\
+options = [\n    {{'name': 'target', 'type': 'string', 'required': True}},\n    {{'name': 'timeout', 'type': 'int', 'required': False, 'default': '30'}},\n    {{'name': 'verbose', 'type': 'bool', 'required': False}},\n    {{'name': 'output', 'type': 'file', 'required': False}},\n]\n\
+red_cell.register_command('demo', cmd, options=options)\n",
+            output = output_path.display().to_string()
+        );
+        write_script(&temp_dir.path().join("opts.py"), &script);
+
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+        {
+            let mut state = lock_app_state(&app_state);
+            state.agents.push(sample_agent("00ABCDEF"));
+        }
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        let executed = runtime
+            .execute_registered_command("00ABCDEF", "demo localhost")
+            .unwrap_or_else(|error| panic!("registered command should run: {error}"));
+
+        assert!(executed);
+        let contents = wait_for_file_contents(&output_path)
+            .unwrap_or_else(|| panic!("output file should be written"));
+        let opts: Vec<serde_json::Value> =
+            serde_json::from_str(&contents).expect("output should be valid JSON");
+        assert_eq!(opts.len(), 4);
+        assert_eq!(opts[0]["name"], "target");
+        assert_eq!(opts[0]["type"], "string");
+        assert_eq!(opts[0]["required"], true);
+        assert_eq!(opts[0]["default"], serde_json::Value::Null);
+        assert_eq!(opts[1]["name"], "timeout");
+        assert_eq!(opts[1]["type"], "int");
+        assert_eq!(opts[1]["required"], false);
+        assert_eq!(opts[1]["default"], "30");
+        assert_eq!(opts[2]["type"], "bool");
+        assert_eq!(opts[3]["type"], "file");
+    }
+
+    #[test]
+    fn command_history_is_empty_on_first_invocation_and_grows_on_subsequent() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let output_path = temp_dir.path().join("history.txt");
+        let script = format!(
+            "import json\nimport pathlib\nimport red_cell\n\
+def cmd(context):\n    pathlib.Path({output:?}).write_text(json.dumps(context.history))\n\
+red_cell.register_command('hist', cmd)\n",
+            output = output_path.display().to_string()
+        );
+        write_script(&temp_dir.path().join("hist.py"), &script);
+
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+        {
+            let mut state = lock_app_state(&app_state);
+            state.agents.push(sample_agent("00ABCDEF"));
+        }
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        // First invocation — history must be empty.
+        runtime
+            .execute_registered_command("00ABCDEF", "hist alpha")
+            .unwrap_or_else(|e| panic!("should run: {e}"));
+        let first = wait_for_file_contents(&output_path)
+            .unwrap_or_else(|| panic!("output should be written"));
+        let hist: Vec<String> = serde_json::from_str(&first).expect("valid JSON");
+        assert!(hist.is_empty(), "history should be empty on first invocation");
+
+        // Second invocation — history must contain the first command.
+        std::fs::remove_file(&output_path).ok();
+        runtime
+            .execute_registered_command("00ABCDEF", "hist beta")
+            .unwrap_or_else(|e| panic!("should run: {e}"));
+        let second = wait_for_file_contents(&output_path)
+            .unwrap_or_else(|| panic!("output should be written"));
+        let hist: Vec<String> = serde_json::from_str(&second).expect("valid JSON");
+        assert_eq!(hist, vec!["hist alpha".to_owned()]);
+
+        // Third invocation — history contains both prior commands in order.
+        std::fs::remove_file(&output_path).ok();
+        runtime
+            .execute_registered_command("00ABCDEF", "hist gamma")
+            .unwrap_or_else(|e| panic!("should run: {e}"));
+        let third = wait_for_file_contents(&output_path)
+            .unwrap_or_else(|| panic!("output should be written"));
+        let hist: Vec<String> = serde_json::from_str(&third).expect("valid JSON");
+        assert_eq!(hist, vec!["hist alpha".to_owned(), "hist beta".to_owned()]);
+    }
+
+    #[test]
+    fn command_history_is_scoped_per_agent() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let output_path = temp_dir.path().join("scoped_hist.txt");
+        let script = format!(
+            "import json\nimport pathlib\nimport red_cell\n\
+def cmd(context):\n    pathlib.Path({output:?}).write_text(json.dumps(context.history))\n\
+red_cell.register_command('scoped', cmd)\n",
+            output = output_path.display().to_string()
+        );
+        write_script(&temp_dir.path().join("scoped.py"), &script);
+
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+        {
+            let mut state = lock_app_state(&app_state);
+            state.agents.push(sample_agent("AABBCCDD"));
+            state.agents.push(sample_agent("11223344"));
+        }
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        // Invoke on agent A.
+        runtime
+            .execute_registered_command("AABBCCDD", "scoped from_a")
+            .unwrap_or_else(|e| panic!("should run: {e}"));
+        let _ = wait_for_file_contents(&output_path);
+
+        // Invoke on agent B — history must be empty (different agent).
+        std::fs::remove_file(&output_path).ok();
+        runtime
+            .execute_registered_command("11223344", "scoped from_b")
+            .unwrap_or_else(|e| panic!("should run: {e}"));
+        let contents = wait_for_file_contents(&output_path)
+            .unwrap_or_else(|| panic!("output should be written"));
+        let hist: Vec<String> = serde_json::from_str(&contents).expect("valid JSON");
+        assert!(hist.is_empty(), "agent B should start with empty history");
+    }
+
+    #[test]
+    fn havocui_register_command_two_arg_form_is_backward_compatible() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let output_path = temp_dir.path().join("ui_cmd.txt");
+        let script = format!(
+            "import pathlib\nimport havocui\n\
+def run(context):\n    pathlib.Path({output:?}).write_text('ok:' + context.command_line)\n\
+havocui.RegisterCommand('ui cmd', run)\n",
+            output = output_path.display().to_string()
+        );
+        write_script(&temp_dir.path().join("ui_cmd.py"), &script);
+
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+        {
+            let mut state = lock_app_state(&app_state);
+            state.agents.push(sample_agent("00ABCDEF"));
+        }
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        let executed = runtime
+            .execute_registered_command("00ABCDEF", "ui cmd")
+            .unwrap_or_else(|e| panic!("should run: {e}"));
+        assert!(executed);
+        assert_eq!(wait_for_file_contents(&output_path).as_deref(), Some("ok:ui cmd"));
+    }
+
+    #[test]
+    fn havocui_register_command_four_arg_form_exposes_description_and_options() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let output_path = temp_dir.path().join("ui_full.txt");
+        let script = format!(
+            "import json\nimport pathlib\nimport havocui\n\
+def run(context):\n    payload = {{'description': context.description, 'options': [o.name for o in context.options]}}\n    pathlib.Path({output:?}).write_text(json.dumps(payload))\n\
+havocui.RegisterCommand('recon scan', 'Run a recon scan', [{{'name': 'target', 'type': 'string', 'required': True}}], run)\n",
+            output = output_path.display().to_string()
+        );
+        write_script(&temp_dir.path().join("ui_full.py"), &script);
+
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+        {
+            let mut state = lock_app_state(&app_state);
+            state.agents.push(sample_agent("00ABCDEF"));
+        }
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        let executed = runtime
+            .execute_registered_command("00ABCDEF", "recon scan 10.0.0.1")
+            .unwrap_or_else(|e| panic!("should run: {e}"));
+        assert!(executed);
+        let contents = wait_for_file_contents(&output_path)
+            .unwrap_or_else(|| panic!("output should be written"));
+        let payload: serde_json::Value = serde_json::from_str(&contents).expect("valid JSON");
+        assert_eq!(payload["description"], "Run a recon scan");
+        assert_eq!(payload["options"], serde_json::json!(["target"]));
     }
 }

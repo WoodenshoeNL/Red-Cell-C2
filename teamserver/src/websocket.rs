@@ -3438,6 +3438,206 @@ mod tests {
     }
 
     #[test]
+    fn build_job_encodes_filesystem_dir_payload() -> Result<(), crate::TeamserverError> {
+        let args = "C:\\Users;true;false;true;false;*.txt;2024-01-01;name".to_owned();
+        let job = build_job(&AgentTaskInfo {
+            task_id: "40".to_owned(),
+            command_line: "ls C:\\Users".to_owned(),
+            demon_id: "DEADBEEF".to_owned(),
+            command_id: u32::from(DemonCommand::CommandFs).to_string(),
+            sub_command: Some("dir".to_owned()),
+            arguments: Some(args),
+            ..AgentTaskInfo::default()
+        })
+        .expect("filesystem dir should encode");
+
+        assert_eq!(job.command, u32::from(DemonCommand::CommandFs));
+        let mut offset = 0usize;
+        assert_eq!(read_u32_le(&job.payload, &mut offset), u32::from(DemonFilesystemCommand::Dir));
+        assert_eq!(read_u32_le(&job.payload, &mut offset), 0); // reserved zero
+        assert_eq!(read_len_prefixed_bytes(&job.payload, &mut offset), encode_utf16("C:\\Users"));
+        assert_eq!(read_u32_le(&job.payload, &mut offset), 1); // bool true
+        assert_eq!(read_u32_le(&job.payload, &mut offset), 0); // bool false
+        assert_eq!(read_u32_le(&job.payload, &mut offset), 1); // bool true
+        assert_eq!(read_u32_le(&job.payload, &mut offset), 0); // bool false
+        assert_eq!(read_len_prefixed_bytes(&job.payload, &mut offset), encode_utf16("*.txt"));
+        assert_eq!(read_len_prefixed_bytes(&job.payload, &mut offset), encode_utf16("2024-01-01"));
+        assert_eq!(read_len_prefixed_bytes(&job.payload, &mut offset), encode_utf16("name"));
+        assert_eq!(offset, job.payload.len());
+        Ok(())
+    }
+
+    #[test]
+    fn build_job_encodes_filesystem_download_payload() -> Result<(), crate::TeamserverError> {
+        let job = build_job(&AgentTaskInfo {
+            task_id: "41".to_owned(),
+            command_line: "download C:\\secret.txt".to_owned(),
+            demon_id: "DEADBEEF".to_owned(),
+            command_id: u32::from(DemonCommand::CommandFs).to_string(),
+            sub_command: Some("download".to_owned()),
+            arguments: Some(BASE64_STANDARD.encode("C:\\secret.txt")),
+            ..AgentTaskInfo::default()
+        })
+        .expect("filesystem download should encode");
+
+        assert_eq!(job.command, u32::from(DemonCommand::CommandFs));
+        let mut offset = 0usize;
+        assert_eq!(
+            read_u32_le(&job.payload, &mut offset),
+            u32::from(DemonFilesystemCommand::Download)
+        );
+        assert_eq!(
+            read_len_prefixed_bytes(&job.payload, &mut offset),
+            encode_utf16("C:\\secret.txt")
+        );
+        assert_eq!(offset, job.payload.len());
+        Ok(())
+    }
+
+    #[test]
+    fn build_job_encodes_filesystem_cat_payload() -> Result<(), crate::TeamserverError> {
+        let job = build_job(&AgentTaskInfo {
+            task_id: "42".to_owned(),
+            command_line: "cat C:\\etc\\hosts".to_owned(),
+            demon_id: "DEADBEEF".to_owned(),
+            command_id: u32::from(DemonCommand::CommandFs).to_string(),
+            sub_command: Some("cat".to_owned()),
+            arguments: Some(BASE64_STANDARD.encode("C:\\etc\\hosts")),
+            ..AgentTaskInfo::default()
+        })
+        .expect("filesystem cat should encode");
+
+        assert_eq!(job.command, u32::from(DemonCommand::CommandFs));
+        let mut offset = 0usize;
+        assert_eq!(read_u32_le(&job.payload, &mut offset), u32::from(DemonFilesystemCommand::Cat));
+        assert_eq!(
+            read_len_prefixed_bytes(&job.payload, &mut offset),
+            encode_utf16("C:\\etc\\hosts")
+        );
+        assert_eq!(offset, job.payload.len());
+        Ok(())
+    }
+
+    #[test]
+    fn build_job_encodes_filesystem_cd_payload() -> Result<(), crate::TeamserverError> {
+        let job = build_job(&AgentTaskInfo {
+            task_id: "43".to_owned(),
+            command_line: "cd C:\\Windows".to_owned(),
+            demon_id: "DEADBEEF".to_owned(),
+            command_id: u32::from(DemonCommand::CommandFs).to_string(),
+            sub_command: Some("cd".to_owned()),
+            arguments: Some("C:\\Windows".to_owned()),
+            ..AgentTaskInfo::default()
+        })
+        .expect("filesystem cd should encode");
+
+        assert_eq!(job.command, u32::from(DemonCommand::CommandFs));
+        let mut offset = 0usize;
+        assert_eq!(read_u32_le(&job.payload, &mut offset), u32::from(DemonFilesystemCommand::Cd));
+        assert_eq!(read_len_prefixed_bytes(&job.payload, &mut offset), encode_utf16("C:\\Windows"));
+        assert_eq!(offset, job.payload.len());
+        Ok(())
+    }
+
+    #[test]
+    fn build_job_encodes_filesystem_remove_payload() -> Result<(), crate::TeamserverError> {
+        let job = build_job(&AgentTaskInfo {
+            task_id: "44".to_owned(),
+            command_line: "rm C:\\tmp\\evil.exe".to_owned(),
+            demon_id: "DEADBEEF".to_owned(),
+            command_id: u32::from(DemonCommand::CommandFs).to_string(),
+            sub_command: Some("remove".to_owned()),
+            arguments: Some("C:\\tmp\\evil.exe".to_owned()),
+            ..AgentTaskInfo::default()
+        })
+        .expect("filesystem remove should encode");
+
+        assert_eq!(job.command, u32::from(DemonCommand::CommandFs));
+        let mut offset = 0usize;
+        assert_eq!(
+            read_u32_le(&job.payload, &mut offset),
+            u32::from(DemonFilesystemCommand::Remove)
+        );
+        assert_eq!(
+            read_len_prefixed_bytes(&job.payload, &mut offset),
+            encode_utf16("C:\\tmp\\evil.exe")
+        );
+        assert_eq!(offset, job.payload.len());
+        Ok(())
+    }
+
+    #[test]
+    fn build_job_encodes_filesystem_mkdir_payload() -> Result<(), crate::TeamserverError> {
+        let job = build_job(&AgentTaskInfo {
+            task_id: "45".to_owned(),
+            command_line: "mkdir C:\\loot".to_owned(),
+            demon_id: "DEADBEEF".to_owned(),
+            command_id: u32::from(DemonCommand::CommandFs).to_string(),
+            sub_command: Some("mkdir".to_owned()),
+            arguments: Some("C:\\loot".to_owned()),
+            ..AgentTaskInfo::default()
+        })
+        .expect("filesystem mkdir should encode");
+
+        assert_eq!(job.command, u32::from(DemonCommand::CommandFs));
+        let mut offset = 0usize;
+        assert_eq!(
+            read_u32_le(&job.payload, &mut offset),
+            u32::from(DemonFilesystemCommand::Mkdir)
+        );
+        assert_eq!(read_len_prefixed_bytes(&job.payload, &mut offset), encode_utf16("C:\\loot"));
+        assert_eq!(offset, job.payload.len());
+        Ok(())
+    }
+
+    #[test]
+    fn build_job_encodes_filesystem_move_payload() -> Result<(), crate::TeamserverError> {
+        let job = build_job(&AgentTaskInfo {
+            task_id: "46".to_owned(),
+            command_line: "mv C:\\src.txt C:\\dst.txt".to_owned(),
+            demon_id: "DEADBEEF".to_owned(),
+            command_id: u32::from(DemonCommand::CommandFs).to_string(),
+            sub_command: Some("move".to_owned()),
+            arguments: Some(format!(
+                "{};{}",
+                BASE64_STANDARD.encode("C:\\src.txt"),
+                BASE64_STANDARD.encode("C:\\dst.txt")
+            )),
+            ..AgentTaskInfo::default()
+        })
+        .expect("filesystem move should encode");
+
+        assert_eq!(job.command, u32::from(DemonCommand::CommandFs));
+        let mut offset = 0usize;
+        assert_eq!(read_u32_le(&job.payload, &mut offset), u32::from(DemonFilesystemCommand::Move));
+        assert_eq!(read_len_prefixed_bytes(&job.payload, &mut offset), encode_utf16("C:\\src.txt"));
+        assert_eq!(read_len_prefixed_bytes(&job.payload, &mut offset), encode_utf16("C:\\dst.txt"));
+        assert_eq!(offset, job.payload.len());
+        Ok(())
+    }
+
+    #[test]
+    fn build_job_encodes_filesystem_getpwd_payload() {
+        let job = build_job(&AgentTaskInfo {
+            task_id: "47".to_owned(),
+            command_line: "pwd".to_owned(),
+            demon_id: "DEADBEEF".to_owned(),
+            command_id: u32::from(DemonCommand::CommandFs).to_string(),
+            sub_command: Some("pwd".to_owned()),
+            ..AgentTaskInfo::default()
+        })
+        .expect("filesystem getpwd should encode");
+
+        assert_eq!(job.command, u32::from(DemonCommand::CommandFs));
+        // GetPwd writes only the 4-byte subcommand discriminant and nothing else.
+        assert_eq!(job.payload.len(), 4);
+        assert_eq!(
+            u32::from_le_bytes(job.payload[0..4].try_into().expect("discriminant fits")),
+            u32::from(DemonFilesystemCommand::GetPwd)
+        );
+    }
+
+    #[test]
     fn build_job_encodes_token_privs_list_payload_from_extra_subcommand_string() {
         let job = build_job(&AgentTaskInfo {
             task_id: "2F".to_owned(),

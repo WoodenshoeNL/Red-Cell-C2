@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 57 | 181 | 31 |
+| Tasks closed | 62 | 181 | 31 |
 | Bugs filed against | 2 | 27 | 9 |
-| Bug rate (bugs/task) | 0.04 | 0.15 | 0.29 |
-| Quality score | 96% | 85% | 71% |
+| Bug rate (bugs/task) | 0.03 | 0.15 | 0.29 |
+| Quality score | 97% | 85% | 71% |
 
 ## Violation Breakdown
 
@@ -36,6 +36,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-15 12:30 — e9e4f38..828dbe7
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 5 | 0 | Closed `red-cell-c2-a74c` (refuse CHECKIN key rotation entirely — was previously allowed for direct agents, now refused universally; tests updated to verify original key preserved and CTR offset not reset); `red-cell-c2-3hro` (MAX_JOB_QUEUE_DEPTH=1000 cap + QueueFull error + tests); `red-cell-c2-2n8o` (constant-time session token lookup via linear scan + `subtle::ConstantTimeEq`; 3 regression tests added); `red-cell-c2-3uhw` (workflow close-hygiene process chore); `red-cell-c2-3cp1` (3 direct handler tests for `websocket_handler`: lifecycle, malformed-frame, oversized-pre-auth). No new defects found. |
+| Codex | 0 | 0 | No activity in range. |
+| Cursor | 0 | 0 | No activity in range. |
+
+Build: **passed** — `cargo check`, `cargo clippy -- -D warnings`, `cargo test --workspace` (539+ tests, 0 failures)
 
 ### Arch Review — 2026-03-15 06:00
 

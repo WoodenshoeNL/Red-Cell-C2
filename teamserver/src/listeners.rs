@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::Router;
-use axum::body::{Body, to_bytes};
+use axum::body::{Body, Bytes};
 use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -2515,6 +2515,54 @@ fn http_listener_subject_alt_names(config: &HttpListenerConfig) -> Vec<String> {
     names
 }
 
+/// Buffers an HTTP request body while performing an early pre-screen on the
+/// Demon transport magic value.
+///
+/// The Demon magic value (`0xDEADBEEF`) occupies bytes 4–7 of every valid
+/// Demon packet. Buffering the full body before checking the magic allows
+/// an adversary to force the server to allocate up to `MAX_AGENT_MESSAGE_LEN`
+/// (30 MiB) per connection before rejection. This function rejects bodies
+/// that fail the magic check as soon as 8 bytes have been accumulated, which
+/// limits per-connection allocation to a single network chunk (~16 KiB in
+/// practice) for obviously non-Demon traffic.
+///
+/// Returns `None` if the body exceeds `max_len`, contains a read error, or
+/// does not carry the correct Demon magic value.
+async fn collect_body_with_magic_precheck(body: Body, max_len: usize) -> Option<Bytes> {
+    use http_body_util::BodyExt as _;
+
+    let mut body = body;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut magic_checked = false;
+
+    while let Some(frame) = body.frame().await {
+        let frame = frame.ok()?;
+        let Ok(data) = frame.into_data() else {
+            // Trailers and other non-data frames are skipped.
+            continue;
+        };
+        if buf.len() + data.len() > max_len {
+            return None;
+        }
+        buf.extend_from_slice(&data);
+        // As soon as we have the 8 bytes that cover the magic field (bytes 4–7),
+        // validate the magic and drop the connection immediately on mismatch.
+        if !magic_checked && buf.len() >= 8 {
+            if buf[4..8] != DEMON_MAGIC_VALUE.to_be_bytes() {
+                return None;
+            }
+            magic_checked = true;
+        }
+    }
+
+    // Bodies shorter than 8 bytes cannot pass the magic check.
+    if !magic_checked {
+        return None;
+    }
+
+    Some(Bytes::from(buf))
+}
+
 async fn http_listener_handler(
     State(state): State<Arc<HttpListenerState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -2531,7 +2579,7 @@ async fn http_listener_handler(
         &request,
     );
     let (_, body) = request.into_parts();
-    let Ok(body) = to_bytes(body, MAX_AGENT_MESSAGE_LEN).await else {
+    let Some(body) = collect_body_with_magic_precheck(body, MAX_AGENT_MESSAGE_LEN).await else {
         return state.fake_404_response();
     };
 
@@ -3016,11 +3064,12 @@ mod tests {
         ListenerSummary, MAX_AGENT_MESSAGE_LEN, MAX_DEMON_INIT_ATTEMPT_WINDOWS,
         MAX_DEMON_INIT_ATTEMPTS_PER_IP, MAX_SMB_FRAME_PAYLOAD_LEN, TrustedProxyPeer,
         action_from_mark, base32hex_decode, base32hex_encode, build_dns_txt_response,
-        chunk_response_to_b32hex, dns_allowed_query_types, extract_external_ip,
-        listener_config_from_operator, listener_error_event, listener_event_for_action,
-        listener_removed_event, operator_requests_start, parse_dns_c2_query, parse_dns_query,
-        parse_trusted_proxy_peer, profile_listener_configs, read_smb_frame, smb_local_socket_name,
-        spawn_dns_listener_runtime, spawn_managed_listener_task, spawn_smb_listener_runtime,
+        chunk_response_to_b32hex, collect_body_with_magic_precheck, dns_allowed_query_types,
+        extract_external_ip, listener_config_from_operator, listener_error_event,
+        listener_event_for_action, listener_removed_event, operator_requests_start,
+        parse_dns_c2_query, parse_dns_query, parse_trusted_proxy_peer, profile_listener_configs,
+        read_smb_frame, smb_local_socket_name, spawn_dns_listener_runtime,
+        spawn_managed_listener_task, spawn_smb_listener_runtime,
     };
     use crate::{
         AgentRegistry, AuditQuery, AuditResultStatus, Database, EventBus, Job,
@@ -3039,7 +3088,7 @@ mod tests {
         AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len, decrypt_agent_data,
         decrypt_agent_data_at_offset, encrypt_agent_data,
     };
-    use red_cell_common::demon::{DemonCommand, DemonEnvelope, DemonMessage};
+    use red_cell_common::demon::{DEMON_MAGIC_VALUE, DemonCommand, DemonEnvelope, DemonMessage};
     use red_cell_common::operator::{ListenerInfo, OperatorMessage};
     use red_cell_common::{
         DnsListenerConfig, HttpListenerConfig, HttpListenerProxyConfig, HttpListenerResponseConfig,
@@ -3711,6 +3760,47 @@ mod tests {
 
         manager.stop("edge-http-oversize").await?;
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn collect_body_with_magic_precheck_accepts_valid_demon_body() {
+        let body = valid_demon_request_body(0x1234_5678);
+        let result =
+            collect_body_with_magic_precheck(Body::from(body.clone()), MAX_AGENT_MESSAGE_LEN).await;
+        assert_eq!(result.as_deref(), Some(body.as_slice()));
+    }
+
+    #[tokio::test]
+    async fn collect_body_with_magic_precheck_rejects_wrong_magic() {
+        let mut body = valid_demon_request_body(0x1234_5678);
+        body[4..8].copy_from_slice(&0xFEED_FACE_u32.to_be_bytes());
+        let result =
+            collect_body_with_magic_precheck(Body::from(body), MAX_AGENT_MESSAGE_LEN).await;
+        assert!(result.is_none(), "wrong magic must be rejected before full body is buffered");
+    }
+
+    #[tokio::test]
+    async fn collect_body_with_magic_precheck_rejects_body_shorter_than_8_bytes() {
+        let short = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xDE, 0xAD, 0xBE];
+        let result =
+            collect_body_with_magic_precheck(Body::from(short), MAX_AGENT_MESSAGE_LEN).await;
+        assert!(result.is_none(), "body shorter than 8 bytes must be rejected");
+    }
+
+    #[tokio::test]
+    async fn collect_body_with_magic_precheck_rejects_body_exceeding_max_len() {
+        // Construct a body that starts with a valid magic value but exceeds max_len.
+        let mut body = vec![0u8; 9];
+        body[4..8].copy_from_slice(&DEMON_MAGIC_VALUE.to_be_bytes());
+        body.extend(vec![0u8; 10]);
+        let result = collect_body_with_magic_precheck(Body::from(body), 8).await;
+        assert!(result.is_none(), "body exceeding max_len must be rejected");
+    }
+
+    #[tokio::test]
+    async fn collect_body_with_magic_precheck_rejects_empty_body() {
+        let result = collect_body_with_magic_precheck(Body::empty(), MAX_AGENT_MESSAGE_LEN).await;
+        assert!(result.is_none(), "empty body must be rejected");
     }
 
     #[tokio::test]

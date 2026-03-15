@@ -26785,3 +26785,13 @@ Done. The fix was a one-character change: `{demon_id:<08x}` → `{demon_id:08x}`
 [2026-03-15 14:28:12] [Ubuntu-C2-dev02-claude] Running Claude on task red-cell-c2-t4ml...
 Done. The fix was a one-liner on `payload_builder.rs:643`: `add_wstring(out, &method.to_ascii_uppercase())?`. The test now asserts byte-level equality between `"post"` and `"POST"` output to prevent regression.
 [2026-03-15 14:31:19] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-t4ml
+[2026-03-15 14:31:19] [Ubuntu-C2-dev02-claude] WIP: committing uncommitted changes for red-cell-c2-t4ml
+[2026-03-15 14:31:20] [Ubuntu-C2-dev02-claude] WIP: pushed
+[2026-03-15 14:31:20] [Ubuntu-C2-dev02-claude] ========================LOOP=========================
+[2026-03-15 14:31:35] [Ubuntu-C2-dev02-claude] === Starting Claude dev loop iteration 12 ===
+[2026-03-15 14:31:37] [Ubuntu-C2-dev02-claude] git pull --ff-only: ok
+[2026-03-15 14:31:37] [Ubuntu-C2-dev02-claude] br sync import: ok
+[2026-03-15 14:31:38] [Ubuntu-C2-dev02-claude] Selected task: red-cell-c2-t6dz
+[2026-03-15 14:31:42] [Ubuntu-C2-dev02-claude] Claimed red-cell-c2-t6dz
+[2026-03-15 14:31:43] [Ubuntu-C2-dev02-claude] Running Claude on task red-cell-c2-t6dz...
+[2026-03-15 14:40:39] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-t6dz

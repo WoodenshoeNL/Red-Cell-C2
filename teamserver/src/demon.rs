@@ -1338,6 +1338,83 @@ mod tests {
         );
     }
 
+    // ── DemonPacketParser COMMAND_CHECKIN truncated inner payload ────────────
+
+    /// Build a COMMAND_CHECKIN callback packet whose encrypted inner payload,
+    /// once decrypted, contains a length-prefix for the second sub-package that
+    /// claims more bytes than the buffer actually holds.
+    ///
+    /// The outer envelope and AES encryption are well-formed so the packet
+    /// passes decryption; the parse error must come from the inner loop.
+    fn build_checkin_packet_with_truncated_inner_payload(
+        agent_id: u32,
+        key: [u8; AGENT_KEY_LENGTH],
+        iv: [u8; AGENT_IV_LENGTH],
+        ctr_offset: u64,
+    ) -> Vec<u8> {
+        // Inner decrypted bytes:
+        //   [4] first_payload_len=3  [3] 0xaa 0xbb 0xcc   <- well-formed first package
+        //   [4] second_cmd_id        [4] second_req_id
+        //   [4] second_payload_len=100  [2] 0xAB 0xCD     <- truncated: only 2 bytes, not 100
+        let mut decrypted = Vec::new();
+        decrypted.extend_from_slice(&u32_be(3));
+        decrypted.extend_from_slice(&[0xaa, 0xbb, 0xcc]);
+        decrypted.extend_from_slice(&u32_be(u32::from(DemonCommand::CommandOutput)));
+        decrypted.extend_from_slice(&u32_be(77));
+        decrypted.extend_from_slice(&u32_be(100)); // claims 100-byte payload
+        decrypted.extend_from_slice(&[0xAB, 0xCD]); // only 2 bytes present
+
+        let encrypted = encrypt_agent_data_at_offset(&key, &iv, ctr_offset, &decrypted)
+            .expect("truncated-inner encryption should succeed");
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u32_be(u32::from(DemonCommand::CommandCheckin)));
+        payload.extend_from_slice(&u32_be(42));
+        payload.extend_from_slice(&encrypted);
+
+        DemonEnvelope::new(agent_id, payload)
+            .expect("truncated-inner callback envelope should be valid")
+            .to_bytes()
+    }
+
+    /// A COMMAND_CHECKIN packet that decrypts successfully but whose inner
+    /// sub-package length-prefix exceeds the remaining buffer must return a
+    /// `DemonParserError` and must never panic.
+    #[tokio::test]
+    async fn parse_checkin_with_truncated_inner_payload_returns_parse_error() {
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry.clone());
+        let key = [0x41; AGENT_KEY_LENGTH];
+        let iv = [0x24; AGENT_IV_LENGTH];
+        let agent_id: u32 = 0x0A0B_0C0D;
+
+        // Register the agent.
+        let init_packet = build_init_packet(agent_id, key, iv);
+        parser
+            .parse_at(&init_packet, "198.51.100.7".to_owned(), datetime!(2026-03-15 10:00:00 UTC))
+            .await
+            .expect("init should succeed");
+
+        // Advance the registry CTR offset by building (and discarding) the init ACK,
+        // exactly as the real server would.  The ACK encrypts one u32 (4 bytes =
+        // 1 AES-CTR block), so the next agent-to-server packet is decrypted starting
+        // at block offset 1.
+        let _ack = build_init_ack(&registry, agent_id).await.expect("ack should build");
+        let ctr_offset = ctr_blocks_for_len(std::mem::size_of::<u32>());
+
+        let bad_packet =
+            build_checkin_packet_with_truncated_inner_payload(agent_id, key, iv, ctr_offset);
+
+        let result = parser
+            .parse_at(&bad_packet, "198.51.100.7".to_owned(), datetime!(2026-03-15 10:00:01 UTC))
+            .await;
+
+        assert!(
+            matches!(result, Err(DemonParserError::Protocol(_))),
+            "truncated inner payload must return a Protocol error, got: {result:?}"
+        );
+    }
+
     // ── windows_version_label ────────────────────────────────────────────────
 
     const SERVER: u32 = 2; // any value != VER_NT_WORKSTATION (1)

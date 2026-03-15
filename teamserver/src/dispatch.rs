@@ -1074,12 +1074,49 @@ async fn handle_pivot_callback(
         Ok(red_cell_common::demon::DemonPivotCommand::SmbCommand) => {
             handle_pivot_command_callback(context, agent_id, &mut parser).await
         }
-        Ok(red_cell_common::demon::DemonPivotCommand::List) => Ok(None),
+        Ok(red_cell_common::demon::DemonPivotCommand::List) => {
+            handle_pivot_list_callback(context.events, agent_id, request_id, &mut parser).await
+        }
         Err(error) => Err(CommandDispatchError::InvalidCallbackPayload {
             command_id: u32::from(DemonCommand::CommandPivot),
             message: error.to_string(),
         }),
     }
+}
+
+async fn handle_pivot_list_callback(
+    events: &EventBus,
+    agent_id: u32,
+    request_id: u32,
+    parser: &mut CallbackParser<'_>,
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let mut entries: Vec<(u32, String)> = Vec::new();
+    while !parser.is_empty() {
+        let demon_id = parser.read_u32("pivot list demon id")?;
+        let named_pipe = parser.read_utf16("pivot list named pipe")?;
+        entries.push((demon_id, named_pipe));
+    }
+
+    let (kind, message, output) = if entries.is_empty() {
+        ("Info", "No pivots connected".to_owned(), None)
+    } else {
+        let count = entries.len();
+        let mut data = String::from(" DemonID    Named Pipe\n --------   -----------\n");
+        for (demon_id, named_pipe) in entries {
+            data.push_str(&format!(" {demon_id:<08x}   {named_pipe}\n"));
+        }
+        ("Info", format!("Pivot List [{count}]:"), Some(data.trim_end().to_owned()))
+    };
+
+    events.broadcast(agent_response_event(
+        agent_id,
+        u32::from(DemonCommand::CommandPivot),
+        request_id,
+        kind,
+        &message,
+        output,
+    )?);
+    Ok(None)
 }
 
 async fn handle_pivot_connect_callback(
@@ -5624,6 +5661,117 @@ mod tests {
             registry.listener_name(child_id).await.as_deref(),
             Some("http-external"),
             "child pivot listener_name must inherit the parent's listener, not be 'null'"
+        );
+        Ok(())
+    }
+
+    fn pivot_list_payload(entries: &[(u32, &str)]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u32::from(DemonPivotCommand::List).to_le_bytes());
+        for (demon_id, pipe_name) in entries {
+            payload.extend_from_slice(&demon_id.to_le_bytes());
+            let utf16: Vec<u16> = pipe_name.encode_utf16().collect();
+            let utf16_bytes: Vec<u8> = utf16.iter().flat_map(|c| c.to_le_bytes()).collect();
+            let len = u32::try_from(utf16_bytes.len()).unwrap_or_default();
+            payload.extend_from_slice(&len.to_le_bytes());
+            payload.extend_from_slice(&utf16_bytes);
+        }
+        payload
+    }
+
+    #[tokio::test]
+    async fn pivot_list_callback_with_entries_broadcasts_formatted_table()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database,
+            sockets,
+            None,
+        );
+        let agent_id = 0xAAAA_BBBB;
+        let key = [0x11; AGENT_KEY_LENGTH];
+        let iv = [0x22; AGENT_IV_LENGTH];
+        registry.insert(sample_agent_info(agent_id, key, iv)).await?;
+
+        let response = dispatcher
+            .dispatch(
+                agent_id,
+                u32::from(DemonCommand::CommandPivot),
+                99,
+                &pivot_list_payload(&[
+                    (0x1234_5678, "\\\\.\\pipe\\foo"),
+                    (0xDEAD_BEEF, "\\\\.\\pipe\\bar"),
+                ]),
+            )
+            .await?;
+
+        assert_eq!(response, None);
+        let event = receiver
+            .recv()
+            .await
+            .ok_or_else(|| "expected AgentResponse event after pivot list".to_owned())?;
+        let OperatorMessage::AgentResponse(msg) = event else {
+            return Err("expected AgentResponse".into());
+        };
+        assert_eq!(msg.info.demon_id, format!("{agent_id:08X}"));
+        assert_eq!(msg.info.extra.get("Type"), Some(&Value::String("Info".to_owned())));
+        let message = msg.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(message.contains("Pivot List [2]"), "message: {message}");
+        let output = &msg.info.output;
+        assert!(output.contains("12345678"), "output: {output}");
+        assert!(output.contains("pipe\\foo"), "output: {output}");
+        assert!(output.contains("deadbeef"), "output: {output}");
+        assert!(output.contains("pipe\\bar"), "output: {output}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pivot_list_callback_empty_broadcasts_no_pivots_message()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database,
+            sockets,
+            None,
+        );
+        let agent_id = 0xCCCC_DDDD;
+        let key = [0x33; AGENT_KEY_LENGTH];
+        let iv = [0x44; AGENT_IV_LENGTH];
+        registry.insert(sample_agent_info(agent_id, key, iv)).await?;
+
+        let response = dispatcher
+            .dispatch(agent_id, u32::from(DemonCommand::CommandPivot), 77, &pivot_list_payload(&[]))
+            .await?;
+
+        assert_eq!(response, None);
+        let event = receiver
+            .recv()
+            .await
+            .ok_or_else(|| "expected AgentResponse event after empty pivot list".to_owned())?;
+        let OperatorMessage::AgentResponse(msg) = event else {
+            return Err("expected AgentResponse".into());
+        };
+        assert_eq!(msg.info.extra.get("Type"), Some(&Value::String("Info".to_owned())));
+        assert_eq!(
+            msg.info.extra.get("Message"),
+            Some(&Value::String("No pivots connected".to_owned()))
+        );
+        assert!(
+            msg.info.output.is_empty(),
+            "output should be empty for no pivots: {}",
+            msg.info.output
         );
         Ok(())
     }

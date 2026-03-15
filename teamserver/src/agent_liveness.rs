@@ -810,17 +810,23 @@ mod tests {
 
         assert_eq!(dead, vec![agent.agent_id]);
 
-        // The audit write is spawned as a background task; yield to let it complete.
-        tokio::task::yield_now().await;
-        tokio::task::yield_now().await;
-
-        let entries = database.audit_log().list().await?;
-        let dead_entry = entries.iter().find(|e| e.action == "agent.dead").ok_or(
-            TeamserverError::InvalidPersistedValue {
-                field: "audit_log",
-                message: "expected agent.dead audit entry".to_owned(),
-            },
-        )?;
+        // The audit write is spawned as a background task.  Poll with a bounded
+        // timeout so the test is deterministic even on a loaded CI worker.
+        let dead_entry = timeout(Duration::from_millis(500), async {
+            loop {
+                let entries = database.audit_log().list().await?;
+                if let Some(entry) = entries.into_iter().find(|e| e.action == "agent.dead") {
+                    return Ok::<_, TeamserverError>(entry);
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| TeamserverError::InvalidPersistedValue {
+            field: "audit_log",
+            message: "expected agent.dead audit entry within timeout".to_owned(),
+        })??;
+        let dead_entry = &dead_entry;
         assert_eq!(dead_entry.actor, "teamserver");
         assert_eq!(dead_entry.target_kind, "agent");
         assert_eq!(dead_entry.target_id.as_deref(), Some("DEADCAFE"));

@@ -10,7 +10,7 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 91 | 181 | 31 |
-| Bugs filed against | 3 | 27 | 9 |
+| Bugs filed against | 3 | 28 | 9 |
 | Bug rate (bugs/task) | 0.03 | 0.15 | 0.29 |
 | Quality score | 97% | 85% | 71% |
 
@@ -22,7 +22,7 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests | 6 | 11 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
 | Protocol errors | 3 | 22 | 3 |
-| Security issues | 7 | 30 | 0 |
+| Security issues | 7 | 31 | 0 |
 | Architecture drift | 2 | 21 | 0 |
 | Memory / resource leaks | 0 | 10 | 1 |
 | Startup / lifecycle regressions | 0 | 8 | 0 |
@@ -1263,3 +1263,16 @@ Notes: Excellent run — Claude closed 10 test-coverage issues in one pass, clea
 
 Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (914 tests, 0 failures)
 Notes: Clean run. All 9 closes are valid: 6 paired with direct implementation commits this cycle, 3 (wf2d, h9be, lpg5) correctly recognized pre-existing tests and closed with accurate descriptions. No unwraps in test or production code. One issue currently in_progress: `red-cell-c2-ude5` (security: all-zero IV accepted during DemonInit without rejection) — this is the next task claimed at HEAD. No bugs filed.
+
+### Arch Review — 2026-03-15 (deep independent review)
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Codex | 1 | Security/OPSEC | red-cell-c2-k00o (P2): fake_404_response() unconditionally sets `x-havoc: true` response header in teamserver/src/listeners.rs:927, fingerprinting the C2 server to any network scanner |
+| Claude | 0 | — | No new findings attributed |
+| Cursor | 0 | — | No new findings attributed |
+
+Overall codebase health: good — zero production unwraps/expects/todos, all user-supplied lengths bounded before allocation, key material absent from logs, constant-time comparisons in auth paths, rate limiting on both DEMON_INIT and operator logins.
+Biggest blindspot: CTR offset continuity after crash-restart remains unverified (red-cell-c2-h5a3, red-cell-c2-3qbl still open). Keystream collision after restart would silently expose all traffic for the affected agent with no server-side warning.
+Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (914 tests, 0 failures)
+Notes: Full codebase audit (security, protocol correctness, error handling, architectural drift, test coverage, consistency, completeness). One net-new issue filed: `red-cell-c2-k00o` — x-havoc OPSEC header leak introduced by Codex in commit 8460d624. All other previously identified risks (da0m, h5a3, 3qbl) remain correctly tracked and unchanged.

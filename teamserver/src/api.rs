@@ -446,12 +446,10 @@ impl ApiRuntime {
 
     fn generate_key_hash_secret() -> [u8; API_KEY_HASH_SECRET_SIZE] {
         let mut bytes = [0_u8; API_KEY_HASH_SECRET_SIZE];
-        let first = Uuid::new_v4();
-        let second = Uuid::new_v4();
-
-        bytes[..16].copy_from_slice(first.as_bytes());
-        bytes[16..].copy_from_slice(second.as_bytes());
-        bytes
+        match getrandom::fill(&mut bytes) {
+            Ok(()) => bytes,
+            Err(error) => panic!("OS RNG unavailable — cannot generate HMAC secret: {error}"),
+        }
     }
 
     async fn check_rate_limit(&self, subject: &RateLimitSubject) -> Result<(), ApiAuthError> {

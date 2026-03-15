@@ -3,7 +3,7 @@
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -21,11 +21,30 @@ const SUCCESS_COLOR: u32 = 0x002E_CC71;
 const FAILURE_COLOR: u32 = 0x00E7_4C3C;
 const DISCORD_WEBHOOK_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Backoff delays for webhook retries: 1 s, 2 s, 4 s (up to 3 retries).
+const RETRY_DELAYS: [Duration; 3] =
+    [Duration::from_secs(1), Duration::from_secs(2), Duration::from_secs(4)];
+
 /// Best-effort outbound webhook dispatcher for audit events.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct AuditWebhookNotifier {
     discord: Option<Arc<DiscordWebhook>>,
     delivery_state: Arc<DeliveryState>,
+    /// Counts permanent delivery failures (all retries exhausted) for the Discord webhook.
+    discord_failure_count: Arc<AtomicU64>,
+    /// Per-attempt backoff delays (first retry after delays[0], etc.).
+    retry_delays: Arc<[Duration]>,
+}
+
+impl Default for AuditWebhookNotifier {
+    fn default() -> Self {
+        Self {
+            discord: None,
+            delivery_state: Arc::new(DeliveryState::default()),
+            discord_failure_count: Arc::new(AtomicU64::new(0)),
+            retry_delays: Arc::from(RETRY_DELAYS.as_slice()),
+        }
+    }
 }
 
 impl AuditWebhookNotifier {
@@ -42,13 +61,34 @@ impl AuditWebhookNotifier {
                 })
             });
 
-        Self { discord, delivery_state: Arc::new(DeliveryState::default()) }
+        Self {
+            discord,
+            delivery_state: Arc::new(DeliveryState::default()),
+            discord_failure_count: Arc::new(AtomicU64::new(0)),
+            retry_delays: Arc::from(RETRY_DELAYS.as_slice()),
+        }
     }
 
     /// Return `true` when at least one outbound webhook is configured.
     #[must_use]
     pub fn is_enabled(&self) -> bool {
         self.discord.is_some()
+    }
+
+    /// Return the total number of permanent Discord webhook delivery failures
+    /// (i.e. deliveries where all retry attempts were exhausted).
+    #[must_use]
+    pub fn discord_failure_count(&self) -> u64 {
+        self.discord_failure_count.load(Ordering::Relaxed)
+    }
+
+    /// Build a notifier identical to [`from_profile`] but with no retry delays.
+    ///
+    /// Used in tests that assert on timing-sensitive shutdown behaviour so that
+    /// a failing webhook does not introduce multi-second delays.
+    #[cfg(test)]
+    pub fn from_profile_no_retry(profile: &Profile) -> Self {
+        Self { retry_delays: Arc::from([]), ..Self::from_profile(profile) }
     }
 
     /// Emit a notification for a persisted audit record.
@@ -61,6 +101,12 @@ impl AuditWebhookNotifier {
     }
 
     /// Emit a notification for a persisted audit record without blocking the caller.
+    ///
+    /// Delivery is attempted up to `1 + retry_delays.len()` times.  Each retry
+    /// is preceded by the corresponding element of `retry_delays` (default:
+    /// 1 s, 2 s, 4 s).  If all attempts fail the permanent failure counter is
+    /// incremented and a warning is logged; the event-dispatch loop is never
+    /// blocked.
     pub fn notify_audit_record_detached(&self, record: AuditRecord) {
         if let Some(discord) = self.discord.clone() {
             // Increment pending *before* checking the closing flag so that shutdown()
@@ -79,15 +125,40 @@ impl AuditWebhookNotifier {
             }
 
             let delivery_state = self.delivery_state.clone();
+            let failure_count = self.discord_failure_count.clone();
+            let retry_delays = self.retry_delays.clone();
             tokio::spawn(async move {
-                if let Err(error) = discord.send(&record).await {
-                    warn!(
-                        actor = record.actor,
-                        action = record.action,
-                        %error,
-                        "failed to deliver audit webhook notification"
-                    );
+                // Initial attempt.
+                let mut last_err = match discord.send(&record).await {
+                    Ok(()) => {
+                        delivery_state.pending.fetch_sub(1, Ordering::SeqCst);
+                        delivery_state.notify_if_drained();
+                        return;
+                    }
+                    Err(e) => e,
+                };
+
+                // Retry with exponential backoff.
+                for &delay in retry_delays.iter() {
+                    tokio::time::sleep(delay).await;
+                    match discord.send(&record).await {
+                        Ok(()) => {
+                            delivery_state.pending.fetch_sub(1, Ordering::SeqCst);
+                            delivery_state.notify_if_drained();
+                            return;
+                        }
+                        Err(e) => last_err = e,
+                    }
                 }
+
+                // All attempts exhausted — record permanent failure.
+                failure_count.fetch_add(1, Ordering::Relaxed);
+                warn!(
+                    actor = record.actor,
+                    action = record.action,
+                    error = %last_err,
+                    "webhook delivery failed after all retries exhausted"
+                );
 
                 delivery_state.pending.fetch_sub(1, Ordering::SeqCst);
                 delivery_state.notify_if_drained();
@@ -264,6 +335,8 @@ impl DiscordField {
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     use axum::{Json, Router, http::StatusCode as HttpStatusCode, routing::post};
@@ -540,7 +613,9 @@ mod tests {
             "#
         ))
         .expect("profile should parse");
-        let notifier = AuditWebhookNotifier::from_profile(&profile);
+        // Use no-retry variant so the 500 response resolves immediately and
+        // shutdown() is not delayed by the default 1 s + 2 s + 4 s backoff.
+        let notifier = AuditWebhookNotifier::from_profile_no_retry(&profile);
 
         notifier.notify_audit_record_detached(AuditRecord {
             id: 10,
@@ -732,6 +807,38 @@ mod tests {
         server.abort();
     }
 
+    /// Webhook that fails on the first `fail_count` requests then succeeds.
+    async fn flaky_webhook_server(
+        fail_count: usize,
+    ) -> (SocketAddr, mpsc::UnboundedReceiver<Value>, tokio::task::JoinHandle<()>) {
+        use std::sync::atomic::AtomicUsize;
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/",
+            post(move |Json(payload): Json<Value>| {
+                let sender = sender.clone();
+                let attempts = attempts.clone();
+                async move {
+                    let n = attempts.fetch_add(1, Ordering::Relaxed);
+                    if n < fail_count {
+                        (HttpStatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok": false})))
+                    } else {
+                        let _ = sender.send(payload);
+                        (HttpStatusCode::OK, Json(json!({"ok": true})))
+                    }
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener should bind");
+        let address = listener.local_addr().expect("listener address should resolve");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("test webhook server should not fail");
+        });
+
+        (address, receiver, server)
+    }
+
     async fn webhook_server(
         response_status: HttpStatusCode,
     ) -> (SocketAddr, mpsc::UnboundedReceiver<Value>, tokio::task::JoinHandle<()>) {
@@ -754,5 +861,108 @@ mod tests {
         });
 
         (address, receiver, server)
+    }
+
+    /// Build a test profile pointing at the given address with a Discord webhook.
+    fn discord_profile(address: SocketAddr) -> Profile {
+        Profile::parse(&format!(
+            r#"
+            Teamserver {{
+              Host = "127.0.0.1"
+              Port = 40056
+            }}
+
+            Operators {{
+              user "operator" {{
+                Password = "password1234"
+              }}
+            }}
+
+            WebHook {{
+              Discord {{
+                Url = "http://{address}/"
+              }}
+            }}
+
+            Demon {{}}
+            "#
+        ))
+        .expect("profile should parse")
+    }
+
+    fn sample_record(id: i64) -> AuditRecord {
+        AuditRecord {
+            id,
+            actor: "operator".to_owned(),
+            action: "operator.login".to_owned(),
+            target_kind: "operator".to_owned(),
+            target_id: None,
+            agent_id: None,
+            command: None,
+            parameters: None,
+            result_status: AuditResultStatus::Success,
+            occurred_at: "2026-03-15T00:00:00Z".to_owned(),
+        }
+    }
+
+    /// Delivery that fails once then succeeds on the first retry should still
+    /// deliver the record and not increment the failure counter.
+    #[tokio::test]
+    async fn retry_succeeds_on_second_attempt() {
+        // Server fails the first request, accepts the second.
+        let (address, mut receiver, server) = flaky_webhook_server(1).await;
+        // Use zero-delay retries so the test runs instantly.
+        let notifier = AuditWebhookNotifier {
+            retry_delays: Arc::from([Duration::ZERO, Duration::ZERO, Duration::ZERO].as_slice()),
+            ..AuditWebhookNotifier::from_profile(&discord_profile(address))
+        };
+
+        notifier.notify_audit_record_detached(sample_record(30));
+        assert!(notifier.shutdown(Duration::from_secs(5)).await, "shutdown should drain");
+
+        assert!(receiver.try_recv().is_ok(), "record must arrive after successful retry");
+        assert_eq!(notifier.discord_failure_count(), 0, "no permanent failure on successful retry");
+
+        server.abort();
+    }
+
+    /// When all attempts fail the permanent failure counter must be incremented
+    /// and no payload should reach the webhook server after the final attempt.
+    #[tokio::test]
+    async fn failure_counter_increments_after_all_retries_exhausted() {
+        let (address, _receiver, server) =
+            webhook_server(HttpStatusCode::INTERNAL_SERVER_ERROR).await;
+        // Three retries, all instantly, so we get 4 total attempts.
+        let notifier = AuditWebhookNotifier {
+            retry_delays: Arc::from([Duration::ZERO, Duration::ZERO, Duration::ZERO].as_slice()),
+            ..AuditWebhookNotifier::from_profile(&discord_profile(address))
+        };
+
+        notifier.notify_audit_record_detached(sample_record(31));
+        assert!(notifier.shutdown(Duration::from_secs(5)).await, "shutdown should drain");
+
+        assert_eq!(notifier.discord_failure_count(), 1, "one permanent failure should be recorded");
+
+        server.abort();
+    }
+
+    /// Sending two records where both exhaust all retries increments the counter
+    /// to 2, not 1.
+    #[tokio::test]
+    async fn failure_counter_accumulates_across_multiple_failures() {
+        let (address, _receiver, server) =
+            webhook_server(HttpStatusCode::INTERNAL_SERVER_ERROR).await;
+        let notifier = AuditWebhookNotifier {
+            retry_delays: Arc::from([].as_slice()),
+            ..AuditWebhookNotifier::from_profile(&discord_profile(address))
+        };
+
+        notifier.notify_audit_record_detached(sample_record(40));
+        notifier.notify_audit_record_detached(sample_record(41));
+        assert!(notifier.shutdown(Duration::from_secs(5)).await, "shutdown should drain");
+
+        assert_eq!(notifier.discord_failure_count(), 2);
+
+        server.abort();
     }
 }

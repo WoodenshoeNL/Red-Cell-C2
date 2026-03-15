@@ -932,6 +932,7 @@ pub fn api_routes(api: ApiRuntime) -> Router<TeamserverState> {
         .route("/listeners/{name}/start", put(start_listener))
         .route("/listeners/{name}/stop", put(stop_listener))
         .route("/listeners/{name}/mark", post(mark_listener))
+        .route("/webhooks/stats", get(get_webhook_stats))
         .route_layer(middleware::from_fn_with_state(api, api_auth_middleware));
 
     Router::new()
@@ -1004,13 +1005,16 @@ struct ApiInfoResponse {
         delete_listener,
         start_listener,
         stop_listener,
-        mark_listener
+        mark_listener,
+        get_webhook_stats
     ),
     components(
         schemas(
             ApiErrorBody,
             ApiErrorDetail,
             ApiInfoResponse,
+            WebhookStats,
+            DiscordWebhookStats,
             AgentTaskQueuedResponse,
             AuditPage,
             SessionActivityPage,
@@ -1052,7 +1056,8 @@ struct ApiInfoResponse {
         (name = "jobs", description = "Queued agent job inspection endpoints"),
         (name = "loot", description = "Captured loot listing and download endpoints"),
         (name = "operators", description = "Administrative operator-management endpoints"),
-        (name = "listeners", description = "Listener lifecycle management endpoints")
+        (name = "listeners", description = "Listener lifecycle management endpoints"),
+        (name = "webhooks", description = "Outbound webhook delivery statistics")
     )
 )]
 struct ApiDoc;
@@ -2558,6 +2563,45 @@ const fn api_role_allows(role: OperatorRole, permission: Permission) -> bool {
         }
         OperatorRole::Analyst => matches!(permission, Permission::Read),
     }
+}
+
+/// Delivery statistics for the Discord outbound webhook.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+struct DiscordWebhookStats {
+    /// Total number of permanent delivery failures (all retry attempts exhausted).
+    failures: u64,
+}
+
+/// Aggregated outbound webhook delivery statistics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+struct WebhookStats {
+    /// Discord webhook stats, or `null` when Discord is not configured.
+    discord: Option<DiscordWebhookStats>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/webhooks/stats",
+    context_path = "/api/v1",
+    tag = "webhooks",
+    security(("api_key" = [])),
+    responses(
+        (status = 200, description = "Outbound webhook delivery statistics", body = WebhookStats),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody),
+    )
+)]
+async fn get_webhook_stats(
+    State(webhooks): State<AuditWebhookNotifier>,
+    _identity: ReadApiAccess,
+) -> Json<WebhookStats> {
+    let discord = if webhooks.is_enabled() {
+        Some(DiscordWebhookStats { failures: webhooks.discord_failure_count() })
+    } else {
+        None
+    };
+
+    Json(WebhookStats { discord })
 }
 
 #[cfg(test)]

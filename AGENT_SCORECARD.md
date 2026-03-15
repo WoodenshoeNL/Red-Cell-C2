@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 149 | 181 | 31 |
+| Tasks closed | 150 | 181 | 31 |
 | Bugs filed against | 15 | 28 | 9 |
 | Bug rate (bugs/task) | 0.10 | 0.15 | 0.29 |
 | Quality score | 90% | 85% | 71% |
@@ -1420,3 +1420,14 @@ Notes: The two delivered Python API features (`get_loot`, `task_agent`/`get_task
 
 Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (686 tests, 0 failures)
 Notes: Solid, well-tested run. All four tasks include comprehensive unit tests for the new paths. The event callback system (command response, loot, listener-change) follows the existing registration pattern cleanly. Transport AppEvent variants are correct. One minor style violation filed (P4 expect()). Bug rate holds at 0.10.
+
+### QA Review — 2026-03-15 22:50 — d214c7b..a9e3043
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed `red-cell-c2-jup` (P2 epic): Core egui client binary — full WebSocket/TLS transport (CA/custom-CA/fingerprint/skip-verify), operator auth flow, JSON protocol handler with complete `OperatorMessage` dispatch, async event processing loop. Client src verified: transport.rs + main.rs are substantial, correct implementations. All `expect()` calls in client code are inside `#[cfg(test)]` blocks. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (141 tests, 0 failures)
+Notes: Light review cycle — one epic closed cleanly. The jup close is legitimate: the client crate has full, well-tested implementations of WebSocket connection management, TLS verification modes, operator authentication, and OperatorMessage dispatch. No new bugs filed. Claude quality score holds at 90%.

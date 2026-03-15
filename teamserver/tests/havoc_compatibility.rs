@@ -1,3 +1,13 @@
+// This test file is only compiled when the `havoc-compat` feature is enabled.
+//
+// Without the feature the file is excluded entirely — tests cannot silently
+// return Ok(()) and give false confidence in CI environments that lack the
+// Go toolchain.
+//
+// To run:
+//   cargo test --features havoc-compat -p red-cell havoc_compatibility
+#![cfg(feature = "havoc-compat")]
+
 mod common;
 
 use std::io::Write;
@@ -20,8 +30,10 @@ use tempfile::tempdir;
 async fn red_cell_packets_match_havoc_at_offset_zero_and_advance_afterward()
 -> Result<(), Box<dyn std::error::Error>> {
     if let Some(reason) = havoc_compatibility_skip_reason() {
-        eprintln!("skipping Havoc compatibility test: {reason}");
-        return Ok(());
+        panic!(
+            "havoc-compat feature is enabled but the Go toolchain is unavailable: {reason}\n\
+             Install Go (https://go.dev/dl/) or run without --features havoc-compat."
+        );
     }
 
     let database = Database::connect_in_memory().await?;

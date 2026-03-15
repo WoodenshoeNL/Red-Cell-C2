@@ -36,6 +36,17 @@ utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 uuid = { version = "1.18", features = ["v4"] }
 zeroize = "1"
 
+[features]
+## Enable Havoc AES-256-CTR compatibility tests.
+##
+## These tests spawn a Go harness that re-implements the original Demon
+## encryption and assert byte-for-byte agreement with the Rust implementation.
+## They require the `go` toolchain to be on PATH.
+##
+## Run with:
+##   cargo test --features havoc-compat -p red-cell havoc_compatibility
+havoc-compat = []
+
 [dev-dependencies]
 futures-util = "0.3"
 tokio-tungstenite = "0.26"

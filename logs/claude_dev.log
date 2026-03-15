@@ -26580,3 +26580,28 @@ Added four new `PluginEvent` variants and wired them across the teamserver:
 
 Each event gets a corresponding `emit_*` method on `PluginRuntime`, a Python `on_*` API function registered in `populate_api_module`, and a test verifying the callback fires correctly.
 [2026-03-15 11:50:49] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-cqmk
+[2026-03-15 11:50:49] [Ubuntu-C2-dev01-claude] WIP: committing uncommitted changes for red-cell-c2-cqmk
+[2026-03-15 11:50:52] [Ubuntu-C2-dev01-claude] WIP: pushed
+[2026-03-15 11:50:52] [Ubuntu-C2-dev01-claude] ========================LOOP=========================
+[2026-03-15 11:51:07] [Ubuntu-C2-dev01-claude] === Starting Claude dev loop iteration 2 ===
+[2026-03-15 11:51:08] [Ubuntu-C2-dev01-claude] git pull --ff-only: ok
+[2026-03-15 11:51:08] [Ubuntu-C2-dev01-claude] br sync import: ok
+[2026-03-15 11:51:11] [Ubuntu-C2-dev01-claude] Selected task: red-cell-c2-dbve
+[2026-03-15 11:51:15] [Ubuntu-C2-dev01-claude] Claimed red-cell-c2-dbve
+[2026-03-15 11:51:15] [Ubuntu-C2-dev01-claude] Running Claude on task red-cell-c2-dbve...
+Done. Here's a summary of what was implemented:
+
+**Fix for CTR desync attack (red-cell-c2-dbve)**
+
+**Root cause**: `decrypt_from_agent` advanced the CTR offset unconditionally before `parse_callback_packages` ran. AES-CTR has no authentication tag, so decryption always "succeeds" — an adversary could send a crafted packet with a valid agent_id + magic but garbage payload, causing the offset to advance and permanently breaking the real agent's session.
+
+**Changes to `agents.rs`**:
+- Added `advance: bool` parameter to `decrypt_payload_with_ctr_offset` (mirrors the existing pattern in `encrypt_payload_with_ctr_offset`)
+- Added `decrypt_from_agent_without_advancing()` — decrypts but doesn't touch the offset
+- Added `advance_ctr_for_agent(agent_id, byte_len)` — explicit offset advance, called after validation succeeds
+- 3 new unit tests covering the new methods and split vs. atomic equivalence
+
+**Changes to `demon.rs`**:
+- `parse_at_for_listener` now decrypts without advancing, calls `parse_callback_packages`, then advances the offset only on success
+- New `garbage_callback_does_not_advance_ctr_offset` test that simulates the full attack: garbage packet rejected → offset unchanged → legitimate callback at same offset still works
+[2026-03-15 11:58:22] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-dbve

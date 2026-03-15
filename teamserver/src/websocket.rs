@@ -2542,7 +2542,7 @@ mod tests {
 
     use super::{
         AgentCommandError, LoginRateLimiter, MAX_AGENT_MESSAGE_LEN, OperatorConnectionManager,
-        build_job, build_jobs, encode_utf16, routes, teamserver_log_event,
+        build_job, build_jobs, encode_utf16, execute_agent_task, routes, teamserver_log_event,
         write_len_prefixed_bytes, write_u32,
     };
     use crate::{
@@ -4818,6 +4818,115 @@ mod tests {
         let mut buf = Vec::new();
         write_len_prefixed_bytes(&mut buf, &[])?;
         assert_eq!(buf, 0_u32.to_le_bytes());
+        Ok(())
+    }
+
+    // ── Plugin event wiring test ──────────────────────────────────────────────
+
+    /// Verify that `execute_agent_task` calls `emit_task_created` for each queued job,
+    /// which in turn fires any registered `TaskCreated` Python callbacks.
+    ///
+    /// This test calls `execute_agent_task` directly so that a future refactor cannot
+    /// silently remove the `emit_task_created` call without breaking the test.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn execute_agent_task_fires_plugin_task_created_event()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::{PluginEvent, PluginRuntime};
+        use pyo3::prelude::*;
+        use pyo3::types::{PyDict, PyList};
+        use red_cell_common::demon::DemonCommand;
+
+        let _guard = crate::plugins::PLUGIN_RUNTIME_TEST_MUTEX
+            .lock()
+            .map_err(|_| "plugin test mutex poisoned")?;
+
+        // Build a PluginRuntime and install it as the active runtime.
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let runtime = PluginRuntime::initialize(
+            database.clone(),
+            registry.clone(),
+            events.clone(),
+            sockets.clone(),
+            None,
+        )
+        .await?;
+
+        struct RuntimeGuard(Option<PluginRuntime>);
+        impl Drop for RuntimeGuard {
+            fn drop(&mut self) {
+                let _ = PluginRuntime::swap_active(self.0.take());
+            }
+        }
+        let previous = PluginRuntime::swap_active(Some(runtime.clone()))?;
+        let _reset = RuntimeGuard(previous);
+
+        // Register a TaskCreated callback that records the command_line for each event.
+        let (tracker, callback) = tokio::task::spawn_blocking({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| {
+                    runtime.install_api_module_for_test(py)?;
+                    let tracker = PyList::empty(py);
+                    let locals = PyDict::new(py);
+                    locals.set_item("_tracker", tracker.clone())?;
+                    let cb = py.eval(
+                        pyo3::ffi::c_str!(
+                            "(lambda t: lambda event: t.append(event.data['command_line']))(_tracker)"
+                        ),
+                        None,
+                        Some(&locals),
+                    )?;
+                    Ok::<_, PyErr>((tracker.unbind(), cb.unbind()))
+                })
+            }
+        })
+        .await??;
+
+        runtime.register_callback_for_test(PluginEvent::TaskCreated, callback).await?;
+
+        // Insert an agent so execute_agent_task can find it.
+        let agent_id: u32 = 0xABCD_1234;
+        registry.insert(sample_agent(agent_id)).await?;
+
+        // Build a task message that produces exactly one job (a checkin command).
+        let message = red_cell_common::operator::Message {
+            head: red_cell_common::operator::MessageHead {
+                event: red_cell_common::operator::EventCode::Session,
+                user: "operator".to_owned(),
+                timestamp: String::new(),
+                one_time: String::new(),
+            },
+            info: AgentTaskInfo {
+                task_id: "FF".to_owned(), // task_id must parse as hex
+                command_line: "checkin".to_owned(),
+                demon_id: format!("{agent_id:08X}"),
+                command_id: u32::from(DemonCommand::CommandCheckin).to_string(),
+                ..AgentTaskInfo::default()
+            },
+        };
+
+        let queued = execute_agent_task(&registry, &sockets, &events, "operator", message).await?;
+        assert_eq!(queued, 1, "checkin command should queue exactly one job");
+
+        // Allow the spawn_blocking inside invoke_callbacks to complete.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let (count, cmd_line) = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<(usize, String)> {
+                let list = tracker.bind(py);
+                let count = list.len();
+                let first = list.get_item(0)?.extract::<String>()?;
+                Ok((count, first))
+            })
+        })
+        .await??;
+
+        assert_eq!(count, 1, "exactly one task_created callback should have fired");
+        assert_eq!(cmd_line, "checkin");
         Ok(())
     }
 }

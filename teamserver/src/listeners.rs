@@ -6371,4 +6371,111 @@ mod tests {
 
         Ok(())
     }
+
+    // ── Plugin event wiring test ──────────────────────────────────────────────
+
+    /// Verify that a successful DemonInit (processed inside `process_demon_transport`)
+    /// causes `emit_agent_registered` to be called, which in turn fires any registered
+    /// `AgentRegistered` Python callbacks.
+    ///
+    /// This test goes end-to-end through the real HTTP listener stack so that a future
+    /// refactor cannot silently disconnect the `emit_agent_registered` call without a
+    /// test failure.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn process_demon_transport_fires_plugin_agent_registered_event()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::{PluginEvent, PluginRuntime};
+        use pyo3::prelude::*;
+        use pyo3::types::{PyDict, PyList};
+
+        let _guard = crate::plugins::PLUGIN_RUNTIME_TEST_MUTEX
+            .lock()
+            .map_err(|_| "plugin test mutex poisoned")?;
+
+        // Build a PluginRuntime that has access to the registry (needed by emit_agent_registered).
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let runtime = PluginRuntime::initialize(
+            database.clone(),
+            registry.clone(),
+            events.clone(),
+            sockets.clone(),
+            None,
+        )
+        .await?;
+
+        // Install this runtime as the process-wide active runtime and arrange for
+        // cleanup when the test exits (success or panic).
+        struct RuntimeGuard(Option<PluginRuntime>);
+        impl Drop for RuntimeGuard {
+            fn drop(&mut self) {
+                let _ = PluginRuntime::swap_active(self.0.take());
+            }
+        }
+        let previous = PluginRuntime::swap_active(Some(runtime.clone()))?;
+        let _reset = RuntimeGuard(previous);
+
+        // Register an AgentRegistered callback that appends the event_type to a Python list.
+        let (tracker, callback) = tokio::task::spawn_blocking({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| {
+                    runtime.install_api_module_for_test(py)?;
+                    let tracker = PyList::empty(py);
+                    let locals = PyDict::new(py);
+                    locals.set_item("_tracker", tracker.clone())?;
+                    let cb = py.eval(
+                        pyo3::ffi::c_str!(
+                            "(lambda t: lambda event: t.append(event.event_type))(_tracker)"
+                        ),
+                        None,
+                        Some(&locals),
+                    )?;
+                    Ok::<_, PyErr>((tracker.unbind(), cb.unbind()))
+                })
+            }
+        })
+        .await??;
+
+        runtime.register_callback_for_test(PluginEvent::AgentRegistered, callback).await?;
+
+        // Start a real HTTP listener, submit a valid DemonInit, and assert it succeeds.
+        let manager = ListenerManager::new(database, registry, events, sockets, None);
+        let port = available_port()?;
+        manager.create(http_listener("plugin-init-wiring", port)).await?;
+        manager.start("plugin-init-wiring").await?;
+        wait_for_listener(port, false).await?;
+
+        let key = [0x41; AGENT_KEY_LENGTH];
+        let iv = [0x24; AGENT_IV_LENGTH];
+        let response = Client::new()
+            .post(format!("http://127.0.0.1:{port}/"))
+            .body(valid_demon_init_body(0xABCD_1234, key, iv))
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = response.bytes().await?;
+
+        // Allow the spawn_blocking inside invoke_callbacks to complete.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let (count, event_type) = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<(usize, String)> {
+                let list = tracker.bind(py);
+                let count = list.len();
+                let first = list.get_item(0)?.extract::<String>()?;
+                Ok((count, first))
+            })
+        })
+        .await??;
+
+        assert_eq!(count, 1, "exactly one agent_registered callback should have fired");
+        assert_eq!(event_type, "agent_registered");
+
+        manager.stop("plugin-init-wiring").await?;
+        Ok(())
+    }
 }

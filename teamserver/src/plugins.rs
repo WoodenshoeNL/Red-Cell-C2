@@ -323,6 +323,37 @@ impl PluginRuntime {
         Ok(())
     }
 
+    /// Replace the process-wide active plugin runtime, returning the previous value.
+    ///
+    /// This is a low-level escape hatch for tests that need to install a known runtime
+    /// and restore the previous state afterwards. Do not call from production code.
+    #[cfg(test)]
+    pub(crate) fn swap_active(runtime: Option<Self>) -> Result<Option<Self>, PluginError> {
+        let mut guard = runtime_slot().lock().map_err(|_| PluginError::MutexPoisoned)?;
+        Ok(std::mem::replace(&mut *guard, runtime))
+    }
+
+    /// Register a Python callback for the given event.
+    ///
+    /// Exposed for wiring tests in other modules that need to register callbacks
+    /// without going through the Python `register_callback` API function.
+    #[cfg(test)]
+    pub(crate) async fn register_callback_for_test(
+        &self,
+        event: PluginEvent,
+        callback: Py<PyAny>,
+    ) -> Result<(), PluginError> {
+        self.register_callback(event, callback).await
+    }
+
+    /// Install the `red_cell`/`havoc` API module into the Python interpreter.
+    ///
+    /// Exposed for wiring tests in other modules that construct tracker callbacks.
+    #[cfg(test)]
+    pub(crate) fn install_api_module_for_test(&self, py: Python<'_>) -> PyResult<()> {
+        self.install_api_module(py)
+    }
+
     fn active() -> PyResult<Self> {
         Self::current()
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
@@ -1112,10 +1143,16 @@ fn populate_api_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
+/// Process-wide serialisation lock for tests that install a `PluginRuntime` as the
+/// active global.  Tests in other modules that call `PluginRuntime::swap_active` must
+/// hold this lock for the duration of the test to prevent races with the plugin unit
+/// tests that share the same global slot.
+#[cfg(test)]
+pub(crate) static PLUGIN_RUNTIME_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use std::process::Command;
-    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use red_cell_common::{AgentEncryptionInfo, HttpListenerConfig, ListenerConfig};
@@ -1124,7 +1161,10 @@ mod tests {
 
     use super::*;
 
-    static TEST_GUARD: Mutex<()> = Mutex::new(());
+    // Tests that install a `PluginRuntime` as the active global must hold
+    // `super::PLUGIN_RUNTIME_TEST_MUTEX` (aliased below) so that wiring tests in
+    // other modules that call `PluginRuntime::swap_active` are serialised with us.
+    use super::PLUGIN_RUNTIME_TEST_MUTEX as TEST_GUARD;
     const POISON_CURRENT_ENV: &str = "RED_CELL_POISON_PLUGIN_RUNTIME_CURRENT";
 
     fn unique_test_dir(label: &str) -> PathBuf {

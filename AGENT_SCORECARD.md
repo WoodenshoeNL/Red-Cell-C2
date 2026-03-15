@@ -9,17 +9,17 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 143 | 181 | 31 |
-| Bugs filed against | 12 | 28 | 9 |
-| Bug rate (bugs/task) | 0.08 | 0.15 | 0.29 |
-| Quality score | 92% | 85% | 71% |
+| Tasks closed | 145 | 181 | 31 |
+| Bugs filed against | 14 | 28 | 9 |
+| Bug rate (bugs/task) | 0.10 | 0.15 | 0.29 |
+| Quality score | 90% | 85% | 71% |
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 0 | 0 | 0 |
-| Missing tests | 8 | 11 | 5 |
+| Missing tests | 9 | 11 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
 | Protocol errors | 5 | 22 | 3 |
 | Security issues | 9 | 31 | 0 |
@@ -1398,3 +1398,14 @@ Notes: The reconnect ACK work is solid (b19c74c + be604f4). However `red-cell-c2
 
 Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (141+ tests, 0 failures)
 Notes: High-output, high-quality run. Payload builder epic fully delivered (toolchain discovery, cache, templates, compiler diagnostics, websocket integration). Dispatch refactor from 10k-line monolith to per-family modules is clean with no regressions. All protocol constants verified correct. No unwrap/expect in production paths, no key material logged, no hardcoded secrets. Bug rate improves to 0.08.
+
+### QA Review — 2026-03-15 20:45 — a9e691d..a25b935
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 2 | Closed `red-cell-c2-369d` (python: get_loot() API with filtering) and `red-cell-c2-p4sa` (python: task_agent() + get_task_result()). Filed `red-cell-c2-agjc` (P3): task sender leaks in `task_result_senders` HashMap after `get_task_result` times out if agent never responds. Filed `red-cell-c2-ouhj` (P3): vacuous assertion `rx.is_empty() == false \|\| true` in `task_agent_returns_task_id_and_queues_message` — always true, provides no coverage guarantee. Dev agent currently in-progress on `red-cell-c2-s7nz` (listener-change/loot event callbacks); working tree has partial uncommitted changes (expected). |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed on HEAD** — `cargo check --workspace` ✓ on committed code. Working tree broken (in-progress s7nz: `AppEvent::ListenerChanged` and `AppEvent::LootCaptured` referenced before enum variants declared — normal mid-task state).
+Notes: The two delivered Python API features (`get_loot`, `task_agent`/`get_task_result`) are well-designed and well-tested overall. The channel-based result delivery with GIL release is correct. Teamserver correctly propagates `TaskID` in extra fields (verified in dispatch/mod.rs:1121). Two minor issues: sender-map cleanup on timeout, and a vacuous test assertion that masks message-dispatch coverage.

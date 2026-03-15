@@ -2289,7 +2289,13 @@ fn get_task_result(py: Python<'_>, task_id: String, timeout: f64) -> PyResult<Py
             dict.set_item("output", task_result.output)?;
             Ok(dict.into_any().unbind())
         }
-        None => Ok(py.None()),
+        None => {
+            // Timeout: the agent never replied. Remove the stale sender so it does not
+            // accumulate indefinitely (deliver_task_result is the only other caller that
+            // would remove it, but it will never fire for an orphaned task).
+            lock_mutex(&api_state.task_result_senders).remove(&task_id);
+            Ok(py.None())
+        }
     }
 }
 
@@ -3380,6 +3386,17 @@ havoc.RegisterCommand(function=queue, module='ops', command='pwd', description='
         .unwrap_or_else(|error| panic!("get_task_result should not error: {error}"));
 
         assert!(is_none, "get_task_result should return None on timeout");
+
+        // After timeout the sender must be removed from the map so it does not leak.
+        let api_state = Python::with_gil(|py| -> PyResult<Arc<PythonApiState>> {
+            install_api_module(py)?;
+            active_api_state()
+        })
+        .unwrap_or_else(|error| panic!("active_api_state should be available: {error}"));
+        assert!(
+            !lock_mutex(&api_state.task_result_senders).contains_key(&task_id),
+            "sender for timed-out task should have been removed from task_result_senders",
+        );
     }
 
     #[test]

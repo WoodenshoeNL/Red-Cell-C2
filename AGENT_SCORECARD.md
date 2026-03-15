@@ -9,17 +9,17 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 108 | 181 | 31 |
-| Bugs filed against | 6 | 28 | 9 |
-| Bug rate (bugs/task) | 0.06 | 0.15 | 0.29 |
-| Quality score | 94% | 85% | 71% |
+| Tasks closed | 110 | 181 | 31 |
+| Bugs filed against | 8 | 28 | 9 |
+| Bug rate (bugs/task) | 0.07 | 0.15 | 0.29 |
+| Quality score | 93% | 85% | 71% |
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 0 | 0 | 0 |
-| Missing tests | 6 | 11 | 5 |
+| Missing tests | 7 | 11 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
 | Protocol errors | 5 | 22 | 3 |
 | Security issues | 9 | 31 | 0 |
@@ -30,13 +30,24 @@ Each loop run updates the running totals and appends a review entry.
 | Availability / timeout regressions | 0 | 4 | 0 |
 | Correctness / pagination | 4 | 2 | 1 |
 | Workflow / close-hygiene | 3 | 0 | 0 |
-| Code reuse / duplication | 2 | 0 | 0 |
+| Code reuse / duplication | 3 | 0 | 0 |
 
 ---
 
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-15 11:00 — 0034f46..762c867
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 2 | Closed `red-cell-c2-dbve` (CTR desync fix: split decrypt into without-advancing + explicit advance_ctr_for_agent, deferred until parse succeeds; comprehensive test including adversary simulation); `red-cell-c2-cqmk` (plugin callback surface expanded: AgentRegistered, AgentDead, LootCaptured, TaskCreated — all four wired to correct lifecycle points with unit tests). Filed `red-cell-c2-mcm8` (P4): unnecessary `job.clone()` in `execute_agent_task` — enqueue takes the clone, plugin borrows original; reorder to emit-first and move job into enqueue. Filed `red-cell-c2-irhw` (P3): no wiring tests for `emit_agent_registered` (listeners.rs DemonInit path) or `emit_task_created` (websocket.rs execute_agent_task path); direct plugin unit tests exist but integration wiring is untested. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (675 tests, 0 failures)
+Notes: Both deliverables are high quality. The CTR fix is the correct defense-in-depth fix for the desync attack and includes an end-to-end adversary simulation test. The plugin expansion is clean and complete. Two minor follow-on issues filed.
 
 ### Arch Review — 2026-03-15 16:00
 

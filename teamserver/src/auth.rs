@@ -78,18 +78,35 @@ pub struct AuthenticationSuccess {
     pub token: String,
 }
 
+/// Maximum number of simultaneously authenticated operator sessions across all accounts.
+///
+/// Keeping N small ensures that the constant-time O(N) token scan in [`SessionRegistry`]
+/// provides meaningful timing protection. Beyond this limit new logins are rejected.
+pub const MAX_OPERATOR_SESSIONS: usize = 64;
+
+/// Maximum number of simultaneously authenticated sessions per individual operator account.
+///
+/// This prevents a single compromised account from consuming the entire global session pool
+/// and allows other operators to authenticate even under targeted abuse.
+pub const MAX_SESSIONS_PER_ACCOUNT: usize = 8;
+
 /// Failed login result mapped onto Havoc-compatible error responses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthenticationFailure {
     /// Submitted credentials did not authenticate an operator account.
     InvalidCredentials,
+    /// The global or per-account session cap has been reached; no new sessions can be created.
+    SessionCapExceeded,
 }
 
 impl AuthenticationFailure {
     /// Build the Havoc-compatible error message returned to the client.
     #[must_use]
     pub fn message(&self) -> &'static str {
-        "Authentication failed"
+        match self {
+            Self::InvalidCredentials => "Authentication failed",
+            Self::SessionCapExceeded => "Too many active sessions; try again later",
+        }
     }
 }
 
@@ -210,7 +227,24 @@ impl AuthService {
             connection_id,
         };
 
-        self.sessions.write().await.insert(session);
+        {
+            let mut registry = self.sessions.write().await;
+            if registry.len() >= MAX_OPERATOR_SESSIONS {
+                tracing::warn!(
+                    username = %login.user,
+                    "login rejected: global session cap ({MAX_OPERATOR_SESSIONS}) reached"
+                );
+                return AuthenticationResult::Failure(AuthenticationFailure::SessionCapExceeded);
+            }
+            if registry.sessions_for_account(&login.user) >= MAX_SESSIONS_PER_ACCOUNT {
+                tracing::warn!(
+                    username = %login.user,
+                    "login rejected: per-account session cap ({MAX_SESSIONS_PER_ACCOUNT}) reached"
+                );
+                return AuthenticationResult::Failure(AuthenticationFailure::SessionCapExceeded);
+            }
+            registry.insert(session);
+        }
 
         AuthenticationResult::Success(AuthenticationSuccess { username: login.user.clone(), token })
     }
@@ -413,6 +447,11 @@ impl SessionRegistry {
 
     fn len(&self) -> usize {
         self.by_token.len()
+    }
+
+    /// Count the number of active sessions belonging to `username`.
+    fn sessions_for_account(&self, username: &str) -> usize {
+        self.by_token.values().filter(|s| s.username == username).count()
     }
 
     fn list(&self) -> Vec<OperatorSession> {
@@ -1356,5 +1395,168 @@ mod tests {
             .expect("admin session should be found");
         assert_eq!(session_b.username, "admin");
         assert_eq!(session_b.connection_id, conn_b);
+    }
+
+    #[tokio::test]
+    async fn authenticate_login_rejects_when_per_account_cap_reached() {
+        use super::{AuthenticationFailure, MAX_SESSIONS_PER_ACCOUNT};
+
+        let service =
+            AuthService::from_profile(&profile()).expect("auth service should initialize");
+
+        // Fill the per-account cap for "operator".
+        for _ in 0..MAX_SESSIONS_PER_ACCOUNT {
+            let result = service
+                .authenticate_login(
+                    Uuid::new_v4(),
+                    &LoginInfo {
+                        user: "operator".to_owned(),
+                        password: hash_password_sha3("password1234"),
+                    },
+                )
+                .await;
+            assert!(matches!(result, AuthenticationResult::Success(_)));
+        }
+
+        assert_eq!(service.session_count().await, MAX_SESSIONS_PER_ACCOUNT);
+
+        // The next login for the same account must be rejected.
+        let result = service
+            .authenticate_login(
+                Uuid::new_v4(),
+                &LoginInfo {
+                    user: "operator".to_owned(),
+                    password: hash_password_sha3("password1234"),
+                },
+            )
+            .await;
+
+        assert_eq!(
+            result,
+            AuthenticationResult::Failure(AuthenticationFailure::SessionCapExceeded)
+        );
+        // Session count must not have grown.
+        assert_eq!(service.session_count().await, MAX_SESSIONS_PER_ACCOUNT);
+    }
+
+    #[tokio::test]
+    async fn authenticate_login_rejects_when_global_cap_reached() {
+        use super::{AuthenticationFailure, MAX_OPERATOR_SESSIONS, MAX_SESSIONS_PER_ACCOUNT};
+
+        // Build a profile with enough distinct accounts to reach the global cap without
+        // hitting the per-account cap.  We need ceil(MAX_OPERATOR_SESSIONS /
+        // MAX_SESSIONS_PER_ACCOUNT) accounts.
+        let accounts_needed = MAX_OPERATOR_SESSIONS.div_ceil(MAX_SESSIONS_PER_ACCOUNT);
+
+        let mut hcl =
+            String::from("Teamserver {\n  Host = \"127.0.0.1\"\n  Port = 40057\n}\nOperators {\n");
+        for i in 0..accounts_needed {
+            hcl.push_str(&format!(
+                "  user \"op{i}\" {{\n    Password = \"pass{i}\"\n    Role = \"Operator\"\n  }}\n"
+            ));
+        }
+        hcl.push_str("}\nDemon {}");
+
+        let profile = Profile::parse(&hcl).expect("test profile should parse");
+        let service = AuthService::from_profile(&profile).expect("auth service should initialize");
+
+        // Authenticate sessions until the global cap is exactly hit.
+        let mut sessions_created = 0usize;
+        'outer: for i in 0..accounts_needed {
+            let username = format!("op{i}");
+            let password = format!("pass{i}");
+            for _ in 0..MAX_SESSIONS_PER_ACCOUNT {
+                if sessions_created >= MAX_OPERATOR_SESSIONS {
+                    break 'outer;
+                }
+                let result = service
+                    .authenticate_login(
+                        Uuid::new_v4(),
+                        &LoginInfo {
+                            user: username.clone(),
+                            password: hash_password_sha3(&password),
+                        },
+                    )
+                    .await;
+                assert!(
+                    matches!(result, AuthenticationResult::Success(_)),
+                    "session {sessions_created} should succeed"
+                );
+                sessions_created += 1;
+            }
+        }
+
+        assert_eq!(service.session_count().await, MAX_OPERATOR_SESSIONS);
+
+        // Any further login (any account) must be rejected.
+        let result = service
+            .authenticate_login(
+                Uuid::new_v4(),
+                &LoginInfo { user: "op0".to_owned(), password: hash_password_sha3("pass0") },
+            )
+            .await;
+
+        assert_eq!(
+            result,
+            AuthenticationResult::Failure(AuthenticationFailure::SessionCapExceeded)
+        );
+        assert_eq!(service.session_count().await, MAX_OPERATOR_SESSIONS);
+    }
+
+    #[tokio::test]
+    async fn authenticate_login_succeeds_after_session_removed() {
+        use super::{AuthenticationFailure, MAX_SESSIONS_PER_ACCOUNT};
+
+        let service =
+            AuthService::from_profile(&profile()).expect("auth service should initialize");
+
+        let mut connection_ids: Vec<Uuid> = Vec::new();
+
+        // Fill the per-account cap.
+        for _ in 0..MAX_SESSIONS_PER_ACCOUNT {
+            let conn = Uuid::new_v4();
+            connection_ids.push(conn);
+            let result = service
+                .authenticate_login(
+                    conn,
+                    &LoginInfo {
+                        user: "operator".to_owned(),
+                        password: hash_password_sha3("password1234"),
+                    },
+                )
+                .await;
+            assert!(matches!(result, AuthenticationResult::Success(_)));
+        }
+
+        // Verify cap is enforced.
+        let over_cap = service
+            .authenticate_login(
+                Uuid::new_v4(),
+                &LoginInfo {
+                    user: "operator".to_owned(),
+                    password: hash_password_sha3("password1234"),
+                },
+            )
+            .await;
+        assert_eq!(
+            over_cap,
+            AuthenticationResult::Failure(AuthenticationFailure::SessionCapExceeded)
+        );
+
+        // Remove one session.
+        service.remove_connection(connection_ids[0]).await;
+        assert_eq!(service.session_count().await, MAX_SESSIONS_PER_ACCOUNT - 1);
+
+        // A new login should now succeed.
+        let result = service
+            .authenticate_login(
+                Uuid::new_v4(),
+                &LoginInfo {
+                    user: "operator".to_owned(),
+                    password: hash_password_sha3("password1234"),
+                },
+            )
+            .await;
+        assert!(matches!(result, AuthenticationResult::Success(_)));
     }
 }

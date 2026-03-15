@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 113 | 181 | 31 |
+| Tasks closed | 119 | 181 | 31 |
 | Bugs filed against | 10 | 28 | 9 |
-| Bug rate (bugs/task) | 0.09 | 0.15 | 0.29 |
-| Quality score | 91% | 85% | 71% |
+| Bug rate (bugs/task) | 0.08 | 0.15 | 0.29 |
+| Quality score | 92% | 85% | 71% |
 
 ## Violation Breakdown
 
@@ -1354,3 +1354,14 @@ Notes: All five fixes are substantively correct and include tests. The shutdown 
 
 Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (967 tests, 0 failures)
 Notes: Four refactoring tasks are clean and well-executed. `rate_limiter.rs` is a textbook extraction — generic over `K`, with three dedicated tests. `is_weak_aes_key`/`is_weak_aes_iv` helpers are well-documented including the vacuously-true empty-slice edge case. The HTTP method allowlist is a genuine correctness improvement over the previous GET-only reject. One protocol regression introduced: method case not normalized before binary serialization. `api.rs` rate-limiter duplication is the sole outstanding carry-over from last review cycle.
+
+### QA Review — 2026-03-15 13:50 — 2cb596e..b2a57a4
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 6 | 0 | Closed `red-cell-c2-olwt` (P2 bug: dev loop re-claimed in-progress tasks on restart — added `find_resumable_task()` + removed reset-to-open, interrupted tasks now resume cleanly); `red-cell-c2-h5a3` (test: CTR offset persistence integration tests — 3 cases in `ctr_offset_persistence.rs` covering nominal, zero, block-boundary); `red-cell-c2-a0oo` (test: QueueFull — pre-existing test `enqueue_job_returns_queue_full_at_capacity` already covered it, close justified); `red-cell-c2-m8tz` (test: concurrent registration race at cap — `concurrent_registration_at_cap_allows_exactly_one` in `agents.rs`); `red-cell-c2-o7z6` (test: X-Forwarded-For spoofing prevention — two cases in `http_listener_pipeline.rs` for no-redirector and untrusted-peer); `red-cell-c2-kky2` (test: SOCKS5 localhost-only binding with NO_AUTH security boundary documentation). In progress: `red-cell-c2-da0m` (session cap — implementation partially staged in auth.rs). |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (141 unit tests + integration tests, 0 failures)
+Notes: Clean period. All six deliverables are high quality — no unwraps, no clippy violations, no protocol issues. The loop re-claim fix is correct and well-designed. Test coverage additions are thorough and well-documented. No bugs filed this period.

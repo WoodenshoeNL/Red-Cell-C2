@@ -26818,3 +26818,33 @@ Done. The fix replaces the two `yield_now()` calls with a polling loop bounded b
 [2026-03-15 21:16:09] [Ubuntu-C2-dev02-claude] Running Claude on task red-cell-c2-p4sa...
 [2026-03-15 21:33:54] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-p4sa
 [2026-03-15 21:48:49] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-s7nz
+[2026-03-15 21:48:49] [Ubuntu-C2-dev02-claude] WIP: committing uncommitted changes for red-cell-c2-s7nz
+[2026-03-15 21:48:50] [Ubuntu-C2-dev02-claude] WIP: pushed
+[2026-03-15 21:48:50] [Ubuntu-C2-dev02-claude] ========================LOOP=========================
+[2026-03-15 21:49:05] [Ubuntu-C2-dev02-claude] === Starting Claude dev loop iteration 5 ===
+[2026-03-15 21:49:07] [Ubuntu-C2-dev02-claude] git pull --ff-only: ok
+[2026-03-15 21:49:07] [Ubuntu-C2-dev02-claude] br sync import: ok
+[2026-03-15 21:49:08] [Ubuntu-C2-dev02-claude] Selected task: red-cell-c2-34ns
+[2026-03-15 21:49:13] [Ubuntu-C2-dev02-claude] Claimed red-cell-c2-34ns
+[2026-03-15 21:49:13] [Ubuntu-C2-dev02-claude] Running Claude on task red-cell-c2-34ns...
+Done. Here's a summary of what was implemented for `red-cell-c2-34ns`:
+
+**New types:**
+- `CommandOptionType` enum (`string`, `int`, `bool`, `file`) with `from_str`/`label`
+- `CommandOption` struct with `name`, `option_type`, `required`, `default`
+- `PyCommandOption` pyclass (frozen) exposing those fields to Python
+
+**Core changes:**
+- `RegisteredCommand` gains `options: Vec<CommandOption>`
+- `PythonApiState` gains `command_history: Mutex<HashMap<(agent_id, command_name), VecDeque<String>>>` capped at 100 entries
+- `execute_registered_command` snapshots history before recording current invocation (so `context.history` shows prior calls only)
+- `PyCommandContext` gains `options` and `history` getters
+
+**Python API:**
+- `red_cell.register_command(name, callback, description=None, options=None)` — options accepted as positional[3] or kwarg
+- `havoc.RegisterCommand(...)` — options accepted via `options=` kwarg
+- `havocui.RegisterCommand(name, callback)` — 2-arg backward-compatible form
+- `havocui.RegisterCommand(name, description, options, callback)` — full 4-arg form
+
+**5 new tests** covering: options exposed via context, history empty on first invocation and grows, history scoped per-agent, havocui 2-arg compat, havocui 4-arg form with description and options.
+[2026-03-15 22:06:30] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-34ns

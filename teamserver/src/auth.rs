@@ -734,6 +734,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authenticate_message_rejects_invalid_json() {
+        let service =
+            AuthService::from_profile(&profile()).expect("auth service should initialize");
+
+        let error = service
+            .authenticate_message(Uuid::new_v4(), "not-valid-json{")
+            .await
+            .expect_err("invalid JSON should be rejected");
+
+        assert!(
+            matches!(error, AuthError::InvalidMessageJson(_)),
+            "expected InvalidMessageJson, got {error:?}"
+        );
+        assert!(
+            service.active_sessions().await.is_empty(),
+            "no session should be created on invalid JSON"
+        );
+    }
+
+    #[tokio::test]
     async fn authenticate_message_accepts_password_sha3_alias() {
         let service =
             AuthService::from_profile(&profile()).expect("auth service should initialize");

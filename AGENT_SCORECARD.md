@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 104 | 181 | 31 |
-| Bugs filed against | 5 | 28 | 9 |
-| Bug rate (bugs/task) | 0.05 | 0.15 | 0.29 |
-| Quality score | 95% | 85% | 71% |
+| Tasks closed | 108 | 181 | 31 |
+| Bugs filed against | 6 | 28 | 9 |
+| Bug rate (bugs/task) | 0.06 | 0.15 | 0.29 |
+| Quality score | 94% | 85% | 71% |
 
 ## Violation Breakdown
 
@@ -21,7 +21,7 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 0 | 0 | 0 |
 | Missing tests | 6 | 11 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
-| Protocol errors | 3 | 22 | 3 |
+| Protocol errors | 4 | 22 | 3 |
 | Security issues | 7 | 31 | 0 |
 | Architecture drift | 2 | 21 | 0 |
 | Memory / resource leaks | 0 | 10 | 1 |
@@ -1310,3 +1310,14 @@ Notes: Both fixes are correct and complete. DB migrations use `NOT NULL DEFAULT`
 
 Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (659 tests, 0 failures)
 Notes: All five fixes are substantively correct and include tests. The shutdown race fix (webhook.rs) is particularly well done — the increment-before-check pattern correctly closes the race window and the new test exercises the concurrent code path with a real HTTP server. The auth rate limiter is functionally sound but reintroduces eviction code that already lives in rate_limiter.rs. The pivot list formatting bug is subtle and only manifests for demon IDs with fewer than 8 hex digits. No unwrap()/expect() in production paths. No hardcoded secrets.
+
+### QA Review — 2026-03-15 17:00 — 66f78ef..36efd87
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 4 | 1 | Closed `red-cell-c2-0ff3` (HTTP method validation), `red-cell-c2-b44y` (is_weak_aes_key/iv extraction), `red-cell-c2-yh94` (MAX_AGENT_MESSAGE_LEN consolidation), `red-cell-c2-2hd9` (rate_limiter.rs extraction). Also added token-limit backoff + post-run WIP cleanup to dev loop. Filed `red-cell-c2-t4ml` (P2): `add_wstring(out, method)` in payload_builder.rs:643 writes method verbatim — case-insensitive validation lets "post" through but the binary embeds "post" not "POST", breaking HTTP callbacks (RFC 7230 §3.1.1). Note: `red-cell-c2-psa8` (`api.rs` rate-limiter duplication) remains open — the `rate_limiter.rs` extraction resolved `listeners.rs`/`websocket.rs` but left `api.rs` unmigrated. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (967 tests, 0 failures)
+Notes: Four refactoring tasks are clean and well-executed. `rate_limiter.rs` is a textbook extraction — generic over `K`, with three dedicated tests. `is_weak_aes_key`/`is_weak_aes_iv` helpers are well-documented including the vacuously-true empty-slice edge case. The HTTP method allowlist is a genuine correctness improvement over the previous GET-only reject. One protocol regression introduced: method case not normalized before binary serialization. `api.rs` rate-limiter duplication is the sole outstanding carry-over from last review cycle.

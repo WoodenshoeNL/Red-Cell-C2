@@ -22,7 +22,7 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests | 6 | 11 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
 | Protocol errors | 3 | 22 | 3 |
-| Security issues | 6 | 30 | 0 |
+| Security issues | 7 | 30 | 0 |
 | Architecture drift | 2 | 21 | 0 |
 | Memory / resource leaks | 0 | 10 | 1 |
 | Startup / lifecycle regressions | 0 | 8 | 0 |
@@ -1218,3 +1218,15 @@ Notes: Reviewed 10 commits from `795c7ad` to `3663234`. All productive work attr
 
 Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (3 tests, 0 failed)
 Notes: Only commit in range was the previous QA checkpoint itself. 14 issues remain stuck `in_progress` (wf2d, mut8, s3a9, 1x9h, 2u74, 3bdz, 2qfs, 3inc, 11aj, 2tru, 35k0, 3uhe, 2z11, 2h4n) — agent claiming but not completing. Workflow bug `red-cell-c2-olwt` remains open. No scorecard changes this run.
+
+### Arch Review — 2026-03-15 (fresh-eyes run)
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 1 | Security | red-cell-c2-da0m: no cap on simultaneous operator sessions degrades constant-time session token scan (P3) |
+| Codex | 0 | — | No new findings attributed |
+| Cursor | 0 | — | No new findings attributed |
+
+Overall codebase health: on track
+Biggest blindspot: CTR offset continuity after restart remains unverified (red-cell-c2-h5a3, red-cell-c2-3qbl still open). A keystream collision after crash-restart would expose all traffic for the affected agent session without any server-side warning.
+Notes: Full build and 607+ test suite passes clean. All previously filed security and protocol issues remain correctly tracked. The codebase has matured significantly — zero unwraps/expects/todos in production code, all user-supplied length fields bounded before allocation, key material redacted from all log output. The session-inflation finding (da0m) is the only net-new issue this run.

@@ -1,0 +1,243 @@
+[2026-03-15 00:07:14] ========================================================
+[2026-03-15 00:07:14]   Claude architecture review loop starting
+[2026-03-15 00:07:14]   Prompt:   /home/michel/Red-Cell-C2/CLAUDE_ARCH_PROMPT.md
+[2026-03-15 00:07:14]   Loop log: /home/michel/Red-Cell-C2/logs/claude_arch.log
+[2026-03-15 00:07:14]   Interval: 6300s–8100s (random)
+[2026-03-15 00:07:14]   Max runs: unlimited
+[2026-03-15 00:07:14] ========================================================
+[2026-03-15 00:07:14] === Architecture review run 1 ===
+[2026-03-15 00:07:16] git pull: ok
+[2026-03-15 00:07:16] Run log: /home/michel/Red-Cell-C2/logs/arch_review_20260315_000716.log
+---
+
+## Architecture Review — 2026-03-15
+
+### Codebase Health: **on track**
+
+The teamserver is well-engineered. No production `unwrap()`/`todo!()`/`unimplemented!()` calls anywhere. Protocol implementation is correct and tightly matched to the Havoc reference. All architectural mandates from `AGENTS.md` are satisfied.
+
+---
+
+### Security Posture
+
+The two highest-severity findings (**SEC-01**: AES-256-CTR two-time-pad, **SEC-02**: CHECKIN key-rotation replay) are both Havoc protocol-inherited constraints that have already been explicitly acknowledged with inline comments. They cannot be fixed without breaking wire compatibility. New findings this run are lower severity:
+
+- **red-cell-c2-zroy** (P3): TLS private key stored without `Zeroizing<>` — inconsistent with the zeroization policy already applied to agent session keys in `AgentEncryptionInfo`.
+- **red-cell-c2-j8a0** (P3): API key HMAC secret generated from two `UUIDv4` values (244 bits entropy, not 256) — `OsRng` should be used directly as it already is for agent key material.
+
+---
+
+### Biggest Blindspot
+
+**CTR offset continuity after restart** (`red-cell-c2-h5a3`, P2). The persist-before-mutate ordering in `set_ctr_offset()` is correct, but there is no test exercising the full save → process restart → reload → encrypt cycle. A regression in this path would silently produce keystream collisions (two-time-pad) on every teamserver restart — exactly the most sensitive failure mode for AES-256-CTR.
+
+---
+
+### Issues Filed (15 new)
+
+| ID | P | Agent | Description |
+|---|---|---|---|
+| red-cell-c2-zroy | 3 | Claude | TLS private key not wrapped in `Zeroizing<>` |
+| red-cell-c2-j8a0 | 3 | Claude | API key HMAC secret from UUIDv4 (244 vs 256 bits) |
+| red-cell-c2-5rtk | 3 | Claude | `DEFAULT_MAX_DOWNLOAD_BYTES` defined twice with different types |
+| red-cell-c2-b44y | 3 | Claude | All-zero key/IV validation duplicated across two modules |
+| red-cell-c2-0ff3 | 2 | Claude | HTTP method in payload not validated against listener config |
+| red-cell-c2-wey1 | 2 | Claude | Audit log missing agent lifecycle events |
+| red-cell-c2-h5a3 | 2 | Claude | No test for CTR offset recovery after teamserver restart |
+| red-cell-c2-kky2 | 3 | Claude | No test verifying SOCKS5 binds localhost-only |
+| red-cell-c2-o7z6 | 3 | Claude | No test for X-Forwarded-For spoofing prevention |
+| red-cell-c2-m8tz | 3 | Claude | No test for concurrent DemonInit at agent cap |
+| red-cell-c2-a0oo | 3 | Claude | No test for `QueueFull` at `MAX_JOB_QUEUE_DEPTH` |
+| red-cell-c2-2hd9 | 3 | Codex | `DemonInitRateLimiter` / `LoginRateLimiter` duplicate eviction logic |
+| red-cell-c2-yh94 | 3 | Codex | `DEMON_MAX_RESPONSE_LENGTH` and `MAX_AGENT_REQUEST_BODY_LEN` same cap, two places |
+| red-cell-c2-cqmk | 3 | Codex | Plugin API only exposes `emit_agent_checkin` — all other lifecycle hooks absent |
+| red-cell-c2-rcy6 | 2 | Codex | `patch_payload()` writes PE header without validating MZ magic first |
+
+---
+
+### Agent Quality
+
+**Claude** is writing the best code this run — zero production `unwrap()`s, correct protocol handling, consistent use of `Zeroizing` for agent keys (just missed the TLS key). The 11 findings against Claude are primarily missing tests and minor consistency gaps, not functional bugs.
+
+**Codex**'s findings are slightly more impactful: the duplicated rate-limiter logic is a maintenance hazard, and the PE patch without magic validation is a correctness bug that could produce silently broken payloads.
+
+---
+
+### Recommendation for Dev Agents
+
+**Priority 1**: `red-cell-c2-h5a3` — write the CTR offset restart test. This is the highest-risk unverified invariant in the codebase.  
+**Priority 2**: `red-cell-c2-0ff3` — validate HTTP method consistency at payload build time; silent misconfiguration produces non-functional implants.  
+**Priority 3**: `red-cell-c2-rcy6` — add PE magic check before patching; same class of silent failure.  
+**Priority 4**: Consolidate the three duplicate constants (`red-cell-c2-5rtk`, `red-cell-c2-yh94`, `red-cell-c2-b44y`) in a single pass.
+[2026-03-15 00:22:36] Architecture review completed successfully
+[2026-03-15 00:22:36] ========================LOOP=========================
+[2026-03-15 00:22:36] Next review in 105m (at 02:08:24)
+[2026-03-15 00:22:36] 
+[2026-03-15 02:08:24] === Architecture review run 2 ===
+[2026-03-15 02:08:24] WARNING: git pull failed, reviewing local state
+[2026-03-15 02:08:24] Run log: /home/michel/Red-Cell-C2/logs/arch_review_20260315_020824.log
+You're out of extra usage · resets 5am (Europe/Amsterdam)
+[2026-03-15 02:13:52] Architecture review completed successfully
+[2026-03-15 02:13:52] ========================LOOP=========================
+[2026-03-15 02:13:52] Next review in 113m (at 04:07:38)
+[2026-03-15 02:13:52] 
+[2026-03-15 04:07:38] === Architecture review run 3 ===
+[2026-03-15 04:07:39] git pull: ok
+[2026-03-15 04:07:39] Run log: /home/michel/Red-Cell-C2/logs/arch_review_20260315_040739.log
+You're out of extra usage · resets 5am (Europe/Amsterdam)
+[2026-03-15 04:07:41] Architecture review completed successfully
+[2026-03-15 04:07:41] ========================LOOP=========================
+[2026-03-15 04:07:41] Next review in 113m (at 06:01:26)
+[2026-03-15 04:07:41] 
+[2026-03-15 06:01:26] === Architecture review run 4 ===
+[2026-03-15 06:01:27] git pull: ok
+[2026-03-15 06:01:27] Run log: /home/michel/Red-Cell-C2/logs/arch_review_20260315_060127.log
+---
+
+## Arch Review — 2026-03-15 — Summary
+
+### 1. Codebase Health: **On Track**
+
+The codebase has matured substantially since the first arch review. Zero `unwrap`/`expect`/`todo!` in production code (enforced by clippy workspace config), all user-supplied length fields are bounded before allocation, AES key material is redacted from all log output, and 607+ tests pass clean.
+
+### 2. Security Posture
+
+Solid for a C2 framework in active development. The known high-severity issues (CTR per-message keystream reuse, CHECKIN key-rotation replay) are documented and mitigated by design. No new critical findings.
+
+### 3. Biggest Blindspot
+
+**CTR offset continuity after restart** (`red-cell-c2-h5a3` + `red-cell-c2-3qbl` both still open). The persist-before-mutate ordering is correct and SQLite writes are tested in isolation, but there is no test exercising the full save → crash → reload → encrypt cycle. A keystream collision after restart would allow retroactive decryption of any agent session traffic with no server-side warning.
+
+### 4. Issues Filed
+
+| ID | Agent | Description |
+|----|-------|-------------|
+| `red-cell-c2-da0m` | Claude | P3 — No cap on simultaneous operator sessions; inflating session count degrades constant-time token scan |
+
+All other previously identified issues (`zroy`, `j8a0`, `5rtk`, `b44y`, `cqmk`, `rcy6`, `h5a3`, `m8tz`, `kky2`, `o7z6`, `2hd9`, `0ff3`) were already in the tracker from the 2026-03-15 06:00 review.
+
+### 5. Agent Quality
+
+**Claude Sonnet 4.6** is writing the best code. It owns 82% of the source files and is responsible for: zero production-code `unwrap`s, complete crypto key redaction, properly bounded buffer allocations, and all the complex protocol/dispatch logic. Its violation rate this run was 1 new P3 (session cap), and all previously found issues were architectural refinements rather than correctness or security failures.
+
+Codex owns the client UI and several utility files; its defect rate (0.15 bugs/task) is meaningfully higher, concentrated in earlier work that is now partially remediated.
+
+### 6. Recommendation
+
+Priority order for dev agents:
+1. **Close `red-cell-c2-3qbl`** (persist CTR offset) and **`red-cell-c2-h5a3`** (test for it) — together they close the biggest unverified regression risk.
+2. **`red-cell-c2-er7d`** — DNS listener has config and domain types but no runtime implementation; it is a declared architecture feature that silently does nothing.
+3. **`red-cell-c2-cqmk`** — Plugin system only fires `emit_agent_checkin`; the other lifecycle hooks should be wired before the plugin API is considered stable.
+4. The 14 stuck `in_progress` issues (`red-cell-c2-olwt`) — the claim-but-not-complete workflow bug should be fixed so the backlog drains.
+[2026-03-15 06:11:47] Architecture review completed successfully
+[2026-03-15 06:11:47] ========================LOOP=========================
+[2026-03-15 06:11:47] Next review in 110m (at 08:02:21)
+[2026-03-15 06:11:47] 
+[2026-03-15 08:02:21] === Architecture review run 5 ===
+[2026-03-15 08:02:21] WARNING: git pull failed, reviewing local state
+[2026-03-15 08:02:21] Run log: /home/michel/Red-Cell-C2/logs/arch_review_20260315_080221.log
+## Arch Review — 2026-03-15
+
+**Codebase health: good.** Build, clippy, and all 914 tests pass clean.
+
+---
+
+### One new finding filed
+
+**`red-cell-c2-k00o` (P2 — Security/OPSEC) — Codex**
+`teamserver/src/listeners.rs:927` — `fake_404_response()` unconditionally injects an `x-havoc: true` response header into every non-matching HTTP request (wrong method, URI, user-agent, unknown agent, etc.). Any network scanner can fingerprint a live Red Cell listener with a single HTTP probe. Fix: remove the header, or make it opt-in via the listener profile.
+
+---
+
+### Scorecard delta
+
+| Agent | Change |
+|-------|--------|
+| Codex | bugs-filed-against 27→28, security violations 30→31 |
+
+---
+
+### Persistent open blindspot
+
+CTR offset continuity across crash-restart (`red-cell-c2-h5a3`, `red-cell-c2-3qbl`) remains open. A keystream collision post-restart silently exposes all agent traffic with no server-side warning.
+
+---
+
+### Overall
+
+The codebase is structurally sound — no new panics, no new crypto misuse, no new unauthenticated handler paths. The fingerprinting leak in `fake_404_response` is the only new finding. The dev agents should prioritize closing the CTR-restart issues next as they're the highest-severity unresolved items.
+[2026-03-15 08:10:21] Architecture review completed successfully
+[2026-03-15 08:10:21] ========================LOOP=========================
+[2026-03-15 08:10:21] Next review in 109m (at 09:59:31)
+[2026-03-15 08:10:21] 
+[2026-03-15 09:59:31] === Architecture review run 6 ===
+[2026-03-15 09:59:31] WARNING: git pull failed, reviewing local state
+[2026-03-15 09:59:31] Run log: /home/michel/Red-Cell-C2/logs/arch_review_20260315_095931.log
+You're out of extra usage · resets 10am (Europe/Amsterdam)
+[2026-03-15 09:59:34] Architecture review completed successfully
+[2026-03-15 09:59:34] ========================LOOP=========================
+[2026-03-15 09:59:34] Next review in 118m (at 11:58:20)
+[2026-03-15 09:59:34] 
+[2026-03-15 11:20:51] ========================================================
+[2026-03-15 11:20:51]   Claude architecture review loop starting
+[2026-03-15 11:20:51]   Prompt:   /home/michel/Red-Cell-C2/CLAUDE_ARCH_PROMPT.md
+[2026-03-15 11:20:51]   Loop log: /home/michel/Red-Cell-C2/logs/claude_arch.log
+[2026-03-15 11:20:51]   Interval: 6300s–8100s (random)
+[2026-03-15 11:20:51]   Max runs: 1
+[2026-03-15 11:20:51] ========================================================
+[2026-03-15 11:20:51] === Architecture review run 1 of 1 ===
+[2026-03-15 11:20:53] git pull: ok
+[2026-03-15 11:20:53] Run log: /home/michel/Red-Cell-C2/logs/arch_review_20260315_112053.log
+---
+
+## Architecture Review Report — 2026-03-15
+
+### Codebase Health: **On track**
+
+Build: ✅ `cargo check` clean · ✅ `cargo clippy -D warnings` clean · ✅ all tests pass (600+ tests, 0 failures)
+
+---
+
+### Security Posture
+
+The core crypto and auth plumbing is solid: Argon2id password verification with constant-time comparison, dummy-verifier timing equalization for unknown usernames, zero-unwrap production code, per-IP rate limiting for DEMON_INIT, job queue depth caps, and agent count caps all in place. Two critical gaps exist:
+
+**CTR desync attack (`red-cell-c2-dbve`, P1):** In `agents.rs:decrypt_payload_with_ctr_offset`, the AES-CTR offset is advanced in both DB and memory as part of decryption — before the decrypted bytes are parsed as a valid Demon protocol message. AES-CTR decryption always "succeeds" (no authentication), so an adversary who can observe a valid `agent_id` from plaintext packet headers can send a packet with the correct `0xDEADBEEF` magic and garbage bytes. The packet passes `is_valid_demon_callback_request`, the offset advances, protocol parsing fails, and the real agent's next callback decrypts at the wrong CTR position, permanently breaking the session. There is no per-IP rate limiter for callbacks.
+
+**30 MiB pre-auth body buffer (`red-cell-c2-a55z`, P1):** `http_listener_handler` calls `to_bytes(body, MAX_AGENT_MESSAGE_LEN)` — allocating up to 30 MiB — before checking the DEMON_MAGIC_VALUE. Any client matching the listener's URI/method/UA can force 30 MiB allocations per request with no rate limit.
+
+---
+
+### Biggest Blindspot
+
+**CTR desync** — no authentication over the ciphertext means any packet with a guessable `agent_id` can silently corrupt the session state. The magic check is not a secret.
+
+---
+
+### Issues Filed
+
+| ID | Agent | P | Description |
+|----|-------|---|-------------|
+| red-cell-c2-dbve | Claude | 1 | CTR desync: garbage callback advances offset before parse succeeds |
+| red-cell-c2-a55z | Claude | 1 | 30 MiB body buffered pre-magic-check — memory DoS |
+| red-cell-c2-t6dz | Claude | 2 | Reconnect ack CTR offset not advanced — post-reconnect path untested |
+| red-cell-c2-bp5w | Claude | 3 | crypto.rs module comment states reset-to-0 but code uses advancing offsets |
+| red-cell-c2-ime3 | Claude | 3 | dispatch.rs ~9 800 lines — should be split into per-command-family modules |
+
+---
+
+### Agent Quality
+
+All recent code is from **Claude Sonnet 4.6** — Codex and Cursor have no activity in the recent window. The code quality is generally high: no production `unwrap()`s, no `todo!()` stubs, excellent error type discipline, consistent `tracing` usage, and well-structured tests. The two P1 findings are architectural blind spots rather than careless mistakes — the CTR desync is a consequence of advancing the offset too early in the pipeline, and the body-size issue is a sequencing problem.
+
+---
+
+### Recommendation
+
+1. **Fix CTR desync first** (`red-cell-c2-dbve`): Advance the CTR offset only after `parse_callback_packages` succeeds. Long-term, add AEAD (AES-GCM) for message authentication — this eliminates the entire class.
+2. **Pre-screen body before buffering** (`red-cell-c2-a55z`): Read the first 12 bytes, check magic, then buffer the rest.
+3. **Add end-to-end reconnect test** (`red-cell-c2-t6dz`): Verify agent can successfully send a callback after a reconnect probe at the correct CTR position.
+[2026-03-15 11:35:19] Architecture review completed successfully
+[2026-03-15 11:35:19] ========================LOOP=========================
+[2026-03-15 11:35:19] Next review in 128m (at 13:43:27)
+[2026-03-15 11:35:19] 

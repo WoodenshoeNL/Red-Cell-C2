@@ -1,0 +1,30 @@
+## Arch Review — 2026-03-15
+
+**Codebase health: good.** Build, clippy, and all 914 tests pass clean.
+
+---
+
+### One new finding filed
+
+**`red-cell-c2-k00o` (P2 — Security/OPSEC) — Codex**
+`teamserver/src/listeners.rs:927` — `fake_404_response()` unconditionally injects an `x-havoc: true` response header into every non-matching HTTP request (wrong method, URI, user-agent, unknown agent, etc.). Any network scanner can fingerprint a live Red Cell listener with a single HTTP probe. Fix: remove the header, or make it opt-in via the listener profile.
+
+---
+
+### Scorecard delta
+
+| Agent | Change |
+|-------|--------|
+| Codex | bugs-filed-against 27→28, security violations 30→31 |
+
+---
+
+### Persistent open blindspot
+
+CTR offset continuity across crash-restart (`red-cell-c2-h5a3`, `red-cell-c2-3qbl`) remains open. A keystream collision post-restart silently exposes all agent traffic with no server-side warning.
+
+---
+
+### Overall
+
+The codebase is structurally sound — no new panics, no new crypto misuse, no new unauthenticated handler paths. The fingerprinting leak in `fake_404_response` is the only new finding. The dev agents should prioritize closing the CTR-restart issues next as they're the highest-severity unresolved items.

@@ -1,0 +1,479 @@
+[2026-03-15 00:06:46] ========================================================
+[2026-03-15 00:06:47]   Claude QA loop starting
+[2026-03-15 00:06:47]   Prompt: /home/michel/Red-Cell-C2/CLAUDE_PROMPT.md
+[2026-03-15 00:06:47]   Log:    /home/michel/Red-Cell-C2/logs/claude_qa.log
+[2026-03-15 00:06:47]   Sleep:  1800s between reviews
+[2026-03-15 00:06:47] ========================================================
+[2026-03-15 00:06:47] === Starting Claude QA review ===
+[2026-03-15 00:06:48] git pull: ok
+The checkpoint correctly captured the dev agent's latest push (`795c7ad`). Everything looks clean. Here's the summary:
+
+---
+
+## QA Review — 2026-03-15 — `08aff95..795c7ad`
+
+**Review range:** 113 commits | All activity: Ubuntu-C2-dev01-claude (Claude Sonnet 4.6), one fix+docs session by dev02
+
+---
+
+### 1. Agent Breakdown
+
+**Claude (all dev01/dev02)** — extremely productive sprint:
+- **47 issues closed** across protocol fixes, security hardening, test coverage, and refactors
+- Key deliverables: TLS cert persistence, AES key/IV zeroization, constant-time auth token lookup, job queue depth cap, CHECKIN truncation rejection, cycle detection fix, DNS registry gate, extensive test suites for sockets/audit/webhook/protocol/DB
+
+**Codex / Cursor** — no activity this run.
+
+---
+
+### 2. Build Status
+
+**All green:**
+- `cargo check --workspace` — passed
+- `cargo clippy --workspace -- -D warnings` — passed (0 warnings)
+- `cargo test --workspace` — passed (125+ tests, 0 failed)
+
+---
+
+### 3. Issues Found
+
+**None.** Code review found no new defects:
+- `expect()` / `unwrap()` only in test code (properly scoped)
+- No production path panics
+- No hardcoded secrets
+- No arch violations (Axum/Tokio/egui/sqlx all correct)
+- AES key material correctly redacted in Debug impl (`"[redacted]"`)
+
+---
+
+### 4. Scorecard Delta
+
+| Agent | Tasks closed (this run) | Bugs filed | Quality score |
+|-------|------------------------:|-----------|--------------|
+| Claude | +47 (total: 54) | 0 | **71% → 96%** |
+| Codex | 0 | 0 | unchanged 85% |
+| Cursor | 0 | 0 | unchanged 71% |
+
+---
+
+### 5. Open Work Queue
+
+Still claimed/in-progress:
+- `red-cell-c2-2n8o` (P2): timing oracle on session token lookup
+- `red-cell-c2-3hro` (P2): unbounded job queue (also fixed as `33iq` this run — may be duplicate; worth verifying)
+- `red-cell-c2-a74c` (P2): CHECKIN key rotation without freshness guarantee
+- `red-cell-c2-35jc` (P3): external listener runtime rejection
+
+---
+
+### 6. Overall Assessment
+
+Project is **on track and accelerating.** Claude (dev01) is performing exceptionally — 47 defect-free task closures in one review window with zero new bugs filed. The two previously critical P1 security issues (all-zero IV in DEMON_INIT and CHECKIN) are now both fixed and closed. Remaining open P2 issues are claimed and in-progress.
+[2026-03-15 00:13:09] Claude review completed successfully
+
+[2026-03-15 00:13:10] ========================LOOP=========================
+
+[2026-03-15 00:13:10] Next review in 1800s (00:43:10)...
+[2026-03-15 00:43:10] === Starting Claude QA review ===
+[2026-03-15 00:43:10] WARNING: git pull failed, reviewing local state
+This output file only captured the tail end of the run (the doc-test sections). The teamserver lib tests had already finished writing before the tail was captured. The definitive result came from the synchronous run I did directly: **533 tests passed, 0 failed**. Both background tasks confirm exit code 0 — clean build across the workspace.
+[2026-03-15 00:52:38] Claude review completed successfully
+
+[2026-03-15 00:52:38] ========================LOOP=========================
+
+[2026-03-15 00:52:39] Next review in 1800s (01:22:39)...
+[2026-03-15 01:22:39] === Starting Claude QA review ===
+[2026-03-15 01:22:39] WARNING: git pull failed, reviewing local state
+---
+
+## QA Review Summary — 2026-03-15 12:30
+
+**Review range**: `e9e4f38..828dbe7` — 13 commits
+
+**Agent breakdown**: All activity attributed to **Claude** (Ubuntu-C2-dev01-claude). Codex and Cursor had no commits in range.
+
+**Claude closed 5 tasks**:
+| Issue | Fix |
+|-------|-----|
+| `red-cell-c2-a74c` | Refuse CHECKIN key rotation universally (not just for pivot agents). CTR offset preserved on refusal. |
+| `red-cell-c2-3hro` | `MAX_JOB_QUEUE_DEPTH=1000` cap in `enqueue_job`, `QueueFull` error variant, tests. |
+| `red-cell-c2-2n8o` | Constant-time session token lookup via `subtle::ConstantTimeEq` linear scan; 3 regression tests. |
+| `red-cell-c2-3uhw` | Workflow/close-hygiene chore. |
+| `red-cell-c2-3cp1` | 3 direct `websocket_handler` tests (lifecycle, malformed frame, oversized pre-auth). |
+
+**Build status**: Passed — `cargo check`, `cargo clippy -- -D warnings`, `cargo test --workspace` (539+ tests, 0 failures).
+
+**Issues filed**: None. No new defects found.
+
+**Scorecard delta**: Claude improves from 96% → 97% quality (62 tasks closed, 2 bugs total, 0.03 bug rate). Codex and Cursor unchanged.
+
+**Overall assessment**: Solid progress this period. Claude is systematically closing the security backlog — the key-rotation replay fix and constant-time token lookup are both correct and well-tested. No regressions detected. The open P2 backlog (zero-IV acceptance, missing DNS runtime, unthrottled REST auth, TLS config ignored) remains the critical path.
+[2026-03-15 01:28:10] Claude review completed successfully
+
+[2026-03-15 01:28:10] ========================LOOP=========================
+
+[2026-03-15 01:28:10] Next review in 1800s (01:58:10)...
+[2026-03-15 01:58:10] === Starting Claude QA review ===
+[2026-03-15 01:58:11] WARNING: git pull failed, reviewing local state
+---
+
+## QA Review Report — 2026-03-15 14:00
+
+**Review range**: `8c78eac..1105dc2` — 20 commits
+
+---
+
+### Agent Breakdown
+
+All activity is from **Claude** (Ubuntu-C2-dev01-claude). 7 tasks closed, all test coverage work:
+
+| Issue | Description |
+|-------|-------------|
+| `red-cell-c2-7thi` | Tightened zero-sleep liveness config: `assert_eq!(sweep_interval, 1s)` + `timeout_for(sleep_delay=0) == 3` |
+| `red-cell-c2-2rw7` | Mixed-liveness sweep test: 2 stale + 1 fresh, verifies sorted dead list and fresh stays active |
+| `red-cell-c2-w0g0` | Webhook shutdown returns `true` immediately when notifier is disabled |
+| `red-cell-c2-1w6q` | Route smoke tests: `GET /api/v1 → 200`, `GET /havoc → non-404`; extracted `build_test_state()` helper |
+| `red-cell-c2-3vns` | DNS listener validation covers all 3 error paths (empty name, empty domain, zero portbind) |
+| `red-cell-c2-2j3l` | `deserialize_bool_from_any` rejects strings `"yes"` / `"maybe"` |
+| `red-cell-c2-iiif` | `deserialize_agent_id` rejects 2^32 and u64::MAX with `"does not fit in u32"` |
+
+---
+
+### Build Status
+
+**Passed** — `cargo check`, `cargo clippy -- -D warnings`, `cargo test --workspace` (600+ tests, 0 failures)
+
+---
+
+### Issues Filed
+
+**None.** All commits this period are pure test additions. No production code was modified. Code quality is high: no `unwrap()`/`expect()` in non-test paths, no `todo!()`, no hardcoded secrets, tests are well-structured and deterministic.
+
+One minor observation: `havoc_prefix_is_routed_not_404` uses a `assert_ne!(status, 404)` assertion rather than an exact status code, but this is intentional and well-commented (Axum WebSocket extractor behavior is context-dependent).
+
+---
+
+### Scorecard Delta
+
+- **Claude**: 62 → **69 tasks closed**, bug rate stays 0.03, quality score stays **97%**
+- Codex/Cursor: no activity this period
+
+---
+
+### Overall Assessment
+
+Project is on track. Claude is maintaining a clean run of pure test-coverage work, systematically closing the gap on untested error paths identified by the architecture reviewer. No regressions, no defects introduced. Claude continues to lead on quality at **97%** vs Codex (85%) and Cursor (71%).
+[2026-03-15 02:06:34] Claude review completed successfully
+
+[2026-03-15 02:06:34] ========================LOOP=========================
+
+[2026-03-15 02:06:34] Next review in 1800s (02:36:34)...
+[2026-03-15 02:36:34] === Starting Claude QA review ===
+[2026-03-15 02:36:36] git pull: ok
+You're out of extra usage · resets 5am (Europe/Amsterdam)
+[2026-03-15 02:36:38] Claude review completed successfully
+
+[2026-03-15 02:36:38] ========================LOOP=========================
+
+[2026-03-15 02:36:38] Next review in 1800s (03:06:38)...
+[2026-03-15 03:06:38] === Starting Claude QA review ===
+[2026-03-15 03:06:39] git pull: ok
+You're out of extra usage · resets 5am (Europe/Amsterdam)
+[2026-03-15 03:06:42] Claude review completed successfully
+
+[2026-03-15 03:06:42] ========================LOOP=========================
+
+[2026-03-15 03:06:42] Next review in 1800s (03:36:42)...
+[2026-03-15 03:36:42] === Starting Claude QA review ===
+[2026-03-15 03:36:43] git pull: ok
+You're out of extra usage · resets 5am (Europe/Amsterdam)
+[2026-03-15 03:36:45] Claude review completed successfully
+
+[2026-03-15 03:36:45] ========================LOOP=========================
+
+[2026-03-15 03:36:46] Next review in 1800s (04:06:45)...
+[2026-03-15 04:06:46] === Starting Claude QA review ===
+[2026-03-15 04:06:47] git pull: ok
+You're out of extra usage · resets 5am (Europe/Amsterdam)
+[2026-03-15 04:06:49] Claude review completed successfully
+
+[2026-03-15 04:06:49] ========================LOOP=========================
+
+[2026-03-15 04:06:49] Next review in 1800s (04:36:49)...
+[2026-03-15 04:36:49] === Starting Claude QA review ===
+[2026-03-15 04:36:51] git pull: ok
+You're out of extra usage · resets 5am (Europe/Amsterdam)
+[2026-03-15 04:36:53] Claude review completed successfully
+
+[2026-03-15 04:36:53] ========================LOOP=========================
+
+[2026-03-15 04:36:53] Next review in 1800s (05:06:53)...
+[2026-03-15 05:06:53] === Starting Claude QA review ===
+[2026-03-15 05:06:54] git pull: ok
+---
+
+## QA Review — `1105dc2..897414b` — 35 commits
+
+### Review range
+35 commits total: 30 claim commits, 3 code commits, 2 close commits. All activity attributed to **Ubuntu-C2-dev01-claude** (Claude Sonnet 4.6).
+
+### Agent breakdown
+| Agent | Tasks closed | Code changed |
+|-------|-------------|-------------|
+| Claude | 3 | `common/src/config.rs`, `common/src/crypto.rs`, `common/src/domain.rs` |
+| Codex | 0 | — |
+| Cursor | 0 | — |
+
+### Build status
+**Passed** — `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` 607 tests, 0 failures.
+
+### Code review
+All three closed tasks are test-only additions — no production code touched:
+- **`red-cell-c2-l2vk`**: `Profile::from_file` error path now asserts path is carried in `ProfileError::Read`. Clean improvement.
+- **`red-cell-c2-24yz`**: Two AES-256-CTR reference vector tests at block_offset=2, pinned against an independent Python reference. This is exactly the right kind of crypto test — correct and thorough.
+- **`red-cell-c2-37xa`**: TLS cert-present/key-missing error path — well-structured with `tempfile::TempDir`.
+
+No `unwrap()`, `todo!()`, hardcoded secrets, or architecture violations found.
+
+### Issues filed
+- **`red-cell-c2-olwt`** (P2, workflow) — *Claude*: Agent loop re-claims already in_progress issues on restart, generating 28 redundant claim commits for 14 issues. The 14 issues (wf2d, mut8, s3a9, 1x9h, 2u74, 3bdz, 2qfs, 3inc, 11aj, 2tru, 35k0, 3uhe, 2z11, 2h4n) remain stuck in_progress across multiple review periods with no forward progress.
+
+### Scorecard delta
+Claude: 69→72 tasks closed, 2→3 bugs, quality 97%→96%. No change for Codex or Cursor.
+
+### Overall assessment
+Code quality remains high — the agent is writing correct, well-tested crypto and config tests. The main concern is the **duplicate-claim workflow problem**: the agent is claiming 14+ issues per run but only completing 3, then restarting and re-claiming the same 14 again. This generates noise and leaves a long tail of in_progress work that never advances. Filed `red-cell-c2-olwt` to track this. Otherwise project health is good.
+[2026-03-15 05:10:49] Claude review completed successfully
+
+[2026-03-15 05:10:49] ========================LOOP=========================
+
+[2026-03-15 05:10:49] Next review in 1800s (05:40:49)...
+[2026-03-15 05:40:49] === Starting Claude QA review ===
+[2026-03-15 05:40:51] git pull: ok
+---
+
+## QA Review Summary — 2026-03-15 14:30
+
+**Review range**: `897414b..19b96f8` — 1 commit (the previous QA checkpoint itself; no dev work)
+
+**Agent breakdown**: No agent activity this period.
+
+**Build status**: All passed
+- `cargo check --workspace` ✓
+- `cargo clippy --workspace -- -D warnings` ✓
+- `cargo test --workspace` ✓ (3 tests, 0 failed)
+
+**Issues found**: None filed this run.
+
+**Scorecard delta**: No changes — zeros across all agents.
+
+**Overall assessment**: Codebase is healthy. 14 issues remain stuck `in_progress` (wf2d, mut8, s3a9, 1x9h, 2u74, 3bdz, 2qfs, 3inc, 11aj, 2tru, 35k0, 3uhe, 2z11, 2h4n) — agent is claiming but not completing within a loop run. The pre-existing workflow bug `red-cell-c2-olwt` covers this. No regression, no new defects. Project is on track.
+[2026-03-15 05:43:26] Claude review completed successfully
+
+[2026-03-15 05:43:26] ========================LOOP=========================
+
+[2026-03-15 05:43:26] Next review in 1800s (06:13:26)...
+[2026-03-15 06:13:26] === Starting Claude QA review ===
+[2026-03-15 06:13:28] git pull: ok
+---
+
+## QA Review — 2026-03-15 15:00
+
+**Review range**: `19b96f8..5bc1577` — 2 commits
+
+**Agent breakdown**: Both commits are QA/arch-review work by Claude (this agent). No dev agent activity in this window.
+
+**Build status**: Passed
+- `cargo check --workspace` ✓
+- `cargo clippy --workspace -- -D warnings` ✓
+- `cargo test --workspace` ✓ — **884 tests total across all crates, 0 failures**
+
+**Issues found**: None — no dev code changed, nothing to flag.
+
+**Notable observation**: `teamserver/src/auth.rs` has an uncommitted local test (`authenticate_message_rejects_invalid_json`) that closes `red-cell-c2-2h4n`. A dev agent wrote it but did not commit or push. Left untouched per QA-doesn't-write-code policy.
+
+**Scorecard delta**: No changes — zero dev tasks closed, zero bugs filed this run. Running totals unchanged (Claude: 72 tasks, 96% quality; Codex: 181 tasks, 85% quality; Cursor: 31 tasks, 71% quality).
+
+**Overall assessment**: Project is on track. Build is clean, 884 tests pass. The 14 test-coverage issues remain stuck `in_progress` — the dev agent claiming them is not completing within a single loop run. `red-cell-c2-olwt` (duplicate claim bug) and `red-cell-c2-3qbl`/`red-cell-c2-h5a3` (CTR offset persistence) remain the highest-priority open items. Claude continues to lead on quality score (96%).
+[2026-03-15 06:16:51] Claude review completed successfully
+
+[2026-03-15 06:16:51] ========================LOOP=========================
+
+[2026-03-15 06:16:51] Next review in 1800s (06:46:51)...
+[2026-03-15 06:46:51] === Starting Claude QA review ===
+[2026-03-15 06:46:53] git pull: ok
+That's a stale notification — I already retrieved that task's output earlier in the review. The result was already used: 909 tests, 0 failures. Nothing new to act on.
+[2026-03-15 06:51:32] Claude review completed successfully
+
+[2026-03-15 06:51:32] ========================LOOP=========================
+
+[2026-03-15 06:51:32] Next review in 1800s (07:21:32)...
+[2026-03-15 07:21:32] === Starting Claude QA review ===
+[2026-03-15 07:21:34] git pull: ok
+`cargo test` completed with exit code 0 — already captured and included in the review (914 tests, 0 failures). No action needed.
+[2026-03-15 07:27:26] Claude review completed successfully
+
+[2026-03-15 07:27:26] ========================LOOP=========================
+
+[2026-03-15 07:27:26] Next review in 1800s (07:57:26)...
+[2026-03-15 07:57:26] === Starting Claude QA review ===
+[2026-03-15 07:57:26] WARNING: git pull failed, reviewing local state
+All 20 auth tests passed. Key highlights:
+
+- `hash_password_matches_havoc_sha3_256` — confirms the password hashing aligns with the Havoc wire format
+- `dummy_verifier_is_valid_argon2_phc_string` — validates the fix from the last commit (replacing all-zero dummy hash)
+- Login accept/reject paths, session tracking, role handling, and operator CRUD all green
+
+No failures.
+[2026-03-15 08:16:54] Claude review completed successfully
+
+[2026-03-15 08:16:54] ========================LOOP=========================
+
+[2026-03-15 08:16:54] Next review in 1800s (08:46:54)...
+[2026-03-15 08:46:54] === Starting Claude QA review ===
+[2026-03-15 08:46:54] WARNING: git pull failed, reviewing local state
+You're out of extra usage · resets 10am (Europe/Amsterdam)
+[2026-03-15 08:46:56] Claude review completed successfully
+
+[2026-03-15 08:46:56] ========================LOOP=========================
+
+[2026-03-15 08:46:56] Next review in 1800s (09:16:56)...
+[2026-03-15 10:10:09] ========================================================
+[2026-03-15 10:10:09]   Claude QA loop starting
+[2026-03-15 10:10:09]   Prompt: /home/michel/Red-Cell-C2/CLAUDE_PROMPT.md
+[2026-03-15 10:10:09]   Log:    /home/michel/Red-Cell-C2/logs/claude_qa.log
+[2026-03-15 10:10:09]   Sleep:  1800s between reviews
+[2026-03-15 10:10:09] ========================================================
+[2026-03-15 10:10:09] === Starting Claude QA review ===
+[2026-03-15 10:10:09] WARNING: git pull failed, reviewing local state
+---
+
+## QA Review Summary — 2026-03-15 13:30
+
+**Review range**: `c98ea0f..26f1378` — 20 commits
+
+### Agent Breakdown
+All activity this period is Claude (Ubuntu-C2-dev01-claude):
+- **2 tasks closed** with substantive code:
+  - `red-cell-c2-5q73`: `process_path` now correctly populated from the full binary path (was being clobbered by `process_name` basename)
+  - `red-cell-c2-lqzt`: `os_build` now surfaced in `AgentRecord`, `OperatorAgentInfo`, REST API, and database (was always empty string / missing)
+- **14 claim commits** — new issues picked up for next work cycle
+
+### Build Status
+**Passed** — `cargo check`, `cargo clippy -D warnings`, `cargo test` all clean. 937 tests, 0 failures.
+
+### Issues Found
+**None filed.** Both fixes are correct:
+- DB migrations use `NOT NULL DEFAULT ''`/`0` — safe additive column additions
+- New fields thread cleanly through all layers: domain → DB → demon protocol → websocket → REST API
+- Three well-targeted unit tests added in `agent_events.rs`
+- No `unwrap()`/`expect()` in production code, no hardcoded secrets
+
+### Key Warning (process, not a code bug)
+Claude has an **uncommitted implementation** of `red-cell-c2-xfkr` (pivot list callback + 2 integration tests) in the local working tree stash. The code quality is good — uses proper error propagation, no unsafe patterns. However, it will be lost if the stash is dropped before committing. The next dev cycle should recover and commit this work.
+
+### Scorecard Delta
+Claude +2 tasks closed, 0 new bugs → quality score holds at **97%**. Codex and Cursor no activity.
+
+### Overall Assessment
+Project is on track. Claude continues to lead on quality (97% vs Codex 85% vs Cursor 71%). The two fixes this cycle address real protocol correctness gaps (stale `os_build`, wrong `process_path`). No regressions. The 14 newly claimed issues are a good sign of forward momentum — 7 P2 bugs and 7 P3 consistency/security issues.
+[2026-03-15 10:17:17] Claude review completed successfully
+
+[2026-03-15 10:17:17] ========================LOOP=========================
+
+[2026-03-15 10:17:17] Next review in 1800s (10:47:17)...
+[2026-03-15 10:47:17] === Starting Claude QA review ===
+[2026-03-15 10:47:17] WARNING: git pull failed, reviewing local state
+---
+
+## QA Review Summary — 2026-03-15 16:00
+
+**Review range**: `24869d7..8ac42f5` — 15 commits
+
+### Agent Breakdown
+All activity: **Claude** (Ubuntu-C2-dev01-claude). No Codex or Cursor activity.
+
+5 tasks closed:
+- `red-cell-c2-xfkr` — pivot list callback handler (`dispatch.rs`)
+- `red-cell-c2-2me2` — webhook shutdown race fix (`webhook.rs`)
+- `red-cell-c2-q9re` — per-IP auth failure rate limiter (`api.rs`)
+- `red-cell-c2-zroy` — TLS private key wrapped in `Zeroizing` (`tls.rs`)
+- `red-cell-c2-j8a0` — replace UUID-based HMAC secret with `getrandom` (`api.rs`)
+
+### Build Status
+**Passed** — `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test` ✓ (659 tests, 0 failures)
+
+### Issues Found
+
+**`red-cell-c2-0bm2`** (P3, Claude) — `dispatch.rs:1109`: pivot list uses `{demon_id:<08x}` — left-aligned zero-padding puts zeros on the right for short demon IDs. Should be `{demon_id:08x}`. Tests use 8-digit values so the bug is not caught.
+
+**`red-cell-c2-psa8`** (P3, Claude) — `api.rs`: the new auth failure rate limiter re-implements `FailedApiAuthWindow` + prune/evict helpers instead of using the generic `rate_limiter.rs` module. Adds a third independent eviction-pattern copy, worsening the issue `red-cell-c2-2hd9` was filed to address.
+
+**Ongoing** (`red-cell-c2-olwt`): HEAD commit 8ac42f5 claims `red-cell-c2-5rtk` which was already closed — the agent loop is still claiming closed issues.
+
+### Scorecard Delta — Claude
+| Metric | Before | After |
+|--------|--------|-------|
+| Tasks closed | 99 | 104 |
+| Bugs filed against | 3 | 5 |
+| Bug rate | 0.03 | 0.05 |
+| Quality score | 97% | 95% |
+
+### Overall Assessment
+Project is progressing well. All five fixes are correct and include tests — the webhook shutdown race fix is particularly solid. The two new bugs are minor display/code-quality issues, not security or correctness regressions. The recurring issue of claiming closed/in-progress issues (`red-cell-c2-olwt`) remains unresolved and continues generating noise in the commit history.
+[2026-03-15 10:55:12] Claude review completed successfully
+
+[2026-03-15 10:55:12] ========================LOOP=========================
+
+[2026-03-15 10:55:12] Next review in 1800s (11:25:12)...
+[2026-03-15 11:25:12] === Starting Claude QA review ===
+[2026-03-15 11:25:14] git pull: ok
+---
+
+## QA Review — 2026-03-15 — `66f78ef..36efd87` (12 commits)
+
+### Review Range
+- Base: `66f78ef` (previous QA checkpoint)
+- Head: `36efd87` (dev agent added one more claim commit during review; checkpoint updated to current HEAD `0034f46`)
+- 12 commits reviewed
+
+### Agent Breakdown
+
+All substantive work this cycle was by **Claude** (Ubuntu-C2-dev01-claude):
+
+| Commit | What |
+|--------|------|
+| `361230e` | `refactor(teamserver)`: extract shared eviction logic → new `rate_limiter.rs` module |
+| `402d4ef` | `refactor(teamserver)`: consolidate duplicate 30 MiB cap into `MAX_AGENT_MESSAGE_LEN` |
+| `24c6e49` | `refactor(crypto)`: extract `is_weak_aes_key`/`is_weak_aes_iv` helpers to `common` |
+| `216627b` | `fix(protocol)`: reject unsupported HTTP methods at payload-build time |
+| `36efd87` | `feat(dev-loop)`: token-limit backoff + post-run WIP commit/reset |
+
+4 issues closed: `0ff3`, `b44y`, `yh94`, `2hd9`. Codex and Cursor: no activity.
+
+### Build Status
+
+**Passed** — `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test` ✓ (967 tests, 0 failures)
+
+### Issues Found
+
+**`red-cell-c2-t4ml` (P2 bug — Claude)** — `payload_builder.rs:643`: `add_wstring(out, method)?` writes the user-supplied method string verbatim. The validation at line 634 is case-insensitive, so `method="post"` passes but gets embedded in the Demon binary as `"post"` instead of `"POST"`. HTTP methods are case-sensitive (RFC 7230 §3.1.1); an implant with `method=post` will make non-standard requests that many servers reject — a silently non-functional agent. Fix: `add_wstring(out, &method.to_ascii_uppercase())?`.
+
+No other bugs found.
+
+### Scorecard Delta
+
+| Agent | Tasks closed (this run) | Bugs filed (this run) | Running totals |
+|-------|------------------------|----------------------|----------------|
+| Claude | +4 | +1 | 108 tasks, 6 bugs, 94% quality |
+| Codex | 0 | 0 | unchanged |
+| Cursor | 0 | 0 | unchanged |
+
+### Overall Assessment
+
+Solid cycle. Four clean refactoring tasks delivered with proper tests — `rate_limiter.rs` is a textbook extraction, the `is_weak_aes_key`/`is_weak_aes_iv` helpers are well-documented, and `MAX_AGENT_MESSAGE_LEN` consolidation eliminates a silent divergence risk. One genuine protocol regression: HTTP method case not normalized before binary serialization. The carry-over `red-cell-c2-psa8` (`api.rs` rate-limiter duplication) is still open. Claude is the only active agent and is performing well at 94% quality.
+[2026-03-15 11:30:24] Claude review completed successfully
+
+[2026-03-15 11:30:24] ========================LOOP=========================
+
+[2026-03-15 11:30:24] Next review in 1800s (12:00:24)...

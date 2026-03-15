@@ -1,0 +1,61 @@
+---
+
+## Architecture Review — 2026-03-15
+
+### Codebase Health: **on track**
+
+The teamserver is well-engineered. No production `unwrap()`/`todo!()`/`unimplemented!()` calls anywhere. Protocol implementation is correct and tightly matched to the Havoc reference. All architectural mandates from `AGENTS.md` are satisfied.
+
+---
+
+### Security Posture
+
+The two highest-severity findings (**SEC-01**: AES-256-CTR two-time-pad, **SEC-02**: CHECKIN key-rotation replay) are both Havoc protocol-inherited constraints that have already been explicitly acknowledged with inline comments. They cannot be fixed without breaking wire compatibility. New findings this run are lower severity:
+
+- **red-cell-c2-zroy** (P3): TLS private key stored without `Zeroizing<>` — inconsistent with the zeroization policy already applied to agent session keys in `AgentEncryptionInfo`.
+- **red-cell-c2-j8a0** (P3): API key HMAC secret generated from two `UUIDv4` values (244 bits entropy, not 256) — `OsRng` should be used directly as it already is for agent key material.
+
+---
+
+### Biggest Blindspot
+
+**CTR offset continuity after restart** (`red-cell-c2-h5a3`, P2). The persist-before-mutate ordering in `set_ctr_offset()` is correct, but there is no test exercising the full save → process restart → reload → encrypt cycle. A regression in this path would silently produce keystream collisions (two-time-pad) on every teamserver restart — exactly the most sensitive failure mode for AES-256-CTR.
+
+---
+
+### Issues Filed (15 new)
+
+| ID | P | Agent | Description |
+|---|---|---|---|
+| red-cell-c2-zroy | 3 | Claude | TLS private key not wrapped in `Zeroizing<>` |
+| red-cell-c2-j8a0 | 3 | Claude | API key HMAC secret from UUIDv4 (244 vs 256 bits) |
+| red-cell-c2-5rtk | 3 | Claude | `DEFAULT_MAX_DOWNLOAD_BYTES` defined twice with different types |
+| red-cell-c2-b44y | 3 | Claude | All-zero key/IV validation duplicated across two modules |
+| red-cell-c2-0ff3 | 2 | Claude | HTTP method in payload not validated against listener config |
+| red-cell-c2-wey1 | 2 | Claude | Audit log missing agent lifecycle events |
+| red-cell-c2-h5a3 | 2 | Claude | No test for CTR offset recovery after teamserver restart |
+| red-cell-c2-kky2 | 3 | Claude | No test verifying SOCKS5 binds localhost-only |
+| red-cell-c2-o7z6 | 3 | Claude | No test for X-Forwarded-For spoofing prevention |
+| red-cell-c2-m8tz | 3 | Claude | No test for concurrent DemonInit at agent cap |
+| red-cell-c2-a0oo | 3 | Claude | No test for `QueueFull` at `MAX_JOB_QUEUE_DEPTH` |
+| red-cell-c2-2hd9 | 3 | Codex | `DemonInitRateLimiter` / `LoginRateLimiter` duplicate eviction logic |
+| red-cell-c2-yh94 | 3 | Codex | `DEMON_MAX_RESPONSE_LENGTH` and `MAX_AGENT_REQUEST_BODY_LEN` same cap, two places |
+| red-cell-c2-cqmk | 3 | Codex | Plugin API only exposes `emit_agent_checkin` — all other lifecycle hooks absent |
+| red-cell-c2-rcy6 | 2 | Codex | `patch_payload()` writes PE header without validating MZ magic first |
+
+---
+
+### Agent Quality
+
+**Claude** is writing the best code this run — zero production `unwrap()`s, correct protocol handling, consistent use of `Zeroizing` for agent keys (just missed the TLS key). The 11 findings against Claude are primarily missing tests and minor consistency gaps, not functional bugs.
+
+**Codex**'s findings are slightly more impactful: the duplicated rate-limiter logic is a maintenance hazard, and the PE patch without magic validation is a correctness bug that could produce silently broken payloads.
+
+---
+
+### Recommendation for Dev Agents
+
+**Priority 1**: `red-cell-c2-h5a3` — write the CTR offset restart test. This is the highest-risk unverified invariant in the codebase.  
+**Priority 2**: `red-cell-c2-0ff3` — validate HTTP method consistency at payload build time; silent misconfiguration produces non-functional implants.  
+**Priority 3**: `red-cell-c2-rcy6` — add PE magic check before patching; same class of silent failure.  
+**Priority 4**: Consolidate the three duplicate constants (`red-cell-c2-5rtk`, `red-cell-c2-yh94`, `red-cell-c2-b44y`) in a single pass.

@@ -173,6 +173,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn closed_bus_causes_recv_to_return_none() {
+        let bus = EventBus::new(8);
+        let mut receiver = bus.subscribe();
+
+        drop(bus);
+
+        assert_eq!(receiver.recv().await, None);
+        assert!(receiver.is_closed());
+        // A second call must also return None immediately without blocking.
+        assert_eq!(receiver.recv().await, None);
+    }
+
+    #[tokio::test]
     async fn recent_teamserver_logs_retain_only_log_events() {
         let bus = EventBus::new(2);
         let first = log_message("one");

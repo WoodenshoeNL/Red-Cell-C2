@@ -560,6 +560,13 @@ fn insert_default_bool(config: &mut Map<String, Value>, key: &str, value: bool) 
     }
 }
 
+/// HTTP methods that the Demon implant supports for C2 callbacks.
+///
+/// Demon callbacks carry an encrypted body, so only methods that allow a
+/// request body are valid.  The Havoc reference implementation uses POST
+/// exclusively; extend this list only after verifying Demon-side support.
+const DEMON_SUPPORTED_HTTP_METHODS: &[&str] = &["POST"];
+
 fn pack_config(
     listener: &ListenerConfig,
     config: &Map<String, Value>,
@@ -624,12 +631,16 @@ fn pack_http_listener(
     add_u32(out, parse_working_hours(config.working_hours.as_deref())? as u32);
 
     let method = config.method.as_deref().unwrap_or("POST");
-    if method.eq_ignore_ascii_case("GET") {
+    if !DEMON_SUPPORTED_HTTP_METHODS.iter().any(|&m| method.eq_ignore_ascii_case(m)) {
         return Err(PayloadBuildError::InvalidRequest {
-            message: "GET method is not supported".to_owned(),
+            message: format!(
+                "HTTP method `{method}` is not supported for Demon payloads; \
+                 supported: {}",
+                DEMON_SUPPORTED_HTTP_METHODS.join(", ")
+            ),
         });
     }
-    add_wstring(out, "POST")?;
+    add_wstring(out, method)?;
     add_u32(out, if config.host_rotation.eq_ignore_ascii_case("round-robin") { 0 } else { 1 });
 
     add_u32(
@@ -1617,6 +1628,103 @@ mod tests {
             PayloadBuildError::InvalidRequest { message }
                 if message == "DNS listeners are not supported for Demon payload builds"
         ));
+        Ok(())
+    }
+
+    fn minimal_config_json() -> Map<String, Value> {
+        serde_json::from_value::<Map<String, Value>>(json!({
+            "Sleep": "5",
+            "Jitter": "0",
+            "Sleep Technique": "WaitForSingleObjectEx",
+            "Injection": {
+                "Alloc": "Win32",
+                "Execute": "Win32",
+                "Spawn64": "a",
+                "Spawn32": "b"
+            }
+        }))
+        .expect("valid test json")
+    }
+
+    fn http_listener_with_method(method: Option<&str>) -> ListenerConfig {
+        ListenerConfig::Http(Box::new(HttpListenerConfig {
+            name: "http".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["localhost:80".to_owned()],
+            host_bind: "0.0.0.0".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: 80,
+            port_conn: None,
+            method: method.map(str::to_owned),
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: Vec::new(),
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: None,
+            proxy: None,
+        }))
+    }
+
+    #[test]
+    fn pack_config_accepts_post_method() -> Result<(), Box<dyn std::error::Error>> {
+        let listener = http_listener_with_method(Some("POST"));
+        pack_config(&listener, &minimal_config_json()).expect("POST should be accepted");
+        Ok(())
+    }
+
+    #[test]
+    fn pack_config_accepts_post_method_case_insensitive() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let listener = http_listener_with_method(Some("post"));
+        pack_config(&listener, &minimal_config_json()).expect("lowercase post should be accepted");
+        Ok(())
+    }
+
+    #[test]
+    fn pack_config_rejects_head_method() {
+        let listener = http_listener_with_method(Some("HEAD"));
+        let error =
+            pack_config(&listener, &minimal_config_json()).expect_err("HEAD should be rejected");
+        assert!(
+            matches!(&error, PayloadBuildError::InvalidRequest { message } if message.contains("HEAD")),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn pack_config_rejects_get_method() {
+        let listener = http_listener_with_method(Some("GET"));
+        let error =
+            pack_config(&listener, &minimal_config_json()).expect_err("GET should be rejected");
+        assert!(
+            matches!(&error, PayloadBuildError::InvalidRequest { message } if message.contains("GET")),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn pack_config_rejects_delete_method() {
+        let listener = http_listener_with_method(Some("DELETE"));
+        let error =
+            pack_config(&listener, &minimal_config_json()).expect_err("DELETE should be rejected");
+        assert!(
+            matches!(&error, PayloadBuildError::InvalidRequest { message } if message.contains("DELETE")),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn pack_config_method_none_defaults_to_post() -> Result<(), Box<dyn std::error::Error>> {
+        // Producing a config with method=None should yield the same bytes as method=Some("POST").
+        let bytes_default = pack_config(&http_listener_with_method(None), &minimal_config_json())?;
+        let bytes_explicit =
+            pack_config(&http_listener_with_method(Some("POST")), &minimal_config_json())?;
+        assert_eq!(bytes_default, bytes_explicit);
         Ok(())
     }
 

@@ -9,17 +9,17 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 110 | 181 | 31 |
-| Bugs filed against | 8 | 28 | 9 |
-| Bug rate (bugs/task) | 0.07 | 0.15 | 0.29 |
-| Quality score | 93% | 85% | 71% |
+| Tasks closed | 113 | 181 | 31 |
+| Bugs filed against | 10 | 28 | 9 |
+| Bug rate (bugs/task) | 0.09 | 0.15 | 0.29 |
+| Quality score | 91% | 85% | 71% |
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 0 | 0 | 0 |
-| Missing tests | 7 | 11 | 5 |
+| Missing tests | 8 | 11 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
 | Protocol errors | 5 | 22 | 3 |
 | Security issues | 9 | 31 | 0 |
@@ -27,7 +27,7 @@ Each loop run updates the running totals and appends a review entry.
 | Memory / resource leaks | 0 | 10 | 1 |
 | Startup / lifecycle regressions | 0 | 8 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
-| Availability / timeout regressions | 0 | 4 | 0 |
+| Availability / timeout regressions | 1 | 4 | 0 |
 | Correctness / pagination | 4 | 2 | 1 |
 | Workflow / close-hygiene | 3 | 0 | 0 |
 | Code reuse / duplication | 3 | 0 | 0 |
@@ -37,6 +37,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-15 13:35 — 762c867..2cb596e
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 2 | Closed `red-cell-c2-a55z` (P1 security: magic pre-check before body buffering — `collect_body_with_magic_precheck()` rejects non-Demon traffic after first 8 bytes, 5 tests added); `red-cell-c2-wey1` (P2 completeness: agent.registered/agent.checkin/agent.dead audit events wired at correct lifecycle points, 3 integration tests); `red-cell-c2-rcy6` (P2 correctness: MZ+PE signature validation in `patch_payload()` before any byte writes, 3 tests). Filed `red-cell-c2-44as` (P3): `handle_checkin` writes audit log inline on hot callback path — should be `tokio::spawn` like `agent.dead`. Filed `red-cell-c2-wd91` (P4): `sweep_records_agent_dead_audit_entry` test uses two `yield_now()` to await background task — may be flaky on loaded CI. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (693 tests, 0 failures)
+Notes: All three deliverables are high quality. The magic pre-check fix is well-designed and correctly documented. The audit lifecycle coverage is comprehensive. Two minor follow-on issues filed (hot-path sync write, test fragility).
 
 ### QA Review — 2026-03-15 11:00 — 0034f46..762c867
 

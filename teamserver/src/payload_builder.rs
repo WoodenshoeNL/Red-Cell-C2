@@ -1582,6 +1582,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_working_hours_rejects_end_before_start() {
+        let err = parse_working_hours(Some("17:00-08:00"));
+        assert!(matches!(
+            err,
+            Err(PayloadBuildError::InvalidRequest { message })
+                if message == "WorkingHours end must be after the start"
+        ));
+    }
+
+    #[test]
+    fn parse_working_hours_rejects_equal_start_and_end() {
+        let err = parse_working_hours(Some("10:30-10:30"));
+        assert!(matches!(
+            err,
+            Err(PayloadBuildError::InvalidRequest { message })
+                if message == "WorkingHours end must be after the start"
+        ));
+    }
+
+    #[test]
     fn parse_kill_date_accepts_positive_timestamp() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(parse_kill_date(Some("1234"))?, 1234);
         Ok(())

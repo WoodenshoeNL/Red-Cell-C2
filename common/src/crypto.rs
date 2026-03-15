@@ -1,33 +1,36 @@
 //! Agent transport cryptography helpers.
 //!
-//! # Security — AES-256-CTR keystream reuse (two-time-pad)
+//! # AES-256-CTR session design
 //!
 //! The Havoc Demon protocol assigns each agent a fixed key+IV pair at registration
-//! time.  The teamserver (and Demon) reset the AES-CTR counter to zero at the start
-//! of **every** message rather than maintaining a running counter across the session.
-//! This means that every message encrypted under the same agent session is protected
-//! by an **identical keystream**.
+//! time.  Red Cell's **running session** maintains a monotonically advancing per-agent
+//! CTR block offset: `decrypt_from_agent` and `encrypt_for_agent` (in the teamserver)
+//! each advance `ctr_block_offset` in both the in-memory session state and the
+//! database after every message.  This means successive messages consume distinct
+//! portions of the keystream and do **not** suffer from the two-time-pad attack.
 //!
-//! Consequence: if an adversary records two ciphertexts `C1` and `C2` produced by
-//! the same agent, `C1 ⊕ C2 = P1 ⊕ P2`.  If either plaintext is partially known
-//! (e.g. a predictable command header), the other can be recovered.  This is the
-//! classic *two-time-pad* (or *many-time-pad*) attack.
+//! ## Init-handshake helpers vs. running-session functions
 //!
-//! **This behaviour is intentional for Havoc wire-format compatibility.**
-//! [`encrypt_agent_data`] and [`decrypt_agent_data`] deliberately reproduce it so
-//! that Red Cell can interoperate with unmodified Demon implants.
+//! [`encrypt_agent_data`] and [`decrypt_agent_data`] are **Havoc-compatibility
+//! helpers** that always start at block offset zero.  They are used exclusively
+//! during the `DEMON_INIT` handshake (`parse_init_agent`), where the Demon itself
+//! sends the first message at offset zero before any session counter has been
+//! established.  They must **not** be used for regular callback processing.
 //!
-//! ## Mitigations available to operators
+//! For all post-registration traffic, use the offset-aware variants
+//! ([`encrypt_agent_data_at_offset`] / [`decrypt_agent_data_at_offset`]) and keep the
+//! `block_offset` advancing — or use an AEAD scheme (e.g. AES-256-GCM) for new
+//! transports that do not need Havoc wire-format compatibility.
 //!
-//! * **When Havoc compatibility is not required** (custom implants), use
-//!   [`encrypt_agent_data_at_offset`] and advance the `block_offset` by the return
-//!   value of [`ctr_blocks_for_len`] after each message.  Keeping a monotonically
-//!   increasing per-session counter eliminates keystream reuse.
-//! * **Use an AEAD scheme** (e.g. AES-256-GCM) for any new transport that does not
-//!   need to remain Havoc-wire-compatible.  AEAD provides both confidentiality and
-//!   ciphertext integrity, which CTR alone does not.
-//! * See [`docs/operator-security.md`](../../../docs/operator-security.md) for
-//!   deployment guidance.
+//! ## Residual keystream-reuse risk
+//!
+//! If an adversary records two ciphertexts `C1` and `C2` encrypted at the **same**
+//! offset (e.g. both at offset zero), `C1 ⊕ C2 = P1 ⊕ P2`.  The advancing-offset
+//! design in the running session prevents this; the init message at offset zero is the
+//! only deliberate reset and is constrained to the handshake phase.
+//!
+//! See [`docs/operator-security.md`](../../../docs/operator-security.md) for
+//! deployment guidance.
 
 use aes::Aes256;
 use cipher::{InvalidLength, KeyIvInit, StreamCipher, StreamCipherSeek};

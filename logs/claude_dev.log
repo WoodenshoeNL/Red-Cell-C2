@@ -26797,3 +26797,13 @@ Done. The fix replaces the two `yield_now()` calls with a polling loop bounded b
 [2026-03-15 20:56:26] [Ubuntu-C2-dev02-claude] Claimed red-cell-c2-3h7
 [2026-03-15 20:56:26] [Ubuntu-C2-dev02-claude] Running Claude on task red-cell-c2-3h7...
 [2026-03-15 21:04:57] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-3h7
+[2026-03-15 21:04:57] [Ubuntu-C2-dev02-claude] WIP: committing uncommitted changes for red-cell-c2-3h7
+[2026-03-15 21:04:59] [Ubuntu-C2-dev02-claude] WIP: pushed
+[2026-03-15 21:04:59] [Ubuntu-C2-dev02-claude] ========================LOOP=========================
+[2026-03-15 21:05:14] [Ubuntu-C2-dev02-claude] === Starting Claude dev loop iteration 2 ===
+[2026-03-15 21:05:15] [Ubuntu-C2-dev02-claude] git pull --ff-only: ok
+[2026-03-15 21:05:16] [Ubuntu-C2-dev02-claude] br sync import: ok
+[2026-03-15 21:05:17] [Ubuntu-C2-dev02-claude] Selected task: red-cell-c2-369d
+[2026-03-15 21:05:21] [Ubuntu-C2-dev02-claude] Claimed red-cell-c2-369d
+[2026-03-15 21:05:21] [Ubuntu-C2-dev02-claude] Running Claude on task red-cell-c2-369d...
+[2026-03-15 21:15:45] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-369d

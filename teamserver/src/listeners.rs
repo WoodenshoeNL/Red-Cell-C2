@@ -2095,18 +2095,33 @@ impl DnsListenerState {
 
         let mut uploads = self.uploads.lock().await;
 
-        if let Some(existing) = uploads.get(&agent_id)
-            && existing.total != total
-        {
-            warn!(
-                listener = %self.config.name,
-                agent_id = format_args!("{agent_id:08X}"),
-                received_total = total,
-                expected_total = existing.total,
-                "dns upload rejected due to inconsistent chunk total"
-            );
-            uploads.remove(&agent_id);
-            return DnsUploadAssembly::Rejected;
+        if let Some(existing) = uploads.get(&agent_id) {
+            if existing.peer_ip != peer_ip {
+                // A different source IP is referencing an agent_id that already has an
+                // in-progress upload.  Reject the imposter without touching the legitimate
+                // session — clearing the session here is exactly what a DoS attacker would
+                // exploit (they can see agent IDs in plaintext DNS labels).
+                warn!(
+                    listener = %self.config.name,
+                    agent_id = format_args!("{agent_id:08X}"),
+                    %peer_ip,
+                    expected_peer_ip = %existing.peer_ip,
+                    "dns upload rejected due to source IP mismatch; possible agent_id spoofing"
+                );
+                return DnsUploadAssembly::Rejected;
+            }
+
+            if existing.total != total {
+                warn!(
+                    listener = %self.config.name,
+                    agent_id = format_args!("{agent_id:08X}"),
+                    received_total = total,
+                    expected_total = existing.total,
+                    "dns upload rejected due to inconsistent chunk total"
+                );
+                uploads.remove(&agent_id);
+                return DnsUploadAssembly::Rejected;
+            }
         }
 
         if !uploads.contains_key(&agent_id) && uploads.len() >= DNS_MAX_PENDING_UPLOADS {
@@ -6061,6 +6076,52 @@ mod tests {
             .await;
         assert_eq!(second, DnsUploadAssembly::Rejected);
         assert!(!state.uploads.lock().await.contains_key(&agent_id));
+    }
+
+    /// A third-party host that knows a valid agent_id must not be able to clear the legitimate
+    /// agent's in-progress upload session by sending a chunk with a mismatched total.
+    #[tokio::test]
+    async fn dns_upload_spoof_does_not_clear_legitimate_session() {
+        let state = dns_state("dns-spoof-dos").await;
+        let agent_id = 0xDEAD_BEEF;
+        let legit_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let attacker_ip = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
+
+        // Legitimate agent opens a 3-chunk upload session.
+        let first = state.try_assemble_upload(agent_id, 0, 3, vec![0x41], legit_ip).await;
+        assert_eq!(first, DnsUploadAssembly::Pending);
+
+        // Attacker sends a chunk for the same agent_id with a different total to trigger
+        // the inconsistent-total branch — this must be rejected without clearing the session.
+        let spoof = state.try_assemble_upload(agent_id, 0, 99, vec![0xFF], attacker_ip).await;
+        assert_eq!(spoof, DnsUploadAssembly::Rejected);
+
+        // The legitimate session must still be intact.
+        {
+            let uploads = state.uploads.lock().await;
+            let session = uploads.get(&agent_id).expect("session must still exist after spoof");
+            assert_eq!(session.total, 3, "session total must not have been overwritten");
+            assert_eq!(session.peer_ip, legit_ip, "session peer_ip must not have changed");
+        }
+
+        // Attacker sends matching total but is still rejected due to IP mismatch.
+        let spoof_matching_total =
+            state.try_assemble_upload(agent_id, 1, 3, vec![0xAA], attacker_ip).await;
+        assert_eq!(spoof_matching_total, DnsUploadAssembly::Rejected);
+
+        // Session must remain unchanged — only legit_ip's chunk (seq 0) is present.
+        {
+            let uploads = state.uploads.lock().await;
+            let session = uploads.get(&agent_id).expect("session must still exist");
+            assert_eq!(session.chunks.len(), 1);
+            assert!(session.chunks.contains_key(&0));
+        }
+
+        // Legitimate agent completes the upload normally.
+        let second = state.try_assemble_upload(agent_id, 1, 3, vec![0x42], legit_ip).await;
+        assert_eq!(second, DnsUploadAssembly::Pending);
+        let third = state.try_assemble_upload(agent_id, 2, 3, vec![0x43], legit_ip).await;
+        assert_eq!(third, DnsUploadAssembly::Complete(vec![0x41, 0x42, 0x43]));
     }
 
     #[tokio::test]

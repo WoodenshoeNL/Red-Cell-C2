@@ -155,6 +155,13 @@ impl DemonPacketParser {
         let remaining = &envelope.payload[offset..];
 
         if command_id == u32::from(DemonCommand::DemonInit) {
+            if envelope.header.agent_id == 0 {
+                warn!(listener_name, "rejecting DEMON_INIT with reserved agent_id 0x00000000");
+                return Err(DemonParserError::InvalidInit(
+                    "agent_id 0 is reserved and not allowed",
+                ));
+            }
+
             if remaining.is_empty() {
                 return Ok(ParsedDemonPacket::Reconnect { header: envelope.header, request_id });
             }
@@ -1353,6 +1360,31 @@ mod tests {
             .parse_at(&packet, "203.0.113.99".to_owned(), datetime!(2026-03-10 12:00:00 UTC))
             .await
             .expect_err("zero-header spoofed init must be rejected");
+
+        assert!(
+            matches!(error, DemonParserError::InvalidInit(_)),
+            "expected InvalidInit error, got: {error}"
+        );
+    }
+
+    /// Regression test for red-cell-c2-4rsi: a DEMON_INIT where both the
+    /// transport header `agent_id` *and* the encrypted metadata `agent_id` are
+    /// zero must be rejected.  Previously the header/payload mismatch check
+    /// passed (both equal) and the zero-id agent was registered.
+    #[tokio::test]
+    async fn parse_rejects_init_with_zero_agent_id_in_both_header_and_payload() {
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry);
+        let key = [0x55; AGENT_KEY_LENGTH];
+        let iv = [0x66; AGENT_IV_LENGTH];
+
+        // Build a fully well-formed init packet with agent_id=0 everywhere.
+        let packet = build_init_packet(0, key, iv);
+
+        let error = parser
+            .parse_at(&packet, "203.0.113.99".to_owned(), datetime!(2026-03-16 10:00:00 UTC))
+            .await
+            .expect_err("zero agent_id init must be rejected");
 
         assert!(
             matches!(error, DemonParserError::InvalidInit(_)),

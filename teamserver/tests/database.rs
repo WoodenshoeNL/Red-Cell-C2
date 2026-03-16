@@ -1285,3 +1285,62 @@ async fn audit_repository_tracks_latest_session_activity_per_operator()
 
     Ok(())
 }
+
+#[tokio::test]
+async fn audit_latest_timestamps_returns_empty_map_for_empty_actions_slice()
+-> Result<(), TeamserverError> {
+    let database = test_database().await?;
+
+    // Insert a row so the DB is not empty — the early-return must fire before any DB round-trip.
+    database
+        .audit_log()
+        .create(&AuditLogEntry {
+            id: None,
+            actor: "neo".to_owned(),
+            action: "operator.connect".to_owned(),
+            target_kind: "operator".to_owned(),
+            target_id: Some("neo".to_owned()),
+            details: None,
+            occurred_at: "2026-03-10T08:00:00Z".to_owned(),
+        })
+        .await?;
+
+    let result = database.audit_log().latest_timestamps_by_actor_for_actions(&[]).await?;
+
+    assert!(result.is_empty(), "empty actions slice must return an empty BTreeMap immediately");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn audit_latest_timestamps_returns_only_most_recent_for_single_actor()
+-> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let audit = database.audit_log();
+
+    // Three rows for the same actor and action — timestamps are deliberately out-of-order.
+    for occurred_at in &["2026-03-10T07:00:00Z", "2026-03-10T09:00:00Z", "2026-03-10T08:00:00Z"] {
+        audit
+            .create(&AuditLogEntry {
+                id: None,
+                actor: "neo".to_owned(),
+                action: "operator.connect".to_owned(),
+                target_kind: "operator".to_owned(),
+                target_id: Some("neo".to_owned()),
+                details: None,
+                occurred_at: (*occurred_at).to_owned(),
+            })
+            .await?;
+    }
+
+    let result = audit.latest_timestamps_by_actor_for_actions(&["operator.connect"]).await?;
+
+    assert_eq!(result.len(), 1, "only one actor should appear");
+    assert_eq!(
+        result.get("neo").map(String::as_str),
+        Some("2026-03-10T09:00:00Z"),
+        "MAX(occurred_at) must be returned, not the first-inserted timestamp"
+    );
+
+    Ok(())
+}

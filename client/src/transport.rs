@@ -1065,6 +1065,9 @@ async fn run_connection_manager(
         {
             Ok(socket) => {
                 reconnect_delay = INITIAL_RECONNECT_DELAY;
+                // Clear any stale TLS failure from a previous attempt so the login
+                // UI does not show a cert error panel after a successful reconnect.
+                lock_app_state(&app_state).tls_failure = None;
                 set_connection_status(&app_state, &repaint, ConnectionStatus::Connected);
 
                 let (write, read) = socket.split();

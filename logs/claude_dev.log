@@ -27282,3 +27282,25 @@ You've hit your limit · resets 12pm (Europe/Amsterdam)
 [2026-03-16 12:51:48] [Ubuntu-C2-dev02-claude] Claimed red-cell-c2-rsu9
 [2026-03-16 12:51:48] [Ubuntu-C2-dev02-claude] Running Claude on task red-cell-c2-rsu9...
 [2026-03-16 12:56:53] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-rsu9
+[2026-03-16 12:56:53] [Ubuntu-C2-dev02-claude] WIP: committing uncommitted changes for red-cell-c2-rsu9
+[2026-03-16 12:56:55] [Ubuntu-C2-dev02-claude] WIP: pushed
+[2026-03-16 12:56:55] [Ubuntu-C2-dev02-claude] ========================LOOP=========================
+[2026-03-16 12:56:55] [Ubuntu-C2-dev02-claude] Next run in 5m (at 13:01:55)
+[2026-03-16 13:01:55] [Ubuntu-C2-dev02-claude] === Claude dev loop iteration 158 ===
+[2026-03-16 13:01:56] [Ubuntu-C2-dev02-claude] git pull --ff-only: ok
+[2026-03-16 13:01:57] [Ubuntu-C2-dev02-claude] br sync import: ok
+[2026-03-16 13:01:58] [Ubuntu-C2-dev02-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-mk68
+[2026-03-16 13:01:58] [Ubuntu-C2-dev02-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-lbxd
+[2026-03-16 13:01:58] [Ubuntu-C2-dev02-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-bdnw
+[2026-03-16 13:01:58] [Ubuntu-C2-dev02-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-5a1q
+[2026-03-16 13:01:58] [Ubuntu-C2-dev02-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-6iz0
+[2026-03-16 13:01:58] [Ubuntu-C2-dev02-claude] Selected task: red-cell-c2-kg7n
+[2026-03-16 13:02:02] [Ubuntu-C2-dev02-claude] Claimed red-cell-c2-kg7n
+[2026-03-16 13:02:03] [Ubuntu-C2-dev02-claude] Running Claude on task red-cell-c2-kg7n...
+Issue `red-cell-c2-kg7n` is closed. The tests were already present and passing in `teamserver/src/dispatch/mod.rs`:
+
+- `pivot_connect_callback_failure_broadcasts_error_event` — verifies `success==0` on connect broadcasts an `AgentResponse` with `Type="Error"` containing the Win32 error code
+- `pivot_disconnect_callback_failure_broadcasts_error_event` — verifies `success==0` on disconnect broadcasts an `AgentResponse` with `Type="Error"` mentioning the child agent ID
+
+Both were introduced by the commits that fixed `red-cell-c2-rsu9` and `red-cell-c2-oreb` (the Error event bugs this issue depended on). All workspace checks pass cleanly.
+[2026-03-16 13:07:26] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-kg7n

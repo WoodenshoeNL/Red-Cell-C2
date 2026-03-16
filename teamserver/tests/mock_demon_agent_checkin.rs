@@ -74,7 +74,7 @@ async fn mock_demon_checkin_get_job_and_output_flow() -> Result<(), Box<dyn std:
         .await;
     });
 
-    let listener_port = common::available_port_excluding(server_addr.port())?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
     let client = reqwest::Client::new();
     let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
     common::login(&mut socket).await?;
@@ -102,6 +102,7 @@ async fn mock_demon_checkin_get_job_and_output_flow() -> Result<(), Box<dyn std:
             proxy: None,
         }))
         .await?;
+    drop(listener_guard);
     listeners.start("edge-http").await?;
     common::wait_for_listener(listener_port).await?;
 
@@ -286,7 +287,7 @@ async fn reconnect_then_subsequent_callback_remains_synchronised()
         .await;
     });
 
-    let listener_port = common::available_port_excluding(server_addr.port())?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
     let client = reqwest::Client::new();
     let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
     common::login(&mut socket).await?;
@@ -314,6 +315,7 @@ async fn reconnect_then_subsequent_callback_remains_synchronised()
             proxy: None,
         }))
         .await?;
+    drop(listener_guard);
     listeners.start("edge-http-reconnect-e2e").await?;
     common::wait_for_listener(listener_port).await?;
 

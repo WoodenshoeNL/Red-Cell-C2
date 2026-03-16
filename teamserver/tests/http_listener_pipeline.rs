@@ -21,13 +21,14 @@ async fn http_listener_pipeline_registers_agent_and_broadcasts_checkin()
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
     let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None);
     let mut event_receiver = events.subscribe();
-    let port = common::available_port()?;
+    let (port, guard) = common::available_port()?;
     let key = [0x41; AGENT_KEY_LENGTH];
     let iv = [0x24; AGENT_IV_LENGTH];
     let agent_id = 0x1234_5678;
     let mut ctr_offset = 0_u64;
 
     manager.create(http_listener("edge-http-pipeline", port)).await?;
+    drop(guard);
     manager.start("edge-http-pipeline").await?;
     common::wait_for_listener(port).await?;
 
@@ -96,10 +97,11 @@ async fn http_listener_pipeline_rejects_plaintext_zero_key_init()
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
     let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
-    let port = common::available_port()?;
+    let (port, guard) = common::available_port()?;
     let agent_id = 0x1357_9BDF;
 
     manager.create(http_listener("edge-http-zero-key", port)).await?;
+    drop(guard);
     manager.start("edge-http-zero-key").await?;
     common::wait_for_listener(port).await?;
 
@@ -125,12 +127,13 @@ async fn http_listener_pipeline_rejects_callbacks_from_unregistered_agent()
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
     let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
-    let port = common::available_port()?;
+    let (port, guard) = common::available_port()?;
     let key = [0x41; AGENT_KEY_LENGTH];
     let iv = [0x24; AGENT_IV_LENGTH];
     let agent_id = 0xCAFE_BABE;
 
     manager.create(http_listener("edge-http-unknown-agent", port)).await?;
+    drop(guard);
     manager.start("edge-http-unknown-agent").await?;
     common::wait_for_listener(port).await?;
 
@@ -180,7 +183,7 @@ async fn http_listener_pipeline_attributes_real_ip_from_trusted_redirector()
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
     let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
-    let port = common::available_port()?;
+    let (port, guard) = common::available_port()?;
     let agent_id = 0xABCD_1234;
 
     manager
@@ -190,6 +193,7 @@ async fn http_listener_pipeline_attributes_real_ip_from_trusted_redirector()
             vec!["127.0.0.1".to_owned()],
         ))
         .await?;
+    drop(guard);
     manager.start("edge-http-trusted-redirector").await?;
     common::wait_for_listener(port).await?;
 
@@ -221,7 +225,7 @@ async fn http_listener_pipeline_ignores_real_ip_from_untrusted_redirector()
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
     let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
-    let port = common::available_port()?;
+    let (port, guard) = common::available_port()?;
     let agent_id = 0xABCD_5678;
 
     manager
@@ -231,6 +235,7 @@ async fn http_listener_pipeline_ignores_real_ip_from_untrusted_redirector()
             vec!["192.0.2.1".to_owned()],
         ))
         .await?;
+    drop(guard);
     manager.start("edge-http-untrusted-redirector").await?;
     common::wait_for_listener(port).await?;
 
@@ -262,11 +267,12 @@ async fn http_listener_pipeline_ignores_forwarded_for_when_not_behind_redirector
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
     let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
-    let port = common::available_port()?;
+    let (port, guard) = common::available_port()?;
     let agent_id = 0xF0F0_A0D1_u32;
 
     // Listener with behind_redirector=false — no proxy headers should ever be trusted.
     manager.create(http_listener("edge-http-xff-no-redirector", port)).await?;
+    drop(guard);
     manager.start("edge-http-xff-no-redirector").await?;
     common::wait_for_listener(port).await?;
 
@@ -303,7 +309,7 @@ async fn http_listener_pipeline_ignores_forwarded_for_from_untrusted_peer()
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
     let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
-    let port = common::available_port()?;
+    let (port, guard) = common::available_port()?;
     let agent_id = 0xF0F0_B0D2_u32;
 
     // Listener with behind_redirector=true but TrustedProxyPeers set to a *different* address
@@ -315,6 +321,7 @@ async fn http_listener_pipeline_ignores_forwarded_for_from_untrusted_peer()
             vec!["192.0.2.1".to_owned()],
         ))
         .await?;
+    drop(guard);
     manager.start("edge-http-xff-untrusted-peer").await?;
     common::wait_for_listener(port).await?;
 
@@ -351,7 +358,7 @@ async fn http_listener_pipeline_rejects_duplicate_init_preserves_original_key()
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
     let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
-    let port = common::available_port()?;
+    let (port, guard) = common::available_port()?;
     let agent_id = 0xDEAD_C0DE;
     let original_key = [0x41_u8; AGENT_KEY_LENGTH];
     let original_iv = [0x24_u8; AGENT_IV_LENGTH];
@@ -359,6 +366,7 @@ async fn http_listener_pipeline_rejects_duplicate_init_preserves_original_key()
     let hijack_iv = [0xCC_u8; AGENT_IV_LENGTH];
 
     manager.create(http_listener("edge-http-dup-init", port)).await?;
+    drop(guard);
     manager.start("edge-http-dup-init").await?;
     common::wait_for_listener(port).await?;
 

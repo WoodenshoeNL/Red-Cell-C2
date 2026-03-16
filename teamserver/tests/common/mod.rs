@@ -137,21 +137,33 @@ pub async fn assert_no_operator_message(socket: &mut WsClient, wait: Duration) {
     assert!(result.is_err(), "unexpected operator message during empty session snapshot");
 }
 
-/// Bind a free TCP port on `127.0.0.1` and return it.
-pub fn available_port() -> Result<u16, Box<dyn std::error::Error>> {
+/// Bind a free TCP port on `127.0.0.1` and return the port number together with
+/// the [`std::net::TcpListener`] that keeps it reserved.
+///
+/// The caller must hold the returned listener alive until immediately before the
+/// system-under-test binds to the port, then [`drop`] it.  This eliminates the
+/// TOCTOU race that arises when only the port number is returned: keep the guard
+/// until the last moment, then release it so the component under test can bind.
+pub fn available_port() -> Result<(u16, std::net::TcpListener), Box<dyn std::error::Error>> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-    Ok(listener.local_addr()?.port())
+    let port = listener.local_addr()?.port();
+    Ok((port, listener))
 }
 
-/// Find a free TCP port on `127.0.0.1` that is not equal to `excluded`.
-pub fn available_port_excluding(excluded: u16) -> Result<u16, Box<dyn std::error::Error>> {
+/// Find a free TCP port on `127.0.0.1` that is not equal to `excluded`, and return
+/// the port number together with the [`std::net::TcpListener`] that keeps it reserved.
+///
+/// See [`available_port`] for the correct usage pattern.
+pub fn available_port_excluding(
+    excluded: u16,
+) -> Result<(u16, std::net::TcpListener), Box<dyn std::error::Error>> {
     for _ in 0..32 {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
-        drop(listener);
         if port != excluded {
-            return Ok(port);
+            return Ok((port, listener));
         }
+        // port == excluded — release and try again
     }
 
     Err(format!("failed to allocate a port different from {excluded}").into())

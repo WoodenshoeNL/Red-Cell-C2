@@ -194,7 +194,8 @@ async fn add_socks_server_starts_listener_on_requested_port()
     let agent_id = 0xAABB_0001_u32;
     registry.insert(sample_agent(agent_id)).await?;
 
-    let port = common::available_port()?;
+    let (port, guard) = common::available_port()?;
+    drop(guard);
     let result = manager.add_socks_server(agent_id, &port.to_string()).await?;
 
     assert!(result.contains(&port.to_string()), "result should mention the bound port");
@@ -214,7 +215,8 @@ async fn remove_socks_server_stops_listener() -> Result<(), Box<dyn std::error::
     let agent_id = 0xAABB_0002_u32;
     registry.insert(sample_agent(agent_id)).await?;
 
-    let port = common::available_port()?;
+    let (port, guard) = common::available_port()?;
+    drop(guard);
     manager.add_socks_server(agent_id, &port.to_string()).await?;
     manager.remove_socks_server(agent_id, &port.to_string()).await?;
 
@@ -235,7 +237,8 @@ async fn duplicate_port_returns_error() -> Result<(), Box<dyn std::error::Error>
     let agent_id = 0xAABB_0003_u32;
     registry.insert(sample_agent(agent_id)).await?;
 
-    let port = common::available_port()?;
+    let (port, guard) = common::available_port()?;
+    drop(guard);
     manager.add_socks_server(agent_id, &port.to_string()).await?;
 
     let result = manager.add_socks_server(agent_id, &port.to_string()).await;
@@ -251,9 +254,11 @@ async fn clear_socks_servers_removes_all_for_agent() -> Result<(), Box<dyn std::
     let agent_id = 0xAABB_0004_u32;
     registry.insert(sample_agent(agent_id)).await?;
 
-    let port_a = common::available_port()?;
-    let port_b = common::available_port_excluding(port_a)?;
+    let (port_a, guard_a) = common::available_port()?;
+    let (port_b, guard_b) = common::available_port_excluding(port_a)?;
+    drop(guard_a);
     manager.add_socks_server(agent_id, &port_a.to_string()).await?;
+    drop(guard_b);
     manager.add_socks_server(agent_id, &port_b.to_string()).await?;
 
     let result = manager.clear_socks_servers(agent_id).await?;
@@ -274,7 +279,8 @@ async fn remove_agent_tears_down_relay_state() -> Result<(), Box<dyn std::error:
     let agent_id = 0xAABB_0005_u32;
     registry.insert(sample_agent(agent_id)).await?;
 
-    let port = common::available_port()?;
+    let (port, guard) = common::available_port()?;
+    drop(guard);
     manager.add_socks_server(agent_id, &port.to_string()).await?;
 
     let removed = manager.remove_agent(agent_id).await;
@@ -308,7 +314,8 @@ async fn socks5_connect_ipv4_handshake_enqueues_connect_job()
     let agent_id = 0xAABB_0010_u32;
     registry.insert(sample_agent(agent_id)).await?;
 
-    let port = common::available_port()?;
+    let (port, guard) = common::available_port()?;
+    drop(guard);
     manager.add_socks_server(agent_id, &port.to_string()).await?;
 
     let mut client =
@@ -331,7 +338,8 @@ async fn socks5_connect_domain_handshake_enqueues_connect_job()
     let agent_id = 0xAABB_0011_u32;
     registry.insert(sample_agent(agent_id)).await?;
 
-    let port = common::available_port()?;
+    let (port, guard) = common::available_port()?;
+    drop(guard);
     manager.add_socks_server(agent_id, &port.to_string()).await?;
 
     let mut client =
@@ -353,7 +361,8 @@ async fn socks5_connect_ipv6_handshake_enqueues_connect_job()
     let agent_id = 0xAABB_0012_u32;
     registry.insert(sample_agent(agent_id)).await?;
 
-    let port = common::available_port()?;
+    let (port, guard) = common::available_port()?;
+    drop(guard);
     manager.add_socks_server(agent_id, &port.to_string()).await?;
 
     let mut client =
@@ -380,7 +389,8 @@ async fn finish_connect_success_allows_data_relay_to_client()
     let agent_id = 0xAABB_0020_u32;
     registry.insert(sample_agent(agent_id)).await?;
 
-    let port = common::available_port()?;
+    let (port, guard) = common::available_port()?;
+    drop(guard);
     manager.add_socks_server(agent_id, &port.to_string()).await?;
 
     let mut client =
@@ -417,7 +427,8 @@ async fn finish_connect_failure_closes_client_socket() -> Result<(), Box<dyn std
     let agent_id = 0xAABB_0021_u32;
     registry.insert(sample_agent(agent_id)).await?;
 
-    let port = common::available_port()?;
+    let (port, guard) = common::available_port()?;
+    drop(guard);
     manager.add_socks_server(agent_id, &port.to_string()).await?;
 
     let mut client =
@@ -446,7 +457,8 @@ async fn write_client_data_after_remove_agent_returns_error()
     let agent_id = 0xAABB_0022_u32;
     registry.insert(sample_agent(agent_id)).await?;
 
-    let port = common::available_port()?;
+    let (port, guard) = common::available_port()?;
+    drop(guard);
     manager.add_socks_server(agent_id, &port.to_string()).await?;
 
     let mut client =

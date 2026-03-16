@@ -60,7 +60,7 @@ fn http_config(name: &str, port: u16) -> ListenerConfig {
 #[tokio::test]
 async fn create_persists_listener_in_created_state() -> Result<(), Box<dyn std::error::Error>> {
     let manager = test_manager().await?;
-    let port = common::available_port()?;
+    let (port, _guard) = common::available_port()?;
 
     manager.create(http_config("lc-create", port)).await?;
 
@@ -73,9 +73,10 @@ async fn create_persists_listener_in_created_state() -> Result<(), Box<dyn std::
 #[tokio::test]
 async fn start_transitions_to_running_state() -> Result<(), Box<dyn std::error::Error>> {
     let manager = test_manager().await?;
-    let port = common::available_port()?;
+    let (port, guard) = common::available_port()?;
 
     manager.create(http_config("lc-start", port)).await?;
+    drop(guard);
     let summary = manager.start("lc-start").await?;
 
     assert_eq!(summary.state.status, ListenerStatus::Running);
@@ -92,9 +93,10 @@ async fn start_transitions_to_running_state() -> Result<(), Box<dyn std::error::
 async fn stop_transitions_running_listener_to_stopped_state()
 -> Result<(), Box<dyn std::error::Error>> {
     let manager = test_manager().await?;
-    let port = common::available_port()?;
+    let (port, guard) = common::available_port()?;
 
     manager.create(http_config("lc-stop", port)).await?;
+    drop(guard);
     manager.start("lc-stop").await?;
     let summary = manager.stop("lc-stop").await?;
 
@@ -108,9 +110,10 @@ async fn stop_transitions_running_listener_to_stopped_state()
 #[tokio::test]
 async fn restart_after_stop_succeeds() -> Result<(), Box<dyn std::error::Error>> {
     let manager = test_manager().await?;
-    let port = common::available_port()?;
+    let (port, guard) = common::available_port()?;
 
     manager.create(http_config("lc-restart", port)).await?;
+    drop(guard);
     manager.start("lc-restart").await?;
     manager.stop("lc-restart").await?;
 
@@ -132,9 +135,10 @@ async fn restart_after_stop_succeeds() -> Result<(), Box<dyn std::error::Error>>
 #[tokio::test]
 async fn start_already_running_listener_returns_error() -> Result<(), Box<dyn std::error::Error>> {
     let manager = test_manager().await?;
-    let port = common::available_port()?;
+    let (port, guard) = common::available_port()?;
 
     manager.create(http_config("lc-double-start", port)).await?;
+    drop(guard);
     manager.start("lc-double-start").await?;
 
     let result = manager.start("lc-double-start").await;
@@ -151,7 +155,7 @@ async fn start_already_running_listener_returns_error() -> Result<(), Box<dyn st
 #[tokio::test]
 async fn stop_non_running_listener_returns_error() -> Result<(), Box<dyn std::error::Error>> {
     let manager = test_manager().await?;
-    let port = common::available_port()?;
+    let (port, _guard) = common::available_port()?;
 
     manager.create(http_config("lc-double-stop", port)).await?;
 
@@ -168,10 +172,9 @@ async fn stop_non_running_listener_returns_error() -> Result<(), Box<dyn std::er
 #[tokio::test]
 async fn start_fails_when_port_is_already_in_use() -> Result<(), Box<dyn std::error::Error>> {
     let manager = test_manager().await?;
-    let port = common::available_port()?;
-
-    // Bind the port externally so the listener cannot claim it.
-    let _guard = std::net::TcpListener::bind(format!("127.0.0.1:{port}"))?;
+    // The guard returned by available_port() is already bound to the port, so it acts
+    // as the external listener that prevents ListenerManager from claiming the same port.
+    let (port, _guard) = common::available_port()?;
 
     manager.create(http_config("lc-port-in-use", port)).await?;
     let result = manager.start("lc-port-in-use").await;
@@ -201,9 +204,10 @@ async fn start_nonexistent_listener_returns_error() -> Result<(), Box<dyn std::e
 #[tokio::test]
 async fn delete_running_listener_stops_then_removes() -> Result<(), Box<dyn std::error::Error>> {
     let manager = test_manager().await?;
-    let port = common::available_port()?;
+    let (port, guard) = common::available_port()?;
 
     manager.create(http_config("lc-delete-running", port)).await?;
+    drop(guard);
     manager.start("lc-delete-running").await?;
     common::wait_for_listener(port).await?;
 
@@ -223,7 +227,7 @@ async fn delete_running_listener_stops_then_removes() -> Result<(), Box<dyn std:
 #[tokio::test]
 async fn delete_stopped_listener_removes_record() -> Result<(), Box<dyn std::error::Error>> {
     let manager = test_manager().await?;
-    let port = common::available_port()?;
+    let (port, _guard) = common::available_port()?;
 
     manager.create(http_config("lc-delete-stopped", port)).await?;
     manager.delete("lc-delete-stopped").await?;
@@ -240,8 +244,8 @@ async fn delete_stopped_listener_removes_record() -> Result<(), Box<dyn std::err
 #[tokio::test]
 async fn list_returns_all_persisted_listeners() -> Result<(), Box<dyn std::error::Error>> {
     let manager = test_manager().await?;
-    let port_a = common::available_port()?;
-    let port_b = common::available_port_excluding(port_a)?;
+    let (port_a, _guard_a) = common::available_port()?;
+    let (port_b, _guard_b) = common::available_port_excluding(port_a)?;
 
     manager.create(http_config("lc-list-a", port_a)).await?;
     manager.create(http_config("lc-list-b", port_b)).await?;
@@ -261,7 +265,7 @@ async fn list_returns_all_persisted_listeners() -> Result<(), Box<dyn std::error
 async fn restore_running_restarts_persisted_running_listeners()
 -> Result<(), Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
-    let port = common::available_port()?;
+    let (port, guard) = common::available_port()?;
 
     // Simulate a teamserver crash: create the listener config in the DB and manually
     // set its state to Running without actually spawning a runtime task.  This mimics
@@ -285,6 +289,8 @@ async fn restore_running_restarts_persisted_running_listeners()
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
     let restored = ListenerManager::new(database, registry, events, sockets, None);
 
+    // Release the port reservation so restore_running() can bind it.
+    drop(guard);
     restored.restore_running().await?;
 
     let summary = restored.summary("lc-restore").await?;
@@ -309,14 +315,19 @@ async fn restore_running_restarts_persisted_running_listeners()
 async fn concurrent_create_and_start_for_independent_listeners_do_not_interfere()
 -> Result<(), Box<dyn std::error::Error>> {
     let manager = test_manager().await?;
-    let port_a = common::available_port()?;
-    let port_b = common::available_port_excluding(port_a)?;
-    let port_c = common::available_port_excluding(port_b)?;
+    let (port_a, guard_a) = common::available_port()?;
+    let (port_b, guard_b) = common::available_port_excluding(port_a)?;
+    let (port_c, guard_c) = common::available_port_excluding(port_b)?;
 
     // Create all three listeners.
     manager.create(http_config("lc-concurrent-a", port_a)).await?;
     manager.create(http_config("lc-concurrent-b", port_b)).await?;
     manager.create(http_config("lc-concurrent-c", port_c)).await?;
+
+    // Release port reservations before the concurrent starts bind.
+    drop(guard_a);
+    drop(guard_b);
+    drop(guard_c);
 
     // Start them concurrently.
     let (r_a, r_b, r_c) = tokio::join!(

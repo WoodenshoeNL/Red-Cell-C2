@@ -79,7 +79,7 @@ async fn operator_session_listener_and_mock_demon_round_trip()
         .await;
     });
 
-    let listener_port = common::available_port_excluding(server_addr.port())?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
     assert_ne!(listener_port, server_addr.port());
     let client = reqwest::Client::new();
     let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
@@ -87,6 +87,8 @@ async fn operator_session_listener_and_mock_demon_round_trip()
     common::login(&mut socket).await?;
     common::assert_no_operator_message(&mut socket, Duration::from_millis(200)).await;
 
+    // Release the port reservation immediately before the server binds it.
+    drop(listener_guard);
     socket
         .send(ClientMessage::Text(listener_new_message("operator", listener_port).into()))
         .await?;

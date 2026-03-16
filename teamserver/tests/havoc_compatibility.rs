@@ -41,13 +41,14 @@ async fn red_cell_packets_match_havoc_at_offset_zero_and_advance_afterward()
     let events = EventBus::default();
     let sockets = SocketRelayManager::new(registry.clone(), events.clone());
     let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
-    let port = common::available_port()?;
+    let (port, guard) = common::available_port()?;
     let agent_id = 0x1234_5678;
     let key = [0x41; AGENT_KEY_LENGTH];
     let iv = [0x24; AGENT_IV_LENGTH];
     let mut ctr_offset = 0_u64;
 
     manager.create(http_listener("havoc-http-compat", port)).await?;
+    drop(guard);
     manager.start("havoc-http-compat").await?;
     common::wait_for_listener(port).await?;
 

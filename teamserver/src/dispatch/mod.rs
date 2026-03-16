@@ -34,6 +34,7 @@ mod screenshot;
 mod socket;
 mod token;
 mod transfer;
+pub(crate) mod util;
 
 type HandlerFuture =
     Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>, CommandDispatchError>> + Send>>;
@@ -1652,7 +1653,10 @@ mod tests {
     };
     use zeroize::Zeroizing;
 
-    use super::checkin::{checkin_windows_arch_label, checkin_windows_version_label};
+    use super::util::{
+        windows_arch_label as checkin_windows_arch_label,
+        windows_version_label as checkin_windows_version_label,
+    };
     use super::{
         CommandDispatchError, CommandDispatcher, DownloadState, DownloadTracker,
         extract_credentials, looks_like_credential_line, looks_like_inline_secret,

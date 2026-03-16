@@ -9,6 +9,7 @@ use crate::agent_events::agent_mark_event;
 use crate::{AgentRegistry, audit_details, parameter_object, record_operator_action};
 use crate::{AuditResultStatus, Database, EventBus, PluginRuntime, TeamserverError};
 
+use super::util::{basename, process_arch_label, windows_arch_label, windows_version_label};
 use super::{CallbackParser, CommandDispatchError};
 
 pub(super) async fn handle_checkin(
@@ -165,17 +166,12 @@ fn parse_checkin_metadata(
     updated.process_pid = process_pid;
     updated.process_tid = process_tid;
     updated.process_ppid = process_ppid;
-    updated.process_arch = checkin_process_arch_label(process_arch).to_owned();
+    updated.process_arch = process_arch_label(process_arch).to_owned();
     updated.elevated = elevated;
-    updated.os_version = checkin_windows_version_label(
-        os_major,
-        os_minor,
-        os_product_type,
-        os_service_pack,
-        os_build,
-    );
+    updated.os_version =
+        windows_version_label(os_major, os_minor, os_product_type, os_service_pack, os_build);
     updated.os_build = os_build;
-    updated.os_arch = checkin_windows_arch_label(os_arch).to_owned();
+    updated.os_arch = windows_arch_label(os_arch).to_owned();
     updated.sleep_delay = sleep_delay;
     updated.sleep_jitter = sleep_jitter;
     updated.kill_date = super::parse_optional_kill_date(
@@ -222,77 +218,4 @@ fn validate_checkin_transport_material(
 pub(super) fn decode_working_hours(raw: u32) -> Option<i32> {
     // Preserve the 32-bit protocol bitmask exactly, including the high bit.
     (raw != 0).then_some(i32::from_be_bytes(raw.to_be_bytes()))
-}
-
-pub(super) fn checkin_process_arch_label(value: u32) -> &'static str {
-    match value {
-        2 => "x64",
-        1 => "x86",
-        3 => "IA64",
-        _ => "Unknown",
-    }
-}
-
-pub(super) fn checkin_windows_arch_label(value: u32) -> &'static str {
-    match value {
-        0 => "x86",
-        9 => "x64/AMD64",
-        5 => "ARM",
-        12 => "ARM64",
-        6 => "Itanium-based",
-        _ => "Unknown",
-    }
-}
-
-pub(super) fn checkin_windows_version_label(
-    major: u32,
-    minor: u32,
-    product_type: u32,
-    service_pack: u32,
-    build: u32,
-) -> String {
-    const VER_NT_WORKSTATION: u32 = 1;
-
-    let mut version =
-        if major == 10 && minor == 0 && product_type != VER_NT_WORKSTATION && build == 20_348 {
-            "Windows 2022 Server 22H2".to_owned()
-        } else if major == 10 && minor == 0 && product_type != VER_NT_WORKSTATION && build == 17_763
-        {
-            "Windows 2019 Server".to_owned()
-        } else if major == 10
-            && minor == 0
-            && product_type == VER_NT_WORKSTATION
-            && (22_000..=22_621).contains(&build)
-        {
-            "Windows 11".to_owned()
-        } else if major == 10 && minor == 0 && product_type != VER_NT_WORKSTATION {
-            "Windows 2016 Server".to_owned()
-        } else if major == 10 && minor == 0 && product_type == VER_NT_WORKSTATION {
-            "Windows 10".to_owned()
-        } else if major == 6 && minor == 3 && product_type != VER_NT_WORKSTATION {
-            "Windows Server 2012 R2".to_owned()
-        } else if major == 6 && minor == 3 && product_type == VER_NT_WORKSTATION {
-            "Windows 8.1".to_owned()
-        } else if major == 6 && minor == 2 && product_type != VER_NT_WORKSTATION {
-            "Windows Server 2012".to_owned()
-        } else if major == 6 && minor == 2 && product_type == VER_NT_WORKSTATION {
-            "Windows 8".to_owned()
-        } else if major == 6 && minor == 1 && product_type != VER_NT_WORKSTATION {
-            "Windows Server 2008 R2".to_owned()
-        } else if major == 6 && minor == 1 && product_type == VER_NT_WORKSTATION {
-            "Windows 7".to_owned()
-        } else {
-            "Unknown".to_owned()
-        };
-
-    if service_pack != 0 {
-        version.push_str(" Service Pack ");
-        version.push_str(&service_pack.to_string());
-    }
-
-    version
-}
-
-fn basename(path: &str) -> String {
-    path.rsplit(['\\', '/']).next().unwrap_or(path).to_owned()
 }

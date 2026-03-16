@@ -14,12 +14,10 @@ use time::format_description::well_known::Rfc3339;
 use tracing::warn;
 use zeroize::Zeroizing;
 
+use crate::dispatch::util::{
+    basename, process_arch_label, windows_arch_label, windows_version_label,
+};
 use crate::{AgentRegistry, TeamserverError};
-
-const PROCESS_ARCH_X86: u32 = 1;
-const PROCESS_ARCH_X64: u32 = 2;
-const PROCESS_ARCH_IA64: u32 = 3;
-const VER_NT_WORKSTATION: u32 = 0x0000_0001;
 
 /// A decrypted Demon callback package parsed from an agent request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -388,77 +386,6 @@ fn parse_kill_date(kill_date: u64) -> Result<Option<i64>, DemonParserError> {
     let parsed = i64::try_from(kill_date)
         .map_err(|_| DemonParserError::InvalidInit("kill date exceeds i64 range"))?;
     Ok(Some(parsed))
-}
-
-fn basename(path: &str) -> String {
-    path.rsplit(['\\', '/']).next().unwrap_or(path).to_owned()
-}
-
-fn process_arch_label(value: u32) -> &'static str {
-    match value {
-        PROCESS_ARCH_X64 => "x64",
-        PROCESS_ARCH_X86 => "x86",
-        PROCESS_ARCH_IA64 => "IA64",
-        _ => "Unknown",
-    }
-}
-
-fn windows_arch_label(value: u32) -> &'static str {
-    match value {
-        0 => "x86",
-        9 => "x64/AMD64",
-        5 => "ARM",
-        12 => "ARM64",
-        6 => "Itanium-based",
-        _ => "Unknown",
-    }
-}
-
-pub(crate) fn windows_version_label(
-    major: u32,
-    minor: u32,
-    product_type: u32,
-    service_pack: u32,
-    build: u32,
-) -> String {
-    let mut version =
-        if major == 10 && minor == 0 && product_type != VER_NT_WORKSTATION && build == 20_348 {
-            "Windows 2022 Server 22H2".to_owned()
-        } else if major == 10 && minor == 0 && product_type != VER_NT_WORKSTATION && build == 17_763
-        {
-            "Windows 2019 Server".to_owned()
-        } else if major == 10
-            && minor == 0
-            && product_type == VER_NT_WORKSTATION
-            && (22_000..=22_621).contains(&build)
-        {
-            "Windows 11".to_owned()
-        } else if major == 10 && minor == 0 && product_type != VER_NT_WORKSTATION {
-            "Windows 2016 Server".to_owned()
-        } else if major == 10 && minor == 0 && product_type == VER_NT_WORKSTATION {
-            "Windows 10".to_owned()
-        } else if major == 6 && minor == 3 && product_type != VER_NT_WORKSTATION {
-            "Windows Server 2012 R2".to_owned()
-        } else if major == 6 && minor == 3 && product_type == VER_NT_WORKSTATION {
-            "Windows 8.1".to_owned()
-        } else if major == 6 && minor == 2 && product_type != VER_NT_WORKSTATION {
-            "Windows Server 2012".to_owned()
-        } else if major == 6 && minor == 2 && product_type == VER_NT_WORKSTATION {
-            "Windows 8".to_owned()
-        } else if major == 6 && minor == 1 && product_type != VER_NT_WORKSTATION {
-            "Windows Server 2008 R2".to_owned()
-        } else if major == 6 && minor == 1 && product_type == VER_NT_WORKSTATION {
-            "Windows 7".to_owned()
-        } else {
-            "Unknown".to_owned()
-        };
-
-    if service_pack != 0 {
-        version.push_str(" Service Pack ");
-        version.push_str(&service_pack.to_string());
-    }
-
-    version
 }
 
 fn read_fixed<const N: usize>(
@@ -1581,7 +1508,7 @@ mod tests {
     // ── windows_version_label ────────────────────────────────────────────────
 
     const SERVER: u32 = 2; // any value != VER_NT_WORKSTATION (1)
-    const WS: u32 = super::VER_NT_WORKSTATION;
+    const WS: u32 = crate::dispatch::util::VER_NT_WORKSTATION;
 
     #[test]
     fn windows_version_label_win11() {

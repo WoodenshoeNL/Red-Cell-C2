@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 168 | 181 | 31 |
+| Tasks closed | 170 | 181 | 31 |
 | Bugs filed against | 28 | 28 | 9 |
-| Bug rate (bugs/task) | 0.17 | 0.15 | 0.29 |
-| Quality score | 83% | 85% | 71% |
+| Bug rate (bugs/task) | 0.16 | 0.15 | 0.29 |
+| Quality score | 84% | 85% | 71% |
 
 ## Violation Breakdown
 
@@ -1518,3 +1518,14 @@ Biggest blindspot: AgentRecord derives Serialize without excluding the AES key/I
 
 Build: **partial** — `cargo check` ✓, `cargo clippy` ✓, `cargo test --workspace` ✗ (3 flaky websocket tests timeout under parallel load; all pass in isolation)
 Notes: Two solid bug fixes delivered. The websocket test flakiness is pre-existing in the test infrastructure (hard-coded 5s read deadline) and unrelated to the config.rs change in this range. No architecture regressions observed.
+
+### QA Review — 2026-03-16 11:15 — b44b0da..091d410
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed `red-cell-c2-yz7q` (P2): Discord webhook SSRF — validate https scheme + restrict to known Discord hostnames + set reqwest redirect Policy::none(). Closed `red-cell-c2-wg35` (P3): Mutex::unwrap poison in auth test cache replaced with unwrap_or_else(|e| e.into_inner()). Clean delivery; 4 unit tests added for URL validation. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check` ✓, `cargo clippy` ✓, `cargo test --workspace` ✓ (145 tests, 0 failures, no flakiness observed this run)
+Notes: Two security/robustness bugs fixed cleanly. URL validation logic is correct and well-tested. No new issues filed. Open backlog: `red-cell-c2-bdnw` (P2 key exposure), `red-cell-c2-5a1q` (P2 unauthenticated upload), `red-cell-c2-6iz0` (P2 flaky WS tests), `red-cell-c2-lbxd` (P3 silent DB error), `red-cell-c2-mk68` (P3 missing test).

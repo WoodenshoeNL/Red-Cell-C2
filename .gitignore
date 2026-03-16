@@ -26,5 +26,5 @@ target/
 .dolt/
 *.db
 
-# GitHub Actions workflows — intentionally removed, do not re-add
-.github/
+# GitHub Actions workflows — restored for CI
+# .github/ is tracked

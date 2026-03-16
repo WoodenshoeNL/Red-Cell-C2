@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 175 | 181 | 31 |
-| Bugs filed against | 30 | 28 | 9 |
-| Bug rate (bugs/task) | 0.17 | 0.15 | 0.29 |
-| Quality score | 83% | 85% | 71% |
+| Tasks closed | 176 | 181 | 31 |
+| Bugs filed against | 29 | 28 | 9 |
+| Bug rate (bugs/task) | 0.16 | 0.15 | 0.29 |
+| Quality score | 84% | 85% | 71% |
 
 ## Violation Breakdown
 
@@ -1582,5 +1582,5 @@ Notes: Two more pivot protocol issues resolved, completing the trio started with
 | Codex | 0 | 0 | No activity. |
 | Cursor | 0 | 0 | No activity. |
 
-Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` **FAILED** — 1 failure: `domain::tests::agent_record_deserialize_restores_encryption_field` in uncommitted WIP (bdnw). 865 tests passed. Committed code is clean; failure is in local working-tree changes not yet committed.
-Notes: Light productive period — 2 closes (lbxd, mk68), 1 real code fix (a1cb211). Still open/ready: `red-cell-c2-bdnw` (AES key leakage risk), `red-cell-c2-5a1q` (DNS upload pre-auth), `red-cell-c2-6iz0` (flaky WebSocket tests). The bdnw WIP has a test typo that must be fixed before commit.
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (all domain serialization tests pass in committed code).
+Notes: 3 tasks closed (lbxd, mk68, bdnw). Two real code fixes: `a1cb211` adds `warn!` logging for silently-discarded socket/download errors; `e64ebd6` adds `skip_serializing` to `AgentRecord.encryption` preventing AES key material from leaking into any future JSON serialization path. A WIP test typo (`AESIV` vs `AESIv`) was caught during review but fixed before commit. Still open/ready: `red-cell-c2-5a1q` (DNS upload pre-auth), `red-cell-c2-6iz0` (flaky WebSocket tests).

@@ -181,6 +181,14 @@ async fn handle_pivot_disconnect_callback(
     let success = parser.read_u32("pivot disconnect success")?;
     let child_agent_id = parser.read_u32("pivot disconnect child agent id")?;
     if success == 0 {
+        events.broadcast(agent_response_event(
+            parent_agent_id,
+            u32::from(DemonCommand::CommandPivot),
+            request_id,
+            "Error",
+            &format!("[SMB] Failed to disconnect agent {child_agent_id:08X}"),
+            None,
+        )?);
         return Ok(None);
     }
 

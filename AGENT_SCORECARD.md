@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 166 | 181 | 31 |
-| Bugs filed against | 27 | 28 | 9 |
-| Bug rate (bugs/task) | 0.16 | 0.15 | 0.29 |
-| Quality score | 84% | 85% | 71% |
+| Tasks closed | 168 | 181 | 31 |
+| Bugs filed against | 28 | 28 | 9 |
+| Bug rate (bugs/task) | 0.17 | 0.15 | 0.29 |
+| Quality score | 83% | 85% | 71% |
 
 ## Violation Breakdown
 
@@ -1508,3 +1508,13 @@ Notes: Clean single-task delivery. The TOCTOU fix is correct and applied consist
 
 Overall codebase health: on track — all tests pass, no compilation errors, no clippy warnings. Architecture decisions (Axum/Tokio/SQLite/HCL/thiserror) are consistent throughout. Crypto design is sound with CTR offset tracking correctly deferred until after parse success.
 Biggest blindspot: AgentRecord derives Serialize without excluding the AES key/IV fields, making it trivially easy for a future REST API route to accidentally expose all agent session keys to operators. The Debug derive on OperatorConfig similarly exposes plaintext passwords to any future tracing instrumentation. Both are latent but high-impact security risks.
+### QA Review — 2026-03-16 10:50 — 57c1abe..c0523cc
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 1 | Closed `red-cell-c2-5ujg` (P1): manual Debug impl on OperatorConfig/HttpListenerProxyConfig redacts passwords. Closed `red-cell-c2-4rsi` (P2): zero agent_id sentinel blocked in parse_at_for_listener + regression test. Bug `red-cell-c2-6iz0` filed: 3 websocket tests fail consistently under full-suite parallel load due to hard-coded 5s frame-read timeout (pass in isolation). Br state inconsistency for 4rsi noted: br list shows in_progress but br show/code confirm fix is landed. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **partial** — `cargo check` ✓, `cargo clippy` ✓, `cargo test --workspace` ✗ (3 flaky websocket tests timeout under parallel load; all pass in isolation)
+Notes: Two solid bug fixes delivered. The websocket test flakiness is pre-existing in the test infrastructure (hard-coded 5s read deadline) and unrelated to the config.rs change in this range. No architecture regressions observed.

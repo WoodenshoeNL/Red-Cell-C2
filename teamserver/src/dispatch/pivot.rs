@@ -5,6 +5,7 @@ use time::format_description::well_known::Rfc3339;
 use crate::agent_events::{agent_mark_event, agent_new_event};
 use crate::{AgentRegistry, DemonPacketParser, EventBus};
 
+use super::process::win32_error_code_name;
 use super::{
     BuiltinDispatchContext, BuiltinHandlerDependencies, CallbackParser, CommandDispatchError,
     CommandDispatcher, DemonCallbackPackage, DemonProtocolError, agent_response_event,
@@ -97,6 +98,19 @@ async fn handle_pivot_connect_callback(
 ) -> Result<Option<Vec<u8>>, CommandDispatchError> {
     let success = parser.read_u32("pivot connect success")?;
     if success == 0 {
+        let error_code = parser.read_u32("pivot connect error code")?;
+        let message = match win32_error_code_name(error_code) {
+            Some(name) => format!("[SMB] Failed to connect: {name} [{error_code}]"),
+            None => format!("[SMB] Failed to connect: [{error_code}]"),
+        };
+        events.broadcast(agent_response_event(
+            parent_agent_id,
+            u32::from(DemonCommand::CommandPivot),
+            request_id,
+            "Error",
+            &message,
+            None,
+        )?);
         return Ok(None);
     }
 

@@ -2176,6 +2176,81 @@ mod tests {
         Ok(())
     }
 
+    fn pivot_connect_failure_payload(error_code: u32) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u32::from(DemonPivotCommand::SmbConnect).to_le_bytes());
+        payload.extend_from_slice(&0_u32.to_le_bytes()); // success == 0
+        payload.extend_from_slice(&error_code.to_le_bytes());
+        payload
+    }
+
+    #[tokio::test]
+    async fn pivot_connect_callback_failure_broadcasts_error_event()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database,
+            sockets,
+            None,
+        );
+        let parent_id = 0x1234_5678;
+        let parent_key = [0xAA; AGENT_KEY_LENGTH];
+        let parent_iv = [0xBB; AGENT_IV_LENGTH];
+        registry
+            .insert_with_listener(sample_agent_info(parent_id, parent_key, parent_iv), "http-main")
+            .await?;
+
+        // ERROR_ACCESS_DENIED = 5
+        let response = dispatcher
+            .dispatch(
+                parent_id,
+                u32::from(DemonCommand::CommandPivot),
+                99,
+                &pivot_connect_failure_payload(5),
+            )
+            .await?;
+
+        assert_eq!(response, None, "failure path should return no agent response bytes");
+
+        // No new agent should have been registered.
+        assert_eq!(registry.children_of(parent_id).await, Vec::<u32>::new());
+
+        let event = receiver
+            .recv()
+            .await
+            .ok_or_else(|| "expected an operator event after pivot connect failure")?;
+        let OperatorMessage::AgentResponse(msg) = event else {
+            return Err(format!("expected AgentResponse, got {event:?}").into());
+        };
+        assert_eq!(
+            msg.info.demon_id,
+            format!("{parent_id:08X}"),
+            "event must be for the parent agent"
+        );
+        let msg_text = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            msg_text.contains("Failed to connect"),
+            "message must mention failure: {:?}",
+            msg_text
+        );
+        assert!(
+            msg_text.contains("[5]"),
+            "message must include numeric error code: {:?}",
+            msg_text
+        );
+        let kind = msg.info.extra.get("Type").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(kind, "Error", "message type must be Error");
+        let request_id_str = msg.info.extra.get("RequestID").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(request_id_str, "63", "request id must be 99 in hex");
+        Ok(())
+    }
+
     fn pivot_list_payload(entries: &[(u32, &str)]) -> Vec<u8> {
         let mut payload = Vec::new();
         payload.extend_from_slice(&u32::from(DemonPivotCommand::List).to_le_bytes());

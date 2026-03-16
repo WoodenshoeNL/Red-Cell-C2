@@ -1,6 +1,7 @@
 //! Havoc-compatible teamserver profile parsing.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::fs;
 use std::io::Read;
 use std::net::IpAddr;
@@ -433,7 +434,7 @@ pub struct OperatorsConfig {
 }
 
 /// A single operator account definition.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 pub struct OperatorConfig {
     /// Operator password.
     #[serde(rename = "Password")]
@@ -441,6 +442,15 @@ pub struct OperatorConfig {
     /// Operator role used by the teamserver RBAC layer.
     #[serde(rename = "Role", default)]
     pub role: OperatorRole,
+}
+
+impl fmt::Debug for OperatorConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OperatorConfig")
+            .field("password", &"[redacted]")
+            .field("role", &self.role)
+            .finish()
+    }
 }
 
 /// Role assigned to an operator account.
@@ -612,7 +622,7 @@ pub struct HttpListenerResponseConfig {
 }
 
 /// Upstream proxy settings for HTTP listeners.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 pub struct HttpListenerProxyConfig {
     /// Proxy hostname.
     #[serde(rename = "Host")]
@@ -626,6 +636,17 @@ pub struct HttpListenerProxyConfig {
     /// Optional proxy password.
     #[serde(rename = "Password", default)]
     pub password: Option<String>,
+}
+
+impl fmt::Debug for HttpListenerProxyConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HttpListenerProxyConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &self.password.as_deref().map(|_| "[redacted]"))
+            .finish()
+    }
 }
 
 /// Demon build-time defaults and injection settings.

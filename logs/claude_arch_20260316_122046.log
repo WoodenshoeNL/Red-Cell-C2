@@ -1,0 +1,36 @@
+---
+
+## Arch Review — 2026-03-16
+
+### Codebase Health: **On Track**
+
+The codebase is in good shape. Zero clippy warnings, zero compile errors, 687 tests all passing. Security architecture is sound — correct AES-256-CTR per-agent offset tracking, constant-time auth comparisons, key material redacted in Debug output, rate limiting on init paths, bounded agent registry and job queues.
+
+### Security Posture
+
+No exploitable vulnerabilities found. All major attack surfaces reviewed:
+- AES-CTR offset continuity: correct (persist-before-mutate, CTR offset tested with `ctr_offset_persistence.rs`)
+- Auth timing attacks: closed (constant-time token scan, dummy Argon2 for unknown usernames)
+- Buffer allocation from untrusted sizes: all guarded with `try_from` + bounds checks
+- Agent registry cap + per-IP DEMON_INIT rate limiting: both working
+- Key material in logs: `AgentEncryptionInfo::Debug` emits `[redacted]`
+
+### Biggest Blindspot
+
+**SMB pivot failure paths are silent.** When a pivot connect or disconnect fails at the agent, the teamserver discards the error without notifying the operator. In a real engagement this means `pivot smb connect` and `pivot smb disconnect` commands appear to complete with no response — operators cannot distinguish success from failure.
+
+### Issues Filed
+
+| ID | Responsible | Priority | Description |
+|----|-------------|----------|-------------|
+| `red-cell-c2-oreb` | Codex | P2 | Pivot connect failure (success==0) silently swallowed — no error event, Havoc reads error code and sends "[SMB] Failed to connect: ..." |
+| `red-cell-c2-rsu9` | Codex | P2 | Pivot disconnect failure (success==0) silently swallowed — no error event, Havoc sends "[SMB] Failed to disconnect agent %x" |
+| `red-cell-c2-kg7n` | Codex | P3 | No tests for pivot connect/disconnect failure branches (blocked on oreb + rsu9) |
+
+### Agent Quality
+
+**Claude** is writing the best code this cycle. The security infrastructure (constant-time auth, CTR offset tracking, key zeroization) is well-engineered. No new Claude-authored defects found. Codex has accumulated the most protocol-fidelity bugs — the original pivot implementation missed Havoc's error-code-on-failure behavior in two places.
+
+### Recommendation
+
+Assign `red-cell-c2-oreb` and `red-cell-c2-rsu9` to the next dev agent. Both are small, self-contained fixes: read the error code from the parser payload on `success == 0` and broadcast an Error event, matching the Havoc Go reference. Low risk, high operator-UX value.

@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 180 | 181 | 31 |
+| Tasks closed | 181 | 181 | 31 |
 | Bugs filed against | 33 | 28 | 9 |
 | Bug rate (bugs/task) | 0.18 | 0.15 | 0.29 |
 | Quality score | 82% | 85% | 71% |
@@ -37,6 +37,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-16 18:15 — 7c35cab..4c908ce
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed `red-cell-c2-t2i5` (P2 DoS): IP-mismatch guard implemented in listeners.rs:2098-2112 (f03ddec). Imposter chunks from a different source IP are now rejected without touching the legitimate session; inconsistent-total clear-and-reject path preserved for same-IP misbehaviour. Test `dns_upload_spoof_does_not_clear_legitimate_session` covers both attack vectors. Also closed `red-cell-c2-chym` (P1 dev-loop stall, reset by QA). Dev loop now idle — no ready work. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (147 tests, 0 failures)
+Notes: Clean delivery. Fix is correct and minimal — IP check precedes total check, protecting the legitimate session without altering the same-IP inconsistency path. All open issues resolved; project awaiting new tasks.
 
 ### QA Review — 2026-03-16 17:10 — eab8f68..219bc8b
 

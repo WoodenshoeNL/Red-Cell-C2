@@ -3958,10 +3958,24 @@ fn export_loot_csv(items: &[&LootItem]) -> std::result::Result<String, String> {
 }
 
 fn csv_field(value: &str) -> String {
-    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
-        format!("\"{}\"", value.replace('"', "\"\""))
+    // Neutralize spreadsheet formula injection: prepend a single-quote to any value whose
+    // first non-whitespace character is a formula trigger (`=`, `+`, `-`, `@`).  Loot data
+    // is adversary-controlled, so an attacker on the target host could craft a credential
+    // name or file path like `=EXEC("malware.exe")` that executes when an operator opens the
+    // exported CSV in Excel or LibreOffice Calc.
+    let effective: String = if value.trim_start().starts_with(['=', '+', '-', '@']) {
+        format!("'{value}")
     } else {
         value.to_owned()
+    };
+    if effective.contains(',')
+        || effective.contains('"')
+        || effective.contains('\n')
+        || effective.contains('\r')
+    {
+        format!("\"{}\"", effective.replace('"', "\"\""))
+    } else {
+        effective
     }
 }
 
@@ -4861,6 +4875,24 @@ mod tests {
         assert_eq!(csv_field("plain"), "plain");
         assert_eq!(csv_field("bare\rreturn"), "\"bare\rreturn\"");
         assert_eq!(csv_field("line\nfeed"), "\"line\nfeed\"");
+    }
+
+    #[test]
+    fn csv_field_sanitizes_formula_injection() {
+        // Plain formula triggers get a leading single-quote (no quoting needed).
+        assert_eq!(csv_field("=SUM(A1)"), "'=SUM(A1)");
+        assert_eq!(csv_field("+SUM(A1)"), "'+SUM(A1)");
+        assert_eq!(csv_field("-1+2"), "'-1+2");
+        assert_eq!(csv_field("@SUM(A1)"), "'@SUM(A1)");
+        // Leading whitespace: the first *non-whitespace* character determines injection risk.
+        assert_eq!(csv_field("  =foo"), "'  =foo");
+        // Formula trigger + embedded double-quote → prefix applied, then CSV-quoted.
+        assert_eq!(csv_field("=EXEC(\"x\")"), "\"'=EXEC(\"\"x\"\")\"");
+        // Values that do not start with a trigger must not be modified.
+        assert_eq!(csv_field("plain"), "plain");
+        assert_eq!(csv_field("hello, world"), "\"hello, world\"");
+        // A bare minus sign (e.g. used as an empty sentinel) must also be neutralised.
+        assert_eq!(csv_field("-"), "'-");
     }
 
     #[test]

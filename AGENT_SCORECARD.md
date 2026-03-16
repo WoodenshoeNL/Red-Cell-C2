@@ -19,9 +19,9 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 2 | 0 | 0 |
-| Missing tests | 10 | 11 | 5 |
+| Missing tests | 10 | 12 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
-| Protocol errors | 6 | 22 | 3 |
+| Protocol errors | 6 | 24 | 3 |
 | Security issues | 15 | 31 | 0 |
 | Architecture drift | 2 | 21 | 0 |
 | Memory / resource leaks | 1 | 10 | 1 |
@@ -37,6 +37,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-16 12:20
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 0 | — | No new findings attributed |
+| Codex | 3 | Protocol errors (2), Missing tests (1) | red-cell-c2-oreb: pivot connect failure (success==0) silently swallowed — no error event broadcast, deviates from Havoc reference which reads error code and sends "[SMB] Failed to connect: <Win32Error> [<ErrorCode>]" (P2); red-cell-c2-rsu9: pivot disconnect failure (success==0) silently swallowed — no error event broadcast, deviates from Havoc reference which sends "[SMB] Failed to disconnect agent %x" (P2); red-cell-c2-kg7n: no tests for pivot connect/disconnect failure paths (P3, blocked on the above two) |
+| Cursor | 0 | — | No new findings attributed |
+
+Overall codebase health: on track
+Biggest blindspot: Pivot failure paths (connect + disconnect) are silently dropped — operators get no feedback when SMB lateral movement fails, making pivot operations unreliable in real engagements. The bugs date to the original Codex pivot implementation (a4d0ad9) and survived the dispatch refactor.
 
 ### QA Review — 2026-03-15 13:35 — 762c867..2cb596e
 

@@ -136,6 +136,44 @@ impl LootTypeFilter {
     ];
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum CredentialSubFilter {
+    #[default]
+    All,
+    NtlmHash,
+    Plaintext,
+    KerberosTicket,
+    Certificate,
+}
+
+impl CredentialSubFilter {
+    const ALL: [(Self, &'static str); 5] = [
+        (Self::All, "All"),
+        (Self::NtlmHash, "NTLM Hash"),
+        (Self::Plaintext, "Plaintext Password"),
+        (Self::KerberosTicket, "Kerberos Ticket"),
+        (Self::Certificate, "Certificate"),
+    ];
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum FileSubFilter {
+    #[default]
+    All,
+    Document,
+    Archive,
+    Binary,
+}
+
+impl FileSubFilter {
+    const ALL: [(Self, &'static str); 4] = [
+        (Self::All, "All"),
+        (Self::Document, "Document"),
+        (Self::Archive, "Archive"),
+        (Self::Binary, "Binary"),
+    ];
+}
+
 #[derive(Debug, Default)]
 struct AgentConsoleState {
     input: String,
@@ -263,8 +301,11 @@ struct SessionPanelState {
     pending_messages: Vec<OperatorMessage>,
     status_message: Option<String>,
     loot_type_filter: LootTypeFilter,
+    loot_cred_filter: CredentialSubFilter,
+    loot_file_filter: FileSubFilter,
     loot_agent_filter: String,
-    loot_time_filter: String,
+    loot_since_filter: String,
+    loot_until_filter: String,
     loot_text_filter: String,
     loot_status_message: Option<String>,
     chat_input: String,
@@ -708,23 +749,74 @@ impl ClientApp {
                         ui.selectable_value(&mut self.session_panel.loot_type_filter, value, label);
                     }
                 });
+
+            match self.session_panel.loot_type_filter {
+                LootTypeFilter::Credentials => {
+                    ui.label("Category");
+                    egui::ComboBox::from_id_salt("loot-cred-filter")
+                        .selected_text(match self.session_panel.loot_cred_filter {
+                            CredentialSubFilter::All => "All",
+                            CredentialSubFilter::NtlmHash => "NTLM Hash",
+                            CredentialSubFilter::Plaintext => "Plaintext Password",
+                            CredentialSubFilter::KerberosTicket => "Kerberos Ticket",
+                            CredentialSubFilter::Certificate => "Certificate",
+                        })
+                        .show_ui(ui, |ui| {
+                            for (value, label) in CredentialSubFilter::ALL {
+                                ui.selectable_value(
+                                    &mut self.session_panel.loot_cred_filter,
+                                    value,
+                                    label,
+                                );
+                            }
+                        });
+                }
+                LootTypeFilter::Files => {
+                    ui.label("Category");
+                    egui::ComboBox::from_id_salt("loot-file-filter")
+                        .selected_text(match self.session_panel.loot_file_filter {
+                            FileSubFilter::All => "All",
+                            FileSubFilter::Document => "Document",
+                            FileSubFilter::Archive => "Archive",
+                            FileSubFilter::Binary => "Binary",
+                        })
+                        .show_ui(ui, |ui| {
+                            for (value, label) in FileSubFilter::ALL {
+                                ui.selectable_value(
+                                    &mut self.session_panel.loot_file_filter,
+                                    value,
+                                    label,
+                                );
+                            }
+                        });
+                }
+                LootTypeFilter::All | LootTypeFilter::Screenshots => {}
+            }
+
             ui.label("Agent");
             ui.add(
                 egui::TextEdit::singleline(&mut self.session_panel.loot_agent_filter)
                     .desired_width(84.0)
                     .hint_text("ABCD1234"),
             );
-            ui.label("Time");
+            ui.label("Since");
             ui.add(
-                egui::TextEdit::singleline(&mut self.session_panel.loot_time_filter)
+                egui::TextEdit::singleline(&mut self.session_panel.loot_since_filter)
                     .desired_width(100.0)
-                    .hint_text("2026-03-10"),
+                    .hint_text("2026-03-01"),
+            );
+            ui.label("Until");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.session_panel.loot_until_filter)
+                    .desired_width(100.0)
+                    .hint_text("2026-03-31"),
             );
         });
         ui.add(
             egui::TextEdit::singleline(&mut self.session_panel.loot_text_filter)
                 .hint_text("Search name, path, source, preview"),
         );
+
         if let Some(message) = &self.session_panel.loot_status_message {
             ui.add_space(6.0);
             ui.label(RichText::new(message).weak());
@@ -738,8 +830,11 @@ impl ClientApp {
                 loot_matches_filters(
                     item,
                     self.session_panel.loot_type_filter,
+                    self.session_panel.loot_cred_filter,
+                    self.session_panel.loot_file_filter,
                     &self.session_panel.loot_agent_filter,
-                    &self.session_panel.loot_time_filter,
+                    &self.session_panel.loot_since_filter,
+                    &self.session_panel.loot_until_filter,
                     &self.session_panel.loot_text_filter,
                 )
             })
@@ -751,14 +846,47 @@ impl ClientApp {
             } else {
                 "No loot matches the current filters."
             });
+
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Export CSV").clicked() {
+                    self.session_panel.loot_status_message =
+                        Some(export_loot_csv(&[]).unwrap_or_else(|e| e));
+                }
+                if ui.button("Export JSON").clicked() {
+                    self.session_panel.loot_status_message =
+                        Some(export_loot_json(&[]).unwrap_or_else(|e| e));
+                }
+            });
             return;
         }
+
+        ui.horizontal(|ui| {
+            ui.label(format!("{} item(s)", filtered_loot.len()));
+            if ui.button("Export CSV").clicked() {
+                self.session_panel.loot_status_message =
+                    Some(export_loot_csv(&filtered_loot).unwrap_or_else(|e| e));
+            }
+            if ui.button("Export JSON").clicked() {
+                self.session_panel.loot_status_message =
+                    Some(export_loot_json(&filtered_loot).unwrap_or_else(|e| e));
+            }
+        });
+        ui.add_space(4.0);
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             for item in filtered_loot {
                 ui.group(|ui| {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(RichText::new(item.kind.label()).strong());
+                        let sub_label = loot_sub_category_label(item);
+                        if !sub_label.is_empty() {
+                            ui.label(
+                                RichText::new(format!("({sub_label})"))
+                                    .small()
+                                    .color(Color32::GRAY),
+                            );
+                        }
                         ui.separator();
                         ui.label(RichText::new(&item.name).strong());
                         if !item.agent_id.is_empty() {
@@ -3551,34 +3679,260 @@ fn ellipsize(value: &str, max_chars: usize) -> String {
 fn loot_matches_filters(
     item: &LootItem,
     type_filter: LootTypeFilter,
+    cred_filter: CredentialSubFilter,
+    file_filter: FileSubFilter,
     agent_filter: &str,
-    time_filter: &str,
+    since_filter: &str,
+    until_filter: &str,
     text_filter: &str,
 ) -> bool {
-    if !matches_loot_type_filter(item, type_filter) {
+    if !matches_loot_type_filter(item, type_filter, cred_filter, file_filter) {
         return false;
     }
 
-    contains_ascii_case_insensitive(&item.agent_id, agent_filter)
-        && contains_ascii_case_insensitive(&item.collected_at, time_filter)
-        && [
-            item.name.as_str(),
-            item.source.as_str(),
-            item.agent_id.as_str(),
-            item.file_path.as_deref().unwrap_or_default(),
-            item.preview.as_deref().unwrap_or_default(),
-        ]
-        .into_iter()
-        .any(|field| contains_ascii_case_insensitive(field, text_filter))
+    if !contains_ascii_case_insensitive(&item.agent_id, agent_filter) {
+        return false;
+    }
+
+    // Time range filtering: `since_filter` is an inclusive lower bound, `until_filter` is an
+    // inclusive upper bound.  Both are matched as string prefixes against `collected_at` so that
+    // partial date strings like "2026-03" work as expected.
+    let since = since_filter.trim();
+    if !since.is_empty() && item.collected_at.as_str() < since {
+        return false;
+    }
+    let until = until_filter.trim();
+    if !until.is_empty() && item.collected_at.as_str() > until {
+        return false;
+    }
+
+    [
+        item.name.as_str(),
+        item.source.as_str(),
+        item.agent_id.as_str(),
+        item.file_path.as_deref().unwrap_or_default(),
+        item.preview.as_deref().unwrap_or_default(),
+    ]
+    .into_iter()
+    .any(|field| contains_ascii_case_insensitive(field, text_filter))
 }
 
-fn matches_loot_type_filter(item: &LootItem, type_filter: LootTypeFilter) -> bool {
+fn matches_loot_type_filter(
+    item: &LootItem,
+    type_filter: LootTypeFilter,
+    cred_filter: CredentialSubFilter,
+    file_filter: FileSubFilter,
+) -> bool {
     match type_filter {
         LootTypeFilter::All => true,
-        LootTypeFilter::Credentials => matches!(item.kind, LootKind::Credential),
-        LootTypeFilter::Files => matches!(item.kind, LootKind::File),
+        LootTypeFilter::Credentials => {
+            if !matches!(item.kind, LootKind::Credential) {
+                return false;
+            }
+            matches_credential_sub_filter(item, cred_filter)
+        }
+        LootTypeFilter::Files => {
+            if !matches!(item.kind, LootKind::File) {
+                return false;
+            }
+            matches_file_sub_filter(item, file_filter)
+        }
         LootTypeFilter::Screenshots => matches!(item.kind, LootKind::Screenshot),
     }
+}
+
+/// Detect a credential sub-category from name/preview/source heuristics.
+fn detect_credential_category(item: &LootItem) -> CredentialSubFilter {
+    let haystack =
+        [item.name.as_str(), item.source.as_str(), item.preview.as_deref().unwrap_or_default()]
+            .join(" ")
+            .to_ascii_lowercase();
+
+    if haystack.contains("ntlm") || haystack.contains("lm hash") || haystack.contains("nthash") {
+        CredentialSubFilter::NtlmHash
+    } else if haystack.contains("kerberos")
+        || haystack.contains("kirbi")
+        || haystack.contains(".ccache")
+        || haystack.contains("tgt")
+        || haystack.contains("tgs")
+    {
+        CredentialSubFilter::KerberosTicket
+    } else if haystack.contains("certificate")
+        || haystack.contains(".pfx")
+        || haystack.contains(".pem")
+        || haystack.contains(".crt")
+        || haystack.contains(".cer")
+    {
+        CredentialSubFilter::Certificate
+    } else if haystack.contains("plaintext")
+        || haystack.contains("password")
+        || haystack.contains("passwd")
+        || haystack.contains("cleartext")
+    {
+        CredentialSubFilter::Plaintext
+    } else {
+        CredentialSubFilter::All
+    }
+}
+
+/// Detect a file sub-category from the file extension or name.
+fn detect_file_category(item: &LootItem) -> FileSubFilter {
+    let path_str = item.file_path.as_deref().unwrap_or(item.name.as_str()).to_ascii_lowercase();
+    let ext =
+        std::path::Path::new(&path_str).extension().and_then(|e| e.to_str()).unwrap_or_default();
+
+    const DOCUMENT_EXTS: &[&str] = &[
+        "doc", "docx", "xls", "xlsx", "ppt", "pptx", "pdf", "txt", "rtf", "odt", "ods", "csv",
+        "md", "html", "htm", "xml", "json", "yaml", "yml",
+    ];
+    const ARCHIVE_EXTS: &[&str] =
+        &["zip", "rar", "7z", "tar", "gz", "bz2", "xz", "cab", "iso", "tgz"];
+
+    if DOCUMENT_EXTS.contains(&ext) {
+        FileSubFilter::Document
+    } else if ARCHIVE_EXTS.contains(&ext) {
+        FileSubFilter::Archive
+    } else if !ext.is_empty() {
+        // Anything with an extension that is not a known document/archive is treated as binary.
+        FileSubFilter::Binary
+    } else {
+        // No extension — heuristic: if the name contains "bin" or the path is a known binary
+        // location, call it binary; otherwise treat as unknown (pass through).
+        if path_str.contains("/bin/")
+            || path_str.contains("\\bin\\")
+            || ext == "exe"
+            || ext == "dll"
+        {
+            FileSubFilter::Binary
+        } else {
+            FileSubFilter::All
+        }
+    }
+}
+
+fn matches_credential_sub_filter(item: &LootItem, filter: CredentialSubFilter) -> bool {
+    if filter == CredentialSubFilter::All {
+        return true;
+    }
+    detect_credential_category(item) == filter
+}
+
+fn matches_file_sub_filter(item: &LootItem, filter: FileSubFilter) -> bool {
+    if filter == FileSubFilter::All {
+        return true;
+    }
+    detect_file_category(item) == filter
+}
+
+/// Returns a short human-readable sub-category label for display in the loot list.
+fn loot_sub_category_label(item: &LootItem) -> &'static str {
+    match item.kind {
+        LootKind::Credential => match detect_credential_category(item) {
+            CredentialSubFilter::NtlmHash => "NTLM Hash",
+            CredentialSubFilter::Plaintext => "Plaintext",
+            CredentialSubFilter::KerberosTicket => "Kerberos",
+            CredentialSubFilter::Certificate => "Certificate",
+            CredentialSubFilter::All => "",
+        },
+        LootKind::File => match detect_file_category(item) {
+            FileSubFilter::Document => "Document",
+            FileSubFilter::Archive => "Archive",
+            FileSubFilter::Binary => "Binary",
+            FileSubFilter::All => "",
+        },
+        _ => "",
+    }
+}
+
+/// Export loot items to CSV and save to the downloads directory.
+fn export_loot_csv(items: &[&LootItem]) -> std::result::Result<String, String> {
+    let mut out = String::from(
+        "id,kind,sub_category,name,agent_id,source,collected_at,file_path,size_bytes,preview\n",
+    );
+    for item in items {
+        let sub = loot_sub_category_label(item);
+        out.push_str(&csv_field(item.id.map(|v| v.to_string()).as_deref().unwrap_or("")));
+        out.push(',');
+        out.push_str(&csv_field(item.kind.label()));
+        out.push(',');
+        out.push_str(&csv_field(sub));
+        out.push(',');
+        out.push_str(&csv_field(&item.name));
+        out.push(',');
+        out.push_str(&csv_field(&item.agent_id));
+        out.push(',');
+        out.push_str(&csv_field(&item.source));
+        out.push(',');
+        out.push_str(&csv_field(&item.collected_at));
+        out.push(',');
+        out.push_str(&csv_field(item.file_path.as_deref().unwrap_or("")));
+        out.push(',');
+        out.push_str(&csv_field(item.size_bytes.map(|v| v.to_string()).as_deref().unwrap_or("")));
+        out.push(',');
+        out.push_str(&csv_field(item.preview.as_deref().unwrap_or("")));
+        out.push('\n');
+    }
+    let output_dir = dirs::download_dir().unwrap_or_else(std::env::temp_dir);
+    let output_path = next_available_path(&output_dir.join("loot.csv"));
+    std::fs::write(&output_path, out.as_bytes()).map_err(|e| format!("Failed to save CSV: {e}"))?;
+    Ok(format!("Exported {} item(s) to {}", items.len(), output_path.display()))
+}
+
+fn csv_field(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_owned()
+    }
+}
+
+/// Export loot items to JSON and save to the downloads directory.
+fn export_loot_json(items: &[&LootItem]) -> std::result::Result<String, String> {
+    let mut out = String::from("[\n");
+    for (index, item) in items.iter().enumerate() {
+        let sub = loot_sub_category_label(item);
+        out.push_str("  {");
+        out.push_str(&format!("\"id\":{},", item.id.unwrap_or(0)));
+        out.push_str(&format!("\"kind\":{},", json_str(item.kind.label())));
+        out.push_str(&format!("\"sub_category\":{},", json_str(sub)));
+        out.push_str(&format!("\"name\":{},", json_str(&item.name)));
+        out.push_str(&format!("\"agent_id\":{},", json_str(&item.agent_id)));
+        out.push_str(&format!("\"source\":{},", json_str(&item.source)));
+        out.push_str(&format!("\"collected_at\":{},", json_str(&item.collected_at)));
+        out.push_str(&format!(
+            "\"file_path\":{},",
+            item.file_path.as_deref().map(json_str).unwrap_or_else(|| "null".to_owned())
+        ));
+        out.push_str(&format!(
+            "\"size_bytes\":{},",
+            item.size_bytes.map(|v| v.to_string()).unwrap_or_else(|| "null".to_owned())
+        ));
+        out.push_str(&format!(
+            "\"preview\":{}",
+            item.preview.as_deref().map(json_str).unwrap_or_else(|| "null".to_owned())
+        ));
+        out.push('}');
+        if index + 1 < items.len() {
+            out.push(',');
+        }
+        out.push('\n');
+    }
+    out.push(']');
+    let output_dir = dirs::download_dir().unwrap_or_else(std::env::temp_dir);
+    let output_path = next_available_path(&output_dir.join("loot.json"));
+    std::fs::write(&output_path, out.as_bytes())
+        .map_err(|e| format!("Failed to save JSON: {e}"))?;
+    Ok(format!("Exported {} item(s) to {}", items.len(), output_path.display()))
+}
+
+fn json_str(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
+    format!("\"{escaped}\"")
 }
 
 fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
@@ -4247,11 +4601,185 @@ mod tests {
         assert!(loot_matches_filters(
             &item,
             LootTypeFilter::Screenshots,
+            CredentialSubFilter::All,
+            FileSubFilter::All,
             "abcd",
-            "2026-03-10",
+            "",
+            "",
             "desktop"
         ));
-        assert!(!loot_matches_filters(&item, LootTypeFilter::Credentials, "", "", ""));
+        assert!(!loot_matches_filters(
+            &item,
+            LootTypeFilter::Credentials,
+            CredentialSubFilter::All,
+            FileSubFilter::All,
+            "",
+            "",
+            "",
+            ""
+        ));
+    }
+
+    fn make_loot_item(kind: LootKind, name: &str, agent_id: &str, collected_at: &str) -> LootItem {
+        LootItem {
+            id: None,
+            kind,
+            name: name.to_owned(),
+            agent_id: agent_id.to_owned(),
+            source: "test".to_owned(),
+            collected_at: collected_at.to_owned(),
+            file_path: None,
+            size_bytes: None,
+            content_base64: None,
+            preview: None,
+        }
+    }
+
+    #[test]
+    fn loot_time_range_filter_since_excludes_older_items() {
+        let item = make_loot_item(LootKind::File, "secret.exe", "AA", "2026-03-05T10:00:00Z");
+        // since=2026-03-10 should exclude an item collected on 2026-03-05
+        assert!(!loot_matches_filters(
+            &item,
+            LootTypeFilter::All,
+            CredentialSubFilter::All,
+            FileSubFilter::All,
+            "",
+            "2026-03-10",
+            "",
+            ""
+        ));
+    }
+
+    #[test]
+    fn loot_time_range_filter_until_excludes_newer_items() {
+        let item = make_loot_item(LootKind::File, "secret.exe", "AA", "2026-03-20T10:00:00Z");
+        // until=2026-03-15 should exclude an item collected on 2026-03-20
+        assert!(!loot_matches_filters(
+            &item,
+            LootTypeFilter::All,
+            CredentialSubFilter::All,
+            FileSubFilter::All,
+            "",
+            "",
+            "2026-03-15",
+            ""
+        ));
+    }
+
+    #[test]
+    fn loot_time_range_filter_passes_item_in_range() {
+        let item = make_loot_item(LootKind::File, "secret.exe", "AA", "2026-03-12T10:00:00Z");
+        assert!(loot_matches_filters(
+            &item,
+            LootTypeFilter::All,
+            CredentialSubFilter::All,
+            FileSubFilter::All,
+            "",
+            "2026-03-10",
+            "2026-03-15",
+            ""
+        ));
+    }
+
+    #[test]
+    fn detect_credential_category_ntlm() {
+        // Name contains "ntlm" keyword
+        let item = make_loot_item(LootKind::Credential, "NTLM hash", "AA", "");
+        assert_eq!(detect_credential_category(&item), CredentialSubFilter::NtlmHash);
+
+        // Source labelled "ntlm" — e.g. from a mimikatz sekurlsa::msv dump
+        let mut item2 = make_loot_item(LootKind::Credential, "Administrator", "AA", "");
+        item2.source = "ntlm".to_owned();
+        assert_eq!(detect_credential_category(&item2), CredentialSubFilter::NtlmHash);
+    }
+
+    #[test]
+    fn detect_credential_category_kerberos() {
+        let item = make_loot_item(LootKind::Credential, "TGT ticket.kirbi", "AA", "");
+        assert_eq!(detect_credential_category(&item), CredentialSubFilter::KerberosTicket);
+    }
+
+    #[test]
+    fn detect_credential_category_certificate() {
+        let item = make_loot_item(LootKind::Credential, "user.pfx", "AA", "");
+        assert_eq!(detect_credential_category(&item), CredentialSubFilter::Certificate);
+    }
+
+    #[test]
+    fn detect_credential_category_plaintext() {
+        let item = make_loot_item(LootKind::Credential, "plaintext password", "AA", "");
+        assert_eq!(detect_credential_category(&item), CredentialSubFilter::Plaintext);
+    }
+
+    #[test]
+    fn detect_file_category_document() {
+        let mut item = make_loot_item(LootKind::File, "report.pdf", "AA", "");
+        item.file_path = Some("C:\\Users\\alice\\report.pdf".to_owned());
+        assert_eq!(detect_file_category(&item), FileSubFilter::Document);
+    }
+
+    #[test]
+    fn detect_file_category_archive() {
+        let mut item = make_loot_item(LootKind::File, "backup.zip", "AA", "");
+        item.file_path = Some("C:\\Temp\\backup.zip".to_owned());
+        assert_eq!(detect_file_category(&item), FileSubFilter::Archive);
+    }
+
+    #[test]
+    fn loot_cred_sub_filter_ntlm_excludes_plaintext() {
+        let mut item = make_loot_item(LootKind::Credential, "plaintext password", "AA", "");
+        item.preview = Some("P@ssw0rd".to_owned());
+        assert!(!loot_matches_filters(
+            &item,
+            LootTypeFilter::Credentials,
+            CredentialSubFilter::NtlmHash,
+            FileSubFilter::All,
+            "",
+            "",
+            "",
+            ""
+        ));
+    }
+
+    #[test]
+    fn loot_file_sub_filter_document_excludes_archives() {
+        let mut item = make_loot_item(LootKind::File, "data.zip", "AA", "");
+        item.file_path = Some("C:\\Temp\\data.zip".to_owned());
+        assert!(!loot_matches_filters(
+            &item,
+            LootTypeFilter::Files,
+            CredentialSubFilter::All,
+            FileSubFilter::Document,
+            "",
+            "",
+            "",
+            ""
+        ));
+    }
+
+    #[test]
+    fn export_loot_csv_writes_file_and_returns_path() {
+        let items: Vec<&LootItem> = vec![];
+        // exporting zero items should still succeed and report 0 items
+        let result = export_loot_csv(&items);
+        assert!(result.is_ok(), "export_loot_csv failed: {:?}", result.err());
+        assert!(result.unwrap().contains("0 item(s)"));
+    }
+
+    #[test]
+    fn export_loot_json_writes_file_and_returns_path() {
+        let items: Vec<&LootItem> = vec![];
+        let result = export_loot_json(&items);
+        assert!(result.is_ok(), "export_loot_json failed: {:?}", result.err());
+        assert!(result.unwrap().contains("0 item(s)"));
+    }
+
+    #[test]
+    fn csv_field_escapes_commas_and_quotes() {
+        assert_eq!(csv_field("hello, world"), "\"hello, world\"");
+        assert_eq!(csv_field("say \"hi\""), "\"say \"\"hi\"\"\"");
+        assert_eq!(csv_field("plain"), "plain");
     }
 
     #[test]

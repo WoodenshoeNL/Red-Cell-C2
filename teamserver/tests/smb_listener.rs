@@ -165,7 +165,8 @@ async fn smb_listener_demon_init_registers_agent_and_returns_ack()
     // Agent must be in the in-memory registry.
     let stored = registry.get(agent_id).await.ok_or("agent should be registered")?;
     assert_eq!(stored.hostname, "wkstn-01");
-    assert_eq!(stored.external_ip, "127.0.0.1");
+    // Synthetic IPv4 derived from agent_id 0xDEAD_C0DE → bytes [0xDE,0xAD,0xC0,0xDE]
+    assert_eq!(stored.external_ip, "222.173.192.222");
 
     // Agent must also be persisted in the database.
     let db_agent = database.agents().get(agent_id).await?.ok_or("agent should be in DB")?;

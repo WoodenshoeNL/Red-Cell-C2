@@ -407,11 +407,13 @@ HEREDOC
 
     CLAUDE_EXIT=${PIPESTATUS[0]}
 
-    # Detect token/context limit via Claude's hard-stop message
+    # Detect token/context limit via Claude's hard-stop messages.
+    # "Context limit reached" — context exhaustion
+    # "You've hit your limit" — API rate-limit (e.g. "You've hit your limit · resets 12pm")
     TOKEN_LIMIT_HIT=0
-    if grep -q "Context limit reached" "$RUN_OUTPUT_TMP" 2>/dev/null; then
+    if grep -qE "Context limit reached|You've hit your limit" "$RUN_OUTPUT_TMP" 2>/dev/null; then
         TOKEN_LIMIT_HIT=1
-        log "Token limit hit during $NEXT_ID"
+        log "Token/rate limit hit during $NEXT_ID"
     fi
     rm -f "$RUN_OUTPUT_TMP"
 

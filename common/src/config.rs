@@ -2017,4 +2017,40 @@ mod tests {
             "error must be the Parse variant"
         );
     }
+
+    #[test]
+    fn profile_error_parse_display_format() {
+        // Trigger a parse error by passing garbage HCL.
+        let err = Profile::parse("{{{{not valid hcl@@@@").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.starts_with("failed to parse YAOTL profile:"),
+            "unexpected Display output: {msg}"
+        );
+    }
+
+    #[test]
+    fn profile_error_read_display_contains_path() {
+        let missing = "/tmp/red_cell_c2_nonexistent_profile_12345.hcl";
+        let err = Profile::from_file(missing).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.starts_with("failed to read YAOTL profile from"),
+            "unexpected Display prefix: {msg}"
+        );
+        assert!(msg.contains(missing), "Display output must contain the path; got: {msg}");
+    }
+
+    #[test]
+    fn profile_validation_error_display_join_format() {
+        let err = ProfileValidationError {
+            errors: vec!["error one".to_owned(), "error two".to_owned(), "error three".to_owned()],
+        };
+        let msg = err.to_string();
+        assert!(msg.starts_with("profile validation failed:"), "unexpected Display prefix: {msg}");
+        assert!(
+            msg.contains("error one; error two; error three"),
+            "errors must be joined with \"; \"; got: {msg}"
+        );
+    }
 }

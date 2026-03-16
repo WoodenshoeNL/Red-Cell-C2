@@ -29795,3 +29795,76 @@ Both issues closed and pushed:
 - `red-cell-c2-rtzx` — closed with the fix from commit `fefddd6` already in the repo
 - `red-cell-c2-t19w` — closed as the workflow cleanup task is complete
 [2026-03-16 17:16:09] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-t19w
+[2026-03-16 17:36:32] [Ubuntu-C2-dev02-claude] === Claude dev loop iteration 661 ===
+[2026-03-16 17:36:33] [Ubuntu-C2-dev02-claude] git pull --ff-only: ok
+[2026-03-16 17:36:33] [Ubuntu-C2-dev02-claude] br sync import: ok
+[2026-03-16 17:36:35] [Ubuntu-C2-dev02-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-t2i5
+[2026-03-16 17:36:35] [Ubuntu-C2-dev02-claude] Could not claim any ready task — retrying after backoff
+[2026-03-16 17:36:46] [Ubuntu-C2-dev02-claude] === Claude dev loop iteration 662 ===
+[2026-03-16 17:36:47] [Ubuntu-C2-dev02-claude] git pull --ff-only: ok
+[2026-03-16 17:36:47] [Ubuntu-C2-dev02-claude] br sync import: ok
+[2026-03-16 17:36:49] [Ubuntu-C2-dev02-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-t2i5
+[2026-03-16 17:36:49] [Ubuntu-C2-dev02-claude] Could not claim any ready task — retrying after backoff
+[2026-03-16 17:36:54] [Ubuntu-C2-dev02-claude] === Claude dev loop iteration 663 ===
+[2026-03-16 17:36:55] [Ubuntu-C2-dev02-claude] git pull --ff-only: ok
+[2026-03-16 17:36:55] [Ubuntu-C2-dev02-claude] br sync import: ok
+[2026-03-16 17:36:57] [Ubuntu-C2-dev02-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-t2i5
+[2026-03-16 17:36:57] [Ubuntu-C2-dev02-claude] Could not claim any ready task — retrying after backoff
+[2026-03-16 17:37:09] [Ubuntu-C2-dev02-claude] === Claude dev loop iteration 664 ===
+[2026-03-16 17:37:10] [Ubuntu-C2-dev02-claude] git pull --ff-only: ok
+[2026-03-16 17:37:10] [Ubuntu-C2-dev02-claude] br sync import: ok
+[2026-03-16 17:37:12] [Ubuntu-C2-dev02-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-t2i5
+[2026-03-16 17:37:12] [Ubuntu-C2-dev02-claude] Could not claim any ready task — retrying after backoff
+[2026-03-16 17:37:33] [Ubuntu-C2-dev02-claude] === Claude dev loop iteration 665 ===
+[2026-03-16 17:37:34] [Ubuntu-C2-dev02-claude] git pull --ff-only: ok
+[2026-03-16 17:37:34] [Ubuntu-C2-dev02-claude] br sync import: ok
+[2026-03-16 17:37:36] [Ubuntu-C2-dev02-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-t2i5
+[2026-03-16 17:37:36] [Ubuntu-C2-dev02-claude] Could not claim any ready task — retrying after backoff
+[2026-03-16 17:37:56] [Ubuntu-C2-dev02-claude] === Claude dev loop iteration 666 ===
+[2026-03-16 17:37:57] [Ubuntu-C2-dev02-claude] git pull --ff-only: ok
+[2026-03-16 17:37:58] [Ubuntu-C2-dev02-claude] br sync import: ok
+[2026-03-16 17:37:59] [Ubuntu-C2-dev02-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-t2i5
+[2026-03-16 17:37:59] [Ubuntu-C2-dev02-claude] Could not claim any ready task — retrying after backoff
+[2026-03-16 17:38:10] [Ubuntu-C2-dev02-claude] === Claude dev loop iteration 667 ===
+[2026-03-16 17:38:11] [Ubuntu-C2-dev02-claude] git pull --ff-only: ok
+[2026-03-16 17:38:11] [Ubuntu-C2-dev02-claude] br sync import: ok
+[2026-03-16 17:38:13] [Ubuntu-C2-dev02-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-t2i5
+[2026-03-16 17:38:13] [Ubuntu-C2-dev02-claude] Could not claim any ready task — retrying after backoff
+[2026-03-16 17:38:19] [Ubuntu-C2-dev02-claude] === Claude dev loop iteration 668 ===
+[2026-03-16 17:38:20] [Ubuntu-C2-dev02-claude] git pull --ff-only: ok
+[2026-03-16 17:38:20] [Ubuntu-C2-dev02-claude] br sync import: ok
+[2026-03-16 17:38:22] [Ubuntu-C2-dev02-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-t2i5
+[2026-03-16 17:38:22] [Ubuntu-C2-dev02-claude] Could not claim any ready task — retrying after backoff
+[2026-03-16 17:38:27] [Ubuntu-C2-dev02-claude] === Claude dev loop iteration 669 ===
+[2026-03-16 17:38:28] [Ubuntu-C2-dev02-claude] git pull --ff-only: ok
+[2026-03-16 17:38:28] [Ubuntu-C2-dev02-claude] br sync import: ok
+[2026-03-16 17:38:30] [Ubuntu-C2-dev02-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-t2i5
+[2026-03-16 17:38:30] [Ubuntu-C2-dev02-claude] Could not claim any ready task — retrying after backoff
+[2026-03-16 17:38:48] [Ubuntu-C2-dev02-claude] === Claude dev loop iteration 670 ===
+[2026-03-16 17:38:49] [Ubuntu-C2-dev02-claude] git pull --ff-only: ok
+[2026-03-16 17:38:49] [Ubuntu-C2-dev02-claude] br sync import: ok
+[2026-03-16 17:38:51] [Ubuntu-C2-dev02-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-t2i5
+[2026-03-16 17:38:51] [Ubuntu-C2-dev02-claude] Could not claim any ready task — retrying after backoff
+[2026-03-16 17:38:56] [Ubuntu-C2-dev02-claude] === Claude dev loop iteration 671 ===
+[2026-03-16 17:38:57] [Ubuntu-C2-dev02-claude] git pull --ff-only: ok
+[2026-03-16 17:38:57] [Ubuntu-C2-dev02-claude] br sync import: ok
+[2026-03-16 17:38:58] [Ubuntu-C2-dev02-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-t2i5
+[2026-03-16 17:38:58] [Ubuntu-C2-dev02-claude] Could not claim any ready task — retrying after backoff
+[2026-03-16 17:39:17] [Ubuntu-C2-dev02-claude] === Claude dev loop iteration 672 ===
+[2026-03-16 17:39:19] [Ubuntu-C2-dev02-claude] git pull --ff-only: ok
+[2026-03-16 17:39:19] [Ubuntu-C2-dev02-claude] br sync import: ok
+[2026-03-16 17:39:20] [Ubuntu-C2-dev02-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-t2i5
+[2026-03-16 17:39:20] [Ubuntu-C2-dev02-claude] Could not claim any ready task — retrying after backoff
+[2026-03-16 17:39:31] [Ubuntu-C2-dev02-claude] === Claude dev loop iteration 673 ===
+[2026-03-16 17:39:33] [Ubuntu-C2-dev02-claude] git pull --ff-only: ok
+[2026-03-16 17:39:33] [Ubuntu-C2-dev02-claude] br sync import: ok
+[2026-03-16 17:39:34] [Ubuntu-C2-dev02-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-t2i5
+[2026-03-16 17:39:34] [Ubuntu-C2-dev02-claude] Could not claim any ready task — retrying after backoff
+[2026-03-16 17:39:52] [Ubuntu-C2-dev02-claude] === Claude dev loop iteration 674 ===
+[2026-03-16 17:39:54] [Ubuntu-C2-dev02-claude] git pull --ff-only: ok
+[2026-03-16 17:39:54] [Ubuntu-C2-dev02-claude] br sync import: ok
+[2026-03-16 17:39:55] [Ubuntu-C2-dev02-claude] Selected task: red-cell-c2-chym
+[2026-03-16 17:39:59] [Ubuntu-C2-dev02-claude] Claimed red-cell-c2-chym
+[2026-03-16 17:40:00] [Ubuntu-C2-dev02-claude] Running Claude on task red-cell-c2-chym...
+Done. `red-cell-c2-t2i5` has been reset from `in_progress` → `open`, and `red-cell-c2-chym` is closed. The dev loop can now re-claim and implement t2i5.
+[2026-03-16 17:40:58] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-chym

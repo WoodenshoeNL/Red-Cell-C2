@@ -400,4 +400,35 @@ mod tests {
         assert!(state.connecting);
         assert!(state.error_message.is_none());
     }
+
+    fn make_tls_failure(msg: &str, fp: Option<&str>) -> TlsFailure {
+        TlsFailure { message: msg.to_owned(), cert_fingerprint: fp.map(str::to_owned) }
+    }
+
+    #[test]
+    fn set_tls_failure_stores_failure() {
+        let mut state = default_login_state();
+        let failure = make_tls_failure("certificate not trusted", Some("aabbcc"));
+        state.set_tls_failure(failure.clone());
+        assert_eq!(state.tls_failure, Some(failure));
+    }
+
+    #[test]
+    fn set_connecting_clears_tls_failure() {
+        let mut state = default_login_state();
+        state.set_tls_failure(make_tls_failure("cert error", None));
+        assert!(state.tls_failure.is_some());
+
+        state.set_connecting();
+        assert!(state.tls_failure.is_none());
+    }
+
+    #[test]
+    fn set_error_does_not_clear_tls_failure() {
+        let mut state = default_login_state();
+        let failure = make_tls_failure("cert error", Some("deadbeef"));
+        state.set_tls_failure(failure.clone());
+        state.set_error("auth failed".to_owned());
+        assert_eq!(state.tls_failure, Some(failure));
+    }
 }

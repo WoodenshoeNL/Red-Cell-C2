@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 150 | 181 | 31 |
-| Bugs filed against | 15 | 28 | 9 |
-| Bug rate (bugs/task) | 0.10 | 0.15 | 0.29 |
-| Quality score | 90% | 85% | 71% |
+| Tasks closed | 152 | 181 | 31 |
+| Bugs filed against | 17 | 28 | 9 |
+| Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
+| Quality score | 89% | 85% | 71% |
 
 ## Violation Breakdown
 
@@ -22,13 +22,13 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests | 9 | 11 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
 | Protocol errors | 5 | 22 | 3 |
-| Security issues | 9 | 31 | 0 |
+| Security issues | 10 | 31 | 0 |
 | Architecture drift | 2 | 21 | 0 |
 | Memory / resource leaks | 0 | 10 | 1 |
 | Startup / lifecycle regressions | 0 | 8 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
 | Availability / timeout regressions | 1 | 4 | 0 |
-| Correctness / pagination | 4 | 2 | 1 |
+| Correctness / pagination | 5 | 2 | 1 |
 | Workflow / close-hygiene | 5 | 0 | 0 |
 | Code reuse / duplication | 3 | 0 | 0 |
 
@@ -1431,3 +1431,14 @@ Notes: Solid, well-tested run. All four tasks include comprehensive unit tests f
 
 Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (141 tests, 0 failures)
 Notes: Light review cycle — one epic closed cleanly. The jup close is legitimate: the client crate has full, well-tested implementations of WebSocket connection management, TLS verification modes, operator authentication, and OperatorMessage dispatch. No new bugs filed. Claude quality score holds at 90%.
+
+### QA Review — 2026-03-16 07:00 — a9e3043..fac8768
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 2 | Closed `red-cell-c2-1j7n`: operator panel with activity monitoring, role badges, per-operator command history (capped at 20), 4 unit tests. Closed `red-cell-c2-2uo8`: loot panel with credential/file categorization, since/until date range, subcategory ComboBox, Export CSV/JSON buttons, 14 unit tests. Also added unified `loop.py` replacing all per-agent loop scripts. Filed `red-cell-c2-jlmp` (P3): `csv_field` doesn't sanitize formula-prefix chars (`=`,`+`,`-`,`@`) — loot data is adversary-controlled, operator exporting to CSV and opening in Excel can trigger formula execution. Filed `red-cell-c2-zjk2` (P4): `csv_field` missing `\r` in quoting condition — standalone carriage return corrupts CSV row structure. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (141 tests, 0 failures)
+Notes: Both feature deliverables are well-structured with good test coverage. The operator panel transport work is clean and correct. The loot export helpers use hand-rolled CSV/JSON serialization which introduces two minor bugs (filed above). Claude quality score slips slightly from 90% → 89%.

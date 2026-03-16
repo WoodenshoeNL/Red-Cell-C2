@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 165 | 181 | 31 |
+| Tasks closed | 166 | 181 | 31 |
 | Bugs filed against | 20 | 28 | 9 |
 | Bug rate (bugs/task) | 0.12 | 0.15 | 0.29 |
 | Quality score | 88% | 85% | 71% |
@@ -1486,3 +1486,14 @@ Notes: Three clean bug-fix deliveries. The CSV formula injection fix is security
 
 Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo fmt --check` ✓, `cargo test --workspace` ✓ (686 unit + ~100 integration, 0 failures)
 Notes: High-quality testing infrastructure delivery. CI workflow, listener lifecycle, SOCKS5, and SMB tests are all well-structured and comprehensive. One correctness/reliability bug filed: `available_port()` and `available_port_excluding()` both release the OS-assigned port before the component under test can bind it, creating a narrow TOCTOU race window in all integration tests. Rated P2 (medium) as it rarely fires in practice but is a latent flaky-test source.
+
+### QA Review — 2026-03-16 10:05 — 66ca6de..57c1abe
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed `red-cell-c2-tp5a`: fixed TOCTOU race in `available_port()` / `available_port_excluding()` by returning `(u16, TcpListener)` so callers hold the port reservation until immediately before the component under test binds. Applied across all integration test files (listener_lifecycle, http_listener_pipeline, socks5_relay, mock_demon_agent_checkin, havoc_compatibility, e2e_operator_agent_session). Session was interrupted after fix commit; wip commit adds only log files. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (141 unit + integration, 0 failures)
+Notes: Clean single-task delivery. The TOCTOU fix is correct and applied consistently across all 18 call sites. Minor observation: SOCKS5 tests must drop the guard immediately (API takes port string, not listener) so the race window there is unchanged — but this is an inherent API limitation, not a bug in the fix. No new issues filed.

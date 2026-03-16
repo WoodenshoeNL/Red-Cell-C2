@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 152 | 181 | 31 |
-| Bugs filed against | 17 | 28 | 9 |
-| Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
-| Quality score | 89% | 85% | 71% |
+| Tasks closed | 153 | 181 | 31 |
+| Bugs filed against | 18 | 28 | 9 |
+| Bug rate (bugs/task) | 0.12 | 0.15 | 0.29 |
+| Quality score | 88% | 85% | 71% |
 
 ## Violation Breakdown
 
@@ -1442,3 +1442,14 @@ Notes: Light review cycle — one epic closed cleanly. The jup close is legitima
 
 Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (141 tests, 0 failures)
 Notes: Both feature deliverables are well-structured with good test coverage. The operator panel transport work is clean and correct. The loot export helpers use hand-rolled CSV/JSON serialization which introduces two minor bugs (filed above). Claude quality score slips slightly from 90% → 89%.
+
+### QA Review — 2026-03-16 08:30 — fac8768..75c028f
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 1 | Closed `red-cell-c2-1uz7`: TLS error UX — `CapturingCertVerifier` wraps `WebPkiServerVerifier` to capture the cert fingerprint before delegating, `classify_tls_error` maps raw rustls strings to actionable messages (expired/hostname-mismatch/unknown-issuer/conn-refused), `is_tls_cert_error` halts the retry loop on non-recoverable cert failures, `TrustCertificate` login action pins the cert to `local_config` and reconnects. 11 new unit/integration tests. Filed `red-cell-c2-f5jl` (P3): `AppState::tls_failure` is set on cert failure but never cleared on successful connection — stale failure can appear in login UI after a non-TLS disconnect that follows a successful session. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓
+Notes: Solid feature delivery. The fingerprint-capture approach (wrap standard verifier, capture before delegating) correctly preserves full CA validation while enabling cert pinning UX. No `unwrap()` in production paths. One latent correctness bug filed (stale tls_failure after reconnect). Claude quality score 89% → 88%.

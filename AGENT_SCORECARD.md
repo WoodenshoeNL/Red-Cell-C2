@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 170 | 181 | 31 |
+| Tasks closed | 171 | 181 | 31 |
 | Bugs filed against | 29 | 28 | 9 |
 | Bug rate (bugs/task) | 0.17 | 0.15 | 0.29 |
 | Quality score | 83% | 85% | 71% |
@@ -1551,3 +1551,14 @@ Notes: Two security/robustness bugs fixed cleanly. URL validation logic is corre
 
 Build: **passed** — `cargo check` ✓, `cargo clippy` ✓, `cargo test --workspace` ✓ (145 tests, 0 failures)
 Notes: No productive work this period — Claude hit its daily rate limit before the QA checkpoint. The dev loop's rate-limit detection is broken (wrong grep string), causing 5 tasks to pile up as in_progress with no work done. Forward progress will resume once STALE_THRESHOLD (2h) resets the stuck tasks or the bug is fixed. Critical blocker: `red-cell-c2-big9`.
+
+### QA Review — 2026-03-16 12:50 — d229395..a147e6a
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed `red-cell-c2-oreb` (P2: pivot connect failure silently swallowed). Fix: `9f32ebf` reads Win32 error code, formats "[SMB] Failed to connect: {name} [{code}]", broadcasts Error event — matches Havoc reference exactly. 1 test added (`pivot_connect_callback_failure_broadcasts_error_event`). Clean implementation, no unwraps, proper error propagation. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (all tests pass, 0 failures)
+Notes: One substantive fix delivered this period. `red-cell-c2-oreb` is resolved. Still open: `red-cell-c2-rsu9` (P2 pivot disconnect failure silent), `red-cell-c2-kg7n` (P3 pivot failure tests), plus 5 tasks still stuck in_progress from rate-limit incident (mk68, lbxd, bdnw, 5a1q, 6iz0) — awaiting STALE_THRESHOLD reset or manual triage.

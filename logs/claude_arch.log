@@ -243,3 +243,11 @@ All recent code is from **Claude Sonnet 4.6** — Codex and Cursor have no activ
 [2026-03-15 11:35:19] 
 [2026-03-15 22:56:36] [Ubuntu-C2-dev02-claude] Pre-sleep: waiting 120.0m before first run...
 [2026-03-15 22:56:53] [Ubuntu-C2-dev02-claude] Pre-sleep: waiting 130.0m before first run...
+[2026-03-16 01:06:53] [Ubuntu-C2-dev02-claude] ========================================================
+[2026-03-16 01:06:53] [Ubuntu-C2-dev02-claude]   Claude arch loop starting
+[2026-03-16 01:06:53] [Ubuntu-C2-dev02-claude]   Prompt:   CLAUDE_ARCH_PROMPT.md
+[2026-03-16 01:06:53] [Ubuntu-C2-dev02-claude]   Log:      claude_arch.log
+[2026-03-16 01:06:53] [Ubuntu-C2-dev02-claude]   Sleep:    120m
+[2026-03-16 01:06:53] [Ubuntu-C2-dev02-claude]   Max runs: unlimited
+[2026-03-16 01:06:53] [Ubuntu-C2-dev02-claude] ========================================================
+[2026-03-16 01:06:53] [Ubuntu-C2-dev02-claude] STOP signal detected (.stop file exists). Exiting.

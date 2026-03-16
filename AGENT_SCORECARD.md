@@ -10,9 +10,9 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 178 | 181 | 31 |
-| Bugs filed against | 29 | 28 | 9 |
-| Bug rate (bugs/task) | 0.16 | 0.15 | 0.29 |
-| Quality score | 84% | 85% | 71% |
+| Bugs filed against | 31 | 28 | 9 |
+| Bug rate (bugs/task) | 0.17 | 0.15 | 0.29 |
+| Quality score | 83% | 85% | 71% |
 
 ## Violation Breakdown
 
@@ -22,10 +22,10 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests | 10 | 12 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
 | Protocol errors | 6 | 24 | 3 |
-| Security issues | 15 | 31 | 0 |
+| Security issues | 16 | 31 | 0 |
 | Architecture drift | 2 | 21 | 0 |
 | Memory / resource leaks | 1 | 10 | 1 |
-| Startup / lifecycle regressions | 0 | 8 | 0 |
+| Startup / lifecycle regressions | 1 | 8 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
 | Availability / timeout regressions | 1 | 4 | 0 |
 | Correctness / pagination | 5 | 2 | 1 |
@@ -37,6 +37,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-16 14:33
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 2 | Security (1), Startup/lifecycle (1) | red-cell-c2-t2i5: DNS upload sessions keyed by agent_id from untrusted wire data — any network source can clear a legitimate agent's in-progress DNS upload by sending a packet with matching agent_id but different total chunk count; per-IP session cap does not prevent this (P2); red-cell-c2-rtzx: generate_key_hash_secret() calls getrandom::fill and panics with panic!() if OS RNG unavailable, crashing the server at startup before any requests are served — should return Result and propagate to main() (P3) |
+| Codex | 0 | — | No new findings attributed |
+| Cursor | 0 | — | No new findings attributed |
+
+Overall codebase health: on track
+Biggest blindspot: DNS C2 upload sessions are keyed purely by agent_id extracted from untrusted wire data (listeners.rs). Any observer who can see DNS traffic (plaintext query labels expose agent_id) can repeatedly clear a target agent's upload session, making DNS C2 exfiltration unreliable against an active network adversary. The fix is to bind each upload session to the source IP that opened it.
 
 ### Arch Review — 2026-03-16 12:20
 

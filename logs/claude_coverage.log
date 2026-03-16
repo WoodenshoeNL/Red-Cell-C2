@@ -44,3 +44,31 @@
 [2026-03-16 23:13:10] [Ubuntu-C2-dev02-claude] === Coverage review run 2 ===
 [2026-03-16 23:13:10] [Ubuntu-C2-dev02-claude] WARNING: git pull --rebase failed, continuing with local state
 [2026-03-16 23:13:10] [Ubuntu-C2-dev02-claude] Run log: claude_coverage_20260316_231310.log
+## Coverage Scan Complete — Index 13→25 of 62
+
+**Files scanned**: 11 source files (positions 13–24; `demon.rs` excluded as in-progress)
+
+**Coverage rate**: ~87% (96/110 public functions covered)
+
+### Issues Filed (9 new)
+
+| ID | Area | Priority |
+|----|------|----------|
+| `red-cell-c2-rqen` | `AgentRegistry::disconnect_link` grandchild cascade | P2 |
+| `red-cell-c2-doop` | `AgentRepository::set_ctr_block_offset` AgentNotFound error path | P2 |
+| `red-cell-c2-yxty` | `AgentRegistry::set_last_call_in` revival persistence across restart | P2 |
+| `red-cell-c2-x0aq` | `AgentResponseRepository::list_for_agent/list/delete` edge cases | P3 |
+| `red-cell-c2-265b` | `AuditLogRepository::latest_timestamps_by_actor_for_actions` empty input | P3 |
+| `red-cell-c2-3nq0` | `LootRepository::query_filtered` multi-field filter combinations | P3 |
+| `red-cell-c2-37rn` | `ListenerRepository::update` and `exists` | P3 |
+| `red-cell-c2-5b4v` | `audit::query_session_activity` empty-set guard | P3 |
+| `red-cell-c2-xypk` | `numeric_code!` macro round-trip for all operator enum types | P3 |
+
+**Worst gap**: `teamserver/src/database.rs` — the `set_ctr_block_offset` AgentNotFound error path is P2 because a silent failure would desync the AES-256-CTR keystream with no observable error.
+
+**Trend**: Core orchestration modules (`auth`, `agents`, `audit`, `api`) are well-tested. Remaining gaps are concentrated in database repository error branches and multi-field query edge cases.
+[2026-03-16 23:22:45] [Ubuntu-C2-dev02-claude] Coverage review completed successfully
+[2026-03-16 23:22:45] [Ubuntu-C2-dev02-claude] ========================LOOP=========================
+[2026-03-16 23:22:45] [Ubuntu-C2-dev02-claude] === Coverage review run 3 ===
+[2026-03-16 23:22:45] [Ubuntu-C2-dev02-claude] WARNING: git pull --rebase failed, continuing with local state
+[2026-03-16 23:22:45] [Ubuntu-C2-dev02-claude] Run log: claude_coverage_20260316_232245.log

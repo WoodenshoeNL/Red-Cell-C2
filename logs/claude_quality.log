@@ -309,3 +309,42 @@ Committed and pushed. Here's the run summary:
 [2026-03-17 00:42:45] [Ubuntu-C2-dev01-claude] === Quality review run 9 of 10 ===
 [2026-03-17 00:42:45] [Ubuntu-C2-dev01-claude] WARNING: git pull --rebase failed, continuing with local state
 [2026-03-17 00:42:45] [Ubuntu-C2-dev01-claude] Run log: claude_quality_20260317_004245.log
+---
+
+## Report
+
+**Files reviewed**: 10 of 61 total (batch 28–37, scan index 28 → 38)
+
+| # | File |
+|---|------|
+| 28 | `teamserver/src/dispatch/kerberos.rs` |
+| 29 | `teamserver/src/dispatch/mod.rs` (test section) |
+| 30 | `teamserver/src/dispatch/network.rs` |
+| 31 | `teamserver/src/dispatch/output.rs` |
+| 32 | `teamserver/src/dispatch/pivot.rs` |
+| 33 | `teamserver/src/dispatch/process.rs` |
+| 34 | `teamserver/src/dispatch/screenshot.rs` |
+| 35 | `teamserver/src/dispatch/socket.rs` |
+| 36 | `teamserver/src/dispatch/token.rs` |
+| 37 | `teamserver/src/dispatch/transfer.rs` |
+
+**Issues filed** (7 new):
+
+| ID | Description |
+|----|-------------|
+| `red-cell-c2-33cr` | P3 — `format_filetime` epoch boundary and invalid timestamp edge cases |
+| `red-cell-c2-tfs3` | P3 — `int_to_ipv4` byte-order correctness for socket/rportfwd display |
+| `red-cell-c2-t8as` | P3 — `handle_exit_callback` broadcasts different messages for thread vs process exit |
+| `red-cell-c2-0evn` | P3 — `handle_kerberos_callback` Luid and Purge/Ptt subcommands untested |
+| `red-cell-c2-bg8g` | P4 — `byte_count` boundary values at 0, 999, 1000, unit transitions |
+| `red-cell-c2-gw6b` | P4 — `format_ticket_flags` bit-field output for zero/single/multi-bit |
+| `red-cell-c2-lesf` | P4 — `format_memory_protect/state/type` fallback to hex for unknown values |
+
+**Most critical gap**: `int_to_ipv4` (network.rs) has no test pinning its byte-order convention. Since the function uses `to_le_bytes()` on a raw u32 read off the wire, any refactor that changes to `to_be_bytes()` would silently render all socket, rportfwd, and session IP addresses backwards in operator output — with nothing catching it.
+
+**Overall test quality**: Exceptionally good. The `dispatch/mod.rs` contains 80+ named, behaviorally-focused tests covering nearly every handler subcommand with both success and error paths. The gaps that remain are all in pure helper/formatting functions (`format_filetime`, `int_to_ipv4`, `byte_count`, `format_ticket_flags`, `format_memory_*`) that were clearly deferred because they're not async. These are low-friction to test but meaningful for correctness and regression prevention.
+[2026-03-17 00:47:16] [Ubuntu-C2-dev01-claude] Quality review completed successfully
+[2026-03-17 00:47:16] [Ubuntu-C2-dev01-claude] ========================LOOP=========================
+[2026-03-17 00:47:16] [Ubuntu-C2-dev01-claude] === Quality review run 10 of 10 ===
+[2026-03-17 00:47:16] [Ubuntu-C2-dev01-claude] WARNING: git pull --rebase failed, continuing with local state
+[2026-03-17 00:47:16] [Ubuntu-C2-dev01-claude] Run log: claude_quality_20260317_004716.log

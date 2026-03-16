@@ -1793,6 +1793,8 @@ const DNS_UPLOAD_CLEANUP_INTERVAL_SECS: u64 = 30;
 const DNS_MAX_UPLOAD_CHUNKS: u16 = 256;
 /// Maximum number of concurrent DNS upload sessions retained in memory.
 const DNS_MAX_PENDING_UPLOADS: usize = 1000;
+/// Maximum number of concurrent DNS upload sessions allowed per source IP.
+const DNS_MAX_UPLOADS_PER_IP: usize = 10;
 /// Maximum response chunk size in bytes (encoded as base32hex in a TXT string).
 /// 200 base32hex chars × 5 bits ÷ 8 = 125 bytes.
 const DNS_RESPONSE_CHUNK_BYTES: usize = 125;
@@ -1808,6 +1810,8 @@ struct DnsPendingUpload {
     total: u16,
     /// Timestamp of the first chunk (for expiry tracking).
     received_at: Instant,
+    /// Source IP that opened this upload session (used for per-IP rate limiting).
+    peer_ip: IpAddr,
 }
 
 /// Pre-chunked C2 response ready to be polled by a DNS agent.
@@ -1958,7 +1962,7 @@ impl DnsListenerState {
         data: Vec<u8>,
         peer_ip: IpAddr,
     ) -> &'static str {
-        let assembled = match self.try_assemble_upload(agent_id, seq, total, data).await {
+        let assembled = match self.try_assemble_upload(agent_id, seq, total, data, peer_ip).await {
             DnsUploadAssembly::Pending => return "ok",
             DnsUploadAssembly::Rejected => return "err",
             DnsUploadAssembly::Complete(assembled) => assembled,
@@ -2064,6 +2068,7 @@ impl DnsListenerState {
         seq: u16,
         total: u16,
         data: Vec<u8>,
+        peer_ip: IpAddr,
     ) -> DnsUploadAssembly {
         if total == 0 || total > DNS_MAX_UPLOAD_CHUNKS {
             warn!(
@@ -2115,10 +2120,26 @@ impl DnsListenerState {
             return DnsUploadAssembly::Rejected;
         }
 
+        if !uploads.contains_key(&agent_id) {
+            let ip_count = uploads.values().filter(|u| u.peer_ip == peer_ip).count();
+            if ip_count >= DNS_MAX_UPLOADS_PER_IP {
+                warn!(
+                    listener = %self.config.name,
+                    agent_id = format_args!("{agent_id:08X}"),
+                    %peer_ip,
+                    ip_count,
+                    max_per_ip = DNS_MAX_UPLOADS_PER_IP,
+                    "dns upload rejected because per-IP upload limit has been reached"
+                );
+                return DnsUploadAssembly::Rejected;
+            }
+        }
+
         let entry = uploads.entry(agent_id).or_insert_with(|| DnsPendingUpload {
             chunks: HashMap::new(),
             total,
             received_at: Instant::now(),
+            peer_ip,
         });
         entry.chunks.insert(seq, data);
 
@@ -3084,18 +3105,18 @@ mod tests {
 
     use super::{
         DEMON_INIT_WINDOW_DURATION, DNS_HEADER_LEN, DNS_MAX_PENDING_UPLOADS, DNS_MAX_UPLOAD_CHUNKS,
-        DNS_TYPE_A, DNS_TYPE_CNAME, DNS_TYPE_TXT, DNS_UPLOAD_TIMEOUT_SECS, DemonInitRateLimiter,
-        DnsListenerState, DnsPendingResponse, DnsPendingUpload, DnsUploadAssembly, DownloadTracker,
-        ListenerEventAction, ListenerManager, ListenerManagerError, ListenerStatus,
-        ListenerSummary, MAX_AGENT_MESSAGE_LEN, MAX_DEMON_INIT_ATTEMPT_WINDOWS,
-        MAX_DEMON_INIT_ATTEMPTS_PER_IP, MAX_SMB_FRAME_PAYLOAD_LEN, TrustedProxyPeer,
-        action_from_mark, base32hex_decode, base32hex_encode, build_dns_txt_response,
-        chunk_response_to_b32hex, collect_body_with_magic_precheck, dns_allowed_query_types,
-        extract_external_ip, listener_config_from_operator, listener_error_event,
-        listener_event_for_action, listener_removed_event, operator_requests_start,
-        parse_dns_c2_query, parse_dns_query, parse_trusted_proxy_peer, profile_listener_configs,
-        read_smb_frame, smb_local_socket_name, spawn_dns_listener_runtime,
-        spawn_managed_listener_task, spawn_smb_listener_runtime,
+        DNS_MAX_UPLOADS_PER_IP, DNS_TYPE_A, DNS_TYPE_CNAME, DNS_TYPE_TXT, DNS_UPLOAD_TIMEOUT_SECS,
+        DemonInitRateLimiter, DnsListenerState, DnsPendingResponse, DnsPendingUpload,
+        DnsUploadAssembly, DownloadTracker, ListenerEventAction, ListenerManager,
+        ListenerManagerError, ListenerStatus, ListenerSummary, MAX_AGENT_MESSAGE_LEN,
+        MAX_DEMON_INIT_ATTEMPT_WINDOWS, MAX_DEMON_INIT_ATTEMPTS_PER_IP, MAX_SMB_FRAME_PAYLOAD_LEN,
+        TrustedProxyPeer, action_from_mark, base32hex_decode, base32hex_encode,
+        build_dns_txt_response, chunk_response_to_b32hex, collect_body_with_magic_precheck,
+        dns_allowed_query_types, extract_external_ip, listener_config_from_operator,
+        listener_error_event, listener_event_for_action, listener_removed_event,
+        operator_requests_start, parse_dns_c2_query, parse_dns_query, parse_trusted_proxy_peer,
+        profile_listener_configs, read_smb_frame, smb_local_socket_name,
+        spawn_dns_listener_runtime, spawn_managed_listener_task, spawn_smb_listener_runtime,
     };
     use crate::{
         AgentRegistry, AuditQuery, AuditResultStatus, Database, EventBus, Job,
@@ -6011,8 +6032,15 @@ mod tests {
     async fn dns_upload_rejects_total_over_limit() {
         let state = dns_state("dns-total-cap").await;
 
-        let result =
-            state.try_assemble_upload(0xDEAD_BEEF, 0, DNS_MAX_UPLOAD_CHUNKS + 1, vec![0x41]).await;
+        let result = state
+            .try_assemble_upload(
+                0xDEAD_BEEF,
+                0,
+                DNS_MAX_UPLOAD_CHUNKS + 1,
+                vec![0x41],
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            )
+            .await;
 
         assert_eq!(result, DnsUploadAssembly::Rejected);
         assert!(state.uploads.lock().await.is_empty());
@@ -6023,10 +6051,14 @@ mod tests {
         let state = dns_state("dns-total-mismatch").await;
         let agent_id = 0xDEAD_BEEF;
 
-        let first = state.try_assemble_upload(agent_id, 0, 2, vec![0x41]).await;
+        let first = state
+            .try_assemble_upload(agent_id, 0, 2, vec![0x41], IpAddr::V4(Ipv4Addr::LOCALHOST))
+            .await;
         assert_eq!(first, DnsUploadAssembly::Pending);
 
-        let second = state.try_assemble_upload(agent_id, 1, 3, vec![0x42]).await;
+        let second = state
+            .try_assemble_upload(agent_id, 1, 3, vec![0x42], IpAddr::V4(Ipv4Addr::LOCALHOST))
+            .await;
         assert_eq!(second, DnsUploadAssembly::Rejected);
         assert!(!state.uploads.lock().await.contains_key(&agent_id));
     }
@@ -6044,15 +6076,53 @@ mod tests {
                         chunks: HashMap::new(),
                         total: 1,
                         received_at: Instant::now(),
+                        // Use a distinct IP per slot so per-IP limits don't interfere.
+                        peer_ip: IpAddr::V4(Ipv4Addr::new(
+                            10,
+                            ((agent_id >> 16) & 0xFF) as u8,
+                            ((agent_id >> 8) & 0xFF) as u8,
+                            (agent_id & 0xFF) as u8,
+                        )),
                     },
                 );
             }
         }
 
-        let result = state.try_assemble_upload(0xDEAD_BEEF, 0, 1, vec![0x41]).await;
+        let result = state
+            .try_assemble_upload(
+                0xDEAD_BEEF,
+                0,
+                1,
+                vec![0x41],
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+            )
+            .await;
 
         assert_eq!(result, DnsUploadAssembly::Rejected);
         assert_eq!(state.uploads.lock().await.len(), DNS_MAX_PENDING_UPLOADS);
+    }
+
+    #[tokio::test]
+    async fn dns_upload_rejects_new_session_when_per_ip_limit_reached() {
+        let state = dns_state("dns-per-ip-cap").await;
+        let attacker_ip = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
+        let other_ip = IpAddr::V4(Ipv4Addr::new(5, 6, 7, 8));
+
+        // Fill up DNS_MAX_UPLOADS_PER_IP sessions from the attacker IP.
+        for i in 0..DNS_MAX_UPLOADS_PER_IP {
+            let result = state.try_assemble_upload(i as u32, 0, 2, vec![0x41], attacker_ip).await;
+            assert_eq!(result, DnsUploadAssembly::Pending, "session {i} should be accepted");
+        }
+
+        // Next session from the same IP must be rejected.
+        let result = state
+            .try_assemble_upload(DNS_MAX_UPLOADS_PER_IP as u32, 0, 1, vec![0x41], attacker_ip)
+            .await;
+        assert_eq!(result, DnsUploadAssembly::Rejected);
+
+        // A different IP must still be accepted.
+        let result = state.try_assemble_upload(0xFFFF_0001, 0, 1, vec![0x41], other_ip).await;
+        assert_eq!(result, DnsUploadAssembly::Complete(vec![0x41]));
     }
 
     #[tokio::test]
@@ -6068,11 +6138,17 @@ mod tests {
                     chunks: HashMap::new(),
                     total: 1,
                     received_at: Instant::now() - stale_age,
+                    peer_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
                 },
             );
             uploads.insert(
                 2,
-                DnsPendingUpload { chunks: HashMap::new(), total: 1, received_at: Instant::now() },
+                DnsPendingUpload {
+                    chunks: HashMap::new(),
+                    total: 1,
+                    received_at: Instant::now(),
+                    peer_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                },
             );
         }
         {

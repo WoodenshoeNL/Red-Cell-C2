@@ -10,9 +10,9 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 183 | 181 | 31 |
-| Bugs filed against | 33 | 30 | 9 |
-| Bug rate (bugs/task) | 0.18 | 0.17 | 0.29 |
-| Quality score | 82% | 83% | 71% |
+| Bugs filed against | 34 | 32 | 9 |
+| Bug rate (bugs/task) | 0.19 | 0.18 | 0.29 |
+| Quality score | 81% | 82% | 71% |
 
 ## Violation Breakdown
 
@@ -22,21 +22,36 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests | 10 | 12 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
 | Protocol errors | 6 | 24 | 3 |
-| Security issues | 16 | 31 | 0 |
+| Security issues | 16 | 32 | 0 |
 | Architecture drift | 2 | 21 | 0 |
 | Memory / resource leaks | 1 | 10 | 1 |
 | Startup / lifecycle regressions | 1 | 8 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
-| Availability / timeout regressions | 1 | 4 | 0 |
+| Availability / timeout regressions | 1 | 5 | 0 |
 | Correctness / pagination | 5 | 4 | 1 |
 | Workflow / close-hygiene | 7 | 0 | 0 |
-| Code reuse / duplication | 3 | 0 | 0 |
+| Code reuse / duplication | 4 | 0 | 0 |
 
 ---
 
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-16 19:28 — HEAD=1c22b60
+
+**Scope:** Full codebase audit — all source files in teamserver/, common/, client/
+**Build:** `cargo check` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓
+
+**Findings filed (3):**
+
+| Issue | Priority | Attributed to | Category | Summary |
+|-------|----------|--------------|----------|---------|
+| red-cell-c2-2fwp | P2 | Codex (8d10163) | Security | SMB DEMON_INIT rate limiter hardcodes `Ipv4Addr::LOCALHOST` for all SMB connections — per-IP rate limiting is non-functional for SMB; all attempts share one bucket |
+| red-cell-c2-ilec | P3 | Claude (b6211d9) | Duplication | `windows_version_label` and `basename` duplicated between `teamserver/src/demon.rs` and `teamserver/src/dispatch/checkin.rs` |
+| red-cell-c2-qy2h | P3 | Codex (a4d0ad9) | Robustness | No max pivot chain depth in `build_pivot_job`/`child_subtree` — unbounded O(depth) traversal on every task enqueue |
+
+**No findings in:** protocol correctness, error handling, unwrap/expect, AES-256-CTR offset logic, constant-time token comparison, Argon2 auth, key zeroization, download caps, body size limits, DNS upload guards, listener lifecycle.
 
 ### QA Review — 2026-03-16 19:15 — 2b1a662..9a7dafa
 

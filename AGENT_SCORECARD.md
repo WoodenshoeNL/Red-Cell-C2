@@ -9,8 +9,8 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 173 | 181 | 31 |
-| Bugs filed against | 29 | 28 | 9 |
+| Tasks closed | 175 | 181 | 31 |
+| Bugs filed against | 30 | 28 | 9 |
 | Bug rate (bugs/task) | 0.17 | 0.15 | 0.29 |
 | Quality score | 83% | 85% | 71% |
 
@@ -1573,3 +1573,14 @@ Notes: One substantive fix delivered this period. `red-cell-c2-oreb` is resolved
 
 Build: **passed** — `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (148 tests, 0 failures)
 Notes: Two more pivot protocol issues resolved, completing the trio started with `oreb`. All three pivot failure paths (connect, disconnect, missing tests) now handled with proper Error events and test coverage. 5 tasks remain stuck in_progress (mk68, lbxd, bdnw, 5a1q, 6iz0) — these are ready and unblocked, awaiting a dev agent session.
+
+### QA Review — 2026-03-16 13:35 — dba2595..716efa3
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 1 | Closed `red-cell-c2-lbxd` (P3: silent discard of download/socket errors) via `a1cb211` — added `warn!` logging to `dispatch/socket.rs` and `dispatch/transfer.rs` for `close_client`, `finish_connect`, and `finish` callbacks. Closed `red-cell-c2-mk68` (P3: missing zero-agent-id test) — test already landed in 785fd5d, close commit only. Bug filed: `red-cell-c2-246e` — test fixture in bdnw WIP uses `"AESIV"` instead of `"AESIv"` causing deserialization test to fail. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` **FAILED** — 1 failure: `domain::tests::agent_record_deserialize_restores_encryption_field` in uncommitted WIP (bdnw). 865 tests passed. Committed code is clean; failure is in local working-tree changes not yet committed.
+Notes: Light productive period — 2 closes (lbxd, mk68), 1 real code fix (a1cb211). Still open/ready: `red-cell-c2-bdnw` (AES key leakage risk), `red-cell-c2-5a1q` (DNS upload pre-auth), `red-cell-c2-6iz0` (flaky WebSocket tests). The bdnw WIP has a test typo that must be fixed before commit.

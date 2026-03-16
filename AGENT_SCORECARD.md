@@ -10,21 +10,21 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 166 | 181 | 31 |
-| Bugs filed against | 20 | 28 | 9 |
-| Bug rate (bugs/task) | 0.12 | 0.15 | 0.29 |
-| Quality score | 88% | 85% | 71% |
+| Bugs filed against | 27 | 28 | 9 |
+| Bug rate (bugs/task) | 0.16 | 0.15 | 0.29 |
+| Quality score | 84% | 85% | 71% |
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
-| unwrap / expect in production | 1 | 0 | 0 |
-| Missing tests | 9 | 11 | 5 |
+| unwrap / expect in production | 2 | 0 | 0 |
+| Missing tests | 10 | 11 | 5 |
 | Clippy warnings | 0 | 0 | 1 |
-| Protocol errors | 5 | 22 | 3 |
-| Security issues | 10 | 31 | 0 |
+| Protocol errors | 6 | 22 | 3 |
+| Security issues | 15 | 31 | 0 |
 | Architecture drift | 2 | 21 | 0 |
-| Memory / resource leaks | 0 | 10 | 1 |
+| Memory / resource leaks | 1 | 10 | 1 |
 | Startup / lifecycle regressions | 0 | 8 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
 | Availability / timeout regressions | 1 | 4 | 0 |
@@ -1497,3 +1497,14 @@ Notes: High-quality testing infrastructure delivery. CI workflow, listener lifec
 
 Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (141 unit + integration, 0 failures)
 Notes: Clean single-task delivery. The TOCTOU fix is correct and applied consistently across all 18 call sites. Minor observation: SOCKS5 tests must drop the guard immediately (API takes port string, not listener) so the race window there is unchanged — but this is an inherent API limitation, not a bug in the fix. No new issues filed.
+
+### Arch Review — 2026-03-16 11:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 7 | Security(4), Protocol(1), Missing tests(1), Robustness(1) | 7 new issues filed: red-cell-c2-5ujg (P1), red-cell-c2-bdnw (P2), red-cell-c2-yz7q (P2), red-cell-c2-4rsi (P2), red-cell-c2-5a1q (P2), red-cell-c2-lbxd (P3), red-cell-c2-wg35 (P3), red-cell-c2-mk68 (P3) |
+| Codex | 0 | — | No recent activity |
+| Cursor | 0 | — | No recent activity |
+
+Overall codebase health: on track — all tests pass, no compilation errors, no clippy warnings. Architecture decisions (Axum/Tokio/SQLite/HCL/thiserror) are consistent throughout. Crypto design is sound with CTR offset tracking correctly deferred until after parse success.
+Biggest blindspot: AgentRecord derives Serialize without excluding the AES key/IV fields, making it trivially easy for a future REST API route to accidentally expose all agent session keys to operators. The Debug derive on OperatorConfig similarly exposes plaintext passwords to any future tracing instrumentation. Both are latent but high-impact security risks.

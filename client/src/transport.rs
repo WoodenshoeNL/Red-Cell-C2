@@ -3187,7 +3187,7 @@ mod tests {
 
     #[test]
     fn chat_user_presence_updates_connected_operators() {
-        use red_cell_common::operator::{ChatCode, ChatUserInfo};
+        use red_cell_common::operator::ChatUserInfo;
 
         let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
 

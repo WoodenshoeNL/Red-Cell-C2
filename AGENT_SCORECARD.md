@@ -9,8 +9,8 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 178 | 181 | 31 |
-| Bugs filed against | 32 | 28 | 9 |
+| Tasks closed | 180 | 181 | 31 |
+| Bugs filed against | 33 | 28 | 9 |
 | Bug rate (bugs/task) | 0.18 | 0.15 | 0.29 |
 | Quality score | 82% | 85% | 71% |
 
@@ -29,7 +29,7 @@ Each loop run updates the running totals and appends a review entry.
 | Audit attribution errors | 0 | 1 | 0 |
 | Availability / timeout regressions | 1 | 4 | 0 |
 | Correctness / pagination | 5 | 2 | 1 |
-| Workflow / close-hygiene | 6 | 0 | 0 |
+| Workflow / close-hygiene | 7 | 0 | 0 |
 | Code reuse / duplication | 3 | 0 | 0 |
 
 ---
@@ -48,6 +48,17 @@ Each loop run updates the running totals and appends a review entry.
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓
 Notes: No tasks formally closed this period. rtzx fix is complete in-tree but unclosed; t2i5 is stalled — the core DoS vector (IP-mismatch on inconsistent-total path) remains unpatched.
+
+### QA Review — 2026-03-16 17:45 — 8933a92..eeb0bd9
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 1 | Closed `red-cell-c2-rtzx` and `red-cell-c2-t19w` (both workflow/hygiene). Filed `red-cell-c2-chym` (P1): dev loop is stalled — t2i5 stuck in_progress after 4+ interrupted claims with zero Rust commits; loop spinning at iterations 661-669+ skipping t2i5 indefinitely. Core DoS fix (IP-mismatch guard in listeners.rs:2098-2110) still absent. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓
+Notes: No Rust code changes this period. Dev loop fully blocked — only ready task (t2i5) is in_progress in JSONL from a prior interrupted claim; no other work exists. Immediate attention needed to unblock.
 
 ### Arch Review — 2026-03-16 14:33
 

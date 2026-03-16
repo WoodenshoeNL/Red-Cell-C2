@@ -2061,8 +2061,8 @@ fn parse_havocui_register_command_request(
     // Prefer explicit keyword form for any argument.
     let callback = if let Some(value) = optional_kwarg(kwargs, "callback")? {
         value
-    } else if positional.last().is_some_and(Bound::is_callable) {
-        positional.last().cloned().expect("last checked above")
+    } else if let Some(cb) = positional.last().filter(|v| v.is_callable()) {
+        cb.clone()
     } else {
         return Err(PyValueError::new_err(
             "havocui.RegisterCommand requires a callable as the last positional argument or `callback=`",

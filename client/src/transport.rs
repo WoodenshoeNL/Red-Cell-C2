@@ -42,7 +42,8 @@ use url::Url;
 use crate::login::TlsFailure;
 use crate::python::PythonRuntime;
 
-const MAX_CHAT_MESSAGES: usize = 200;
+/// Default maximum number of events kept in the notification log.
+pub(crate) const DEFAULT_EVENT_LOG_MAX: usize = 500;
 const MAX_OPERATOR_ACTIVITY: usize = 20;
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
@@ -259,11 +260,97 @@ pub(crate) struct LootItem {
     pub(crate) preview: Option<String>,
 }
 
+/// Classifies an event stored in the notification log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EventKind {
+    /// Events directly related to agent check-ins and task output.
+    Agent,
+    /// Chat messages sent by human operators.
+    Operator,
+    /// Teamserver, builder, and connection lifecycle messages.
+    System,
+}
+
+impl EventKind {
+    /// Human-readable label used in filter buttons.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Agent => "Agent",
+            Self::Operator => "Operator",
+            Self::System => "System",
+        }
+    }
+}
+
+/// A single entry in the persistent notification / chat log.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ChatMessage {
+pub(crate) struct NotificationEntry {
+    pub(crate) kind: EventKind,
     pub(crate) author: String,
     pub(crate) sent_at: String,
     pub(crate) message: String,
+    pub(crate) read: bool,
+}
+
+/// Bounded event log stored in the client, backed by a `VecDeque`.
+///
+/// Oldest entries are evicted when `max_size` is exceeded. An `unread_count`
+/// is maintained so callers can display a badge without scanning all entries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EventLog {
+    pub(crate) entries: VecDeque<NotificationEntry>,
+    pub(crate) max_size: usize,
+    pub(crate) unread_count: usize,
+}
+
+impl EventLog {
+    /// Create a new empty log with the given capacity limit.
+    pub(crate) fn new(max_size: usize) -> Self {
+        Self { entries: VecDeque::new(), max_size, unread_count: 0 }
+    }
+
+    /// Push a new event; evicts the oldest entry when at capacity.
+    pub(crate) fn push(
+        &mut self,
+        kind: EventKind,
+        author: impl Into<String>,
+        sent_at: impl Into<String>,
+        message: impl Into<String>,
+    ) {
+        if self.entries.len() >= self.max_size {
+            if let Some(front) = self.entries.pop_front() {
+                if !front.read {
+                    self.unread_count = self.unread_count.saturating_sub(1);
+                }
+            }
+        }
+        self.entries.push_back(NotificationEntry {
+            kind,
+            author: author.into(),
+            sent_at: sent_at.into(),
+            message: message.into(),
+            read: false,
+        });
+        self.unread_count += 1;
+    }
+
+    /// Mark every entry as read, resetting `unread_count` to zero.
+    pub(crate) fn mark_all_read(&mut self) {
+        for entry in &mut self.entries {
+            entry.read = true;
+        }
+        self.unread_count = 0;
+    }
+
+    /// Number of unread entries with a given kind.
+    pub(crate) fn unread_by_kind(&self, kind: EventKind) -> usize {
+        self.entries.iter().filter(|e| !e.read && e.kind == kind).count()
+    }
+
+    /// Total number of entries (read and unread).
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -377,7 +464,8 @@ pub(crate) struct AppState {
     pub(crate) process_lists: BTreeMap<String, AgentProcessListState>,
     pub(crate) listeners: Vec<ListenerSummary>,
     pub(crate) loot: Vec<LootItem>,
-    pub(crate) chat_messages: Vec<ChatMessage>,
+    /// Persistent notification / chat log with per-entry read tracking.
+    pub(crate) event_log: EventLog,
     /// Usernames of operators currently seen online (used by the chat panel).
     pub(crate) online_operators: BTreeSet<String>,
     /// Per-operator presence, role, and activity state, keyed by username.
@@ -398,7 +486,7 @@ impl AppState {
             process_lists: BTreeMap::new(),
             listeners: Vec::new(),
             loot: Vec::new(),
-            chat_messages: Vec::new(),
+            event_log: EventLog::new(DEFAULT_EVENT_LOG_MAX),
             online_operators: BTreeSet::new(),
             connected_operators: BTreeMap::new(),
             tls_failure: None,
@@ -420,7 +508,8 @@ impl AppState {
                         last_seen: Some(message.head.timestamp.clone()),
                     });
                 }
-                self.push_chat_message(
+                self.push_event(
+                    EventKind::System,
                     "teamserver",
                     message.head.timestamp,
                     sanitize_text(&message.info.message),
@@ -428,7 +517,12 @@ impl AppState {
             }
             OperatorMessage::InitConnectionError(message) => {
                 self.connection_status = ConnectionStatus::Error(message.info.message.clone());
-                self.push_chat_message("teamserver", message.head.timestamp, message.info.message);
+                self.push_event(
+                    EventKind::System,
+                    "teamserver",
+                    message.head.timestamp,
+                    message.info.message,
+                );
             }
             OperatorMessage::InitConnectionInfo(message) => {
                 self.handle_operator_snapshot(message.info);
@@ -457,15 +551,28 @@ impl AppState {
                     protocol: "unknown".to_owned(),
                     status: format!("Error: {}", message.info.error),
                 });
-                self.push_chat_message("teamserver", message.head.timestamp, message.info.error);
+                self.push_event(
+                    EventKind::System,
+                    "teamserver",
+                    message.head.timestamp,
+                    message.info.error,
+                );
             }
-            OperatorMessage::ChatMessage(message)
-            | OperatorMessage::ChatListener(message)
-            | OperatorMessage::ChatAgent(message) => {
-                self.push_chat_message(
+            OperatorMessage::ChatMessage(message) => {
+                self.push_event(
+                    EventKind::Operator,
                     flat_info_string(&message.info, &["User", "Name", "DemonID"])
-                        .unwrap_or_else(|| "system".to_owned())
-                        .as_str(),
+                        .unwrap_or_else(|| "system".to_owned()),
+                    message.head.timestamp,
+                    flat_info_string(&message.info, &["Message", "Text", "Output"])
+                        .unwrap_or_else(|| "Received event".to_owned()),
+                );
+            }
+            OperatorMessage::ChatListener(message) | OperatorMessage::ChatAgent(message) => {
+                self.push_event(
+                    EventKind::Agent,
+                    flat_info_string(&message.info, &["User", "Name", "DemonID"])
+                        .unwrap_or_else(|| "system".to_owned()),
                     message.head.timestamp,
                     flat_info_string(&message.info, &["Message", "Text", "Output"])
                         .unwrap_or_else(|| "Received event".to_owned()),
@@ -497,7 +604,14 @@ impl AppState {
                 self.remove_loot_matching(&message.info, LootKind::File);
             }
             OperatorMessage::AgentNew(message) => {
-                events.push(AppEvent::AgentCheckin(normalize_agent_id(&message.info.name_id)));
+                let agent_id = normalize_agent_id(&message.info.name_id);
+                self.push_event(
+                    EventKind::Agent,
+                    "teamserver",
+                    message.head.timestamp,
+                    format!("Agent {} checked in (new)", agent_id),
+                );
+                events.push(AppEvent::AgentCheckin(agent_id));
                 self.upsert_agent(agent_summary_from_message(&message.info));
             }
             OperatorMessage::AgentRemove(message) => {
@@ -541,17 +655,24 @@ impl AppState {
                 events.extend(self.handle_agent_response(message));
             }
             OperatorMessage::TeamserverLog(message) => {
-                self.push_chat_message("teamserver", message.head.timestamp, message.info.text);
+                self.push_event(
+                    EventKind::System,
+                    "teamserver",
+                    message.head.timestamp,
+                    message.info.text,
+                );
             }
             OperatorMessage::BuildPayloadMessage(message) => {
-                self.push_chat_message(
+                self.push_event(
+                    EventKind::System,
                     "builder",
                     message.head.timestamp,
                     format!("{}: {}", message.info.message_type, message.info.message),
                 );
             }
             OperatorMessage::BuildPayloadResponse(message) => {
-                self.push_chat_message(
+                self.push_event(
+                    EventKind::System,
                     "builder",
                     message.head.timestamp,
                     format!("Built {}", message.info.file_name),
@@ -577,22 +698,14 @@ impl AppState {
         events
     }
 
-    fn push_chat_message(
+    fn push_event(
         &mut self,
+        kind: EventKind,
         author: impl Into<String>,
         sent_at: impl Into<String>,
         message: impl Into<String>,
     ) {
-        self.chat_messages.push(ChatMessage {
-            author: author.into(),
-            sent_at: sent_at.into(),
-            message: message.into(),
-        });
-
-        if self.chat_messages.len() > MAX_CHAT_MESSAGES {
-            let excess = self.chat_messages.len() - MAX_CHAT_MESSAGES;
-            self.chat_messages.drain(0..excess);
-        }
+        self.event_log.push(kind, author, sent_at, message);
     }
 
     fn upsert_agent(&mut self, agent: AgentSummary) {
@@ -639,7 +752,8 @@ impl AppState {
         } else {
             self.online_operators.remove(&chat_user.user);
         }
-        self.push_chat_message(
+        self.push_event(
+            EventKind::System,
             "teamserver",
             timestamp.clone(),
             format!("{} {}", chat_user.user, action),
@@ -2533,15 +2647,64 @@ mod tests {
     }
 
     #[test]
-    fn app_state_caps_chat_history() {
+    fn event_log_mark_all_read_clears_unread_count() {
+        let mut log = EventLog::new(10);
+        log.push(EventKind::System, "a", "t", "msg1");
+        log.push(EventKind::Operator, "b", "t", "msg2");
+        assert_eq!(log.unread_count, 2);
+
+        log.mark_all_read();
+        assert_eq!(log.unread_count, 0);
+        assert!(log.entries.iter().all(|e| e.read));
+    }
+
+    #[test]
+    fn event_log_unread_by_kind_counts_correctly() {
+        let mut log = EventLog::new(10);
+        log.push(EventKind::Agent, "a", "t", "agent1");
+        log.push(EventKind::Agent, "a", "t", "agent2");
+        log.push(EventKind::Operator, "b", "t", "op1");
+        log.push(EventKind::System, "c", "t", "sys1");
+
+        assert_eq!(log.unread_by_kind(EventKind::Agent), 2);
+        assert_eq!(log.unread_by_kind(EventKind::Operator), 1);
+        assert_eq!(log.unread_by_kind(EventKind::System), 1);
+
+        // mark one agent entry read
+        log.entries.front_mut().unwrap().read = true;
+        log.unread_count -= 1;
+        assert_eq!(log.unread_by_kind(EventKind::Agent), 1);
+    }
+
+    #[test]
+    fn event_log_eviction_adjusts_unread_count() {
+        let mut log = EventLog::new(2);
+        log.push(EventKind::System, "a", "t", "first");
+        log.push(EventKind::System, "a", "t", "second");
+        assert_eq!(log.unread_count, 2);
+
+        // Evict the oldest unread entry.
+        log.push(EventKind::System, "a", "t", "third");
+        assert_eq!(log.len(), 2);
+        assert_eq!(log.unread_count, 2, "evicted unread should decrement count");
+    }
+
+    #[test]
+    fn event_log_caps_history_at_max_size() {
+        let max = DEFAULT_EVENT_LOG_MAX;
         let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
 
-        for index in 0..(MAX_CHAT_MESSAGES + 5) {
-            state.push_chat_message("teamserver", index.to_string(), format!("message-{index}"));
+        for index in 0..(max + 5) {
+            state.push_event(
+                EventKind::System,
+                "teamserver",
+                index.to_string(),
+                format!("message-{index}"),
+            );
         }
 
-        assert_eq!(state.chat_messages.len(), MAX_CHAT_MESSAGES);
-        assert_eq!(state.chat_messages[0].message, "message-5");
+        assert_eq!(state.event_log.len(), max);
+        assert_eq!(state.event_log.entries.front().map(|e| e.message.as_str()), Some("message-5"),);
     }
 
     async fn spawn_tls_echo_server(
@@ -2754,7 +2917,7 @@ mod tests {
             protocol: "Https".to_owned(),
             status: "Online".to_owned(),
         });
-        let chat_before = state.chat_messages.len();
+        let log_before = state.event_log.len();
 
         state.apply_operator_message(OperatorMessage::ListenerError(Message {
             head: head(EventCode::Listener),
@@ -2774,15 +2937,15 @@ mod tests {
             listener.status
         );
         assert_eq!(
-            state.chat_messages.len(),
-            chat_before + 1,
-            "a chat notification should have been appended"
+            state.event_log.len(),
+            log_before + 1,
+            "an event notification should have been appended"
         );
-        let chat = &state.chat_messages[chat_before];
+        let entry = state.event_log.entries.back().expect("entry should exist");
         assert!(
-            chat.message.contains("port in use"),
-            "chat message should echo the error text but was: {:?}",
-            chat.message
+            entry.message.contains("port in use"),
+            "event message should echo the error text but was: {:?}",
+            entry.message
         );
     }
 
@@ -2804,7 +2967,7 @@ mod tests {
             "status should start with 'Error:' but was: {:?}",
             listener.status
         );
-        assert_eq!(state.chat_messages.len(), 1, "chat notification should be appended");
+        assert_eq!(state.event_log.len(), 1, "event notification should be appended");
     }
 
     #[test]

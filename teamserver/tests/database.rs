@@ -705,6 +705,89 @@ async fn agent_response_repository_supports_insert_query_and_delete() -> Result<
 }
 
 #[tokio::test]
+async fn agent_response_list_for_agent_returns_empty_for_unknown_agent_id()
+-> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let responses = database.agent_responses();
+
+    // No agent registered, no responses inserted — should return Ok(empty vec).
+    let result = responses.list_for_agent(0xFFFF_FFFF).await?;
+    assert!(
+        result.is_empty(),
+        "list_for_agent with unknown agent_id must return an empty Vec, not an error"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_response_list_preserves_insertion_order_across_agents() -> Result<(), TeamserverError>
+{
+    let database = test_database().await?;
+    let agents = database.agents();
+    let responses = database.agent_responses();
+
+    let agent_a = sample_agent(0x4400_0001);
+    let agent_b = sample_agent(0x4400_0002);
+    agents.create(&agent_a).await?;
+    agents.create(&agent_b).await?;
+
+    let make_record = |agent_id: u32, seq: u32, ts: &str| AgentResponseRecord {
+        id: None,
+        agent_id,
+        command_id: 1,
+        request_id: seq,
+        response_type: "Good".to_owned(),
+        message: format!("msg-{seq}"),
+        output: format!("out-{seq}"),
+        command_line: None,
+        task_id: None,
+        operator: None,
+        received_at: ts.to_owned(),
+        extra: None,
+    };
+
+    // Insert three rows: two for agent_a, one for agent_b, interleaved.
+    let id1 = responses.create(&make_record(agent_a.agent_id, 1, "2026-03-17T10:00:00Z")).await?;
+    let id2 = responses.create(&make_record(agent_b.agent_id, 2, "2026-03-17T10:01:00Z")).await?;
+    let id3 = responses.create(&make_record(agent_a.agent_id, 3, "2026-03-17T10:02:00Z")).await?;
+
+    // list() must return all three in insertion (id) order.
+    let all = responses.list().await?;
+    assert_eq!(all.len(), 3);
+    assert_eq!(all[0].id, Some(id1));
+    assert_eq!(all[1].id, Some(id2));
+    assert_eq!(all[2].id, Some(id3));
+
+    // list_for_agent returns only the two rows for agent_a, in insertion order.
+    let for_a = responses.list_for_agent(agent_a.agent_id).await?;
+    assert_eq!(for_a.len(), 2);
+    assert_eq!(for_a[0].id, Some(id1));
+    assert_eq!(for_a[1].id, Some(id3));
+
+    // list_for_agent for agent_b returns exactly the one row belonging to it.
+    let for_b = responses.list_for_agent(agent_b.agent_id).await?;
+    assert_eq!(for_b.len(), 1);
+    assert_eq!(for_b[0].id, Some(id2));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_response_delete_nonexistent_id_is_silent_noop() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let responses = database.agent_responses();
+
+    // Deleting an id that was never inserted must not return an error.
+    responses.delete(999_999_999).await?;
+
+    // Subsequent list() must be empty — nothing was affected.
+    assert!(responses.list().await?.is_empty());
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn audit_helpers_persist_and_filter_structured_records() -> Result<(), TeamserverError> {
     let database = test_database().await?;
 

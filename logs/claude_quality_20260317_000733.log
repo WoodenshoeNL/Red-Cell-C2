@@ -1,0 +1,25 @@
+---
+
+## Run Summary
+
+**Files reviewed**: 10 of 63 total (indices 31–40)
+- `dispatch/output.rs` · `dispatch/pivot.rs` · `dispatch/process.rs` · `dispatch/screenshot.rs`
+- `dispatch/socket.rs` · `dispatch/token.rs` · `dispatch/transfer.rs` · `dispatch/util.rs`
+- `events.rs` · `lib.rs`
+
+**Scan position**: 31 → 41
+
+**Issues filed**:
+
+| ID | Description |
+|----|-------------|
+| `red-cell-c2-cgt1` | `handle_command_error_callback` — Win32 unknown code, Token non-0x1, Coffee/unknown silent returns untested |
+| `red-cell-c2-c482` | `handle_job_callback` — List, Suspend, KillRemove failure, Died, unknown subcommand all untested |
+| `red-cell-c2-i9b2` | `handle_config_callback` — only WorkingHours tested; 11 other DemonConfigKey variants have zero coverage |
+| `red-cell-c2-8js2` | `dispatch/util.rs basename` — no tests for empty, no-separator, trailing-separator, or mixed paths |
+| `red-cell-c2-irjx` | `handle_sleep_callback` — agent-not-found error path never exercised |
+| `red-cell-c2-2m4s` | `EventBus` ring buffer — capacity=1 single-slot eviction and multi-wrap ordering untested |
+
+**Most critical gap**: `red-cell-c2-i9b2` — `handle_config_callback` has 12 DemonConfigKey variants but only WorkingHours is tested. Two variants (`KillDate` and `WorkingHours`) mutate agent state and persist to the database; a regression in any of the other 10 would produce wrong operator console messages with no test to catch it.
+
+**Overall test quality**: The `dispatch/` module has impressively deep coverage in `dispatch/mod.rs` (6,693 lines of tests). `events.rs` is well-tested. The gaps are mostly uncovered branches within already-tested handlers (error class variants, job subcommands) rather than entire functions without any tests. The codebase shows mature testing discipline.

@@ -1,0 +1,40 @@
+---
+
+## Run Report
+
+### Files Reviewed: 10 of 63 total (indices 51–60)
+
+| Index | File |
+|-------|------|
+| 51 | `teamserver/src/websocket.rs` (partial — 57K tokens, read first 100 lines) |
+| 52 | `teamserver/tests/common/mod.rs` |
+| 53 | `teamserver/tests/ctr_offset_persistence.rs` |
+| 54 | `teamserver/tests/database.rs` |
+| 55 | `teamserver/tests/e2e_operator_agent_session.rs` |
+| 56 | `teamserver/tests/havoc_compatibility.rs` |
+| 57 | `teamserver/tests/http_listener_pipeline.rs` |
+| 58 | `teamserver/tests/listener_lifecycle.rs` |
+| 59 | `teamserver/tests/mock_demon_agent_checkin.rs` |
+| 60 | `teamserver/tests/red_cell_public_api.rs` |
+
+### Scan Position: 51 → 61
+
+### Issues Filed: 7
+
+| ID | Description |
+|----|-------------|
+| `red-cell-c2-dhs9` | P2 — Login rate limiter lockout never tested end-to-end |
+| `red-cell-c2-xmo7` | P2 — HTTP listener doesn't reject malformed/truncated request bodies |
+| `red-cell-c2-f6o2` | P2 — Concurrent `encrypt_for_agent` calls may race on CTR counter |
+| `red-cell-c2-tc5q` | P3 — `restore_running` with port-in-use failure state not tested |
+| `red-cell-c2-d53r` | P3 — `ListenerManager::create` duplicate name rejection not tested |
+| `red-cell-c2-jvax` | P3 — Admin role positive RBAC test missing (only denial tests exist) |
+| `red-cell-c2-w9qh` | P4 — Large setup boilerplate duplication in `mock_demon_agent_checkin.rs` |
+
+### Most Critical Gap
+
+**`red-cell-c2-dhs9`** (rate limiter) and **`red-cell-c2-f6o2`** (CTR counter race) tie for most dangerous. The CTR race is particularly severe: two concurrent encryptions for the same agent could silently reuse the same AES-CTR keystream offset — a two-time-pad — and no existing test would catch it because all tests call `encrypt_for_agent` sequentially.
+
+### Overall Test Quality
+
+The integration test suite (indices 52–60) is genuinely impressive: well-named tests, strong assertions, solid error-path coverage for the happy-path flows. The `database.rs` tests are especially thorough. The main systemic gaps are (1) security controls (rate limiter, RBAC positive path) that have rejection tests but no behavioral acceptance/enforcement tests, and (2) concurrent/race-condition scenarios across the crypto layer that are absent from the entire suite.

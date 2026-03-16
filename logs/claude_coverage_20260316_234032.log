@@ -1,0 +1,22 @@
+## Report
+
+**Files scanned**: 11 files (positions 37–48 of 62 total; `dispatch/util.rs` excluded — recently touched)
+
+**Batch**: `dispatch/transfer.rs`, `events.rs`, `lib.rs`, `listeners.rs`, `logging.rs`, `main.rs`, `payload_builder.rs`, `plugins.rs`, `rate_limiter.rs`, `rbac.rs`, `shutdown.rs`
+
+**Public functions found**: ~60 total across the batch
+
+**Coverage rate**: ~95% — almost all public API is tested
+
+**Issues filed**:
+
+| ID | Functions | Priority |
+|---|---|---|
+| `red-cell-c2-uyk8` | `transfer_progress_text`, `transfer_state_name`, `byte_count` | P3 |
+| `red-cell-c2-zpn2` | `handle_transfer_callback`, `handle_mem_file_callback`, `handle_package_dropped_callback`, `handle_beacon_output_callback` | P3 |
+
+**Worst coverage gap**: `teamserver/src/dispatch/transfer.rs` — zero tests in the entire file. The pure formatting helpers (`byte_count`, `transfer_progress_text`, `transfer_state_name`) are simple to test; the four async callback handlers are more complex but directly in the agent callback path.
+
+**Well-tested files this batch**: `events.rs`, `logging.rs`, `rate_limiter.rs`, `rbac.rs`, `shutdown.rs`, `payload_builder.rs`, `plugins.rs`, `listeners.rs` (backed by comprehensive integration tests in `listener_lifecycle.rs` and `http_listener_pipeline.rs`).
+
+**Trend**: Coverage is strong and improving. The remaining gaps are concentrated in the `dispatch/` subsystem — consistent with earlier scan rounds.

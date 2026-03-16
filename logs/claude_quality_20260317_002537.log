@@ -1,0 +1,31 @@
+---
+
+## Summary
+
+**Files reviewed**: 10 of 63 total (wrapping around from index 61)
+- `teamserver/src/webhook.rs`
+- `teamserver/src/websocket.rs`
+- `teamserver/src/agent_events.rs`
+- `teamserver/src/agent_liveness.rs`
+- `teamserver/src/agents.rs`
+- `teamserver/src/api.rs`
+- `teamserver/src/app.rs`
+- `teamserver/src/dispatch/assembly.rs`
+- `teamserver/src/audit.rs`
+- `teamserver/src/auth.rs`
+
+**Scan position**: 61 → 8 (wrapping)
+
+**Issues filed**:
+| ID | Description |
+|----|-------------|
+| `red-cell-c2-baok` | P2 — `dispatch/assembly.rs` handlers have no unit tests for truncated or malformed payloads |
+| `red-cell-c2-0dau` | P3 — `query_audit_log` `since`/`until` time-range filters are never tested |
+| `red-cell-c2-w08j` | P3 — `encrypt_for_agent`/`decrypt_from_agent` error path for unknown agent_id |
+| `red-cell-c2-cov0` | P4 — `operator_agent_info` `kill_date`/`working_hours` `None` → `Value::Null` untested |
+| `red-cell-c2-ovnk` | P4 — `AgentLivenessConfig` sweep interval MAX clamp (30s) boundary untested |
+| `red-cell-c2-xz11` | P4 — `AuditQuery::actor_filter()` operator-beats-actor precedence untested |
+
+**Most critical gap**: `dispatch/assembly.rs` (`red-cell-c2-baok`) — binary protocol parsers with zero test coverage for malformed inputs. A compromised agent sending a zero-byte BOF callback would exercise untested error handling code.
+
+**Overall test quality**: Very high in the files reviewed. `webhook.rs`, `agent_liveness.rs`, `agents.rs`, `auth.rs`, and `audit.rs` all have thorough, well-named tests covering the critical paths, error paths, and concurrency/shutdown scenarios. The main gap was `dispatch/assembly.rs` having no inline tests, and a few edge cases in the other modules (time range filters, boundary clamping).

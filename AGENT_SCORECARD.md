@@ -10,9 +10,9 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 178 | 181 | 31 |
-| Bugs filed against | 31 | 28 | 9 |
-| Bug rate (bugs/task) | 0.17 | 0.15 | 0.29 |
-| Quality score | 83% | 85% | 71% |
+| Bugs filed against | 32 | 28 | 9 |
+| Bug rate (bugs/task) | 0.18 | 0.15 | 0.29 |
+| Quality score | 82% | 85% | 71% |
 
 ## Violation Breakdown
 
@@ -29,7 +29,7 @@ Each loop run updates the running totals and appends a review entry.
 | Audit attribution errors | 0 | 1 | 0 |
 | Availability / timeout regressions | 1 | 4 | 0 |
 | Correctness / pagination | 5 | 2 | 1 |
-| Workflow / close-hygiene | 5 | 0 | 0 |
+| Workflow / close-hygiene | 6 | 0 | 0 |
 | Code reuse / duplication | 3 | 0 | 0 |
 
 ---
@@ -37,6 +37,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-16 17:10 — eab8f68..219bc8b
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 1 | `red-cell-c2-rtzx` fix fully implemented in fefddd6 (generate_key_hash_secret returns Result, TeamserverError::Rng variant added, main.rs propagates cleanly) but issue left in_progress — filed red-cell-c2-t19w (P4, workflow hygiene). `red-cell-c2-t2i5` claimed 3× without progress: `peer_ip` field is stored in DnsPendingUpload but the IP-mismatch guard before the inconsistent-total check (listeners.rs:2098-2110) is still absent — a different-IP attacker can still clear a legitimate session. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓
+Notes: No tasks formally closed this period. rtzx fix is complete in-tree but unclosed; t2i5 is stalled — the core DoS vector (IP-mismatch on inconsistent-total path) remains unpatched.
 
 ### Arch Review — 2026-03-16 14:33
 

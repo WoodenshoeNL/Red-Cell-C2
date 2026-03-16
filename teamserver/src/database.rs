@@ -96,6 +96,9 @@ pub enum TeamserverError {
     /// Returned when an AES transport operation fails.
     #[error("agent crypto error: {0}")]
     Crypto(#[from] red_cell_common::crypto::CryptoError),
+    /// Returned when the OS random-number generator is unavailable.
+    #[error("OS RNG unavailable: {0}")]
+    Rng(#[from] getrandom::Error),
     /// Returned when a per-agent job queue has reached its capacity limit.
     #[error(
         "job queue full for agent 0x{agent_id:08X}: {queued} jobs already queued (max {max_queue_depth})"

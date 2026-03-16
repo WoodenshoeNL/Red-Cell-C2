@@ -46,7 +46,7 @@ pub async fn spawn_test_server(
         profile: profile.clone(),
         database: database.clone(),
         auth: AuthService::from_profile(&profile).expect("auth service should initialize"),
-        api: ApiRuntime::from_profile(&profile),
+        api: ApiRuntime::from_profile(&profile).expect("rng should work in tests"),
         events,
         connections: OperatorConnectionManager::new(),
         agent_registry: registry.clone(),

@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
         profile: profile.clone(),
         auth: AuthService::from_profile_with_database(&profile, &database).await?,
         database,
-        api: ApiRuntime::from_profile(&profile),
+        api: ApiRuntime::from_profile(&profile).context("OS RNG unavailable")?,
         events,
         connections: OperatorConnectionManager::new(),
         agent_registry,
@@ -488,7 +488,7 @@ mod tests {
         let sockets = SocketRelayManager::new(agent_registry.clone(), events.clone());
         let state = TeamserverState {
             auth: AuthService::from_profile(&profile).expect("auth service should initialize"),
-            api: ApiRuntime::from_profile(&profile),
+            api: ApiRuntime::from_profile(&profile).expect("rng should work in tests"),
             database: database.clone(),
             events: events.clone(),
             connections: OperatorConnectionManager::new(),

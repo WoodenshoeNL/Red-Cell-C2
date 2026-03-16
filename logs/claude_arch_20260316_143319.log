@@ -1,0 +1,30 @@
+---
+
+## Architecture Review — 2026-03-16 14:33
+
+**Build status:** `cargo check` ✓ · `cargo clippy -D warnings` ✓ · `cargo test` ✓ (690+ tests, 0 failures)
+
+### Codebase health: on track
+
+The security fundamentals remain solid — constant-time comparisons for tokens and API keys, deferred CTR advance so failed parses don't corrupt offset, Argon2id with dummy verifier for timing equalization, fails-closed proxy trust, per-IP rate limiting on all three attack surfaces (operator login, DEMON_INIT, REST API auth).
+
+### Issues filed this run
+
+| ID | Priority | Category | Description |
+|----|----------|----------|-------------|
+| red-cell-c2-rtzx | P3 | Startup/lifecycle | `generate_key_hash_secret` uses bare `panic!` if OS RNG unavailable — server crashes at startup before serving any requests (`api.rs:418-420`) |
+| red-cell-c2-t2i5 | P2 | Security | DNS upload sessions keyed by untrusted `agent_id` from wire data — any host that can observe DNS traffic can repeatedly send a packet with a matching `agent_id` and wrong `total`, clearing the real agent's in-progress upload session (`listeners.rs:2065-2170`) |
+
+### Biggest blindspot
+
+The DNS upload session vulnerability (`red-cell-c2-t2i5`) is the most operationally significant finding. `agent_id` is visible in plaintext in DNS query labels, so a passive network observer can trivially identify active agents and persistently disrupt their DNS C2 exfiltration. The per-IP concurrent-session cap (10) guards against exhaustion but does nothing against targeted session clearing. Fix: bind each upload session to the source IP that created it and reject chunks arriving from a different IP for the same `agent_id`.
+
+### Agent quality
+
+| Agent | Tasks | Bugs | Rate | Quality |
+|-------|------:|-----:|-----:|--------:|
+| Claude | 178 | 31 | 0.17 | 83% |
+| Codex | 181 | 28 | 0.15 | 85% |
+| Cursor | 31 | 9 | 0.29 | 71% |
+
+Claude introduced both findings in this run. Codex leads on quality; the gap closed slightly. No Cursor activity since last review.

@@ -252,9 +252,13 @@ pub struct ApiRuntime {
 
 impl ApiRuntime {
     /// Build REST API runtime state from a validated profile.
-    #[must_use]
-    pub fn from_profile(profile: &Profile) -> Self {
-        let key_hash_secret = Arc::new(Self::generate_key_hash_secret());
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the OS random-number generator is unavailable when
+    /// generating the HMAC secret used to hash API keys.
+    pub fn from_profile(profile: &Profile) -> Result<Self, crate::TeamserverError> {
+        let key_hash_secret = Arc::new(Self::generate_key_hash_secret()?);
         let (keys, requests_per_minute) = profile
             .api
             .as_ref()
@@ -274,13 +278,13 @@ impl ApiRuntime {
             })
             .unwrap_or_else(|| (Vec::new(), 0));
 
-        Self {
+        Ok(Self {
             key_hash_secret,
             keys: Arc::new(keys),
             rate_limit: ApiRateLimit { requests_per_minute },
             windows: Arc::new(Mutex::new(BTreeMap::new())),
             auth_failure_windows: Arc::new(Mutex::new(HashMap::new())),
-        }
+        })
     }
 
     /// Return whether protected API routes are enabled.
@@ -413,12 +417,10 @@ impl ApiRuntime {
         ApiKeyDigest(bytes)
     }
 
-    fn generate_key_hash_secret() -> [u8; API_KEY_HASH_SECRET_SIZE] {
+    fn generate_key_hash_secret() -> Result<[u8; API_KEY_HASH_SECRET_SIZE], getrandom::Error> {
         let mut bytes = [0_u8; API_KEY_HASH_SECRET_SIZE];
-        match getrandom::fill(&mut bytes) {
-            Ok(()) => bytes,
-            Err(error) => panic!("OS RNG unavailable — cannot generate HMAC secret: {error}"),
-        }
+        getrandom::fill(&mut bytes)?;
+        Ok(bytes)
     }
 
     async fn check_rate_limit(&self, subject: &RateLimitSubject) -> Result<(), ApiAuthError> {
@@ -3647,7 +3649,7 @@ mod tests {
             sockets.clone(),
             None,
         );
-        let api = ApiRuntime::from_profile(&profile);
+        let api = ApiRuntime::from_profile(&profile).expect("rng should work in tests");
         let app = api_routes(api.clone()).with_state(TeamserverState {
             profile: profile.clone(),
             database,
@@ -4024,7 +4026,9 @@ mod tests {
     #[tokio::test]
     async fn rate_limiting_prunes_expired_windows_for_inactive_keys() {
         let api = ApiRuntime {
-            key_hash_secret: Arc::new(ApiRuntime::generate_key_hash_secret()),
+            key_hash_secret: Arc::new(
+                ApiRuntime::generate_key_hash_secret().expect("rng should work in tests"),
+            ),
             keys: Arc::new(Vec::new()),
             rate_limit: ApiRateLimit { requests_per_minute: 60 },
             windows: Arc::new(Mutex::new(BTreeMap::from([
@@ -4235,7 +4239,7 @@ mod tests {
             None,
         );
 
-        let api = ApiRuntime::from_profile(&profile);
+        let api = ApiRuntime::from_profile(&profile).expect("rng should work in tests");
         let auth =
             AuthService::from_profile_with_database(&profile, &database).await.expect("auth");
 

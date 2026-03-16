@@ -52,7 +52,7 @@ async fn crate_root_reexports_support_minimal_teamserver_bootstrap() {
         profile: profile.clone(),
         database: database.clone(),
         auth: AuthService::from_profile(&profile).expect("auth service should initialize"),
-        api: ApiRuntime::from_profile(&profile),
+        api: ApiRuntime::from_profile(&profile).expect("rng should work in tests"),
         events: events.clone(),
         connections: OperatorConnectionManager::new(),
         agent_registry: agent_registry.clone(),

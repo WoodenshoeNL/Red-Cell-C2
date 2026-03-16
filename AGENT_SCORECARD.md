@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 156 | 181 | 31 |
+| Tasks closed | 159 | 181 | 31 |
 | Bugs filed against | 19 | 28 | 9 |
 | Bug rate (bugs/task) | 0.12 | 0.15 | 0.29 |
 | Quality score | 88% | 85% | 71% |
@@ -1464,3 +1464,14 @@ Notes: Solid feature delivery. The fingerprint-capture approach (wrap standard v
 
 Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (720 tests, 0 failures)
 Notes: High-quality feature delivery. EventLog is well-designed: bounded VecDeque, eviction correctly adjusts unread_count, `mark_all_read` is atomic, `unread_by_kind` is O(n) but acceptable at max_size=500. The `expect()` removal in python.rs is correct. One trivial cleanup filed (unused import). Bug rate holds at 0.12.
+
+### QA Review — 2026-03-16 09:30 — 526dc3f..fa17ece
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 0 | Closed `red-cell-c2-jlmp`: CSV formula injection sanitization in `csv_field` — prepends `'` to values starting with `=`, `+`, `-`, `@` (trim_start aware); 9 test cases added. Closed `red-cell-c2-f5jl`: clear `AppState::tls_failure` on successful WebSocket reconnect (one-liner fix in `run_connection_manager` Ok branch). Closed `red-cell-c2-elfx`: remove unused `ChatCode` import from transport test module. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (141 tests + integration, 0 failures)
+Notes: Three clean bug-fix deliveries. The CSV formula injection fix is security-correct (covers all four trigger chars, handles leading whitespace conservatively, includes comprehensive tests). TLS state fix is minimal and correct. No new bugs filed. Bug rate holds at 0.12.

@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 183 | 181 | 31 |
+| Tasks closed | 187 | 181 | 31 |
 | Bugs filed against | 34 | 32 | 9 |
-| Bug rate (bugs/task) | 0.19 | 0.18 | 0.29 |
-| Quality score | 81% | 82% | 71% |
+| Bug rate (bugs/task) | 0.18 | 0.18 | 0.29 |
+| Quality score | 82% | 82% | 71% |
 
 ## Violation Breakdown
 
@@ -1712,3 +1712,25 @@ Issues filed: red-cell-c2-dhhb (P4), red-cell-c2-wuqv (P4). Both attributed to C
 
 Build: skipped — no source changes
 Notes: Only commit in range is the previous QA checkpoint commit. No open issues in tracker.
+
+### QA Review — 2026-03-16 23:30 — 827dc6a..0f65754
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 4 | 0 | Closed red-cell-c2-2fwp (SMB rate limiter synthetic IP fix, fe1d841), red-cell-c2-ilec (dispatch/util deduplication refactor, d1a709f), red-cell-c2-qy2h (MAX_PIVOT_CHAIN_DEPTH=16 enforcement, 240831c), red-cell-c2-uh00 (LoginState TLS failure unit tests, 0f65754). All three arch findings from prior cycle delivered cleanly. |
+| Codex | 0 | 0 | Filed red-cell-c2-uh00 and red-cell-c2-ih44 via coverage scan (6a67a12); no task closures. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (150 tests, 0 failures)
+Notes: Clean delivery cycle. No new bugs found. Dispatch helpers properly deduplicated into dispatch/util.rs. Pivot chain depth cap is correct and well-tested (boundary + reject + build_pivot_job guards). SMB synthetic IP derivation is sound — per-agent_id rate limiting now functional.
+
+### QA Review — 2026-03-16 23:35 — 0f65754..73cb663
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | Claimed red-cell-c2-ih44 (P4, in_progress); dev loop halted by .stop before completion. Spurious duplicate close of red-cell-c2-uh00 at 60bf990 — uh00 was already closed in 0f65754; two concurrent sessions both claimed the same issue. No code impact. |
+| Codex | 0 | 0 | Coverage scan advanced index to 37 (73cb663). No task closures. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: skipped — no Rust source changes
+Notes: ih44 left in_progress; will be picked up when dev loop resumes. .stop file is present.

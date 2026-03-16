@@ -10,9 +10,9 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 181 | 181 | 31 |
-| Bugs filed against | 33 | 28 | 9 |
-| Bug rate (bugs/task) | 0.18 | 0.15 | 0.29 |
-| Quality score | 82% | 85% | 71% |
+| Bugs filed against | 33 | 30 | 9 |
+| Bug rate (bugs/task) | 0.18 | 0.17 | 0.29 |
+| Quality score | 82% | 83% | 71% |
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Startup / lifecycle regressions | 1 | 8 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
 | Availability / timeout regressions | 1 | 4 | 0 |
-| Correctness / pagination | 5 | 2 | 1 |
+| Correctness / pagination | 5 | 4 | 1 |
 | Workflow / close-hygiene | 7 | 0 | 0 |
 | Code reuse / duplication | 3 | 0 | 0 |
 
@@ -1661,3 +1661,17 @@ Notes: 3 tasks closed (lbxd, mk68, bdnw). Two real code fixes: `a1cb211` adds `w
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (all 690+ tests pass, including previously-flaky websocket tests).
 Notes: Clean productive period. Both outstanding P2 security/stability issues addressed with correct, tested fixes. No bugs filed this run. No open issues remain in the tracker.
+
+### Arch Review — 2026-03-16 19:10
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 0 | — | No new findings attributed |
+| Codex | 2 | Correctness / pagination (2) | red-cell-c2-dhhb: `i64::try_from(credential.content.len()).unwrap_or_default()` at dispatch/mod.rs:1352 silently records `size_bytes=0` in loot table for credential content ≥ 2^63 bytes — fallback hides conversion failure (P4); red-cell-c2-wuqv: `u64::try_from(state.data.len()).unwrap_or_default()` at dispatch/filesystem.rs:205,242,517 and dispatch/transfer.rs:344 silently emits 0-progress download events for data > usize::MAX — dead fallback path with wrong semantics (P4) |
+| Cursor | 0 | — | No new findings attributed |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (891 tests, 0 failures across all workspace members)
+Overall codebase health: on track
+Security posture: strong — AES-256-CTR with advancing block offsets, constant-time token comparison, Argon2 password hashing, dummy verifier for user enumeration, HMAC-SHA256 API key digests, rate limiting on all auth endpoints, body size limits with early magic precheck, DNS upload sessions IP-bound, redirect-disabled webhook client (SSRF prevention), zeroized key material. No open security findings.
+Biggest blindspot: Both P4 findings involve `unwrap_or_default()` on integer narrowing conversions that silently produce semantically wrong values (0) instead of an error or the maximum representable value. The pattern appears in both the loot persistence path and the download-progress broadcast path. Neither is exploitable nor even triggerable in practice on 64-bit, but the idiom sets a bad precedent and would hide real failures if the data model ever changes.
+Issues filed: red-cell-c2-dhhb (P4), red-cell-c2-wuqv (P4). Both attributed to Codex (a849a947).

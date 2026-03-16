@@ -1349,7 +1349,7 @@ async fn persist_credentials_from_output(
                 kind: "credential".to_owned(),
                 name: format!("credential-{request_id:X}-{}", index + 1),
                 file_path: None,
-                size_bytes: Some(i64::try_from(credential.content.len()).unwrap_or_default()),
+                size_bytes: Some(i64::try_from(credential.content.len()).unwrap_or(i64::MAX)),
                 captured_at,
                 data: Some(credential.content.as_bytes().to_vec()),
                 metadata: Some(metadata_with_context(

@@ -9,8 +9,8 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 153 | 181 | 31 |
-| Bugs filed against | 18 | 28 | 9 |
+| Tasks closed | 156 | 181 | 31 |
+| Bugs filed against | 19 | 28 | 9 |
 | Bug rate (bugs/task) | 0.12 | 0.15 | 0.29 |
 | Quality score | 88% | 85% | 71% |
 
@@ -1453,3 +1453,14 @@ Notes: Both feature deliverables are well-structured with good test coverage. Th
 
 Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓
 Notes: Solid feature delivery. The fingerprint-capture approach (wrap standard verifier, capture before delegating) correctly preserves full CA validation while enabling cert pinning UX. No `unwrap()` in production paths. One latent correctness bug filed (stale tls_failure after reconnect). Claude quality score 89% → 88%.
+
+### QA Review — 2026-03-16 08:45 — 75c028f..a83c9c4
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 1 | Closed `red-cell-c2-1nri`: notification panel with EventLog (VecDeque, per-entry read tracking, per-kind unread counts, filter buttons, "Mark all read", 4 new unit tests). Closed `red-cell-c2-e3p5`: remove `expect()` in `parse_havocui_register_command_request` — replaced with safe `filter/clone` pattern. Closed `red-cell-c2-zjk2`: `csv_field` now quotes values containing bare `\r`, 2 new test cases. Filed `red-cell-c2-elfx` (P4): unused import `ChatCode` in test module at `transport.rs:3187` left over from chat→EventLog refactor. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (720 tests, 0 failures)
+Notes: High-quality feature delivery. EventLog is well-designed: bounded VecDeque, eviction correctly adjusts unread_count, `mark_all_read` is atomic, `unread_by_kind` is O(n) but acceptable at max_size=500. The `expect()` removal in python.rs is correct. One trivial cleanup filed (unused import). Bug rate holds at 0.12.

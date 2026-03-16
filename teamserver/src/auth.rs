@@ -549,14 +549,14 @@ fn password_verifier_for_sha3_cached(password_hash: &str) -> Result<String, Auth
 
     let key = password_hash.to_ascii_lowercase();
     {
-        let guard = cache.lock().unwrap();
+        let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(cached) = guard.get(&key) {
             return Ok(cached.clone());
         }
     }
 
     let verifier = password_verifier_for_sha3_impl(password_hash)?;
-    cache.lock().unwrap().entry(key).or_insert_with(|| verifier.clone());
+    cache.lock().unwrap_or_else(|e| e.into_inner()).entry(key).or_insert_with(|| verifier.clone());
     Ok(verifier)
 }
 

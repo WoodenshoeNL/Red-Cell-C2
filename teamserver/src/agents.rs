@@ -102,6 +102,14 @@ pub const DEFAULT_MAX_REGISTERED_AGENTS: usize = 10_000;
 /// [`TeamserverError::QueueFull`] so that a misbehaving or compromised operator
 /// cannot cause unbounded heap growth on the teamserver.
 pub const MAX_JOB_QUEUE_DEPTH: usize = 1_000;
+/// Maximum allowed depth of a pivot chain (ancestor hops from a leaf to the root).
+///
+/// A compromised or misbehaving agent could register arbitrarily deep SMB pivot
+/// chains. Every `enqueue_job` call for a pivoted agent calls `build_pivot_job`,
+/// which acquires one read-lock per hop; without a cap this is O(depth) work
+/// per dispatch. Limiting the chain to 16 hops bounds that cost while allowing
+/// realistic multi-hop topologies.
+pub const MAX_PIVOT_CHAIN_DEPTH: usize = 16;
 
 type AgentCleanupFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 type AgentCleanupHook = Arc<dyn Fn(u32) -> AgentCleanupFuture + Send + Sync + 'static>;
@@ -731,6 +739,15 @@ impl AgentRegistry {
             });
         }
 
+        let parent_depth = self.pivot_chain_depth(parent_agent_id).await;
+        if parent_depth >= MAX_PIVOT_CHAIN_DEPTH {
+            return Err(TeamserverError::InvalidPivotLink {
+                message: format!(
+                    "pivot chain depth would exceed MAX_PIVOT_CHAIN_DEPTH ({MAX_PIVOT_CHAIN_DEPTH})"
+                ),
+            });
+        }
+
         let existing_parent = self.parent_of(link_agent_id).await;
         if existing_parent == Some(parent_agent_id) {
             return Ok(());
@@ -796,8 +813,17 @@ impl AgentRegistry {
             operator: job.operator.clone(),
         };
         let mut current_parent = direct_parent_agent_id;
+        let mut hops: usize = 0;
 
         while let Some(next_parent) = self.parent_of(current_parent).await {
+            hops = hops.saturating_add(1);
+            if hops > MAX_PIVOT_CHAIN_DEPTH {
+                return Err(TeamserverError::InvalidPivotLink {
+                    message: format!(
+                        "pivot chain depth exceeds MAX_PIVOT_CHAIN_DEPTH ({MAX_PIVOT_CHAIN_DEPTH})"
+                    ),
+                });
+            }
             wrapped_payload =
                 self.serialize_jobs_for_agent(current_parent, &[wrapped_job.clone()]).await?;
             wrapped_target = current_parent;
@@ -905,6 +931,19 @@ impl AgentRegistry {
         }
 
         Ok(plaintext)
+    }
+
+    /// Count the number of ancestor hops from `agent_id` to the root of its pivot chain.
+    ///
+    /// A root agent (no parent) has depth 0; its direct child has depth 1; and so on.
+    async fn pivot_chain_depth(&self, agent_id: u32) -> usize {
+        let mut depth = 0usize;
+        let mut current = agent_id;
+        while let Some(parent) = self.parent_of(current).await {
+            depth = depth.saturating_add(1);
+            current = parent;
+        }
+        depth
     }
 
     async fn path_contains(&self, start_agent_id: u32, sought_agent_id: u32) -> bool {
@@ -2441,6 +2480,62 @@ mod tests {
             result,
             Err(TeamserverError::InvalidPivotLink { ref message }) if message.contains("itself")
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn add_link_rejects_chain_too_deep() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database);
+
+        // Build a linear chain of MAX_PIVOT_CHAIN_DEPTH + 1 agents.
+        // After MAX_PIVOT_CHAIN_DEPTH links the root is at depth 0 and the
+        // last inserted agent is at depth MAX_PIVOT_CHAIN_DEPTH, which is the
+        // limit. Trying to add one more level must be rejected.
+        let base_id = 0x2000_0000u32;
+        for i in 0..=(super::MAX_PIVOT_CHAIN_DEPTH as u32) {
+            registry.insert(sample_agent(base_id + i)).await?;
+        }
+        for i in 0..(super::MAX_PIVOT_CHAIN_DEPTH as u32) {
+            registry.add_link(base_id + i, base_id + i + 1).await?;
+        }
+
+        // The chain is now MAX_PIVOT_CHAIN_DEPTH deep. Adding one more level
+        // must fail.
+        let extra = sample_agent(base_id + super::MAX_PIVOT_CHAIN_DEPTH as u32 + 1);
+        registry.insert(extra.clone()).await?;
+        let result =
+            registry.add_link(base_id + super::MAX_PIVOT_CHAIN_DEPTH as u32, extra.agent_id).await;
+
+        assert!(
+            matches!(result, Err(TeamserverError::InvalidPivotLink { ref message }) if message.contains("MAX_PIVOT_CHAIN_DEPTH")),
+            "expected InvalidPivotLink depth error, got {result:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn add_link_allows_chain_at_max_depth() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database);
+
+        // A chain exactly MAX_PIVOT_CHAIN_DEPTH nodes deep (0..MAX_PIVOT_CHAIN_DEPTH
+        // links) must be accepted — depth equals the limit, not exceeds it.
+        let base_id = 0x2100_0000u32;
+        for i in 0..=(super::MAX_PIVOT_CHAIN_DEPTH as u32) {
+            registry.insert(sample_agent(base_id + i)).await?;
+        }
+        for i in 0..(super::MAX_PIVOT_CHAIN_DEPTH as u32) {
+            registry.add_link(base_id + i, base_id + i + 1).await?;
+        }
+        // The last link put the deepest agent at depth MAX_PIVOT_CHAIN_DEPTH,
+        // which is exactly the boundary — it must have succeeded.
+        let deepest_id = base_id + super::MAX_PIVOT_CHAIN_DEPTH as u32;
+        assert_eq!(
+            registry.parent_of(deepest_id).await,
+            Some(deepest_id - 1),
+            "deepest agent must still have a parent after successful add_link at boundary"
+        );
         Ok(())
     }
 

@@ -22,6 +22,7 @@ use tokio::time::sleep;
 use tokio_rustls::rustls::ClientConfig;
 use tokio_rustls::rustls::RootCertStore;
 use tokio_rustls::rustls::SignatureScheme;
+use tokio_rustls::rustls::client::WebPkiServerVerifier;
 use tokio_rustls::rustls::client::danger::{
     HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
 };
@@ -38,6 +39,7 @@ use tokio_tungstenite::{
 use tracing::warn;
 use url::Url;
 
+use crate::login::TlsFailure;
 use crate::python::PythonRuntime;
 
 const MAX_CHAT_MESSAGES: usize = 200;
@@ -380,6 +382,8 @@ pub(crate) struct AppState {
     pub(crate) online_operators: BTreeSet<String>,
     /// Per-operator presence, role, and activity state, keyed by username.
     pub(crate) connected_operators: BTreeMap<String, ConnectedOperatorState>,
+    /// Set when the last connection attempt failed due to a TLS certificate error.
+    pub(crate) tls_failure: Option<TlsFailure>,
 }
 
 impl AppState {
@@ -397,6 +401,7 @@ impl AppState {
             chat_messages: Vec::new(),
             online_operators: BTreeSet::new(),
             connected_operators: BTreeMap::new(),
+            tls_failure: None,
         }
     }
 
@@ -902,6 +907,8 @@ pub(crate) enum TransportError {
     CustomCaEmpty(String),
     #[error("custom CA certificate rejected by root store: {0}")]
     CustomCaInvalid(String),
+    #[error("failed to build certificate verifier: {0}")]
+    RustlsVerifier(String),
     #[error("failed to create websocket request: {0}")]
     WebSocketRequest(#[source] Box<tungstenite::Error>),
     #[error("failed to serialize websocket command: {0}")]
@@ -931,7 +938,17 @@ async fn run_connection_manager(
 
         set_connection_status(&app_state, &repaint, ConnectionStatus::Connecting);
 
-        let disconnect_reason = match connect_websocket(&server_url, &tls_verification).await {
+        // Fresh fingerprint sink for each connection attempt.
+        let fingerprint_sink: Arc<std::sync::Mutex<Option<String>>> =
+            Arc::new(std::sync::Mutex::new(None));
+
+        let disconnect_reason = match connect_websocket(
+            &server_url,
+            &tls_verification,
+            &fingerprint_sink,
+        )
+        .await
+        {
             Ok(socket) => {
                 reconnect_delay = INITIAL_RECONNECT_DELAY;
                 set_connection_status(&app_state, &repaint, ConnectionStatus::Connected);
@@ -965,7 +982,31 @@ async fn run_connection_manager(
                 send_task.abort();
                 reason
             }
-            Err(error) => error.to_string(),
+            Err(error) => {
+                let raw = error.to_string();
+                let captured_fp = fingerprint_sink.lock().ok().and_then(|guard| guard.clone());
+
+                if is_tls_cert_error(&raw) {
+                    // TLS certificate errors do not self-heal — stop retrying and surface
+                    // the cert fingerprint so the UI can offer an exception prompt.
+                    let message = classify_tls_error(&raw);
+                    {
+                        let mut state = lock_app_state(&app_state);
+                        state.tls_failure = Some(TlsFailure {
+                            message: message.clone(),
+                            cert_fingerprint: captured_fp,
+                        });
+                        state.connection_status = ConnectionStatus::Error(message);
+                    }
+                    repaint.request_repaint();
+                    // Wait for shutdown before returning.
+                    let _ = shutdown_rx.changed().await;
+                    set_connection_status(&app_state, &repaint, ConnectionStatus::Disconnected);
+                    return;
+                }
+
+                classify_tls_error(&raw)
+            }
         };
 
         if *shutdown_rx.borrow() {
@@ -1002,14 +1043,59 @@ async fn run_connection_manager(
     }
 }
 
+/// Returns true when the error string indicates a TLS *certificate* problem that will not
+/// self-heal on retry (e.g. expired cert, hostname mismatch, untrusted CA).
+fn is_tls_cert_error(err: &str) -> bool {
+    err.contains("invalid peer certificate:") || err.contains("certificate fingerprint mismatch")
+}
+
+/// Translate a raw connection error into an actionable message for the UI.
+/// Falls back to the raw error string when no specific pattern matches.
+pub(crate) fn classify_tls_error(err: &str) -> String {
+    if err.contains("invalid peer certificate:") {
+        if err.contains("certificate expired") || err.contains("Expired") {
+            return "The server's TLS certificate has expired. \
+                     Contact your teamserver administrator to renew it."
+                .to_owned();
+        }
+        if err.contains("not valid for name") || err.contains("NotValidForName") {
+            return "TLS hostname mismatch: the server URL's hostname does not match \
+                     the certificate. Verify the server address."
+                .to_owned();
+        }
+        if err.contains("UnknownIssuer") || err.contains("unknown issuer") {
+            return "The server's TLS certificate is signed by an unknown authority. \
+                     Use --ca-cert to specify the CA certificate, or trust the \
+                     certificate by its fingerprint."
+                .to_owned();
+        }
+        return format!("TLS certificate error: {err}");
+    }
+    if err.contains("certificate fingerprint mismatch") {
+        return "The server's certificate fingerprint does not match the pinned value. \
+                 The certificate may have been renewed — verify with your administrator."
+            .to_owned();
+    }
+    if err.contains("Connection refused")
+        || err.contains("connection refused")
+        || err.contains("os error 111")
+    {
+        return "Connection refused: check that the teamserver is running \
+                 and the address is correct."
+            .to_owned();
+    }
+    err.to_owned()
+}
+
 async fn connect_websocket(
     server_url: &str,
     tls_verification: &TlsVerification,
+    fingerprint_sink: &Arc<std::sync::Mutex<Option<String>>>,
 ) -> Result<ClientWebSocket, TransportError> {
     let request = server_url
         .into_client_request()
         .map_err(|error| TransportError::WebSocketRequest(Box::new(error)))?;
-    let connector = build_tls_connector(tls_verification)?;
+    let connector = build_tls_connector(tls_verification, Arc::clone(fingerprint_sink))?;
     let (stream, _) = connect_async_tls_with_config(request, None, false, Some(connector))
         .await
         .map_err(|error| TransportError::WebSocketRequest(Box::new(error)))?;
@@ -1110,17 +1196,28 @@ async fn run_send_loop(
     }
 }
 
-fn build_tls_connector(verification: &TlsVerification) -> Result<Connector, TransportError> {
+fn build_tls_connector(
+    verification: &TlsVerification,
+    fingerprint_sink: Arc<std::sync::Mutex<Option<String>>>,
+) -> Result<Connector, TransportError> {
     let provider = aws_lc_rs::default_provider();
 
     match verification {
         TlsVerification::CertificateAuthority => {
             let mut root_store = RootCertStore::empty();
             root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            let inner: Arc<dyn ServerCertVerifier> = WebPkiServerVerifier::builder_with_provider(
+                Arc::new(root_store),
+                provider.clone().into(),
+            )
+            .build()
+            .map_err(|e| TransportError::RustlsVerifier(e.to_string()))?;
+            let verifier = Arc::new(CapturingCertVerifier { inner, fingerprint_sink });
             let client_config = ClientConfig::builder_with_provider(provider.into())
                 .with_safe_default_protocol_versions()
                 .map_err(|error| TransportError::Rustls(Box::new(error)))?
-                .with_root_certificates(root_store)
+                .dangerous()
+                .with_custom_certificate_verifier(verifier)
                 .with_no_client_auth();
             Ok(Connector::Rustls(Arc::new(client_config)))
         }
@@ -1142,10 +1239,18 @@ fn build_tls_connector(verification: &TlsVerification) -> Result<Connector, Tran
             if !found_any {
                 return Err(TransportError::CustomCaEmpty(path.display().to_string()));
             }
+            let inner: Arc<dyn ServerCertVerifier> = WebPkiServerVerifier::builder_with_provider(
+                Arc::new(root_store),
+                provider.clone().into(),
+            )
+            .build()
+            .map_err(|e| TransportError::RustlsVerifier(e.to_string()))?;
+            let verifier = Arc::new(CapturingCertVerifier { inner, fingerprint_sink });
             let client_config = ClientConfig::builder_with_provider(provider.into())
                 .with_safe_default_protocol_versions()
                 .map_err(|error| TransportError::Rustls(Box::new(error)))?
-                .with_root_certificates(root_store)
+                .dangerous()
+                .with_custom_certificate_verifier(verifier)
                 .with_no_client_auth();
             Ok(Connector::Rustls(Arc::new(client_config)))
         }
@@ -1153,6 +1258,7 @@ fn build_tls_connector(verification: &TlsVerification) -> Result<Connector, Tran
             let verifier = Arc::new(FingerprintCertificateVerifier {
                 expected_fingerprint: expected.to_ascii_lowercase(),
                 provider: provider.clone(),
+                fingerprint_sink,
             });
             let client_config = ClientConfig::builder_with_provider(provider.into())
                 .with_safe_default_protocol_versions()
@@ -1175,6 +1281,55 @@ fn build_tls_connector(verification: &TlsVerification) -> Result<Connector, Tran
                 .with_no_client_auth();
             Ok(Connector::Rustls(Arc::new(client_config)))
         }
+    }
+}
+
+/// Wraps an inner [`ServerCertVerifier`], capturing the end-entity certificate's SHA-256
+/// fingerprint before delegating. This lets the caller display or pin the server's certificate
+/// even when CA verification fails.
+#[derive(Debug)]
+struct CapturingCertVerifier {
+    inner: Arc<dyn ServerCertVerifier>,
+    fingerprint_sink: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl ServerCertVerifier for CapturingCertVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, tokio_rustls::rustls::Error> {
+        // Capture the fingerprint before verification so it's available even on failure.
+        let fp = certificate_fingerprint(end_entity.as_ref());
+        if let Ok(mut sink) = self.fingerprint_sink.lock() {
+            *sink = Some(fp);
+        }
+        self.inner.verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &tokio_rustls::rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &tokio_rustls::rustls::DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
     }
 }
 
@@ -1616,6 +1771,8 @@ pub(crate) fn certificate_fingerprint(cert_der: &[u8]) -> String {
 struct FingerprintCertificateVerifier {
     expected_fingerprint: String,
     provider: crypto::CryptoProvider,
+    /// Captures the server's actual certificate fingerprint (may differ from expected).
+    fingerprint_sink: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl ServerCertVerifier for FingerprintCertificateVerifier {
@@ -1628,6 +1785,10 @@ impl ServerCertVerifier for FingerprintCertificateVerifier {
         _now: UnixTime,
     ) -> Result<ServerCertVerified, tokio_rustls::rustls::Error> {
         let actual = certificate_fingerprint(end_entity.as_ref());
+        // Always capture the actual fingerprint so the caller can show it on mismatch.
+        if let Ok(mut sink) = self.fingerprint_sink.lock() {
+            *sink = Some(actual.clone());
+        }
         if actual == self.expected_fingerprint {
             Ok(ServerCertVerified::assertion())
         } else {
@@ -2442,9 +2603,11 @@ mod tests {
         .expect("identity generation should succeed");
         let address = spawn_tls_echo_server(&identity).await;
 
+        let sink = Arc::new(std::sync::Mutex::new(None));
         let socket = connect_websocket(
             &format!("wss://{address}/havoc/"),
             &TlsVerification::DangerousSkipVerify,
+            &sink,
         )
         .await
         .expect("client should accept self-signed cert with skip-verify");
@@ -2470,9 +2633,11 @@ mod tests {
         let fingerprint = certificate_fingerprint(cert_der.as_ref());
         let address = spawn_tls_echo_server(&identity).await;
 
+        let sink = Arc::new(std::sync::Mutex::new(None));
         let socket = connect_websocket(
             &format!("wss://{address}/havoc/"),
             &TlsVerification::Fingerprint(fingerprint),
+            &sink,
         )
         .await
         .expect("client should accept cert with matching fingerprint");
@@ -2490,13 +2655,19 @@ mod tests {
         let address = spawn_tls_echo_server(&identity).await;
 
         let wrong_fingerprint = "00".repeat(32);
+        let sink = Arc::new(std::sync::Mutex::new(None));
         let result = connect_websocket(
             &format!("wss://{address}/havoc/"),
             &TlsVerification::Fingerprint(wrong_fingerprint),
+            &sink,
         )
         .await;
 
         assert!(result.is_err(), "mismatched fingerprint should be rejected");
+        assert!(
+            sink.lock().unwrap().is_some(),
+            "fingerprint sink should be populated even on mismatch"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2514,9 +2685,11 @@ mod tests {
 
         let address = spawn_tls_echo_server(&identity).await;
 
+        let sink = Arc::new(std::sync::Mutex::new(None));
         let socket = connect_websocket(
             &format!("wss://{address}/havoc/"),
             &TlsVerification::CustomCa(ca_path),
+            &sink,
         )
         .await
         .expect("client should accept cert signed by custom CA");
@@ -2533,13 +2706,19 @@ mod tests {
         .expect("identity generation should succeed");
         let address = spawn_tls_echo_server(&identity).await;
 
+        let sink = Arc::new(std::sync::Mutex::new(None));
         let result = connect_websocket(
             &format!("wss://{address}/havoc/"),
             &TlsVerification::CertificateAuthority,
+            &sink,
         )
         .await;
 
         assert!(result.is_err(), "self-signed cert should be rejected by default CA verification");
+        assert!(
+            sink.lock().unwrap().is_some(),
+            "fingerprint sink should be populated even when CA verification fails"
+        );
     }
 
     #[test]
@@ -2879,5 +3058,44 @@ mod tests {
             .unwrap_or_else(|| panic!("alice should still be present after disconnect"));
         assert!(!alice.online);
         assert_eq!(alice.last_seen.as_deref(), Some("10/03/2026 12:05:00"));
+    }
+
+    #[test]
+    fn classify_tls_error_expired() {
+        let msg = classify_tls_error("invalid peer certificate: certificate expired: ...");
+        assert!(msg.contains("expired"), "expected 'expired' in: {msg}");
+    }
+
+    #[test]
+    fn classify_tls_error_hostname_mismatch() {
+        let msg =
+            classify_tls_error("invalid peer certificate: certificate not valid for name ...");
+        assert!(msg.contains("hostname mismatch"), "expected 'hostname mismatch' in: {msg}");
+    }
+
+    #[test]
+    fn classify_tls_error_unknown_issuer() {
+        let msg = classify_tls_error("invalid peer certificate: UnknownIssuer");
+        assert!(msg.contains("unknown authority"), "expected 'unknown authority' in: {msg}");
+    }
+
+    #[test]
+    fn classify_tls_error_connection_refused() {
+        let msg = classify_tls_error("tcp connect error: Connection refused (os error 111)");
+        assert!(msg.contains("Connection refused"), "expected 'Connection refused' in: {msg}");
+    }
+
+    #[test]
+    fn classify_tls_error_fingerprint_mismatch() {
+        let msg = classify_tls_error("certificate fingerprint mismatch: expected abc, got def");
+        assert!(msg.contains("fingerprint"), "expected 'fingerprint' in: {msg}");
+    }
+
+    #[test]
+    fn is_tls_cert_error_detects_invalid_cert() {
+        assert!(is_tls_cert_error("invalid peer certificate: UnknownIssuer"));
+        assert!(is_tls_cert_error("certificate fingerprint mismatch: expected abc, got def"));
+        assert!(!is_tls_cert_error("Connection refused (os error 111)"));
+        assert!(!is_tls_cert_error("broken pipe"));
     }
 }

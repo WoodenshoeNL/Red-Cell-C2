@@ -531,11 +531,15 @@ impl ClientApp {
         }
 
         if let Some(error_msg) = error_message {
+            let tls_failure = snapshot.tls_failure.clone();
             let placeholder =
                 AppPhase::Login(LoginState::new(&self.cli_server_url, &self.local_config));
             let old_phase = std::mem::replace(&mut self.phase, placeholder);
             if let AppPhase::Authenticating { mut login_state, .. } = old_phase {
                 login_state.set_error(error_msg);
+                if let Some(failure) = tls_failure {
+                    login_state.set_tls_failure(failure);
+                }
                 self.outgoing_tx = None;
                 self.phase = AppPhase::Login(login_state);
             }
@@ -1023,6 +1027,11 @@ impl ClientApp {
             AppPhase::Login(login_state) => {
                 let action = render_login_dialog(ctx, login_state);
                 if action == LoginAction::Submit {
+                    self.handle_login_submit(ctx);
+                } else if let LoginAction::TrustCertificate(fingerprint) = action {
+                    self.local_config.cert_fingerprint = Some(fingerprint.clone());
+                    self.tls_verification = TlsVerification::Fingerprint(fingerprint);
+                    self.local_config.save();
                     self.handle_login_submit(ctx);
                 }
             }

@@ -11,6 +11,15 @@ const LOGIN_PANEL_WIDTH: f32 = 400.0;
 #[allow(dead_code)]
 const CONNECTING_COLOR: Color32 = Color32::from_rgb(232, 182, 83);
 
+/// Details about a TLS connection failure, surfaced to the UI for actionable messaging.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlsFailure {
+    /// Actionable, human-readable description of what went wrong.
+    pub message: String,
+    /// SHA-256 fingerprint (64 lowercase hex chars) of the server's certificate, if captured.
+    pub cert_fingerprint: Option<String>,
+}
+
 /// Tracks which field should receive initial focus on the next frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -30,6 +39,8 @@ pub struct LoginState {
     pub error_message: Option<String>,
     pub connecting: bool,
     focus_request: FocusRequest,
+    /// Set when the last connection failed due to a TLS certificate error.
+    pub tls_failure: Option<TlsFailure>,
 }
 
 impl LoginState {
@@ -48,6 +59,7 @@ impl LoginState {
             error_message: None,
             connecting: false,
             focus_request,
+            tls_failure: None,
         }
     }
 
@@ -82,10 +94,16 @@ impl LoginState {
         self.focus_request = FocusRequest::Password;
     }
 
+    /// Record a TLS failure with optional certificate fingerprint for the UI prompt.
+    pub fn set_tls_failure(&mut self, failure: TlsFailure) {
+        self.tls_failure = Some(failure);
+    }
+
     /// Mark the login as in-progress (disables the form).
     pub fn set_connecting(&mut self) {
         self.connecting = true;
         self.error_message = None;
+        self.tls_failure = None;
     }
 }
 
@@ -97,6 +115,8 @@ pub(crate) enum LoginAction {
     Waiting,
     /// User submitted the login form.
     Submit,
+    /// User chose to trust the server certificate by its fingerprint.
+    TrustCertificate(String),
 }
 
 /// Render the login dialog into the given egui context. Returns the action taken.
@@ -163,6 +183,44 @@ pub(crate) fn render_login_dialog(ctx: &egui::Context, state: &mut LoginState) -
 
                     if let Some(error) = &state.error_message {
                         ui.colored_label(Color32::from_rgb(215, 83, 83), error);
+                        ui.add_space(8.0);
+                    }
+
+                    if let Some(failure) = &state.tls_failure.clone() {
+                        egui::Frame::NONE
+                            .inner_margin(10.0)
+                            .corner_radius(4.0)
+                            .fill(Color32::from_rgb(50, 30, 30))
+                            .show(ui, |ui| {
+                                ui.set_min_width(LOGIN_PANEL_WIDTH);
+                                ui.colored_label(
+                                    Color32::from_rgb(215, 83, 83),
+                                    "TLS Certificate Error",
+                                );
+                                if let Some(fp) = &failure.cert_fingerprint {
+                                    ui.add_space(4.0);
+                                    ui.label(
+                                        RichText::new("Server certificate fingerprint:").small(),
+                                    );
+                                    ui.add(
+                                        TextEdit::singleline(&mut fp.clone())
+                                            .font(egui::TextStyle::Monospace)
+                                            .desired_width(f32::INFINITY)
+                                            .interactive(false),
+                                    );
+                                    ui.add_space(6.0);
+                                    if ui
+                                        .button(RichText::new("Trust this certificate").strong())
+                                        .on_hover_text(
+                                            "Pin this certificate fingerprint and reconnect. \
+                                             Only do this if you recognise this certificate.",
+                                        )
+                                        .clicked()
+                                    {
+                                        action = LoginAction::TrustCertificate(fp.clone());
+                                    }
+                                }
+                            });
                         ui.add_space(8.0);
                     }
 

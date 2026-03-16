@@ -10,9 +10,9 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 170 | 181 | 31 |
-| Bugs filed against | 28 | 28 | 9 |
-| Bug rate (bugs/task) | 0.16 | 0.15 | 0.29 |
-| Quality score | 84% | 85% | 71% |
+| Bugs filed against | 29 | 28 | 9 |
+| Bug rate (bugs/task) | 0.17 | 0.15 | 0.29 |
+| Quality score | 83% | 85% | 71% |
 
 ## Violation Breakdown
 
@@ -1529,3 +1529,14 @@ Notes: Two solid bug fixes delivered. The websocket test flakiness is pre-existi
 
 Build: **passed** — `cargo check` ✓, `cargo clippy` ✓, `cargo test --workspace` ✓ (145 tests, 0 failures, no flakiness observed this run)
 Notes: Two security/robustness bugs fixed cleanly. URL validation logic is correct and well-tested. No new issues filed. Open backlog: `red-cell-c2-bdnw` (P2 key exposure), `red-cell-c2-5a1q` (P2 unauthenticated upload), `red-cell-c2-6iz0` (P2 flaky WS tests), `red-cell-c2-lbxd` (P3 silent DB error), `red-cell-c2-mk68` (P3 missing test).
+
+### QA Review — 2026-03-16 12:20 — a6724da..4303615
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 1 | Rate-limit hit at 11:17; loop failed to detect it (grepped for "Context limit reached" but message was "You've hit your limit"). Result: 5 tasks (mk68, lbxd, bdnw, 5a1q, 6iz0) claimed but not closed, all stuck in_progress. No code written. Filed `red-cell-c2-big9` (P1 bug) against the dev loop. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check` ✓, `cargo clippy` ✓, `cargo test --workspace` ✓ (145 tests, 0 failures)
+Notes: No productive work this period — Claude hit its daily rate limit before the QA checkpoint. The dev loop's rate-limit detection is broken (wrong grep string), causing 5 tasks to pile up as in_progress with no work done. Forward progress will resume once STALE_THRESHOLD (2h) resets the stuck tasks or the bug is fixed. Critical blocker: `red-cell-c2-big9`.

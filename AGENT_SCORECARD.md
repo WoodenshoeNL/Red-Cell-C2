@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 176 | 181 | 31 |
+| Tasks closed | 178 | 181 | 31 |
 | Bugs filed against | 29 | 28 | 9 |
 | Bug rate (bugs/task) | 0.16 | 0.15 | 0.29 |
 | Quality score | 84% | 85% | 71% |
@@ -1584,3 +1584,14 @@ Notes: Two more pivot protocol issues resolved, completing the trio started with
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (all domain serialization tests pass in committed code).
 Notes: 3 tasks closed (lbxd, mk68, bdnw). Two real code fixes: `a1cb211` adds `warn!` logging for silently-discarded socket/download errors; `e64ebd6` adds `skip_serializing` to `AgentRecord.encryption` preventing AES key material from leaking into any future JSON serialization path. A WIP test typo (`AESIV` vs `AESIv`) was caught during review but fixed before commit. Still open/ready: `red-cell-c2-5a1q` (DNS upload pre-auth), `red-cell-c2-6iz0` (flaky WebSocket tests).
+
+### QA Review — 2026-03-16 13:48 — ea32b0f..eab8f68
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed `red-cell-c2-5a1q` (P2: DNS upload pre-auth memory exhaustion) — `b739cb6` adds `DNS_MAX_UPLOADS_PER_IP=10` cap, stores `peer_ip` in `DnsPendingUpload`, O(n) scan on new session open rejects when ≥10 sessions exist from same IP; new test `dns_upload_rejects_new_session_when_per_ip_limit_reached` verifies accept/reject/other-IP logic. Closed `red-cell-c2-6iz0` (P2: flaky websocket tests) — `4c120f0` raises `read_operator_message` test-helper timeout from 5s to 30s; tests pass clean under full-suite parallel load this run. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (all 690+ tests pass, including previously-flaky websocket tests).
+Notes: Clean productive period. Both outstanding P2 security/stability issues addressed with correct, tested fixes. No bugs filed this run. No open issues remain in the tracker.

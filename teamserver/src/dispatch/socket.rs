@@ -157,14 +157,30 @@ pub(super) async fn handle_socket_callback(
             let socket_id = parser.read_u32("socket close socket id")?;
             let socket_type = parser.read_u32("socket close type")?;
             if socket_type == u32::from(DemonSocketType::ReverseProxy) {
-                let _ = sockets.close_client(agent_id, socket_id).await;
+                if let Err(error) = sockets.close_client(agent_id, socket_id).await {
+                    warn!(
+                        agent_id = format_args!("{agent_id:08X}"),
+                        socket_id = format_args!("{socket_id:08X}"),
+                        %error,
+                        "failed to close SOCKS client on socket close callback"
+                    );
+                }
             }
         }
         DemonSocketCommand::Connect => {
             let success = parser.read_u32("socket connect success")?;
             let socket_id = parser.read_u32("socket connect socket id")?;
             let error_code = parser.read_u32("socket connect error code")?;
-            let _ = sockets.finish_connect(agent_id, socket_id, success != 0, error_code).await;
+            if let Err(error) =
+                sockets.finish_connect(agent_id, socket_id, success != 0, error_code).await
+            {
+                warn!(
+                    agent_id = format_args!("{agent_id:08X}"),
+                    socket_id = format_args!("{socket_id:08X}"),
+                    %error,
+                    "failed to finish SOCKS connect on connect callback"
+                );
+            }
         }
         DemonSocketCommand::SocksProxyAdd
         | DemonSocketCommand::Open

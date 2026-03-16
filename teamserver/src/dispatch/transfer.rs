@@ -107,7 +107,13 @@ pub(super) async fn handle_transfer_callback(
                 }
                 DemonTransferCommand::Remove => {
                     if found && exists {
-                        let _ = downloads.finish(agent_id, file_id).await;
+                        if downloads.finish(agent_id, file_id).await.is_none() {
+                            warn!(
+                                agent_id = format_args!("{agent_id:08X}"),
+                                file_id = format_args!("{file_id:08X}"),
+                                "download remove: finish returned None — in-memory state was absent despite exists check"
+                            );
+                        }
                         ("Good", format!("Successfully found and removed download: {file_id:x}"))
                     } else if found {
                         (

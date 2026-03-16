@@ -1272,28 +1272,19 @@ mod tests {
             !json.contains("Encryption"),
             "serialised AgentRecord must not contain the Encryption key: {json}"
         );
-        assert!(
-            !json.contains("AESKey"),
-            "serialised AgentRecord must not contain AESKey: {json}"
-        );
-        assert!(
-            !json.contains("AESIv"),
-            "serialised AgentRecord must not contain AESIv: {json}"
-        );
+        assert!(!json.contains("AESKey"), "serialised AgentRecord must not contain AESKey: {json}");
+        assert!(!json.contains("AESIv"), "serialised AgentRecord must not contain AESIv: {json}");
     }
 
     #[test]
     fn agent_record_deserialize_restores_encryption_field() {
-        use base64::engine::general_purpose::STANDARD as BASE64;
         use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD as BASE64;
 
         let mut record = minimal_agent_record();
         // Serialise then re-inject the encryption blob manually.
         let serialised = serde_json::to_value(&record).expect("serialisation must succeed");
-        let mut map = serialised
-            .as_object()
-            .expect("top-level value must be an object")
-            .clone();
+        let mut map = serialised.as_object().expect("top-level value must be an object").clone();
         map.insert(
             "Encryption".to_string(),
             serde_json::json!({
@@ -1301,17 +1292,14 @@ mod tests {
                 "AESIv":  BASE64.encode(&*record.encryption.aes_iv),
             }),
         );
-        let round_tripped: AgentRecord =
-            serde_json::from_value(serde_json::Value::Object(map))
-                .expect("deserialisation with Encryption blob must succeed");
+        let round_tripped: AgentRecord = serde_json::from_value(serde_json::Value::Object(map))
+            .expect("deserialisation with Encryption blob must succeed");
         assert_eq!(
-            *round_tripped.encryption.aes_key,
-            *record.encryption.aes_key,
+            *round_tripped.encryption.aes_key, *record.encryption.aes_key,
             "aes_key must survive the round-trip"
         );
         assert_eq!(
-            *round_tripped.encryption.aes_iv,
-            *record.encryption.aes_iv,
+            *round_tripped.encryption.aes_iv, *record.encryption.aes_iv,
             "aes_iv must survive the round-trip"
         );
         // Also verify that a record without the Encryption key deserialises with defaults.

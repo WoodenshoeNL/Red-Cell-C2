@@ -1,0 +1,46 @@
+[2026-03-16 23:04:40] [Ubuntu-C2-dev02-claude] ========================================================
+[2026-03-16 23:04:40] [Ubuntu-C2-dev02-claude]   Claude coverage loop starting
+[2026-03-16 23:04:40] [Ubuntu-C2-dev02-claude]   Prompt:   CODEX_TEST_PROMPT.md
+[2026-03-16 23:04:40] [Ubuntu-C2-dev02-claude]   Log:      claude_coverage.log
+[2026-03-16 23:04:40] [Ubuntu-C2-dev02-claude]   Sleep:    0m
+[2026-03-16 23:04:40] [Ubuntu-C2-dev02-claude]   Max runs: unlimited
+[2026-03-16 23:04:40] [Ubuntu-C2-dev02-claude] ========================================================
+[2026-03-16 23:04:40] [Ubuntu-C2-dev02-claude] === Coverage review run 1 ===
+[2026-03-16 23:04:40] [Ubuntu-C2-dev02-claude] WARNING: git pull --rebase failed, continuing with local state
+[2026-03-16 23:04:40] [Ubuntu-C2-dev02-claude] Run log: claude_coverage_20260316_230440.log
+---
+
+## Coverage Scan Report — Run 2 (index 1→13)
+
+**Files scanned**: 11 source files (positions 1–12 of 61; `client/tests/login_persistence.rs` skipped as a test file)
+
+**Public functions found across batch**:
+
+| File | Pub fns | Has Tests? |
+|------|---------|------------|
+| `client/src/local_config.rs` | 5 | Yes (12 inline tests) |
+| `client/src/login.rs` | 6 | Yes, but `set_tls_failure` untested |
+| `client/src/main.rs` | 0 | N/A (entrypoint) |
+| `client/src/python.rs` | 0 pub (all internal) | Yes (30+ tests) |
+| `client/src/transport.rs` | 0 pub (all `pub(crate)`) | Yes (29+ tests) |
+| `common/src/config.rs` | 4 | Yes (20+ tests); Display fmt untested |
+| `common/src/crypto.rs` | 9 | Yes (20+ tests, all functions covered) |
+| `common/src/demon.rs` | 14 | Yes (28+ tests, extensive round-trips) |
+| `common/src/domain.rs` | 3 | Yes (20+ tests) |
+| `common/src/error.rs` | 0 pub fn (only enum) | Yes (3 tests) |
+| `common/src/lib.rs` | 0 (re-exports) | Integration test in `common/tests/` |
+
+**Coverage rate**: ~96% of public functions have tests
+
+**Issues filed**:
+- `red-cell-c2-uh00` (P4) — `LoginState::set_tls_failure` and `set_connecting` tls_failure-clearing are untested in `client/src/login.rs`
+- `red-cell-c2-ih44` (P4) — `ProfileError` and `ProfileValidationError` Display format strings never asserted in `common/src/config.rs`
+
+**Worst coverage gap**: `set_tls_failure` — a TLS-pinning failure path that, if silently broken, could mask MITM warnings from operators.
+
+**Trend**: Overall coverage is very high (1082 test functions codebase-wide). The gaps found this run are P4 quality issues, not P2/P3 critical gaps. The protocol-critical paths (`common/src/demon.rs`, `common/src/crypto.rs`) are extremely well-tested with round-trip, error path, and boundary tests.
+[2026-03-16 23:13:10] [Ubuntu-C2-dev02-claude] Coverage review completed successfully
+[2026-03-16 23:13:10] [Ubuntu-C2-dev02-claude] ========================LOOP=========================
+[2026-03-16 23:13:10] [Ubuntu-C2-dev02-claude] === Coverage review run 2 ===
+[2026-03-16 23:13:10] [Ubuntu-C2-dev02-claude] WARNING: git pull --rebase failed, continuing with local state
+[2026-03-16 23:13:10] [Ubuntu-C2-dev02-claude] Run log: claude_coverage_20260316_231310.log

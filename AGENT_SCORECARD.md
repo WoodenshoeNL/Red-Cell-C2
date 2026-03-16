@@ -9,8 +9,8 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 159 | 181 | 31 |
-| Bugs filed against | 19 | 28 | 9 |
+| Tasks closed | 165 | 181 | 31 |
+| Bugs filed against | 20 | 28 | 9 |
 | Bug rate (bugs/task) | 0.12 | 0.15 | 0.29 |
 | Quality score | 88% | 85% | 71% |
 
@@ -1475,3 +1475,14 @@ Notes: High-quality feature delivery. EventLog is well-designed: bounded VecDequ
 
 Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓ (141 tests + integration, 0 failures)
 Notes: Three clean bug-fix deliveries. The CSV formula injection fix is security-correct (covers all four trigger chars, handles leading whitespace conservatively, includes comprehensive tests). TLS state fix is minimal and correct. No new bugs filed. Bug rate holds at 0.12.
+
+### QA Review — 2026-03-16 10:00 — 8d6a957..66ca6de
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 6 | 1 | Closed testing infrastructure epic `red-cell-c2-f2i` and 5 sub-tasks: CI workflow restored (`red-cell-c2-1347`), crypto round-trip tests confirmed present (`red-cell-c2-1zah`), listener lifecycle tests added (13 tests, `red-cell-c2-1eme`), SOCKS5 relay integration tests added (12 tests, `red-cell-c2-kvlo`), SMB listener integration tests added (5 tests, `red-cell-c2-nfon`). Bug `red-cell-c2-tp5a` filed: TOCTOU race in `available_port()` test helper. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: **passed** — `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo fmt --check` ✓, `cargo test --workspace` ✓ (686 unit + ~100 integration, 0 failures)
+Notes: High-quality testing infrastructure delivery. CI workflow, listener lifecycle, SOCKS5, and SMB tests are all well-structured and comprehensive. One correctness/reliability bug filed: `available_port()` and `available_port_excluding()` both release the OS-assigned port before the component under test can bind it, creating a narrow TOCTOU race window in all integration tests. Rated P2 (medium) as it rarely fires in practice but is a latent flaky-test source.

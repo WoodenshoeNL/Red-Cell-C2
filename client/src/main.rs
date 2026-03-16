@@ -3958,7 +3958,7 @@ fn export_loot_csv(items: &[&LootItem]) -> std::result::Result<String, String> {
 }
 
 fn csv_field(value: &str) -> String {
-    if value.contains(',') || value.contains('"') || value.contains('\n') {
+    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
         format!("\"{}\"", value.replace('"', "\"\""))
     } else {
         value.to_owned()
@@ -4859,6 +4859,8 @@ mod tests {
         assert_eq!(csv_field("hello, world"), "\"hello, world\"");
         assert_eq!(csv_field("say \"hi\""), "\"say \"\"hi\"\"\"");
         assert_eq!(csv_field("plain"), "plain");
+        assert_eq!(csv_field("bare\rreturn"), "\"bare\rreturn\"");
+        assert_eq!(csv_field("line\nfeed"), "\"line\nfeed\"");
     }
 
     #[test]

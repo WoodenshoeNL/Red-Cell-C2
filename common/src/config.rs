@@ -239,9 +239,8 @@ impl Profile {
 
         if let Some(webhook) = &self.webhook
             && let Some(discord) = &webhook.discord
-            && discord.url.trim().is_empty()
         {
-            errors.push("WebHook.Discord.Url must not be empty".to_owned());
+            validate_discord_webhook_url(&discord.url, &mut errors);
         }
 
         for peer in &self.demon.trusted_proxy_peers {
@@ -288,6 +287,38 @@ impl Profile {
         }
 
         if errors.is_empty() { Ok(()) } else { Err(ProfileValidationError { errors }) }
+    }
+}
+
+/// Permitted Discord webhook hostnames (scheme must always be `https`).
+const DISCORD_WEBHOOK_HOSTS: &[&str] =
+    &["discord.com", "discordapp.com", "hooks.discord.com", "hooks.discordapp.com"];
+
+/// Validate a Discord webhook URL: must be `https://` and target a known Discord hostname.
+///
+/// Any HTTP URL or unknown host is rejected to prevent SSRF via the webhook HTTP client.
+fn validate_discord_webhook_url(url: &str, errors: &mut Vec<String>) {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        errors.push("WebHook.Discord.Url must not be empty".to_owned());
+        return;
+    }
+
+    // Require the https scheme to prevent plaintext delivery and trivial SSRF.
+    let Some(after_scheme) = trimmed.strip_prefix("https://") else {
+        errors.push("WebHook.Discord.Url must use the https:// scheme to prevent SSRF".to_owned());
+        return;
+    };
+
+    // Extract the host (stop at '/', '?', '#', or ':' for a port).
+    let host = after_scheme.split(['/', '?', '#', ':']).next().unwrap_or("").to_ascii_lowercase();
+
+    if !DISCORD_WEBHOOK_HOSTS.contains(&host.as_str()) {
+        errors.push(format!(
+            "WebHook.Discord.Url host `{host}` is not a permitted Discord hostname; \
+             allowed: {}",
+            DISCORD_WEBHOOK_HOSTS.join(", ")
+        ));
     }
 }
 
@@ -920,7 +951,7 @@ mod tests {
 
         WebHook {
           Discord {
-            Url = "..."
+            Url = "https://discord.com/api/webhooks/000000000000000000/test-token"
             User = "Havoc"
           }
         }
@@ -1011,7 +1042,10 @@ mod tests {
         let profile = Profile::parse(WEBHOOK_PROFILE).expect("webhook profile should parse");
 
         let webhook = profile.webhook.and_then(|config| config.discord);
-        assert_eq!(webhook.as_ref().map(|discord| discord.url.as_str()), Some("..."));
+        assert_eq!(
+            webhook.as_ref().map(|discord| discord.url.as_str()),
+            Some("https://discord.com/api/webhooks/000000000000000000/test-token")
+        );
         assert_eq!(webhook.as_ref().and_then(|discord| discord.user.as_deref()), Some("Havoc"));
     }
 
@@ -1867,6 +1901,100 @@ mod tests {
             }
             other => panic!("expected ProfileError::Read, got {other:?}"),
         }
+    }
+
+    /// Build a minimal valid profile with the given Discord webhook URL for validation tests.
+    fn profile_with_discord_url(url: &str) -> Profile {
+        Profile::parse(&format!(
+            r#"
+            Teamserver {{
+              Host = "127.0.0.1"
+              Port = 40056
+            }}
+            Operators {{
+              user "neo" {{
+                Password = "pw"
+              }}
+            }}
+            Demon {{}}
+            WebHook {{
+              Discord {{
+                Url = "{url}"
+              }}
+            }}
+            "#
+        ))
+        .expect("profile should parse")
+    }
+
+    #[test]
+    fn accepts_valid_discord_webhook_urls() {
+        let valid = [
+            "https://discord.com/api/webhooks/123/token",
+            "https://discordapp.com/api/webhooks/123/token",
+            "https://hooks.discord.com/services/T/B/x",
+            "https://hooks.discordapp.com/services/T/B/x",
+        ];
+        for url in valid {
+            let profile = profile_with_discord_url(url);
+            assert!(
+                profile.validate().is_ok(),
+                "expected valid for {url}: {:?}",
+                profile.validate().unwrap_err()
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_http_discord_webhook_url() {
+        let profile = profile_with_discord_url("http://discord.com/api/webhooks/123/token");
+        let err = profile.validate().expect_err("http webhook URL must be rejected");
+        assert!(
+            err.errors.iter().any(|m| m.contains("https://")),
+            "error should mention https requirement: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_non_discord_webhook_url() {
+        for url in [
+            "https://evil.example.com/hook",
+            "https://169.254.169.254/latest/meta-data/",
+            "https://localhost/hook",
+        ] {
+            let profile = profile_with_discord_url(url);
+            let err = profile.validate().expect_err(&format!("SSRF URL {url} must be rejected"));
+            assert!(
+                err.errors.iter().any(|m| m.contains("permitted Discord hostname")),
+                "error should mention hostname restriction for {url}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_empty_discord_webhook_url() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+            Operators {
+              user "neo" {
+                Password = "pw"
+              }
+            }
+            Demon {}
+            WebHook {
+              Discord {
+                Url = ""
+              }
+            }
+            "#,
+        )
+        .expect("profile should parse");
+        let err = profile.validate().expect_err("empty webhook URL must be rejected");
+        assert!(err.errors.iter().any(|m| m.contains("must not be empty")));
     }
 
     #[test]

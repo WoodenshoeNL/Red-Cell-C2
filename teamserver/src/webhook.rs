@@ -208,6 +208,9 @@ impl DeliveryState {
 fn discord_webhook_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(DISCORD_WEBHOOK_TIMEOUT)
+        // Disable redirects: a redirect-following client can be used to pivot to internal
+        // services (SSRF) if an attacker controls DNS for the configured webhook hostname.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
 }

@@ -313,7 +313,10 @@ pub struct AgentRecord {
     #[serde(rename = "Note", default)]
     pub note: String,
     /// Per-agent transport keys.
-    #[serde(rename = "Encryption", default)]
+    /// Serialisation is intentionally suppressed so that key material is never included in
+    /// operator-facing JSON responses (REST API, WebSocket broadcasts).  The field is still
+    /// deserialisable for any path that loads a full record from a trusted source.
+    #[serde(rename = "Encryption", default, skip_serializing)]
     pub encryption: AgentEncryptionInfo,
     /// Computer hostname.
     #[serde(rename = "Hostname")]
@@ -1222,6 +1225,103 @@ mod tests {
         assert!(
             error.to_string().contains("invalid boolean number"),
             "unexpected error message: {error}"
+        );
+    }
+
+    fn minimal_agent_record() -> AgentRecord {
+        use zeroize::Zeroizing;
+        AgentRecord {
+            agent_id: 0xABCD1234,
+            active: true,
+            reason: String::new(),
+            note: String::new(),
+            encryption: crate::AgentEncryptionInfo {
+                aes_key: Zeroizing::new(vec![0xAA; 32]),
+                aes_iv: Zeroizing::new(vec![0xBB; 16]),
+            },
+            hostname: "wkstn-1".to_string(),
+            username: "operator".to_string(),
+            domain_name: "LAB".to_string(),
+            external_ip: "203.0.113.10".to_string(),
+            internal_ip: "10.0.0.10".to_string(),
+            process_name: "explorer.exe".to_string(),
+            process_path: String::new(),
+            base_address: 1,
+            process_pid: 1,
+            process_tid: 1,
+            process_ppid: 1,
+            process_arch: "x64".to_string(),
+            elevated: false,
+            os_version: "Windows 10".to_string(),
+            os_build: 0,
+            os_arch: "x64".to_string(),
+            sleep_delay: 5,
+            sleep_jitter: 10,
+            kill_date: None,
+            working_hours: None,
+            first_call_in: "09/03/2026 19:04:00".to_string(),
+            last_call_in: "09/03/2026 19:05:00".to_string(),
+        }
+    }
+
+    #[test]
+    fn agent_record_serialize_omits_encryption_field() {
+        let record = minimal_agent_record();
+        let json = serde_json::to_string(&record).expect("serialisation must succeed");
+        assert!(
+            !json.contains("Encryption"),
+            "serialised AgentRecord must not contain the Encryption key: {json}"
+        );
+        assert!(
+            !json.contains("AESKey"),
+            "serialised AgentRecord must not contain AESKey: {json}"
+        );
+        assert!(
+            !json.contains("AESIv"),
+            "serialised AgentRecord must not contain AESIv: {json}"
+        );
+    }
+
+    #[test]
+    fn agent_record_deserialize_restores_encryption_field() {
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine as _;
+
+        let mut record = minimal_agent_record();
+        // Serialise then re-inject the encryption blob manually.
+        let serialised = serde_json::to_value(&record).expect("serialisation must succeed");
+        let mut map = serialised
+            .as_object()
+            .expect("top-level value must be an object")
+            .clone();
+        map.insert(
+            "Encryption".to_string(),
+            serde_json::json!({
+                "AESKey": BASE64.encode(&*record.encryption.aes_key),
+                "AESIv":  BASE64.encode(&*record.encryption.aes_iv),
+            }),
+        );
+        let round_tripped: AgentRecord =
+            serde_json::from_value(serde_json::Value::Object(map))
+                .expect("deserialisation with Encryption blob must succeed");
+        assert_eq!(
+            *round_tripped.encryption.aes_key,
+            *record.encryption.aes_key,
+            "aes_key must survive the round-trip"
+        );
+        assert_eq!(
+            *round_tripped.encryption.aes_iv,
+            *record.encryption.aes_iv,
+            "aes_iv must survive the round-trip"
+        );
+        // Also verify that a record without the Encryption key deserialises with defaults.
+        record.encryption = crate::AgentEncryptionInfo::default();
+        let no_enc = serde_json::to_value(&record).expect("serialisation must succeed");
+        let without_enc: AgentRecord = serde_json::from_value(no_enc)
+            .expect("deserialisation without Encryption blob must succeed");
+        assert!(
+            without_enc.encryption.aes_key.is_empty(),
+            "missing Encryption field must produce empty aes_key"
         );
     }
 }

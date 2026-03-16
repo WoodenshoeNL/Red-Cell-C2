@@ -26961,3 +26961,15 @@ Done. Fixed `client/src/python.rs:2065` — replaced `is_some_and(Bound::is_call
 [2026-03-16 08:56:11] [Ubuntu-C2-dev02-claude] Claimed red-cell-c2-jlmp
 [2026-03-16 08:56:12] [Ubuntu-C2-dev02-claude] Running Claude on task red-cell-c2-jlmp...
 [2026-03-16 08:59:53] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-jlmp
+[2026-03-16 08:59:53] [Ubuntu-C2-dev02-claude] WIP: committing uncommitted changes for red-cell-c2-jlmp
+[2026-03-16 08:59:55] [Ubuntu-C2-dev02-claude] WIP: pushed
+[2026-03-16 08:59:55] [Ubuntu-C2-dev02-claude] ========================LOOP=========================
+[2026-03-16 08:59:55] [Ubuntu-C2-dev02-claude] Next run in 5m (at 09:04:55)
+[2026-03-16 09:04:55] [Ubuntu-C2-dev02-claude] === Claude dev loop iteration 7 ===
+[2026-03-16 09:04:56] [Ubuntu-C2-dev02-claude] git pull --ff-only: ok
+[2026-03-16 09:04:57] [Ubuntu-C2-dev02-claude] br sync import: ok
+[2026-03-16 09:04:58] [Ubuntu-C2-dev02-claude] Selected task: red-cell-c2-f5jl
+[2026-03-16 09:05:02] [Ubuntu-C2-dev02-claude] Claimed red-cell-c2-f5jl
+[2026-03-16 09:05:02] [Ubuntu-C2-dev02-claude] Running Claude on task red-cell-c2-f5jl...
+Done. The fix was a one-liner in `transport.rs:1067` — `lock_app_state(&app_state).tls_failure = None;` at the top of the `Ok(socket)` branch resets the stale TLS failure state immediately when a WebSocket connection succeeds, before entering the send/recv loops.
+[2026-03-16 09:07:55] [Ubuntu-C2-dev02-claude] Claude completed task red-cell-c2-f5jl

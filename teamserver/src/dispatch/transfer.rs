@@ -340,7 +340,7 @@ pub(super) async fn handle_beacon_output_callback(
                 state.request_id,
                 file_id,
                 &state.remote_path,
-                u64::try_from(state.data.len()).unwrap_or_default(),
+                state.data.len() as u64,
                 state.expected_size,
                 "InProgress",
             )?);

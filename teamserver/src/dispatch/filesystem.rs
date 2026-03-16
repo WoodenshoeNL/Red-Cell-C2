@@ -202,7 +202,7 @@ pub(super) async fn handle_filesystem_callback(
                         state.request_id,
                         file_id,
                         &state.remote_path,
-                        u64::try_from(state.data.len()).unwrap_or_default(),
+                        state.data.len() as u64,
                         state.expected_size,
                         "InProgress",
                     )?);
@@ -239,7 +239,7 @@ pub(super) async fn handle_filesystem_callback(
                                 state.request_id,
                                 file_id,
                                 &state.remote_path,
-                                u64::try_from(state.data.len()).unwrap_or_default(),
+                                state.data.len() as u64,
                                 state.expected_size,
                                 "Removed",
                             )?);
@@ -514,7 +514,7 @@ pub(super) fn download_complete_event(
                 Value::String(format!(
                     "{};{}",
                     BASE64_STANDARD.encode(state.remote_path.as_bytes()),
-                    byte_count(u64::try_from(state.data.len()).unwrap_or_default())
+                    byte_count(state.data.len() as u64)
                 )),
             ),
         ]),

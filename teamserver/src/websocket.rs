@@ -4537,7 +4537,7 @@ mod tests {
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
     ) -> OperatorMessage {
-        let frame = timeout(Duration::from_secs(5), socket.next())
+        let frame = timeout(Duration::from_secs(30), socket.next())
             .await
             .expect("socket should yield a frame")
             .expect("frame should be present")

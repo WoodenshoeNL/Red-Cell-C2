@@ -281,6 +281,45 @@ mod tests {
                     Ok(_) => panic!("invalid filter should not initialize tracing"),
                 }
             }
+            "create_log_dir_error" => {
+                let log_dir = match env::var(SUBPROCESS_LOG_DIR_ENV) {
+                    Ok(path) => path,
+                    Err(error) => panic!("log directory should be set: {error}"),
+                };
+                let profile = parse_profile(&format!(
+                    r#"
+                    Teamserver {{
+                      Host = "127.0.0.1"
+                      Port = 40056
+                      Logging {{
+                        Level = "info"
+                        Format = "Json"
+                        File {{
+                          Directory = "{log_dir}"
+                          Prefix = "teamserver.log"
+                          Rotation = "Never"
+                        }}
+                      }}
+                    }}
+
+                    Operators {{
+                      user "neo" {{
+                        Password = "password1234"
+                      }}
+                    }}
+
+                    Demon {{}}
+                    "#
+                ));
+
+                match init_tracing(Some(&profile), false) {
+                    Err(LoggingInitError::CreateLogDirectory { path, .. }) => {
+                        assert_eq!(path, PathBuf::from(&log_dir));
+                    }
+                    Err(error) => panic!("expected CreateLogDirectory error, got {error}"),
+                    Ok(_) => panic!("init_tracing should fail for uncreatable directory"),
+                }
+            }
             "default_config_once" => {
                 let debug_logging = match env::var(SUBPROCESS_DEBUG_ENV) {
                     Ok(value) => value == "1",
@@ -445,6 +484,22 @@ mod tests {
     fn init_tracing_rejects_invalid_filter_directive() {
         let output =
             run_init_tracing_subprocess("invalid_filter", &[(SUBPROCESS_FILTER_ENV, "[invalid")]);
+
+        assert!(
+            output.status.success(),
+            "subprocess should succeed, stdout: {}, stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn init_tracing_returns_create_log_directory_error_for_uncreatable_path() {
+        let impossible_dir = "/proc/red_cell_test/impossible/log/dir";
+        let output = run_init_tracing_subprocess(
+            "create_log_dir_error",
+            &[(SUBPROCESS_LOG_DIR_ENV, impossible_dir)],
+        );
 
         assert!(
             output.status.success(),

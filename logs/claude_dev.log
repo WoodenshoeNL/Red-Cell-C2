@@ -32695,3 +32695,25 @@ Also added a **SubEvent symmetry assertion** to the loop (`encoded["Body"]["SubE
 
 **Added `flat_info_sibling_subevent_rejected`** — verifies that each SubEvent within a family decodes to the correct variant and not a sibling (covers Credentials, HostFile, Chat, and Listener families).
 [2026-03-17 17:55:57] [ubuntu-c2-dev01-claude] Claude completed task red-cell-c2-xrjk
+[2026-03-17 17:55:57] [ubuntu-c2-dev01-claude] WIP: committing uncommitted changes for red-cell-c2-xrjk
+[2026-03-17 17:55:59] [ubuntu-c2-dev01-claude] WIP: pushed
+[2026-03-17 17:55:59] [ubuntu-c2-dev01-claude] ========================LOOP=========================
+[2026-03-17 17:55:59] [ubuntu-c2-dev01-claude] Next run in 0m (at 17:56:14)
+[2026-03-17 17:56:14] [ubuntu-c2-dev01-claude] === Claude dev loop iteration 6 ===
+[2026-03-17 17:56:15] [ubuntu-c2-dev01-claude] git pull --ff-only: ok
+[2026-03-17 17:56:15] [ubuntu-c2-dev01-claude] br sync import: ok
+[2026-03-17 17:56:16] [ubuntu-c2-dev01-claude] Selected task: red-cell-c2-p8dt
+[2026-03-17 17:56:20] [ubuntu-c2-dev01-claude] Claimed red-cell-c2-p8dt
+[2026-03-17 17:56:21] [ubuntu-c2-dev01-claude] Running Claude on task red-cell-c2-p8dt...
+Done. Issue `red-cell-c2-p8dt` is closed and pushed.
+
+**What was implemented:**
+
+Three new tests in `common/src/operator.rs` extending the existing `build_payload_variants_deserialize_by_shape` test:
+
+1. **`build_payload_request_round_trip`** — constructs a `BuildPayloadRequest` with all 5 fields set, serializes to JSON, asserts each renamed field (`AgentType`, `Listener`, `Arch`, `Format`, `Config`) is present at the correct JSON path, then deserializes and asserts equality.
+
+2. **`build_payload_response_round_trip`** — same for `BuildPayloadResponse` with a real base64-encoded `PayloadArray`, `Format`, and `FileName`.
+
+3. **`build_payload_response_partial_fields`** — verifies a response with only the three required fields deserializes cleanly without extras.
+[2026-03-17 18:00:11] [ubuntu-c2-dev01-claude] Claude completed task red-cell-c2-p8dt

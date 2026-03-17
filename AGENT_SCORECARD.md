@@ -9,8 +9,8 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 220 | 195 | 31 |
-| Bugs filed against | 38 | 34 | 9 |
+| Tasks closed | 223 | 195 | 31 |
+| Bugs filed against | 39 | 34 | 9 |
 | Bug rate (bugs/task) | 0.17 | 0.17 | 0.29 |
 | Quality score | 83% | 83% | 71% |
 
@@ -29,7 +29,7 @@ Each loop run updates the running totals and appends a review entry.
 | Audit attribution errors | 0 | 1 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
 | Correctness / pagination | 6 | 4 | 1 |
-| Workflow / close-hygiene | 9 | 0 | 0 |
+| Workflow / close-hygiene | 10 | 0 | 0 |
 | Code reuse / duplication | 5 | 0 | 0 |
 
 ---
@@ -1978,3 +1978,14 @@ Notes: No new bugs filed. `br list --status=in_progress` returned empty during t
 
 Build: `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓
 Notes: No QA findings were upheld in this window. A transient failure seen during an overlapping local QA run did not reproduce once the quality gates were rerun cleanly, and the final tip `9e082c8` includes the `create_listener` validation/tests needed for `red-cell-c2-wj6s`. `br ready` reports 20 unblocked issues, and `.beads/issues.jsonl` contains no remaining `in_progress` items. Updated cumulative totals: Claude 206 tasks / 38 bugs / 18% bug rate / 82% quality; Codex 195 tasks / 34 bugs / 17% bug rate / 83% quality.
+
+### QA Review — 2026-03-17 22:43 — 37ccf2c..17bb81a
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (dev02-opus) | 3 | 1 | Closed rucc, o00x, ovje. All test additions: DemonCallbackPackage error paths, download-limit enforcement, pivot command callbacks, LootRepository get/list. Filed 2icd (workflow: 35dz not closed after interruption). |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (175 tests, 0 failures)
+Notes: Test count stable at 175 (new tests replace none; test binary count unchanged). One workflow issue: 35dz work fully committed but issue left in_progress due to session interruption. No code quality, security, or architecture issues found — all changes are well-structured test additions following existing patterns.

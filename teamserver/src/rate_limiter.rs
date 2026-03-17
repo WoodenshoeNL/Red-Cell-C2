@@ -127,4 +127,48 @@ mod tests {
 
         assert_eq!(windows.len(), 1);
     }
+
+    #[test]
+    fn evict_with_target_zero_removes_all_entries() {
+        let mut windows: HashMap<IpAddr, AttemptWindow> = HashMap::new();
+        let base = Instant::now() - Duration::from_secs(100);
+        for i in 0u8..3 {
+            windows.insert(
+                ip(10, 0, 0, i),
+                AttemptWindow {
+                    attempts: 1,
+                    window_start: base + Duration::from_secs(u64::from(i)),
+                },
+            );
+        }
+
+        evict_oldest_windows(&mut windows, 0);
+
+        assert!(windows.is_empty(), "target_size=0 must evict every entry");
+    }
+
+    #[test]
+    fn prune_removes_window_at_exact_expiry_boundary() {
+        let mut windows: HashMap<IpAddr, AttemptWindow> = HashMap::new();
+        let duration = Duration::from_secs(60);
+        let now = Instant::now();
+
+        // Window started exactly `duration` ago — duration_since == duration,
+        // which is NOT < duration, so it must be pruned.
+        windows
+            .insert(ip(10, 0, 0, 1), AttemptWindow { attempts: 1, window_start: now - duration });
+        // A clearly fresh window that must survive.
+        windows.insert(
+            ip(10, 0, 0, 2),
+            AttemptWindow { attempts: 1, window_start: now - Duration::from_secs(30) },
+        );
+
+        prune_expired_windows(&mut windows, duration, now);
+
+        assert!(
+            !windows.contains_key(&ip(10, 0, 0, 1)),
+            "window at exact expiry boundary must be pruned (duration_since == duration is not < duration)",
+        );
+        assert!(windows.contains_key(&ip(10, 0, 0, 2)));
+    }
 }

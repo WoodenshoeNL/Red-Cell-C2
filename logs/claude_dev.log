@@ -32191,3 +32191,31 @@ Done. Added 13 unit tests inline in `teamserver/src/dispatch/transfer.rs`:
 
 All tests pass, clippy clean, fmt clean, pushed.
 [2026-03-17 04:58:53] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-uyk8
+[2026-03-17 04:58:53] [Ubuntu-C2-dev01-claude] WIP: committing uncommitted changes for red-cell-c2-uyk8
+[2026-03-17 04:58:55] [Ubuntu-C2-dev01-claude] WIP: pushed
+[2026-03-17 04:58:55] [Ubuntu-C2-dev01-claude] ========================LOOP=========================
+[2026-03-17 04:58:55] [Ubuntu-C2-dev01-claude] Next run in 5m (at 05:03:55)
+[2026-03-17 05:03:55] [Ubuntu-C2-dev01-claude] === Claude dev loop iteration 95 ===
+[2026-03-17 05:03:57] [Ubuntu-C2-dev01-claude] git pull --ff-only: ok
+[2026-03-17 05:03:57] [Ubuntu-C2-dev01-claude] br sync import: ok
+[2026-03-17 05:03:58] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-37rn
+[2026-03-17 05:03:58] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-rqen
+[2026-03-17 05:03:58] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-doop
+[2026-03-17 05:03:58] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-5b4v
+[2026-03-17 05:03:58] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-xypk
+[2026-03-17 05:03:58] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-yxty
+[2026-03-17 05:03:58] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-y4fs
+[2026-03-17 05:03:58] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-0eb7
+[2026-03-17 05:03:58] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-upwv
+[2026-03-17 05:03:58] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-8gri
+[2026-03-17 05:03:58] [Ubuntu-C2-dev01-claude] Selected task: red-cell-c2-zpn2
+[2026-03-17 05:04:02] [Ubuntu-C2-dev01-claude] Claimed red-cell-c2-zpn2
+[2026-03-17 05:04:03] [Ubuntu-C2-dev01-claude] Running Claude on task red-cell-c2-zpn2...
+Done. Added 5 integration tests to `teamserver/src/dispatch/transfer.rs`:
+
+1. **`transfer_callback_list_shows_active_download`** — pre-populates the download tracker, crafts a List payload with one entry (progress 500/1000), asserts `None` return and that the output contains the filename and "50.00%"
+2. **`transfer_callback_truncated_returns_error`** — empty payload returns `InvalidCallbackPayload`
+3. **`mem_file_callback_broadcasts_response_event`** — valid mem-file payload triggers an `AgentResponse` event
+4. **`package_dropped_callback_broadcasts_error_event`** — verifies the error message references both sizes (8192 > 4096)
+5. **`beacon_output_callback_persists_credential_loot`** — output containing "password: secret123" triggers the credential extractor; asserts the `AgentResponse` event and that a `credential` loot record is persisted in the in-memory database
+[2026-03-17 05:19:40] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-zpn2

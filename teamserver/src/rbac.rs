@@ -894,4 +894,36 @@ mod tests {
 
         assert_eq!(extracted.role, OperatorRole::Admin);
     }
+
+    #[tokio::test]
+    async fn authenticated_operator_extractor_rejects_non_bearer_authorization_scheme() {
+        let auth = AuthService::from_profile(&profile()).expect("auth service should initialize");
+        let request = Request::builder()
+            .header(AUTHORIZATION, "Basic dXNlcjpwYXNz")
+            .body(())
+            .expect("request should build");
+        let (mut parts, _) = request.into_parts();
+
+        let error = AuthenticatedOperator::from_request_parts(&mut parts, &TestState { auth })
+            .await
+            .expect_err("non-Bearer authorization scheme should be rejected");
+
+        assert_eq!(error, AuthorizationError::InvalidAuthorizationHeader);
+    }
+
+    #[tokio::test]
+    async fn authenticated_operator_extractor_rejects_bearer_without_space() {
+        let auth = AuthService::from_profile(&profile()).expect("auth service should initialize");
+        let request = Request::builder()
+            .header(AUTHORIZATION, "Bearertoken")
+            .body(())
+            .expect("request should build");
+        let (mut parts, _) = request.into_parts();
+
+        let error = AuthenticatedOperator::from_request_parts(&mut parts, &TestState { auth })
+            .await
+            .expect_err("Bearer without trailing space should be rejected");
+
+        assert_eq!(error, AuthorizationError::InvalidAuthorizationHeader);
+    }
 }

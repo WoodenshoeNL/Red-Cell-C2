@@ -1,0 +1,32 @@
+## Report
+
+**Files reviewed**: 10 of 63 total (index 38 → 48)
+
+| File | Test status |
+|---|---|
+| `dispatch/util.rs` | **No tests** — 4 pure functions, 0 coverage |
+| `events.rs` | Solid — 6 tests covering broadcast, lag, close, history |
+| `lib.rs` | Re-exports only, no tests needed |
+| `listeners.rs` | Extensive (60+ tests) |
+| `logging.rs` | Good — subprocess pattern for subscriber singleton, but one untested combination |
+| `main.rs` | Entry point, not testable |
+| `payload_builder.rs` | Extensive (90+ tests), but `PayloadCache` not isolated |
+| `plugins.rs` | Minimal — only 2 tests for a large async API surface |
+| `rate_limiter.rs` | Basic (3 tests), misses key boundary conditions |
+| `rbac.rs` | Excellent — 13 tests covering all roles × permissions × extractors |
+
+**Issues filed**:
+
+| ID | Description | Priority |
+|---|---|---|
+| `red-cell-c2-9hnj` | `windows_version_label` has zero tests — 11-branch Havoc-compatibility logic | P3 |
+| `red-cell-c2-7son` | `basename`, `process_arch_label`, `windows_arch_label` have no tests | P3 |
+| `red-cell-c2-ags8` | `prune_expired_windows` exact-boundary condition not tested | P3 |
+| `red-cell-c2-aa5t` | `PayloadCache::get`/`flush` missing isolated round-trip tests | P3 |
+| `red-cell-c2-d3q2` | `session_token` with non-Bearer Authorization scheme not tested | P4 |
+| `red-cell-c2-lah3` | `RUST_LOG` override with `profile=None` combination untested in logging | P4 |
+| `red-cell-c2-h87y` | `evict_oldest_windows` with empty map and `target_size=0` untested | P4 |
+
+**Most critical gap**: `dispatch/util.rs` has zero tests for all four functions. The most dangerous is `windows_version_label` — it has 11 conditional branches implementing Havoc protocol compatibility, including a build-number range check for Windows 11 (22000–22621) and a service pack suffix. Any misclassification silently shows the wrong OS in the operator console, and there is no test to catch a regression.
+
+**Overall quality**: High for the files that have tests — `rbac.rs`, `listeners.rs`, `events.rs`, and `logging.rs` show thoughtful, scenario-driven coverage. The main weakness this run is `dispatch/util.rs` (completely untested) and `rate_limiter.rs` (tested for happy path only, missing boundary and edge conditions).

@@ -30082,3 +30082,23 @@ Already retrieved that output — all tests passed (147 passed, 0 failed). The t
 [2026-03-17 00:48:30] [Ubuntu-C2-dev01-claude] Claimed red-cell-c2-265b
 [2026-03-17 00:48:30] [Ubuntu-C2-dev01-claude] Running Claude on task red-cell-c2-265b...
 [2026-03-17 00:55:07] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-265b
+[2026-03-17 00:55:07] [Ubuntu-C2-dev01-claude] WIP: committing uncommitted changes for red-cell-c2-265b
+[2026-03-17 00:55:09] [Ubuntu-C2-dev01-claude] WIP: pushed
+[2026-03-17 00:55:10] [Ubuntu-C2-dev01-claude] ========================LOOP=========================
+[2026-03-17 00:55:10] [Ubuntu-C2-dev01-claude] Next run in 5m (at 01:00:10)
+[2026-03-17 01:00:10] [Ubuntu-C2-dev01-claude] === Claude dev loop iteration 3 ===
+[2026-03-17 01:00:11] [Ubuntu-C2-dev01-claude] git pull --ff-only: ok
+[2026-03-17 01:00:11] [Ubuntu-C2-dev01-claude] br sync import: ok
+[2026-03-17 01:00:12] [Ubuntu-C2-dev01-claude] Selected task: red-cell-c2-3nq0
+[2026-03-17 01:00:16] [Ubuntu-C2-dev01-claude] Claimed red-cell-c2-3nq0
+[2026-03-17 01:00:16] [Ubuntu-C2-dev01-claude] Running Claude on task red-cell-c2-3nq0...
+Done. Added 4 new tests to `teamserver/tests/database.rs`:
+
+1. **`loot_repository_agent_id_and_kind_combined_filter_isolates_correct_row`** — two agents with overlapping kinds; confirms `agent_id AND kind_exact` returns only the row for the correct agent.
+
+2. **`loot_repository_operator_contains_matches_json_metadata_field`** — verifies `json_extract(metadata, '$.operator')` path works correctly and null-metadata rows are not falsely matched.
+
+3. **`loot_repository_count_filtered_equals_query_filtered_len_with_multi_field_filter`** — four filters active simultaneously (`kind_exact`, `agent_id`, `operator_contains`, `pattern_contains`); confirms `count_filtered == len(query_filtered)`.
+
+4. **`loot_repository_since_until_range_outside_all_rows_returns_empty`** — timestamp range that excludes all inserted rows returns empty Vec and count=0.
+[2026-03-17 01:03:49] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-3nq0

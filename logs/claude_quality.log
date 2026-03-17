@@ -399,3 +399,49 @@ Committed and pushed. Here's the run summary:
 [2026-03-17 22:40:45] [Ubuntu-C2-dev02-claude] === Quality review run 3 of 10 ===
 [2026-03-17 22:40:45] [Ubuntu-C2-dev02-claude] WARNING: git pull --rebase failed, continuing with local state
 [2026-03-17 22:40:45] [Ubuntu-C2-dev02-claude] Run log: claude_quality_20260317_224045.log
+## Test Quality Review Report
+
+### Files reviewed (10 of 66 total)
+1. `teamserver/src/rbac.rs` — 14+ inline tests, excellent coverage
+2. `teamserver/src/shutdown.rs` — 7 inline tests, solid
+3. `teamserver/src/sockets.rs` — 29+ inline tests, extensive
+4. `teamserver/src/webhook.rs` — 11+ inline tests, very thorough
+5. `teamserver/src/websocket.rs` — 70+ inline tests, comprehensive
+6. `teamserver/tests/assembly_dispatch.rs` — 4 integration tests
+7. `teamserver/tests/common/mod.rs` — shared test helpers
+8. `teamserver/tests/ctr_offset_persistence.rs` — 3 focused crypto tests
+9. `teamserver/tests/database.rs` — extensive DB test suite
+10. `teamserver/tests/e2e_operator_agent_session.rs` — full E2E round-trips + RBAC
+
+### Scan position: 47 → 57
+
+### Issues filed
+| ID | Description |
+|---|---|
+| `red-cell-c2-7z8p` | rbac `session_token` rejects non-Bearer authorization schemes (P3) |
+| `red-cell-c2-ejlg` | CTR offset persistence: independent offsets for multiple agents (P3) |
+| `red-cell-c2-kt6v` | shutdown `try_track_callback` race with concurrent initiate (P4) |
+| `red-cell-c2-so02` | webhook Discord payload omits optional username/avatar_url when None (P4) |
+| `red-cell-c2-5b4a` | `notify_audit_record` returns Ok silently when disabled (P4) |
+
+### Most critical gap
+**Non-Bearer authorization scheme rejection in RBAC** (`red-cell-c2-7z8p`). The `session_token` function handles "Bearer " tokens and falls back to `x-session-token`, but a request with `Authorization: Basic xyz` silently hits the `strip_prefix` → `None` path without any test verifying the error. This is auth-critical code.
+
+### Overall test quality
+The files in this batch are **very well tested**. `websocket.rs` alone has 70+ tests. `rbac.rs`, `webhook.rs`, and `sockets.rs` all have thorough inline test suites with meaningful assertions, descriptive names, and good error-path coverage. The integration tests (`assembly_dispatch.rs`, `e2e_operator_agent_session.rs`, `ctr_offset_persistence.rs`) are well-designed with proper protocol-level assertions. The gaps found are minor edge cases rather than fundamental coverage holes.
+[2026-03-17 22:43:55] [Ubuntu-C2-dev02-claude] Quality review completed successfully
+[2026-03-17 22:43:55] [Ubuntu-C2-dev02-claude] ========================LOOP=========================
+[2026-03-17 22:43:55] [Ubuntu-C2-dev02-claude] === Quality review run 4 of 10 ===
+[2026-03-17 22:43:55] [Ubuntu-C2-dev02-claude] WARNING: git pull --rebase failed, continuing with local state
+[2026-03-17 22:43:55] [Ubuntu-C2-dev02-claude] Run log: claude_quality_20260317_224355.log
+[2026-03-17 22:46:44] [Ubuntu-C2-dev02-claude] Quality review completed successfully
+[2026-03-17 22:46:44] [Ubuntu-C2-dev02-claude] ========================LOOP=========================
+[2026-03-17 22:46:44] [Ubuntu-C2-dev02-claude] === Quality review run 5 of 10 ===
+[2026-03-17 22:46:44] [Ubuntu-C2-dev02-claude] WARNING: git pull --rebase failed, continuing with local state
+[2026-03-17 22:46:44] [Ubuntu-C2-dev02-claude] Run log: claude_quality_20260317_224644.log
+API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded. https://docs.claude.com/en/api/errors"},"request_id":"req_011CZ9Pbz54U9U4zUZ5XcsDP"}
+[2026-03-17 22:49:49] [Ubuntu-C2-dev02-claude] WARNING: Claude exited with code 1
+[2026-03-17 22:49:49] [Ubuntu-C2-dev02-claude] ========================LOOP=========================
+[2026-03-17 22:49:49] [Ubuntu-C2-dev02-claude] === Quality review run 6 of 10 ===
+[2026-03-17 22:49:49] [Ubuntu-C2-dev02-claude] WARNING: git pull --rebase failed, continuing with local state
+[2026-03-17 22:49:49] [Ubuntu-C2-dev02-claude] Run log: claude_quality_20260317_224949.log

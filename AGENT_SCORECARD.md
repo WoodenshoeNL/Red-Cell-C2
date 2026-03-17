@@ -10,9 +10,9 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 204 | 181 | 31 |
-| Bugs filed against | 37 | 32 | 9 |
-| Bug rate (bugs/task) | 0.18 | 0.18 | 0.29 |
-| Quality score | 82% | 82% | 71% |
+| Bugs filed against | 38 | 32 | 9 |
+| Bug rate (bugs/task) | 0.19 | 0.18 | 0.29 |
+| Quality score | 81% | 82% | 71% |
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Startup / lifecycle regressions | 1 | 8 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
-| Correctness / pagination | 5 | 4 | 1 |
+| Correctness / pagination | 6 | 4 | 1 |
 | Workflow / close-hygiene | 9 | 0 | 0 |
 | Code reuse / duplication | 5 | 0 | 0 |
 
@@ -1878,3 +1878,14 @@ Notes: Test quality is solid — revival test reloads from DB to confirm persist
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (1244 tests, 0 failures)
 Notes: Tests are thorough — all three parser functions covered with both success and error paths. No production code changed. Claude cumulative: 204 tasks, 37 bugs, 18% bug rate, 82% quality.
+
+### QA Review — 2026-03-17 14:10 — c7b38fb..b0cd03e
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 1 | No tasks closed this period. Filed red-cell-c2-zjcx (P2): in-progress test for red-cell-c2-upwv has off-by-one-space assertion error in `format_net_group_descriptions_multiple_rows_varying_widths` — expected 12 spaces between "Group" and "Description" header labels but actual output has 11. Dependency added (upwv blocked by zjcx). |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` FAIL (1 failure: dispatch::network::tests::format_net_group_descriptions_multiple_rows_varying_widths — in uncommitted in-progress work; committed codebase is clean)
+Notes: Review range contains only 2 admin commits (prior QA checkpoint + claim commit). No production code committed. Committed codebase has 768 passing tests. The 1 test failure is in the dev agent's uncommitted stash for red-cell-c2-upwv and is caused by a wrong expected-string in the test assertion (not a production code bug). Claude cumulative: 204 tasks, 38 bugs, 19% bug rate, 81% quality.

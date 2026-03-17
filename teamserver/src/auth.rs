@@ -1272,6 +1272,39 @@ mod tests {
         assert_eq!(value["Body"]["Info"]["Message"], json!("Authentication failed"));
     }
 
+    #[test]
+    fn authentication_failure_session_cap_exceeded_message_returns_expected_string() {
+        assert_eq!(
+            AuthenticationFailure::SessionCapExceeded.message(),
+            "Too many active sessions; try again later"
+        );
+    }
+
+    #[test]
+    fn login_failure_message_session_cap_exceeded_uses_init_connection_error_wire_shape() {
+        let message =
+            login_failure_message("overloaded", &AuthenticationFailure::SessionCapExceeded);
+        let value = serde_json::to_value(&message).expect("message should serialize");
+
+        assert_eq!(value["Body"]["SubEvent"], json!(InitConnectionCode::Error.as_u32()));
+        assert_eq!(
+            value["Body"]["Info"]["Message"],
+            json!("Too many active sessions; try again later")
+        );
+    }
+
+    #[test]
+    fn all_authentication_failure_variants_have_non_empty_messages() {
+        let variants =
+            [AuthenticationFailure::InvalidCredentials, AuthenticationFailure::SessionCapExceeded];
+        for variant in &variants {
+            assert!(
+                !variant.message().is_empty(),
+                "AuthenticationFailure::{variant:?} must have a non-empty message"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn from_profile_with_database_upgrades_legacy_runtime_operator_digests() {
         let database = Database::connect_in_memory().await.expect("database should initialize");

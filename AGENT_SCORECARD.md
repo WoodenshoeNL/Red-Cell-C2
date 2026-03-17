@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 187 | 181 | 31 |
-| Bugs filed against | 34 | 32 | 9 |
-| Bug rate (bugs/task) | 0.18 | 0.18 | 0.29 |
-| Quality score | 82% | 82% | 71% |
+| Tasks closed | 191 | 181 | 31 |
+| Bugs filed against | 36 | 32 | 9 |
+| Bug rate (bugs/task) | 0.19 | 0.18 | 0.29 |
+| Quality score | 81% | 82% | 71% |
 
 ## Violation Breakdown
 
@@ -29,7 +29,7 @@ Each loop run updates the running totals and appends a review entry.
 | Audit attribution errors | 0 | 1 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
 | Correctness / pagination | 5 | 4 | 1 |
-| Workflow / close-hygiene | 7 | 0 | 0 |
+| Workflow / close-hygiene | 9 | 0 | 0 |
 | Code reuse / duplication | 4 | 0 | 0 |
 
 ---
@@ -37,6 +37,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-17 04:10 — 73cb663..a73963a
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (dev01) | 3 | 2 | Closed red-cell-c2-3nq0 (LootRepository multi-field filter tests), red-cell-c2-265b (AuditLogRepository::latest_timestamps tests), red-cell-c2-x0aq (AgentResponseRepository CRUD tests). Filed red-cell-c2-xajz (completed red-cell-c2-37rn work committed in wip: 1720f08 but issue never closed) and red-cell-c2-zu4h (17 test tasks stuck in repeated claim/interrupt loop, blocking other agents). |
+| Claude (dev02) | 1 | 0 | Closed red-cell-c2-ih44 (ProfileError/ProfileValidationError Display format tests in common/src/config.rs). Clean delivery. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (150 tests, 0 failures)
+Notes: Code quality is good — tests are well-structured with no unwrap/expect in test bodies. Major concern: dev01-claude is spinning on 17 in_progress issues (repeated claim/interrupt, no code output). These are blocking the queue. red-cell-c2-37rn work is complete but unclosed.
 
 ### Arch Review — 2026-03-16 19:28 — HEAD=1c22b60
 

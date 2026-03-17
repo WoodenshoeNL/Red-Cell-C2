@@ -7917,4 +7917,538 @@ mod tests {
         assert!(result.is_err(), "truncated inner payload must produce a parse error, not panic");
         Ok(())
     }
+
+    #[tokio::test]
+    async fn builtin_config_handler_memory_alloc() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0xCF01_0001, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonConfigKey::MemoryAlloc));
+        add_u32(&mut payload, 0x40); // PAGE_EXECUTE_READWRITE
+        dispatcher
+            .dispatch(0xCF01_0001, u32::from(DemonCommand::CommandConfig), 100, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("config response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Default memory allocation set to 64".to_owned()))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_config_handler_memory_execute() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0xCF01_0002, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonConfigKey::MemoryExecute));
+        add_u32(&mut payload, 0x20); // PAGE_EXECUTE_READ
+        dispatcher
+            .dispatch(0xCF01_0002, u32::from(DemonCommand::CommandConfig), 101, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("config response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Default memory executing set to 32".to_owned()))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_config_handler_inject_spawn64() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0xCF01_0003, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonConfigKey::InjectSpawn64));
+        add_utf16(&mut payload, "C:\\Windows\\System32\\notepad.exe");
+        dispatcher
+            .dispatch(0xCF01_0003, u32::from(DemonCommand::CommandConfig), 102, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("config response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String(
+                "Default x64 target process set to C:\\Windows\\System32\\notepad.exe".to_owned()
+            ))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_config_handler_inject_spawn32() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0xCF01_0004, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonConfigKey::InjectSpawn32));
+        add_utf16(&mut payload, "C:\\Windows\\SysWOW64\\rundll32.exe");
+        dispatcher
+            .dispatch(0xCF01_0004, u32::from(DemonCommand::CommandConfig), 103, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("config response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String(
+                "Default x86 target process set to C:\\Windows\\SysWOW64\\rundll32.exe".to_owned()
+            ))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_config_handler_implant_spf_thread_start()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0xCF01_0005, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonConfigKey::ImplantSpfThreadStart));
+        add_bytes(&mut payload, b"ntdll.dll");
+        add_bytes(&mut payload, b"RtlUserThreadStart");
+        dispatcher
+            .dispatch(0xCF01_0005, u32::from(DemonCommand::CommandConfig), 104, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("config response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String(
+                "Sleep obfuscation spoof thread start addr to ntdll.dll!RtlUserThreadStart"
+                    .to_owned()
+            ))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_config_handler_implant_sleep_technique()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0xCF01_0006, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonConfigKey::ImplantSleepTechnique));
+        add_u32(&mut payload, 2);
+        dispatcher
+            .dispatch(0xCF01_0006, u32::from(DemonCommand::CommandConfig), 105, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("config response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Sleep obfuscation technique set to 2".to_owned()))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_config_handler_implant_coffee_veh() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0xCF01_0007, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        // Test with true
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonConfigKey::ImplantCoffeeVeh));
+        add_u32(&mut payload, 1); // true
+        dispatcher
+            .dispatch(0xCF01_0007, u32::from(DemonCommand::CommandConfig), 106, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("config response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Coffee VEH set to true".to_owned()))
+        );
+
+        // Test with false
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonConfigKey::ImplantCoffeeVeh));
+        add_u32(&mut payload, 0); // false
+        dispatcher
+            .dispatch(0xCF01_0007, u32::from(DemonCommand::CommandConfig), 107, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("config response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Coffee VEH set to false".to_owned()))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_config_handler_implant_coffee_threaded()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0xCF01_0008, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonConfigKey::ImplantCoffeeThreaded));
+        add_u32(&mut payload, 1); // true
+        dispatcher
+            .dispatch(0xCF01_0008, u32::from(DemonCommand::CommandConfig), 108, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("config response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Coffee threading set to true".to_owned()))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_config_handler_inject_technique() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0xCF01_0009, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonConfigKey::InjectTechnique));
+        add_u32(&mut payload, 3);
+        dispatcher
+            .dispatch(0xCF01_0009, u32::from(DemonCommand::CommandConfig), 109, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("config response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Set default injection technique to 3".to_owned()))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_config_handler_inject_spoof_addr() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0xCF01_000A, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonConfigKey::InjectSpoofAddr));
+        add_bytes(&mut payload, b"kernel32.dll");
+        add_bytes(&mut payload, b"CreateThread");
+        dispatcher
+            .dispatch(0xCF01_000A, u32::from(DemonCommand::CommandConfig), 110, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("config response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String(
+                "Injection thread spoofing value set to kernel32.dll!CreateThread".to_owned()
+            ))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_config_handler_implant_verbose() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0xCF01_000B, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        // Test enabled
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonConfigKey::ImplantVerbose));
+        add_u32(&mut payload, 1); // true
+        dispatcher
+            .dispatch(0xCF01_000B, u32::from(DemonCommand::CommandConfig), 111, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("config response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Implant verbose messaging: true".to_owned()))
+        );
+
+        // Test disabled
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonConfigKey::ImplantVerbose));
+        add_u32(&mut payload, 0); // false
+        dispatcher
+            .dispatch(0xCF01_000B, u32::from(DemonCommand::CommandConfig), 112, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("config response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Implant verbose messaging: false".to_owned()))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_config_handler_working_hours_disabled()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0xCF01_000C, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonConfigKey::WorkingHours));
+        add_u32(&mut payload, 0); // disable
+        dispatcher
+            .dispatch(0xCF01_000C, u32::from(DemonCommand::CommandConfig), 113, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("agent update missing")?;
+        let OperatorMessage::AgentUpdate(_) = event else {
+            panic!("expected agent update event");
+        };
+        let event = receiver.recv().await.ok_or("config response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("WorkingHours was disabled".to_owned()))
+        );
+        assert_eq!(registry.get(0xCF01_000C).await.and_then(|a| a.working_hours), None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_config_handler_unknown_key_returns_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0xCF01_000D, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, 9999); // unknown config key
+        let error = dispatcher
+            .dispatch(0xCF01_000D, u32::from(DemonCommand::CommandConfig), 114, &payload)
+            .await
+            .expect_err("unknown config key must be rejected");
+
+        assert!(matches!(
+            error,
+            CommandDispatchError::InvalidCallbackPayload { command_id, .. }
+                if command_id == u32::from(DemonCommand::CommandConfig)
+        ));
+        Ok(())
+    }
 }

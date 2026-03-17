@@ -32263,3 +32263,23 @@ Done. The existing tests already covered the happy path (non-zero offset) and er
 All three scenarios from the issue spec are now covered.
 [2026-03-17 05:43:42] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-doop
 [2026-03-17 05:59:42] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-5b4v
+[2026-03-17 05:59:42] [Ubuntu-C2-dev01-claude] WIP: committing uncommitted changes for red-cell-c2-5b4v
+[2026-03-17 05:59:44] [Ubuntu-C2-dev01-claude] WIP: pushed
+[2026-03-17 05:59:44] [Ubuntu-C2-dev01-claude] ========================LOOP=========================
+[2026-03-17 05:59:44] [Ubuntu-C2-dev01-claude] Next run in 5m (at 06:04:44)
+[2026-03-17 06:04:44] [Ubuntu-C2-dev01-claude] === Claude dev loop iteration 100 ===
+[2026-03-17 06:04:46] [Ubuntu-C2-dev01-claude] git pull --ff-only: ok
+[2026-03-17 06:04:46] [Ubuntu-C2-dev01-claude] br sync import: ok
+[2026-03-17 06:04:48] [Ubuntu-C2-dev01-claude] SAFEGUARD: red-cell-c2-8gri stuck in_progress for >7200s — resetting to open
+[2026-03-17 06:04:49] [Ubuntu-C2-dev01-claude] SAFEGUARD: red-cell-c2-8gri reset to open
+[2026-03-17 06:04:49] [Ubuntu-C2-dev01-claude] SAFEGUARD: red-cell-c2-upwv stuck in_progress for >7200s — resetting to open
+[2026-03-17 06:04:49] [Ubuntu-C2-dev01-claude] SAFEGUARD: red-cell-c2-upwv reset to open
+[2026-03-17 06:04:50] [Ubuntu-C2-dev01-claude] Selected task: red-cell-c2-xypk
+[2026-03-17 06:04:54] [Ubuntu-C2-dev01-claude] Claimed red-cell-c2-xypk
+[2026-03-17 06:04:54] [Ubuntu-C2-dev01-claude] Running Claude on task red-cell-c2-xypk...
+Done. Added 11 new tests to `common/src/operator.rs`:
+
+- **Per-enum round-trip** (`*_as_u32_and_round_trip`): every variant of all 11 enums (`EventCode`, `InitConnectionCode`, `ListenerCode`, `CredentialsCode`, `ChatCode`, `GateCode`, `HostFileCode`, `SessionCode`, `ServiceCode`, `TeamserverCode`, `MiscCode`) asserts the expected literal from `as_u32()` and that `from_u32(as_u32(v)) == Some(v)`.
+- **Unknown-value rejection** (`from_u32_returns_none_for_unknown_values`): checks `0` and `u32::MAX` return `None` for every enum — no panics.
+- **JSON wire-value assertions** (`event_code_json_wire_values`, `sub_event_codes_json_wire_values`, `operator_message_event_code_wire_value_survives_round_trip`): verifies the serializer emits the correct integer literals and a full `OperatorMessage` round-trip preserves the correct `Head.Event` numeric value.
+[2026-03-17 06:08:04] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-xypk

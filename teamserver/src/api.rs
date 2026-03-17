@@ -5269,4 +5269,105 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
+
+    #[tokio::test]
+    async fn get_webhook_stats_returns_null_discord_when_not_configured() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/webhooks/stats")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["discord"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn get_webhook_stats_returns_discord_failures_when_configured() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "Neo" {
+                Password = "password1234"
+              }
+            }
+
+            Api {
+              RateLimitPerMinute = 60
+              key "rest-admin" {
+                Value = "secret-admin"
+                Role = "Admin"
+              }
+            }
+
+            WebHook {
+              Discord {
+                Url = "http://127.0.0.1:19999/discord-stub"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile");
+
+        let database = crate::Database::connect_in_memory().await.expect("database");
+        let agent_registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(agent_registry.clone(), events.clone());
+        let listeners = ListenerManager::new(
+            database.clone(),
+            agent_registry.clone(),
+            events.clone(),
+            sockets.clone(),
+            None,
+        );
+        let api = ApiRuntime::from_profile(&profile).expect("rng should work in tests");
+        let auth = AuthService::from_profile(&profile).expect("auth service should initialize");
+
+        let app = api_routes(api.clone()).with_state(crate::TeamserverState {
+            profile: profile.clone(),
+            database,
+            auth,
+            api,
+            events,
+            connections: OperatorConnectionManager::new(),
+            agent_registry,
+            listeners,
+            payload_builder: crate::PayloadBuilderService::disabled_for_tests(),
+            sockets,
+            webhooks: crate::AuditWebhookNotifier::from_profile(&profile),
+            login_rate_limiter: crate::LoginRateLimiter::new(),
+            shutdown: crate::ShutdownController::new(),
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/webhooks/stats")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert!(body["discord"].is_object(), "discord field should be present when configured");
+        assert_eq!(body["discord"]["failures"], 0u64);
+    }
 }

@@ -600,3 +600,257 @@ pub(super) fn format_memory_type(mem_type: u32) -> String {
         other => format!("0x{other:X}"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    fn make_process_row(name: &str, pid: u32, ppid: u32) -> ProcessRow {
+        ProcessRow {
+            name: name.to_owned(),
+            pid,
+            ppid,
+            session: 1,
+            arch: "x64".to_owned(),
+            threads: 4,
+            user: "SYSTEM".to_owned(),
+        }
+    }
+
+    // ── format_process_table ─────────────────────────────────────────────────
+
+    #[test]
+    fn format_process_table_empty_returns_empty_string() {
+        assert_eq!(format_process_table(&[]), "");
+    }
+
+    #[test]
+    fn format_process_table_single_row_contains_header_separator_and_data() {
+        let rows = vec![make_process_row("svchost.exe", 1234, 456)];
+        let table = format_process_table(&rows);
+
+        // Header line must be present
+        assert!(table.contains("Name"), "missing Name header: {table}");
+        assert!(table.contains("PID"), "missing PID header: {table}");
+        assert!(table.contains("PPID"), "missing PPID header: {table}");
+        assert!(table.contains("Session"), "missing Session header: {table}");
+        assert!(table.contains("Arch"), "missing Arch header: {table}");
+        assert!(table.contains("Threads"), "missing Threads header: {table}");
+        assert!(table.contains("User"), "missing User header: {table}");
+
+        // Separator dashes must be present
+        assert!(table.contains("----"), "missing separator: {table}");
+
+        // Data row must be present
+        assert!(table.contains("svchost.exe"), "missing process name: {table}");
+        assert!(table.contains("1234"), "missing PID: {table}");
+        assert!(table.contains("456"), "missing PPID: {table}");
+
+        // Three lines: header, separator, data row (each ends with '\n')
+        assert_eq!(table.lines().count(), 3, "expected 3 lines:\n{table}");
+    }
+
+    #[test]
+    fn format_process_table_name_width_is_dynamic() {
+        // A long process name should widen the Name column for all rows.
+        let rows =
+            vec![make_process_row("a", 1, 0), make_process_row("very_long_process_name.exe", 2, 0)];
+        let table = format_process_table(&rows);
+        // Both rows must have the same leading-space alignment — i.e. "a" must
+        // be left-padded to the same width as "very_long_process_name.exe".
+        let lines: Vec<&str> = table.lines().collect();
+        // data rows start at index 2
+        let short_row = lines[2];
+        let long_row = lines[3];
+        // The PID column starts at the same offset in both rows when names
+        // are padded correctly; verify by checking equal lengths up to PID.
+        assert_eq!(
+            short_row.find("1   "),
+            long_row.find("2   "),
+            "PID column offsets differ — name width not applied uniformly"
+        );
+    }
+
+    // ── process_rows_json ────────────────────────────────────────────────────
+
+    #[test]
+    fn process_rows_json_two_rows_produce_correct_array() {
+        let rows = vec![
+            ProcessRow {
+                name: "explorer.exe".to_owned(),
+                pid: 100,
+                ppid: 4,
+                session: 1,
+                arch: "x64".to_owned(),
+                threads: 32,
+                user: "user1".to_owned(),
+            },
+            ProcessRow {
+                name: "cmd.exe".to_owned(),
+                pid: 200,
+                ppid: 100,
+                session: 1,
+                arch: "x86".to_owned(),
+                threads: 2,
+                user: "user2".to_owned(),
+            },
+        ];
+
+        let Value::Array(arr) = process_rows_json(&rows) else {
+            panic!("expected JSON array");
+        };
+
+        assert_eq!(arr.len(), 2);
+
+        assert_eq!(arr[0]["Name"], "explorer.exe");
+        assert_eq!(arr[0]["PID"], 100u32);
+        assert_eq!(arr[0]["PPID"], 4u32);
+        assert_eq!(arr[0]["Session"], 1u32);
+        assert_eq!(arr[0]["Arch"], "x64");
+        assert_eq!(arr[0]["Threads"], 32u32);
+        assert_eq!(arr[0]["User"], "user1");
+
+        assert_eq!(arr[1]["Name"], "cmd.exe");
+        assert_eq!(arr[1]["PID"], 200u32);
+        assert_eq!(arr[1]["PPID"], 100u32);
+        assert_eq!(arr[1]["Arch"], "x86");
+        assert_eq!(arr[1]["User"], "user2");
+    }
+
+    #[test]
+    fn process_rows_json_empty_produces_empty_array() {
+        let Value::Array(arr) = process_rows_json(&[]) else {
+            panic!("expected JSON array");
+        };
+        assert!(arr.is_empty());
+    }
+
+    // ── format_module_table ──────────────────────────────────────────────────
+
+    #[test]
+    fn format_module_table_empty_returns_empty_string() {
+        assert_eq!(format_module_table(&[]), "");
+    }
+
+    #[test]
+    fn format_module_table_formats_hex_base_address() {
+        let rows = vec![ModuleRow { name: "ntdll.dll".to_owned(), base: 0x7FFE_0000_1234_ABCD }];
+        let table = format_module_table(&rows);
+        assert!(table.contains("7FFE00001234ABCD"), "expected hex base address in table:\n{table}");
+        assert!(table.contains("ntdll.dll"), "missing module name:\n{table}");
+    }
+
+    // ── format_grep_table ────────────────────────────────────────────────────
+
+    #[test]
+    fn format_grep_table_empty_returns_empty_string() {
+        assert_eq!(format_grep_table(&[]), "");
+    }
+
+    #[test]
+    fn format_grep_table_contains_expected_row_data() {
+        let rows = vec![GrepRow {
+            name: "lsass.exe".to_owned(),
+            pid: 700,
+            ppid: 4,
+            user: "SYSTEM".to_owned(),
+            arch: "x64".to_owned(),
+        }];
+        let table = format_grep_table(&rows);
+        assert!(table.contains("lsass.exe"), "missing name:\n{table}");
+        assert!(table.contains("700"), "missing PID:\n{table}");
+        assert!(table.contains("SYSTEM"), "missing user:\n{table}");
+    }
+
+    // ── format_memory_table ──────────────────────────────────────────────────
+
+    #[test]
+    fn format_memory_table_empty_returns_empty_string() {
+        assert_eq!(format_memory_table(&[]), "");
+    }
+
+    #[test]
+    fn format_memory_table_formats_row_correctly() {
+        let rows = vec![MemoryRow {
+            base: 0x0000_7FF0_0000_0000,
+            size: 0x1000,
+            protect: 0x20,     // PAGE_EXECUTE_READ
+            state: 0x1000,     // MEM_COMMIT
+            mem_type: 0x20000, // MEM_PRIVATE
+        }];
+        let table = format_memory_table(&rows);
+        assert!(table.contains("PAGE_EXECUTE_READ"), "missing protect:\n{table}");
+        assert!(table.contains("MEM_COMMIT"), "missing state:\n{table}");
+        assert!(table.contains("MEM_PRIVATE"), "missing type:\n{table}");
+        assert!(table.contains("7FF000000000"), "missing base address:\n{table}");
+    }
+
+    // ── format_memory_protect ────────────────────────────────────────────────
+
+    #[test]
+    fn format_memory_protect_known_constants_return_names() {
+        assert_eq!(format_memory_protect(0x01), "PAGE_NOACCESS");
+        assert_eq!(format_memory_protect(0x02), "PAGE_READONLY");
+        assert_eq!(format_memory_protect(0x04), "PAGE_READWRITE");
+        assert_eq!(format_memory_protect(0x08), "PAGE_WRITECOPY");
+        assert_eq!(format_memory_protect(0x10), "PAGE_EXECUTE");
+        assert_eq!(format_memory_protect(0x20), "PAGE_EXECUTE_READ");
+        assert_eq!(format_memory_protect(0x40), "PAGE_EXECUTE_READWRITE");
+        assert_eq!(format_memory_protect(0x80), "PAGE_EXECUTE_WRITECOPY");
+        assert_eq!(format_memory_protect(0x100), "PAGE_GUARD");
+    }
+
+    #[test]
+    fn format_memory_protect_unknown_constant_returns_hex_fallback() {
+        assert_eq!(format_memory_protect(0x99), "0x99");
+        assert_eq!(format_memory_protect(0), "0x0");
+    }
+
+    // ── format_memory_state ──────────────────────────────────────────────────
+
+    #[test]
+    fn format_memory_state_known_constants_return_names() {
+        assert_eq!(format_memory_state(0x1000), "MEM_COMMIT");
+        assert_eq!(format_memory_state(0x2000), "MEM_RESERVE");
+        assert_eq!(format_memory_state(0x10000), "MEM_FREE");
+    }
+
+    #[test]
+    fn format_memory_state_unknown_constant_returns_hex_fallback() {
+        assert_eq!(format_memory_state(0xABCD), "0xABCD");
+    }
+
+    // ── format_memory_type ───────────────────────────────────────────────────
+
+    #[test]
+    fn format_memory_type_known_constants_return_names() {
+        assert_eq!(format_memory_type(0x20000), "MEM_PRIVATE");
+        assert_eq!(format_memory_type(0x40000), "MEM_MAPPED");
+        assert_eq!(format_memory_type(0x1000000), "MEM_IMAGE");
+    }
+
+    #[test]
+    fn format_memory_type_unknown_constant_returns_hex_fallback() {
+        assert_eq!(format_memory_type(0x99999), "0x99999");
+    }
+
+    // ── win32_error_code_name ────────────────────────────────────────────────
+
+    #[test]
+    fn win32_error_code_name_known_codes_return_symbolic_names() {
+        assert_eq!(win32_error_code_name(2), Some("ERROR_FILE_NOT_FOUND"));
+        assert_eq!(win32_error_code_name(5), Some("ERROR_ACCESS_DENIED"));
+        assert_eq!(win32_error_code_name(87), Some("ERROR_INVALID_PARAMETER"));
+        assert_eq!(win32_error_code_name(183), Some("ERROR_ALREADY_EXISTS"));
+        assert_eq!(win32_error_code_name(997), Some("ERROR_IO_PENDING"));
+    }
+
+    #[test]
+    fn win32_error_code_name_unknown_codes_return_none() {
+        assert_eq!(win32_error_code_name(0), None);
+        assert_eq!(win32_error_code_name(1), None);
+        assert_eq!(win32_error_code_name(9999), None);
+    }
+}

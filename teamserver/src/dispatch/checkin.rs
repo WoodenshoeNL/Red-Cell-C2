@@ -410,4 +410,79 @@ mod tests {
 
         Ok(())
     }
+
+    /// A payload shorter than the 48-byte metadata prefix must be rejected
+    /// with `InvalidCallbackPayload`.  This guards against truncated or
+    /// malformed CHECKIN frames reaching the parser.
+    #[test]
+    fn parse_checkin_metadata_rejects_truncated_payload() {
+        let key = [0xAA; AGENT_KEY_LENGTH];
+        let iv = [0xBB; AGENT_IV_LENGTH];
+        let agent_id = 0xDEAD_0003;
+        let existing = sample_agent(agent_id, key, iv);
+
+        // 47 bytes — one byte short of the 48-byte minimum.
+        let truncated = vec![0x42u8; 47];
+        let result = parse_checkin_metadata(existing, agent_id, &truncated, "2026-03-17T00:00:00Z");
+
+        let err = result.expect_err("truncated payload must be rejected");
+        match &err {
+            CommandDispatchError::InvalidCallbackPayload { command_id, message } => {
+                assert_eq!(
+                    *command_id,
+                    u32::from(DemonCommand::CommandCheckin),
+                    "error must reference CommandCheckin"
+                );
+                assert!(
+                    message.contains("truncated"),
+                    "error message should mention truncation, got: {message}"
+                );
+                assert!(
+                    message.contains("47"),
+                    "error message should include actual payload length, got: {message}"
+                );
+            }
+            other => panic!("expected InvalidCallbackPayload, got: {other:?}"),
+        }
+    }
+
+    /// When the agent ID inside the payload differs from the outer envelope's
+    /// agent ID, `parse_checkin_metadata` must return `InvalidCallbackPayload`.
+    /// This prevents silent state corruption from misrouted or tampered frames.
+    #[test]
+    fn parse_checkin_metadata_rejects_agent_id_mismatch() {
+        let key = [0xAA; AGENT_KEY_LENGTH];
+        let iv = [0xBB; AGENT_IV_LENGTH];
+        let envelope_agent_id = 0xDEAD_0004;
+        let payload_agent_id = 0xDEAD_FFFF; // different from envelope
+        let existing = sample_agent(envelope_agent_id, key, iv);
+
+        let payload = make_checkin_payload(payload_agent_id, key, iv);
+        let result =
+            parse_checkin_metadata(existing, envelope_agent_id, &payload, "2026-03-17T00:00:00Z");
+
+        let err = result.expect_err("agent ID mismatch must be rejected");
+        match &err {
+            CommandDispatchError::InvalidCallbackPayload { command_id, message } => {
+                assert_eq!(
+                    *command_id,
+                    u32::from(DemonCommand::CommandCheckin),
+                    "error must reference CommandCheckin"
+                );
+                assert!(
+                    message.contains("mismatch"),
+                    "error message should mention mismatch, got: {message}"
+                );
+                assert!(
+                    message.contains(&format!("0x{envelope_agent_id:08X}")),
+                    "error message should include expected agent ID, got: {message}"
+                );
+                assert!(
+                    message.contains(&format!("0x{payload_agent_id:08X}")),
+                    "error message should include actual agent ID, got: {message}"
+                );
+            }
+            other => panic!("expected InvalidCallbackPayload, got: {other:?}"),
+        }
+    }
 }

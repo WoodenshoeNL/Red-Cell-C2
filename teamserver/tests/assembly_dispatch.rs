@@ -1,0 +1,470 @@
+mod common;
+
+use red_cell::{
+    AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
+    ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
+    SocketRelayManager, TeamserverState, websocket_routes,
+};
+use red_cell_common::HttpListenerConfig;
+use red_cell_common::config::Profile;
+use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len};
+use red_cell_common::demon::DemonCommand;
+use red_cell_common::operator::OperatorMessage;
+use tokio::net::TcpListener;
+use tokio_tungstenite::connect_async;
+
+// ── payload builders ────────────────────────────────────────────────────────
+
+/// Build a BOF_CALLBACK_OUTPUT (0x00) payload: u32 LE type + length-prefixed UTF-8 string.
+fn bof_output_payload(text: &str) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&0u32.to_le_bytes()); // BOF_CALLBACK_OUTPUT
+    p.extend_from_slice(&(text.len() as u32).to_le_bytes());
+    p.extend_from_slice(text.as_bytes());
+    p
+}
+
+/// Build a BOF_RAN_OK (3) payload: just the u32 LE sub-type, no extra data.
+fn bof_ran_ok_payload() -> Vec<u8> {
+    3u32.to_le_bytes().to_vec()
+}
+
+/// Build a DOTNET_INFO_NET_VERSION (0x2) payload for `CommandAssemblyInlineExecute`.
+/// The CLR version string is encoded as a LE-length-prefixed UTF-16 LE string.
+fn assembly_clr_version_payload(version: &str) -> Vec<u8> {
+    let utf16_bytes: Vec<u8> = version.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+    let mut p = Vec::new();
+    p.extend_from_slice(&2u32.to_le_bytes()); // DOTNET_INFO_NET_VERSION
+    p.extend_from_slice(&(utf16_bytes.len() as u32).to_le_bytes());
+    p.extend_from_slice(&utf16_bytes);
+    p
+}
+
+/// Build a `CommandAssemblyListVersions` payload: a sequence of LE-length-prefixed
+/// UTF-16 LE strings, one per version.
+fn assembly_list_versions_payload(versions: &[&str]) -> Vec<u8> {
+    let mut p = Vec::new();
+    for v in versions {
+        let utf16_bytes: Vec<u8> = v.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+        p.extend_from_slice(&(utf16_bytes.len() as u32).to_le_bytes());
+        p.extend_from_slice(&utf16_bytes);
+    }
+    p
+}
+
+// ── shared profile ───────────────────────────────────────────────────────────
+
+const PROFILE: &str = r#"
+    Teamserver {
+      Host = "127.0.0.1"
+      Port = 0
+    }
+
+    Operators {
+      user "operator" {
+        Password = "password1234"
+        Role = "Operator"
+      }
+    }
+
+    Demon {}
+"#;
+
+/// Boot a teamserver and return its local address together with a cloned
+/// `ListenerManager` so callers can start HTTP listeners.
+async fn start_server()
+-> Result<(std::net::SocketAddr, ListenerManager), Box<dyn std::error::Error>> {
+    let profile = Profile::parse(PROFILE)?;
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let listeners = ListenerManager::new(
+        database.clone(),
+        registry.clone(),
+        events.clone(),
+        sockets.clone(),
+        None,
+    );
+    let state = TeamserverState {
+        profile: profile.clone(),
+        database: database.clone(),
+        auth: AuthService::from_profile(&profile).expect("auth service should init"),
+        api: ApiRuntime::from_profile(&profile).expect("rng should work in tests"),
+        events,
+        connections: OperatorConnectionManager::new(),
+        agent_registry: registry.clone(),
+        listeners: listeners.clone(),
+        payload_builder: PayloadBuilderService::disabled_for_tests(),
+        sockets,
+        webhooks: AuditWebhookNotifier::from_profile(&profile),
+        login_rate_limiter: LoginRateLimiter::new(),
+        shutdown: red_cell::ShutdownController::new(),
+    };
+
+    let tcp = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = tcp.local_addr()?;
+    tokio::spawn(async move {
+        let app = websocket_routes().with_state(state);
+        let _ = axum::serve(tcp, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+            .await;
+    });
+
+    Ok((addr, listeners))
+}
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+/// Register a fresh agent via DEMON_INIT and return the ctr_offset after init.
+async fn register_agent(
+    client: &reqwest::Client,
+    listener_port: u16,
+    agent_id: u32,
+    key: [u8; AGENT_KEY_LENGTH],
+    iv: [u8; AGENT_IV_LENGTH],
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let init_response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_init_body(agent_id, key, iv))
+        .send()
+        .await?
+        .error_for_status()?;
+    let init_bytes = init_response.bytes().await?;
+    let ctr_offset = ctr_blocks_for_len(init_bytes.len());
+    Ok(ctr_offset)
+}
+
+// ── tests ────────────────────────────────────────────────────────────────────
+
+/// A BOF inline-execute callback with output text must broadcast an `AgentResponse`
+/// event to the operator with the correct message and kind fields.
+#[tokio::test]
+async fn bof_output_callback_broadcasts_output_to_operator()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners
+        .create(red_cell_common::ListenerConfig::from(HttpListenerConfig {
+            name: "asm-test-bof-out".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["127.0.0.1".to_owned()],
+            host_bind: "127.0.0.1".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: listener_port,
+            port_conn: Some(listener_port),
+            method: Some("POST".to_owned()),
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: vec!["/".to_owned()],
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: None,
+            proxy: None,
+        }))
+        .await?;
+    drop(listener_guard);
+    listeners.start("asm-test-bof-out").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xAB01_0001_u32;
+    let key = [0x11; AGENT_KEY_LENGTH];
+    let iv = [0x22; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    // Consume the AgentNew broadcast.
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(
+        matches!(agent_new, OperatorMessage::AgentNew(_)),
+        "expected AgentNew, got {agent_new:?}"
+    );
+
+    let output_text = "BOF found 3 processes";
+    let payload = bof_output_payload(output_text);
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandInlineExecute),
+            0x10,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse, got {event:?}");
+    };
+    assert_eq!(msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::CommandInlineExecute).to_string());
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Output"));
+    assert_eq!(msg.info.extra.get("Message").and_then(|v| v.as_str()), Some(output_text));
+
+    socket.close(None).await?;
+    listeners.stop("asm-test-bof-out").await?;
+    Ok(())
+}
+
+/// A BOF inline-execute callback with an empty payload (BOF_RAN_OK) must not
+/// return an error and must broadcast a completion event to the operator.
+#[tokio::test]
+async fn bof_ran_ok_callback_broadcasts_completion() -> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners
+        .create(red_cell_common::ListenerConfig::from(HttpListenerConfig {
+            name: "asm-test-bof-ok".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["127.0.0.1".to_owned()],
+            host_bind: "127.0.0.1".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: listener_port,
+            port_conn: Some(listener_port),
+            method: Some("POST".to_owned()),
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: vec!["/".to_owned()],
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: None,
+            proxy: None,
+        }))
+        .await?;
+    drop(listener_guard);
+    listeners.start("asm-test-bof-ok").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xAB01_0002_u32;
+    let key = [0x33; AGENT_KEY_LENGTH];
+    let iv = [0x44; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // BOF_RAN_OK has no extra data — just the 4-byte sub-type code.
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandInlineExecute),
+            0x20,
+            &bof_ran_ok_payload(),
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse, got {event:?}");
+    };
+    assert_eq!(msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+    assert_eq!(
+        msg.info.extra.get("Message").and_then(|v| v.as_str()),
+        Some("BOF execution completed")
+    );
+
+    socket.close(None).await?;
+    listeners.stop("asm-test-bof-ok").await?;
+    Ok(())
+}
+
+/// `handle_assembly_list_versions_callback` must broadcast a formatted list of
+/// available CLR version strings to the operator, one per line.
+#[tokio::test]
+async fn assembly_list_versions_broadcasts_formatted_list() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners
+        .create(red_cell_common::ListenerConfig::from(HttpListenerConfig {
+            name: "asm-test-list-ver".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["127.0.0.1".to_owned()],
+            host_bind: "127.0.0.1".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: listener_port,
+            port_conn: Some(listener_port),
+            method: Some("POST".to_owned()),
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: vec!["/".to_owned()],
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: None,
+            proxy: None,
+        }))
+        .await?;
+    drop(listener_guard);
+    listeners.start("asm-test-list-ver").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xAB01_0003_u32;
+    let key = [0x55; AGENT_KEY_LENGTH];
+    let iv = [0x66; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let versions = ["v4.0.30319", "v2.0.50727"];
+    let payload = assembly_list_versions_payload(&versions);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandAssemblyListVersions),
+            0x30,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse, got {event:?}");
+    };
+    assert_eq!(msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(
+        msg.info.command_id,
+        u32::from(DemonCommand::CommandAssemblyListVersions).to_string()
+    );
+    // The output must contain each version prefixed with "   - ".
+    for v in &versions {
+        assert!(
+            msg.info.output.contains(&format!("   - {v}")),
+            "output missing version {v}: {:?}",
+            msg.info.output
+        );
+    }
+
+    socket.close(None).await?;
+    listeners.stop("asm-test-list-ver").await?;
+    Ok(())
+}
+
+/// `handle_assembly_inline_execute_callback` with DOTNET_INFO_NET_VERSION must
+/// broadcast the parsed CLR version string to the operator.
+#[tokio::test]
+async fn assembly_inline_execute_clr_version_broadcast() -> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners
+        .create(red_cell_common::ListenerConfig::from(HttpListenerConfig {
+            name: "asm-test-clr-ver".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["127.0.0.1".to_owned()],
+            host_bind: "127.0.0.1".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: listener_port,
+            port_conn: Some(listener_port),
+            method: Some("POST".to_owned()),
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: vec!["/".to_owned()],
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: None,
+            proxy: None,
+        }))
+        .await?;
+    drop(listener_guard);
+    listeners.start("asm-test-clr-ver").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xAB01_0004_u32;
+    let key = [0x77; AGENT_KEY_LENGTH];
+    let iv = [0x88; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let clr_version = "v4.0.30319";
+    let payload = assembly_clr_version_payload(clr_version);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandAssemblyInlineExecute),
+            0x40,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse, got {event:?}");
+    };
+    assert_eq!(msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(
+        msg.info.command_id,
+        u32::from(DemonCommand::CommandAssemblyInlineExecute).to_string()
+    );
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Info"));
+    assert!(
+        msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("").contains(clr_version),
+        "message should contain CLR version string: {:?}",
+        msg.info.extra.get("Message")
+    );
+
+    socket.close(None).await?;
+    listeners.stop("asm-test-clr-ver").await?;
+    Ok(())
+}

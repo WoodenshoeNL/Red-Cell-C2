@@ -32654,3 +32654,19 @@ Done. Three tests added to `common/src/operator.rs`:
 
 All workspace checks passed, committed, pushed, and issue closed.
 [2026-03-17 17:45:00] [ubuntu-c2-dev01-claude] Claude completed task red-cell-c2-1stu
+[2026-03-17 17:45:00] [ubuntu-c2-dev01-claude] WIP: committing uncommitted changes for red-cell-c2-1stu
+[2026-03-17 17:45:02] [ubuntu-c2-dev01-claude] WIP: pushed
+[2026-03-17 17:45:02] [ubuntu-c2-dev01-claude] ========================LOOP=========================
+[2026-03-17 17:45:02] [ubuntu-c2-dev01-claude] Next run in 0m (at 17:45:17)
+[2026-03-17 17:45:17] [ubuntu-c2-dev01-claude] === Claude dev loop iteration 4 ===
+[2026-03-17 17:45:18] [ubuntu-c2-dev01-claude] git pull --ff-only: ok
+[2026-03-17 17:45:18] [ubuntu-c2-dev01-claude] br sync import: ok
+[2026-03-17 17:45:19] [ubuntu-c2-dev01-claude] Selected task: red-cell-c2-zfr0
+[2026-03-17 17:45:23] [ubuntu-c2-dev01-claude] Claimed red-cell-c2-zfr0
+[2026-03-17 17:45:23] [ubuntu-c2-dev01-claude] Running Claude on task red-cell-c2-zfr0...
+Done. Three new tests added to `teamserver/src/agent_liveness.rs`:
+
+- **`timeout_for_override_zero_returns_zero_and_sweep_uses_minimum_interval`** — verifies `Some(0)` override clamps sweep to 1s and passes 0 through `timeout_for`
+- **`timeout_for_very_large_override_does_not_overflow`** — verifies `u64::MAX/3` clamps sweep to 30s and passes the value through unchanged  
+- **`timeout_for_sleep_delay_u16_max_returns_expected_value`** — verifies `sleep_delay = 65535` (u16::MAX stored as u32) yields `65535 * 3 = 196605` with no overflow
+[2026-03-17 17:48:47] [ubuntu-c2-dev01-claude] Claude completed task red-cell-c2-zfr0

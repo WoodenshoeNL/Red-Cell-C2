@@ -5228,6 +5228,26 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn parse_api_agent_id_u32_max_boundary() -> Result<(), AgentApiError> {
+        // u32::MAX (0xFFFF_FFFF) must succeed
+        assert_eq!(super::parse_api_agent_id("FFFFFFFF")?, u32::MAX);
+        assert_eq!(super::parse_api_agent_id("ffffffff")?, u32::MAX);
+        assert_eq!(super::parse_api_agent_id("0xFFFFFFFF")?, u32::MAX);
+        assert_eq!(super::parse_api_agent_id("0xffffffff")?, u32::MAX);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_api_agent_id_rejects_overflow() {
+        // 9 hex digits — value 0x1_0000_0000 overflows u32
+        assert!(super::parse_api_agent_id("100000000").is_err());
+        assert!(super::parse_api_agent_id("0x100000000").is_err());
+        // Larger values also rejected
+        assert!(super::parse_api_agent_id("FFFFFFFFF").is_err());
+        assert!(super::parse_api_agent_id("0xFFFFFFFF0").is_err());
+    }
+
     #[tokio::test]
     async fn flush_payload_cache_returns_flushed_count_for_admin() {
         let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;

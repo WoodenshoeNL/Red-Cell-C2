@@ -20,9 +20,9 @@ Each loop run updates the running totals and appends a review entry.
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 2 | 0 | 0 |
 | Missing tests | 10 | 12 | 5 |
-| Clippy warnings | 0 | 0 | 1 |
-| Protocol errors | 6 | 24 | 3 |
-| Security issues | 16 | 32 | 0 |
+| Clippy warnings | 1 | 0 | 1 |
+| Protocol errors | 6 | 25 | 3 |
+| Security issues | 17 | 34 | 0 |
 | Architecture drift | 2 | 21 | 0 |
 | Memory / resource leaks | 1 | 10 | 1 |
 | Startup / lifecycle regressions | 1 | 8 | 0 |
@@ -37,6 +37,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-17 15:16
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 2 | Security (1), Clippy/warnings (1) | red-cell-c2-1o7x: unknown callback probes now persist audit rows before authentication, enabling storage/log churn DoS from unauthenticated traffic (P1); red-cell-c2-2zkn: `cargo test --workspace` emits warnings from unused imports in `teamserver/tests/listener_lifecycle.rs` (P4) |
+| Codex | 3 | Security (2), Protocol errors (1) | red-cell-c2-1pij: DNS pending responses are keyed only by `agent_id`, so another host can fetch a live agent's queued response chunks (P1); red-cell-c2-18r7: unknown reconnect probes synchronously write audit rows on the unauthenticated listener path, enabling write-amplification/storage DoS (P1); red-cell-c2-k9mp: listener operator events emit lowercase protocol labels instead of Havoc-compatible `Http`/`Https`/`Smb` values (P2) |
+| Cursor | 0 | — | No new findings attributed |
+
+Overall codebase health: drifting
+Biggest blindspot: listener paths still let unauthenticated network traffic trigger persistent side effects. Unknown reconnect/callback probes can force audit writes, and DNS response retrieval is not bound to the peer that created the session, so internet-facing listeners still expose avoidable DoS and data-leak surfaces before authentication.
 
 ### QA Review — 2026-03-17 04:10 — 73cb663..a73963a
 

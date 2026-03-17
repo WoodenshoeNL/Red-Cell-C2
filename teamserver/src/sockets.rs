@@ -1411,6 +1411,73 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn read_socks_connect_request_accepts_domain_address() -> io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut client, mut server) = connected_stream_pair().await?;
+
+        let domain = b"example.com";
+        let port: u16 = 443;
+
+        let client_task = tokio::spawn(async move {
+            let mut request = vec![
+                super::SOCKS_VERSION,
+                super::SOCKS_COMMAND_CONNECT,
+                0,
+                super::SOCKS_ATYP_DOMAIN,
+                u8::try_from(domain.len()).unwrap(),
+            ];
+            request.extend_from_slice(domain);
+            request.extend_from_slice(&port.to_be_bytes());
+            client.write_all(&request).await
+        });
+
+        let result = super::read_socks_connect_request(&mut server).await;
+
+        assert!(result.is_ok(), "DOMAIN CONNECT request should succeed: {:?}", result.err());
+        let req = result.unwrap();
+        assert_eq!(req.atyp, super::SOCKS_ATYP_DOMAIN, "atyp should be DOMAIN");
+        assert_eq!(req.address, domain.to_vec(), "address should be the domain bytes");
+        assert_eq!(req.port, port, "port should match");
+
+        let _ = client_task.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_socks_connect_request_accepts_zero_length_domain() -> io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut client, mut server) = connected_stream_pair().await?;
+
+        let port: u16 = 80;
+
+        let client_task = tokio::spawn(async move {
+            let request = vec![
+                super::SOCKS_VERSION,
+                super::SOCKS_COMMAND_CONNECT,
+                0,
+                super::SOCKS_ATYP_DOMAIN,
+                0, // zero-length domain
+                0,
+                80, // port 80 in big-endian
+            ];
+            client.write_all(&request).await
+        });
+
+        let result = super::read_socks_connect_request(&mut server).await;
+
+        assert!(result.is_ok(), "zero-length DOMAIN request should not panic: {:?}", result.err());
+        let req = result.unwrap();
+        assert_eq!(req.atyp, super::SOCKS_ATYP_DOMAIN, "atyp should be DOMAIN");
+        assert!(req.address.is_empty(), "address should be empty for zero-length domain");
+        assert_eq!(req.port, port, "port should match");
+
+        let _ = client_task.await;
+        Ok(())
+    }
+
     /// Build a registered `PendingClient` for `agent_id`/`socket_id` and return the read half of
     /// the peer socket so the caller can verify what the manager writes to the client.
     ///

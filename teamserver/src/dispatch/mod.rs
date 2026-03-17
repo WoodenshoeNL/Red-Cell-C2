@@ -7057,4 +7057,207 @@ mod tests {
         assert_eq!(details["agent_id"], "ABCD1234");
         Ok(())
     }
+
+    /// Build a pivot SmbCommand payload wrapping the given inner callback envelope bytes.
+    fn pivot_command_payload(inner_envelope: &[u8]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u32::from(DemonPivotCommand::SmbCommand).to_le_bytes());
+        add_bytes(&mut payload, inner_envelope);
+        payload
+    }
+
+    /// Build a valid Demon callback envelope for `agent_id` containing a single callback
+    /// package with the given `command_id`, `request_id`, and inner payload bytes.
+    fn valid_callback_envelope(
+        agent_id: u32,
+        key: &[u8; AGENT_KEY_LENGTH],
+        iv: &[u8; AGENT_IV_LENGTH],
+        command_id: u32,
+        request_id: u32,
+        inner_payload: &[u8],
+    ) -> Vec<u8> {
+        // The callback plaintext is: length-prefixed payload (BE) for the first package.
+        let mut plaintext = Vec::new();
+        plaintext.extend_from_slice(
+            &u32::try_from(inner_payload.len()).unwrap_or_default().to_be_bytes(),
+        );
+        plaintext.extend_from_slice(inner_payload);
+
+        let encrypted = red_cell_common::crypto::encrypt_agent_data(key, iv, &plaintext)
+            .expect("callback payload encryption should succeed");
+
+        let mut envelope_payload = Vec::new();
+        envelope_payload.extend_from_slice(&command_id.to_be_bytes());
+        envelope_payload.extend_from_slice(&request_id.to_be_bytes());
+        envelope_payload.extend_from_slice(&encrypted);
+
+        red_cell_common::demon::DemonEnvelope::new(agent_id, envelope_payload)
+            .unwrap_or_else(|error| panic!("failed to build callback envelope: {error}"))
+            .to_bytes()
+    }
+
+    #[tokio::test]
+    async fn pivot_command_callback_dispatches_inner_package_and_emits_mark_event()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database,
+            sockets,
+            None,
+        );
+
+        let parent_id = 0x1111_2222;
+        let parent_key = [0xAA; AGENT_KEY_LENGTH];
+        let parent_iv = [0xBB; AGENT_IV_LENGTH];
+        let child_id = 0x3333_4444;
+        let child_key = [0xCC; AGENT_KEY_LENGTH];
+        let child_iv = [0xDD; AGENT_IV_LENGTH];
+
+        // Register both parent and child agents.
+        registry.insert(sample_agent_info(parent_id, parent_key, parent_iv)).await?;
+        registry.insert(sample_agent_info(child_id, child_key, child_iv)).await?;
+        registry.add_link(parent_id, child_id).await?;
+
+        // Enqueue a job on the child so we can verify the command handler sees the right
+        // agent_id.  We use CommandOutput as a simple builtin that broadcasts an event.
+        registry
+            .enqueue_job(
+                child_id,
+                Job {
+                    command: u32::from(DemonCommand::CommandOutput),
+                    request_id: 0x42,
+                    payload: Vec::new(),
+                    command_line: "test-cmd".to_owned(),
+                    task_id: "task-42".to_owned(),
+                    created_at: "2026-03-17T12:00:00Z".to_owned(),
+                    operator: "operator".to_owned(),
+                },
+            )
+            .await?;
+
+        // Build a callback from the child agent containing a CommandOutput response.
+        let mut inner_output = Vec::new();
+        add_bytes(&mut inner_output, b"hello from pivot child");
+
+        let inner_envelope = valid_callback_envelope(
+            child_id,
+            &child_key,
+            &child_iv,
+            u32::from(DemonCommand::CommandOutput),
+            0x42,
+            &inner_output,
+        );
+        let payload = pivot_command_payload(&inner_envelope);
+
+        let response = dispatcher
+            .dispatch(parent_id, u32::from(DemonCommand::CommandPivot), 1, &payload)
+            .await?;
+        assert_eq!(response, None);
+
+        // First event should be the agent update (mark) event from last_call_in update.
+        let mark_event =
+            receiver.recv().await.ok_or("expected AgentUpdate event after pivot command")?;
+        let OperatorMessage::AgentUpdate(update) = mark_event else {
+            return Err(format!("expected AgentUpdate, got {mark_event:?}").into());
+        };
+        assert_eq!(
+            update.info.agent_id,
+            format!("{child_id:08x}"),
+            "update event must be for the child agent"
+        );
+
+        // Second event should be the output response from the inner CommandOutput handler.
+        let output_event =
+            receiver.recv().await.ok_or("expected AgentResponse from inner command handler")?;
+        let OperatorMessage::AgentResponse(msg) = output_event else {
+            return Err(format!("expected AgentResponse, got {output_event:?}").into());
+        };
+        assert_eq!(
+            msg.info.demon_id,
+            format!("{child_id:08X}"),
+            "output event must reference the child agent"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pivot_command_callback_unknown_inner_agent_returns_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database,
+            sockets,
+            None,
+        );
+
+        let parent_id = 0xAAAA_BBBB;
+        let parent_key = [0x11; AGENT_KEY_LENGTH];
+        let parent_iv = [0x22; AGENT_IV_LENGTH];
+        registry.insert(sample_agent_info(parent_id, parent_key, parent_iv)).await?;
+
+        // Build an envelope for a non-existent inner agent.
+        let unknown_child_id = 0xDEAD_FACE;
+        let fake_key = [0x99; AGENT_KEY_LENGTH];
+        let fake_iv = [0x88; AGENT_IV_LENGTH];
+        let inner_envelope = valid_callback_envelope(
+            unknown_child_id,
+            &fake_key,
+            &fake_iv,
+            u32::from(DemonCommand::CommandOutput),
+            1,
+            &[],
+        );
+        let payload = pivot_command_payload(&inner_envelope);
+
+        let result = dispatcher
+            .dispatch(parent_id, u32::from(DemonCommand::CommandPivot), 1, &payload)
+            .await;
+
+        assert!(result.is_err(), "unknown inner agent must produce an error, not panic");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pivot_command_callback_truncated_inner_payload_returns_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database,
+            sockets,
+            None,
+        );
+
+        let parent_id = 0xBBCC_DDEE;
+        let parent_key = [0x33; AGENT_KEY_LENGTH];
+        let parent_iv = [0x44; AGENT_IV_LENGTH];
+        registry.insert(sample_agent_info(parent_id, parent_key, parent_iv)).await?;
+
+        // Build a pivot SmbCommand payload with truncated inner data (too short for an
+        // envelope header).
+        let truncated_inner = vec![0xDE, 0xAD];
+        let payload = pivot_command_payload(&truncated_inner);
+
+        let result = dispatcher
+            .dispatch(parent_id, u32::from(DemonCommand::CommandPivot), 1, &payload)
+            .await;
+
+        assert!(result.is_err(), "truncated inner payload must produce a parse error, not panic");
+        Ok(())
+    }
 }

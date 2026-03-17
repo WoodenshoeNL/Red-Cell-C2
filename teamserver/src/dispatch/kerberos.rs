@@ -269,6 +269,467 @@ pub(super) fn format_ticket_flags(flags: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use red_cell_common::demon::DemonCommand;
+
+    // ── Byte-builder helpers for CallbackParser inputs ──
+
+    /// Append a u32 as little-endian bytes.
+    fn push_u32(buf: &mut Vec<u8>, v: u32) {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    /// Append a length-prefixed UTF-16LE string (the wire format read_utf16 expects).
+    fn push_utf16(buf: &mut Vec<u8>, s: &str) {
+        let utf16: Vec<u16> = s.encode_utf16().collect();
+        let byte_len = (utf16.len() * 2) as u32;
+        push_u32(buf, byte_len);
+        for code_unit in &utf16 {
+            buf.extend_from_slice(&code_unit.to_le_bytes());
+        }
+    }
+
+    /// Append a length-prefixed raw byte blob (the wire format read_bytes expects).
+    fn push_bytes(buf: &mut Vec<u8>, data: &[u8]) {
+        push_u32(buf, data.len() as u32);
+        buf.extend_from_slice(data);
+    }
+
+    /// Build one session's fixed fields (before tickets) into `buf`.
+    fn push_session_header(
+        buf: &mut Vec<u8>,
+        username: &str,
+        domain: &str,
+        logon_id_low: u32,
+        logon_id_high: u32,
+        session: u32,
+        user_sid: &str,
+        logon_time_low: u32,
+        logon_time_high: u32,
+        logon_type: u32,
+        auth_package: &str,
+        logon_server: &str,
+        dns_domain: &str,
+        upn: &str,
+        ticket_count: u32,
+    ) {
+        push_utf16(buf, username);
+        push_utf16(buf, domain);
+        push_u32(buf, logon_id_low);
+        push_u32(buf, logon_id_high);
+        push_u32(buf, session);
+        push_utf16(buf, user_sid);
+        push_u32(buf, logon_time_low);
+        push_u32(buf, logon_time_high);
+        push_u32(buf, logon_type);
+        push_utf16(buf, auth_package);
+        push_utf16(buf, logon_server);
+        push_utf16(buf, dns_domain);
+        push_utf16(buf, upn);
+        push_u32(buf, ticket_count);
+    }
+
+    /// Build one ticket entry into `buf`.
+    fn push_ticket(
+        buf: &mut Vec<u8>,
+        client_name: &str,
+        client_realm: &str,
+        server_name: &str,
+        server_realm: &str,
+        start_low: u32,
+        start_high: u32,
+        end_low: u32,
+        end_high: u32,
+        renew_low: u32,
+        renew_high: u32,
+        encryption_type: u32,
+        ticket_flags: u32,
+        ticket_data: &[u8],
+    ) {
+        push_utf16(buf, client_name);
+        push_utf16(buf, client_realm);
+        push_utf16(buf, server_name);
+        push_utf16(buf, server_realm);
+        push_u32(buf, start_low);
+        push_u32(buf, start_high);
+        push_u32(buf, end_low);
+        push_u32(buf, end_high);
+        push_u32(buf, renew_low);
+        push_u32(buf, renew_high);
+        push_u32(buf, encryption_type);
+        push_u32(buf, ticket_flags);
+        push_bytes(buf, ticket_data);
+    }
+
+    // ── format_kerberos_klist tests ──
+
+    #[test]
+    fn format_kerberos_klist_zero_sessions() {
+        let mut payload = Vec::new();
+        push_u32(&mut payload, 0); // session_count = 0
+        let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandKerberos));
+        let result = format_kerberos_klist(&mut parser).expect("should succeed with zero sessions");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn format_kerberos_klist_single_session_zero_tickets() {
+        let mut payload = Vec::new();
+        push_u32(&mut payload, 1); // session_count = 1
+        push_session_header(
+            &mut payload,
+            "admin",            // username
+            "CORP",             // domain
+            0x0000_1234,        // logon_id_low
+            0x0000_0000,        // logon_id_high
+            0,                  // session
+            "S-1-5-21-1234",    // user_sid
+            0,                  // logon_time_low (epoch guard)
+            0,                  // logon_time_high
+            2,                  // logon_type = Interactive
+            "Kerberos",         // auth_package
+            "DC01",             // logon_server
+            "corp.local",       // dns_domain
+            "admin@corp.local", // upn
+            0,                  // ticket_count = 0
+        );
+
+        let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandKerberos));
+        let result = format_kerberos_klist(&mut parser)
+            .expect("should succeed with one session, zero tickets");
+
+        assert!(result.contains("UserName                : admin"), "missing username");
+        assert!(result.contains("Domain                  : CORP"), "missing domain");
+        assert!(result.contains("LogonId                 : 0:0x1234"), "missing logon id");
+        assert!(result.contains("Session                 : 0"), "missing session");
+        assert!(result.contains("UserSID                 : S-1-5-21-1234"), "missing sid");
+        assert!(result.contains("Authentication package  : Kerberos"), "missing auth package");
+        assert!(result.contains("LogonType               : Interactive"), "missing logon type");
+        assert!(result.contains("LogonServer             : DC01"), "missing logon server");
+        assert!(result.contains("LogonServerDNSDomain    : corp.local"), "missing dns domain");
+        assert!(result.contains("UserPrincipalName       : admin@corp.local"), "missing upn");
+        assert!(result.contains("Cached tickets:         : 0"), "missing ticket count");
+        // Should NOT contain any ticket sub-entries
+        assert!(!result.contains("Client name"), "should have no ticket entries");
+    }
+
+    #[test]
+    fn format_kerberos_klist_single_session_with_ticket() {
+        let mut payload = Vec::new();
+        push_u32(&mut payload, 1); // session_count = 1
+        push_session_header(
+            &mut payload,
+            "user1",
+            "REALM",
+            0x00AA,
+            0x0000,
+            1,
+            "S-1-5-21-999",
+            0,
+            0,
+            3, // Network
+            "Negotiate",
+            "SRV01",
+            "realm.local",
+            "user1@realm.local",
+            1, // ticket_count = 1
+        );
+        push_ticket(
+            &mut payload,
+            "user1",
+            "REALM.LOCAL",
+            "krbtgt/REALM.LOCAL",
+            "REALM.LOCAL",
+            0,
+            0, // start time
+            0,
+            0, // end time
+            0,
+            0,                     // renew time
+            18,                    // AES256_CTS_HMAC_SHA1
+            (1 << 30) | (1 << 23), // forwardable + renewable
+            b"TICKETDATA",         // ticket bytes
+        );
+
+        let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandKerberos));
+        let result =
+            format_kerberos_klist(&mut parser).expect("should format session with one ticket");
+
+        assert!(result.contains("UserName                : user1"), "missing username");
+        assert!(result.contains("Cached tickets:         : 1"), "missing ticket count");
+        assert!(
+            result.contains("\tClient name     : user1 @ REALM.LOCAL"),
+            "missing client name in ticket"
+        );
+        assert!(
+            result.contains("\tServer name     : krbtgt/REALM.LOCAL @ REALM.LOCAL"),
+            "missing server name in ticket"
+        );
+        assert!(
+            result.contains("\tEncryption type : AES256_CTS_HMAC_SHA1"),
+            "missing encryption type"
+        );
+        assert!(result.contains("forwardable"), "missing forwardable flag");
+        assert!(result.contains("renewable"), "missing renewable flag");
+        // Ticket data should be base64-encoded
+        assert!(
+            result.contains(&base64::engine::general_purpose::STANDARD.encode(b"TICKETDATA")),
+            "missing base64 ticket data"
+        );
+    }
+
+    #[test]
+    fn format_kerberos_klist_multi_session_multi_ticket() {
+        let mut payload = Vec::new();
+        push_u32(&mut payload, 2); // session_count = 2
+
+        // Session 1: 2 tickets
+        push_session_header(
+            &mut payload,
+            "alice",
+            "ALPHA",
+            1,
+            0,
+            0,
+            "S-1-5-21-100",
+            0,
+            0,
+            2,
+            "Kerberos",
+            "DC-A",
+            "alpha.local",
+            "alice@alpha.local",
+            2,
+        );
+        push_ticket(
+            &mut payload,
+            "alice",
+            "ALPHA",
+            "krbtgt/ALPHA",
+            "ALPHA",
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            23,
+            0,
+            b"T1",
+        );
+        push_ticket(
+            &mut payload,
+            "alice",
+            "ALPHA",
+            "cifs/fileserv",
+            "ALPHA",
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            17,
+            0,
+            b"",
+        );
+
+        // Session 2: 1 ticket
+        push_session_header(
+            &mut payload,
+            "bob",
+            "BETA",
+            2,
+            0,
+            1,
+            "S-1-5-21-200",
+            0,
+            0,
+            3,
+            "Negotiate",
+            "DC-B",
+            "beta.local",
+            "bob@beta.local",
+            1,
+        );
+        push_ticket(
+            &mut payload,
+            "bob",
+            "BETA",
+            "krbtgt/BETA",
+            "BETA",
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            18,
+            0,
+            b"T3",
+        );
+
+        let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandKerberos));
+        let result = format_kerberos_klist(&mut parser)
+            .expect("should format multiple sessions with multiple tickets");
+
+        // Both sessions present
+        assert!(result.contains("UserName                : alice"), "missing alice");
+        assert!(result.contains("UserName                : bob"), "missing bob");
+        assert!(result.contains("Cached tickets:         : 2"), "missing alice ticket count");
+        assert!(result.contains("Cached tickets:         : 1"), "missing bob ticket count");
+        // Tickets from session 1
+        assert!(result.contains("krbtgt/ALPHA"), "missing alice krbtgt ticket");
+        assert!(result.contains("cifs/fileserv"), "missing alice cifs ticket");
+        // Ticket from session 2
+        assert!(result.contains("krbtgt/BETA"), "missing bob krbtgt ticket");
+        // Encryption types
+        assert!(result.contains("RC4_HMAC"), "missing RC4_HMAC");
+        assert!(result.contains("AES128_CTS_HMAC_SHA1"), "missing AES128");
+        assert!(result.contains("AES256_CTS_HMAC_SHA1"), "missing AES256");
+    }
+
+    #[test]
+    fn format_kerberos_klist_empty_ticket_bytes_omits_ticket_line() {
+        let mut payload = Vec::new();
+        push_u32(&mut payload, 1);
+        push_session_header(
+            &mut payload,
+            "user",
+            "DOM",
+            0,
+            0,
+            0,
+            "S-1-5-21-0",
+            0,
+            0,
+            2,
+            "Kerberos",
+            "DC",
+            "dom.local",
+            "user@dom.local",
+            1,
+        );
+        push_ticket(
+            &mut payload,
+            "user",
+            "DOM",
+            "krbtgt/DOM",
+            "DOM",
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            23,
+            0,
+            b"", // empty ticket bytes
+        );
+
+        let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandKerberos));
+        let result = format_kerberos_klist(&mut parser).expect("should succeed");
+
+        // Empty ticket bytes → no "Ticket" line emitted
+        assert!(!result.contains("\tTicket"), "should not emit Ticket line for empty bytes");
+    }
+
+    #[test]
+    fn format_kerberos_klist_truncated_session_header() {
+        // Claims 1 session but payload has no session data at all
+        let mut payload = Vec::new();
+        push_u32(&mut payload, 1); // session_count = 1
+        // No session data follows
+
+        let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandKerberos));
+        let result = format_kerberos_klist(&mut parser);
+        assert!(result.is_err(), "should error on truncated session header");
+    }
+
+    #[test]
+    fn format_kerberos_klist_truncated_mid_session() {
+        // Claims 2 sessions but only has data for 1
+        let mut payload = Vec::new();
+        push_u32(&mut payload, 2); // session_count = 2
+
+        // Full first session with 0 tickets
+        push_session_header(
+            &mut payload,
+            "user1",
+            "DOM",
+            0,
+            0,
+            0,
+            "S-1-5-21-0",
+            0,
+            0,
+            2,
+            "Kerberos",
+            "DC",
+            "dom.local",
+            "user1@dom.local",
+            0,
+        );
+        // No second session data
+
+        let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandKerberos));
+        let result = format_kerberos_klist(&mut parser);
+        assert!(result.is_err(), "should error when second session is missing");
+    }
+
+    #[test]
+    fn format_kerberos_klist_truncated_ticket() {
+        // 1 session claiming 2 tickets but only 1 ticket's worth of data
+        let mut payload = Vec::new();
+        push_u32(&mut payload, 1);
+        push_session_header(
+            &mut payload,
+            "user",
+            "DOM",
+            0,
+            0,
+            0,
+            "S-1-5-21-0",
+            0,
+            0,
+            2,
+            "Kerberos",
+            "DC",
+            "dom.local",
+            "user@dom.local",
+            2, // claims 2 tickets
+        );
+        // Only provide 1 ticket
+        push_ticket(
+            &mut payload,
+            "user",
+            "DOM",
+            "krbtgt/DOM",
+            "DOM",
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            23,
+            0,
+            b"T1",
+        );
+        // Second ticket is missing
+
+        let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandKerberos));
+        let result = format_kerberos_klist(&mut parser);
+        assert!(result.is_err(), "should error when second ticket is truncated");
+    }
+
+    #[test]
+    fn format_kerberos_klist_truncated_no_session_count() {
+        // Completely empty payload — can't even read session_count
+        let payload: Vec<u8> = Vec::new();
+        let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandKerberos));
+        let result = format_kerberos_klist(&mut parser);
+        assert!(result.is_err(), "should error on empty payload");
+    }
 
     // format_filetime tests
 

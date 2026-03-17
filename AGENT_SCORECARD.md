@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Startup / lifecycle regressions | 1 | 8 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
-| Correctness / pagination | 6 | 4 | 1 |
+| Correctness / pagination | 7 | 5 | 1 |
 | Workflow / close-hygiene | 11 | 0 | 0 |
 | Code reuse / duplication | 5 | 0 | 0 |
 
@@ -37,6 +37,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-18 16:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 1 | Correctness (1) | red-cell-c2-hctp (partial): `let _ =` swallows relay prune error in agent_liveness.rs:131 and dispatch/output.rs:181 |
+| Codex | 1 | Correctness (1) | red-cell-c2-hctp (primary): SOCKS relay cleanup in sockets.rs silently drops enqueue/remove/close errors across ~8 call sites |
+| Cursor | 0 | — | No new findings attributed |
+
+Overall codebase health: on track
+Biggest blindspot: SOCKS relay error observability — cleanup failures in teardown paths are silently discarded, making relay debugging harder in production.
 
 ### QA Review — 2026-03-18 00:45 — 87361d4..1606a65
 

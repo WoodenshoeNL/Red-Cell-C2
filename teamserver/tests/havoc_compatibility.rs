@@ -166,6 +166,108 @@ async fn red_cell_packets_match_havoc_at_offset_zero_and_advance_afterward()
     Ok(())
 }
 
+#[tokio::test]
+async fn demon_info_and_reconnect_match_havoc_after_non_zero_ctr_advance()
+-> Result<(), Box<dyn std::error::Error>> {
+    if let Some(reason) = havoc_compatibility_skip_reason() {
+        panic!(
+            "havoc-compat feature is enabled but the Go toolchain is unavailable: {reason}\n\
+             Install Go (https://go.dev/dl/) or run without --features havoc-compat."
+        );
+    }
+
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let (port, guard) = common::available_port()?;
+    let agent_id = 0x2468_ACED;
+    let key = [0x73; AGENT_KEY_LENGTH];
+    let iv = [0x19; AGENT_IV_LENGTH];
+
+    manager.create(http_listener("havoc-http-reconnect-compat", port)).await?;
+    drop(guard);
+    manager.start("havoc-http-reconnect-compat").await?;
+    common::wait_for_listener(port).await?;
+
+    let client = Client::new();
+    let init_response = client
+        .post(format!("http://127.0.0.1:{port}/"))
+        .body(common::valid_demon_init_body(agent_id, key, iv))
+        .send()
+        .await?
+        .error_for_status()?;
+    let init_ack = init_response.bytes().await?;
+    let mut ctr_offset = ctr_blocks_for_len(init_ack.len());
+    assert_eq!(ctr_offset, 1, "init ACK should consume one AES block");
+
+    let demon_info_payload = demon_info_mem_alloc_payload(0x1234_5678_9ABC_DEF0, 4096, 0x20);
+    let mut expected_plaintext = Vec::with_capacity(4 + demon_info_payload.len());
+    expected_plaintext.extend_from_slice(&u32::try_from(demon_info_payload.len())?.to_be_bytes());
+    expected_plaintext.extend_from_slice(&demon_info_payload);
+    let expected_plaintext_len = expected_plaintext.len();
+    let expected_ciphertext = havoc_encrypt_many(&key, &iv, ctr_offset, &[expected_plaintext])?;
+
+    let demon_info_request = common::valid_demon_callback_body(
+        agent_id,
+        key,
+        iv,
+        ctr_offset,
+        u32::from(DemonCommand::DemonInfo),
+        0x10,
+        &demon_info_payload,
+    );
+    let envelope = red_cell_common::demon::DemonEnvelope::from_bytes(&demon_info_request)?;
+    assert_eq!(
+        &envelope.payload[8..],
+        expected_ciphertext[0].as_slice(),
+        "DEMON_INFO callback ciphertext must match Go AES-CTR at block offset {ctr_offset}"
+    );
+
+    let demon_info_response = client
+        .post(format!("http://127.0.0.1:{port}/"))
+        .body(demon_info_request)
+        .send()
+        .await?
+        .error_for_status()?;
+    assert!(
+        demon_info_response.bytes().await?.is_empty(),
+        "DEMON_INFO callbacks should not return a body"
+    );
+
+    ctr_offset += ctr_blocks_for_len(expected_plaintext_len);
+    assert!(ctr_offset > 1, "DEMON_INFO callback should advance the CTR past the initial block");
+    assert_eq!(registry.ctr_offset(agent_id).await?, ctr_offset);
+
+    let reconnect_response = client
+        .post(format!("http://127.0.0.1:{port}/"))
+        .body(common::valid_demon_reconnect_body(agent_id))
+        .send()
+        .await?
+        .error_for_status()?;
+    let reconnect_ack = reconnect_response.bytes().await?;
+    let havoc_reconnect_ack =
+        havoc_encrypt_many(&key, &iv, ctr_offset, &[agent_id.to_le_bytes().to_vec()])?;
+    assert_eq!(
+        reconnect_ack.as_ref(),
+        havoc_reconnect_ack[0].as_slice(),
+        "reconnect ACK must match Go AES-CTR at preserved block offset {ctr_offset}"
+    );
+    assert_eq!(
+        decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &reconnect_ack)?,
+        agent_id.to_le_bytes()
+    );
+    assert_eq!(
+        registry.ctr_offset(agent_id).await?,
+        ctr_offset,
+        "reconnect ACK must not advance the stored CTR offset"
+    );
+
+    manager.stop("havoc-http-reconnect-compat").await?;
+    Ok(())
+}
+
 fn http_listener(name: &str, port: u16) -> ListenerConfig {
     ListenerConfig::from(HttpListenerConfig {
         name: name.to_owned(),
@@ -188,6 +290,15 @@ fn http_listener(name: &str, port: u16) -> ListenerConfig {
         response: None,
         proxy: None,
     })
+}
+
+fn demon_info_mem_alloc_payload(pointer: u64, size: u32, protection: u32) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&10_u32.to_le_bytes());
+    payload.extend_from_slice(&pointer.to_le_bytes());
+    payload.extend_from_slice(&size.to_le_bytes());
+    payload.extend_from_slice(&protection.to_le_bytes());
+    payload
 }
 
 #[derive(Serialize)]

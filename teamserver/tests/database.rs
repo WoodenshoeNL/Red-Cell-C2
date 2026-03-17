@@ -461,6 +461,70 @@ async fn listener_repository_set_state_updates_runtime_fields_without_rewriting_
 }
 
 #[tokio::test]
+async fn listener_repository_update_persists_config_changes() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let repository = database.listeners();
+    let mut listener = sample_listener();
+
+    repository.create(&listener).await?;
+
+    if let ListenerConfig::Http(config) = &mut listener {
+        config.port_bind = 9443;
+        config.host_bind = "127.0.0.1".to_owned();
+    }
+    repository.update(&listener).await?;
+
+    let stored = repository
+        .get(listener.name())
+        .await?
+        .expect("listener should still exist after update");
+    assert_eq!(stored.config, listener);
+    assert_eq!(stored.state.status, ListenerStatus::Created);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn listener_repository_update_is_a_noop_for_missing_listener() -> Result<(), TeamserverError>
+{
+    let database = test_database().await?;
+    let repository = database.listeners();
+    let existing = sample_listener();
+
+    repository.create(&existing).await?;
+
+    let mut ghost = sample_listener();
+    if let ListenerConfig::Http(config) = &mut ghost {
+        config.name = "never-created".to_owned();
+        config.port_bind = 9999;
+    }
+    // update on a non-existent listener should succeed silently (no-op)
+    repository.update(&ghost).await?;
+
+    assert_eq!(repository.get("never-created").await?, None);
+    assert_eq!(repository.count().await?, 1);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn listener_repository_exists_tracks_creation_and_deletion() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let repository = database.listeners();
+    let listener = sample_listener();
+
+    assert!(!repository.exists(listener.name()).await?, "should not exist before creation");
+
+    repository.create(&listener).await?;
+    assert!(repository.exists(listener.name()).await?, "should exist after creation");
+
+    repository.delete(listener.name()).await?;
+    assert!(!repository.exists(listener.name()).await?, "should not exist after deletion");
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn listener_repository_set_state_is_a_noop_for_missing_listener()
 -> Result<(), TeamserverError> {
     let database = test_database().await?;

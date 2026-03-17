@@ -839,6 +839,144 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_session_activity_connect_filter_returns_only_connect_entries() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+
+        for action in ["operator.connect", "operator.connect", "operator.chat"] {
+            database
+                .audit_log()
+                .create(&AuditLogEntry {
+                    id: None,
+                    actor: "operator".to_owned(),
+                    action: action.to_owned(),
+                    target_kind: "operator".to_owned(),
+                    target_id: None,
+                    details: None,
+                    occurred_at: "2026-03-10T12:00:00Z".to_owned(),
+                })
+                .await
+                .expect("seed row should insert");
+        }
+
+        let query = SessionActivityQuery {
+            activity: Some("connect".to_owned()),
+            ..SessionActivityQuery::default()
+        };
+        let page = query_session_activity(&database, &query).await.expect("query should succeed");
+
+        assert_eq!(page.total, 2, "only operator.connect entries should be counted");
+        assert_eq!(page.items.len(), 2, "only operator.connect items should be returned");
+        assert!(
+            page.items.iter().all(|r| r.activity == "connect"),
+            "all returned items must have activity=connect"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_session_activity_chat_filter_excludes_connect_entries() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+
+        for action in ["operator.connect", "operator.chat", "operator.chat"] {
+            database
+                .audit_log()
+                .create(&AuditLogEntry {
+                    id: None,
+                    actor: "operator".to_owned(),
+                    action: action.to_owned(),
+                    target_kind: "operator".to_owned(),
+                    target_id: None,
+                    details: None,
+                    occurred_at: "2026-03-10T12:00:00Z".to_owned(),
+                })
+                .await
+                .expect("seed row should insert");
+        }
+
+        let query = SessionActivityQuery {
+            activity: Some("chat".to_owned()),
+            ..SessionActivityQuery::default()
+        };
+        let page = query_session_activity(&database, &query).await.expect("query should succeed");
+
+        assert_eq!(page.total, 2, "only operator.chat entries should be counted");
+        assert_eq!(page.items.len(), 2, "only operator.chat items should be returned");
+        assert!(
+            page.items.iter().all(|r| r.activity == "chat"),
+            "all returned items must have activity=chat"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_session_activity_nonexistent_action_triggers_empty_set_guard() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+
+        for action in ["operator.connect", "operator.chat"] {
+            database
+                .audit_log()
+                .create(&AuditLogEntry {
+                    id: None,
+                    actor: "operator".to_owned(),
+                    action: action.to_owned(),
+                    target_kind: "operator".to_owned(),
+                    target_id: None,
+                    details: None,
+                    occurred_at: "2026-03-10T12:00:00Z".to_owned(),
+                })
+                .await
+                .expect("seed row should insert");
+        }
+
+        let query = SessionActivityQuery {
+            activity: Some("nonexistent_action_xyz".to_owned()),
+            ..SessionActivityQuery::default()
+        };
+        let page = query_session_activity(&database, &query).await.expect("query should succeed");
+
+        assert_eq!(page.total, 0, "empty-set guard must return total=0 for unknown activity");
+        assert!(page.items.is_empty(), "empty-set guard must return no items for unknown activity");
+    }
+
+    #[tokio::test]
+    async fn query_session_activity_no_filter_includes_all_five_event_types() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+
+        for action in [
+            "operator.connect",
+            "operator.disconnect",
+            "operator.chat",
+            "operator.session_timeout",
+            "operator.permission_denied",
+        ] {
+            database
+                .audit_log()
+                .create(&AuditLogEntry {
+                    id: None,
+                    actor: "operator".to_owned(),
+                    action: action.to_owned(),
+                    target_kind: "operator".to_owned(),
+                    target_id: None,
+                    details: None,
+                    occurred_at: "2026-03-10T12:00:00Z".to_owned(),
+                })
+                .await
+                .expect("seed row should insert");
+        }
+
+        let page = query_session_activity(&database, &SessionActivityQuery::default())
+            .await
+            .expect("query should succeed");
+
+        assert_eq!(page.total, 5, "unfiltered query must return all five session event types");
+        let mut activities: Vec<_> = page.items.iter().map(|r| r.activity.as_str()).collect();
+        activities.sort_unstable();
+        assert_eq!(
+            activities,
+            ["chat", "connect", "disconnect", "permission_denied", "session_timeout"],
+            "all five activity types must appear in results"
+        );
+    }
+
+    #[tokio::test]
     async fn notifying_audit_helper_posts_to_configured_discord_webhook() {
         let (address, mut receiver, server) = webhook_server().await;
         let profile = Profile::parse(&format!(

@@ -4555,6 +4555,219 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn with_builtin_handlers_and_max_download_bytes_happy_path()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xABCD_EF60,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let dispatcher = CommandDispatcher::with_builtin_handlers_and_max_download_bytes(
+            registry,
+            events,
+            database.clone(),
+            sockets,
+            None,
+            512,
+        );
+
+        let file_id = 0xA1_u32;
+        let content = b"small-payload";
+
+        // Open
+        let mut open = Vec::new();
+        add_u32(&mut open, u32::from(DemonFilesystemCommand::Download));
+        add_u32(&mut open, 0);
+        add_u32(&mut open, file_id);
+        add_u64(&mut open, u64::try_from(content.len())?);
+        add_utf16(&mut open, "C:\\Temp\\small.bin");
+        dispatcher.dispatch(0xABCD_EF60, u32::from(DemonCommand::CommandFs), 0x99, &open).await?;
+
+        // Write (13 bytes < 512 ceiling)
+        let mut write = Vec::new();
+        add_u32(&mut write, u32::from(DemonFilesystemCommand::Download));
+        add_u32(&mut write, 1);
+        add_u32(&mut write, file_id);
+        add_bytes(&mut write, content);
+        dispatcher.dispatch(0xABCD_EF60, u32::from(DemonCommand::CommandFs), 0x99, &write).await?;
+
+        // Close
+        let mut close = Vec::new();
+        add_u32(&mut close, u32::from(DemonFilesystemCommand::Download));
+        add_u32(&mut close, 2);
+        add_u32(&mut close, file_id);
+        add_u32(&mut close, 0);
+        dispatcher.dispatch(0xABCD_EF60, u32::from(DemonCommand::CommandFs), 0x99, &close).await?;
+
+        // Drain events: open, progress, loot, completion
+        let _open_event = receiver.recv().await.ok_or("missing open event")?;
+        let _progress_event = receiver.recv().await.ok_or("missing progress event")?;
+        let loot_event = receiver.recv().await.ok_or("missing loot event")?;
+        let _done_event = receiver.recv().await.ok_or("missing completion event")?;
+
+        let OperatorMessage::AgentResponse(loot_message) = loot_event else {
+            panic!("expected loot event");
+        };
+        assert_eq!(
+            loot_message.info.extra.get("MiscType"),
+            Some(&Value::String("loot-new".to_owned()))
+        );
+
+        let loot = database.loot().list_for_agent(0xABCD_EF60).await?;
+        assert_eq!(loot.len(), 1);
+        assert_eq!(loot[0].kind, "download");
+        assert_eq!(loot[0].file_path.as_deref(), Some("C:\\Temp\\small.bin"));
+        assert_eq!(loot[0].data.as_deref(), Some(content.as_slice()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn with_builtin_handlers_and_max_download_bytes_ceiling_exceeded()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xABCD_EF61,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let dispatcher = CommandDispatcher::with_builtin_handlers_and_max_download_bytes(
+            registry,
+            events,
+            database.clone(),
+            sockets,
+            None,
+            8,
+        );
+
+        let file_id = 0xA2_u32;
+
+        // Open
+        let mut open = Vec::new();
+        add_u32(&mut open, u32::from(DemonFilesystemCommand::Download));
+        add_u32(&mut open, 0);
+        add_u32(&mut open, file_id);
+        add_u64(&mut open, 32);
+        add_utf16(&mut open, "C:\\Temp\\big.bin");
+        dispatcher.dispatch(0xABCD_EF61, u32::from(DemonCommand::CommandFs), 0x99, &open).await?;
+
+        // Write chunk that exceeds ceiling (9 bytes > 8)
+        let mut write = Vec::new();
+        add_u32(&mut write, u32::from(DemonFilesystemCommand::Download));
+        add_u32(&mut write, 1);
+        add_u32(&mut write, file_id);
+        add_bytes(&mut write, b"123456789");
+        let error = dispatcher
+            .dispatch(0xABCD_EF61, u32::from(DemonCommand::CommandFs), 0x99, &write)
+            .await
+            .expect_err("download exceeding ceiling should be rejected");
+        assert!(matches!(
+            error,
+            crate::CommandDispatchError::DownloadTooLarge {
+                agent_id: 0xABCD_EF61,
+                file_id: 0xA2,
+                max_download_bytes: 8,
+            }
+        ));
+
+        // Subsequent write for the same file_id should also fail (download was dropped)
+        let mut write2 = Vec::new();
+        add_u32(&mut write2, u32::from(DemonFilesystemCommand::Download));
+        add_u32(&mut write2, 1);
+        add_u32(&mut write2, file_id);
+        add_bytes(&mut write2, b"ab");
+        let error2 = dispatcher
+            .dispatch(0xABCD_EF61, u32::from(DemonCommand::CommandFs), 0x99, &write2)
+            .await;
+        assert!(error2.is_err(), "writes after drop should be rejected");
+
+        // Drain the open event, then confirm no further events
+        let _open_event = receiver.recv().await.ok_or("missing open event")?;
+        assert!(
+            timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),
+            "oversized download should not emit progress or completion events"
+        );
+        assert!(database.loot().list_for_agent(0xABCD_EF61).await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn with_builtin_handlers_and_max_download_bytes_zero_ceiling()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xABCD_EF62,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let dispatcher = CommandDispatcher::with_builtin_handlers_and_max_download_bytes(
+            registry,
+            events,
+            database.clone(),
+            sockets,
+            None,
+            0,
+        );
+
+        let file_id = 0xA3_u32;
+
+        // Open succeeds (start does not enforce the cap)
+        let mut open = Vec::new();
+        add_u32(&mut open, u32::from(DemonFilesystemCommand::Download));
+        add_u32(&mut open, 0);
+        add_u32(&mut open, file_id);
+        add_u64(&mut open, 1);
+        add_utf16(&mut open, "C:\\Temp\\zero.bin");
+        dispatcher.dispatch(0xABCD_EF62, u32::from(DemonCommand::CommandFs), 0x99, &open).await?;
+
+        // Even a single byte write should be rejected with ceiling=0
+        let mut write = Vec::new();
+        add_u32(&mut write, u32::from(DemonFilesystemCommand::Download));
+        add_u32(&mut write, 1);
+        add_u32(&mut write, file_id);
+        add_bytes(&mut write, b"x");
+        let error = dispatcher
+            .dispatch(0xABCD_EF62, u32::from(DemonCommand::CommandFs), 0x99, &write)
+            .await
+            .expect_err("any write should be rejected with zero ceiling");
+        assert!(matches!(
+            error,
+            crate::CommandDispatchError::DownloadTooLarge {
+                agent_id: 0xABCD_EF62,
+                file_id: 0xA3,
+                max_download_bytes: 0,
+            }
+        ));
+
+        // Drain the open event, confirm no loot persisted
+        let _open_event = receiver.recv().await.ok_or("missing open event")?;
+        assert!(
+            timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),
+            "zero-ceiling download should not emit progress events"
+        );
+        assert!(database.loot().list_for_agent(0xABCD_EF62).await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn builtin_kerberos_klist_handler_formats_ticket_output()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;

@@ -218,4 +218,29 @@ mod tests {
         assert_eq!(bus.broadcast(log_message("discarded")), 0);
         assert!(bus.recent_teamserver_logs().is_empty());
     }
+
+    #[tokio::test]
+    async fn capacity_one_evicts_on_second_log() {
+        let bus = EventBus::new(1);
+        let first = log_message("first");
+        let second = log_message("second");
+
+        bus.broadcast(first);
+        bus.broadcast(second.clone());
+
+        let logs = bus.recent_teamserver_logs();
+        assert_eq!(logs, vec![second]);
+    }
+
+    #[tokio::test]
+    async fn wraparound_preserves_chronological_order() {
+        let bus = EventBus::new(3);
+
+        for i in 1..=5 {
+            bus.broadcast(log_message(&format!("msg-{i}")));
+        }
+
+        let logs = bus.recent_teamserver_logs();
+        assert_eq!(logs, vec![log_message("msg-3"), log_message("msg-4"), log_message("msg-5"),]);
+    }
 }

@@ -1249,6 +1249,19 @@ mod tests {
     }
 
     #[test]
+    fn rejects_unknown_operator_event_code() {
+        let value = json!({
+            "Head": { "Event": 255, "Time": "09/03/2026 19:00:00" },
+            "Body": { "SubEvent": 1, "Info": {} }
+        });
+
+        let error = serde_json::from_value::<OperatorMessage>(value)
+            .expect_err("unsupported event code must fail");
+
+        assert!(error.to_string().contains("unsupported EventCode code"));
+    }
+
+    #[test]
     fn operator_message_exposes_expected_event_codes() {
         let messages = [
             (
@@ -1431,7 +1444,7 @@ mod tests {
     #[test]
     fn rejects_unknown_operator_sub_event() {
         let value = json!({
-            "Head": { "Event": 7, "Time": "09/03/2026 19:00:00" },
+            "Head": { "Event": 1, "Time": "09/03/2026 19:00:00" },
             "Body": { "SubEvent": 255, "Info": {} }
         });
 

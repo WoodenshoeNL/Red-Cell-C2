@@ -1038,6 +1038,7 @@ impl fmt::Display for EventCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
     use serde_json::json;
 
     fn head(event: EventCode) -> MessageHead {
@@ -1194,6 +1195,97 @@ mod tests {
             serde_json::from_value::<OperatorMessage>(response)?,
             OperatorMessage::BuildPayloadResponse(_)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn build_payload_request_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+        let message = OperatorMessage::BuildPayloadRequest(Message {
+            head: MessageHead {
+                event: EventCode::Gate,
+                user: "operator".to_string(),
+                timestamp: "09/03/2026 19:00:00".to_string(),
+                one_time: String::new(),
+            },
+            info: BuildPayloadRequestInfo {
+                agent_type: "Demon".to_string(),
+                listener: "http-listener".to_string(),
+                arch: "x64".to_string(),
+                format: "Windows Exe".to_string(),
+                config: r#"{"Sleep":5,"Jitter":10}"#.to_string(),
+            },
+        });
+
+        let encoded = serde_json::to_value(&message)?;
+
+        // All renamed fields must survive serialization.
+        assert_eq!(encoded.pointer("/Body/Info/AgentType"), Some(&json!("Demon")));
+        assert_eq!(encoded.pointer("/Body/Info/Listener"), Some(&json!("http-listener")));
+        assert_eq!(encoded.pointer("/Body/Info/Arch"), Some(&json!("x64")));
+        assert_eq!(encoded.pointer("/Body/Info/Format"), Some(&json!("Windows Exe")));
+        assert_eq!(
+            encoded.pointer("/Body/Info/Config"),
+            Some(&json!(r#"{"Sleep":5,"Jitter":10}"#))
+        );
+
+        let decoded: OperatorMessage = serde_json::from_value(encoded)?;
+        assert_eq!(decoded, message);
+        Ok(())
+    }
+
+    #[test]
+    fn build_payload_response_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+        let payload_bytes = b"binary payload data";
+        let encoded_payload = base64::engine::general_purpose::STANDARD.encode(payload_bytes);
+
+        let message = OperatorMessage::BuildPayloadResponse(Message {
+            head: MessageHead {
+                event: EventCode::Gate,
+                user: String::new(),
+                timestamp: "09/03/2026 19:00:00".to_string(),
+                one_time: String::new(),
+            },
+            info: BuildPayloadResponseInfo {
+                payload_array: encoded_payload.clone(),
+                format: "Windows Exe".to_string(),
+                file_name: "demon.exe".to_string(),
+            },
+        });
+
+        let encoded = serde_json::to_value(&message)?;
+
+        // All renamed fields must survive serialization.
+        assert_eq!(encoded.pointer("/Body/Info/PayloadArray"), Some(&json!(encoded_payload)));
+        assert_eq!(encoded.pointer("/Body/Info/Format"), Some(&json!("Windows Exe")));
+        assert_eq!(encoded.pointer("/Body/Info/FileName"), Some(&json!("demon.exe")));
+
+        let decoded: OperatorMessage = serde_json::from_value(encoded)?;
+        assert_eq!(decoded, message);
+        Ok(())
+    }
+
+    #[test]
+    fn build_payload_response_partial_fields() -> Result<(), Box<dyn std::error::Error>> {
+        // All three fields are required; a message with only them (no extras) must decode cleanly.
+        let value = json!({
+            "Head": { "Event": 5, "Time": "09/03/2026 19:00:00" },
+            "Body": {
+                "SubEvent": 2,
+                "Info": {
+                    "PayloadArray": "QUJD",
+                    "Format": "shellcode",
+                    "FileName": "payload.bin"
+                }
+            }
+        });
+
+        let decoded: OperatorMessage = serde_json::from_value(value)?;
+        let OperatorMessage::BuildPayloadResponse(msg) = decoded else {
+            panic!("expected BuildPayloadResponse");
+        };
+        assert_eq!(msg.info.payload_array, "QUJD");
+        assert_eq!(msg.info.format, "shellcode");
+        assert_eq!(msg.info.file_name, "payload.bin");
         Ok(())
     }
 

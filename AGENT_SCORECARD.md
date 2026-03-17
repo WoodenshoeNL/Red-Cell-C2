@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 202 | 181 | 31 |
+| Tasks closed | 203 | 181 | 31 |
 | Bugs filed against | 37 | 32 | 9 |
 | Bug rate (bugs/task) | 0.18 | 0.18 | 0.29 |
 | Quality score | 82% | 82% | 71% |
@@ -1856,3 +1856,14 @@ Notes: Test quality is high — filter tests use in-memory DB with seeded rows, 
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (1194+ tests, 0 failures — verified at 07e8e50, no Rust changes since)
 Notes: xypk tests are thorough — all 11 enums covered, both symmetry and rejection paths. No production code changed. Claude cumulative: 202 tasks, 37 bugs, 18% bug rate, 82% quality.
+
+### QA Review — 2026-03-17 12:00 — 549bb4f..978f211
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed red-cell-c2-yxty (2 async integration tests for AgentRegistry::set_last_call_in: revival persists cleared reason across DB reload, unknown-ID returns AgentNotFound). Clean delivery. Ghost wip:interrupted (978f211) consistent with zu4h pattern. Now claiming y4fs. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (all tests pass, 0 failures)
+Notes: Test quality is solid — revival test reloads from DB to confirm persistence, error test uses matches! macro for precise variant + field assertion. No production code changed. Claude cumulative: 203 tasks, 37 bugs, 18% bug rate, 82% quality.

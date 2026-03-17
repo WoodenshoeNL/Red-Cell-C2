@@ -1644,3 +1644,72 @@ async fn audit_latest_timestamps_returns_only_most_recent_for_single_actor()
 
     Ok(())
 }
+
+#[tokio::test]
+async fn agent_list_active_returns_only_active_agents() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let repository = database.agents();
+
+    let active_agent = sample_agent(0x0011_2233);
+    let mut inactive_agent = sample_agent(0x0044_5566);
+    inactive_agent.active = false;
+    inactive_agent.reason = "decommissioned".to_owned();
+    inactive_agent.hostname = "wkstn-02".to_owned();
+
+    repository.create(&active_agent).await?;
+    repository.create(&inactive_agent).await?;
+
+    let active_list = repository.list_active().await?;
+    assert_eq!(active_list.len(), 1, "only the active agent should be returned");
+    assert_eq!(active_list[0].agent_id, active_agent.agent_id);
+
+    // list() should still return both agents.
+    let all = repository.list().await?;
+    assert_eq!(all.len(), 2, "list() must return both active and inactive agents");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_update_persists_changed_fields_on_re_read() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let repository = database.agents();
+
+    let mut agent = sample_agent(0x00AA_BB01);
+    repository.create(&agent).await?;
+
+    // Mutate several fields.
+    agent.hostname = "wkstn-updated".to_owned();
+    agent.username = "new-operator".to_owned();
+    agent.domain_name = "NEWDOMAIN".to_owned();
+    agent.external_ip = "198.51.100.5".to_owned();
+    agent.internal_ip = "10.0.0.99".to_owned();
+    agent.process_name = "svchost.exe".to_owned();
+    agent.process_path = "C:\\Windows\\System32\\svchost.exe".to_owned();
+    agent.process_pid = 9999;
+    agent.elevated = true;
+    agent.os_version = "Windows 11".to_owned();
+    agent.os_build = 22631;
+    agent.sleep_delay = 120;
+    agent.sleep_jitter = 25;
+
+    repository.update(&agent).await?;
+
+    let stored = repository.get(agent.agent_id).await?.expect("agent must exist after update");
+    assert_eq!(stored.hostname, "wkstn-updated");
+    assert_eq!(stored.username, "new-operator");
+    assert_eq!(stored.domain_name, "NEWDOMAIN");
+    assert_eq!(stored.external_ip, "198.51.100.5");
+    assert_eq!(stored.internal_ip, "10.0.0.99");
+    assert_eq!(stored.process_name, "svchost.exe");
+    assert_eq!(stored.process_path, "C:\\Windows\\System32\\svchost.exe");
+    assert_eq!(stored.process_pid, 9999);
+    assert!(stored.elevated);
+    assert_eq!(stored.os_version, "Windows 11");
+    assert_eq!(stored.os_build, 22631);
+    assert_eq!(stored.sleep_delay, 120);
+    assert_eq!(stored.sleep_jitter, 25);
+    assert_eq!(stored, agent, "full round-trip must match the updated record");
+
+    Ok(())
+}

@@ -265,3 +265,63 @@ pub(super) async fn dispatch_builtin_packages(
 pub(super) fn inner_demon_agent_id(bytes: &[u8]) -> Result<u32, DemonProtocolError> {
     Ok(red_cell_common::demon::DemonEnvelope::from_bytes(bytes)?.header.agent_id)
 }
+
+#[cfg(test)]
+mod tests {
+    use red_cell_common::demon::{
+        DEMON_MAGIC_VALUE, DemonEnvelope, DemonProtocolError, MIN_ENVELOPE_SIZE,
+    };
+
+    use super::inner_demon_agent_id;
+
+    /// Build a minimal valid Demon envelope wire encoding for `agent_id` with no payload.
+    fn valid_envelope_bytes(agent_id: u32) -> Vec<u8> {
+        DemonEnvelope::new(agent_id, Vec::new())
+            .expect("envelope construction must succeed")
+            .to_bytes()
+    }
+
+    #[test]
+    fn happy_path_returns_correct_agent_id() {
+        let expected_agent_id: u32 = 0xCAFE_BABE;
+        let bytes = valid_envelope_bytes(expected_agent_id);
+
+        let result = inner_demon_agent_id(&bytes).expect("valid envelope must parse successfully");
+
+        assert_eq!(result, expected_agent_id);
+    }
+
+    #[test]
+    fn empty_slice_returns_protocol_error_not_panic() {
+        let error =
+            inner_demon_agent_id(&[]).expect_err("empty slice must return an error, not panic");
+
+        assert_eq!(
+            error,
+            DemonProtocolError::BufferTooShort {
+                context: "DemonEnvelope",
+                expected: MIN_ENVELOPE_SIZE,
+                actual: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn wrong_magic_returns_invalid_magic_error() {
+        // Build a valid envelope then flip the magic bytes.
+        let mut bytes = valid_envelope_bytes(0x1234_5678);
+        // Magic occupies bytes [4..8] in big-endian order.
+        bytes[4] = 0xDE;
+        bytes[5] = 0xAD;
+        bytes[6] = 0xBE;
+        bytes[7] = 0xEE; // last byte differs from 0xEF
+
+        let error = inner_demon_agent_id(&bytes)
+            .expect_err("wrong magic must return an error, not panic");
+
+        assert_eq!(
+            error,
+            DemonProtocolError::InvalidMagic { expected: DEMON_MAGIC_VALUE, actual: 0xDEAD_BEEE }
+        );
+    }
+}

@@ -474,10 +474,8 @@ async fn listener_repository_update_persists_config_changes() -> Result<(), Team
     }
     repository.update(&listener).await?;
 
-    let stored = repository
-        .get(listener.name())
-        .await?
-        .expect("listener should still exist after update");
+    let stored =
+        repository.get(listener.name()).await?.expect("listener should still exist after update");
     assert_eq!(stored.config, listener);
     assert_eq!(stored.state.status, ListenerStatus::Created);
 

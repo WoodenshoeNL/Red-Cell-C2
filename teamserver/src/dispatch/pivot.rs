@@ -316,8 +316,8 @@ mod tests {
         bytes[6] = 0xBE;
         bytes[7] = 0xEE; // last byte differs from 0xEF
 
-        let error = inner_demon_agent_id(&bytes)
-            .expect_err("wrong magic must return an error, not panic");
+        let error =
+            inner_demon_agent_id(&bytes).expect_err("wrong magic must return an error, not panic");
 
         assert_eq!(
             error,

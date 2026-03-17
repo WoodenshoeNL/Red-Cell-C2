@@ -32091,3 +32091,38 @@ You're out of extra usage · resets 4am (Europe/Amsterdam)
 You're out of extra usage · resets 4am (Europe/Amsterdam)
 [2026-03-17 03:56:44] [Ubuntu-C2-dev01-claude] WARNING: Claude exited with code 1 for task red-cell-c2-8gri
 [2026-03-17 04:11:59] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-enwz
+[2026-03-17 04:11:59] [Ubuntu-C2-dev01-claude] WIP: committing uncommitted changes for red-cell-c2-enwz
+[2026-03-17 04:12:01] [Ubuntu-C2-dev01-claude] WIP: pushed
+[2026-03-17 04:12:01] [Ubuntu-C2-dev01-claude] ========================LOOP=========================
+[2026-03-17 04:12:01] [Ubuntu-C2-dev01-claude] Next run in 5m (at 04:17:01)
+[2026-03-17 04:17:01] [Ubuntu-C2-dev01-claude] === Claude dev loop iteration 91 ===
+[2026-03-17 04:17:02] [Ubuntu-C2-dev01-claude] git pull --ff-only: ok
+[2026-03-17 04:17:03] [Ubuntu-C2-dev01-claude] br sync import: ok
+[2026-03-17 04:17:03] [Ubuntu-C2-dev01-claude] SAFEGUARD: red-cell-c2-ldu0 stuck in_progress for >7200s — resetting to open
+[2026-03-17 04:17:04] [Ubuntu-C2-dev01-claude] SAFEGUARD: red-cell-c2-ldu0 reset to open
+[2026-03-17 04:17:04] [Ubuntu-C2-dev01-claude] SAFEGUARD: red-cell-c2-m47p stuck in_progress for >7200s — resetting to open
+[2026-03-17 04:17:05] [Ubuntu-C2-dev01-claude] SAFEGUARD: red-cell-c2-m47p reset to open
+[2026-03-17 04:17:05] [Ubuntu-C2-dev01-claude] SAFEGUARD: red-cell-c2-t4fy stuck in_progress for >7200s — resetting to open
+[2026-03-17 04:17:05] [Ubuntu-C2-dev01-claude] SAFEGUARD: red-cell-c2-t4fy reset to open
+[2026-03-17 04:17:05] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-37rn
+[2026-03-17 04:17:05] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-rqen
+[2026-03-17 04:17:05] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-doop
+[2026-03-17 04:17:05] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-5b4v
+[2026-03-17 04:17:05] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-xypk
+[2026-03-17 04:17:06] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-yxty
+[2026-03-17 04:17:06] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-y4fs
+[2026-03-17 04:17:06] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-0eb7
+[2026-03-17 04:17:06] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-upwv
+[2026-03-17 04:17:06] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-8gri
+[2026-03-17 04:17:06] [Ubuntu-C2-dev01-claude] Selected task: red-cell-c2-t4fy
+[2026-03-17 04:17:09] [Ubuntu-C2-dev01-claude] Claimed red-cell-c2-t4fy
+[2026-03-17 04:17:10] [Ubuntu-C2-dev01-claude] Running Claude on task red-cell-c2-t4fy...
+Done. Created `teamserver/tests/assembly_dispatch.rs` with 4 integration tests:
+
+1. **`bof_output_callback_broadcasts_output_to_operator`** — BOF_CALLBACK_OUTPUT (0x00) payload → verifies `AgentResponse` with `Type="Output"` and the output text in `extra["Message"]`
+2. **`bof_ran_ok_callback_broadcasts_completion`** — BOF_RAN_OK (3) payload → verifies `Type="Good"` and `"BOF execution completed"` message
+3. **`assembly_list_versions_broadcasts_formatted_list`** — `CommandAssemblyListVersions` with two UTF-16 versions → verifies each version appears prefixed with `"   - "` in the broadcast output
+4. **`assembly_inline_execute_clr_version_broadcast`** — `DOTNET_INFO_NET_VERSION` payload → verifies the CLR version string appears in the operator event
+
+Each test boots a full teamserver + HTTP listener, registers an agent via DEMON_INIT, sends a correctly-encoded AES-CTR callback, and asserts the operator WebSocket receives the expected `AgentResponse` event.
+[2026-03-17 04:23:14] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-t4fy

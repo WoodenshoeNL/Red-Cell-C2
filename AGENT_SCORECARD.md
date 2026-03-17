@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 204 | 181 | 31 |
+| Tasks closed | 205 | 181 | 31 |
 | Bugs filed against | 38 | 32 | 9 |
 | Bug rate (bugs/task) | 0.19 | 0.18 | 0.29 |
 | Quality score | 81% | 82% | 71% |
@@ -1889,3 +1889,14 @@ Notes: Tests are thorough — all three parser functions covered with both succe
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` FAIL (1 failure: dispatch::network::tests::format_net_group_descriptions_multiple_rows_varying_widths — in uncommitted in-progress work; committed codebase is clean)
 Notes: Review range contains only 2 admin commits (prior QA checkpoint + claim commit). No production code committed. Committed codebase has 768 passing tests. The 1 test failure is in the dev agent's uncommitted stash for red-cell-c2-upwv and is caused by a wrong expected-string in the test assertion (not a production code bug). Claude cumulative: 204 tasks, 38 bugs, 19% bug rate, 81% quality.
+
+### QA Review — 2026-03-17 15:30 — b0cd03e..d218fec
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed red-cell-c2-upwv (tests for network formatting helpers). Bug red-cell-c2-zjcx (off-by-one space) was fixed before committing — closed as resolved. WIP interrupted commit (d218fec) only touched log files; no incomplete production code committed. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (1258 tests, 0 failures)
+Notes: Solid test commit covering all four functions (format_net_sessions, format_net_shares, format_net_group_descriptions, int_to_ipv4) with empty-input guards, min-width enforcement, and column expansion. Assertion correctness verified (zjcx resolved pre-commit). Claude cumulative: 205 tasks, 38 bugs, 19% bug rate, 81% quality.

@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 205 | 181 | 31 |
+| Tasks closed | 206 | 182 | 31 |
 | Bugs filed against | 38 | 32 | 9 |
-| Bug rate (bugs/task) | 0.19 | 0.18 | 0.29 |
-| Quality score | 81% | 82% | 71% |
+| Bug rate (bugs/task) | 0.18 | 0.18 | 0.29 |
+| Quality score | 82% | 82% | 71% |
 
 ## Violation Breakdown
 
@@ -1900,3 +1900,14 @@ Notes: Review range contains only 2 admin commits (prior QA checkpoint + claim c
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (1258 tests, 0 failures)
 Notes: Solid test commit covering all four functions (format_net_sessions, format_net_shares, format_net_group_descriptions, int_to_ipv4) with empty-input guards, min-width enforcement, and column expansion. Assertion correctness verified (zjcx resolved pre-commit). Claude cumulative: 205 tasks, 38 bugs, 19% bug rate, 81% quality.
+
+### QA Review — 2026-03-17 15:04 — 78dfdd2..15c0a25
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed red-cell-c2-8gri via the process formatter test coverage commit (`teamserver/src/dispatch/process.rs`). Tests are additive only; no production-path regressions found. |
+| Codex | 1 | 0 | Closed red-cell-c2-3b4x via the SMB listener integration test in [`teamserver/tests/smb_listener.rs`](/home/michel/Red-Cell-C2/teamserver/tests/smb_listener.rs). The test correctly validates that unknown-agent callbacks are ignored without mutating the registered agent. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓
+Notes: No new bugs filed in this window. `br list --status=in_progress` shows only `red-cell-c2-vidy`, which matches a fresh claim in-range and does not appear stale. `br list --status=open` intermittently returned `database is busy` during review, but issue creation was not needed this run. Updated cumulative totals: Claude 206 tasks / 38 bugs / 18% bug rate / 82% quality; Codex 182 tasks / 32 bugs / 18% bug rate / 82% quality.

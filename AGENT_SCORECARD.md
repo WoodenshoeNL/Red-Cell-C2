@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 195 | 181 | 31 |
+| Tasks closed | 196 | 181 | 31 |
 | Bugs filed against | 37 | 32 | 9 |
 | Bug rate (bugs/task) | 0.19 | 0.18 | 0.29 |
 | Quality score | 81% | 82% | 71% |
@@ -1790,3 +1790,14 @@ Notes: dev01-claude continues post-close wip:interrupted pattern (no code in wip
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (708+ tests, 0 failures — 5 new screenshot tests + 2 new socket dispatch tests all pass)
 Notes: Test quality is high — Result-based pattern throughout, full HTTP→listener→dispatch pipeline used, correct protocol constants (DemonCommand::CommandScreenshot, DemonSocketCommand::Connect/Close). No unwraps in test logic. The post-close wip:interrupted on m47p (ab3fc87, no code output) is a ghost commit consistent with zu4h pattern. red-cell-c2-3ptb updated to cover all 4 files now exhibiting the listener config boilerplate duplication.
+
+### QA Review — 2026-03-17 07:35 — b6c71e6..0804de1
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed red-cell-c2-uyk8 (P2: unit tests for transfer format helpers — byte_count, transfer_progress_text, transfer_state_name). 12 clean unit tests in transfer.rs: zero/below-kilo/kilo/mega/tera boundaries, progress fraction, state name lookup. Note: prior QA run (06:15) covered m47p and wrote its scorecard entry but set checkpoint to b6c71e6 instead of b1da79d — this run picks up from b6c71e6 and avoids double-counting m47p. wip:interrupted on uyk8 (0804de1, post-close, no code) consistent with zu4h pattern. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (708+ tests, 0 failures)
+Notes: Transfer format unit tests are concise and correct — pure value assertions, no Result overhead needed. No production code was changed this period, only tests added. red-cell-c2-3ptb and red-cell-c2-zu4h remain open. Checkpoint inconsistency (prior QA set checkpoint to b6c71e6 after reviewing b6c71e6..b1da79d) corrected in this run — checkpoint now set to 0804de1.

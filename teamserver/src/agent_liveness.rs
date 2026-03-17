@@ -785,6 +785,73 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn timeout_for_override_zero_returns_zero_and_sweep_uses_minimum_interval() {
+        // AgentTimeoutSecs = 0 means every agent gets a 0-second timeout.
+        // effective_timeout_secs = 0 → sweep_secs = (0/3).clamp(1, 30) = 1
+        let profile = sample_profile(Some(0), 5);
+        let config = AgentLivenessConfig::from_profile(&profile);
+
+        assert_eq!(
+            config.sweep_interval,
+            Duration::from_secs(1),
+            "override=0 must clamp sweep to MIN_SWEEP_INTERVAL_SECS (1 s), got {:?}",
+            config.sweep_interval,
+        );
+
+        let agent = sample_agent(0x0000_0001);
+        assert_eq!(
+            config.timeout_for(&agent),
+            0,
+            "timeout_for must pass override=0 through unchanged",
+        );
+    }
+
+    #[test]
+    fn timeout_for_very_large_override_does_not_overflow() {
+        // u64::MAX / 3 is the largest value that won't overflow when the caller
+        // later does i64::try_from(timeout_secs).  The sweep interval clamp uses
+        // division-by-3 which is always safe; the override itself goes straight
+        // through timeout_for without further multiplication.
+        let large = u64::MAX / 3;
+        let profile = sample_profile(Some(large), 5);
+        let config = AgentLivenessConfig::from_profile(&profile);
+
+        // sweep_secs = (large / 3).clamp(1, 30) = 30
+        assert_eq!(
+            config.sweep_interval,
+            Duration::from_secs(30),
+            "very large override must clamp sweep to MAX_SWEEP_INTERVAL_SECS (30 s), got {:?}",
+            config.sweep_interval,
+        );
+
+        let agent = sample_agent(0x0000_0002);
+        assert_eq!(
+            config.timeout_for(&agent),
+            large,
+            "timeout_for must return the large override value unchanged",
+        );
+    }
+
+    #[test]
+    fn timeout_for_sleep_delay_u16_max_returns_expected_value() {
+        // sleep_delay is u32; using u16::MAX (65535) exercises the boundary where a
+        // prior u16-field assumption would have caused a narrowing cast.
+        // u64::from(65535) is lossless; with no override and default_sleep_secs = None:
+        //   max(65535, 0).max(1).saturating_mul(3) = 65535 * 3 = 196605
+        let profile = sample_profile(None, 0); // demon sleep 0 → default_sleep_secs = None
+        let config = AgentLivenessConfig::from_profile(&profile);
+
+        let mut agent = sample_agent(0x0000_0003);
+        agent.sleep_delay = u32::from(u16::MAX);
+
+        assert_eq!(
+            config.timeout_for(&agent),
+            196_605,
+            "timeout_for with sleep_delay=u16::MAX must return 65535 * 3 = 196605",
+        );
+    }
+
     #[tokio::test]
     async fn sweep_records_agent_dead_audit_entry() -> Result<(), TeamserverError> {
         // Verify that marking a stale agent dead via the sweep writes an

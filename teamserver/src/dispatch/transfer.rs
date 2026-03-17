@@ -407,3 +407,68 @@ pub(super) fn byte_count(size: u64) -> String {
         format!("{value:.2} {}", UNITS[unit])
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{byte_count, transfer_progress_text, transfer_state_name};
+
+    #[test]
+    fn byte_count_zero() {
+        assert_eq!(byte_count(0), "0 B");
+    }
+
+    #[test]
+    fn byte_count_below_kilo() {
+        assert_eq!(byte_count(999), "999 B");
+    }
+
+    #[test]
+    fn byte_count_kilobytes() {
+        assert_eq!(byte_count(1_000), "1.00 kB");
+    }
+
+    #[test]
+    fn byte_count_megabytes() {
+        assert_eq!(byte_count(1_000_000), "1.00 MB");
+    }
+
+    #[test]
+    fn byte_count_terabytes() {
+        assert_eq!(byte_count(1_000_000_000_000), "1.00 TB");
+    }
+
+    #[test]
+    fn transfer_progress_text_zero_total() {
+        assert_eq!(transfer_progress_text(0, 0), "0.00%");
+    }
+
+    #[test]
+    fn transfer_progress_text_half() {
+        assert_eq!(transfer_progress_text(50, 100), "50.00%");
+    }
+
+    #[test]
+    fn transfer_progress_text_fraction() {
+        assert_eq!(transfer_progress_text(1, 3), "33.33%");
+    }
+
+    #[test]
+    fn transfer_state_name_running() {
+        assert_eq!(transfer_state_name(1), "Running");
+    }
+
+    #[test]
+    fn transfer_state_name_stopped() {
+        assert_eq!(transfer_state_name(2), "Stopped");
+    }
+
+    #[test]
+    fn transfer_state_name_removed() {
+        assert_eq!(transfer_state_name(3), "Removed");
+    }
+
+    #[test]
+    fn transfer_state_name_unknown() {
+        assert_eq!(transfer_state_name(99), "Unknown");
+    }
+}

@@ -2024,6 +2024,18 @@ mod tests {
     }
 
     #[test]
+    fn agent_console_entry_kind_from_command_id_classifies_error_and_output() {
+        assert_eq!(AgentConsoleEntryKind::from_command_id("91"), AgentConsoleEntryKind::Error);
+        assert_eq!(AgentConsoleEntryKind::from_command_id("100"), AgentConsoleEntryKind::Output);
+        assert_eq!(
+            AgentConsoleEntryKind::from_command_id("not-a-number"),
+            AgentConsoleEntryKind::Output
+        );
+        assert_eq!(AgentConsoleEntryKind::from_command_id(""), AgentConsoleEntryKind::Output);
+        assert_eq!(AgentConsoleEntryKind::from_command_id(" 91 "), AgentConsoleEntryKind::Error);
+    }
+
+    #[test]
     fn normalize_server_url_appends_havoc_path() {
         let normalized = normalize_server_url("wss://127.0.0.1:40056")
             .expect("url normalization should succeed");

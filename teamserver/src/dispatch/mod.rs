@@ -6182,6 +6182,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn command_error_handler_win32_unknown_code_and_token_non_0x1_status()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        // Case 1: Win32 with an unknown error code (no name lookup hit)
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonCallbackError::Win32));
+        add_u32(&mut payload, 9999);
+        dispatcher
+            .dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandError), 50, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("win32 unknown code response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Win32 Error: [9999]".to_owned()))
+        );
+        assert_eq!(message.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
+
+        // Case 2: Token with status != 0x1
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonCallbackError::Token));
+        add_u32(&mut payload, 0x5);
+        dispatcher
+            .dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandError), 51, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("token non-0x1 response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Token operation failed with status 0x5".to_owned()))
+        );
+        assert_eq!(message.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn command_error_handler_coffee_and_unknown_class_broadcast_nothing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        // Case 3: Coffee — should return Ok(None) with no broadcast
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonCallbackError::Coffee));
+        dispatcher
+            .dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandError), 52, &payload)
+            .await?;
+
+        let result = timeout(Duration::from_millis(50), receiver.recv()).await;
+        assert!(result.is_err(), "Coffee error class should not broadcast any event");
+
+        // Case 4: Unknown error class (0xFF) — should also return Ok(None) with no broadcast
+        let mut payload = Vec::new();
+        add_u32(&mut payload, 0xFF_u32);
+        dispatcher
+            .dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandError), 53, &payload)
+            .await?;
+
+        let result = timeout(Duration::from_millis(50), receiver.recv()).await;
+        assert!(result.is_err(), "Unknown error class should not broadcast any event");
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn builtin_job_and_package_dropped_handlers_broadcast_agent_responses()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;

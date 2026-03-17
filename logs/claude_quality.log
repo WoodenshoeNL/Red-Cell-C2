@@ -366,3 +366,36 @@ Committed and pushed. Here's the run summary:
 [2026-03-17 22:38:00] [Ubuntu-C2-dev02-claude] === Quality review run 2 of 10 ===
 [2026-03-17 22:38:00] [Ubuntu-C2-dev02-claude] WARNING: git pull --rebase failed, continuing with local state
 [2026-03-17 22:38:00] [Ubuntu-C2-dev02-claude] Run log: claude_quality_20260317_223800.log
+## Test Quality Review Report
+
+**Files reviewed**: 10 of 66 total
+- `teamserver/src/dispatch/transfer.rs`
+- `teamserver/src/dispatch/util.rs`
+- `teamserver/src/events.rs`
+- `teamserver/src/lib.rs` (re-exports only)
+- `teamserver/src/listeners.rs`
+- `teamserver/src/logging.rs`
+- `teamserver/src/main.rs`
+- `teamserver/src/payload_builder.rs`
+- `teamserver/src/plugins.rs`
+- `teamserver/src/rate_limiter.rs`
+
+**Scan position**: 37 → 47
+
+**Issues filed**:
+| ID | Description |
+|---|---|
+| `red-cell-c2-fc78` | dispatch/util.rs has zero tests for `windows_version_label` and `basename` helpers |
+| `red-cell-c2-atd4` | plugins.rs `emit_*` event hooks and `load_plugins` have no test coverage |
+| `red-cell-c2-20ip` | transfer callback Stop/Resume/Remove subcommands lack handler-level tests |
+| `red-cell-c2-lgcr` | beacon output File/FileWrite/FileClose download lifecycle is untested (P2) |
+| `red-cell-c2-ny4n` | events.rs EventBus doesn't test non-log event exclusion from history |
+
+**Most critical gap**: The beacon output File/FileWrite/FileClose download lifecycle (`red-cell-c2-lgcr`, P2) — this is the core path by which agent-exfiltrated files arrive, get reassembled, and get persisted as loot. A regression here could silently drop or corrupt downloaded files with zero test coverage to catch it.
+
+**Overall test quality**: Mixed. `listeners.rs` (100+ tests), `payload_builder.rs` (90+ tests), `logging.rs`, `main.rs`, `events.rs`, and `rate_limiter.rs` all have solid, well-structured tests with meaningful assertions. However, `dispatch/util.rs` has zero tests despite being protocol-critical, and `plugins.rs` has only 3 tests for 13+ public methods. The transfer handler tests cover the happy path for List and credential persistence but skip the Stop/Resume/Remove command logic entirely.
+[2026-03-17 22:40:45] [Ubuntu-C2-dev02-claude] Quality review completed successfully
+[2026-03-17 22:40:45] [Ubuntu-C2-dev02-claude] ========================LOOP=========================
+[2026-03-17 22:40:45] [Ubuntu-C2-dev02-claude] === Quality review run 3 of 10 ===
+[2026-03-17 22:40:45] [Ubuntu-C2-dev02-claude] WARNING: git pull --rebase failed, continuing with local state
+[2026-03-17 22:40:45] [Ubuntu-C2-dev02-claude] Run log: claude_quality_20260317_224045.log

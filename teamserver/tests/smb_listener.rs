@@ -352,6 +352,119 @@ async fn smb_listener_rejects_callbacks_from_unregistered_agent()
     Ok(())
 }
 
+/// A duplicate full DEMON_INIT over SMB must not overwrite the original AES key/IV,
+/// and must not emit a second registration event.
+#[cfg(unix)]
+#[tokio::test]
+async fn smb_listener_rejects_duplicate_init_preserves_original_key()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_, registry, events, manager) = test_manager().await?;
+    let mut event_receiver = events.subscribe();
+    let pipe_name = unique_pipe_name("duplicate-init");
+
+    manager.create(smb_config("smb-test-duplicate-init", &pipe_name)).await?;
+    manager.start("smb-test-duplicate-init").await?;
+    wait_for_smb_listener(&pipe_name).await?;
+
+    let agent_id = 0xD00D_F00D_u32;
+    let original_key = [0x44_u8; AGENT_KEY_LENGTH];
+    let original_iv = [0x27_u8; AGENT_IV_LENGTH];
+    let hijack_key = [0xBB_u8; AGENT_KEY_LENGTH];
+    let hijack_iv = [0xCC_u8; AGENT_IV_LENGTH];
+    let mut ctr_offset = 0_u64;
+
+    let mut init_stream = connect_smb(&pipe_name).await?;
+    write_smb_frame(
+        &mut init_stream,
+        agent_id,
+        &common::valid_demon_init_body(agent_id, original_key, original_iv),
+    )
+    .await?;
+
+    let (ack_agent_id, ack_payload) =
+        timeout(Duration::from_secs(5), read_smb_frame(&mut init_stream)).await??;
+    assert_eq!(ack_agent_id, agent_id, "ack agent_id must match the registered agent");
+    let decrypted_ack = decrypt_agent_data(&original_key, &original_iv, &ack_payload)?;
+    assert_eq!(decrypted_ack.as_slice(), &agent_id.to_le_bytes());
+    ctr_offset += ctr_blocks_for_len(ack_payload.len());
+
+    let registration_event = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
+    let Some(OperatorMessage::AgentNew(message)) = registration_event else {
+        panic!("expected AgentNew event");
+    };
+    assert_eq!(message.info.name_id, format!("{agent_id:08X}"));
+
+    let stored_after_first =
+        registry.get(agent_id).await.ok_or("agent should be registered after first init")?;
+    assert_eq!(
+        stored_after_first.encryption.aes_key.as_slice(),
+        &original_key,
+        "first init must store the original AES key"
+    );
+    assert_eq!(
+        stored_after_first.encryption.aes_iv.as_slice(),
+        &original_iv,
+        "first init must store the original AES IV"
+    );
+
+    drop(init_stream);
+
+    let mut duplicate_stream = connect_smb(&pipe_name).await?;
+    write_smb_frame(
+        &mut duplicate_stream,
+        agent_id,
+        &common::valid_demon_init_body(agent_id, hijack_key, hijack_iv),
+    )
+    .await?;
+
+    assert!(
+        timeout(Duration::from_millis(250), read_smb_frame(&mut duplicate_stream)).await.is_err(),
+        "duplicate SMB init must not return an ACK"
+    );
+    assert!(
+        timeout(Duration::from_millis(250), event_receiver.recv()).await.is_err(),
+        "duplicate SMB init must not emit a second AgentNew event"
+    );
+
+    let stored_after_duplicate = registry
+        .get(agent_id)
+        .await
+        .ok_or("agent should remain registered after duplicate init")?;
+    assert_eq!(
+        stored_after_duplicate.encryption.aes_key.as_slice(),
+        &original_key,
+        "duplicate init must not overwrite the original AES key"
+    );
+    assert_eq!(
+        stored_after_duplicate.encryption.aes_iv.as_slice(),
+        &original_iv,
+        "duplicate init must not overwrite the original AES IV"
+    );
+
+    drop(duplicate_stream);
+
+    let mut callback_stream = connect_smb(&pipe_name).await?;
+    let callback_body = common::valid_demon_callback_body(
+        agent_id,
+        original_key,
+        original_iv,
+        ctr_offset,
+        u32::from(DemonCommand::CommandCheckin),
+        6,
+        &[],
+    );
+    write_smb_frame(&mut callback_stream, agent_id, &callback_body).await?;
+
+    let callback_event = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
+    let Some(OperatorMessage::AgentUpdate(message)) = callback_event else {
+        panic!("expected AgentUpdate event");
+    };
+    assert_eq!(message.info.agent_id, format!("{agent_id:08X}"));
+
+    manager.stop("smb-test-duplicate-init").await?;
+    Ok(())
+}
+
 /// A Demon that connects but sends no valid init payload must not register.
 #[cfg(unix)]
 #[tokio::test]

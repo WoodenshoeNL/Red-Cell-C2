@@ -9,8 +9,8 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 206 | 182 | 31 |
-| Bugs filed against | 38 | 32 | 9 |
+| Tasks closed | 206 | 184 | 31 |
+| Bugs filed against | 38 | 33 | 9 |
 | Bug rate (bugs/task) | 0.18 | 0.18 | 0.29 |
 | Quality score | 82% | 82% | 71% |
 
@@ -21,7 +21,7 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 2 | 0 | 0 |
 | Missing tests | 10 | 12 | 5 |
 | Clippy warnings | 1 | 0 | 1 |
-| Protocol errors | 6 | 25 | 3 |
+| Protocol errors | 6 | 26 | 3 |
 | Security issues | 17 | 34 | 0 |
 | Architecture drift | 2 | 21 | 0 |
 | Memory / resource leaks | 1 | 10 | 1 |
@@ -1922,3 +1922,14 @@ Notes: Solid test commit covering all four functions (format_net_sessions, forma
 
 Build: `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓
 Notes: No new bugs filed in this window. `br list --status=in_progress` shows only `red-cell-c2-vidy`, which matches a fresh claim in-range and does not appear stale. `br list --status=open` intermittently returned `database is busy` during review, but issue creation was not needed this run. Updated cumulative totals: Claude 206 tasks / 38 bugs / 18% bug rate / 82% quality; Codex 182 tasks / 32 bugs / 18% bug rate / 82% quality.
+
+### QA Review — 2026-03-17 15:31 — 15c0a25..3e4725a
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | Two `chore(test-review)` maintenance commits landed in-range, but no task close commits or QA findings were attributable to Claude in this window. |
+| Codex | 2 | 1 | Closed `red-cell-c2-vidy` and `red-cell-c2-bvqn` via [`teamserver/tests/smb_listener.rs`](/home/michel/Red-Cell-C2/teamserver/tests/smb_listener.rs) and [`teamserver/tests/e2e_operator_agent_session.rs`](/home/michel/Red-Cell-C2/teamserver/tests/e2e_operator_agent_session.rs). Filed `red-cell-c2-2x1d` because the new SMB E2E test hard-codes the known-bad lowercase listener protocol label at [`teamserver/tests/e2e_operator_agent_session.rs:324`](/home/michel/Red-Cell-C2/teamserver/tests/e2e_operator_agent_session.rs#L324), which blocks the Havoc-compatibility fix tracked in `red-cell-c2-k9mp`. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` failed (`clippy::too_many_arguments` at [`teamserver/src/listeners.rs:1316`](/home/michel/Red-Cell-C2/teamserver/src/listeners.rs#L1316)), `cargo test --workspace` ✓
+Notes: Review window contained two Codex test-task closures and one fresh Codex claim (`red-cell-c2-1o7x`). `br list --status=in_progress` now shows only `red-cell-c2-1o7x`, which matches that new claim and does not appear stale. Added dependency `red-cell-c2-k9mp -> red-cell-c2-2x1d` because the new test expectation would otherwise pin the protocol bug in place. Updated cumulative totals: Claude 206 tasks / 38 bugs / 18% bug rate / 82% quality; Codex 184 tasks / 33 bugs / 18% bug rate / 82% quality.

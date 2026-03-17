@@ -32733,3 +32733,19 @@ Done. Added three tests to `teamserver/src/auth.rs`:
 2. `login_failure_message_session_cap_exceeded_uses_init_connection_error_wire_shape` — verifies the full wire shape (SubEvent + Message body) for the cap-exceeded failure path
 3. `all_authentication_failure_variants_have_non_empty_messages` — exhaustiveness guard that will catch any future variant added without a message
 [2026-03-17 18:03:42] [ubuntu-c2-dev01-claude] Claude completed task red-cell-c2-8lto
+[2026-03-17 18:03:42] [ubuntu-c2-dev01-claude] WIP: committing uncommitted changes for red-cell-c2-8lto
+[2026-03-17 18:03:44] [ubuntu-c2-dev01-claude] WIP: pushed
+[2026-03-17 18:03:44] [ubuntu-c2-dev01-claude] ========================LOOP=========================
+[2026-03-17 18:03:44] [ubuntu-c2-dev01-claude] Next run in 0m (at 18:03:59)
+[2026-03-17 18:03:59] [ubuntu-c2-dev01-claude] === Claude dev loop iteration 8 ===
+[2026-03-17 18:04:00] [ubuntu-c2-dev01-claude] git pull --ff-only: ok
+[2026-03-17 18:04:00] [ubuntu-c2-dev01-claude] br sync import: ok
+[2026-03-17 18:04:01] [ubuntu-c2-dev01-claude] Selected task: red-cell-c2-5joy
+[2026-03-17 18:04:05] [ubuntu-c2-dev01-claude] Claimed red-cell-c2-5joy
+[2026-03-17 18:04:05] [ubuntu-c2-dev01-claude] Running Claude on task red-cell-c2-5joy...
+Done. The task is complete:
+
+- Added `api_v1_unknown_sub_path_returns_json_not_found` test in `teamserver/src/app.rs` that verifies `GET /api/v1/nonexistent` through `build_router` returns 404 with a JSON body containing `error.code == "not_found"` (from `api_routes`'s fallback), not the empty-body fallback from the root router.
+- All four checks pass: `cargo check`, `cargo test`, `cargo clippy`, `cargo fmt --check`.
+- Issue `red-cell-c2-5joy` closed and pushed.
+[2026-03-17 18:07:20] [ubuntu-c2-dev01-claude] Claude completed task red-cell-c2-5joy

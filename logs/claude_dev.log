@@ -32670,3 +32670,28 @@ Done. Three new tests added to `teamserver/src/agent_liveness.rs`:
 - **`timeout_for_very_large_override_does_not_overflow`** — verifies `u64::MAX/3` clamps sweep to 30s and passes the value through unchanged  
 - **`timeout_for_sleep_delay_u16_max_returns_expected_value`** — verifies `sleep_delay = 65535` (u16::MAX stored as u32) yields `65535 * 3 = 196605` with no overflow
 [2026-03-17 17:48:47] [ubuntu-c2-dev01-claude] Claude completed task red-cell-c2-zfr0
+[2026-03-17 17:48:47] [ubuntu-c2-dev01-claude] WIP: committing uncommitted changes for red-cell-c2-zfr0
+[2026-03-17 17:48:49] [ubuntu-c2-dev01-claude] WIP: pushed
+[2026-03-17 17:48:49] [ubuntu-c2-dev01-claude] ========================LOOP=========================
+[2026-03-17 17:48:49] [ubuntu-c2-dev01-claude] Next run in 0m (at 17:49:04)
+[2026-03-17 17:49:04] [ubuntu-c2-dev01-claude] === Claude dev loop iteration 5 ===
+[2026-03-17 17:49:05] [ubuntu-c2-dev01-claude] git pull --ff-only: ok
+[2026-03-17 17:49:05] [ubuntu-c2-dev01-claude] br sync import: ok
+[2026-03-17 17:49:06] [ubuntu-c2-dev01-claude] Selected task: red-cell-c2-xrjk
+[2026-03-17 17:49:10] [ubuntu-c2-dev01-claude] Claimed red-cell-c2-xrjk
+[2026-03-17 17:49:10] [ubuntu-c2-dev01-claude] Running Claude on task red-cell-c2-xrjk...
+Done. Here's what was implemented for `red-cell-c2-xrjk`:
+
+**Extended `flat_info_variants_round_trip`** with 7 previously uncovered JSON round-trip cases:
+- `ListenerEdit` (Event=2, SE=2)
+- `CredentialsEdit` (Event=3, SE=2)
+- `CredentialsRemove` (Event=3, SE=3)
+- `ChatMessage` (Event=4, SE=1)
+- `ChatAgent` (Event=4, SE=3) — what the issue called "ChatListener SubEvent 3"
+- `BuildPayloadMsOffice` (Event=5, SE=3)
+- `HostFileAdd` (Event=6, SE=1)
+
+Also added a **SubEvent symmetry assertion** to the loop (`encoded["Body"]["SubEvent"] == value["Body"]["SubEvent"]`) so any discriminant typo in the dispatch table fails immediately.
+
+**Added `flat_info_sibling_subevent_rejected`** — verifies that each SubEvent within a family decodes to the correct variant and not a sibling (covers Credentials, HostFile, Chat, and Listener families).
+[2026-03-17 17:55:57] [ubuntu-c2-dev01-claude] Claude completed task red-cell-c2-xrjk

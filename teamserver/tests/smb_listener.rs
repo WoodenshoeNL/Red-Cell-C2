@@ -270,6 +270,88 @@ async fn smb_listener_processes_callback_after_init() -> Result<(), Box<dyn std:
     Ok(())
 }
 
+/// After registering one agent, an SMB callback that claims a different, unknown
+/// agent ID must be ignored without mutating the registered agent or emitting an
+/// operator event.
+#[cfg(unix)]
+#[tokio::test]
+async fn smb_listener_rejects_callbacks_from_unregistered_agent()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_, registry, events, manager) = test_manager().await?;
+    let mut event_receiver = events.subscribe();
+    let pipe_name = unique_pipe_name("unknown-callback");
+
+    manager.create(smb_config("smb-test-unknown-callback", &pipe_name)).await?;
+    manager.start("smb-test-unknown-callback").await?;
+    wait_for_smb_listener(&pipe_name).await?;
+
+    let registered_key = [0x43_u8; AGENT_KEY_LENGTH];
+    let registered_iv = [0x26_u8; AGENT_IV_LENGTH];
+    let registered_agent_id = 0xA1A2_A3A4_u32;
+    let unknown_agent_id = 0xB1B2_B3B4_u32;
+
+    let mut init_stream = connect_smb(&pipe_name).await?;
+    write_smb_frame(
+        &mut init_stream,
+        registered_agent_id,
+        &common::valid_demon_init_body(registered_agent_id, registered_key, registered_iv),
+    )
+    .await?;
+    let (_, ack_payload) =
+        timeout(Duration::from_secs(5), read_smb_frame(&mut init_stream)).await??;
+    let decrypted_ack = decrypt_agent_data(&registered_key, &registered_iv, &ack_payload)?;
+    assert_eq!(decrypted_ack.as_slice(), &registered_agent_id.to_le_bytes());
+
+    let event = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
+    let Some(OperatorMessage::AgentNew(message)) = event else {
+        panic!("expected AgentNew event");
+    };
+    assert_eq!(message.info.name_id, format!("{registered_agent_id:08X}"));
+
+    let before = registry.get(registered_agent_id).await.ok_or("registered agent missing")?;
+    let before_last_call_in = before.last_call_in.clone();
+    let before_hostname = before.hostname.clone();
+    drop(init_stream);
+
+    let mut callback_stream = connect_smb(&pipe_name).await?;
+    let unknown_callback = common::valid_demon_callback_body(
+        unknown_agent_id,
+        registered_key,
+        registered_iv,
+        0,
+        u32::from(DemonCommand::CommandCheckin),
+        6,
+        &[],
+    );
+    write_smb_frame(&mut callback_stream, unknown_agent_id, &unknown_callback).await?;
+
+    assert!(
+        timeout(Duration::from_millis(200), read_smb_frame(&mut callback_stream)).await.is_err(),
+        "unknown SMB callback must not produce a response frame"
+    );
+    assert!(
+        timeout(Duration::from_millis(200), event_receiver.recv()).await.is_err(),
+        "unknown SMB callback must not emit an operator event"
+    );
+    assert!(
+        registry.get(unknown_agent_id).await.is_none(),
+        "unknown SMB callback must not register a new agent"
+    );
+
+    let after = registry.get(registered_agent_id).await.ok_or("registered agent missing")?;
+    assert_eq!(
+        after.last_call_in, before_last_call_in,
+        "registered agent last_call_in must not change after unknown callback"
+    );
+    assert_eq!(
+        after.hostname, before_hostname,
+        "registered agent metadata must remain unchanged after unknown callback"
+    );
+
+    manager.stop("smb-test-unknown-callback").await?;
+    Ok(())
+}
+
 /// A Demon that connects but sends no valid init payload must not register.
 #[cfg(unix)]
 #[tokio::test]

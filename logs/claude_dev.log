@@ -32717,3 +32717,19 @@ Three new tests in `common/src/operator.rs` extending the existing `build_payloa
 
 3. **`build_payload_response_partial_fields`** — verifies a response with only the three required fields deserializes cleanly without extras.
 [2026-03-17 18:00:11] [ubuntu-c2-dev01-claude] Claude completed task red-cell-c2-p8dt
+[2026-03-17 18:00:11] [ubuntu-c2-dev01-claude] WIP: committing uncommitted changes for red-cell-c2-p8dt
+[2026-03-17 18:00:12] [ubuntu-c2-dev01-claude] WIP: pushed
+[2026-03-17 18:00:12] [ubuntu-c2-dev01-claude] ========================LOOP=========================
+[2026-03-17 18:00:12] [ubuntu-c2-dev01-claude] Next run in 0m (at 18:00:27)
+[2026-03-17 18:00:27] [ubuntu-c2-dev01-claude] === Claude dev loop iteration 7 ===
+[2026-03-17 18:00:29] [ubuntu-c2-dev01-claude] git pull --ff-only: ok
+[2026-03-17 18:00:29] [ubuntu-c2-dev01-claude] br sync import: ok
+[2026-03-17 18:00:29] [ubuntu-c2-dev01-claude] Selected task: red-cell-c2-8lto
+[2026-03-17 18:00:33] [ubuntu-c2-dev01-claude] Claimed red-cell-c2-8lto
+[2026-03-17 18:00:34] [ubuntu-c2-dev01-claude] Running Claude on task red-cell-c2-8lto...
+Done. Added three tests to `teamserver/src/auth.rs`:
+
+1. `authentication_failure_session_cap_exceeded_message_returns_expected_string` — directly asserts the static string returned by `SessionCapExceeded.message()`
+2. `login_failure_message_session_cap_exceeded_uses_init_connection_error_wire_shape` — verifies the full wire shape (SubEvent + Message body) for the cap-exceeded failure path
+3. `all_authentication_failure_variants_have_non_empty_messages` — exhaustiveness guard that will catch any future variant added without a message
+[2026-03-17 18:03:42] [ubuntu-c2-dev01-claude] Claude completed task red-cell-c2-8lto

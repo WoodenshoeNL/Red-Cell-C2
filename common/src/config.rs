@@ -211,9 +211,8 @@ impl Profile {
         }
 
         if self.service.is_some() {
-            errors.push(
-                "Service bridge is not yet supported; remove the Service block from the profile"
-                    .to_owned(),
+            tracing::warn!(
+                "Service block present in profile but service bridge is not yet implemented — ignoring"
             );
         }
 
@@ -1394,7 +1393,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_service_block_until_service_bridge_exists() {
+    fn accepts_service_block_with_warning() {
         let profile = Profile::parse(
             r#"
             Teamserver {
@@ -1418,10 +1417,8 @@ mod tests {
         )
         .expect("profile should parse");
 
-        let error = profile.validate().expect_err("profile should be invalid");
-        assert!(error.errors.iter().any(|message| {
-            message.contains("Service") && message.contains("not yet supported")
-        }));
+        profile.validate().expect("profile with Service block should validate successfully");
+        assert!(profile.service.is_some());
     }
 
     #[test]

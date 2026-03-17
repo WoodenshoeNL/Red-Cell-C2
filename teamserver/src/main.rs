@@ -391,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn load_profile_rejects_service_block_configuration() {
+    fn load_profile_accepts_service_block_configuration() {
         let temp_file = NamedTempFile::new().expect("temporary file should be created");
         std::fs::write(
             temp_file.path(),
@@ -417,12 +417,9 @@ mod tests {
         )
         .expect("profile should be written");
 
-        let error = load_profile(&temp_file.path().to_path_buf()).expect_err("load should fail");
-        let message = error.to_string();
-
-        assert!(message.contains("profile validation failed"));
-        assert!(message.contains("Service"));
-        assert!(message.contains("not yet supported"));
+        let profile = load_profile(&temp_file.path().to_path_buf())
+            .expect("profile with Service block should load successfully");
+        assert!(profile.service.is_some());
     }
 
     #[test]

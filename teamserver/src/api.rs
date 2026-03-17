@@ -1853,6 +1853,7 @@ async fn create_listener(
     Json(config): Json<ListenerConfig>,
 ) -> Result<(StatusCode, Json<ListenerSummary>), ListenerManagerError> {
     let parameters = serde_json::to_value(&config).ok();
+    validate_listener_config_fields(&config)?;
     let listener_name = config.name().to_owned();
     let summary = match state.listeners.create(config).await {
         Ok(summary) => summary,
@@ -1894,6 +1895,24 @@ async fn create_listener(
     )
     .await;
     Ok((StatusCode::CREATED, Json(summary)))
+}
+
+fn validate_listener_config_fields(config: &ListenerConfig) -> Result<(), ListenerManagerError> {
+    if config.name().trim().is_empty() {
+        return Err(ListenerManagerError::InvalidConfig {
+            message: "listener name is required".to_owned(),
+        });
+    }
+
+    if let ListenerConfig::Smb(config) = config
+        && config.pipe_name.trim().is_empty()
+    {
+        return Err(ListenerManagerError::InvalidConfig {
+            message: "pipe name is required".to_owned(),
+        });
+    }
+
+    Ok(())
 }
 
 #[utoipa::path(
@@ -4371,6 +4390,83 @@ mod tests {
             .header("content-type", "application/json")
             .body(Body::from(body.to_owned()))
             .expect("request")
+    }
+
+    // ── POST /listeners ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn create_listener_returns_created_summary_body() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let response = app
+            .oneshot(create_listener_request(&smb_listener_json("pivot", "pipe-a"), "secret-admin"))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = read_json(response).await;
+        assert_eq!(body["name"], "pivot");
+        assert_eq!(body["protocol"], "smb");
+        assert_eq!(body["state"]["status"], "Created");
+        assert_eq!(body["config"]["protocol"], "smb");
+        assert_eq!(body["config"]["config"]["name"], "pivot");
+        assert_eq!(body["config"]["config"]["pipe_name"], "pipe-a");
+    }
+
+    #[tokio::test]
+    async fn create_listener_rejects_duplicate_name_and_records_audit_failure() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let create_response = app
+            .clone()
+            .oneshot(create_listener_request(&smb_listener_json("pivot", "pipe-a"), "secret-admin"))
+            .await
+            .expect("response");
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+
+        let duplicate_response = app
+            .clone()
+            .oneshot(create_listener_request(&smb_listener_json("pivot", "pipe-b"), "secret-admin"))
+            .await
+            .expect("response");
+
+        assert_eq!(duplicate_response.status(), StatusCode::CONFLICT);
+        let body = read_json(duplicate_response).await;
+        assert_eq!(body["error"]["code"], "listener_already_exists");
+
+        let audit_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/audit?action=listener.create")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(audit_response.status(), StatusCode::OK);
+        let audit_body = read_json(audit_response).await;
+        let items = audit_body["items"].as_array().expect("items array");
+        assert!(!items.is_empty(), "expected at least one listener.create audit entry");
+        let entry = &items[0];
+        assert_eq!(entry["action"], "listener.create");
+        assert_eq!(entry["target_kind"], "listener");
+        assert_eq!(entry["target_id"], "pivot");
+        assert_eq!(entry["result_status"], "failure");
+    }
+
+    #[tokio::test]
+    async fn create_listener_rejects_empty_name() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let response = app
+            .oneshot(create_listener_request(&smb_listener_json("", "pipe-a"), "secret-admin"))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "listener_invalid_config");
     }
 
     // ── GET /listeners/{name} ───────────────────────────────────────────

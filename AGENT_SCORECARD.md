@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 201 | 181 | 31 |
+| Tasks closed | 202 | 181 | 31 |
 | Bugs filed against | 37 | 32 | 9 |
 | Bug rate (bugs/task) | 0.18 | 0.18 | 0.29 |
 | Quality score | 82% | 82% | 71% |
@@ -1845,3 +1845,14 @@ Notes: Test quality is high — cascade tests add unique value by asserting `.ac
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (1194 tests, 0 failures)
 Notes: Test quality is high — filter tests use in-memory DB with seeded rows, sorted-comparison pattern for the no-filter case correctly handles non-deterministic row order. No production code changed this period. 20 unblocked tasks remain in `br ready`. Claude cumulative: 201 tasks, 37 bugs, 18% bug rate, 82% quality.
+
+### QA Review — 2026-03-17 11:45 — 2653d4e..549bb4f
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed red-cell-c2-xypk (round-trip tests for all 11 numeric_code! enum variants in common/src/operator.rs: as_u32/from_u32 symmetry, unknown-value rejection, JSON wire value). Ghost wip:interrupted commit (549bb4f, log-only). |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (1194+ tests, 0 failures — verified at 07e8e50, no Rust changes since)
+Notes: xypk tests are thorough — all 11 enums covered, both symmetry and rejection paths. No production code changed. Claude cumulative: 202 tasks, 37 bugs, 18% bug rate, 82% quality.

@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 206 | 192 | 31 |
+| Tasks closed | 206 | 195 | 31 |
 | Bugs filed against | 38 | 34 | 9 |
-| Bug rate (bugs/task) | 0.18 | 0.18 | 0.29 |
-| Quality score | 82% | 82% | 71% |
+| Bug rate (bugs/task) | 0.18 | 0.17 | 0.29 |
+| Quality score | 82% | 83% | 71% |
 
 ## Violation Breakdown
 
@@ -1955,3 +1955,14 @@ Notes: Review range extended twice mid-run because `origin/main` advanced from `
 
 Build: `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓
 Notes: No new bugs filed. `br list --status=in_progress` returned empty during the review, and `br ready` succeeded after transient SQLite lock contention from concurrent beads activity. Updated cumulative totals: Claude 206 tasks / 38 bugs / 18% bug rate / 82% quality; Codex 192 tasks / 34 bugs / 18% bug rate / 82% quality.
+
+### QA Review — 2026-03-17 17:13 — 4d43128..9e082c8
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No activity. |
+| Codex | 3 | 0 | Closed `red-cell-c2-1vji`, `red-cell-c2-425c`, and `red-cell-c2-boge` via dedicated `chore: close` commits. Also claimed and then delivered `red-cell-c2-wj6s` in `9e082c8`, but that issue was closed in beads without a separate `chore: close` commit, so it is noted here and not counted in the close-commit total. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓
+Notes: No QA findings were upheld in this window. A transient failure seen during an overlapping local QA run did not reproduce once the quality gates were rerun cleanly, and the final tip `9e082c8` includes the `create_listener` validation/tests needed for `red-cell-c2-wj6s`. `br ready` reports 20 unblocked issues, and `.beads/issues.jsonl` contains no remaining `in_progress` items. Updated cumulative totals: Claude 206 tasks / 38 bugs / 18% bug rate / 82% quality; Codex 195 tasks / 34 bugs / 17% bug rate / 83% quality.

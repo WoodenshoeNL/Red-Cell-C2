@@ -1910,6 +1910,8 @@ struct DnsPendingResponse {
     chunks: Vec<String>,
     /// Timestamp of when the response was queued for download.
     received_at: Instant,
+    /// Source IP that uploaded the callback this response belongs to.
+    peer_ip: IpAddr,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2035,7 +2037,7 @@ impl DnsListenerState {
                 ))
             }
             DnsC2Query::Download { agent_id, seq } => {
-                let txt = self.handle_download(agent_id, seq).await;
+                let txt = self.handle_download(agent_id, seq, peer_ip).await;
                 Some(build_dns_txt_response(
                     query.id,
                     &query.qname_raw,
@@ -2102,7 +2104,7 @@ impl DnsListenerState {
                     let chunks = chunk_response_to_b32hex(&response.payload);
                     self.responses.lock().await.insert(
                         agent_id,
-                        DnsPendingResponse { chunks, received_at: Instant::now() },
+                        DnsPendingResponse { chunks, received_at: Instant::now(), peer_ip },
                     );
                 }
                 "ack"
@@ -2130,7 +2132,7 @@ impl DnsListenerState {
             .retain(|_, pending| pending.received_at.elapsed().as_secs() < DNS_UPLOAD_TIMEOUT_SECS);
     }
 
-    async fn handle_download(&self, agent_id: u32, seq: u16) -> String {
+    async fn handle_download(&self, agent_id: u32, seq: u16, peer_ip: IpAddr) -> String {
         if self.registry.get(agent_id).await.is_none() {
             return "wait".to_owned();
         }
@@ -2139,6 +2141,16 @@ impl DnsListenerState {
         let Some(pending) = responses.get(&agent_id) else {
             return "wait".to_owned();
         };
+        if pending.peer_ip != peer_ip {
+            warn!(
+                listener = %self.config.name,
+                agent_id = format_args!("{agent_id:08X}"),
+                %peer_ip,
+                expected_peer_ip = %pending.peer_ip,
+                "dns download rejected due to source IP mismatch; possible agent_id spoofing"
+            );
+            return "wait".to_owned();
+        }
 
         let idx = usize::from(seq);
         let total = pending.chunks.len();
@@ -6210,15 +6222,25 @@ mod tests {
             DnsPendingResponse {
                 chunks: vec!["AAA".to_owned(), "BBB".to_owned()],
                 received_at: Instant::now(),
+                peer_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
             },
         );
 
-        assert_eq!(state.handle_download(agent_id, 0).await, "2 AAA");
+        assert_eq!(
+            state.handle_download(agent_id, 0, IpAddr::V4(Ipv4Addr::LOCALHOST)).await,
+            "2 AAA"
+        );
         assert!(state.responses.lock().await.contains_key(&agent_id));
 
-        assert_eq!(state.handle_download(agent_id, 2).await, "done");
+        assert_eq!(
+            state.handle_download(agent_id, 2, IpAddr::V4(Ipv4Addr::LOCALHOST)).await,
+            "done"
+        );
         assert!(!state.responses.lock().await.contains_key(&agent_id));
-        assert_eq!(state.handle_download(agent_id, 0).await, "wait");
+        assert_eq!(
+            state.handle_download(agent_id, 0, IpAddr::V4(Ipv4Addr::LOCALHOST)).await,
+            "wait"
+        );
     }
 
     #[tokio::test]
@@ -6235,15 +6257,57 @@ mod tests {
         // to simulate an attacker injecting under an unregistered agent ID.
         state.responses.lock().await.insert(
             unknown_id,
-            DnsPendingResponse { chunks: vec!["SECRET".to_owned()], received_at: Instant::now() },
+            DnsPendingResponse {
+                chunks: vec!["SECRET".to_owned()],
+                received_at: Instant::now(),
+                peer_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            },
         );
 
         // Unknown agent should be rejected with "wait" and the queue entry must survive.
-        assert_eq!(state.handle_download(unknown_id, 0).await, "wait");
+        assert_eq!(
+            state.handle_download(unknown_id, 0, IpAddr::V4(Ipv4Addr::LOCALHOST)).await,
+            "wait"
+        );
         assert!(
             state.responses.lock().await.contains_key(&unknown_id),
             "queued response must not be consumed for unregistered agent"
         );
+    }
+
+    #[tokio::test]
+    async fn dns_download_spoof_cannot_read_or_clear_legitimate_response() {
+        let state = dns_state("dns-download-spoof").await;
+        let agent_id = 0xDEAD_BEEF;
+        let legit_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let attacker_ip = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
+        let key = [0x11u8; AGENT_KEY_LENGTH];
+        let iv = [0x22u8; AGENT_IV_LENGTH];
+
+        state.registry.insert(sample_agent_info(agent_id, key, iv)).await.expect("insert agent");
+        state.responses.lock().await.insert(
+            agent_id,
+            DnsPendingResponse {
+                chunks: vec!["AAA".to_owned(), "BBB".to_owned()],
+                received_at: Instant::now(),
+                peer_ip: legit_ip,
+            },
+        );
+
+        assert_eq!(state.handle_download(agent_id, 0, attacker_ip).await, "wait");
+        assert_eq!(state.handle_download(agent_id, 2, attacker_ip).await, "wait");
+
+        {
+            let responses = state.responses.lock().await;
+            let queued = responses.get(&agent_id).expect("response must remain queued");
+            assert_eq!(queued.peer_ip, legit_ip);
+            assert_eq!(queued.chunks, vec!["AAA".to_owned(), "BBB".to_owned()]);
+        }
+
+        assert_eq!(state.handle_download(agent_id, 0, legit_ip).await, "2 AAA");
+        assert!(state.responses.lock().await.contains_key(&agent_id));
+        assert_eq!(state.handle_download(agent_id, 2, legit_ip).await, "done");
+        assert!(!state.responses.lock().await.contains_key(&agent_id));
     }
 
     #[tokio::test]
@@ -6422,11 +6486,16 @@ mod tests {
                 DnsPendingResponse {
                     chunks: vec!["AAA".to_owned()],
                     received_at: Instant::now() - stale_age,
+                    peer_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)),
                 },
             );
             responses.insert(
                 4,
-                DnsPendingResponse { chunks: vec!["BBB".to_owned()], received_at: Instant::now() },
+                DnsPendingResponse {
+                    chunks: vec!["BBB".to_owned()],
+                    received_at: Instant::now(),
+                    peer_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4)),
+                },
             );
         }
 

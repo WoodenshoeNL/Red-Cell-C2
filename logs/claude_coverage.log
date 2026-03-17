@@ -149,3 +149,54 @@ API Error: 500 {"type":"error","error":{"type":"api_error","message":"Internal s
 [2026-03-17 22:28:24] [Ubuntu-C2-dev02-claude] === Coverage review run 4 of 5 ===
 [2026-03-17 22:28:24] [Ubuntu-C2-dev02-claude] WARNING: git pull --rebase failed, continuing with local state
 [2026-03-17 22:28:24] [Ubuntu-C2-dev02-claude] Run log: claude_coverage_20260317_222824.log
+## Coverage Scan Report — Run #4 (index 15→27)
+
+**Files scanned**: 10 files (positions 15–26 of 65 total)
+- `teamserver/src/agent_events.rs`
+- `teamserver/src/agent_liveness.rs`
+- `teamserver/src/agents.rs`
+- `teamserver/src/api.rs`
+- `teamserver/src/app.rs`
+- `teamserver/src/audit.rs`
+- `teamserver/src/auth.rs`
+- `teamserver/src/database.rs`
+- `teamserver/src/demon.rs`
+- `teamserver/src/dispatch/assembly.rs`
+
+**Excluded**: `dispatch/checkin.rs` (actively worked on), `common/tests/public_api.rs` (test file)
+
+**Public functions found**: ~130 total, ~110 with tests, ~20 without
+**Coverage rate for this batch**: ~85% (functions with at least one test reference)
+**All tests pass**: 1272 test annotations across workspace, 0 failures
+
+### Issues filed (6):
+
+| ID | Coverage Gap | Priority |
+|----|-------------|----------|
+| `red-cell-c2-zf4l` | REST API listener management endpoints (8 handlers) | P3 |
+| `red-cell-c2-qnl2` | REST API credential and loot endpoints (4 handlers) | P3 |
+| `red-cell-c2-43uq` | REST API job queue endpoints (2 handlers) | P3 |
+| `red-cell-c2-4690` | REST API operator management endpoints (2 handlers) | P2 |
+| `red-cell-c2-rm6n` | REST API session activity/audit endpoints (3 handlers) | P3 |
+| `red-cell-c2-5gzc` | API rate limiting and auth failure tracking (4 functions) | P2 |
+
+### Well-tested files:
+- **agents.rs** — 50+ test functions covering all 33 public methods. Excellent coverage.
+- **auth.rs** — 15+ tests across login, session, RBAC, and operator creation. Well-tested.
+- **agent_liveness.rs** — 12 tests including TOCTOU guards and edge cases. Well-tested.
+- **demon.rs** — 8+ tests covering init, reconnect, crypto round-trips. Well-tested.
+- **app.rs** — 4 routing tests. Complete for its single pub fn.
+- **agent_events.rs** — 6 tests for event serialization. Well-tested.
+
+### Worst coverage gap:
+**`api.rs` route handlers** — 19 of 24 Axum route handlers have zero test coverage. The existing inline tests cover authentication, RBAC, and a few agent endpoints, but the majority of CRUD endpoints (listeners, loot, credentials, jobs, operators, session activity) are completely untested at the HTTP layer.
+
+### Trend:
+Coverage is **strong in core domain logic** (agents, auth, demon protocol, crypto) but **weak at the REST API boundary**. The api.rs file has grown to 2700+ lines with 24 route handlers, but only 6 have inline tests. This is the single largest coverage gap in the batch.
+[2026-03-17 22:33:23] [Ubuntu-C2-dev02-claude] Coverage review completed successfully
+[2026-03-17 22:33:23] [Ubuntu-C2-dev02-claude] ========================LOOP=========================
+[2026-03-17 22:33:23] [Ubuntu-C2-dev02-claude] === Coverage review run 5 of 5 ===
+[2026-03-17 22:33:23] [Ubuntu-C2-dev02-claude] WARNING: git pull --rebase failed, continuing with local state
+[2026-03-17 22:33:23] [Ubuntu-C2-dev02-claude] Run log: claude_coverage_20260317_223323.log
+[2026-03-17 22:36:31] [Ubuntu-C2-dev02-claude] Coverage review completed successfully
+[2026-03-17 22:36:31] [Ubuntu-C2-dev02-claude] Reached max iterations (5). Exiting.

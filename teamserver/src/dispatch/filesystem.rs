@@ -649,4 +649,115 @@ mod tests {
         let err = parse_file_close(CMD_ID, &[]).unwrap_err();
         assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }));
     }
+
+    // DownloadTracker out-of-order state machine tests
+
+    use super::{DownloadState, DownloadTracker};
+
+    fn sample_download_state() -> DownloadState {
+        DownloadState {
+            request_id: 1,
+            remote_path: "C:\\loot\\flag.txt".to_owned(),
+            expected_size: 1024,
+            data: Vec::new(),
+            started_at: "2026-03-17T00:00:00Z".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn append_without_start_returns_error() {
+        let tracker = DownloadTracker::new(1024 * 1024);
+        let agent_id = 0xAAAA_BBBB;
+        let file_id = 42;
+
+        let err = tracker.append(agent_id, file_id, b"chunk data").await.unwrap_err();
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload for append without start, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn finish_without_start_returns_none() {
+        let tracker = DownloadTracker::new(1024 * 1024);
+        let agent_id = 0xAAAA_BBBB;
+        let file_id = 42;
+
+        let result = tracker.finish(agent_id, file_id).await;
+        assert!(result.is_none(), "finish without start should return None");
+    }
+
+    #[tokio::test]
+    async fn finish_after_start_returns_state() {
+        let tracker = DownloadTracker::new(1024 * 1024);
+        let agent_id = 0x1234_5678;
+        let file_id = 7;
+        let state = sample_download_state();
+
+        tracker.start(agent_id, file_id, state.clone()).await;
+        let finished = tracker.finish(agent_id, file_id).await;
+        assert_eq!(finished, Some(state));
+    }
+
+    #[tokio::test]
+    async fn double_finish_returns_none_on_second_call() {
+        let tracker = DownloadTracker::new(1024 * 1024);
+        let agent_id = 0x1234_5678;
+        let file_id = 7;
+
+        tracker.start(agent_id, file_id, sample_download_state()).await;
+        let first = tracker.finish(agent_id, file_id).await;
+        assert!(first.is_some());
+
+        let second = tracker.finish(agent_id, file_id).await;
+        assert!(second.is_none(), "second finish should return None after state was consumed");
+    }
+
+    #[tokio::test]
+    async fn append_after_finish_returns_error() {
+        let tracker = DownloadTracker::new(1024 * 1024);
+        let agent_id = 0x1234_5678;
+        let file_id = 7;
+
+        tracker.start(agent_id, file_id, sample_download_state()).await;
+        let _ = tracker.finish(agent_id, file_id).await;
+
+        let err = tracker.append(agent_id, file_id, b"late chunk").await.unwrap_err();
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "append after finish should fail, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn finish_wrong_agent_returns_none() {
+        let tracker = DownloadTracker::new(1024 * 1024);
+        let agent_id = 0x1111_1111;
+        let wrong_agent = 0x2222_2222;
+        let file_id = 1;
+
+        tracker.start(agent_id, file_id, sample_download_state()).await;
+        let result = tracker.finish(wrong_agent, file_id).await;
+        assert!(result.is_none(), "finish with wrong agent_id should return None");
+    }
+
+    #[tokio::test]
+    async fn finish_wrong_file_id_returns_none() {
+        let tracker = DownloadTracker::new(1024 * 1024);
+        let agent_id = 0x1111_1111;
+        let file_id = 1;
+        let wrong_file_id = 99;
+
+        tracker.start(agent_id, file_id, sample_download_state()).await;
+        let result = tracker.finish(agent_id, wrong_file_id).await;
+        assert!(result.is_none(), "finish with wrong file_id should return None");
+    }
+
+    #[tokio::test]
+    async fn buffered_bytes_cleared_after_finish_without_start() {
+        let tracker = DownloadTracker::new(1024 * 1024);
+        // Calling finish on non-existent download should not affect buffered bytes.
+        let _ = tracker.finish(0xDEAD, 0xBEEF).await;
+        assert_eq!(tracker.buffered_bytes().await, 0);
+    }
 }

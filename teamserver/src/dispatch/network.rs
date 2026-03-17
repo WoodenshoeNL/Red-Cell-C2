@@ -337,6 +337,33 @@ mod tests {
     }
 
     #[test]
+    fn format_net_group_descriptions_single_row_name_exceeds_min_width() {
+        // "Admins" (6) > min 5 → group_width must expand to 6
+        let rows = vec![("Admins".to_owned(), "Local administrators".to_owned())];
+        let result = format_net_group_descriptions(&rows);
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 3, "header + separator + one data row");
+        // group_width = 6, so format is " {:<6}  {}"
+        assert_eq!(lines[0], " Group   Description");
+        assert_eq!(lines[1], " -----   -----------");
+        assert_eq!(lines[2], " Admins  Local administrators");
+    }
+
+    #[test]
+    fn format_net_group_descriptions_long_name_pads_columns_to_name_width() {
+        // 20-char group name forces group_width = 20
+        let long_name = "Domain-Power-Editor!".to_owned(); // exactly 20 chars
+        let rows = vec![(long_name.clone(), "Can edit power things".to_owned())];
+        let result = format_net_group_descriptions(&rows);
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 3);
+        // "Group" padded to width 20
+        assert_eq!(lines[0], format!(" {:<20}  Description", "Group"));
+        assert_eq!(lines[1], format!(" {:<20}  -----------", "-----"));
+        assert_eq!(lines[2], format!(" {:<20}  Can edit power things", long_name));
+    }
+
+    #[test]
     fn format_net_group_descriptions_multiple_rows_varying_widths() {
         let rows = vec![
             ("Guests".to_owned(), "Built-in guest account".to_owned()),

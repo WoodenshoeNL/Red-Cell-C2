@@ -626,6 +626,111 @@ async fn loot_repository_supports_insert_query_and_delete() -> Result<(), Teamse
 }
 
 #[tokio::test]
+async fn loot_get_returns_inserted_record() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let agents = database.agents();
+    let loot = database.loot();
+    let agent = sample_agent(0x2200_0010);
+
+    agents.create(&agent).await?;
+
+    let record = LootRecord {
+        id: None,
+        agent_id: agent.agent_id,
+        kind: "credential".to_owned(),
+        name: "ntds.dit".to_owned(),
+        file_path: Some("C:\\Windows\\NTDS\\ntds.dit".to_owned()),
+        size_bytes: Some(4096),
+        captured_at: "2026-03-15T12:00:00Z".to_owned(),
+        data: Some(vec![0xDE, 0xAD]),
+        metadata: Some(json!({ "source": "dcsync" })),
+    };
+
+    let id = loot.create(&record).await?;
+    let fetched = loot.get(id).await?.expect("record should exist");
+
+    assert_eq!(fetched.id, Some(id));
+    assert_eq!(fetched.agent_id, record.agent_id);
+    assert_eq!(fetched.kind, record.kind);
+    assert_eq!(fetched.name, record.name);
+    assert_eq!(fetched.file_path, record.file_path);
+    assert_eq!(fetched.size_bytes, record.size_bytes);
+    assert_eq!(fetched.captured_at, record.captured_at);
+    assert_eq!(fetched.data, record.data);
+    assert_eq!(fetched.metadata, record.metadata);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn loot_get_missing_id_returns_none() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let result = database.loot().get(9999).await?;
+    assert!(result.is_none(), "get on nonexistent id should return None");
+    Ok(())
+}
+
+#[tokio::test]
+async fn loot_list_returns_all_agents_while_list_for_agent_filters() -> Result<(), TeamserverError>
+{
+    let database = test_database().await?;
+    let agents = database.agents();
+    let loot = database.loot();
+
+    let agent_a = sample_agent(0x2200_0020);
+    let agent_b = sample_agent(0x2200_0021);
+    agents.create(&agent_a).await?;
+    agents.create(&agent_b).await?;
+
+    let record_a = LootRecord {
+        id: None,
+        agent_id: agent_a.agent_id,
+        kind: "download".to_owned(),
+        name: "secrets_a.txt".to_owned(),
+        file_path: None,
+        size_bytes: Some(10),
+        captured_at: "2026-03-15T13:00:00Z".to_owned(),
+        data: Some(vec![0xAA]),
+        metadata: None,
+    };
+
+    let record_b = LootRecord {
+        id: None,
+        agent_id: agent_b.agent_id,
+        kind: "download".to_owned(),
+        name: "secrets_b.txt".to_owned(),
+        file_path: None,
+        size_bytes: Some(20),
+        captured_at: "2026-03-15T14:00:00Z".to_owned(),
+        data: Some(vec![0xBB]),
+        metadata: None,
+    };
+
+    let id_a = loot.create(&record_a).await?;
+    let id_b = loot.create(&record_b).await?;
+
+    // list() must return records from both agents
+    let all = loot.list().await?;
+    assert_eq!(all.len(), 2);
+    let all_ids: Vec<Option<i64>> = all.iter().map(|r| r.id).collect();
+    assert!(all_ids.contains(&Some(id_a)));
+    assert!(all_ids.contains(&Some(id_b)));
+
+    // list_for_agent must return only that agent's record
+    let only_a = loot.list_for_agent(agent_a.agent_id).await?;
+    assert_eq!(only_a.len(), 1);
+    assert_eq!(only_a[0].id, Some(id_a));
+    assert_eq!(only_a[0].name, "secrets_a.txt");
+
+    let only_b = loot.list_for_agent(agent_b.agent_id).await?;
+    assert_eq!(only_b.len(), 1);
+    assert_eq!(only_b[0].id, Some(id_b));
+    assert_eq!(only_b[0].name, "secrets_b.txt");
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn loot_repository_count_filtered_matches_query_filtered_length()
 -> Result<(), TeamserverError> {
     let database = test_database().await?;

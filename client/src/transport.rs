@@ -2075,6 +2075,54 @@ mod tests {
     }
 
     #[test]
+    fn connection_status_label_matches_expected_text() {
+        assert_eq!(ConnectionStatus::Connected.label(), "Connected");
+        assert_eq!(ConnectionStatus::Disconnected.label(), "Disconnected");
+        assert_eq!(ConnectionStatus::Connecting.label(), "Connecting");
+        assert_eq!(ConnectionStatus::Retrying("later".to_owned()).label(), "Retrying");
+        assert_eq!(ConnectionStatus::Error("failed".to_owned()).label(), "Connection Error");
+    }
+
+    #[test]
+    fn connection_status_detail_returns_message_only_for_retrying_and_error() {
+        let retrying = ConnectionStatus::Retrying("x".to_owned());
+        let error = ConnectionStatus::Error("boom".to_owned());
+
+        assert_eq!(retrying.detail(), Some("x"));
+        assert_eq!(error.detail(), Some("boom"));
+        assert_eq!(ConnectionStatus::Connected.detail(), None);
+        assert_eq!(ConnectionStatus::Connecting.detail(), None);
+        assert_eq!(ConnectionStatus::Disconnected.detail(), None);
+    }
+
+    #[test]
+    fn connection_status_placeholders_cover_all_variants() {
+        let placeholders = ConnectionStatus::placeholders();
+
+        assert_eq!(placeholders.len(), 5);
+        assert!(placeholders.contains(&ConnectionStatus::Disconnected));
+        assert!(placeholders.contains(&ConnectionStatus::Connecting));
+        assert!(placeholders.contains(&ConnectionStatus::Connected));
+        assert!(placeholders.iter().any(|status| matches!(status, ConnectionStatus::Retrying(_))));
+        assert!(placeholders.iter().any(|status| matches!(status, ConnectionStatus::Error(_))));
+    }
+
+    #[test]
+    fn connection_status_color_distinguishes_status_groups() {
+        let disconnected = ConnectionStatus::Disconnected.color();
+        let connecting = ConnectionStatus::Connecting.color();
+        let connected = ConnectionStatus::Connected.color();
+        let retrying = ConnectionStatus::Retrying("x".to_owned()).color();
+        let error = ConnectionStatus::Error("boom".to_owned()).color();
+
+        assert_ne!(connected, disconnected);
+        assert_eq!(connecting, retrying);
+        assert_ne!(connected, connecting);
+        assert_ne!(error, connected);
+        assert_ne!(error, disconnected);
+    }
+
+    #[test]
     fn app_state_applies_listener_and_agent_updates() {
         let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
 

@@ -32242,3 +32242,23 @@ Done. Added two new tests to `teamserver/src/agents.rs`:
 
 The gap vs the existing tests: `disconnect_link_removes_existing_parent_child_relationship` already covered the 3-node topology but only checked `reason`, not `active == false`. The new test explicitly asserts the `active` flag for the full subtree cascade path.
 [2026-03-17 05:36:39] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-rqen
+[2026-03-17 05:36:39] [Ubuntu-C2-dev01-claude] WIP: committing uncommitted changes for red-cell-c2-rqen
+[2026-03-17 05:36:41] [Ubuntu-C2-dev01-claude] WIP: pushed
+[2026-03-17 05:36:41] [Ubuntu-C2-dev01-claude] ========================LOOP=========================
+[2026-03-17 05:36:41] [Ubuntu-C2-dev01-claude] Next run in 5m (at 05:41:41)
+[2026-03-17 05:41:41] [Ubuntu-C2-dev01-claude] === Claude dev loop iteration 98 ===
+[2026-03-17 05:41:42] [Ubuntu-C2-dev01-claude] git pull --ff-only: ok
+[2026-03-17 05:41:42] [Ubuntu-C2-dev01-claude] br sync import: ok
+[2026-03-17 05:41:44] [Ubuntu-C2-dev01-claude] SAFEGUARD: red-cell-c2-y4fs stuck in_progress for >7200s — resetting to open
+[2026-03-17 05:41:44] [Ubuntu-C2-dev01-claude] SAFEGUARD: red-cell-c2-y4fs reset to open
+[2026-03-17 05:41:44] [Ubuntu-C2-dev01-claude] SAFEGUARD: red-cell-c2-yxty stuck in_progress for >7200s — resetting to open
+[2026-03-17 05:41:45] [Ubuntu-C2-dev01-claude] SAFEGUARD: red-cell-c2-yxty reset to open
+[2026-03-17 05:41:45] [Ubuntu-C2-dev01-claude] Selected task: red-cell-c2-doop
+[2026-03-17 05:41:49] [Ubuntu-C2-dev01-claude] Claimed red-cell-c2-doop
+[2026-03-17 05:41:50] [Ubuntu-C2-dev01-claude] Running Claude on task red-cell-c2-doop...
+Done. The existing tests already covered the happy path (non-zero offset) and error path (AgentNotFound). I added the missing edge case:
+
+- **`agent_repository_set_ctr_block_offset_accepts_zero`** — inserts an agent with offset 42, resets it to 0, and verifies the persisted value is 0.
+
+All three scenarios from the issue spec are now covered.
+[2026-03-17 05:43:42] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-doop

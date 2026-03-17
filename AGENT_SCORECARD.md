@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 226 | 195 | 31 |
+| Tasks closed | 232 | 195 | 31 |
 | Bugs filed against | 40 | 34 | 9 |
-| Bug rate (bugs/task) | 0.18 | 0.17 | 0.29 |
-| Quality score | 82% | 83% | 71% |
+| Bug rate (bugs/task) | 0.17 | 0.17 | 0.29 |
+| Quality score | 83% | 83% | 71% |
 
 ## Violation Breakdown
 
@@ -37,6 +37,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-18 17:00 — a3b6141..ee1a918
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (dev02-opus) | 6 | 0 | Closed irjx, 2m4s, 09oo, lyft, ah46, skbq. All test additions: dispatch sleep_callback error path, events capacity/wraparound, logging CreateLogDirectory error, rate_limiter eviction edge cases, sockets DOMAIN success paths. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (931 tests, 0 failures)
+Notes: Clean review — all 6 task closures are well-structured test additions with no production code changes. Test count grew from 882 to 931. Two in-progress issues: 35dz (still stuck, previously tracked by kbo9) and lhgi (freshly claimed). No code quality, security, or architecture issues found. Claude quality score improves from 82% to 83% this run.
 
 ### Arch Review — 2026-03-18 16:30
 

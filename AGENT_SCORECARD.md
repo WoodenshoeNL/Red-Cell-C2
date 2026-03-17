@@ -9,8 +9,8 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 206 | 184 | 31 |
-| Bugs filed against | 38 | 33 | 9 |
+| Tasks closed | 206 | 188 | 31 |
+| Bugs filed against | 38 | 34 | 9 |
 | Bug rate (bugs/task) | 0.18 | 0.18 | 0.29 |
 | Quality score | 82% | 82% | 71% |
 
@@ -21,7 +21,7 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 2 | 0 | 0 |
 | Missing tests | 10 | 12 | 5 |
 | Clippy warnings | 1 | 0 | 1 |
-| Protocol errors | 6 | 26 | 3 |
+| Protocol errors | 6 | 27 | 3 |
 | Security issues | 17 | 34 | 0 |
 | Architecture drift | 2 | 21 | 0 |
 | Memory / resource leaks | 1 | 10 | 1 |
@@ -1933,3 +1933,14 @@ Notes: No new bugs filed in this window. `br list --status=in_progress` shows on
 
 Build: `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` failed (`clippy::too_many_arguments` at [`teamserver/src/listeners.rs:1316`](/home/michel/Red-Cell-C2/teamserver/src/listeners.rs#L1316)), `cargo test --workspace` ✓
 Notes: Review window contained two Codex test-task closures and one fresh Codex claim (`red-cell-c2-1o7x`). `br list --status=in_progress` now shows only `red-cell-c2-1o7x`, which matches that new claim and does not appear stale. Added dependency `red-cell-c2-k9mp -> red-cell-c2-2x1d` because the new test expectation would otherwise pin the protocol bug in place. Updated cumulative totals: Claude 206 tasks / 38 bugs / 18% bug rate / 82% quality; Codex 184 tasks / 33 bugs / 18% bug rate / 82% quality.
+
+### QA Review — 2026-03-17 16:13 — 3e4725a..3b26fb6
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No activity in this range. |
+| Codex | 4 | 1 | Closed `red-cell-c2-1o7x`, `red-cell-c2-1pij`, `red-cell-c2-18r7`, and `red-cell-c2-8hft`. The listener hot-path hardening in [`teamserver/src/listeners.rs`](/home/michel/Red-Cell-C2/teamserver/src/listeners.rs) is sound overall, and the new compatibility coverage in [`teamserver/tests/havoc_compatibility.rs`](/home/michel/Red-Cell-C2/teamserver/tests/havoc_compatibility.rs) is additive. Filed `red-cell-c2-59m7` because the DNS response theft fix binds queued responses to the observed peer IP at [`teamserver/src/listeners.rs:2105`](/home/michel/Red-Cell-C2/teamserver/src/listeners.rs#L2105) and rejects later downloads from a different peer at [`teamserver/src/listeners.rs:2144`](/home/michel/Red-Cell-C2/teamserver/src/listeners.rs#L2144), which can strand legitimate agents behind rotating recursive resolvers. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓
+Notes: Review range extended twice mid-run because `origin/main` advanced from `91ffad2` to `dda4137` and then to `3b26fb6`; both added Codex commits were reviewed before checkpointing. `br list --status=in_progress` shows only `red-cell-c2-932b`, which matches a fresh Codex claim in-range and does not appear stale. Updated cumulative totals: Claude 206 tasks / 38 bugs / 18% bug rate / 82% quality; Codex 188 tasks / 34 bugs / 18% bug rate / 82% quality.

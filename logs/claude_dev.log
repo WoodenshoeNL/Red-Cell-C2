@@ -32636,3 +32636,21 @@ Done. Added two new tests to `teamserver/src/api.rs`:
 
 The underlying `u32::from_str_radix` already handles overflow correctly — the tests confirm there's no silent truncation.
 [2026-03-17 17:39:49] [ubuntu-c2-dev01-claude] Claude completed task red-cell-c2-bzw0
+[2026-03-17 17:39:49] [ubuntu-c2-dev01-claude] WIP: committing uncommitted changes for red-cell-c2-bzw0
+[2026-03-17 17:39:50] [ubuntu-c2-dev01-claude] WIP: pushed
+[2026-03-17 17:39:50] [ubuntu-c2-dev01-claude] ========================LOOP=========================
+[2026-03-17 17:39:50] [ubuntu-c2-dev01-claude] Next run in 0m (at 17:40:05)
+[2026-03-17 17:40:05] [ubuntu-c2-dev01-claude] === Claude dev loop iteration 3 ===
+[2026-03-17 17:40:07] [ubuntu-c2-dev01-claude] git pull --ff-only: ok
+[2026-03-17 17:40:07] [ubuntu-c2-dev01-claude] br sync import: ok
+[2026-03-17 17:40:07] [ubuntu-c2-dev01-claude] Selected task: red-cell-c2-1stu
+[2026-03-17 17:40:11] [ubuntu-c2-dev01-claude] Claimed red-cell-c2-1stu
+[2026-03-17 17:40:12] [ubuntu-c2-dev01-claude] Running Claude on task red-cell-c2-1stu...
+Done. Three tests added to `common/src/operator.rs`:
+
+1. **`agent_info_empty_info_object_fails_deserialization`** — verifies that `Info: {}` returns an error (all non-`default` fields are required)
+2. **`agent_info_null_value_fields_round_trip`** — verifies `SleepDelay`, `SleepJitter`, `KillDate`, `WorkingHours` as `Value::Null` survive serialize → deserialize unchanged
+3. **`agent_info_minimal_fields_defaults_optional`** — verifies a minimal JSON with only required fields populates `port_fwds`, `note`, `socks_cli`, `socks_cli_mtx`, `socks_svr` with their serde defaults
+
+All workspace checks passed, committed, pushed, and issue closed.
+[2026-03-17 17:45:00] [ubuntu-c2-dev01-claude] Claude completed task red-cell-c2-1stu

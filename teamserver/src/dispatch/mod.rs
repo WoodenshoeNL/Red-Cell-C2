@@ -6848,6 +6848,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn builtin_config_handler_kill_date_set_then_clear_and_sleep_update()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0x5566_7801, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database.clone(),
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        // --- Step 1: Set kill_date to a future timestamp ---
+        let future_timestamp: u64 = 1_893_456_000; // 2030-01-01 approx
+        let mut config_payload = Vec::new();
+        add_u32(&mut config_payload, u32::from(DemonConfigKey::KillDate));
+        add_u64(&mut config_payload, future_timestamp);
+        dispatcher
+            .dispatch(0x5566_7801, u32::from(DemonCommand::CommandConfig), 40, &config_payload)
+            .await?;
+
+        // Drain agent-update + response events
+        let event = receiver.recv().await.ok_or("agent update missing after kill_date set")?;
+        let OperatorMessage::AgentUpdate(_) = event else {
+            panic!("expected agent update event after kill_date set");
+        };
+        let event = receiver.recv().await.ok_or("config response missing after kill_date set")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event after kill_date set");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("KillDate has been set".to_owned()))
+        );
+
+        // Verify registry and database reflect the new kill_date
+        assert_eq!(
+            registry.get(0x5566_7801).await.and_then(|a| a.kill_date),
+            Some(future_timestamp as i64)
+        );
+        let persisted = database.agents().get(0x5566_7801).await?.ok_or("agent missing")?;
+        assert_eq!(persisted.kill_date, Some(future_timestamp as i64));
+
+        // --- Step 2: Clear kill_date with kill_date = 0 ---
+        let mut clear_payload = Vec::new();
+        add_u32(&mut clear_payload, u32::from(DemonConfigKey::KillDate));
+        add_u64(&mut clear_payload, 0);
+        dispatcher
+            .dispatch(0x5566_7801, u32::from(DemonCommand::CommandConfig), 41, &clear_payload)
+            .await?;
+
+        // Drain agent-update + response events
+        let event = receiver.recv().await.ok_or("agent update missing after kill_date clear")?;
+        let OperatorMessage::AgentUpdate(_) = event else {
+            panic!("expected agent update event after kill_date clear");
+        };
+        let event = receiver.recv().await.ok_or("config response missing after kill_date clear")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event after kill_date clear");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("KillDate was disabled".to_owned()))
+        );
+
+        // Verify registry and database kill_date is cleared
+        assert_eq!(registry.get(0x5566_7801).await.and_then(|a| a.kill_date), None);
+        let persisted = database.agents().get(0x5566_7801).await?.ok_or("agent missing")?;
+        assert_eq!(persisted.kill_date, None);
+
+        // --- Step 3: Update sleep via sleep callback and verify ---
+        let mut sleep_payload = Vec::new();
+        add_u32(&mut sleep_payload, 30); // sleep_delay
+        add_u32(&mut sleep_payload, 50); // sleep_jitter
+        dispatcher
+            .dispatch(0x5566_7801, u32::from(DemonCommand::CommandSleep), 42, &sleep_payload)
+            .await?;
+
+        // Drain agent-update + response events
+        let event = receiver.recv().await.ok_or("agent update missing after sleep")?;
+        let OperatorMessage::AgentUpdate(_) = event else {
+            panic!("expected agent update event after sleep");
+        };
+        let event = receiver.recv().await.ok_or("sleep response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event after sleep");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Set sleep interval to 30 seconds with 50% jitter".to_owned()))
+        );
+
+        // Verify sleep values updated and kill_date still cleared
+        let agent = registry.get(0x5566_7801).await.ok_or("agent missing")?;
+        assert_eq!(agent.sleep_delay, 30);
+        assert_eq!(agent.sleep_jitter, 50);
+        assert_eq!(agent.kill_date, None);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn builtin_sleep_ppid_and_assembly_handlers_update_state_and_broadcast()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;

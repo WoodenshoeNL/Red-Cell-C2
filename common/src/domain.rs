@@ -616,6 +616,18 @@ mod tests {
     }
 
     #[test]
+    fn listener_protocol_as_str_returns_canonical_labels() {
+        assert_eq!(ListenerProtocol::Http.as_str(), "http");
+        assert_eq!(ListenerProtocol::Smb.as_str(), "smb");
+        assert_eq!(ListenerProtocol::Dns.as_str(), "dns");
+    }
+
+    #[test]
+    fn listener_protocol_display_uses_canonical_label() {
+        assert_eq!(ListenerProtocol::Http.to_string(), "http");
+    }
+
+    #[test]
     fn listener_protocol_rejects_unknown_labels() {
         let error =
             ListenerProtocol::try_from_str("quic").expect_err("unknown protocol should fail");

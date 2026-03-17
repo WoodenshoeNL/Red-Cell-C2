@@ -642,6 +642,109 @@ async fn wrong_password_receives_error_and_connection_closes()
     Ok(())
 }
 
+/// Fire N consecutive bad-password logins from the same IP, then verify
+/// that the (N+1)th connection is rejected immediately by the rate limiter
+/// without ever sending a login frame.
+#[tokio::test]
+async fn repeated_wrong_passwords_trigger_rate_limiter_lockout()
+-> Result<(), Box<dyn std::error::Error>> {
+    use red_cell_common::crypto::hash_password_sha3;
+    use red_cell_common::operator::LoginInfo;
+    use std::time::Instant;
+
+    // MAX_FAILED_LOGIN_ATTEMPTS is 5; we need that many failures to trip the
+    // lockout, then one more attempt to observe the rejection.
+    const MAX_FAILURES: usize = 5;
+
+    let addr = common::spawn_test_server(multi_role_profile()).await?;
+
+    let bad_login = serde_json::to_string(&OperatorMessage::Login(Message {
+        head: MessageHead {
+            event: EventCode::InitConnection,
+            user: "operator".to_owned(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info: LoginInfo {
+            user: "operator".to_owned(),
+            password: hash_password_sha3("wrong-password"),
+        },
+    }))?;
+
+    // --- Phase 1: exhaust the failure budget ---
+    for i in 0..MAX_FAILURES {
+        let (mut socket, _) = connect_async(format!("ws://{addr}/")).await?;
+        socket.send(ClientMessage::Text(bad_login.clone().into())).await?;
+
+        // Each failed login incurs a 2 s server-side delay.
+        let response = timeout(Duration::from_secs(5), futures_util::StreamExt::next(&mut socket))
+            .await?
+            .ok_or(format!("attempt {}: server closed without rejection", i + 1))??;
+        let rejection: OperatorMessage = match response {
+            ClientMessage::Text(payload) => serde_json::from_str(payload.as_str())?,
+            other => return Err(format!("attempt {}: unexpected frame: {other:?}", i + 1).into()),
+        };
+        assert!(
+            matches!(rejection, OperatorMessage::InitConnectionError(_)),
+            "attempt {}: expected InitConnectionError, got {rejection:?}",
+            i + 1
+        );
+
+        // Wait for the close frame so the server records the failure before we
+        // open the next connection.
+        let _ = timeout(Duration::from_secs(3), futures_util::StreamExt::next(&mut socket)).await;
+    }
+
+    // --- Phase 2: the next attempt must be rejected by the rate limiter ---
+    let start = Instant::now();
+    let (mut socket, _) = connect_async(format!("ws://{addr}/")).await?;
+
+    // The rate-limited path rejects *before* reading a login frame, so we
+    // intentionally do NOT send any login message. The server should push an
+    // error and close the socket on its own.
+    let response = timeout(Duration::from_secs(5), futures_util::StreamExt::next(&mut socket))
+        .await?
+        .ok_or("rate-limited attempt: server closed without sending rejection")?;
+
+    // Verify the rejection is an InitConnectionError.
+    match response? {
+        ClientMessage::Text(payload) => {
+            let msg: OperatorMessage = serde_json::from_str(payload.as_str())?;
+            assert!(
+                matches!(msg, OperatorMessage::InitConnectionError(_)),
+                "rate-limited attempt: expected InitConnectionError, got {msg:?}"
+            );
+        }
+        other => return Err(format!("rate-limited attempt: unexpected frame: {other:?}").into()),
+    }
+
+    // The rate-limited rejection must be substantially faster than the normal
+    // 2 s FAILED_LOGIN_DELAY, proving the limiter short-circuited the
+    // authentication flow.
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(1500),
+        "rate-limited rejection took {elapsed:?}, expected < 1.5 s — \
+         limiter may not be short-circuiting"
+    );
+
+    // The server must close the connection after the rejection.
+    let next = timeout(Duration::from_secs(3), futures_util::StreamExt::next(&mut socket)).await?;
+    match next {
+        Some(Ok(ClientMessage::Close(_))) | None => {}
+        Some(Ok(frame)) => {
+            return Err(
+                format!("expected Close frame after rate-limit rejection, got {frame:?}").into()
+            );
+        }
+        Some(Err(error)) => {
+            return Err(format!("websocket error after rate-limit rejection: {error}").into());
+        }
+    }
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn analyst_can_send_chat_message_without_disconnection()
 -> Result<(), Box<dyn std::error::Error>> {

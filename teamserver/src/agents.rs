@@ -2414,6 +2414,48 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn set_last_call_in_revival_persists_cleared_reason_across_load()
+    -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let agent = sample_agent(0x1000_00C1);
+        registry.insert(agent.clone()).await?;
+        registry.mark_dead(agent.agent_id, "connection lost").await?;
+
+        registry.set_last_call_in(agent.agent_id, "2026-03-09T22:00:00Z").await?;
+
+        let reloaded = AgentRegistry::load(database).await?;
+        let restored = reloaded
+            .get(agent.agent_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?;
+        assert!(restored.active);
+        assert!(restored.reason.is_empty());
+        assert_eq!(restored.last_call_in, "2026-03-09T22:00:00Z");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn set_last_call_in_returns_agent_not_found_for_unknown_id() -> Result<(), TeamserverError>
+    {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database);
+        let unknown_id = 0x1000_00C2_u32;
+
+        let error = registry
+            .set_last_call_in(unknown_id, "2026-03-09T22:00:00Z")
+            .await
+            .expect_err("set_last_call_in must fail for an unknown agent_id");
+
+        assert!(
+            matches!(error, TeamserverError::AgentNotFound { agent_id } if agent_id == unknown_id)
+        );
+
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_insert_get_and_update_are_safe() -> Result<(), TeamserverError> {
         let database = test_database().await?;

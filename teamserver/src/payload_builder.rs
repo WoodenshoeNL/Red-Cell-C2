@@ -182,7 +182,7 @@ fn compute_cache_key(
     hasher.update(b"\x00");
     hasher.update(arch.suffix().as_bytes());
     hasher.update(b"\x00");
-    hasher.update(format.file_extension().as_bytes());
+    hasher.update(format.cache_tag().as_bytes());
     hasher.update(b"\x00");
     hasher.update(config_bytes);
     hasher.update(b"\x00");
@@ -337,6 +337,23 @@ impl OutputFormat {
             Self::Exe | Self::ServiceExe | Self::StagedShellcode => ".exe",
             Self::Dll | Self::ReflectiveDll => ".dll",
             Self::Shellcode | Self::RawShellcode => ".bin",
+        }
+    }
+
+    /// Unique per-variant tag used in cache key computation.
+    ///
+    /// Unlike [`file_extension`](Self::file_extension), this returns a distinct
+    /// value for every variant so that formats sharing the same extension
+    /// (e.g. `Exe` vs `ServiceExe`) never collide in the payload cache.
+    const fn cache_tag(self) -> &'static str {
+        match self {
+            Self::Exe => "exe",
+            Self::ServiceExe => "service-exe",
+            Self::Dll => "dll",
+            Self::ReflectiveDll => "reflective-dll",
+            Self::Shellcode => "shellcode",
+            Self::StagedShellcode => "staged-shellcode",
+            Self::RawShellcode => "raw-shellcode",
         }
     }
 }
@@ -3952,6 +3969,89 @@ mod tests {
         let key_bin = compute_cache_key(Architecture::X64, OutputFormat::Shellcode, b"c", None);
         assert_eq!(key_exe.ext, ".exe");
         assert_eq!(key_bin.ext, ".bin");
+    }
+
+    #[test]
+    fn compute_cache_key_deterministic() {
+        let a = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"same", None);
+        let b = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"same", None);
+        assert_eq!(a.hex, b.hex, "identical inputs must produce the same cache key");
+    }
+
+    #[test]
+    fn compute_cache_key_differs_by_binary_patch_presence() {
+        let patch = BinaryConfig {
+            header: None,
+            replace_strings_x64: std::collections::BTreeMap::new(),
+            replace_strings_x86: std::collections::BTreeMap::new(),
+        };
+        let key_none = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"cfg", None);
+        let key_some =
+            compute_cache_key(Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch));
+        assert_ne!(
+            key_none.hex, key_some.hex,
+            "present vs absent binary_patch must produce different cache keys"
+        );
+    }
+
+    #[test]
+    fn compute_cache_key_differs_by_binary_patch_content() {
+        let patch_a = BinaryConfig {
+            header: None,
+            replace_strings_x64: [("old".into(), "new-a".into())].into_iter().collect(),
+            replace_strings_x86: std::collections::BTreeMap::new(),
+        };
+        let patch_b = BinaryConfig {
+            header: None,
+            replace_strings_x64: [("old".into(), "new-b".into())].into_iter().collect(),
+            replace_strings_x86: std::collections::BTreeMap::new(),
+        };
+        let key_a = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch_a));
+        let key_b = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch_b));
+        assert_ne!(
+            key_a.hex, key_b.hex,
+            "different binary_patch content must produce different cache keys"
+        );
+    }
+
+    #[test]
+    fn compute_cache_key_all_dimensions_distinct() {
+        use std::collections::HashSet;
+
+        let patch = BinaryConfig {
+            header: None,
+            replace_strings_x64: std::collections::BTreeMap::new(),
+            replace_strings_x86: std::collections::BTreeMap::new(),
+        };
+        let config = b"cfg";
+
+        // Generate keys varying exactly one dimension at a time from a baseline.
+        let keys: Vec<String> = vec![
+            // baseline
+            compute_cache_key(Architecture::X64, OutputFormat::Exe, config, None).hex,
+            // vary arch
+            compute_cache_key(Architecture::X86, OutputFormat::Exe, config, None).hex,
+            // vary format
+            compute_cache_key(Architecture::X64, OutputFormat::Dll, config, None).hex,
+            compute_cache_key(Architecture::X64, OutputFormat::ServiceExe, config, None).hex,
+            compute_cache_key(Architecture::X64, OutputFormat::ReflectiveDll, config, None).hex,
+            compute_cache_key(Architecture::X64, OutputFormat::Shellcode, config, None).hex,
+            compute_cache_key(Architecture::X64, OutputFormat::StagedShellcode, config, None).hex,
+            compute_cache_key(Architecture::X64, OutputFormat::RawShellcode, config, None).hex,
+            // vary config bytes
+            compute_cache_key(Architecture::X64, OutputFormat::Exe, b"other", None).hex,
+            // vary binary_patch
+            compute_cache_key(Architecture::X64, OutputFormat::Exe, config, Some(&patch)).hex,
+        ];
+
+        let unique: HashSet<&str> = keys.iter().map(|s| s.as_str()).collect();
+        assert_eq!(
+            unique.len(),
+            keys.len(),
+            "all cache keys must be distinct; got {} unique out of {}",
+            unique.len(),
+            keys.len()
+        );
     }
 
     // ──────────────────────────────────────────────────────────────────────

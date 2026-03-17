@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 223 | 195 | 31 |
-| Bugs filed against | 39 | 34 | 9 |
-| Bug rate (bugs/task) | 0.17 | 0.17 | 0.29 |
-| Quality score | 83% | 83% | 71% |
+| Tasks closed | 226 | 195 | 31 |
+| Bugs filed against | 40 | 34 | 9 |
+| Bug rate (bugs/task) | 0.18 | 0.17 | 0.29 |
+| Quality score | 82% | 83% | 71% |
 
 ## Violation Breakdown
 
@@ -29,7 +29,7 @@ Each loop run updates the running totals and appends a review entry.
 | Audit attribution errors | 0 | 1 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
 | Correctness / pagination | 6 | 4 | 1 |
-| Workflow / close-hygiene | 10 | 0 | 0 |
+| Workflow / close-hygiene | 11 | 0 | 0 |
 | Code reuse / duplication | 5 | 0 | 0 |
 
 ---
@@ -37,6 +37,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-18 00:45 — 87361d4..1606a65
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (dev02-opus) | 3 | 1 | Closed cgt1, c482, i9b2. All test additions (dispatch error/job/config callbacks). 1 workflow bug: 35dz stuck in_progress despite committed tests. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (882 tests, 0 failures)
+Notes: Clean code review — all 3 commits are test additions with good coverage patterns. Test count grew from 175 to 882 (massive growth from prior unreviewed period). Two issues stuck in_progress: 35dz (has committed tests but never closed) and irjx (claimed 5+ times, never completed). Filed kbo9 for close hygiene.
 
 ### QA Review — 2026-03-17 22:30 — 9e082c8..47fd67c
 

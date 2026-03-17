@@ -9,9 +9,9 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 200 | 181 | 31 |
+| Tasks closed | 201 | 181 | 31 |
 | Bugs filed against | 37 | 32 | 9 |
-| Bug rate (bugs/task) | 0.19 | 0.18 | 0.29 |
+| Bug rate (bugs/task) | 0.18 | 0.18 | 0.29 |
 | Quality score | 82% | 82% | 71% |
 
 ## Violation Breakdown
@@ -1834,3 +1834,14 @@ Notes: No new commits since the 08:45 QA run. Codebase fully reviewed. 20 unbloc
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (all tests pass, 0 failures)
 Notes: Test quality is high — cascade tests add unique value by asserting `.active == false` on all subtree nodes (not just `.reason`), which the pre-existing `disconnect_link_removes_existing_parent_child_relationship` test did not verify. Zero-offset CTR test is a clean boundary-condition check. No production code changed. zu4h (claim/interrupt loop) and red-cell-c2-3ptb (listener config boilerplate) remain open.
+
+### QA Review — 2026-03-17 11:30 — c36c1f4..07e8e50
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed red-cell-c2-5b4v (4 tests for query_session_activity in audit.rs: connect/chat activity filters, empty-set guard for unknown action, no-filter returns all five event types). Ghost wip:interrupted commit (07e8e50, log-only) consistent with pattern. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (1194 tests, 0 failures)
+Notes: Test quality is high — filter tests use in-memory DB with seeded rows, sorted-comparison pattern for the no-filter case correctly handles non-deterministic row order. No production code changed this period. 20 unblocked tasks remain in `br ready`. Claude cumulative: 201 tasks, 37 bugs, 18% bug rate, 82% quality.

@@ -2208,6 +2208,43 @@ mod tests {
     }
 
     #[test]
+    fn update_agent_note_updates_matching_agent_and_ignores_unknown_ids() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+        state.agents.push(AgentSummary {
+            name_id: "ABCD1234".to_owned(),
+            status: "Alive".to_owned(),
+            domain_name: "LAB".to_owned(),
+            username: "operator".to_owned(),
+            internal_ip: "10.0.0.10".to_owned(),
+            external_ip: "203.0.113.10".to_owned(),
+            hostname: "wkstn-1".to_owned(),
+            process_arch: "x64".to_owned(),
+            process_name: "explorer.exe".to_owned(),
+            process_pid: "1234".to_owned(),
+            elevated: true,
+            os_version: "Windows 11".to_owned(),
+            os_build: "19045".to_owned(),
+            os_arch: "x64".to_owned(),
+            sleep_delay: "5".to_owned(),
+            sleep_jitter: "10".to_owned(),
+            last_call_in: "10/03/2026 12:00:00".to_owned(),
+            note: String::new(),
+            pivot_parent: None,
+            pivot_links: Vec::new(),
+        });
+
+        state.update_agent_note("ABCD1234", "my note".to_owned());
+        assert_eq!(state.agents[0].note, "my note");
+
+        state.update_agent_note("ABCD1234", "updated note".to_owned());
+        assert_eq!(state.agents[0].note, "updated note");
+
+        let agents_before_unknown_update = state.agents.clone();
+        state.update_agent_note("BEEF5678", "ignored".to_owned());
+        assert_eq!(state.agents, agents_before_unknown_update);
+    }
+
+    #[test]
     fn agent_update_for_unknown_agent_creates_stub_entry() {
         // AgentUpdate arrives before AgentNew (e.g. after reconnect before snapshot).
         // The fallback path must create a minimal stub with a normalised name_id and

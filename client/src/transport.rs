@@ -2135,6 +2135,28 @@ mod tests {
     }
 
     #[test]
+    fn loot_kind_label_matches_expected_text() {
+        assert_eq!(LootKind::Credential.label(), "Credential");
+        assert_eq!(LootKind::Screenshot.label(), "Screenshot");
+        assert_eq!(LootKind::File.label(), "File");
+        assert_eq!(LootKind::Other.label(), "Other");
+    }
+
+    #[test]
+    fn event_kind_label_is_distinct_and_non_empty() {
+        let agent = EventKind::Agent.label();
+        let operator = EventKind::Operator.label();
+        let system = EventKind::System.label();
+
+        assert!(!agent.is_empty());
+        assert!(!operator.is_empty());
+        assert!(!system.is_empty());
+        assert_ne!(agent, operator);
+        assert_ne!(agent, system);
+        assert_ne!(operator, system);
+    }
+
+    #[test]
     fn app_state_applies_listener_and_agent_updates() {
         let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
 

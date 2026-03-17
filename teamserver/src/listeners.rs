@@ -41,7 +41,7 @@ use tokio::net::TcpListener;
 use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
-use tracing::{info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 use utoipa::ToSchema;
 
 use crate::{
@@ -63,6 +63,9 @@ use crate::DEFAULT_MAX_DOWNLOAD_BYTES;
 const MAX_DEMON_INIT_ATTEMPTS_PER_IP: u32 = 5;
 const DEMON_INIT_WINDOW_DURATION: Duration = Duration::from_secs(60);
 const MAX_DEMON_INIT_ATTEMPT_WINDOWS: usize = 10_000;
+const MAX_UNKNOWN_CALLBACK_PROBE_AUDITS_PER_SOURCE: u32 = 1;
+const UNKNOWN_CALLBACK_PROBE_AUDIT_WINDOW_DURATION: Duration = Duration::from_secs(60);
+const MAX_UNKNOWN_CALLBACK_PROBE_AUDIT_WINDOWS: usize = 10_000;
 const EXTRA_METHOD: &str = "Method";
 const EXTRA_BEHIND_REDIRECTOR: &str = "BehindRedirector";
 const EXTRA_TRUSTED_PROXY_PEERS: &str = "TrustedProxyPeers";
@@ -108,6 +111,60 @@ impl DemonInitRateLimiter {
 
     #[cfg(test)]
     async fn tracked_ip_count(&self) -> usize {
+        self.windows.lock().await.len()
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct UnknownCallbackProbeAuditLimiter {
+    windows: Arc<Mutex<HashMap<String, AttemptWindow>>>,
+}
+
+impl UnknownCallbackProbeAuditLimiter {
+    #[must_use]
+    fn new() -> Self {
+        Self::default()
+    }
+
+    async fn allow(&self, listener_name: &str, external_ip: &str) -> bool {
+        let mut windows = self.windows.lock().await;
+        let now = Instant::now();
+        let source = format!("{listener_name}\0{external_ip}");
+
+        prune_expired_windows(&mut windows, UNKNOWN_CALLBACK_PROBE_AUDIT_WINDOW_DURATION, now);
+        if !windows.contains_key(&source)
+            && windows.len() >= MAX_UNKNOWN_CALLBACK_PROBE_AUDIT_WINDOWS
+        {
+            let target_size = MAX_UNKNOWN_CALLBACK_PROBE_AUDIT_WINDOWS / 2;
+            let to_remove = windows.len().saturating_sub(target_size);
+            if to_remove > 0 {
+                let mut entries: Vec<_> = windows
+                    .iter()
+                    .map(|(key, window)| (key.clone(), window.window_start))
+                    .collect();
+                entries.sort_unstable_by_key(|(_, window_start)| *window_start);
+                for (key, _) in entries.into_iter().take(to_remove) {
+                    windows.remove(&key);
+                }
+            }
+        }
+
+        let window = windows.entry(source).or_default();
+        if now.duration_since(window.window_start) >= UNKNOWN_CALLBACK_PROBE_AUDIT_WINDOW_DURATION {
+            window.attempts = 0;
+            window.window_start = now;
+        }
+
+        if window.attempts >= MAX_UNKNOWN_CALLBACK_PROBE_AUDITS_PER_SOURCE {
+            return false;
+        }
+
+        window.attempts += 1;
+        true
+    }
+
+    #[cfg(test)]
+    async fn tracked_source_count(&self) -> usize {
         self.windows.lock().await.len()
     }
 }
@@ -376,6 +433,7 @@ pub struct ListenerManager {
     plugins: Option<PluginRuntime>,
     downloads: DownloadTracker,
     demon_init_rate_limiter: DemonInitRateLimiter,
+    unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
     shutdown: ShutdownController,
     active_handles: Arc<RwLock<BTreeMap<String, JoinHandle<()>>>>,
     operations: Arc<Mutex<()>>,
@@ -428,6 +486,7 @@ impl ListenerManager {
             plugins,
             downloads,
             demon_init_rate_limiter: DemonInitRateLimiter::new(),
+            unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter::new(),
             shutdown: ShutdownController::new(),
             active_handles: Arc::new(RwLock::new(BTreeMap::new())),
             operations: Arc::new(Mutex::new(())),
@@ -761,6 +820,7 @@ struct HttpListenerState {
     events: EventBus,
     dispatcher: CommandDispatcher,
     demon_init_rate_limiter: DemonInitRateLimiter,
+    unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
     method: Method,
     required_headers: Vec<ExpectedHeader>,
     response_headers: Vec<(HeaderName, HeaderValue)>,
@@ -796,6 +856,7 @@ struct SmbListenerState {
     events: EventBus,
     dispatcher: CommandDispatcher,
     demon_init_rate_limiter: DemonInitRateLimiter,
+    unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
     shutdown: ShutdownController,
 }
 
@@ -830,6 +891,7 @@ impl HttpListenerState {
         plugins: Option<PluginRuntime>,
         downloads: DownloadTracker,
         demon_init_rate_limiter: DemonInitRateLimiter,
+        unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
         shutdown: ShutdownController,
     ) -> Result<Self, ListenerManagerError> {
         let method = parse_method(config)?;
@@ -872,6 +934,7 @@ impl HttpListenerState {
             ),
             events,
             demon_init_rate_limiter,
+            unknown_callback_probe_audit_limiter,
             method,
             required_headers,
             response_headers,
@@ -916,6 +979,7 @@ impl SmbListenerState {
         plugins: Option<PluginRuntime>,
         downloads: DownloadTracker,
         demon_init_rate_limiter: DemonInitRateLimiter,
+        unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
         shutdown: ShutdownController,
     ) -> Self {
         Self {
@@ -925,6 +989,7 @@ impl SmbListenerState {
             parser: DemonPacketParser::new(registry.clone()),
             events: events.clone(),
             demon_init_rate_limiter,
+            unknown_callback_probe_audit_limiter,
             shutdown,
             dispatcher: CommandDispatcher::with_builtin_handlers_and_downloads(
                 registry.clone(),
@@ -1177,6 +1242,7 @@ async fn spawn_http_listener_runtime(
     plugins: Option<PluginRuntime>,
     downloads: DownloadTracker,
     demon_init_rate_limiter: DemonInitRateLimiter,
+    unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
     shutdown: ShutdownController,
 ) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
     let state = Arc::new(HttpListenerState::build(
@@ -1188,6 +1254,7 @@ async fn spawn_http_listener_runtime(
         plugins,
         downloads,
         demon_init_rate_limiter,
+        unknown_callback_probe_audit_limiter,
         shutdown,
     )?);
     let address = format!("{}:{}", config.host_bind, config.port_bind);
@@ -1246,6 +1313,7 @@ async fn build_callback_response(
     dispatcher.dispatch_packages(agent_id, packages).await.map_err(map_command_dispatch_error)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_demon_transport(
     listener_name: &str,
     registry: &AgentRegistry,
@@ -1253,6 +1321,7 @@ async fn process_demon_transport(
     parser: &DemonPacketParser,
     events: &EventBus,
     dispatcher: &CommandDispatcher,
+    unknown_callback_probe_audit_limiter: &UnknownCallbackProbeAuditLimiter,
     body: &[u8],
     external_ip: String,
 ) -> Result<ProcessedDemonResponse, ListenerManagerError> {
@@ -1352,13 +1421,23 @@ async fn process_demon_transport(
             })
         }
         Err(DemonParserError::Registry(TeamserverError::AgentNotFound { agent_id })) => {
-            warn!(
-                listener = listener_name,
-                agent_id = format_args!("{:08X}", agent_id),
-                external_ip,
-                "unknown agent sent callback probe"
-            );
-            record_unknown_callback_probe(database, listener_name, agent_id, &external_ip).await;
+            if unknown_callback_probe_audit_limiter.allow(listener_name, &external_ip).await {
+                warn!(
+                    listener = listener_name,
+                    agent_id = format_args!("{:08X}", agent_id),
+                    external_ip,
+                    "unknown agent sent callback probe"
+                );
+                record_unknown_callback_probe(database, listener_name, agent_id, &external_ip)
+                    .await;
+            } else {
+                debug!(
+                    listener = listener_name,
+                    agent_id = format_args!("{:08X}", agent_id),
+                    external_ip,
+                    "suppressing unknown callback probe audit row after per-source limit"
+                );
+            }
             Ok(ProcessedDemonResponse {
                 agent_id,
                 payload: Vec::new(),
@@ -1498,6 +1577,7 @@ async fn spawn_smb_listener_runtime(
     plugins: Option<PluginRuntime>,
     downloads: DownloadTracker,
     demon_init_rate_limiter: DemonInitRateLimiter,
+    unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
     shutdown: ShutdownController,
 ) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
     let state = Arc::new(SmbListenerState::build(
@@ -1509,6 +1589,7 @@ async fn spawn_smb_listener_runtime(
         plugins,
         downloads,
         demon_init_rate_limiter,
+        unknown_callback_probe_audit_limiter,
         shutdown,
     ));
     let listener_name = normalized_smb_pipe_name(&config.pipe_name);
@@ -1604,6 +1685,7 @@ async fn handle_smb_connection(state: Arc<SmbListenerState>, mut stream: LocalSo
             &state.parser,
             &state.events,
             &state.dispatcher,
+            &state.unknown_callback_probe_audit_limiter,
             &frame.payload,
             client_ip.to_string(),
         )
@@ -1726,6 +1808,7 @@ impl ListenerManager {
                     self.plugins.clone(),
                     self.downloads.clone(),
                     self.demon_init_rate_limiter.clone(),
+                    self.unknown_callback_probe_audit_limiter.clone(),
                     self.shutdown.clone(),
                 )
                 .await
@@ -1740,6 +1823,7 @@ impl ListenerManager {
                     self.plugins.clone(),
                     self.downloads.clone(),
                     self.demon_init_rate_limiter.clone(),
+                    self.unknown_callback_probe_audit_limiter.clone(),
                     self.shutdown.clone(),
                 )
                 .await
@@ -1754,6 +1838,7 @@ impl ListenerManager {
                     self.plugins.clone(),
                     self.downloads.clone(),
                     self.demon_init_rate_limiter.clone(),
+                    self.unknown_callback_probe_audit_limiter.clone(),
                     self.shutdown.clone(),
                 )
                 .await
@@ -1876,6 +1961,7 @@ struct DnsListenerState {
     events: EventBus,
     dispatcher: CommandDispatcher,
     demon_init_rate_limiter: DemonInitRateLimiter,
+    unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
     shutdown: ShutdownController,
     /// Pending uploads keyed by agent ID.
     uploads: Mutex<HashMap<u32, DnsPendingUpload>>,
@@ -1894,6 +1980,7 @@ impl DnsListenerState {
         plugins: Option<PluginRuntime>,
         downloads: DownloadTracker,
         demon_init_rate_limiter: DemonInitRateLimiter,
+        unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
         shutdown: ShutdownController,
     ) -> Self {
         Self {
@@ -1911,6 +1998,7 @@ impl DnsListenerState {
                 downloads,
             ),
             demon_init_rate_limiter,
+            unknown_callback_probe_audit_limiter,
             shutdown,
             uploads: Mutex::new(HashMap::new()),
             responses: Mutex::new(HashMap::new()),
@@ -2003,6 +2091,7 @@ impl DnsListenerState {
             &self.parser,
             &self.events,
             &self.dispatcher,
+            &self.unknown_callback_probe_audit_limiter,
             &assembled,
             peer_ip.to_string(),
         )
@@ -2447,6 +2536,7 @@ async fn spawn_dns_listener_runtime(
     plugins: Option<PluginRuntime>,
     downloads: DownloadTracker,
     demon_init_rate_limiter: DemonInitRateLimiter,
+    unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
     shutdown: ShutdownController,
 ) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
     if dns_allowed_query_types(&config.record_types).is_none() {
@@ -2468,6 +2558,7 @@ async fn spawn_dns_listener_runtime(
         plugins,
         downloads,
         demon_init_rate_limiter,
+        unknown_callback_probe_audit_limiter,
         shutdown,
     ));
     let addr = format!("{}:{}", config.host_bind, config.port_bind);
@@ -2675,6 +2766,7 @@ async fn http_listener_handler(
         &state.parser,
         &state.events,
         &state.dispatcher,
+        &state.unknown_callback_probe_audit_limiter,
         &body,
         external_ip.to_string(),
     )
@@ -3129,13 +3221,15 @@ mod tests {
         DnsUploadAssembly, DownloadTracker, ListenerEventAction, ListenerManager,
         ListenerManagerError, ListenerStatus, ListenerSummary, MAX_AGENT_MESSAGE_LEN,
         MAX_DEMON_INIT_ATTEMPT_WINDOWS, MAX_DEMON_INIT_ATTEMPTS_PER_IP, MAX_SMB_FRAME_PAYLOAD_LEN,
-        TrustedProxyPeer, action_from_mark, base32hex_decode, base32hex_encode,
-        build_dns_txt_response, chunk_response_to_b32hex, collect_body_with_magic_precheck,
-        dns_allowed_query_types, extract_external_ip, listener_config_from_operator,
-        listener_error_event, listener_event_for_action, listener_removed_event,
-        operator_requests_start, parse_dns_c2_query, parse_dns_query, parse_trusted_proxy_peer,
-        profile_listener_configs, read_smb_frame, smb_local_socket_name,
-        spawn_dns_listener_runtime, spawn_managed_listener_task, spawn_smb_listener_runtime,
+        MAX_UNKNOWN_CALLBACK_PROBE_AUDITS_PER_SOURCE, TrustedProxyPeer,
+        UNKNOWN_CALLBACK_PROBE_AUDIT_WINDOW_DURATION, UnknownCallbackProbeAuditLimiter,
+        action_from_mark, base32hex_decode, base32hex_encode, build_dns_txt_response,
+        chunk_response_to_b32hex, collect_body_with_magic_precheck, dns_allowed_query_types,
+        extract_external_ip, listener_config_from_operator, listener_error_event,
+        listener_event_for_action, listener_removed_event, operator_requests_start,
+        parse_dns_c2_query, parse_dns_query, parse_trusted_proxy_peer, profile_listener_configs,
+        read_smb_frame, smb_local_socket_name, spawn_dns_listener_runtime,
+        spawn_managed_listener_task, spawn_smb_listener_runtime,
     };
     use crate::{
         AgentRegistry, AuditQuery, AuditResultStatus, Database, EventBus, Job,
@@ -3328,6 +3422,43 @@ mod tests {
             !limiter.windows.lock().await.contains_key(&oldest_ip),
             "oldest IP should have been evicted"
         );
+    }
+
+    #[tokio::test]
+    async fn unknown_callback_probe_audit_limiter_blocks_after_threshold() {
+        let limiter = UnknownCallbackProbeAuditLimiter::new();
+
+        for _ in 0..MAX_UNKNOWN_CALLBACK_PROBE_AUDITS_PER_SOURCE {
+            assert!(limiter.allow("edge-http", "127.0.0.1").await);
+        }
+
+        assert!(!limiter.allow("edge-http", "127.0.0.1").await);
+        assert!(limiter.allow("edge-http", "127.0.0.2").await);
+    }
+
+    #[tokio::test]
+    async fn unknown_callback_probe_audit_limiter_prunes_expired_windows() {
+        let limiter = UnknownCallbackProbeAuditLimiter::new();
+        let stale_source = "edge-http\0127.0.0.1".to_owned();
+
+        {
+            let mut windows = limiter.windows.lock().await;
+            windows.insert(
+                stale_source.clone(),
+                crate::rate_limiter::AttemptWindow {
+                    attempts: 1,
+                    window_start: Instant::now()
+                        - UNKNOWN_CALLBACK_PROBE_AUDIT_WINDOW_DURATION
+                        - Duration::from_secs(1),
+                },
+            );
+        }
+
+        assert!(limiter.allow("edge-http", "127.0.0.2").await);
+        let windows = limiter.windows.lock().await;
+        assert!(!windows.contains_key(&stale_source));
+        drop(windows);
+        assert_eq!(limiter.tracked_source_count().await, 1);
     }
 
     #[test]
@@ -4233,7 +4364,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_listener_unknown_callback_probe_returns_fake_404_and_audit_entry()
+    async fn http_listener_unknown_callback_probe_is_rate_limited_before_auditing()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());
@@ -4251,13 +4382,21 @@ mod tests {
         manager.start("edge-http-unknown-callback").await?;
         wait_for_listener(port, false).await?;
 
-        let callback_response = client
+        let first_callback_response = client
             .post(format!("http://127.0.0.1:{port}/"))
             .body(valid_demon_callback_body(agent_id, key, iv, 1, 1, b"data"))
             .send()
             .await?;
 
-        assert_eq!(callback_response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(first_callback_response.status(), StatusCode::NOT_FOUND);
+
+        let second_callback_response = client
+            .post(format!("http://127.0.0.1:{port}/"))
+            .body(valid_demon_callback_body(agent_id.wrapping_add(1), key, iv, 1, 1, b"data"))
+            .send()
+            .await?;
+
+        assert_eq!(second_callback_response.status(), StatusCode::NOT_FOUND);
 
         let audit_page = query_audit_log(
             &database,
@@ -5475,6 +5614,7 @@ mod tests {
             None,
             DownloadTracker::from_max_download_bytes(super::DEFAULT_MAX_DOWNLOAD_BYTES),
             DemonInitRateLimiter::new(),
+            UnknownCallbackProbeAuditLimiter::new(),
             ShutdownController::new(),
         )
     }
@@ -5495,6 +5635,7 @@ mod tests {
             None,
             DownloadTracker::from_max_download_bytes(super::DEFAULT_MAX_DOWNLOAD_BYTES),
             DemonInitRateLimiter::new(),
+            UnknownCallbackProbeAuditLimiter::new(),
             ShutdownController::new(),
         )
         .await
@@ -5523,6 +5664,7 @@ mod tests {
             None,
             DownloadTracker::from_max_download_bytes(super::DEFAULT_MAX_DOWNLOAD_BYTES),
             DemonInitRateLimiter::new(),
+            UnknownCallbackProbeAuditLimiter::new(),
             shutdown,
         )
         .await
@@ -5764,6 +5906,7 @@ mod tests {
             None,
             DownloadTracker::from_max_download_bytes(super::DEFAULT_MAX_DOWNLOAD_BYTES),
             DemonInitRateLimiter::new(),
+            UnknownCallbackProbeAuditLimiter::new(),
             shutdown.clone(),
         )
         .await
@@ -6039,6 +6182,7 @@ mod tests {
             None,
             DownloadTracker::from_max_download_bytes(super::DEFAULT_MAX_DOWNLOAD_BYTES),
             DemonInitRateLimiter::new(),
+            UnknownCallbackProbeAuditLimiter::new(),
             ShutdownController::new(),
         )
         .await

@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 194 | 181 | 31 |
+| Tasks closed | 195 | 181 | 31 |
 | Bugs filed against | 37 | 32 | 9 |
 | Bug rate (bugs/task) | 0.19 | 0.18 | 0.29 |
 | Quality score | 81% | 82% | 71% |
@@ -1779,3 +1779,14 @@ Notes: Clean productive cycle. Both test deliveries are high quality — pivot u
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (696+ tests, 0 failures, new assembly_dispatch and output_dispatch suites pass)
 Notes: dev01-claude continues post-close wip:interrupted pattern (no code in wip commits, tracked in red-cell-c2-zu4h). output_dispatch.rs test quality is good — Result-based pattern, proper cleanup. Same HttpListenerConfig duplication as assembly_dispatch.rs filed as one P4 bug covering both files.
+
+### QA Review — 2026-03-17 06:15 — b6c71e6..b1da79d
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed red-cell-c2-m47p (P2: screenshot + socket callback integration tests). Added screenshot_dispatch.rs (3 tests: success stores loot + broadcasts, failure broadcasts error no loot, empty-bytes broadcasts error no loot) and extended socks5_relay.rs (2 tests: Connect callback routes to relay finish_connect, Close callback routes to relay close_client). Updated existing red-cell-c2-3ptb to include new files (now 4 files with duplicate HttpListenerConfig helpers). Post-close wip:interrupted commit on m47p (ab3fc87) continues zu4h pattern. red-cell-c2-uyk8 freshly claimed (b1da79d), not yet delivered. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (708+ tests, 0 failures — 5 new screenshot tests + 2 new socket dispatch tests all pass)
+Notes: Test quality is high — Result-based pattern throughout, full HTTP→listener→dispatch pipeline used, correct protocol constants (DemonCommand::CommandScreenshot, DemonSocketCommand::Connect/Close). No unwraps in test logic. The post-close wip:interrupted on m47p (ab3fc87, no code output) is a ghost commit consistent with zu4h pattern. red-cell-c2-3ptb updated to cover all 4 files now exhibiting the listener config boilerplate duplication.

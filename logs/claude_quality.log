@@ -350,3 +350,4 @@ Committed and pushed. Here's the run summary:
 [2026-03-17 00:47:16] [Ubuntu-C2-dev01-claude] Run log: claude_quality_20260317_004716.log
 [2026-03-17 00:55:17] [Ubuntu-C2-dev01-claude] Quality review completed successfully
 [2026-03-17 00:55:17] [Ubuntu-C2-dev01-claude] Reached max iterations (10). Exiting.
+[2026-03-17 22:19:43] [Ubuntu-C2-dev02-claude] Pre-sleep: waiting 15.0m before first run...

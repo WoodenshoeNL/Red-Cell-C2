@@ -839,3 +839,4 @@ You're out of extra usage · resets 9am (Europe/Amsterdam)
 [2026-03-17 08:15:00] [Ubuntu-C2-dev01-claude] WARNING: Claude exited with code 1
 [2026-03-17 08:15:00] [Ubuntu-C2-dev01-claude] ========================LOOP=========================
 [2026-03-17 08:15:00] [Ubuntu-C2-dev01-claude] Next run in 20m (at 08:35:00)
+[2026-03-17 22:19:19] [Ubuntu-C2-dev02-claude] Pre-sleep: waiting 60.0m before first run...

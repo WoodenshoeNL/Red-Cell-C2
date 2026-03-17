@@ -1,8 +1,17 @@
 mod common;
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use futures_util::SinkExt;
+#[cfg(unix)]
+use interprocess::local_socket::ToNsName as _;
+#[cfg(unix)]
+use interprocess::local_socket::tokio::Stream as LocalSocketStream;
+#[cfg(unix)]
+use interprocess::local_socket::traits::tokio::Stream as _;
+#[cfg(unix)]
+use interprocess::os::unix::local_socket::AbstractNsUdSocket;
 use red_cell::{
     AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
     ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
@@ -15,9 +24,12 @@ use red_cell_common::operator::{
     AgentResponseInfo, AgentTaskInfo, EventCode, FlatInfo, ListenerInfo, ListenerMarkInfo, Message,
     MessageHead, OperatorMessage,
 };
-use red_cell_common::{HttpListenerConfig, ListenerConfig};
+use red_cell_common::{HttpListenerConfig, ListenerConfig, SmbListenerConfig};
+use serde_json::Value;
+#[cfg(unix)]
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
 
 #[tokio::test]
@@ -231,6 +243,220 @@ async fn operator_session_listener_and_mock_demon_round_trip()
     Ok(())
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn operator_session_smb_listener_and_mock_demon_round_trip()
+-> Result<(), Box<dyn std::error::Error>> {
+    let profile = Profile::parse(
+        r#"
+        Teamserver {
+          Host = "127.0.0.1"
+          Port = 40156
+        }
+
+        Operators {
+          user "operator" {
+            Password = "password1234"
+            Role = "Operator"
+          }
+        }
+
+        Demon {}
+        "#,
+    )?;
+
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let listeners = ListenerManager::new(
+        database.clone(),
+        registry.clone(),
+        events.clone(),
+        sockets.clone(),
+        None,
+    );
+    let state = TeamserverState {
+        profile: profile.clone(),
+        database: database.clone(),
+        auth: AuthService::from_profile(&profile).expect("auth service should initialize"),
+        api: ApiRuntime::from_profile(&profile).expect("rng should work in tests"),
+        events,
+        connections: OperatorConnectionManager::new(),
+        agent_registry: registry,
+        listeners: listeners.clone(),
+        payload_builder: PayloadBuilderService::disabled_for_tests(),
+        sockets,
+        webhooks: AuditWebhookNotifier::from_profile(&profile),
+        login_rate_limiter: LoginRateLimiter::new(),
+        shutdown: red_cell::ShutdownController::new(),
+    };
+
+    let server_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let server_addr = server_listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        let app = websocket_routes().with_state(state);
+        let _ = axum::serve(
+            server_listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await;
+    });
+
+    let pipe_name = unique_pipe_name("operator-round-trip");
+    let listener_name = "edge-smb";
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+
+    common::login(&mut socket).await?;
+    common::assert_no_operator_message(&mut socket, Duration::from_millis(200)).await;
+
+    socket
+        .send(ClientMessage::Text(
+            listener_new_smb_message("operator", listener_name, &pipe_name).into(),
+        ))
+        .await?;
+
+    let listener_created = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::ListenerNew(message) = listener_created else {
+        panic!("expected listener create event");
+    };
+    assert_eq!(message.info.name.as_deref(), Some(listener_name));
+    assert_eq!(message.info.protocol.as_deref(), Some("smb"));
+    assert_eq!(message.info.status.as_deref(), Some("Offline"));
+    assert_eq!(
+        message.info.extra.get("PipeName").and_then(serde_json::Value::as_str),
+        Some(pipe_name.as_str())
+    );
+
+    let listener_started = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::ListenerMark(message) = listener_started else {
+        panic!("expected listener start event");
+    };
+    assert_eq!(message.head.event, EventCode::Listener);
+    assert_eq!(message.head.user, "operator");
+    assert_eq!(
+        message.info,
+        ListenerMarkInfo { name: listener_name.to_owned(), mark: "Online".to_owned() }
+    );
+
+    listeners.update(smb_listener_config(listener_name, &pipe_name)).await?;
+    wait_for_smb_listener(&pipe_name).await?;
+
+    let agent_id = 0x1234_5678;
+    let key = [0x41; AGENT_KEY_LENGTH];
+    let iv = [0x24; AGENT_IV_LENGTH];
+    let mut ctr_offset = 0_u64;
+
+    let mut init_stream = connect_smb(&pipe_name).await?;
+    write_smb_frame(&mut init_stream, agent_id, &common::valid_demon_init_body(agent_id, key, iv))
+        .await?;
+
+    let (ack_agent_id, ack_payload) =
+        timeout(Duration::from_secs(5), read_smb_frame(&mut init_stream)).await??;
+    assert_eq!(ack_agent_id, agent_id);
+    let init_ack =
+        red_cell_common::crypto::decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &ack_payload)?;
+    assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
+    ctr_offset += ctr_blocks_for_len(ack_payload.len());
+    drop(init_stream);
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentNew(message) = agent_new else {
+        panic!("expected agent session event");
+    };
+    assert_eq!(message.info.name_id, "12345678");
+    assert_eq!(message.info.listener, listener_name);
+    assert_eq!(message.info.hostname, "wkstn-01");
+
+    let (mut snapshot_socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut snapshot_socket).await?;
+    let snapshot_agent = read_until_operator_message(&mut snapshot_socket, |message| {
+        matches!(message, OperatorMessage::AgentNew(_))
+    })
+    .await?;
+    let OperatorMessage::AgentNew(message) = snapshot_agent else {
+        panic!("expected agent snapshot event");
+    };
+    assert_eq!(message.info.name_id, "12345678");
+    assert_eq!(message.info.listener, listener_name);
+    snapshot_socket.close(None).await?;
+
+    socket.send(ClientMessage::Text(agent_task_message("2A").into())).await?;
+
+    let task_echo = read_until_operator_message(&mut socket, |message| {
+        matches!(message, OperatorMessage::AgentTask(_))
+    })
+    .await?;
+    let OperatorMessage::AgentTask(message) = task_echo else {
+        panic!("expected agent task echo");
+    };
+    assert_eq!(message.info.demon_id, "12345678");
+    assert_eq!(message.info.task_id, "2A");
+    assert_eq!(message.info.command_line, "checkin");
+
+    let mut get_job_stream = connect_smb(&pipe_name).await?;
+    write_smb_frame(
+        &mut get_job_stream,
+        agent_id,
+        &common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandGetJob),
+            5,
+            &[],
+        ),
+    )
+    .await?;
+    ctr_offset += ctr_blocks_for_len(4);
+
+    let (job_agent_id, job_bytes) =
+        timeout(Duration::from_secs(5), read_smb_frame(&mut get_job_stream)).await??;
+    assert_eq!(job_agent_id, agent_id);
+    let job_message = DemonMessage::from_bytes(job_bytes.as_ref())?;
+    assert_eq!(job_message.packages.len(), 1);
+    assert_eq!(job_message.packages[0].command_id, u32::from(DemonCommand::CommandCheckin));
+    assert_eq!(job_message.packages[0].request_id, 0x2A);
+    assert!(job_message.packages[0].payload.is_empty());
+    drop(get_job_stream);
+
+    let output_text = "hello from smb demon";
+    let mut callback_stream = connect_smb(&pipe_name).await?;
+    write_smb_frame(
+        &mut callback_stream,
+        agent_id,
+        &common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandOutput),
+            0x2A,
+            &common::command_output_payload(output_text),
+        ),
+    )
+    .await?;
+    assert!(
+        timeout(Duration::from_millis(250), read_smb_frame(&mut callback_stream)).await.is_err(),
+        "output callback should not produce an SMB response frame"
+    );
+
+    let output_event = read_until_operator_message(&mut socket, |message| {
+        matches!(message, OperatorMessage::AgentResponse(_))
+    })
+    .await?;
+    let OperatorMessage::AgentResponse(message) = output_event else {
+        panic!("expected agent response event");
+    };
+    assert_agent_output(&message.info, output_text);
+
+    socket.close(None).await?;
+    listeners.stop(listener_name).await?;
+    server.abort();
+    Ok(())
+}
+
 /// Spin up a minimal teamserver with Admin, Operator, and Analyst users.
 fn multi_role_profile() -> Profile {
     Profile::parse(
@@ -273,6 +499,23 @@ async fn assert_connection_closed_after_rbac_denial(
         }
         Some(Err(error)) => Err(format!("websocket error after RBAC denial: {error}").into()),
     }
+}
+
+async fn read_until_operator_message<F>(
+    socket: &mut common::WsClient,
+    mut predicate: F,
+) -> Result<OperatorMessage, Box<dyn std::error::Error>>
+where
+    F: FnMut(&OperatorMessage) -> bool,
+{
+    for _ in 0..10 {
+        let message = common::read_operator_message(socket).await?;
+        if predicate(&message) {
+            return Ok(message);
+        }
+    }
+
+    Err("did not observe expected operator message within 10 frames".into())
 }
 
 // ---- RBAC WebSocket enforcement integration tests ----------------------------------------
@@ -448,6 +691,25 @@ fn listener_new_message(user: &str, port: u16) -> String {
     .expect("listener message should serialize")
 }
 
+fn listener_new_smb_message(user: &str, name: &str, pipe_name: &str) -> String {
+    serde_json::to_string(&OperatorMessage::ListenerNew(Message {
+        head: MessageHead {
+            event: EventCode::Listener,
+            user: user.to_owned(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info: ListenerInfo {
+            name: Some(name.to_owned()),
+            protocol: Some("SMB".to_owned()),
+            status: Some("Online".to_owned()),
+            extra: BTreeMap::from([("PipeName".to_owned(), Value::String(pipe_name.to_owned()))]),
+            ..ListenerInfo::default()
+        },
+    }))
+    .expect("smb listener message should serialize")
+}
+
 fn agent_task_message(task_id: &str) -> String {
     serde_json::to_string(&OperatorMessage::AgentTask(Message {
         head: MessageHead {
@@ -497,4 +759,79 @@ fn http_listener_config(port: u16) -> ListenerConfig {
         response: None,
         proxy: None,
     })
+}
+
+fn smb_listener_config(name: &str, pipe_name: &str) -> ListenerConfig {
+    ListenerConfig::from(SmbListenerConfig {
+        name: name.to_owned(),
+        pipe_name: pipe_name.to_owned(),
+        kill_date: None,
+        working_hours: None,
+    })
+}
+
+#[cfg(unix)]
+const SMB_PIPE_PREFIX: &str = r"\\.\pipe\";
+
+#[cfg(unix)]
+fn unique_pipe_name(suffix: &str) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or_default();
+    format!("red-cell-smb-e2e-{suffix}-{ts}")
+}
+
+#[cfg(unix)]
+fn resolve_socket_name(
+    pipe_name: &str,
+) -> Result<interprocess::local_socket::Name<'static>, Box<dyn std::error::Error>> {
+    let trimmed = pipe_name.trim();
+    let full = if trimmed.starts_with('/') || trimmed.starts_with(r"\\") {
+        trimmed.to_owned()
+    } else {
+        format!("{SMB_PIPE_PREFIX}{trimmed}")
+    };
+    Ok(full.to_ns_name::<AbstractNsUdSocket>()?.into_owned())
+}
+
+#[cfg(unix)]
+async fn connect_smb(pipe_name: &str) -> Result<LocalSocketStream, Box<dyn std::error::Error>> {
+    let socket_name = resolve_socket_name(pipe_name)?;
+    Ok(LocalSocketStream::connect(socket_name).await?)
+}
+
+#[cfg(unix)]
+async fn wait_for_smb_listener(pipe_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    for _ in 0..40 {
+        if connect_smb(pipe_name).await.is_ok() {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+
+    Err(format!("SMB listener on pipe `{pipe_name}` did not become ready within 1 s").into())
+}
+
+#[cfg(unix)]
+async fn write_smb_frame(
+    stream: &mut LocalSocketStream,
+    agent_id: u32,
+    payload: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    stream.write_u32_le(agent_id).await?;
+    stream.write_u32_le(u32::try_from(payload.len())?).await?;
+    stream.write_all(payload).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn read_smb_frame(
+    stream: &mut LocalSocketStream,
+) -> Result<(u32, Vec<u8>), Box<dyn std::error::Error>> {
+    let agent_id = stream.read_u32_le().await?;
+    let payload_len = usize::try_from(stream.read_u32_le().await?)?;
+    let mut payload = vec![0u8; payload_len];
+    stream.read_exact(&mut payload).await?;
+    Ok((agent_id, payload))
 }

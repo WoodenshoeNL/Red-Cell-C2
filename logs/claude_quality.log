@@ -467,3 +467,80 @@ API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Ove
 [2026-03-17 22:54:00] [Ubuntu-C2-dev02-claude] === Quality review run 7 of 10 ===
 [2026-03-17 22:54:00] [Ubuntu-C2-dev02-claude] WARNING: git pull --rebase failed, continuing with local state
 [2026-03-17 22:54:00] [Ubuntu-C2-dev02-claude] Run log: claude_quality_20260317_225400.log
+## Test Quality Review Report
+
+### Files reviewed (10 of 66 total)
+1. `common/src/error.rs` — well tested
+2. `common/src/lib.rs` — re-exports only, no logic
+3. `common/src/operator.rs` — 20 tests, good round-trip coverage
+4. `common/src/tls.rs` — 18 tests, excellent including error paths and persistence
+5. `common/tests/public_api.rs` — 3 integration tests
+6. `teamserver/src/agent_events.rs` — 9 tests, good field-level verification
+7. `teamserver/src/agent_liveness.rs` — 12 tests, excellent with TOCTOU guards and overflow
+8. `teamserver/src/agents.rs` — 30+ tests, very thorough
+9. `teamserver/src/api.rs` — 30+ tests, good auth/RBAC/rate limiting coverage
+10. `teamserver/src/app.rs` — 4 tests, covers router wiring
+
+### Scan position: 11 → 21
+
+### Issues filed (5)
+- **red-cell-c2-lo18** — operator.rs numeric_code enums lack deserialization error path tests for unknown values (P3)
+- **red-cell-c2-v2wi** — agent_events.rs lacks serialization round-trip test verifying Havoc JSON field names (P3)
+- **red-cell-c2-84sf** — api.rs lacks test for disabled API rejecting all authenticated requests (P3)
+- **red-cell-c2-njbm** — app.rs build_router lacks test for POST/PUT/DELETE methods hitting fallback (P4)
+- **red-cell-c2-6s5w** — agent_liveness.rs lacks test for timezone-offset timestamps (P4)
+
+### Most critical gap
+**agent_events.rs JSON serialization round-trip** — the event builder tests only verify Rust struct fields, never the serialized JSON wire format. A misconfigured `#[serde(rename)]` could silently break the Havoc operator client protocol without any test catching it.
+
+### Overall test quality
+Excellent. The files reviewed in this batch have consistently high-quality tests with meaningful assertions, descriptive names, proper error path coverage, and edge case handling. The agent_liveness module is particularly well-designed with TOCTOU race condition guards and overflow boundary tests. The gaps found are minor — mostly about adding serialization-level verification to complement the existing struct-level tests.
+[2026-03-17 22:57:49] [Ubuntu-C2-dev02-claude] Quality review completed successfully
+[2026-03-17 22:57:49] [Ubuntu-C2-dev02-claude] ========================LOOP=========================
+[2026-03-17 22:57:49] [Ubuntu-C2-dev02-claude] === Quality review run 8 of 10 ===
+[2026-03-17 22:57:49] [Ubuntu-C2-dev02-claude] WARNING: git pull --rebase failed, continuing with local state
+[2026-03-17 22:57:49] [Ubuntu-C2-dev02-claude] Run log: claude_quality_20260317_225749.log
+[2026-03-17 23:01:26] [Ubuntu-C2-dev02-claude] Quality review completed successfully
+[2026-03-17 23:01:26] [Ubuntu-C2-dev02-claude] ========================LOOP=========================
+[2026-03-17 23:01:26] [Ubuntu-C2-dev02-claude] === Quality review run 9 of 10 ===
+[2026-03-17 23:01:26] [Ubuntu-C2-dev02-claude] WARNING: git pull --rebase failed, continuing with local state
+[2026-03-17 23:01:26] [Ubuntu-C2-dev02-claude] Run log: claude_quality_20260317_230126.log
+## Test Quality Review Report — Run 4
+
+### 1. Files reviewed (10 of 66 total)
+- `teamserver/src/dispatch/output.rs` — command output, error, exit, kill-date, sleep, config, job, demon-info handlers
+- `teamserver/src/dispatch/pivot.rs` — SMB pivot connect/disconnect/command/list handlers
+- `teamserver/src/dispatch/process.rs` — process list, create, kill, modules, grep, memory, injection handlers
+- `teamserver/src/dispatch/screenshot.rs` — screenshot capture and loot persistence
+- `teamserver/src/dispatch/socket.rs` — rportfwd and SOCKS relay callbacks
+- `teamserver/src/dispatch/token.rs` — token impersonation/steal/list/make/revert/find handlers
+- `teamserver/src/dispatch/transfer.rs` — file transfer, beacon output, download tracking
+- `teamserver/src/dispatch/util.rs` — windows version labels, basename, arch labels
+- `teamserver/src/events.rs` — EventBus fan-out broadcaster
+- `teamserver/src/lib.rs` — module re-exports
+
+### 2. Scan position: 31 → 41
+
+### 3. Issues filed (6 new)
+| ID | Description |
+|---|---|
+| `red-cell-c2-erqp` | util.rs helpers (windows_version_label, basename, arch labels) have zero test coverage |
+| `red-cell-c2-vkp7` | handle_config_callback has no unit or integration test for any config key path |
+| `red-cell-c2-xe8e` | handle_inject_shellcode/dll/spawn_dll callbacks lack tests for security-critical injection status handling |
+| `red-cell-c2-tdya` | handle_sleep_callback lacks test for agent state mutation and event broadcast |
+| `red-cell-c2-hyce` | handle_command_error_callback silently swallows unknown error classes without test |
+| `red-cell-c2-iexb` | handle_process_command_callback subcommands (Create, Kill, Modules, Grep, Memory) lack direct tests |
+
+### 4. Most critical gap
+**Injection status handlers** (`handle_inject_shellcode_callback`, `handle_inject_dll_callback`, `handle_spawn_dll_callback`) — these are security-critical functions that report whether shellcode/DLL injection succeeded. An operator makes tactical decisions based on this feedback. Zero tests exist for any of these handlers. Filed as P2.
+
+### 5. Overall test quality
+Mixed quality across the batch:
+- **Strong**: `events.rs` has excellent inline tests covering all edge cases. `transfer.rs` has thorough unit tests for helpers and async handlers. `screenshot.rs` has comprehensive integration tests. `process.rs` has solid formatting helper tests. `pivot.rs` has good `inner_demon_agent_id` tests.
+- **Weak**: `util.rs` has zero tests despite being used in every agent record. `output.rs` has integration tests for exit/info/job but nothing for config, sleep, or error callbacks. The injection handlers in `process.rs` and all process command subcommands have no coverage at all.
+- **Already tracked**: socket.rs and token.rs gaps were already captured in prior runs.
+[2026-03-17 23:03:48] [Ubuntu-C2-dev02-claude] Quality review completed successfully
+[2026-03-17 23:03:48] [Ubuntu-C2-dev02-claude] ========================LOOP=========================
+[2026-03-17 23:03:48] [Ubuntu-C2-dev02-claude] === Quality review run 10 of 10 ===
+[2026-03-17 23:03:48] [Ubuntu-C2-dev02-claude] WARNING: git pull --rebase failed, continuing with local state
+[2026-03-17 23:03:48] [Ubuntu-C2-dev02-claude] Run log: claude_quality_20260317_230348.log

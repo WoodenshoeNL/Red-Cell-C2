@@ -12,9 +12,57 @@ use red_cell_common::crypto::{
     AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len, decrypt_agent_data_at_offset,
 };
 use red_cell_common::demon::{DemonCommand, DemonMessage};
-use red_cell_common::operator::{AgentTaskInfo, EventCode, Message, MessageHead, OperatorMessage};
+use red_cell_common::operator::{
+    AgentResponseInfo, AgentTaskInfo, EventCode, Message, MessageHead, OperatorMessage,
+};
 use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
+
+fn operator_task_message(
+    task_id: &str,
+    command_line: &str,
+    demon_id: &str,
+    command_id: DemonCommand,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&OperatorMessage::AgentTask(Message {
+        head: MessageHead {
+            event: EventCode::Session,
+            user: "operator".to_owned(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info: AgentTaskInfo {
+            task_id: task_id.to_owned(),
+            command_line: command_line.to_owned(),
+            demon_id: demon_id.to_owned(),
+            command_id: u32::from(command_id).to_string(),
+            ..AgentTaskInfo::default()
+        },
+    }))
+}
+
+fn callback_ctr_advance(payload: &[u8]) -> u64 {
+    ctr_blocks_for_len(4 + payload.len())
+}
+
+fn assert_agent_output(
+    info: &AgentResponseInfo,
+    task_id: &str,
+    request_id: u32,
+    command_line: &str,
+    output_text: &str,
+) {
+    let request_id_hex = format!("{request_id:X}");
+    assert_eq!(info.demon_id, "12345678");
+    assert_eq!(info.command_id, u32::from(DemonCommand::CommandOutput).to_string());
+    assert_eq!(info.output, output_text);
+    assert_eq!(info.command_line.as_deref(), Some(command_line));
+    assert_eq!(
+        info.extra.get("RequestID").and_then(serde_json::Value::as_str),
+        Some(request_id_hex.as_str())
+    );
+    assert_eq!(info.extra.get("TaskID").and_then(serde_json::Value::as_str), Some(task_id));
+}
 
 #[tokio::test]
 async fn mock_demon_checkin_get_job_and_output_flow() -> Result<(), Box<dyn std::error::Error>> {
@@ -131,21 +179,7 @@ async fn mock_demon_checkin_get_job_and_output_flow() -> Result<(), Box<dyn std:
     assert_eq!(message.info.listener, "edge-http");
     assert_eq!(message.info.hostname, "wkstn-01");
 
-    let task = serde_json::to_string(&OperatorMessage::AgentTask(Message {
-        head: MessageHead {
-            event: EventCode::Session,
-            user: "operator".to_owned(),
-            timestamp: String::new(),
-            one_time: String::new(),
-        },
-        info: AgentTaskInfo {
-            task_id: "2A".to_owned(),
-            command_line: "checkin".to_owned(),
-            demon_id: "12345678".to_owned(),
-            command_id: u32::from(DemonCommand::CommandCheckin).to_string(),
-            ..AgentTaskInfo::default()
-        },
-    }))?;
+    let task = operator_task_message("2A", "checkin", "12345678", DemonCommand::CommandCheckin)?;
     socket.send(ClientMessage::Text(task.into())).await?;
 
     let task_echo = common::read_operator_message(&mut socket).await?;
@@ -206,6 +240,367 @@ async fn mock_demon_checkin_get_job_and_output_flow() -> Result<(), Box<dyn std:
 
     socket.close(None).await?;
     listeners.stop("edge-http").await?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn mock_demon_checkin_streams_multiple_output_events_for_one_task()
+-> Result<(), Box<dyn std::error::Error>> {
+    let profile = Profile::parse(
+        r#"
+        Teamserver {
+          Host = "127.0.0.1"
+          Port = 40058
+        }
+
+        Operators {
+          user "operator" {
+            Password = "password1234"
+            Role = "Operator"
+          }
+        }
+
+        Demon {}
+        "#,
+    )?;
+
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let listeners = ListenerManager::new(
+        database.clone(),
+        registry.clone(),
+        events.clone(),
+        sockets.clone(),
+        None,
+    );
+    let state = TeamserverState {
+        profile: profile.clone(),
+        database: database.clone(),
+        auth: AuthService::from_profile(&profile).expect("auth service should initialize"),
+        api: ApiRuntime::from_profile(&profile).expect("rng should work in tests"),
+        events,
+        connections: OperatorConnectionManager::new(),
+        agent_registry: registry.clone(),
+        listeners: listeners.clone(),
+        payload_builder: PayloadBuilderService::disabled_for_tests(),
+        sockets,
+        webhooks: AuditWebhookNotifier::from_profile(&profile),
+        login_rate_limiter: LoginRateLimiter::new(),
+        shutdown: red_cell::ShutdownController::new(),
+    };
+
+    let server_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let server_addr = server_listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        let app = websocket_routes().with_state(state);
+        let _ = axum::serve(
+            server_listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await;
+    });
+
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners
+        .create(red_cell_common::ListenerConfig::from(HttpListenerConfig {
+            name: "edge-http-streaming-single".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["127.0.0.1".to_owned()],
+            host_bind: "127.0.0.1".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: listener_port,
+            port_conn: Some(listener_port),
+            method: Some("POST".to_owned()),
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: vec!["/".to_owned()],
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: None,
+            proxy: None,
+        }))
+        .await?;
+    drop(listener_guard);
+    listeners.start("edge-http-streaming-single").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0x1234_5678;
+    let key = [0x41; AGENT_KEY_LENGTH];
+    let iv = [0x24; AGENT_IV_LENGTH];
+    let mut ctr_offset = 0_u64;
+
+    let init_response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_init_body(agent_id, key, iv))
+        .send()
+        .await?
+        .error_for_status()?;
+    let init_bytes = init_response.bytes().await?;
+    let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
+    assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
+    ctr_offset += ctr_blocks_for_len(init_bytes.len());
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let task =
+        operator_task_message("2A", "shell whoami", "12345678", DemonCommand::CommandCheckin)?;
+    socket.send(ClientMessage::Text(task.into())).await?;
+
+    let task_echo = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentTask(message) = task_echo else {
+        panic!("expected agent task echo");
+    };
+    assert_eq!(message.info.task_id, "2A");
+
+    let get_job_response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandGetJob),
+            5,
+            &[],
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+    let job_bytes = get_job_response.bytes().await?;
+    let message = DemonMessage::from_bytes(job_bytes.as_ref())?;
+    assert_eq!(message.packages.len(), 1);
+    assert_eq!(message.packages[0].request_id, 0x2A);
+    ctr_offset += ctr_blocks_for_len(4);
+
+    let outputs = ["chunk one\n", "chunk two\n", "chunk three"];
+    for output in outputs {
+        let payload = common::command_output_payload(output);
+        client
+            .post(format!("http://127.0.0.1:{listener_port}/"))
+            .body(common::valid_demon_callback_body(
+                agent_id,
+                key,
+                iv,
+                ctr_offset,
+                u32::from(DemonCommand::CommandOutput),
+                0x2A,
+                &payload,
+            ))
+            .send()
+            .await?
+            .error_for_status()?;
+        ctr_offset += callback_ctr_advance(&payload);
+    }
+
+    for output in outputs {
+        let event = common::read_operator_message(&mut socket).await?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_agent_output(&message.info, "2A", 0x2A, "shell whoami", output);
+    }
+
+    socket.close(None).await?;
+    listeners.stop("edge-http-streaming-single").await?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn mock_demon_checkin_interleaved_output_keeps_task_attribution()
+-> Result<(), Box<dyn std::error::Error>> {
+    let profile = Profile::parse(
+        r#"
+        Teamserver {
+          Host = "127.0.0.1"
+          Port = 40059
+        }
+
+        Operators {
+          user "operator" {
+            Password = "password1234"
+            Role = "Operator"
+          }
+        }
+
+        Demon {}
+        "#,
+    )?;
+
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let listeners = ListenerManager::new(
+        database.clone(),
+        registry.clone(),
+        events.clone(),
+        sockets.clone(),
+        None,
+    );
+    let state = TeamserverState {
+        profile: profile.clone(),
+        database: database.clone(),
+        auth: AuthService::from_profile(&profile).expect("auth service should initialize"),
+        api: ApiRuntime::from_profile(&profile).expect("rng should work in tests"),
+        events,
+        connections: OperatorConnectionManager::new(),
+        agent_registry: registry.clone(),
+        listeners: listeners.clone(),
+        payload_builder: PayloadBuilderService::disabled_for_tests(),
+        sockets,
+        webhooks: AuditWebhookNotifier::from_profile(&profile),
+        login_rate_limiter: LoginRateLimiter::new(),
+        shutdown: red_cell::ShutdownController::new(),
+    };
+
+    let server_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let server_addr = server_listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        let app = websocket_routes().with_state(state);
+        let _ = axum::serve(
+            server_listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await;
+    });
+
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners
+        .create(red_cell_common::ListenerConfig::from(HttpListenerConfig {
+            name: "edge-http-streaming-interleaved".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["127.0.0.1".to_owned()],
+            host_bind: "127.0.0.1".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: listener_port,
+            port_conn: Some(listener_port),
+            method: Some("POST".to_owned()),
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: vec!["/".to_owned()],
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: None,
+            proxy: None,
+        }))
+        .await?;
+    drop(listener_guard);
+    listeners.start("edge-http-streaming-interleaved").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0x1234_5678;
+    let key = [0x41; AGENT_KEY_LENGTH];
+    let iv = [0x24; AGENT_IV_LENGTH];
+    let mut ctr_offset = 0_u64;
+
+    let init_response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_init_body(agent_id, key, iv))
+        .send()
+        .await?
+        .error_for_status()?;
+    let init_bytes = init_response.bytes().await?;
+    let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
+    assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
+    ctr_offset += ctr_blocks_for_len(init_bytes.len());
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let first_task =
+        operator_task_message("2A", "shell whoami", "12345678", DemonCommand::CommandCheckin)?;
+    socket.send(ClientMessage::Text(first_task.into())).await?;
+    let first_task_echo = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(first_task_echo, OperatorMessage::AgentTask(_)));
+
+    let second_task = operator_task_message(
+        "2B",
+        "powershell Get-Date",
+        "12345678",
+        DemonCommand::CommandCheckin,
+    )?;
+    socket.send(ClientMessage::Text(second_task.into())).await?;
+    let second_task_echo = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(second_task_echo, OperatorMessage::AgentTask(_)));
+
+    let get_job_response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandGetJob),
+            5,
+            &[],
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+    let job_bytes = get_job_response.bytes().await?;
+    let message = DemonMessage::from_bytes(job_bytes.as_ref())?;
+    assert_eq!(message.packages.len(), 2);
+    assert_eq!(message.packages[0].request_id, 0x2A);
+    assert_eq!(message.packages[1].request_id, 0x2B);
+    ctr_offset += ctr_blocks_for_len(4);
+
+    let callbacks = [
+        (0x2A, "shell whoami", "whoami chunk 1"),
+        (0x2B, "powershell Get-Date", "date chunk 1"),
+        (0x2A, "shell whoami", "whoami chunk 2"),
+        (0x2B, "powershell Get-Date", "date chunk 2"),
+    ];
+    for (request_id, _, output) in callbacks {
+        let payload = common::command_output_payload(output);
+        client
+            .post(format!("http://127.0.0.1:{listener_port}/"))
+            .body(common::valid_demon_callback_body(
+                agent_id,
+                key,
+                iv,
+                ctr_offset,
+                u32::from(DemonCommand::CommandOutput),
+                request_id,
+                &payload,
+            ))
+            .send()
+            .await?
+            .error_for_status()?;
+        ctr_offset += callback_ctr_advance(&payload);
+    }
+
+    for (request_id, command_line, output) in callbacks {
+        let event = common::read_operator_message(&mut socket).await?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        let task_id = format!("{request_id:X}");
+        assert_agent_output(&message.info, &task_id, request_id, command_line, output);
+    }
+
+    socket.close(None).await?;
+    listeners.stop("edge-http-streaming-interleaved").await?;
     server.abort();
     Ok(())
 }

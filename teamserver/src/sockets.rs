@@ -1319,6 +1319,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn negotiate_socks5_rejects_zero_methods() -> io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut client, mut server) = connected_stream_pair().await?;
+
+        // Send version=5, n_methods=0, no method bytes — adversarial/malformed greeting.
+        let client_task = tokio::spawn(async move {
+            client.write_all(&[super::SOCKS_VERSION, 0]).await?;
+            // Read the rejection response sent by negotiate_socks5.
+            let mut response = [0_u8; 2];
+            tokio::io::AsyncReadExt::read_exact(&mut client, &mut response).await?;
+            io::Result::Ok(response)
+        });
+
+        let result = super::negotiate_socks5(&mut server).await;
+
+        assert!(
+            result.is_err(),
+            "negotiate_socks5 should return an error when zero methods are advertised"
+        );
+        assert_eq!(
+            result.unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied,
+            "error kind should be PermissionDenied when no methods are advertised"
+        );
+
+        let response = client_task.await.map_err(|e| io::Error::other(e.to_string()))??;
+        assert_eq!(
+            response,
+            [super::SOCKS_VERSION, super::SOCKS_METHOD_NOT_ACCEPTABLE],
+            "server should send [5, 0xFF] rejection to client"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn read_socks_connect_request_rejects_non_connect_command() -> io::Result<()> {
         use tokio::io::AsyncWriteExt;
 

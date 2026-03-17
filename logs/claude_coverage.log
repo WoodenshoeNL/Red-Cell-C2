@@ -122,3 +122,30 @@ API Error: 500 {"type":"error","error":{"type":"api_error","message":"Internal s
 [2026-03-17 22:20:27] [Ubuntu-C2-dev02-claude] === Coverage review run 2 of 5 ===
 [2026-03-17 22:20:27] [Ubuntu-C2-dev02-claude] WARNING: git pull --rebase failed, continuing with local state
 [2026-03-17 22:20:27] [Ubuntu-C2-dev02-claude] Run log: claude_coverage_20260317_222027.log
+## Coverage Scan Report
+
+1. **Files scanned**: 3 source files (positions 56–67 of 65 total, wrapping to index 3)
+   - `client/src/lib.rs` — module re-exports only, nothing to test
+   - `client/src/local_config.rs` — **well-tested** (12 unit tests + 3 integration tests)
+   - `client/src/login.rs` — **well-tested** (14 unit tests + 3 integration tests)
+
+2. **Public functions found**: 11 total, 10 with tests, 1 partially tested
+
+3. **Coverage rate for this batch**: ~95% (10.5/11 public functions covered)
+
+4. **Issues filed**: 1
+   - `red-cell-c2-krej` — `resolved_scripts_dir` fallback path + `default_scripts_dir` helper (P4)
+
+5. **Worst coverage gap**: `resolved_scripts_dir()` only tests the `Some` path; the `None` fallback through `default_scripts_dir()` is never exercised. Minor risk — wrong scripts path would cause silent plugin loading failure.
+
+6. **Trend**: The client crate is in excellent shape. Both scanned source files have comprehensive unit + integration test suites with edge cases (invalid TOML, whitespace-only fields, TLS failure state transitions). Coverage is strong and improving — 1,269 test functions across the workspace.
+[2026-03-17 22:26:09] [Ubuntu-C2-dev02-claude] Coverage review completed successfully
+[2026-03-17 22:26:09] [Ubuntu-C2-dev02-claude] ========================LOOP=========================
+[2026-03-17 22:26:09] [Ubuntu-C2-dev02-claude] === Coverage review run 3 of 5 ===
+[2026-03-17 22:26:09] [Ubuntu-C2-dev02-claude] WARNING: git pull --rebase failed, continuing with local state
+[2026-03-17 22:26:09] [Ubuntu-C2-dev02-claude] Run log: claude_coverage_20260317_222609.log
+[2026-03-17 22:28:24] [Ubuntu-C2-dev02-claude] Coverage review completed successfully
+[2026-03-17 22:28:24] [Ubuntu-C2-dev02-claude] ========================LOOP=========================
+[2026-03-17 22:28:24] [Ubuntu-C2-dev02-claude] === Coverage review run 4 of 5 ===
+[2026-03-17 22:28:24] [Ubuntu-C2-dev02-claude] WARNING: git pull --rebase failed, continuing with local state
+[2026-03-17 22:28:24] [Ubuntu-C2-dev02-claude] Run log: claude_coverage_20260317_222824.log

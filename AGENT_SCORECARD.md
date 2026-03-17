@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 203 | 181 | 31 |
+| Tasks closed | 204 | 181 | 31 |
 | Bugs filed against | 37 | 32 | 9 |
 | Bug rate (bugs/task) | 0.18 | 0.18 | 0.29 |
 | Quality score | 82% | 82% | 71% |
@@ -1867,3 +1867,14 @@ Notes: xypk tests are thorough — all 11 enums covered, both symmetry and rejec
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (all tests pass, 0 failures)
 Notes: Test quality is solid — revival test reloads from DB to confirm persistence, error test uses matches! macro for precise variant + field assertion. No production code changed. Claude cumulative: 203 tasks, 37 bugs, 18% bug rate, 82% quality.
+
+### QA Review — 2026-03-17 13:15 — e7398a1..738bf7e
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed red-cell-c2-y4fs (13 inline unit tests for parse_file_open_header, parse_file_chunk, parse_file_close: happy paths, too-short/empty error paths, null-terminator stripping, empty path, extra-bytes-ignored). Ghost wip:interrupted (738bf7e, beads state + logs only) consistent with zu4h pattern. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (1244 tests, 0 failures)
+Notes: Tests are thorough — all three parser functions covered with both success and error paths. No production code changed. Claude cumulative: 204 tasks, 37 bugs, 18% bug rate, 82% quality.

@@ -6106,6 +6106,374 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn net_sessions_two_rows_produces_formatted_table()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0x1122_3344, [0x12; AGENT_KEY_LENGTH], [0x34; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonNetCommand::Sessions));
+        add_utf16(&mut payload, "SRV-01");
+        // Row 1
+        add_utf16(&mut payload, "10.0.0.1");
+        add_utf16(&mut payload, "alice");
+        add_u32(&mut payload, 120);
+        add_u32(&mut payload, 5);
+        // Row 2
+        add_utf16(&mut payload, "10.0.0.2");
+        add_utf16(&mut payload, "bob");
+        add_u32(&mut payload, 300);
+        add_u32(&mut payload, 0);
+
+        dispatcher.dispatch(0x1122_3344, u32::from(DemonCommand::CommandNet), 50, &payload).await?;
+
+        let event = receiver.recv().await.ok_or("net sessions response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Sessions for SRV-01 [2]: ".to_owned()))
+        );
+        let output = &message.info.output;
+        assert!(output.contains("10.0.0.1"), "output should contain first client");
+        assert!(output.contains("alice"), "output should contain first user");
+        assert!(output.contains("10.0.0.2"), "output should contain second client");
+        assert!(output.contains("bob"), "output should contain second user");
+        assert!(output.contains("Computer"), "output should contain header");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn net_share_one_row_contains_name_and_path() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0x1122_3344, [0x12; AGENT_KEY_LENGTH], [0x34; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonNetCommand::Share));
+        add_utf16(&mut payload, "FILE-SRV");
+        // One share row
+        add_utf16(&mut payload, "ADMIN$");
+        add_utf16(&mut payload, "C:\\Windows");
+        add_utf16(&mut payload, "Remote Admin");
+        add_u32(&mut payload, 0);
+
+        dispatcher.dispatch(0x1122_3344, u32::from(DemonCommand::CommandNet), 51, &payload).await?;
+
+        let event = receiver.recv().await.ok_or("net share response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Shares for FILE-SRV [1]: ".to_owned()))
+        );
+        let output = &message.info.output;
+        assert!(output.contains("ADMIN$"), "output should contain share name");
+        assert!(output.contains("C:\\Windows"), "output should contain share path");
+        assert!(output.contains("Remote Admin"), "output should contain remark");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn net_logons_lists_each_username() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0x1122_3344, [0x12; AGENT_KEY_LENGTH], [0x34; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonNetCommand::Logons));
+        add_utf16(&mut payload, "DC-01");
+        add_utf16(&mut payload, "administrator");
+        add_utf16(&mut payload, "svc_backup");
+        add_utf16(&mut payload, "jdoe");
+
+        dispatcher.dispatch(0x1122_3344, u32::from(DemonCommand::CommandNet), 52, &payload).await?;
+
+        let event = receiver.recv().await.ok_or("net logons response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Logged on users at DC-01 [3]: ".to_owned()))
+        );
+        let output = &message.info.output;
+        assert!(output.contains("administrator"), "output should list first user");
+        assert!(output.contains("svc_backup"), "output should list second user");
+        assert!(output.contains("jdoe"), "output should list third user");
+        assert!(output.contains("Usernames"), "output should contain header");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn net_group_two_rows_contains_both_names() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0x1122_3344, [0x12; AGENT_KEY_LENGTH], [0x34; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonNetCommand::Group));
+        add_utf16(&mut payload, "CORP-DC");
+        add_utf16(&mut payload, "Domain Admins");
+        add_utf16(&mut payload, "Designated administrators of the domain");
+        add_utf16(&mut payload, "Domain Users");
+        add_utf16(&mut payload, "All domain users");
+
+        dispatcher.dispatch(0x1122_3344, u32::from(DemonCommand::CommandNet), 53, &payload).await?;
+
+        let event = receiver.recv().await.ok_or("net group response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("List groups on CORP-DC: ".to_owned()))
+        );
+        let output = &message.info.output;
+        assert!(output.contains("Domain Admins"), "output should contain first group");
+        assert!(output.contains("Domain Users"), "output should contain second group");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn net_localgroup_two_rows_contains_both_names() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0x1122_3344, [0x12; AGENT_KEY_LENGTH], [0x34; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonNetCommand::LocalGroup));
+        add_utf16(&mut payload, "WKSTN-05");
+        add_utf16(&mut payload, "Administrators");
+        add_utf16(&mut payload, "Full system access");
+        add_utf16(&mut payload, "Remote Desktop Users");
+        add_utf16(&mut payload, "Can log on remotely");
+
+        dispatcher.dispatch(0x1122_3344, u32::from(DemonCommand::CommandNet), 54, &payload).await?;
+
+        let event = receiver.recv().await.ok_or("net localgroup response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Local Groups for WKSTN-05: ".to_owned()))
+        );
+        let output = &message.info.output;
+        assert!(output.contains("Administrators"), "output should contain first group");
+        assert!(output.contains("Remote Desktop Users"), "output should contain second group");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn net_domain_nonempty_reports_domain_name() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0x1122_3344, [0x12; AGENT_KEY_LENGTH], [0x34; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonNetCommand::Domain));
+        // read_string uses read_bytes (length-prefixed UTF-8)
+        add_bytes(&mut payload, b"CORP.LOCAL\0");
+
+        dispatcher.dispatch(0x1122_3344, u32::from(DemonCommand::CommandNet), 55, &payload).await?;
+
+        let event = receiver.recv().await.ok_or("net domain response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Domain for this Host: CORP.LOCAL".to_owned()))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn net_domain_empty_reports_not_joined() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0x1122_3344, [0x12; AGENT_KEY_LENGTH], [0x34; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonNetCommand::Domain));
+        // Empty string: just a null terminator (read_string trims trailing \0)
+        add_bytes(&mut payload, b"\0");
+
+        dispatcher.dispatch(0x1122_3344, u32::from(DemonCommand::CommandNet), 56, &payload).await?;
+
+        let event = receiver.recv().await.ok_or("net domain empty response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("The machine does not seem to be joined to a domain".to_owned()))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn net_computer_returns_none() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0x1122_3344, [0x12; AGENT_KEY_LENGTH], [0x34; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonNetCommand::Computer));
+
+        let result = dispatcher
+            .dispatch(0x1122_3344, u32::from(DemonCommand::CommandNet), 57, &payload)
+            .await?;
+        assert!(result.is_none(), "Computer subcommand should return None");
+
+        // No event should have been broadcast
+        let recv = timeout(Duration::from_millis(50), receiver.recv()).await;
+        assert!(recv.is_err(), "no event should be broadcast for Computer subcommand");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn net_dclist_returns_none() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent =
+            sample_agent_info(0x1122_3344, [0x12; AGENT_KEY_LENGTH], [0x34; AGENT_IV_LENGTH]);
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonNetCommand::DcList));
+
+        let result = dispatcher
+            .dispatch(0x1122_3344, u32::from(DemonCommand::CommandNet), 58, &payload)
+            .await?;
+        assert!(result.is_none(), "DcList subcommand should return None");
+
+        let recv = timeout(Duration::from_millis(50), receiver.recv()).await;
+        assert!(recv.is_err(), "no event should be broadcast for DcList subcommand");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn builtin_config_and_mem_file_handlers_update_agent_state_and_broadcast()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;

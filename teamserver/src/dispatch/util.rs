@@ -88,3 +88,53 @@ pub(crate) fn windows_arch_label(value: u32) -> &'static str {
         _ => "Unknown",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn basename_empty_string() {
+        assert_eq!(basename(""), "");
+    }
+
+    #[test]
+    fn basename_bare_filename() {
+        assert_eq!(basename("cmd.exe"), "cmd.exe");
+    }
+
+    #[test]
+    fn basename_windows_backslash_path() {
+        assert_eq!(basename("C:\\Windows\\system32\\cmd.exe"), "cmd.exe");
+    }
+
+    #[test]
+    fn basename_posix_forward_slash_path() {
+        assert_eq!(basename("/usr/bin/ls"), "ls");
+    }
+
+    #[test]
+    fn basename_mixed_separators() {
+        assert_eq!(basename("C:\\path/to\\file.exe"), "file.exe");
+    }
+
+    #[test]
+    fn basename_trailing_separator() {
+        assert_eq!(basename("C:\\Windows\\"), "");
+    }
+
+    #[test]
+    fn basename_trailing_forward_slash() {
+        assert_eq!(basename("/usr/bin/"), "");
+    }
+
+    #[test]
+    fn basename_single_separator() {
+        assert_eq!(basename("\\"), "");
+    }
+
+    #[test]
+    fn basename_root_forward_slash() {
+        assert_eq!(basename("/"), "");
+    }
+}

@@ -337,3 +337,47 @@ You've hit your limit · resets 5pm (Europe/Amsterdam)
 [2026-03-18 00:19:29] [Ubuntu-C2-dev02-claude] === Arch review run 1 ===
 [2026-03-18 00:19:29] [Ubuntu-C2-dev02-claude] WARNING: git pull --rebase failed, continuing with local state
 [2026-03-18 00:19:29] [Ubuntu-C2-dev02-claude] Run log: claude_arch_20260318_001929.log
+---
+
+## Architecture Review Report — 2026-03-18
+
+### 1. Codebase Health: On Track
+
+The codebase is in excellent shape. Zero `unwrap()`/`expect()`/`panic!()`/`todo!()`/`unimplemented!()` in production code. Zero clippy warnings. Zero unsafe blocks. All 885+ tests pass. Architecture matches AGENTS.md spec exactly (Axum+Tokio, SQLite via sqlx, HCL config, thiserror in libraries, anyhow only at binary entry points, egui client, Rust 2024 edition).
+
+### 2. Security Posture: Strong
+
+- **Crypto**: AES-256-CTR with per-agent keys, monotonically advancing CTR block offsets to prevent keystream reuse. Offset zero reserved for DEMON_INIT handshake only.
+- **Auth**: Argon2id password hashing with constant-time verification. SHA3-256 on the wire (Havoc compat), Argon2 for storage. Dummy verifier prevents user enumeration via timing.
+- **Session tokens**: Constant-time comparison via `subtle::ConstantTimeEq`.
+- **Input validation**: Body size limits (30 MiB), download caps, DNS upload bounds (1000 global, 10 per-IP, 256 max chunks, 120s timeout).
+- **Prior P1 findings (unauthenticated audit DoS, DNS response hijack)**: All fixed and closed.
+
+### 3. Biggest Blindspot: SOCKS Relay Error Observability
+
+The SOCKS relay cleanup paths in `sockets.rs` silently discard errors via `let _ =` across ~8 call sites. While non-fatal in teardown paths, this makes relay failures invisible in production logs. Filed as `red-cell-c2-hctp` (P3).
+
+### 4. Issues Filed
+
+| Issue ID | Agent | Description |
+|----------|-------|-------------|
+| `red-cell-c2-hctp` | Codex (primary), Claude (partial) | SOCKS relay cleanup paths silently swallow errors without logging |
+| `red-cell-c2-ynm6` | — | Housekeeping: duplicate issue 197z/k9mp needs closure |
+
+### 5. Agent Quality
+
+**Claude** is writing the cleanest code this cycle — zero new production-code issues found. The two minor `let _ =` attributions (agent_liveness.rs, dispatch/output.rs) are in cleanup paths added alongside otherwise solid implementations.
+
+**Codex** has the SOCKS relay error-swallowing pattern (original implementation in c298cb15) and three prior open bugs about lowercase protocol labels.
+
+**Cursor** has no new findings but also no recent activity.
+
+### 6. Recommendation
+
+Dev agents should prioritize:
+1. **red-cell-c2-hctp**: Add `warn!` logging to SOCKS relay cleanup errors (quick win, improves operability)
+2. The large backlog of ~45 open test coverage tasks — these are well-filed and actionable
+3. Closing the duplicate issue pair (k9mp/197z)
+[2026-03-18 00:29:08] [Ubuntu-C2-dev02-claude] Arch review completed successfully
+[2026-03-18 00:29:08] [Ubuntu-C2-dev02-claude] ========================LOOP=========================
+[2026-03-18 00:29:08] [Ubuntu-C2-dev02-claude] Next run in 120m (at 02:29:08)

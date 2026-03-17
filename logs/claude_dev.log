@@ -32294,3 +32294,21 @@ Done. Added 11 new tests to `common/src/operator.rs`:
 [2026-03-17 06:13:13] [Ubuntu-C2-dev01-claude] Claimed red-cell-c2-yxty
 [2026-03-17 06:13:13] [Ubuntu-C2-dev01-claude] Running Claude on task red-cell-c2-yxty...
 [2026-03-17 06:18:36] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-yxty
+[2026-03-17 06:18:36] [Ubuntu-C2-dev01-claude] WIP: committing uncommitted changes for red-cell-c2-yxty
+[2026-03-17 06:18:38] [Ubuntu-C2-dev01-claude] WIP: pushed
+[2026-03-17 06:18:38] [Ubuntu-C2-dev01-claude] ========================LOOP=========================
+[2026-03-17 06:18:38] [Ubuntu-C2-dev01-claude] Next run in 5m (at 06:23:38)
+[2026-03-17 06:23:38] [Ubuntu-C2-dev01-claude] === Claude dev loop iteration 102 ===
+[2026-03-17 06:23:39] [Ubuntu-C2-dev01-claude] git pull --ff-only: ok
+[2026-03-17 06:23:39] [Ubuntu-C2-dev01-claude] br sync import: ok
+[2026-03-17 06:23:41] [Ubuntu-C2-dev01-claude] Selected task: red-cell-c2-y4fs
+[2026-03-17 06:23:46] [Ubuntu-C2-dev01-claude] Claimed red-cell-c2-y4fs
+[2026-03-17 06:23:46] [Ubuntu-C2-dev01-claude] Running Claude on task red-cell-c2-y4fs...
+Done. Added 13 unit tests to `teamserver/src/dispatch/filesystem.rs:523` covering:
+
+- `parse_file_open_header`: happy path, null-terminator stripping, empty path (exactly 8 bytes), too-short (7 bytes), empty slice
+- `parse_file_chunk`: happy path, empty chunk (exactly 4 bytes), too-short (3 bytes), empty slice  
+- `parse_file_close`: happy path, extra bytes ignored, too-short (3 bytes), empty slice
+
+All 13 pass, clippy clean, fmt clean.
+[2026-03-17 06:26:40] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-y4fs

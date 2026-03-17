@@ -544,3 +544,38 @@ Mixed quality across the batch:
 [2026-03-17 23:03:48] [Ubuntu-C2-dev02-claude] === Quality review run 10 of 10 ===
 [2026-03-17 23:03:48] [Ubuntu-C2-dev02-claude] WARNING: git pull --rebase failed, continuing with local state
 [2026-03-17 23:03:48] [Ubuntu-C2-dev02-claude] Run log: claude_quality_20260317_230348.log
+## Test Quality Review Report — Scan Run 5
+
+### 1. Files reviewed (10 of 66 total)
+| # | File | Tests |
+|---|------|-------|
+| 41 | `teamserver/src/listeners.rs` | 97 inline tests |
+| 42 | `teamserver/src/logging.rs` | 10 tests (subprocess isolation) |
+| 43 | `teamserver/src/main.rs` | 17 tests |
+| 44 | `teamserver/src/payload_builder.rs` | 91 tests |
+| 45 | `teamserver/src/plugins.rs` | ~20 tests (event hooks, lifecycle) |
+| 46 | `teamserver/src/rate_limiter.rs` | 3 tests |
+| 47 | `teamserver/src/rbac.rs` | 12 tests |
+| 48 | `teamserver/src/shutdown.rs` | 7 tests |
+| 49 | `teamserver/src/sockets.rs` | 29 tests |
+| 50 | `teamserver/src/webhook.rs` | 12 tests |
+
+### 2. Scan position
+41 → 51 (77% through codebase)
+
+### 3. Issues filed
+| ID | Description |
+|----|-------------|
+| `red-cell-c2-ie7v` | SOCKS5 `read_socks_connect_request` lacks domain (ATYP=3) happy-path test |
+| `red-cell-c2-vhn9` | `negotiate_socks5` lacks isolated happy-path unit test |
+| `red-cell-c2-7eta` | `ShutdownController::try_track_callback` vs `initiate()` race untested |
+| `red-cell-c2-4x9u` | `DemonInitRateLimiter` window rollover (re-allow after expiry) untested |
+| `red-cell-c2-zncq` | `DiscordWebhookPayload` optional field omission when None untested |
+
+### 4. Most critical gap
+**`ShutdownController::try_track_callback` vs `initiate()` race** (`red-cell-c2-7eta`, P3) — The two-phase check-after-increment pattern at `shutdown.rs:57-70` handles a real concurrency hazard. A bug here could leak callback guards, causing shutdown to hang indefinitely waiting for guards that will never drop.
+
+### 5. Overall test quality
+**Excellent.** This batch represents the most heavily-tested portion of the codebase I've seen across all scan runs. Every file has meaningful inline tests with proper assertions, descriptive names, and error path coverage. The `listeners.rs` file alone has 97 tests covering rate limiting, DNS/SMB/HTTP protocols, and configuration parsing. The `payload_builder.rs` has cache round-trip tests, toolchain validation, and compiler diagnostic parsing. The `webhook.rs` tests use real mock HTTP servers with retry logic testing. The gaps found are edge cases and missing happy-path complements to existing rejection tests — no file in this batch lacks fundamental coverage.
+[2026-03-17 23:11:01] [Ubuntu-C2-dev02-claude] Quality review completed successfully
+[2026-03-17 23:11:01] [Ubuntu-C2-dev02-claude] Reached max iterations (10). Exiting.

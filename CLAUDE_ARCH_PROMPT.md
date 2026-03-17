@@ -161,6 +161,18 @@ Look for features that are partially stubbed but silently do nothing:
 - Event bus messages emitted but never consumed (or vice versa)
 - Config fields parsed but never used
 
+### 5h — Unimplemented Functionality
+
+Look for parts of the codebase that are not yet implemented or only skeletally present:
+- `todo!()` / `unimplemented!()` macros — each one represents missing functionality
+- Empty or near-empty modules that are declared but have no real logic
+- Enum variants or match arms that are stubbed with placeholder responses
+- Listener types, command handlers, or protocol features referenced in types/config but with no working implementation
+- Functions that exist in trait definitions but whose impl blocks are trivial no-ops
+- Features described in `AGENTS.md` or config schemas that have no corresponding code yet
+
+For each, file a **task** issue (not a bug) describing what needs to be implemented and where.
+
 ---
 
 ## Step 6 — Attribute Findings to Agents

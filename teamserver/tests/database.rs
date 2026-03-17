@@ -383,6 +383,22 @@ async fn agent_repository_listener_bound_updates_fail_for_missing_agents()
 }
 
 #[tokio::test]
+async fn agent_repository_set_ctr_block_offset_accepts_zero() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let repository = database.agents();
+    let agent = sample_agent(0xC0DE_0001);
+
+    repository.create_with_listener_and_ctr_offset(&agent, "http-test", 42).await?;
+    // Reset the offset back to zero — must succeed without error.
+    repository.set_ctr_block_offset(agent.agent_id, 0).await?;
+
+    let persisted = repository.get_persisted(agent.agent_id).await?.expect("agent should exist");
+    assert_eq!(persisted.ctr_block_offset, 0);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn listener_repository_supports_crud_queries() -> Result<(), TeamserverError> {
     let database = test_database().await?;
     let repository = database.listeners();

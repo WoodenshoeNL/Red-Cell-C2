@@ -246,6 +246,36 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
+    /// GET /api/v1/nonexistent must reach the JSON not-found handler installed
+    /// by `api_routes`, not the plain empty-body fallback installed on the root
+    /// router.  The body must contain `{"error": {"code": "not_found", …}}`.
+    #[tokio::test]
+    async fn api_v1_unknown_sub_path_returns_json_not_found() {
+        let state = build_test_state().await;
+
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/nonexistent")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("body should read");
+        assert!(!body.is_empty(), "/api/v1/nonexistent must return a JSON body, not an empty 404");
+
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).expect("body should be valid JSON");
+        assert_eq!(
+            json["error"]["code"], "not_found",
+            "expected JSON error code 'not_found' from api_routes fallback"
+        );
+    }
+
     /// GET /havoc without WebSocket upgrade headers must reach the WebSocket
     /// handler and be rejected by axum's WebSocketUpgrade extractor rather than
     /// falling through to the 404 fallback.

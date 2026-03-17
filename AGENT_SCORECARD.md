@@ -38,6 +38,18 @@ Each loop run updates the running totals and appends a review entry.
 
 <!-- QA and arch loops append entries below this line -->
 
+### QA Review — 2026-03-17 22:30 — 9e082c8..47fd67c
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (dev01-sonnet) | 8 | 0 | Closed uy5v, bzw0, 1stu, zfr0, xrjk, p8dt, 8lto, 5joy. All test additions. |
+| Claude (dev02-opus) | 6 | 0 | Closed gy77, mp1s, 1va2, v85g, x81t, 2692. Tests + Service block config fix. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (175 tests, 0 failures)
+Notes: Clean review — 14 tasks closed, 0 bugs filed. All test additions plus one config fix (Service block downgrade from error to warning). Test count grew from 150 to 175. One in_progress: red-cell-c2-tz9m (AES key rotation test).
+
 ### Arch Review — 2026-03-17 15:16
 
 | Agent | Findings | Categories | Notes |

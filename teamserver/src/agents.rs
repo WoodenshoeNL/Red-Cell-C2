@@ -1665,6 +1665,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disconnect_link_subtree_cascade_marks_all_descendants_inactive()
+    -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let root = sample_agent(0x1000_0019);
+        let mid = sample_agent(0x1000_001A);
+        let leaf = sample_agent(0x1000_001B);
+
+        registry.insert(root.clone()).await?;
+        registry.insert(mid.clone()).await?;
+        registry.insert(leaf.clone()).await?;
+        registry.add_link(root.agent_id, mid.agent_id).await?;
+        registry.add_link(mid.agent_id, leaf.agent_id).await?;
+
+        let affected =
+            registry.disconnect_link(root.agent_id, mid.agent_id, "cascade test").await?;
+
+        // Both mid and leaf must appear in the affected set.
+        assert_eq!(affected, vec![mid.agent_id, leaf.agent_id]);
+
+        // mid must be marked inactive.
+        let mid_state = registry
+            .get(mid.agent_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: mid.agent_id })?;
+        assert!(!mid_state.active, "mid agent must be inactive after subtree cascade");
+        assert_eq!(mid_state.reason, "cascade test");
+
+        // leaf must also be marked inactive — the grandchild cascade path.
+        let leaf_state = registry
+            .get(leaf.agent_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: leaf.agent_id })?;
+        assert!(!leaf_state.active, "leaf agent must be inactive after subtree cascade");
+        assert_eq!(leaf_state.reason, "cascade test");
+
+        // root must remain active — it was not part of the disconnected subtree.
+        let root_state = registry
+            .get(root.agent_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: root.agent_id })?;
+        assert!(root_state.active, "root agent must remain active");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn disconnect_link_leaf_no_children_returns_single_entry() -> Result<(), TeamserverError>
+    {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let parent = sample_agent(0x1000_001C);
+        let leaf = sample_agent(0x1000_001D);
+
+        registry.insert(parent.clone()).await?;
+        registry.insert(leaf.clone()).await?;
+        registry.add_link(parent.agent_id, leaf.agent_id).await?;
+
+        let affected =
+            registry.disconnect_link(parent.agent_id, leaf.agent_id, "leaf removed").await?;
+
+        assert_eq!(affected.len(), 1, "only the leaf itself should be affected");
+        assert_eq!(affected[0], leaf.agent_id);
+
+        let leaf_state = registry
+            .get(leaf.agent_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: leaf.agent_id })?;
+        assert!(!leaf_state.active, "leaf must be marked inactive");
+        assert_eq!(leaf_state.reason, "leaf removed");
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn disconnect_link_returns_empty_for_nonexistent_relationship()
     -> Result<(), TeamserverError> {
         let database = test_database().await?;

@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 206 | 188 | 31 |
+| Tasks closed | 206 | 192 | 31 |
 | Bugs filed against | 38 | 34 | 9 |
 | Bug rate (bugs/task) | 0.18 | 0.18 | 0.29 |
 | Quality score | 82% | 82% | 71% |
@@ -1944,3 +1944,14 @@ Notes: Review window contained two Codex test-task closures and one fresh Codex 
 
 Build: `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓
 Notes: Review range extended twice mid-run because `origin/main` advanced from `91ffad2` to `dda4137` and then to `3b26fb6`; both added Codex commits were reviewed before checkpointing. `br list --status=in_progress` shows only `red-cell-c2-932b`, which matches a fresh Codex claim in-range and does not appear stale. Updated cumulative totals: Claude 206 tasks / 38 bugs / 18% bug rate / 82% quality; Codex 188 tasks / 34 bugs / 18% bug rate / 82% quality.
+
+### QA Review — 2026-03-17 16:39 — 3b26fb6..4d43128
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No activity. |
+| Codex | 4 | 0 | Closed `red-cell-c2-932b`, `red-cell-c2-qubw`, `red-cell-c2-8nay`, and `red-cell-c2-uwuq`; also claimed `red-cell-c2-1vji`. The reviewed source diff is test-only and passed all quality gates. `red-cell-c2-hpoe` was also closed in beads in this window, but without a dedicated `chore: close` commit. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check --workspace` ✓, `cargo clippy --workspace -- -D warnings` ✓, `cargo test --workspace` ✓
+Notes: No new bugs filed. `br list --status=in_progress` returned empty during the review, and `br ready` succeeded after transient SQLite lock contention from concurrent beads activity. Updated cumulative totals: Claude 206 tasks / 38 bugs / 18% bug rate / 82% quality; Codex 192 tasks / 34 bugs / 18% bug rate / 82% quality.

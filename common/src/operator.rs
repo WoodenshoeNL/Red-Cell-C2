@@ -1440,4 +1440,301 @@ mod tests {
 
         assert!(error.to_string().contains("unsupported operator message"));
     }
+
+    // ── numeric_code! macro round-trip tests ────────────────────────────────
+
+    /// Every variant of every numeric_code! enum must satisfy:
+    ///   as_u32() returns the declared literal, and
+    ///   from_u32(as_u32(v)) == Some(v)
+    #[test]
+    fn event_code_as_u32_and_round_trip() {
+        let cases = [
+            (EventCode::InitConnection, 0x1_u32),
+            (EventCode::Listener, 0x2),
+            (EventCode::Credentials, 0x3),
+            (EventCode::Chat, 0x4),
+            (EventCode::Gate, 0x5),
+            (EventCode::HostFile, 0x6),
+            (EventCode::Session, 0x7),
+            (EventCode::Service, 0x9),
+            (EventCode::Teamserver, 0x10),
+        ];
+        for (variant, expected) in cases {
+            assert_eq!(variant.as_u32(), expected, "EventCode::{variant:?} wire value");
+            assert_eq!(EventCode::from_u32(expected), Some(variant));
+        }
+    }
+
+    #[test]
+    fn init_connection_code_as_u32_and_round_trip() {
+        let cases = [
+            (InitConnectionCode::Success, 0x1_u32),
+            (InitConnectionCode::Error, 0x2),
+            (InitConnectionCode::Login, 0x3),
+            (InitConnectionCode::InitInfo, 0x4),
+            (InitConnectionCode::Profile, 0x5),
+        ];
+        for (variant, expected) in cases {
+            assert_eq!(variant.as_u32(), expected, "InitConnectionCode::{variant:?} wire value");
+            assert_eq!(InitConnectionCode::from_u32(expected), Some(variant));
+        }
+    }
+
+    #[test]
+    fn listener_code_as_u32_and_round_trip() {
+        let cases = [
+            (ListenerCode::New, 0x1_u32),
+            (ListenerCode::Edit, 0x2),
+            (ListenerCode::Remove, 0x3),
+            (ListenerCode::Mark, 0x4),
+            (ListenerCode::Error, 0x5),
+        ];
+        for (variant, expected) in cases {
+            assert_eq!(variant.as_u32(), expected, "ListenerCode::{variant:?} wire value");
+            assert_eq!(ListenerCode::from_u32(expected), Some(variant));
+        }
+    }
+
+    #[test]
+    fn credentials_code_as_u32_and_round_trip() {
+        let cases = [
+            (CredentialsCode::Add, 0x1_u32),
+            (CredentialsCode::Edit, 0x2),
+            (CredentialsCode::Remove, 0x3),
+        ];
+        for (variant, expected) in cases {
+            assert_eq!(variant.as_u32(), expected, "CredentialsCode::{variant:?} wire value");
+            assert_eq!(CredentialsCode::from_u32(expected), Some(variant));
+        }
+    }
+
+    #[test]
+    fn chat_code_as_u32_and_round_trip() {
+        let cases = [
+            (ChatCode::Message, 0x1_u32),
+            (ChatCode::Listener, 0x2),
+            (ChatCode::Agent, 0x3),
+            (ChatCode::UserConnected, 0x4),
+            (ChatCode::UserDisconnected, 0x5),
+        ];
+        for (variant, expected) in cases {
+            assert_eq!(variant.as_u32(), expected, "ChatCode::{variant:?} wire value");
+            assert_eq!(ChatCode::from_u32(expected), Some(variant));
+        }
+    }
+
+    #[test]
+    fn gate_code_as_u32_and_round_trip() {
+        let cases =
+            [(GateCode::Staged, 0x1_u32), (GateCode::BuildPayload, 0x2), (GateCode::MsOffice, 0x3)];
+        for (variant, expected) in cases {
+            assert_eq!(variant.as_u32(), expected, "GateCode::{variant:?} wire value");
+            assert_eq!(GateCode::from_u32(expected), Some(variant));
+        }
+    }
+
+    #[test]
+    fn host_file_code_as_u32_and_round_trip() {
+        let cases = [(HostFileCode::Add, 0x1_u32), (HostFileCode::Remove, 0x2)];
+        for (variant, expected) in cases {
+            assert_eq!(variant.as_u32(), expected, "HostFileCode::{variant:?} wire value");
+            assert_eq!(HostFileCode::from_u32(expected), Some(variant));
+        }
+    }
+
+    #[test]
+    fn session_code_as_u32_and_round_trip() {
+        let cases = [
+            (SessionCode::AgentNew, 0x1_u32),
+            (SessionCode::AgentRemove, 0x2),
+            (SessionCode::AgentTask, 0x3),
+            (SessionCode::AgentResponse, 0x4),
+            (SessionCode::AgentUpdate, 0x5),
+        ];
+        for (variant, expected) in cases {
+            assert_eq!(variant.as_u32(), expected, "SessionCode::{variant:?} wire value");
+            assert_eq!(SessionCode::from_u32(expected), Some(variant));
+        }
+    }
+
+    #[test]
+    fn service_code_as_u32_and_round_trip() {
+        let cases = [(ServiceCode::RegisterAgent, 0x1_u32), (ServiceCode::RegisterListener, 0x2)];
+        for (variant, expected) in cases {
+            assert_eq!(variant.as_u32(), expected, "ServiceCode::{variant:?} wire value");
+            assert_eq!(ServiceCode::from_u32(expected), Some(variant));
+        }
+    }
+
+    #[test]
+    fn teamserver_code_as_u32_and_round_trip() {
+        let cases = [(TeamserverCode::Log, 0x1_u32), (TeamserverCode::Profile, 0x2)];
+        for (variant, expected) in cases {
+            assert_eq!(variant.as_u32(), expected, "TeamserverCode::{variant:?} wire value");
+            assert_eq!(TeamserverCode::from_u32(expected), Some(variant));
+        }
+    }
+
+    #[test]
+    fn misc_code_as_u32_and_round_trip() {
+        assert_eq!(MiscCode::MessageBox.as_u32(), 0x1_u32);
+        assert_eq!(MiscCode::from_u32(0x1), Some(MiscCode::MessageBox));
+    }
+
+    // ── from_u32 unknown-value rejection ────────────────────────────────────
+
+    /// from_u32 must return None (not panic) for values that have no matching variant.
+    #[test]
+    fn from_u32_returns_none_for_unknown_values() {
+        assert_eq!(EventCode::from_u32(0), None);
+        assert_eq!(EventCode::from_u32(u32::MAX), None);
+        assert_eq!(InitConnectionCode::from_u32(0), None);
+        assert_eq!(InitConnectionCode::from_u32(u32::MAX), None);
+        assert_eq!(ListenerCode::from_u32(0), None);
+        assert_eq!(ListenerCode::from_u32(u32::MAX), None);
+        assert_eq!(CredentialsCode::from_u32(0), None);
+        assert_eq!(CredentialsCode::from_u32(u32::MAX), None);
+        assert_eq!(ChatCode::from_u32(0), None);
+        assert_eq!(ChatCode::from_u32(u32::MAX), None);
+        assert_eq!(GateCode::from_u32(0), None);
+        assert_eq!(GateCode::from_u32(u32::MAX), None);
+        assert_eq!(HostFileCode::from_u32(0), None);
+        assert_eq!(HostFileCode::from_u32(u32::MAX), None);
+        assert_eq!(SessionCode::from_u32(0), None);
+        assert_eq!(SessionCode::from_u32(u32::MAX), None);
+        assert_eq!(ServiceCode::from_u32(0), None);
+        assert_eq!(ServiceCode::from_u32(u32::MAX), None);
+        assert_eq!(TeamserverCode::from_u32(0), None);
+        assert_eq!(TeamserverCode::from_u32(u32::MAX), None);
+        assert_eq!(MiscCode::from_u32(0), None);
+        assert_eq!(MiscCode::from_u32(u32::MAX), None);
+    }
+
+    // ── JSON wire-value assertions ───────────────────────────────────────────
+
+    /// Serializing a numeric_code! enum via serde_json must produce the correct
+    /// integer literal on the wire, and deserializing that integer must recover
+    /// the original variant.
+    #[test]
+    fn event_code_json_wire_values() -> Result<(), Box<dyn std::error::Error>> {
+        let cases = [
+            (EventCode::InitConnection, json!(1_u32)),
+            (EventCode::Listener, json!(2_u32)),
+            (EventCode::Credentials, json!(3_u32)),
+            (EventCode::Chat, json!(4_u32)),
+            (EventCode::Gate, json!(5_u32)),
+            (EventCode::HostFile, json!(6_u32)),
+            (EventCode::Session, json!(7_u32)),
+            (EventCode::Service, json!(9_u32)),
+            (EventCode::Teamserver, json!(16_u32)),
+        ];
+        for (variant, expected_wire) in cases {
+            let serialized = serde_json::to_value(variant)?;
+            assert_eq!(serialized, expected_wire, "EventCode::{variant:?} JSON wire value");
+            let deserialized: EventCode = serde_json::from_value(expected_wire)?;
+            assert_eq!(deserialized, variant);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sub_event_codes_json_wire_values() -> Result<(), Box<dyn std::error::Error>> {
+        // Spot-check one variant per sub-code enum to verify the serializer
+        // emits the correct integer rather than a string or object.
+        assert_eq!(serde_json::to_value(InitConnectionCode::Login)?, json!(3_u32));
+        assert_eq!(serde_json::to_value(ListenerCode::Mark)?, json!(4_u32));
+        assert_eq!(serde_json::to_value(CredentialsCode::Edit)?, json!(2_u32));
+        assert_eq!(serde_json::to_value(ChatCode::UserDisconnected)?, json!(5_u32));
+        assert_eq!(serde_json::to_value(GateCode::BuildPayload)?, json!(2_u32));
+        assert_eq!(serde_json::to_value(HostFileCode::Remove)?, json!(2_u32));
+        assert_eq!(serde_json::to_value(SessionCode::AgentResponse)?, json!(4_u32));
+        assert_eq!(serde_json::to_value(ServiceCode::RegisterListener)?, json!(2_u32));
+        assert_eq!(serde_json::to_value(TeamserverCode::Profile)?, json!(2_u32));
+        assert_eq!(serde_json::to_value(MiscCode::MessageBox)?, json!(1_u32));
+        Ok(())
+    }
+
+    /// A full OperatorMessage round-trip must preserve the EventCode numeric
+    /// value in the Head.Event JSON field.
+    #[test]
+    fn operator_message_event_code_wire_value_survives_round_trip()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cases: &[(OperatorMessage, u32)] = &[
+            (
+                OperatorMessage::InitConnectionSuccess(Message {
+                    head: head(EventCode::InitConnection),
+                    info: MessageInfo { message: "ok".to_string() },
+                }),
+                1,
+            ),
+            (
+                OperatorMessage::ListenerNew(Message {
+                    head: head(EventCode::Listener),
+                    info: ListenerInfo::default(),
+                }),
+                2,
+            ),
+            (
+                OperatorMessage::CredentialsAdd(Message {
+                    head: head(EventCode::Credentials),
+                    info: FlatInfo::default(),
+                }),
+                3,
+            ),
+            (
+                OperatorMessage::ChatMessage(Message {
+                    head: head(EventCode::Chat),
+                    info: FlatInfo::default(),
+                }),
+                4,
+            ),
+            (
+                OperatorMessage::BuildPayloadStaged(Message {
+                    head: head(EventCode::Gate),
+                    info: FlatInfo::default(),
+                }),
+                5,
+            ),
+            (
+                OperatorMessage::HostFileAdd(Message {
+                    head: head(EventCode::HostFile),
+                    info: FlatInfo::default(),
+                }),
+                6,
+            ),
+            (
+                OperatorMessage::AgentTask(Message {
+                    head: head(EventCode::Session),
+                    info: AgentTaskInfo::default(),
+                }),
+                7,
+            ),
+            (
+                OperatorMessage::ServiceAgentRegister(Message {
+                    head: head(EventCode::Service),
+                    info: ServiceAgentRegistrationInfo::default(),
+                }),
+                9,
+            ),
+            (
+                OperatorMessage::TeamserverLog(Message {
+                    head: head(EventCode::Teamserver),
+                    info: TeamserverLogInfo::default(),
+                }),
+                16,
+            ),
+        ];
+
+        for (message, expected_event_wire) in cases {
+            let encoded = serde_json::to_value(message)?;
+            assert_eq!(
+                encoded["Head"]["Event"],
+                json!(*expected_event_wire),
+                "event code on wire for {message:?}"
+            );
+            let decoded: OperatorMessage = serde_json::from_value(encoded)?;
+            assert_eq!(&decoded, message);
+        }
+        Ok(())
+    }
 }

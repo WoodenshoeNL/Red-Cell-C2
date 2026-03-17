@@ -32127,3 +32127,40 @@ Done. Created `teamserver/tests/assembly_dispatch.rs` with 4 integration tests:
 Each test boots a full teamserver + HTTP listener, registers an agent via DEMON_INIT, sends a correctly-encoded AES-CTR callback, and asserts the operator WebSocket receives the expected `AgentResponse` event.
 [2026-03-17 04:23:14] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-t4fy
 [2026-03-17 04:34:47] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-ldu0
+[2026-03-17 04:34:47] [Ubuntu-C2-dev01-claude] WIP: committing uncommitted changes for red-cell-c2-ldu0
+[2026-03-17 04:34:49] [Ubuntu-C2-dev01-claude] WIP: pushed
+[2026-03-17 04:34:49] [Ubuntu-C2-dev01-claude] ========================LOOP=========================
+[2026-03-17 04:34:49] [Ubuntu-C2-dev01-claude] Next run in 5m (at 04:39:49)
+[2026-03-17 04:39:49] [Ubuntu-C2-dev01-claude] === Claude dev loop iteration 93 ===
+[2026-03-17 04:39:51] [Ubuntu-C2-dev01-claude] git pull --ff-only: ok
+[2026-03-17 04:39:51] [Ubuntu-C2-dev01-claude] br sync import: ok
+[2026-03-17 04:39:52] [Ubuntu-C2-dev01-claude] SAFEGUARD: red-cell-c2-3b4x stuck in_progress for >7200s — resetting to open
+[2026-03-17 04:39:53] [Ubuntu-C2-dev01-claude] SAFEGUARD: red-cell-c2-3b4x reset to open
+[2026-03-17 04:39:53] [Ubuntu-C2-dev01-claude] SAFEGUARD: red-cell-c2-vidy stuck in_progress for >7200s — resetting to open
+[2026-03-17 04:39:53] [Ubuntu-C2-dev01-claude] SAFEGUARD: red-cell-c2-vidy reset to open
+[2026-03-17 04:39:53] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-37rn
+[2026-03-17 04:39:53] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-rqen
+[2026-03-17 04:39:53] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-doop
+[2026-03-17 04:39:53] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-5b4v
+[2026-03-17 04:39:53] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-xypk
+[2026-03-17 04:39:53] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-yxty
+[2026-03-17 04:39:53] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-y4fs
+[2026-03-17 04:39:53] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-0eb7
+[2026-03-17 04:39:53] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-upwv
+[2026-03-17 04:39:53] [Ubuntu-C2-dev01-claude] Skipping candidate already in_progress in JSONL: red-cell-c2-8gri
+[2026-03-17 04:39:53] [Ubuntu-C2-dev01-claude] Selected task: red-cell-c2-m47p
+[2026-03-17 04:39:57] [Ubuntu-C2-dev01-claude] Claimed red-cell-c2-m47p
+[2026-03-17 04:39:58] [Ubuntu-C2-dev01-claude] Running Claude on task red-cell-c2-m47p...
+Done. Here's what was implemented:
+
+**`teamserver/tests/screenshot_dispatch.rs`** (new file, 3 tests):
+- `screenshot_callback_stores_loot_and_broadcasts_events` — valid PNG bytes → DB loot record with `kind="screenshot"` + `loot-new` broadcast + `MiscType="screenshot"` broadcast
+- `screenshot_callback_failure_broadcasts_error_no_loot` — `success=0` → error broadcast, no loot stored
+- `screenshot_callback_empty_bytes_broadcasts_error_no_loot` — `success=1` with 0 bytes → error broadcast, no loot stored, no panic
+
+**`teamserver/tests/socks5_relay.rs`** (extended, 2 new tests):
+- `socket_connect_callback_routes_to_relay_finish_connect` — HTTP `CommandSocket/Connect` callback (success=1) routes through dispatch to `relay.finish_connect`, SOCKS5 client receives success reply
+- `socket_close_callback_routes_to_relay_close_client` — HTTP `CommandSocket/Close` callback routes through dispatch to `relay.close_client`, SOCKS5 client receives EOF
+
+All 5 new tests pass alongside the full workspace suite.
+[2026-03-17 04:50:04] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-m47p

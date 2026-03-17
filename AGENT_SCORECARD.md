@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 198 | 181 | 31 |
+| Tasks closed | 200 | 181 | 31 |
 | Bugs filed against | 37 | 32 | 9 |
 | Bug rate (bugs/task) | 0.19 | 0.18 | 0.29 |
-| Quality score | 81% | 82% | 71% |
+| Quality score | 82% | 82% | 71% |
 
 ## Violation Breakdown
 
@@ -1823,3 +1823,14 @@ Notes: Test quality is high — proper async test structure, credential persiste
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (all tests pass, 0 failures)
 Notes: No new commits since the 08:45 QA run. Codebase fully reviewed. 20 unblocked tasks remain in `br ready`. Claude quality score holds at 81% (198 tasks, 37 bugs filed).
+
+### QA Review — 2026-03-17 10:45 — a1de98b..c36c1f4
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed red-cell-c2-rqen (2 subtree cascade tests for disconnect_link in agents.rs: verifies active=false on mid and leaf, root stays active, affected vec ordering) and red-cell-c2-doop (1 edge-case test for set_ctr_block_offset with offset=0 in database.rs). Ghost wip:interrupted commits on both (38121e1, 52cdd7a, no code) consistent with zu4h pattern. red-cell-c2-5b4v freshly claimed (c36c1f4), not yet delivered. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (all tests pass, 0 failures)
+Notes: Test quality is high — cascade tests add unique value by asserting `.active == false` on all subtree nodes (not just `.reason`), which the pre-existing `disconnect_link_removes_existing_parent_child_relationship` test did not verify. Zero-offset CTR test is a clean boundary-condition check. No production code changed. zu4h (claim/interrupt loop) and red-cell-c2-3ptb (listener config boilerplate) remain open.

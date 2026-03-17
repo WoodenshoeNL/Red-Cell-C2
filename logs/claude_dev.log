@@ -32220,3 +32220,25 @@ Done. Added 5 integration tests to `teamserver/src/dispatch/transfer.rs`:
 5. **`beacon_output_callback_persists_credential_loot`** — output containing "password: secret123" triggers the credential extractor; asserts the `AgentResponse` event and that a `credential` loot record is persisted in the in-memory database
 [2026-03-17 05:19:40] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-zpn2
 [2026-03-17 05:26:20] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-37rn
+[2026-03-17 05:26:21] [Ubuntu-C2-dev01-claude] WIP: committing uncommitted changes for red-cell-c2-37rn
+[2026-03-17 05:26:23] [Ubuntu-C2-dev01-claude] WIP: pushed
+[2026-03-17 05:26:23] [Ubuntu-C2-dev01-claude] ========================LOOP=========================
+[2026-03-17 05:26:23] [Ubuntu-C2-dev01-claude] Next run in 5m (at 05:31:23)
+[2026-03-17 05:31:23] [Ubuntu-C2-dev01-claude] === Claude dev loop iteration 97 ===
+[2026-03-17 05:31:24] [Ubuntu-C2-dev01-claude] git pull --ff-only: ok
+[2026-03-17 05:31:24] [Ubuntu-C2-dev01-claude] br sync import: ok
+[2026-03-17 05:31:26] [Ubuntu-C2-dev01-claude] SAFEGUARD: red-cell-c2-xypk stuck in_progress for >7200s — resetting to open
+[2026-03-17 05:31:26] [Ubuntu-C2-dev01-claude] SAFEGUARD: red-cell-c2-xypk reset to open
+[2026-03-17 05:31:26] [Ubuntu-C2-dev01-claude] SAFEGUARD: red-cell-c2-5b4v stuck in_progress for >7200s — resetting to open
+[2026-03-17 05:31:27] [Ubuntu-C2-dev01-claude] SAFEGUARD: red-cell-c2-5b4v reset to open
+[2026-03-17 05:31:27] [Ubuntu-C2-dev01-claude] Selected task: red-cell-c2-rqen
+[2026-03-17 05:31:31] [Ubuntu-C2-dev01-claude] Claimed red-cell-c2-rqen
+[2026-03-17 05:31:32] [Ubuntu-C2-dev01-claude] Running Claude on task red-cell-c2-rqen...
+Done. Added two new tests to `teamserver/src/agents.rs`:
+
+1. **`disconnect_link_subtree_cascade_marks_all_descendants_inactive`** — 3-node root→mid→leaf topology; verifies `active == false` and correct `reason` for both mid and leaf after `disconnect_link(root, mid)`, and that root remains active.
+
+2. **`disconnect_link_leaf_no_children_returns_single_entry`** — verifies a leaf with no children produces a `Vec` of length 1 and the leaf is marked inactive.
+
+The gap vs the existing tests: `disconnect_link_removes_existing_parent_child_relationship` already covered the 3-node topology but only checked `reason`, not `active == false`. The new test explicitly asserts the `active` flag for the full subtree cascade path.
+[2026-03-17 05:36:39] [Ubuntu-C2-dev01-claude] Claude completed task red-cell-c2-rqen

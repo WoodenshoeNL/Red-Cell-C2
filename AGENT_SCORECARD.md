@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 196 | 181 | 31 |
+| Tasks closed | 198 | 181 | 31 |
 | Bugs filed against | 37 | 32 | 9 |
 | Bug rate (bugs/task) | 0.19 | 0.18 | 0.29 |
 | Quality score | 81% | 82% | 71% |
@@ -1801,3 +1801,14 @@ Notes: Test quality is high — Result-based pattern throughout, full HTTP→lis
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (708+ tests, 0 failures)
 Notes: Transfer format unit tests are concise and correct — pure value assertions, no Result overhead needed. No production code was changed this period, only tests added. red-cell-c2-3ptb and red-cell-c2-zu4h remain open. Checkpoint inconsistency (prior QA set checkpoint to b6c71e6 after reviewing b6c71e6..b1da79d) corrected in this run — checkpoint now set to 0804de1.
+
+### QA Review — 2026-03-17 08:45 — e319b98..8697e39
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed red-cell-c2-zpn2 (P3: integration tests for transfer callback handlers). 5 new async integration tests in transfer.rs covering handle_transfer_callback (List subcommand + truncated payload), handle_mem_file_callback, handle_package_dropped_callback, and handle_beacon_output_callback with credential persistence. Result-based error propagation throughout. Ghost wip:interrupted commit (8697e39, log-only) consistent with zu4h pattern. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (all tests pass, 0 failures)
+Notes: Test quality is high — proper async test structure, credential persistence validated end-to-end with in-memory DB + FK-satisfying agent registration, correct error variant assertion (CommandDispatchError::InvalidCallbackPayload) for truncated payload path. No production code changed this period. red-cell-c2-37rn also closed this period: agent correctly identified pre-existing tests (1720f08) and closed the issue; red-cell-c2-xajz (tracking the oversight) closed by QA as resolved. QA checkpoint covers e319b98..a8f19be including both the zpn2 test work and the 37rn housekeeping closure.

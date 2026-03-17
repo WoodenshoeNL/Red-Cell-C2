@@ -198,6 +198,7 @@ Keep a mental tally per agent: how many findings, and of what category.
 For each real finding, create a beads issue. **Always include the responsible agent** so the
 scorecard can be updated accurately.
 
+For **bugs and quality issues**:
 ```bash
 br create \
   --title="<short, specific title>" \
@@ -206,6 +207,15 @@ br create \
 <file:line — what is wrong, why it matters, what the fix should be>" \
   --type=bug \
   --priority=<1 for security/crash, 2 for correctness, 3 for quality, 4 for polish>
+```
+
+For **unimplemented functionality** (from 5h):
+```bash
+br create \
+  --title="impl: <what needs to be implemented>" \
+  --description="<file:line — what is missing, what it should do, any relevant context from AGENTS.md or types>" \
+  --type=task \
+  --priority=<2 for core functionality, 3 for secondary features, 4 for nice-to-haves>
 ```
 
 If the finding blocks existing work:

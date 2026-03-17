@@ -4373,6 +4373,57 @@ mod tests {
             .expect("request")
     }
 
+    // ── GET /listeners/{name} ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_listener_returns_summary_for_existing_listener() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let create_response = app
+            .clone()
+            .oneshot(create_listener_request(&smb_listener_json("pivot", "pipe-a"), "secret-admin"))
+            .await
+            .expect("response");
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/listeners/pivot")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["name"], "pivot");
+        assert_eq!(body["config"]["protocol"], "smb");
+        assert_eq!(body["state"]["status"], "Created");
+    }
+
+    #[tokio::test]
+    async fn get_listener_returns_not_found_for_missing_listener() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/listeners/nonexistent")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "listener_not_found");
+    }
+
     // ── PUT /listeners/{name} (update) ──────────────────────────────────
 
     #[tokio::test]
@@ -4433,7 +4484,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = read_json(response).await;
-        assert_eq!(body["error"]["code"], "listener_error");
+        assert_eq!(body["error"]["code"], "listener_invalid_config");
     }
 
     #[tokio::test]
@@ -4785,7 +4836,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::CONFLICT);
         let body = read_json(response).await;
-        assert_eq!(body["error"]["code"], "listener_error");
+        assert_eq!(body["error"]["code"], "listener_already_running");
     }
 
     // ── PUT /listeners/{name}/stop ──────────────────────────────────────
@@ -4881,7 +4932,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::CONFLICT);
         let body = read_json(response).await;
-        assert_eq!(body["error"]["code"], "listener_error");
+        assert_eq!(body["error"]["code"], "listener_not_running");
     }
 
     // ── POST /listeners/{name}/mark ─────────────────────────────────────
@@ -5025,7 +5076,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = read_json(response).await;
-        assert_eq!(body["error"]["code"], "listener_error");
+        assert_eq!(body["error"]["code"], "listener_unsupported_mark");
     }
 
     #[tokio::test]

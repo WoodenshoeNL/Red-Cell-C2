@@ -408,18 +408,20 @@ pub enum ListenerManagerError {
 
 impl IntoResponse for ListenerManagerError {
     fn into_response(self) -> Response {
-        let status = match self {
-            Self::DuplicateListener { .. } => StatusCode::CONFLICT,
-            Self::ListenerNotFound { .. } => StatusCode::NOT_FOUND,
-            Self::ListenerAlreadyRunning { .. } | Self::ListenerNotRunning { .. } => {
-                StatusCode::CONFLICT
+        let (status, code) = match &self {
+            Self::DuplicateListener { .. } => (StatusCode::CONFLICT, "listener_already_exists"),
+            Self::ListenerNotFound { .. } => (StatusCode::NOT_FOUND, "listener_not_found"),
+            Self::ListenerAlreadyRunning { .. } => {
+                (StatusCode::CONFLICT, "listener_already_running")
             }
-            Self::InvalidConfig { .. } | Self::UnsupportedMark { .. } => StatusCode::BAD_REQUEST,
-            Self::StartFailed { .. } => StatusCode::UNPROCESSABLE_ENTITY,
-            Self::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::ListenerNotRunning { .. } => (StatusCode::CONFLICT, "listener_not_running"),
+            Self::InvalidConfig { .. } => (StatusCode::BAD_REQUEST, "listener_invalid_config"),
+            Self::UnsupportedMark { .. } => (StatusCode::BAD_REQUEST, "listener_unsupported_mark"),
+            Self::StartFailed { .. } => (StatusCode::UNPROCESSABLE_ENTITY, "listener_start_failed"),
+            Self::Database(_) => (StatusCode::INTERNAL_SERVER_ERROR, "listener_error"),
         };
 
-        json_error_response(status, "listener_error", self.to_string())
+        json_error_response(status, code, self.to_string())
     }
 }
 

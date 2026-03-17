@@ -410,7 +410,250 @@ pub(super) fn byte_count(size: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{byte_count, transfer_progress_text, transfer_state_name};
+    use super::super::{CommandDispatchError, DownloadState, DownloadTracker};
+    use super::{
+        byte_count, handle_beacon_output_callback, handle_mem_file_callback,
+        handle_package_dropped_callback, handle_transfer_callback, transfer_progress_text,
+        transfer_state_name,
+    };
+    use crate::{AgentRegistry, Database, EventBus};
+    use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
+    use red_cell_common::demon::{DemonCallback, DemonTransferCommand};
+    use red_cell_common::operator::OperatorMessage;
+    use zeroize::Zeroizing;
+
+    fn le32(v: u32) -> [u8; 4] {
+        v.to_le_bytes()
+    }
+
+    fn length_prefixed(data: &[u8]) -> Vec<u8> {
+        let mut out = u32::try_from(data.len()).unwrap_or_default().to_le_bytes().to_vec();
+        out.extend_from_slice(data);
+        out
+    }
+
+    // ------------------------------------------------------------------
+    // handle_transfer_callback — List subcommand
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn transfer_callback_list_shows_active_download() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let downloads = DownloadTracker::new(1024 * 1024);
+        let agent_id: u32 = 0x1234_5678;
+        let file_id: u32 = 0xABCD_EF01;
+        let request_id: u32 = 42;
+
+        downloads
+            .start(
+                agent_id,
+                file_id,
+                DownloadState {
+                    request_id,
+                    remote_path: r"C:\loot\secrets.txt".to_owned(),
+                    expected_size: 1000,
+                    data: Vec::new(),
+                    started_at: "2026-03-17T00:00:00Z".to_owned(),
+                },
+            )
+            .await;
+
+        // Payload: List subcommand + file_id + progress(500 of 1000 = 50%) + state(Running=1)
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&le32(u32::from(DemonTransferCommand::List)));
+        payload.extend_from_slice(&le32(file_id));
+        payload.extend_from_slice(&le32(500));
+        payload.extend_from_slice(&le32(1));
+
+        let result =
+            handle_transfer_callback(&events, &downloads, agent_id, request_id, &payload).await?;
+
+        assert_eq!(result, None, "transfer List handler must not produce a reply packet");
+
+        let event = receiver.recv().await.ok_or("expected AgentResponse event after List")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            return Err("expected AgentResponse event".into());
+        };
+        assert!(
+            message.info.output.contains("secrets.txt"),
+            "List output should contain the file name; got: {}",
+            message.info.output
+        );
+        assert!(
+            message.info.output.contains("50.00%"),
+            "List output should show 50.00%% progress; got: {}",
+            message.info.output
+        );
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // handle_transfer_callback — truncated payload
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn transfer_callback_truncated_returns_error() {
+        let events = EventBus::default();
+        let downloads = DownloadTracker::new(1024 * 1024);
+
+        let result = handle_transfer_callback(&events, &downloads, 0x1111_1111, 1, &[]).await;
+
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "empty payload must yield InvalidCallbackPayload; got: {result:?}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // handle_mem_file_callback — valid payload
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn mem_file_callback_broadcasts_response_event() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let agent_id: u32 = 0xDEAD_BEEF;
+        let request_id: u32 = 7;
+
+        // Payload: mem_file_id(0x99) + success(1 = true)
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&le32(0x0000_0099));
+        payload.extend_from_slice(&le32(1));
+
+        let result = handle_mem_file_callback(&events, agent_id, request_id, &payload).await?;
+
+        assert_eq!(result, None, "mem-file handler must not produce a reply packet");
+
+        let event =
+            receiver.recv().await.ok_or("expected AgentResponse event after mem-file callback")?;
+        assert!(
+            matches!(event, OperatorMessage::AgentResponse(_)),
+            "event should be AgentResponse; got: {event:?}"
+        );
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // handle_package_dropped_callback — valid payload
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn package_dropped_callback_broadcasts_error_event()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let agent_id: u32 = 0xAAAA_BBBB;
+        let request_id: u32 = 3;
+
+        // Payload: package_length(8192) + max_length(4096)
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&le32(8192));
+        payload.extend_from_slice(&le32(4096));
+
+        let result =
+            handle_package_dropped_callback(&events, agent_id, request_id, &payload).await?;
+
+        assert_eq!(result, None, "package-dropped handler must not produce a reply packet");
+
+        let event = receiver
+            .recv()
+            .await
+            .ok_or("expected AgentResponse event after package-dropped callback")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            return Err("expected AgentResponse event".into());
+        };
+        let msg_text = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            msg_text.contains("8192") && msg_text.contains("4096"),
+            "error message should reference both sizes; got: {msg_text}"
+        );
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // handle_beacon_output_callback — credential line triggers persistence
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn beacon_output_callback_persists_credential_loot()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let downloads = DownloadTracker::new(1024 * 1024);
+        let agent_id: u32 = 0xCAFE_BABE;
+        let request_id: u32 = 99;
+
+        // Register the agent so agent_responses FK constraint is satisfied.
+        let key = [0x11_u8; AGENT_KEY_LENGTH];
+        let iv = [0x22_u8; AGENT_IV_LENGTH];
+        registry
+            .insert(red_cell_common::AgentRecord {
+                agent_id,
+                active: true,
+                reason: String::new(),
+                note: String::new(),
+                encryption: red_cell_common::AgentEncryptionInfo {
+                    aes_key: Zeroizing::new(key.to_vec()),
+                    aes_iv: Zeroizing::new(iv.to_vec()),
+                },
+                hostname: "test-host".to_owned(),
+                username: "test-user".to_owned(),
+                domain_name: "test".to_owned(),
+                external_ip: "1.2.3.4".to_owned(),
+                internal_ip: "10.0.0.1".to_owned(),
+                process_name: "cmd.exe".to_owned(),
+                process_path: "C:\\cmd.exe".to_owned(),
+                base_address: 0x1000,
+                process_pid: 100,
+                process_tid: 101,
+                process_ppid: 4,
+                process_arch: "x64".to_owned(),
+                elevated: false,
+                os_version: "Windows 10".to_owned(),
+                os_build: 19045,
+                os_arch: "x64".to_owned(),
+                sleep_delay: 5,
+                sleep_jitter: 0,
+                kill_date: None,
+                working_hours: None,
+                first_call_in: "2026-03-17T00:00:00Z".to_owned(),
+                last_call_in: "2026-03-17T00:00:00Z".to_owned(),
+            })
+            .await?;
+
+        // Output text containing a recognisable credential line.
+        let output_text = "password: secret123";
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&le32(u32::from(DemonCallback::Output)));
+        payload.extend_from_slice(&length_prefixed(output_text.as_bytes()));
+
+        let result = handle_beacon_output_callback(
+            &registry, &database, &events, &downloads, None, agent_id, request_id, &payload,
+        )
+        .await?;
+
+        assert_eq!(result, None, "beacon-output handler must not produce a reply packet");
+
+        // First event: AgentResponse carrying the captured output.
+        let first_event = receiver.recv().await.ok_or("expected AgentResponse event for output")?;
+        assert!(
+            matches!(first_event, OperatorMessage::AgentResponse(_)),
+            "first event should be AgentResponse; got: {first_event:?}"
+        );
+
+        // The credential line must have been persisted as a loot record.
+        let loot_records = database.loot().list_for_agent(agent_id).await?;
+        assert!(
+            loot_records.iter().any(|r| r.kind == "credential"),
+            "expected at least one 'credential' loot record; got: {loot_records:?}"
+        );
+        Ok(())
+    }
 
     #[test]
     fn byte_count_zero() {

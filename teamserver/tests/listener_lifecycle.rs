@@ -9,11 +9,10 @@ mod common;
 use std::time::Duration;
 
 use red_cell::{
-    AgentRegistry, Database, EventBus, ListenerManager, ListenerRepository, ListenerStatus,
-    SocketRelayManager,
+    AgentRegistry, Database, EventBus, ListenerManager, ListenerStatus, SocketRelayManager,
 };
 use red_cell_common::{HttpListenerConfig, ListenerConfig};
-use tokio::time::{sleep, timeout};
+use tokio::time::timeout;
 
 // ---------------------------------------------------------------------------
 // Helpers

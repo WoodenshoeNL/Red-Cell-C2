@@ -1393,19 +1393,28 @@ async fn process_demon_transport(
                     })
                     .map(|payload| (payload, DemonHttpDisposition::Ok))?
             } else {
-                warn!(
-                    listener = listener_name,
-                    agent_id = format_args!("{:08X}", header.agent_id),
-                    external_ip,
-                    "unknown agent sent reconnect probe"
-                );
-                record_unknown_reconnect_probe(
-                    database,
-                    listener_name,
-                    header.agent_id,
-                    &external_ip,
-                )
-                .await;
+                if unknown_callback_probe_audit_limiter.allow(listener_name, &external_ip).await {
+                    warn!(
+                        listener = listener_name,
+                        agent_id = format_args!("{:08X}", header.agent_id),
+                        external_ip,
+                        "unknown agent sent reconnect probe"
+                    );
+                    record_unknown_reconnect_probe(
+                        database,
+                        listener_name,
+                        header.agent_id,
+                        &external_ip,
+                    )
+                    .await;
+                } else {
+                    debug!(
+                        listener = listener_name,
+                        agent_id = format_args!("{:08X}", header.agent_id),
+                        external_ip,
+                        "suppressing unknown reconnect probe audit row after per-source limit"
+                    );
+                }
                 (Vec::new(), DemonHttpDisposition::Fake404)
             };
 
@@ -4450,7 +4459,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_listener_unknown_reconnect_probe_returns_fake_404_and_audit_entry()
+    async fn http_listener_unknown_reconnect_probe_is_rate_limited_before_auditing()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());
@@ -4472,6 +4481,14 @@ mod tests {
             .await?;
 
         assert_eq!(reconnect_response.status(), StatusCode::NOT_FOUND);
+
+        let second_reconnect_response = client
+            .post(format!("http://127.0.0.1:{port}/"))
+            .body(valid_demon_request_body(agent_id.wrapping_add(1)))
+            .send()
+            .await?;
+
+        assert_eq!(second_reconnect_response.status(), StatusCode::NOT_FOUND);
 
         let audit_page = query_audit_log(
             &database,

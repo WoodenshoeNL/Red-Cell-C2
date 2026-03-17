@@ -8451,4 +8451,50 @@ mod tests {
         ));
         Ok(())
     }
+
+    #[tokio::test]
+    async fn sleep_callback_returns_agent_not_found_for_unregistered_agent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        // Build a valid CommandSleep payload: delay=60, jitter=15
+        let mut payload = Vec::new();
+        add_u32(&mut payload, 60);
+        add_u32(&mut payload, 15);
+
+        // Dispatch to a non-existent agent
+        let nonexistent_agent_id: u32 = 0xDEAD_BEEF;
+        let result = dispatcher
+            .dispatch(nonexistent_agent_id, u32::from(DemonCommand::CommandSleep), 99, &payload)
+            .await;
+
+        // Assert that the error is AgentNotFound
+        let error = result.expect_err("dispatch to unregistered agent must fail");
+        assert!(
+            matches!(
+                &error,
+                CommandDispatchError::Registry(TeamserverError::AgentNotFound { agent_id })
+                    if *agent_id == nonexistent_agent_id
+            ),
+            "expected AgentNotFound for 0x{nonexistent_agent_id:08X}, got: {error}"
+        );
+
+        // Confirm no events were broadcast (short timeout to verify nothing arrives)
+        let no_event = timeout(Duration::from_millis(50), receiver.recv()).await;
+        assert!(no_event.is_err(), "no events should be broadcast when agent is not found");
+
+        Ok(())
+    }
 }

@@ -521,3 +521,132 @@ pub(super) fn download_complete_event(
         String::new(),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CMD_ID: u32 = 0x1234;
+
+    // parse_file_open_header tests
+
+    #[test]
+    fn parse_file_open_header_happy_path() {
+        // file_id = 7 (BE), size = 1024 (BE), path = "C:\flag.txt"
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&7u32.to_be_bytes());
+        bytes.extend_from_slice(&1024u32.to_be_bytes());
+        bytes.extend_from_slice(b"C:\\flag.txt");
+
+        let (file_id, size, path) = parse_file_open_header(CMD_ID, &bytes).unwrap();
+        assert_eq!(file_id, 7);
+        assert_eq!(size, 1024);
+        assert_eq!(path, "C:\\flag.txt");
+    }
+
+    #[test]
+    fn parse_file_open_header_strips_null_terminator() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1u32.to_be_bytes());
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(b"path\0");
+
+        let (_, _, path) = parse_file_open_header(CMD_ID, &bytes).unwrap();
+        assert_eq!(path, "path");
+    }
+
+    #[test]
+    fn parse_file_open_header_empty_path() {
+        // Exactly 8 bytes — no path bytes at all
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&42u32.to_be_bytes());
+        bytes.extend_from_slice(&99u32.to_be_bytes());
+
+        let (file_id, size, path) = parse_file_open_header(CMD_ID, &bytes).unwrap();
+        assert_eq!(file_id, 42);
+        assert_eq!(size, 99);
+        assert_eq!(path, "");
+    }
+
+    #[test]
+    fn parse_file_open_header_too_short_returns_error() {
+        let bytes = [0u8; 7];
+        let err = parse_file_open_header(CMD_ID, &bytes).unwrap_err();
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_file_open_header_empty_slice_returns_error() {
+        let err = parse_file_open_header(CMD_ID, &[]).unwrap_err();
+        assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }));
+    }
+
+    // parse_file_chunk tests
+
+    #[test]
+    fn parse_file_chunk_happy_path() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&5u32.to_be_bytes());
+        bytes.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+
+        let (file_id, chunk) = parse_file_chunk(CMD_ID, &bytes).unwrap();
+        assert_eq!(file_id, 5);
+        assert_eq!(chunk, &[0xDE, 0xAD, 0xBE, 0xEF]);
+    }
+
+    #[test]
+    fn parse_file_chunk_empty_chunk_data() {
+        // Exactly 4 bytes — file_id only, empty chunk
+        let bytes = 3u32.to_be_bytes();
+        let (file_id, chunk) = parse_file_chunk(CMD_ID, &bytes).unwrap();
+        assert_eq!(file_id, 3);
+        assert!(chunk.is_empty());
+    }
+
+    #[test]
+    fn parse_file_chunk_too_short_returns_error() {
+        let bytes = [0u8; 3];
+        let err = parse_file_chunk(CMD_ID, &bytes).unwrap_err();
+        assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }));
+    }
+
+    #[test]
+    fn parse_file_chunk_empty_slice_returns_error() {
+        let err = parse_file_chunk(CMD_ID, &[]).unwrap_err();
+        assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }));
+    }
+
+    // parse_file_close tests
+
+    #[test]
+    fn parse_file_close_happy_path() {
+        let bytes = 0xDEAD_u32.to_be_bytes();
+        let file_id = parse_file_close(CMD_ID, &bytes).unwrap();
+        assert_eq!(file_id, 0xDEAD);
+    }
+
+    #[test]
+    fn parse_file_close_extra_bytes_ignored() {
+        // More than 4 bytes is fine — only first 4 matter
+        let mut bytes = 0x0000_0001u32.to_be_bytes().to_vec();
+        bytes.extend_from_slice(&[0xFF, 0xFF]);
+        let file_id = parse_file_close(CMD_ID, &bytes).unwrap();
+        assert_eq!(file_id, 1);
+    }
+
+    #[test]
+    fn parse_file_close_too_short_returns_error() {
+        let bytes = [0u8; 3];
+        let err = parse_file_close(CMD_ID, &bytes).unwrap_err();
+        assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }));
+    }
+
+    #[test]
+    fn parse_file_close_empty_slice_returns_error() {
+        let err = parse_file_close(CMD_ID, &[]).unwrap_err();
+        assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }));
+    }
+}

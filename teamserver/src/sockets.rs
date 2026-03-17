@@ -1200,6 +1200,35 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn send_socks_connect_reply_domain_success_path() -> io::Result<()> {
+        let (writer, mut reader) = connected_write_half_and_reader().await?;
+        let domain = b"example.com";
+
+        super::send_socks_connect_reply(
+            &writer,
+            super::SOCKS_REPLY_SUCCEEDED,
+            super::SOCKS_ATYP_DOMAIN,
+            domain,
+            443,
+        )
+        .await;
+
+        // Expected: [VER=5, REP=0, RSV=0, ATYP=3, LEN=11, "example.com", PORT_HI=1, PORT_LO=187]
+        let mut response = vec![0_u8; 4 + 1 + domain.len() + 2];
+        reader.read_exact(&mut response).await?;
+
+        assert_eq!(response[0], super::SOCKS_VERSION);
+        assert_eq!(response[1], super::SOCKS_REPLY_SUCCEEDED);
+        assert_eq!(response[2], 0); // reserved
+        assert_eq!(response[3], super::SOCKS_ATYP_DOMAIN);
+        assert_eq!(response[4], 11); // length prefix for "example.com"
+        assert_eq!(&response[5..16], b"example.com");
+        assert_eq!(&response[16..18], &443_u16.to_be_bytes());
+
+        Ok(())
+    }
+
     #[test]
     fn write_len_prefixed_bytes_normal_input() -> Result<(), SocketRelayError> {
         let mut buf = Vec::new();

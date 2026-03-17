@@ -265,3 +265,165 @@ pub(super) fn format_ticket_flags(flags: u32) -> String {
     text.push_str(&format!(" (0x{flags:x})"));
     text
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // format_filetime tests
+
+    #[test]
+    fn format_filetime_known_value() {
+        // Windows FILETIME for 2009-07-25 23:59:59 UTC
+        // = 128924159990000000 = 0x01CA0CBE_6F4E4080
+        let high: u32 = 0x01CA_0CBE;
+        let low: u32 = 0x6F4E_4080;
+        let result = format_filetime(high, low);
+        // Should contain the date portion
+        assert!(result.contains("2009-07-25"), "Expected date 2009-07-25, got: {result}");
+    }
+
+    #[test]
+    fn format_filetime_epoch_guard_zero() {
+        // filetime = 0 is before epoch guard
+        let result = format_filetime(0, 0);
+        assert_eq!(result, "1970-01-01 00:00:00 +00:00:00");
+    }
+
+    #[test]
+    fn format_filetime_epoch_guard_exact_boundary() {
+        // filetime = 0x019DB1DED53E8000 is exactly at the boundary — should return fallback
+        let filetime: u64 = 0x019D_B1DE_D53E_8000;
+        let high = (filetime >> 32) as u32;
+        let low = filetime as u32;
+        let result = format_filetime(high, low);
+        assert_eq!(result, "1970-01-01 00:00:00 +00:00:00");
+    }
+
+    #[test]
+    fn format_filetime_just_above_epoch_guard() {
+        // filetime = 0x019DB1DED53E8001 — 1 tick above guard, should map to 1970-01-01 00:00:00 UTC
+        let filetime: u64 = 0x019D_B1DE_D53E_8000 + 10_000_000; // exactly 1 second past epoch
+        let high = (filetime >> 32) as u32;
+        let low = filetime as u32;
+        let result = format_filetime(high, low);
+        assert!(result.contains("1970-01-01"), "Expected 1970-01-01 epoch date, got: {result}");
+    }
+
+    // logon_type_name tests
+
+    #[test]
+    fn logon_type_name_interactive() {
+        assert_eq!(logon_type_name(2), "Interactive");
+    }
+
+    #[test]
+    fn logon_type_name_network() {
+        assert_eq!(logon_type_name(3), "Network");
+    }
+
+    #[test]
+    fn logon_type_name_new_credentials() {
+        assert_eq!(logon_type_name(9), "New_Credentials");
+    }
+
+    #[test]
+    fn logon_type_name_unknown() {
+        assert_eq!(logon_type_name(0), "Unknown");
+        assert_eq!(logon_type_name(99), "Unknown");
+    }
+
+    #[test]
+    fn logon_type_name_all_known() {
+        assert_eq!(logon_type_name(4), "Batch");
+        assert_eq!(logon_type_name(5), "Service");
+        assert_eq!(logon_type_name(7), "Unlock");
+        assert_eq!(logon_type_name(8), "Network_Cleartext");
+    }
+
+    // kerberos_encryption_type_name tests
+
+    #[test]
+    fn kerberos_encryption_type_name_aes256() {
+        assert_eq!(kerberos_encryption_type_name(18), "AES256_CTS_HMAC_SHA1");
+    }
+
+    #[test]
+    fn kerberos_encryption_type_name_rc4_hmac() {
+        assert_eq!(kerberos_encryption_type_name(23), "RC4_HMAC");
+    }
+
+    #[test]
+    fn kerberos_encryption_type_name_unknown() {
+        assert_eq!(kerberos_encryption_type_name(99), "Unknown");
+        assert_eq!(kerberos_encryption_type_name(0), "Unknown");
+    }
+
+    #[test]
+    fn kerberos_encryption_type_name_others() {
+        assert_eq!(kerberos_encryption_type_name(17), "AES128_CTS_HMAC_SHA1");
+        assert_eq!(kerberos_encryption_type_name(24), "RC4_HMAC_EXP");
+        assert_eq!(kerberos_encryption_type_name(1), "DES_CBC_CRC");
+    }
+
+    // format_ticket_flags tests
+
+    #[test]
+    fn format_ticket_flags_zero() {
+        // No bits set — no flag names, only the hex suffix
+        let result = format_ticket_flags(0);
+        assert_eq!(result, " (0x0)");
+    }
+
+    #[test]
+    fn format_ticket_flags_single_forwardable() {
+        // bit 30 (index 14, shift index+16=30) = forwardable
+        let flags: u32 = 1 << 30;
+        let result = format_ticket_flags(flags);
+        assert!(result.contains("forwardable"), "Expected 'forwardable', got: {result}");
+        assert!(!result.contains("forwarded"), "Should not contain 'forwarded'");
+    }
+
+    #[test]
+    fn format_ticket_flags_single_renewable() {
+        // renewable is index 7, bit position 7+16=23
+        let flags: u32 = 1 << 23;
+        let result = format_ticket_flags(flags);
+        assert!(result.contains("renewable"), "Expected 'renewable', got: {result}");
+    }
+
+    #[test]
+    fn format_ticket_flags_multiple_bits() {
+        // Set forwardable (bit 30) and renewable (bit 23)
+        let flags: u32 = (1 << 30) | (1 << 23);
+        let result = format_ticket_flags(flags);
+        assert!(result.contains("forwardable"), "Expected 'forwardable' in: {result}");
+        assert!(result.contains("renewable"), "Expected 'renewable' in: {result}");
+    }
+
+    #[test]
+    fn format_ticket_flags_includes_hex_suffix() {
+        let flags: u32 = 1 << 30;
+        let result = format_ticket_flags(flags);
+        assert!(result.contains(&format!("(0x{flags:x})")), "Expected hex suffix in: {result}");
+    }
+
+    #[test]
+    fn format_ticket_flags_name_canonicalize() {
+        // name_canonicalize is index 0, bit position 0+16=16
+        let flags: u32 = 1 << 16;
+        let result = format_ticket_flags(flags);
+        assert!(
+            result.contains("name_canonicalize"),
+            "Expected 'name_canonicalize', got: {result}"
+        );
+    }
+
+    #[test]
+    fn format_ticket_flags_reserved() {
+        // reserved is index 15, bit position 15+16=31
+        let flags: u32 = 1 << 31;
+        let result = format_ticket_flags(flags);
+        assert!(result.contains("reserved"), "Expected 'reserved', got: {result}");
+    }
+}

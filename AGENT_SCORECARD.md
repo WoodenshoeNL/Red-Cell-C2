@@ -9,8 +9,8 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 193 | 181 | 31 |
-| Bugs filed against | 36 | 32 | 9 |
+| Tasks closed | 194 | 181 | 31 |
+| Bugs filed against | 37 | 32 | 9 |
 | Bug rate (bugs/task) | 0.19 | 0.18 | 0.29 |
 | Quality score | 81% | 82% | 71% |
 
@@ -30,7 +30,7 @@ Each loop run updates the running totals and appends a review entry.
 | Availability / timeout regressions | 1 | 5 | 0 |
 | Correctness / pagination | 5 | 4 | 1 |
 | Workflow / close-hygiene | 9 | 0 | 0 |
-| Code reuse / duplication | 4 | 0 | 0 |
+| Code reuse / duplication | 5 | 0 | 0 |
 
 ---
 
@@ -1768,3 +1768,14 @@ Notes: ih44 left in_progress; will be picked up when dev loop resumes. .stop fil
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (150 tests, 0 failures)
 Notes: Clean productive cycle. Both test deliveries are high quality — pivot unit tests cover all three DemonProtocolError variants; assembly integration tests use proper Result-based pattern with no unwraps in test bodies. Minor: assembly_dispatch.rs has duplicated listener config boilerplate across 4 tests (minor DRY issue, not filed). red-cell-c2-baok (malformed payload error paths) remains open and unaddressed — separate from t4fy's happy-path coverage.
+
+### QA Review — 2026-03-17 04:40 — 3f1315d..b6c71e6
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 1 | Closed red-cell-c2-ldu0 (P2: output dispatch integration tests, 3f1315d) — 4 tests: exit callback marks agent dead, DemonInfo MemAlloc broadcasts, job list broadcasts table, truncated payload returns error. Filed red-cell-c2-3ptb (P4): HttpListenerConfig boilerplate copy-pasted across 4 tests in both assembly_dispatch.rs and output_dispatch.rs. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (696+ tests, 0 failures, new assembly_dispatch and output_dispatch suites pass)
+Notes: dev01-claude continues post-close wip:interrupted pattern (no code in wip commits, tracked in red-cell-c2-zu4h). output_dispatch.rs test quality is good — Result-based pattern, proper cleanup. Same HttpListenerConfig duplication as assembly_dispatch.rs filed as one P4 bug covering both files.

@@ -642,6 +642,228 @@ async fn loot_repository_query_filtered_pushes_pagination_to_sql() -> Result<(),
 }
 
 #[tokio::test]
+async fn loot_repository_agent_id_and_kind_combined_filter_isolates_correct_row()
+-> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let agents = database.agents();
+    let loot = database.loot();
+    let agent_a = sample_agent(0x2200_0010);
+    let agent_b = sample_agent(0x2200_0011);
+
+    agents.create(&agent_a).await?;
+    agents.create(&agent_b).await?;
+
+    // agent_a has a "credential" and a "download"
+    loot.create(&LootRecord {
+        id: None,
+        agent_id: agent_a.agent_id,
+        kind: "credential".to_owned(),
+        name: "cred-a".to_owned(),
+        file_path: None,
+        size_bytes: None,
+        captured_at: "2026-03-15T10:00:00Z".to_owned(),
+        data: None,
+        metadata: None,
+    })
+    .await?;
+    loot.create(&LootRecord {
+        id: None,
+        agent_id: agent_a.agent_id,
+        kind: "download".to_owned(),
+        name: "dl-a".to_owned(),
+        file_path: None,
+        size_bytes: None,
+        captured_at: "2026-03-15T10:01:00Z".to_owned(),
+        data: None,
+        metadata: None,
+    })
+    .await?;
+
+    // agent_b has a "credential" row — same kind, different agent
+    loot.create(&LootRecord {
+        id: None,
+        agent_id: agent_b.agent_id,
+        kind: "credential".to_owned(),
+        name: "cred-b".to_owned(),
+        file_path: None,
+        size_bytes: None,
+        captured_at: "2026-03-15T10:02:00Z".to_owned(),
+        data: None,
+        metadata: None,
+    })
+    .await?;
+
+    let filter = LootFilter {
+        agent_id: Some(agent_a.agent_id),
+        kind_exact: Some("credential".to_owned()),
+        ..LootFilter::default()
+    };
+    let rows = loot.query_filtered(&filter, 10, 0).await?;
+
+    assert_eq!(rows.len(), 1, "only the credential row for agent_a should match");
+    assert_eq!(rows[0].name, "cred-a");
+    assert_eq!(rows[0].agent_id, agent_a.agent_id);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn loot_repository_operator_contains_matches_json_metadata_field()
+-> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let agents = database.agents();
+    let loot = database.loot();
+    let agent = sample_agent(0x2200_0012);
+
+    agents.create(&agent).await?;
+
+    loot.create(&LootRecord {
+        id: None,
+        agent_id: agent.agent_id,
+        kind: "credential".to_owned(),
+        name: "row-morpheus".to_owned(),
+        file_path: None,
+        size_bytes: None,
+        captured_at: "2026-03-15T09:00:00Z".to_owned(),
+        data: None,
+        metadata: Some(
+            json!({ "operator": "morpheus", "command_line": "sekurlsa::logonpasswords" }),
+        ),
+    })
+    .await?;
+    loot.create(&LootRecord {
+        id: None,
+        agent_id: agent.agent_id,
+        kind: "credential".to_owned(),
+        name: "row-trinity".to_owned(),
+        file_path: None,
+        size_bytes: None,
+        captured_at: "2026-03-15T09:01:00Z".to_owned(),
+        data: None,
+        metadata: Some(
+            json!({ "operator": "trinity", "command_line": "sekurlsa::logonpasswords" }),
+        ),
+    })
+    .await?;
+    // Row with no metadata — operator_contains must not match this
+    loot.create(&LootRecord {
+        id: None,
+        agent_id: agent.agent_id,
+        kind: "download".to_owned(),
+        name: "row-no-meta".to_owned(),
+        file_path: None,
+        size_bytes: None,
+        captured_at: "2026-03-15T09:02:00Z".to_owned(),
+        data: None,
+        metadata: None,
+    })
+    .await?;
+
+    let filter =
+        LootFilter { operator_contains: Some("morpheus".to_owned()), ..LootFilter::default() };
+    let rows = loot.query_filtered(&filter, 10, 0).await?;
+
+    assert_eq!(rows.len(), 1, "only the morpheus row should match operator_contains");
+    assert_eq!(rows[0].name, "row-morpheus");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn loot_repository_count_filtered_equals_query_filtered_len_with_multi_field_filter()
+-> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let agents = database.agents();
+    let loot = database.loot();
+    let agent = sample_agent(0x2200_0013);
+
+    agents.create(&agent).await?;
+
+    for (name, kind, operator, pattern) in [
+        ("r1", "credential", "neo", Some("lsass")),
+        ("r2", "credential", "neo", None),
+        ("r3", "download", "neo", Some("lsass")),
+        ("r4", "credential", "morpheus", Some("lsass")),
+    ] {
+        loot.create(&LootRecord {
+            id: None,
+            agent_id: agent.agent_id,
+            kind: kind.to_owned(),
+            name: name.to_owned(),
+            file_path: None,
+            size_bytes: None,
+            captured_at: "2026-03-15T12:00:00Z".to_owned(),
+            data: None,
+            metadata: Some(json!({ "operator": operator, "pattern": pattern })),
+        })
+        .await?;
+    }
+
+    // Simultaneously active: kind_exact, agent_id, operator_contains, pattern_contains
+    let filter = LootFilter {
+        kind_exact: Some("credential".to_owned()),
+        agent_id: Some(agent.agent_id),
+        operator_contains: Some("neo".to_owned()),
+        pattern_contains: Some("lsass".to_owned()),
+        ..LootFilter::default()
+    };
+
+    let count = loot.count_filtered(&filter).await?;
+    let rows = loot.query_filtered(&filter, 100, 0).await?;
+
+    assert_eq!(count, rows.len() as i64, "count_filtered must equal query_filtered length");
+    assert_eq!(count, 1, "only r1 satisfies all four filters simultaneously");
+    assert_eq!(rows[0].name, "r1");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn loot_repository_since_until_range_outside_all_rows_returns_empty()
+-> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let agents = database.agents();
+    let loot = database.loot();
+    let agent = sample_agent(0x2200_0014);
+
+    agents.create(&agent).await?;
+
+    for (name, captured_at) in [
+        ("row-a", "2026-03-10T10:00:00Z"),
+        ("row-b", "2026-03-11T10:00:00Z"),
+        ("row-c", "2026-03-12T10:00:00Z"),
+    ] {
+        loot.create(&LootRecord {
+            id: None,
+            agent_id: agent.agent_id,
+            kind: "download".to_owned(),
+            name: name.to_owned(),
+            file_path: None,
+            size_bytes: None,
+            captured_at: captured_at.to_owned(),
+            data: None,
+            metadata: None,
+        })
+        .await?;
+    }
+
+    // Range entirely before all rows
+    let filter = LootFilter {
+        since: Some("2026-03-01T00:00:00Z".to_owned()),
+        until: Some("2026-03-09T23:59:59Z".to_owned()),
+        ..LootFilter::default()
+    };
+
+    let rows = loot.query_filtered(&filter, 10, 0).await?;
+    let count = loot.count_filtered(&filter).await?;
+
+    assert!(rows.is_empty(), "no rows should fall within the range");
+    assert_eq!(count, 0);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn audit_log_repository_supports_insert_query_and_delete() -> Result<(), TeamserverError> {
     let database = test_database().await?;
     let audit = database.audit_log();

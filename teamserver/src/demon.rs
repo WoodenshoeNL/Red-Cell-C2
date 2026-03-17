@@ -486,7 +486,8 @@ mod tests {
     use zeroize::Zeroizing;
 
     use super::{
-        DemonPacketParser, DemonParserError, ParsedDemonPacket, build_init_ack, build_reconnect_ack,
+        DemonCallbackPackage, DemonPacketParser, DemonParserError, ParsedDemonPacket,
+        build_init_ack, build_reconnect_ack,
     };
     use crate::{AgentRegistry, Database};
 
@@ -1671,5 +1672,39 @@ mod tests {
                 "truncation '{label}' must not register the agent in the registry"
             );
         }
+    }
+
+    // ---- DemonCallbackPackage::command() tests ----
+
+    #[test]
+    fn callback_package_command_returns_known_variant() {
+        let pkg = DemonCallbackPackage {
+            command_id: u32::from(DemonCommand::CommandGetJob),
+            request_id: 1,
+            payload: Vec::new(),
+        };
+
+        assert_eq!(pkg.command(), Ok(DemonCommand::CommandGetJob));
+    }
+
+    #[test]
+    fn callback_package_command_returns_error_for_unknown_id() {
+        let pkg =
+            DemonCallbackPackage { command_id: 0xFFFF_FFFE, request_id: 0, payload: Vec::new() };
+
+        let err = pkg.command().expect_err("unknown command ID must return Err");
+        assert_eq!(
+            err,
+            DemonProtocolError::UnknownEnumValue { kind: "DemonCommand", value: 0xFFFF_FFFE }
+        );
+    }
+
+    #[test]
+    fn callback_package_command_returns_error_for_zero_id() {
+        let pkg = DemonCallbackPackage { command_id: 0, request_id: 0, payload: Vec::new() };
+
+        // Zero is not a valid DemonCommand discriminant — the lowest is CommandGetJob = 1.
+        let err = pkg.command().expect_err("zero command ID must return Err");
+        assert_eq!(err, DemonProtocolError::UnknownEnumValue { kind: "DemonCommand", value: 0 });
     }
 }

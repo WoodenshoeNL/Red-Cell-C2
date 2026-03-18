@@ -1818,3 +1818,112 @@ async fn agent_update_persists_changed_fields_on_re_read() -> Result<(), Teamser
 
     Ok(())
 }
+
+#[tokio::test]
+async fn agent_update_nonexistent_returns_agent_not_found() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let repository = database.agents();
+
+    let phantom = sample_agent(0xDEAD_0001);
+
+    let result = repository.update(&phantom).await;
+    assert!(result.is_err(), "updating a non-existent agent must fail");
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, TeamserverError::AgentNotFound { agent_id } if agent_id == 0xDEAD_0001),
+        "expected AgentNotFound, got: {err:?}",
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_delete_nonexistent_is_silent_noop() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let repository = database.agents();
+
+    // Deleting an agent_id that was never inserted should succeed silently.
+    repository.delete(0xDEAD_0002).await?;
+
+    // The repository should still be empty.
+    let all = repository.list().await?;
+    assert!(all.is_empty(), "no agents should exist after deleting a phantom");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_list_with_corrupt_base64_aes_key_returns_error() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let repository = database.agents();
+
+    // Insert a valid agent first, then corrupt its aes_key directly via SQL.
+    let agent = sample_agent(0xBAD0_0001);
+    repository.create(&agent).await?;
+
+    sqlx::query("UPDATE ts_agents SET aes_key = '!!!not-valid-base64!!!' WHERE agent_id = ?")
+        .bind(i64::from(agent.agent_id))
+        .execute(database.pool())
+        .await
+        .expect("raw SQL update must succeed");
+
+    let result = repository.list().await;
+    assert!(result.is_err(), "list() must fail when a row has invalid base64 aes_key");
+    let err = result.unwrap_err();
+    assert!(
+        matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "aes_key"),
+        "expected InvalidPersistedValue for aes_key, got: {err:?}",
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_list_with_corrupt_base64_aes_iv_returns_error() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let repository = database.agents();
+
+    let agent = sample_agent(0xBAD0_0002);
+    repository.create(&agent).await?;
+
+    sqlx::query("UPDATE ts_agents SET aes_iv = '!!!not-valid-base64!!!' WHERE agent_id = ?")
+        .bind(i64::from(agent.agent_id))
+        .execute(database.pool())
+        .await
+        .expect("raw SQL update must succeed");
+
+    let result = repository.list().await;
+    assert!(result.is_err(), "list() must fail when a row has invalid base64 aes_iv");
+    let err = result.unwrap_err();
+    assert!(
+        matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "aes_iv"),
+        "expected InvalidPersistedValue for aes_iv, got: {err:?}",
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_get_with_corrupt_base64_returns_error() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let repository = database.agents();
+
+    let agent = sample_agent(0xBAD0_0003);
+    repository.create(&agent).await?;
+
+    sqlx::query("UPDATE ts_agents SET aes_key = '@@invalid@@' WHERE agent_id = ?")
+        .bind(i64::from(agent.agent_id))
+        .execute(database.pool())
+        .await
+        .expect("raw SQL update must succeed");
+
+    let result = repository.get(agent.agent_id).await;
+    assert!(result.is_err(), "get() must fail when the row has invalid base64 aes_key");
+    let err = result.unwrap_err();
+    assert!(
+        matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "aes_key"),
+        "expected InvalidPersistedValue for aes_key, got: {err:?}",
+    );
+
+    Ok(())
+}

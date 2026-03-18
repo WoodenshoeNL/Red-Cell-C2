@@ -618,4 +618,233 @@ mod tests {
             other => panic!("expected InvalidCallbackPayload, got: {other:?}"),
         }
     }
+
+    /// Happy-path: a valid checkin payload updates *all* metadata fields on the
+    /// agent record (hostname, username, domain, IPs, process info, OS, sleep,
+    /// working hours, etc.) and broadcasts an `AgentUpdate` "Alive" event.
+    #[tokio::test]
+    async fn handle_checkin_valid_payload_updates_all_metadata_and_broadcasts_alive()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use red_cell_common::operator::OperatorMessage;
+
+        let key = [0xAA; AGENT_KEY_LENGTH];
+        let iv = [0xBB; AGENT_IV_LENGTH];
+        let agent_id = 0xDEAD_0020;
+
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+
+        let original = sample_agent(agent_id, key, iv);
+        registry.insert(original.clone()).await?;
+
+        let payload = make_checkin_payload(agent_id, key, iv);
+        handle_checkin(&registry, &events, &database, None, agent_id, &payload).await?;
+
+        let agent = registry.get(agent_id).await.ok_or("agent should exist")?;
+
+        // Metadata fields from the payload.
+        assert_eq!(agent.hostname, "wkstn-02");
+        assert_eq!(agent.username, "svc-op");
+        assert_eq!(agent.domain_name, "research");
+        assert_eq!(agent.internal_ip, "10.10.10.50");
+        assert_eq!(agent.process_name, "cmd.exe");
+        assert_eq!(agent.process_path, "C:\\Windows\\System32\\cmd.exe");
+        assert_eq!(agent.process_pid, 4040);
+        assert_eq!(agent.process_tid, 5050);
+        assert_eq!(agent.process_ppid, 3030);
+        assert_eq!(agent.base_address, 0x401000);
+        assert!(!agent.elevated, "elevated should be false from payload");
+        assert_eq!(agent.sleep_delay, 45);
+        assert_eq!(agent.sleep_jitter, 5);
+        assert_eq!(agent.os_build, 22_621);
+        assert!(agent.active, "agent must be marked active after checkin");
+        assert_ne!(agent.last_call_in, original.last_call_in, "last_call_in must be refreshed");
+
+        // working_hours from payload: 0x00FF_00FF
+        assert_eq!(
+            agent.working_hours,
+            decode_working_hours(0x00FF_00FF),
+            "working_hours must match decoded payload value"
+        );
+
+        // Verify the broadcast event is an AgentUpdate with "Alive".
+        let event = rx.recv().await.ok_or("should have received a broadcast event")?;
+        match event {
+            OperatorMessage::AgentUpdate(msg) => {
+                assert_eq!(msg.info.agent_id, format!("{agent_id:08X}"));
+                assert_eq!(msg.info.marked, "Alive");
+            }
+            other => panic!("expected AgentUpdate, got: {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    /// When the CHECKIN payload contains an all-zero AES key, `handle_checkin`
+    /// must return `InvalidCallbackPayload` and leave the stored agent record
+    /// completely untouched.
+    #[tokio::test]
+    async fn handle_checkin_weak_aes_key_rejects_and_does_not_mutate()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let good_key = [0xAA; AGENT_KEY_LENGTH];
+        let good_iv = [0xBB; AGENT_IV_LENGTH];
+        let agent_id = 0xDEAD_0030;
+
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+
+        let original = sample_agent(agent_id, good_key, good_iv);
+        registry.insert(original.clone()).await?;
+
+        // Build payload with all-zero key (weak).
+        let weak_key = [0u8; AGENT_KEY_LENGTH];
+        let payload = make_checkin_payload(agent_id, weak_key, good_iv);
+        let result = handle_checkin(&registry, &events, &database, None, agent_id, &payload).await;
+
+        assert!(result.is_err(), "weak AES key must be rejected");
+        match result.unwrap_err() {
+            CommandDispatchError::InvalidCallbackPayload { message, .. } => {
+                assert!(message.contains("key"), "error should mention key: {message}");
+            }
+            other => panic!("expected InvalidCallbackPayload, got: {other:?}"),
+        }
+
+        // Agent state must be unchanged.
+        let agent = registry.get(agent_id).await.ok_or("agent should still exist")?;
+        assert_eq!(agent.hostname, original.hostname);
+        assert_eq!(agent.username, original.username);
+        assert_eq!(agent.last_call_in, original.last_call_in);
+
+        Ok(())
+    }
+
+    /// When the CHECKIN payload contains an all-zero AES IV, `handle_checkin`
+    /// must return `InvalidCallbackPayload` and leave the stored agent record
+    /// completely untouched.
+    #[tokio::test]
+    async fn handle_checkin_weak_aes_iv_rejects_and_does_not_mutate()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let good_key = [0xAA; AGENT_KEY_LENGTH];
+        let good_iv = [0xBB; AGENT_IV_LENGTH];
+        let agent_id = 0xDEAD_0031;
+
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+
+        let original = sample_agent(agent_id, good_key, good_iv);
+        registry.insert(original.clone()).await?;
+
+        // Build payload with all-zero IV (weak).
+        let weak_iv = [0u8; AGENT_IV_LENGTH];
+        let payload = make_checkin_payload(agent_id, good_key, weak_iv);
+        let result = handle_checkin(&registry, &events, &database, None, agent_id, &payload).await;
+
+        assert!(result.is_err(), "weak AES IV must be rejected");
+        match result.unwrap_err() {
+            CommandDispatchError::InvalidCallbackPayload { message, .. } => {
+                assert!(message.contains("IV"), "error should mention IV: {message}");
+            }
+            other => panic!("expected InvalidCallbackPayload, got: {other:?}"),
+        }
+
+        // Agent state must be unchanged.
+        let agent = registry.get(agent_id).await.ok_or("agent should still exist")?;
+        assert_eq!(agent.hostname, original.hostname);
+        assert_eq!(agent.last_call_in, original.last_call_in);
+
+        Ok(())
+    }
+
+    /// Verify `parse_checkin_metadata` correctly populates all fields from a
+    /// well-formed payload — the pure-function counterpart to the
+    /// `handle_checkin` happy-path integration test above.
+    #[test]
+    fn parse_checkin_metadata_populates_all_fields() {
+        let key = [0xAA; AGENT_KEY_LENGTH];
+        let iv = [0xBB; AGENT_IV_LENGTH];
+        let agent_id = 0xDEAD_0040;
+        let existing = sample_agent(agent_id, key, iv);
+
+        let payload = make_checkin_payload(agent_id, key, iv);
+        let ts = "2026-03-18T12:00:00Z";
+        let result = parse_checkin_metadata(existing, agent_id, &payload, ts);
+
+        let updated = result
+            .expect("valid payload must succeed")
+            .expect("non-empty payload must return Some");
+
+        assert_eq!(updated.hostname, "wkstn-02");
+        assert_eq!(updated.username, "svc-op");
+        assert_eq!(updated.domain_name, "research");
+        assert_eq!(updated.internal_ip, "10.10.10.50");
+        assert_eq!(updated.process_name, "cmd.exe");
+        assert_eq!(updated.process_path, "C:\\Windows\\System32\\cmd.exe");
+        assert_eq!(updated.process_pid, 4040);
+        assert_eq!(updated.process_tid, 5050);
+        assert_eq!(updated.process_ppid, 3030);
+        assert_eq!(updated.base_address, 0x401000);
+        assert!(!updated.elevated);
+        assert_eq!(updated.sleep_delay, 45);
+        assert_eq!(updated.sleep_jitter, 5);
+        assert_eq!(updated.os_build, 22_621);
+        assert!(updated.active);
+        assert!(updated.reason.is_empty());
+        assert_eq!(updated.last_call_in, ts);
+        assert_eq!(updated.working_hours, decode_working_hours(0x00FF_00FF));
+        // kill_date should be parsed from the payload value 1_725_000_000
+        assert!(updated.kill_date.is_some(), "kill_date should be set from non-zero payload value");
+        // Encryption should carry the payload key/iv (before handle_checkin's rotation guard).
+        assert_eq!(updated.encryption.aes_key.as_slice(), key.as_slice());
+        assert_eq!(updated.encryption.aes_iv.as_slice(), iv.as_slice());
+    }
+
+    /// Empty payload returns `None` from `parse_checkin_metadata`, indicating
+    /// heartbeat-only (no metadata update).
+    #[test]
+    fn parse_checkin_metadata_empty_payload_returns_none() {
+        let key = [0xAA; AGENT_KEY_LENGTH];
+        let iv = [0xBB; AGENT_IV_LENGTH];
+        let agent_id = 0xDEAD_0041;
+        let existing = sample_agent(agent_id, key, iv);
+
+        let result = parse_checkin_metadata(existing, agent_id, &[], "2026-03-18T12:00:00Z");
+        let opt = result.expect("empty payload must not error");
+        assert!(opt.is_none(), "empty payload must return None");
+    }
+
+    /// Verify that the empty-payload path through `handle_checkin` broadcasts
+    /// an `AgentUpdate` "Alive" event even when no metadata is updated.
+    #[tokio::test]
+    async fn handle_checkin_empty_payload_still_broadcasts_alive()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use red_cell_common::operator::OperatorMessage;
+
+        let key = [0xAA; AGENT_KEY_LENGTH];
+        let iv = [0xBB; AGENT_IV_LENGTH];
+        let agent_id = 0xDEAD_0050;
+
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+
+        registry.insert(sample_agent(agent_id, key, iv)).await?;
+
+        handle_checkin(&registry, &events, &database, None, agent_id, &[]).await?;
+
+        let event = rx.recv().await.ok_or("should have received a broadcast")?;
+        match event {
+            OperatorMessage::AgentUpdate(msg) => {
+                assert_eq!(msg.info.agent_id, format!("{agent_id:08X}"));
+                assert_eq!(msg.info.marked, "Alive");
+            }
+            other => panic!("expected AgentUpdate, got: {other:?}"),
+        }
+
+        Ok(())
+    }
 }

@@ -1649,6 +1649,7 @@ mod tests {
     async fn from_profile_with_database_does_not_override_profile_operators() {
         let database = Database::connect_in_memory().await.expect("database should initialize");
         // Persist a runtime operator whose username collides with a profile operator.
+        // Use a different password AND role so we can assert both are rejected.
         database
             .operators()
             .create(&PersistedOperator {
@@ -1665,9 +1666,10 @@ mod tests {
             .expect("auth service should load without error");
 
         // The profile password ("password1234") should still work — profile takes precedence.
+        let connection_id = Uuid::new_v4();
         let result = service
             .authenticate_login(
-                Uuid::new_v4(),
+                connection_id,
                 &LoginInfo {
                     user: "operator".to_owned(),
                     password: hash_password_sha3("password1234"),
@@ -1677,6 +1679,18 @@ mod tests {
         assert!(
             matches!(result, AuthenticationResult::Success(_)),
             "profile operator credentials should take precedence over persisted runtime duplicate"
+        );
+
+        // The session role must be the profile-defined role (Operator), not the
+        // persisted runtime role (Analyst).
+        let session = service
+            .session_for_connection(connection_id)
+            .await
+            .expect("session should exist after successful login");
+        assert_eq!(
+            session.role,
+            red_cell_common::config::OperatorRole::Operator,
+            "session role must reflect the profile-configured role, not the persisted runtime role"
         );
 
         // The persisted password should NOT authenticate.

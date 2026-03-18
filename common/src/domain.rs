@@ -1327,6 +1327,62 @@ mod tests {
         );
     }
 
+    /// Helper: builds a minimal valid `HttpListenerConfig` JSON, then applies overrides.
+    fn http_listener_json(overrides: serde_json::Value) -> serde_json::Value {
+        let mut base = json!({
+            "name": "edge",
+            "hosts": [],
+            "host_bind": "0.0.0.0",
+            "host_rotation": "round-robin",
+            "port_bind": 443,
+            "behind_redirector": false,
+            "headers": [],
+            "uris": [],
+            "secure": false
+        });
+        if let (Some(base_map), Some(over_map)) = (base.as_object_mut(), overrides.as_object()) {
+            for (k, v) in over_map {
+                base_map.insert(k.clone(), v.clone());
+            }
+        }
+        base
+    }
+
+    #[test]
+    fn port_bind_rejects_string_value_above_u16_max() {
+        let payload = http_listener_json(json!({ "port_bind": "70000" }));
+        let error = serde_json::from_value::<HttpListenerConfig>(payload)
+            .expect_err("string port_bind \"70000\" must be rejected");
+        assert!(
+            error.to_string().contains("does not fit in u16"),
+            "unexpected error message: {error}"
+        );
+    }
+
+    #[test]
+    fn port_bind_accepts_zero() {
+        let payload = http_listener_json(json!({ "port_bind": 0 }));
+        let config: HttpListenerConfig =
+            serde_json::from_value(payload).expect("port_bind 0 must be accepted");
+        assert_eq!(config.port_bind, 0);
+    }
+
+    #[test]
+    fn port_bind_accepts_string_zero() {
+        let payload = http_listener_json(json!({ "port_bind": "0" }));
+        let config: HttpListenerConfig =
+            serde_json::from_value(payload).expect("string port_bind \"0\" must be accepted");
+        assert_eq!(config.port_bind, 0);
+    }
+
+    #[test]
+    fn port_bind_trims_whitespace_from_string() {
+        let payload = http_listener_json(json!({ "port_bind": " 443 " }));
+        let config: HttpListenerConfig =
+            serde_json::from_value(payload).expect("whitespace-padded port_bind must be accepted");
+        assert_eq!(config.port_bind, 443);
+    }
+
     fn minimal_agent_record() -> AgentRecord {
         use zeroize::Zeroizing;
         AgentRecord {

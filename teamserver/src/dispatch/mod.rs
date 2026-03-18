@@ -9444,4 +9444,168 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn with_builtin_handlers_and_downloads_registers_all_builtin_commands()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+
+        let custom_cap: usize = 2048;
+        let tracker = DownloadTracker::new(custom_cap);
+        let dispatcher = CommandDispatcher::with_builtin_handlers_and_downloads(
+            registry, events, database, sockets, None, tracker,
+        );
+
+        // Every built-in command must be registered.
+        let expected_commands = [
+            DemonCommand::CommandGetJob,
+            DemonCommand::CommandCheckin,
+            DemonCommand::CommandProcList,
+            DemonCommand::CommandSleep,
+            DemonCommand::CommandFs,
+            DemonCommand::CommandProc,
+            DemonCommand::CommandProcPpidSpoof,
+            DemonCommand::CommandInjectShellcode,
+            DemonCommand::CommandInjectDll,
+            DemonCommand::CommandSpawnDll,
+            DemonCommand::CommandOutput,
+            DemonCommand::CommandError,
+            DemonCommand::CommandExit,
+            DemonCommand::CommandKillDate,
+            DemonCommand::DemonInfo,
+            DemonCommand::BeaconOutput,
+            DemonCommand::CommandToken,
+            DemonCommand::CommandInlineExecute,
+            DemonCommand::CommandAssemblyInlineExecute,
+            DemonCommand::CommandAssemblyListVersions,
+            DemonCommand::CommandJob,
+            DemonCommand::CommandNet,
+            DemonCommand::CommandConfig,
+            DemonCommand::CommandScreenshot,
+            DemonCommand::CommandTransfer,
+            DemonCommand::CommandKerberos,
+            DemonCommand::CommandMemFile,
+            DemonCommand::CommandPackageDropped,
+            DemonCommand::CommandSocket,
+            DemonCommand::CommandPivot,
+        ];
+        for cmd in &expected_commands {
+            assert!(
+                dispatcher.handles_command(u32::from(*cmd)),
+                "built-in handler missing for {cmd:?} (0x{:08X})",
+                u32::from(*cmd),
+            );
+        }
+
+        // The custom tracker limits must be preserved.
+        assert_eq!(dispatcher.downloads.max_download_bytes, custom_cap);
+        assert_eq!(
+            dispatcher.downloads.max_total_download_bytes,
+            custom_cap
+                .saturating_mul(super::DOWNLOAD_TRACKER_AGGREGATE_CAP_MULTIPLIER)
+                .max(custom_cap),
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn with_builtin_handlers_and_downloads_dispatches_known_builtin_command()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+
+        let tracker = DownloadTracker::new(4096);
+        let dispatcher = CommandDispatcher::with_builtin_handlers_and_downloads(
+            registry.clone(),
+            events,
+            database,
+            sockets,
+            None,
+            tracker,
+        );
+
+        // Dispatching CommandGetJob for an agent with no queued jobs should return None
+        // (no jobs to serialize), proving the handler ran rather than returning None because
+        // no handler was found. We verify by first confirming the handler exists.
+        assert!(dispatcher.handles_command(u32::from(DemonCommand::CommandGetJob)));
+
+        let agent_id = 0xCAFE_0001;
+        let key = [0xAA; AGENT_KEY_LENGTH];
+        let iv = [0xBB; AGENT_IV_LENGTH];
+        registry.insert(sample_agent_info(agent_id, key, iv)).await?;
+
+        // With no queued jobs, CommandGetJob handler returns None (empty queue path).
+        let result =
+            dispatcher.dispatch(agent_id, u32::from(DemonCommand::CommandGetJob), 1, &[]).await?;
+        assert!(result.is_none(), "empty job queue should return None");
+
+        // Now enqueue a job and confirm the handler produces a response.
+        registry
+            .enqueue_job(
+                agent_id,
+                Job {
+                    command: u32::from(DemonCommand::CommandSleep),
+                    request_id: 42,
+                    payload: vec![0xDE, 0xAD],
+                    command_line: "sleep 5".to_owned(),
+                    task_id: "task-42".to_owned(),
+                    created_at: "2026-03-18T00:00:00Z".to_owned(),
+                    operator: "tester".to_owned(),
+                },
+            )
+            .await?;
+
+        let response =
+            dispatcher.dispatch(agent_id, u32::from(DemonCommand::CommandGetJob), 2, &[]).await?;
+        assert!(response.is_some(), "handler must return serialized job packages");
+
+        Ok(())
+    }
+
+    #[test]
+    fn download_tracker_from_max_download_bytes_normal_value() {
+        let tracker = DownloadTracker::from_max_download_bytes(1024);
+        assert_eq!(tracker.max_download_bytes, 1024);
+        assert_eq!(
+            tracker.max_total_download_bytes,
+            1024 * super::DOWNLOAD_TRACKER_AGGREGATE_CAP_MULTIPLIER,
+        );
+    }
+
+    #[test]
+    fn download_tracker_from_max_download_bytes_saturates_large_u64() {
+        // A value larger than usize::MAX (on any platform) must saturate to usize::MAX.
+        let huge: u64 = u64::MAX;
+        let tracker = DownloadTracker::from_max_download_bytes(huge);
+
+        // The per-file cap saturates to usize::MAX.
+        assert_eq!(tracker.max_download_bytes, usize::MAX);
+        // The aggregate cap is at least the per-file cap (saturating_mul overflows to
+        // usize::MAX, and .max() ensures it is >= max_download_bytes).
+        assert!(tracker.max_total_download_bytes >= tracker.max_download_bytes);
+    }
+
+    #[test]
+    fn download_tracker_from_max_download_bytes_zero() {
+        let tracker = DownloadTracker::from_max_download_bytes(0);
+        assert_eq!(tracker.max_download_bytes, 0);
+        // 0 * multiplier = 0, .max(0) = 0
+        assert_eq!(tracker.max_total_download_bytes, 0);
+    }
+
+    #[test]
+    fn download_tracker_from_max_download_bytes_one() {
+        let tracker = DownloadTracker::from_max_download_bytes(1);
+        assert_eq!(tracker.max_download_bytes, 1);
+        assert_eq!(
+            tracker.max_total_download_bytes,
+            super::DOWNLOAD_TRACKER_AGGREGATE_CAP_MULTIPLIER,
+        );
+    }
 }

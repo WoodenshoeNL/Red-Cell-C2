@@ -330,6 +330,19 @@ mod tests {
                     panic!("default init should succeed: {error}");
                 }
             }
+            "double_init" => {
+                // First init should succeed.
+                if let Err(error) = init_tracing(None, false) {
+                    panic!("first init should succeed: {error}");
+                }
+
+                // Second init in the same process must fail with InitializeSubscriber.
+                match init_tracing(None, false) {
+                    Err(LoggingInitError::InitializeSubscriber { .. }) => {}
+                    Err(error) => panic!("expected InitializeSubscriber error, got {error}"),
+                    Ok(_) => panic!("second init_tracing call should fail"),
+                }
+            }
             other => panic!("unexpected subprocess case: {other}"),
         }
     }
@@ -605,6 +618,18 @@ mod tests {
 
         let file = resolved.file.expect("file logging should be resolved");
         assert_eq!(file.rotation, LogRotation::Minutely);
+    }
+
+    #[test]
+    fn init_tracing_returns_initialize_subscriber_error_on_double_init() {
+        let output = run_init_tracing_subprocess("double_init", &[]);
+
+        assert!(
+            output.status.success(),
+            "subprocess should succeed, stdout: {}, stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

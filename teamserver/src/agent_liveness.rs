@@ -611,6 +611,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn from_profile_large_sleep_clamps_sweep_to_max_interval() {
+        // Sleep = 200 → effective_timeout = 600 → sweep_secs = 200,
+        // which must be clamped to MAX_SWEEP_INTERVAL_SECS (30 s).
+        let profile = sample_profile(None, 200);
+        let config = AgentLivenessConfig::from_profile(&profile);
+
+        assert_eq!(
+            config.sweep_interval,
+            Duration::from_secs(30),
+            "sweep interval must be clamped to MAX_SWEEP_INTERVAL_SECS (30 s), got {:?}",
+            config.sweep_interval,
+        );
+        assert_eq!(
+            config.default_sleep_secs,
+            Some(200),
+            "default_sleep_secs must be 200, got {:?}",
+            config.default_sleep_secs,
+        );
+
+        // An agent with sleep_delay = 200 and no timeout override must get
+        // timeout = max(200, 200).max(1) * 3 = 600 s.
+        let mut agent = sample_agent(0x0000_0004);
+        agent.sleep_delay = 200;
+        assert_eq!(
+            config.timeout_for(&agent),
+            600,
+            "timeout_for an agent with sleep_delay=200 must return 600",
+        );
+    }
+
     #[tokio::test]
     async fn sweep_mixed_liveness_only_marks_stale_agents_dead() -> Result<(), TeamserverError> {
         // Two stale agents (IDs inserted in descending order to exercise the sort) and one

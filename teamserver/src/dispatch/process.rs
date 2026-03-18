@@ -1506,6 +1506,319 @@ mod tests {
         );
     }
 
+    // ── handle_process_command_callback — Kill branch ──────────────────────
+
+    fn build_process_kill_payload(success: u32, pid: u32) -> Vec<u8> {
+        let mut buf = Vec::new();
+        add_u32(&mut buf, u32::from(DemonProcessCommand::Kill));
+        add_u32(&mut buf, success);
+        add_u32(&mut buf, pid);
+        buf
+    }
+
+    #[tokio::test]
+    async fn process_kill_success_broadcasts_good_with_pid() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let payload = build_process_kill_payload(1, 4200);
+
+        handle_process_command_callback(&events, 0xA1, 10, &payload)
+            .await
+            .expect("handler should succeed");
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("event");
+        let (kind, message) = extract_response_kind_and_message(&event);
+        assert_eq!(kind, "Good");
+        assert!(message.contains("4200"), "expected pid in message, got: {message}");
+    }
+
+    #[tokio::test]
+    async fn process_kill_failure_broadcasts_error() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let payload = build_process_kill_payload(0, 4200);
+
+        handle_process_command_callback(&events, 0xA2, 11, &payload)
+            .await
+            .expect("handler should succeed");
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("event");
+        let (kind, message) = extract_response_kind_and_message(&event);
+        assert_eq!(kind, "Error");
+        assert!(message.contains("Failed"), "expected failure message, got: {message}");
+    }
+
+    // ── handle_process_command_callback — Modules branch ────────────────────
+
+    fn add_string(buf: &mut Vec<u8>, value: &str) {
+        let bytes = value.as_bytes();
+        add_u32(buf, u32::try_from(bytes.len()).unwrap());
+        buf.extend_from_slice(bytes);
+    }
+
+    fn add_u64(buf: &mut Vec<u8>, value: u64) {
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn build_process_modules_payload(pid: u32, modules: &[(&str, u64)]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        add_u32(&mut buf, u32::from(DemonProcessCommand::Modules));
+        add_u32(&mut buf, pid);
+        for &(name, base) in modules {
+            add_string(&mut buf, name);
+            add_u64(&mut buf, base);
+        }
+        buf
+    }
+
+    #[tokio::test]
+    async fn process_modules_broadcasts_info_with_table_and_json() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let payload = build_process_modules_payload(
+            1234,
+            &[("ntdll.dll", 0x7FFE_0000_0000), ("kernel32.dll", 0x7FFE_0001_0000)],
+        );
+
+        handle_process_command_callback(&events, 0xB1, 20, &payload)
+            .await
+            .expect("handler should succeed");
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("event");
+
+        let OperatorMessage::AgentResponse(ref msg) = event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+
+        let kind = msg.info.extra.get("Type").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(kind, "Info");
+
+        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(message.contains("1234"), "expected PID in message, got: {message}");
+
+        let rows_json = msg.info.extra.get("ModuleRows").expect("missing ModuleRows");
+        let arr = rows_json.as_array().expect("ModuleRows should be array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["Name"], "ntdll.dll");
+        assert_eq!(arr[1]["Name"], "kernel32.dll");
+    }
+
+    #[tokio::test]
+    async fn process_modules_empty_list_still_broadcasts() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let payload = build_process_modules_payload(999, &[]);
+
+        handle_process_command_callback(&events, 0xB2, 21, &payload)
+            .await
+            .expect("handler should succeed");
+
+        // Empty module table → format_module_table returns "" but handler still broadcasts
+        // because the Modules branch always broadcasts (unlike process list which checks is_empty)
+        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("event");
+
+        let OperatorMessage::AgentResponse(ref msg) = event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+        let rows_json = msg.info.extra.get("ModuleRows").expect("missing ModuleRows");
+        let arr = rows_json.as_array().expect("ModuleRows should be array");
+        assert!(arr.is_empty());
+    }
+
+    // ── handle_process_command_callback — Grep branch ───────────────────────
+
+    fn add_bytes_raw(buf: &mut Vec<u8>, data: &[u8]) {
+        add_u32(buf, u32::try_from(data.len()).unwrap());
+        buf.extend_from_slice(data);
+    }
+
+    fn build_process_grep_payload(rows: &[(&str, u32, u32, &[u8], u32)]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        add_u32(&mut buf, u32::from(DemonProcessCommand::Grep));
+        for &(name, pid, ppid, user_bytes, arch) in rows {
+            add_utf16(&mut buf, name);
+            add_u32(&mut buf, pid);
+            add_u32(&mut buf, ppid);
+            add_bytes_raw(&mut buf, user_bytes);
+            add_u32(&mut buf, arch);
+        }
+        buf
+    }
+
+    #[tokio::test]
+    async fn process_grep_broadcasts_info_with_table_and_json() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let payload = build_process_grep_payload(&[
+            ("lsass.exe", 700, 4, b"SYSTEM\0", 64),
+            ("cmd.exe", 1200, 700, b"user1\0", 86),
+        ]);
+
+        handle_process_command_callback(&events, 0xC1, 30, &payload)
+            .await
+            .expect("handler should succeed");
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("event");
+
+        let OperatorMessage::AgentResponse(ref msg) = event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+
+        let kind = msg.info.extra.get("Type").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(kind, "Info");
+
+        let rows_json = msg.info.extra.get("GrepRows").expect("missing GrepRows");
+        let arr = rows_json.as_array().expect("GrepRows should be array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["Name"], "lsass.exe");
+        assert_eq!(arr[0]["PID"], 700);
+        assert_eq!(arr[0]["User"], "SYSTEM");
+        assert_eq!(arr[0]["Arch"], "x64"); // arch != 86 → x64
+        assert_eq!(arr[1]["Name"], "cmd.exe");
+        assert_eq!(arr[1]["Arch"], "x86"); // arch == 86 → x86
+    }
+
+    // ── handle_process_command_callback — Memory branch ─────────────────────
+
+    fn build_process_memory_payload(
+        pid: u32,
+        query_protect: u32,
+        regions: &[(u64, u32, u32, u32, u32)],
+    ) -> Vec<u8> {
+        let mut buf = Vec::new();
+        add_u32(&mut buf, u32::from(DemonProcessCommand::Memory));
+        add_u32(&mut buf, pid);
+        add_u32(&mut buf, query_protect);
+        for &(base, size, protect, state, mem_type) in regions {
+            add_u64(&mut buf, base);
+            add_u32(&mut buf, size);
+            add_u32(&mut buf, protect);
+            add_u32(&mut buf, state);
+            add_u32(&mut buf, mem_type);
+        }
+        buf
+    }
+
+    #[tokio::test]
+    async fn process_memory_broadcasts_info_with_table_and_json() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let payload = build_process_memory_payload(
+            500,
+            0, // query_protect=0 → "All"
+            &[(0x7FF0_0000_0000, 0x1000, 0x20, 0x1000, 0x20000)],
+        );
+
+        handle_process_command_callback(&events, 0xD1, 40, &payload)
+            .await
+            .expect("handler should succeed");
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("event");
+
+        let OperatorMessage::AgentResponse(ref msg) = event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+
+        let kind = msg.info.extra.get("Type").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(kind, "Info");
+
+        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(message.contains("500"), "expected PID in message, got: {message}");
+        assert!(message.contains("All"), "expected 'All' filter, got: {message}");
+
+        let rows_json = msg.info.extra.get("MemoryRows").expect("missing MemoryRows");
+        let arr = rows_json.as_array().expect("MemoryRows should be array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["Protect"], "PAGE_EXECUTE_READ");
+        assert_eq!(arr[0]["State"], "MEM_COMMIT");
+        assert_eq!(arr[0]["Type"], "MEM_PRIVATE");
+    }
+
+    #[tokio::test]
+    async fn process_memory_with_protect_filter_shows_protect_name() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let payload = build_process_memory_payload(
+            600,
+            0x40, // PAGE_EXECUTE_READWRITE
+            &[(0x1000, 0x100, 0x40, 0x1000, 0x1000000)],
+        );
+
+        handle_process_command_callback(&events, 0xD2, 41, &payload)
+            .await
+            .expect("handler should succeed");
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("event");
+
+        let OperatorMessage::AgentResponse(ref msg) = event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            message.contains("PAGE_EXECUTE_READWRITE"),
+            "expected protect name in filter, got: {message}"
+        );
+    }
+
+    // ── handle_process_command_callback — invalid subcommand ────────────────
+
+    #[tokio::test]
+    async fn process_command_invalid_subcommand_returns_error() {
+        let events = EventBus::default();
+        let mut buf = Vec::new();
+        add_u32(&mut buf, 0xFF); // invalid subcommand
+
+        let result = handle_process_command_callback(&events, 0xE1, 50, &buf).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload for invalid subcommand, got: {result:?}"
+        );
+    }
+
+    // ── handle_process_command_callback — truncated multi-row payload ───────
+
+    #[tokio::test]
+    async fn process_modules_truncated_second_row_returns_error() {
+        let events = EventBus::default();
+        // Build a valid first module row, then a truncated second row
+        let mut buf = Vec::new();
+        add_u32(&mut buf, u32::from(DemonProcessCommand::Modules));
+        add_u32(&mut buf, 1234); // pid
+        // First complete module row
+        add_string(&mut buf, "ntdll.dll");
+        add_u64(&mut buf, 0x7FFE_0000_0000);
+        // Second row: name length says 10 bytes, but only provide 3
+        buf.extend_from_slice(&10u32.to_le_bytes());
+        buf.extend_from_slice(&[0x41, 0x42, 0x43]); // only 3 of the promised 10 bytes
+
+        let result = handle_process_command_callback(&events, 0xF1, 60, &buf).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload for truncated module row, got: {result:?}"
+        );
+    }
+
     #[tokio::test]
     async fn inject_shellcode_truncated_payload_returns_error() {
         let events = EventBus::default();

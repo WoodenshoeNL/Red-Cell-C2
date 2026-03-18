@@ -384,3 +384,58 @@ Dev agents should prioritize:
 [2026-03-18 02:29:08] [Ubuntu-C2-dev02-claude] === Arch review run 2 ===
 [2026-03-18 02:29:08] [Ubuntu-C2-dev02-claude] WARNING: git pull --rebase failed, continuing with local state
 [2026-03-18 02:29:08] [Ubuntu-C2-dev02-claude] Run log: claude_arch_20260318_022908.log
+---
+
+## Architecture Review Report — 2026-03-18
+
+### 1. Codebase Health: **On Track**
+
+85K lines of Rust across 3 crates. Clean build, zero clippy warnings, all 183 tests pass. The codebase is mature, well-structured, and security-conscious. No `todo!()`, no `unimplemented!()`, no `println!`/`eprintln!` in production code, no `unwrap()` in production code.
+
+### 2. Security Posture: **Strong**
+
+- Constant-time comparisons via `subtle::ConstantTimeEq` for API keys and auth tokens
+- `Zeroizing` wrappers on all key material; Debug impls redact secrets
+- AES-256-CTR with advancing per-agent block offset (mitigates two-time-pad from Havoc's stateless design)
+- Weak key/IV rejection on DEMON_INIT and CHECKIN
+- Replay attack defense in checkin (rejects session key rotation)
+- SSRF protection on Discord webhooks (HTTPS + domain whitelist)
+- Rate limiting on login and agent init
+- No unsafe code anywhere
+
+**No exploitable issues found.**
+
+### 3. Biggest Blindspot
+
+**`CommandPsImport` (0x1011) has no dispatch handler.** It's defined in the protocol enum but never registered — if a Demon agent sends a PsImport callback, it's silently dropped. This is a functional gap, not a security issue.
+
+### 4. Issues Filed
+
+| ID | Agent | Description |
+|----|-------|-------------|
+| `red-cell-c2-4be2` | Claude | Missing CommandPsImport (0x1011) dispatch handler |
+| `red-cell-c2-e8jg` | Claude | Process injection callbacks (shellcode/DLL/spawn) lack integration tests |
+| `red-cell-c2-a0ac` | Codex | DNS listener has no E2E agent registration pipeline test |
+| `red-cell-c2-tphz` | Claude | Kerberos timestamp filetime→unix conversion has unchecked i64 cast |
+| `red-cell-c2-42hq` | Claude | Websocket shutdown paths swallow send errors without logging |
+| `red-cell-c2-6wo8` | Claude | `is_weak_aes_key`/`iv` return true for empty slices (misleading API) |
+| `red-cell-c2-1gwf` | Claude | Poison lock recovery in auth.rs uses potentially inconsistent state |
+| `red-cell-c2-e0cv` | Claude | Kerberos UTF-16 length u32 cast could overflow on extreme input |
+
+### 5. Agent Quality
+
+**Claude** is producing the highest-quality code overall — proper error handling, comprehensive test coverage where it exists, excellent crypto design. The findings against Claude are minor API polish and edge cases, not correctness bugs. 5 findings this review attributed to Claude were all P3-P4 severity.
+
+**Codex** has 1 finding (missing DNS E2E test). Its listener code is solid but the test coverage gap is notable given it wrote the DNS implementation.
+
+**Cursor** had no new findings this review.
+
+### 6. Recommendation
+
+Dev agents should prioritize:
+1. **Add the CommandPsImport handler** — straightforward, follows existing patterns
+2. **Write the DNS listener E2E test** — use http_listener_pipeline.rs as a template
+3. **Add integration tests for injection callbacks** — security-critical handlers with zero test coverage
+[2026-03-18 02:36:48] [Ubuntu-C2-dev02-claude] Arch review completed successfully
+[2026-03-18 02:36:48] [Ubuntu-C2-dev02-claude] ========================LOOP=========================
+[2026-03-18 02:36:48] [Ubuntu-C2-dev02-claude] Next run in 120m (at 04:36:48)

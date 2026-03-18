@@ -716,6 +716,106 @@ mod tests {
     }
 
     #[test]
+    fn resolve_or_persist_regenerates_both_files_when_only_cert_exists() {
+        let temp_dir = tempfile::TempDir::new().expect("temporary directory should be created");
+        let cert_path = temp_dir.path().join("teamserver.tls.crt");
+        let key_path = temp_dir.path().join("teamserver.tls.key");
+
+        // Simulate partial state: only the certificate was persisted (e.g. interrupted write).
+        let stale_identity = generate_self_signed_tls_identity(
+            &["stale.local".to_owned()],
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("stale identity generation should succeed");
+        std::fs::write(&cert_path, stale_identity.certificate_pem())
+            .expect("stale certificate should be written");
+
+        assert!(cert_path.exists(), "precondition: cert file should exist");
+        assert!(!key_path.exists(), "precondition: key file should not exist");
+
+        let identity = resolve_or_persist_tls_identity(
+            &["teamserver.local".to_owned()],
+            None,
+            &cert_path,
+            &key_path,
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("cert-only partial state should trigger regeneration");
+
+        // Both files must be written and match the returned identity.
+        assert!(cert_path.exists(), "certificate file should be written");
+        assert!(key_path.exists(), "private key file should be written");
+        assert_eq!(
+            std::fs::read(&cert_path).expect("cert should be readable"),
+            identity.certificate_pem(),
+            "on-disk cert must match returned identity"
+        );
+        assert_eq!(
+            std::fs::read(&key_path).expect("key should be readable"),
+            identity.private_key_pem(),
+            "on-disk key must match returned identity"
+        );
+
+        // The stale cert must be overwritten — the new cert/key pair must be consistent.
+        assert_ne!(
+            identity.certificate_pem(),
+            stale_identity.certificate_pem(),
+            "stale certificate should be replaced by a fresh one"
+        );
+        identity.server_config().expect("regenerated identity must produce a valid rustls config");
+    }
+
+    #[test]
+    fn resolve_or_persist_regenerates_both_files_when_only_key_exists() {
+        let temp_dir = tempfile::TempDir::new().expect("temporary directory should be created");
+        let cert_path = temp_dir.path().join("teamserver.tls.crt");
+        let key_path = temp_dir.path().join("teamserver.tls.key");
+
+        // Simulate partial state: only the key was persisted (e.g. cert deleted manually).
+        let stale_identity = generate_self_signed_tls_identity(
+            &["stale.local".to_owned()],
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("stale identity generation should succeed");
+        std::fs::write(&key_path, stale_identity.private_key_pem())
+            .expect("stale private key should be written");
+
+        assert!(!cert_path.exists(), "precondition: cert file should not exist");
+        assert!(key_path.exists(), "precondition: key file should exist");
+
+        let identity = resolve_or_persist_tls_identity(
+            &["teamserver.local".to_owned()],
+            None,
+            &cert_path,
+            &key_path,
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("key-only partial state should trigger regeneration");
+
+        // Both files must be written and match the returned identity.
+        assert!(cert_path.exists(), "certificate file should be written");
+        assert!(key_path.exists(), "private key file should be written");
+        assert_eq!(
+            std::fs::read(&cert_path).expect("cert should be readable"),
+            identity.certificate_pem(),
+            "on-disk cert must match returned identity"
+        );
+        assert_eq!(
+            std::fs::read(&key_path).expect("key should be readable"),
+            identity.private_key_pem(),
+            "on-disk key must match returned identity"
+        );
+
+        // The stale key must be overwritten — the new cert/key pair must be consistent.
+        assert_ne!(
+            identity.private_key_pem(),
+            stale_identity.private_key_pem(),
+            "stale private key should be replaced by a fresh one"
+        );
+        identity.server_config().expect("regenerated identity must produce a valid rustls config");
+    }
+
+    #[test]
     fn resolve_or_persist_fails_when_write_directory_is_read_only() {
         let temp_dir = tempfile::TempDir::new().expect("temporary directory should be created");
 

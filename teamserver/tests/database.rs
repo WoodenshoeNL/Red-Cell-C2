@@ -1927,3 +1927,294 @@ async fn agent_get_with_corrupt_base64_returns_error() -> Result<(), TeamserverE
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Corrupted-row rejection tests for reload / conversion error paths
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn agent_get_persisted_with_corrupt_aes_key_returns_error() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let repository = database.agents();
+
+    let agent = sample_agent(0xBAD1_0001);
+    repository.create(&agent).await?;
+
+    sqlx::query("UPDATE ts_agents SET aes_key = '!!!bad!!!' WHERE agent_id = ?")
+        .bind(i64::from(agent.agent_id))
+        .execute(database.pool())
+        .await
+        .expect("raw SQL update must succeed");
+
+    let result = repository.get_persisted(agent.agent_id).await;
+    assert!(result.is_err(), "get_persisted() must fail on invalid base64 aes_key");
+    let err = result.unwrap_err();
+    assert!(
+        matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "aes_key"),
+        "expected InvalidPersistedValue for aes_key, got: {err:?}",
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_list_persisted_with_corrupt_aes_iv_returns_error() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let repository = database.agents();
+
+    let agent = sample_agent(0xBAD1_0002);
+    repository.create(&agent).await?;
+
+    sqlx::query("UPDATE ts_agents SET aes_iv = '!!!bad!!!' WHERE agent_id = ?")
+        .bind(i64::from(agent.agent_id))
+        .execute(database.pool())
+        .await
+        .expect("raw SQL update must succeed");
+
+    let result = repository.list_persisted().await;
+    assert!(result.is_err(), "list_persisted() must fail on invalid base64 aes_iv");
+    let err = result.unwrap_err();
+    assert!(
+        matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "aes_iv"),
+        "expected InvalidPersistedValue for aes_iv, got: {err:?}",
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_reload_with_negative_ctr_block_offset_returns_error() -> Result<(), TeamserverError>
+{
+    let database = test_database().await?;
+    let repository = database.agents();
+
+    let agent = sample_agent(0xBAD1_0003);
+    repository.create(&agent).await?;
+
+    sqlx::query("UPDATE ts_agents SET ctr_block_offset = -1 WHERE agent_id = ?")
+        .bind(i64::from(agent.agent_id))
+        .execute(database.pool())
+        .await
+        .expect("raw SQL update must succeed");
+
+    let result = repository.get_persisted(agent.agent_id).await;
+    assert!(result.is_err(), "get_persisted() must fail on negative ctr_block_offset");
+    let err = result.unwrap_err();
+    assert!(
+        matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "ctr_block_offset"),
+        "expected InvalidPersistedValue for ctr_block_offset, got: {err:?}",
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_reload_with_negative_process_pid_returns_error() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let repository = database.agents();
+
+    let agent = sample_agent(0xBAD1_0004);
+    repository.create(&agent).await?;
+
+    sqlx::query("UPDATE ts_agents SET process_pid = -1 WHERE agent_id = ?")
+        .bind(i64::from(agent.agent_id))
+        .execute(database.pool())
+        .await
+        .expect("raw SQL update must succeed");
+
+    let result = repository.get(agent.agent_id).await;
+    assert!(result.is_err(), "get() must fail on negative process_pid");
+    let err = result.unwrap_err();
+    assert!(
+        matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "process_pid"),
+        "expected InvalidPersistedValue for process_pid, got: {err:?}",
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_reload_with_overflowed_os_build_returns_error() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let repository = database.agents();
+
+    let agent = sample_agent(0xBAD1_0005);
+    repository.create(&agent).await?;
+
+    // u32::MAX + 1 does not fit in u32.
+    sqlx::query("UPDATE ts_agents SET os_build = ? WHERE agent_id = ?")
+        .bind(i64::from(u32::MAX) + 1)
+        .bind(i64::from(agent.agent_id))
+        .execute(database.pool())
+        .await
+        .expect("raw SQL update must succeed");
+
+    let result = repository.get(agent.agent_id).await;
+    assert!(result.is_err(), "get() must fail on overflowed os_build");
+    let err = result.unwrap_err();
+    assert!(
+        matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "os_build"),
+        "expected InvalidPersistedValue for os_build, got: {err:?}",
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn listener_get_with_unsupported_protocol_returns_error() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let repository = database.listeners();
+
+    let listener = sample_listener();
+    repository.create(&listener).await?;
+
+    sqlx::query("UPDATE ts_listeners SET protocol = 'QUIC' WHERE name = ?")
+        .bind(listener.name())
+        .execute(database.pool())
+        .await
+        .expect("raw SQL update must succeed");
+
+    let result = repository.get(listener.name()).await;
+    assert!(result.is_err(), "get() must fail on unsupported protocol 'QUIC'");
+    let err = result.unwrap_err();
+    assert!(
+        matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "protocol"),
+        "expected InvalidPersistedValue for protocol, got: {err:?}",
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn listener_list_with_unsupported_status_returns_error() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let repository = database.listeners();
+
+    let listener = sample_listener();
+    repository.create(&listener).await?;
+
+    sqlx::query("UPDATE ts_listeners SET status = 'exploded' WHERE name = ?")
+        .bind(listener.name())
+        .execute(database.pool())
+        .await
+        .expect("raw SQL update must succeed");
+
+    let result = repository.list().await;
+    assert!(result.is_err(), "list() must fail on unsupported listener status 'exploded'");
+    let err = result.unwrap_err();
+    assert!(
+        matches!(&err, TeamserverError::InvalidListenerState { state } if state == "exploded"),
+        "expected InvalidListenerState for 'exploded', got: {err:?}",
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn operator_get_with_unsupported_role_returns_error() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let repository = database.operators();
+
+    let operator = PersistedOperator {
+        username: "bad-role-user".to_owned(),
+        password_verifier: "dummy-verifier".to_owned(),
+        role: OperatorRole::Admin,
+    };
+    repository.create(&operator).await?;
+
+    sqlx::query("UPDATE ts_runtime_operators SET role = 'Superuser' WHERE username = ?")
+        .bind(&operator.username)
+        .execute(database.pool())
+        .await
+        .expect("raw SQL update must succeed");
+
+    let result = repository.get(&operator.username).await;
+    assert!(result.is_err(), "get() must fail on unsupported operator role 'Superuser'");
+    let err = result.unwrap_err();
+    assert!(
+        matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "ts_runtime_operators.role"),
+        "expected InvalidPersistedValue for role, got: {err:?}",
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn operator_list_with_unsupported_role_returns_error() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let repository = database.operators();
+
+    let operator = PersistedOperator {
+        username: "bad-role-list".to_owned(),
+        password_verifier: "dummy-verifier".to_owned(),
+        role: OperatorRole::Operator,
+    };
+    repository.create(&operator).await?;
+
+    sqlx::query("UPDATE ts_runtime_operators SET role = 'Root' WHERE username = ?")
+        .bind(&operator.username)
+        .execute(database.pool())
+        .await
+        .expect("raw SQL update must succeed");
+
+    let result = repository.list().await;
+    assert!(result.is_err(), "list() must fail on unsupported operator role 'Root'");
+    let err = result.unwrap_err();
+    assert!(
+        matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "ts_runtime_operators.role"),
+        "expected InvalidPersistedValue for role, got: {err:?}",
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn listener_get_with_corrupt_config_json_returns_error() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let repository = database.listeners();
+
+    let listener = sample_listener();
+    repository.create(&listener).await?;
+
+    sqlx::query("UPDATE ts_listeners SET config = '{not valid json' WHERE name = ?")
+        .bind(listener.name())
+        .execute(database.pool())
+        .await
+        .expect("raw SQL update must succeed");
+
+    let result = repository.get(listener.name()).await;
+    assert!(result.is_err(), "get() must fail on corrupt config JSON");
+    let err = result.unwrap_err();
+    assert!(
+        matches!(&err, TeamserverError::Json(_)),
+        "expected Json error for corrupt config, got: {err:?}",
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_list_active_with_corrupt_row_returns_error() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let repository = database.agents();
+
+    let agent = sample_agent(0xBAD1_0006);
+    repository.create(&agent).await?;
+
+    // Corrupt base_address to a value that overflows u64 conversion (negative).
+    sqlx::query("UPDATE ts_agents SET base_address = -999 WHERE agent_id = ?")
+        .bind(i64::from(agent.agent_id))
+        .execute(database.pool())
+        .await
+        .expect("raw SQL update must succeed");
+
+    let result = repository.list_active().await;
+    assert!(result.is_err(), "list_active() must fail on negative base_address");
+    let err = result.unwrap_err();
+    assert!(
+        matches!(&err, TeamserverError::InvalidPersistedValue { field, .. } if *field == "base_address"),
+        "expected InvalidPersistedValue for base_address, got: {err:?}",
+    );
+
+    Ok(())
+}

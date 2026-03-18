@@ -6134,6 +6134,587 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn token_impersonate_success_emits_good_response()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::Impersonate));
+        add_u32(&mut payload, 1); // success
+        add_bytes(&mut payload, b"CORP\\jdoe\0");
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 40, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("impersonate success response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(message.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+        assert_eq!(
+            message.info.extra.get("Message").and_then(|v| v.as_str()),
+            Some("Successfully impersonated CORP\\jdoe")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_impersonate_failure_emits_error_response()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::Impersonate));
+        add_u32(&mut payload, 0); // failure
+        add_bytes(&mut payload, b"CORP\\jdoe\0");
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 41, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("impersonate failure response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(message.info.extra.get("Type").and_then(|v| v.as_str()), Some("Error"));
+        assert_eq!(
+            message.info.extra.get("Message").and_then(|v| v.as_str()),
+            Some("Failed to impersonate CORP\\jdoe")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_make_success_emits_good_type() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::Make));
+        add_utf16(&mut payload, "CORP\\svcacct");
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 42, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("make success response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(message.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+        let msg = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(msg, "Successfully created and impersonated token: CORP\\svcacct");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_make_empty_payload_emits_error_type() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::Make));
+        // No user_domain — triggers failure path
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 43, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("make failure response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(message.info.extra.get("Type").and_then(|v| v.as_str()), Some("Error"));
+        assert_eq!(
+            message.info.extra.get("Message").and_then(|v| v.as_str()),
+            Some("Failed to create token")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_getuid_elevated_emits_admin_suffix() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        // Elevated user
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::GetUid));
+        add_u32(&mut payload, 1); // elevated
+        add_utf16(&mut payload, "CORP\\admin");
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 44, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("getuid elevated response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(message.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+        assert_eq!(
+            message.info.extra.get("Message").and_then(|v| v.as_str()),
+            Some("Token User: CORP\\admin (Admin)")
+        );
+
+        // Non-elevated user
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::GetUid));
+        add_u32(&mut payload, 0); // not elevated
+        add_utf16(&mut payload, "CORP\\user");
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 45, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("getuid normal response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(message.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+        assert_eq!(
+            message.info.extra.get("Message").and_then(|v| v.as_str()),
+            Some("Token User: CORP\\user")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_privs_get_success_emits_good_type() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        // Enable privilege — success
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::PrivsGetOrList));
+        add_u32(&mut payload, 0); // get mode
+        add_u32(&mut payload, 1); // success
+        add_bytes(&mut payload, b"SeImpersonatePrivilege\0");
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 46, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("privs get success response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(message.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+        assert_eq!(
+            message.info.extra.get("Message").and_then(|v| v.as_str()),
+            Some("The privilege SeImpersonatePrivilege was successfully enabled")
+        );
+
+        // Enable privilege — failure
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::PrivsGetOrList));
+        add_u32(&mut payload, 0); // get mode
+        add_u32(&mut payload, 0); // failure
+        add_bytes(&mut payload, b"SeImpersonatePrivilege\0");
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 47, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("privs get failure response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(message.info.extra.get("Type").and_then(|v| v.as_str()), Some("Error"));
+        assert_eq!(
+            message.info.extra.get("Message").and_then(|v| v.as_str()),
+            Some("Failed to enable the SeImpersonatePrivilege privilege")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_privs_list_emits_good_type_with_all_states()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::PrivsGetOrList));
+        add_u32(&mut payload, 1); // list mode
+        add_bytes(&mut payload, b"SeDebugPrivilege\0");
+        add_u32(&mut payload, 3); // Enabled
+        add_bytes(&mut payload, b"SeBackupPrivilege\0");
+        add_u32(&mut payload, 2); // Adjusted
+        add_bytes(&mut payload, b"SeRestorePrivilege\0");
+        add_u32(&mut payload, 0); // Disabled
+        add_bytes(&mut payload, b"SeCustomPrivilege\0");
+        add_u32(&mut payload, 99); // Unknown
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 48, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("privs list response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(message.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+        let output = &message.info.output;
+        assert!(output.contains("SeDebugPrivilege :: Enabled"));
+        assert!(output.contains("SeBackupPrivilege :: Adjusted"));
+        assert!(output.contains("SeRestorePrivilege :: Disabled"));
+        assert!(output.contains("SeCustomPrivilege :: Unknown"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_revert_success_emits_good_failure_emits_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::Revert));
+        add_u32(&mut payload, 1); // success
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 49, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("revert success response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(message.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+        assert_eq!(
+            message.info.extra.get("Message").and_then(|v| v.as_str()),
+            Some("Successful reverted token to itself")
+        );
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::Revert));
+        add_u32(&mut payload, 0); // failure
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 50, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("revert failure response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(message.info.extra.get("Type").and_then(|v| v.as_str()), Some("Error"));
+        assert_eq!(
+            message.info.extra.get("Message").and_then(|v| v.as_str()),
+            Some("Failed to revert token to itself")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_remove_success_emits_good_failure_emits_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::Remove));
+        add_u32(&mut payload, 1); // success
+        add_u32(&mut payload, 42); // token_id
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 51, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("remove success response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(message.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+        assert_eq!(
+            message.info.extra.get("Message").and_then(|v| v.as_str()),
+            Some("Successful removed token [42] from vault")
+        );
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::Remove));
+        add_u32(&mut payload, 0); // failure
+        add_u32(&mut payload, 42); // token_id
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 52, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("remove failure response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(message.info.extra.get("Type").and_then(|v| v.as_str()), Some("Error"));
+        assert_eq!(
+            message.info.extra.get("Message").and_then(|v| v.as_str()),
+            Some("Failed to remove token [42] from vault")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_find_tokens_zero_count_returns_no_tokens()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::FindTokens));
+        add_u32(&mut payload, 1); // success
+        add_u32(&mut payload, 0); // num_tokens = 0
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 53, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("find tokens zero count response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(message.info.extra.get("Type").and_then(|v| v.as_str()), Some("Info"));
+        assert!(message.info.output.contains("No tokens found"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_find_tokens_impersonation_type_with_delegation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::FindTokens));
+        add_u32(&mut payload, 1); // success
+        add_u32(&mut payload, 1); // num_tokens
+        add_utf16(&mut payload, "CORP\\delegator");
+        add_u32(&mut payload, 9999); // pid
+        add_u32(&mut payload, 0x20); // handle
+        add_u32(&mut payload, 0x2000); // integrity = Medium
+        add_u32(&mut payload, 3); // impersonation = Delegation
+        add_u32(&mut payload, 2); // token_type = Impersonation
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 54, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("find tokens impersonation response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(message.info.extra.get("Type").and_then(|v| v.as_str()), Some("Info"));
+        let output = &message.info.output;
+        assert!(output.contains("CORP\\delegator"));
+        assert!(output.contains("Medium"));
+        assert!(output.contains("Impersonation"));
+        assert!(output.contains("Delegation"));
+        // Delegation impersonation level means remote auth = Yes
+        assert!(output.contains("Yes"));
+        assert!(output.contains("token steal"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_find_tokens_failure_emits_error_type() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::FindTokens));
+        add_u32(&mut payload, 0); // failure
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 55, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("find tokens failure response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(message.info.extra.get("Type").and_then(|v| v.as_str()), Some("Error"));
+        assert_eq!(
+            message.info.extra.get("Message").and_then(|v| v.as_str()),
+            Some("Failed to list existing tokens")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_list_multiple_types_formats_correctly() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::List));
+        // Entry 0: stolen (type=1), impersonating
+        add_u32(&mut payload, 0); // index
+        add_u32(&mut payload, 0xAA); // handle
+        add_utf16(&mut payload, "LAB\\stolen_user");
+        add_u32(&mut payload, 1000); // pid
+        add_u32(&mut payload, 1); // type = stolen
+        add_u32(&mut payload, 1); // impersonating = Yes
+        // Entry 1: make (local) (type=2), not impersonating
+        add_u32(&mut payload, 1); // index
+        add_u32(&mut payload, 0xBB); // handle
+        add_utf16(&mut payload, "LAB\\local_user");
+        add_u32(&mut payload, 2000); // pid
+        add_u32(&mut payload, 2); // type = make (local)
+        add_u32(&mut payload, 0); // impersonating = No
+        // Entry 2: make (network) (type=3)
+        add_u32(&mut payload, 2); // index
+        add_u32(&mut payload, 0xCC); // handle
+        add_utf16(&mut payload, "LAB\\net_user");
+        add_u32(&mut payload, 3000); // pid
+        add_u32(&mut payload, 3); // type = make (network)
+        add_u32(&mut payload, 0); // impersonating = No
+        // Entry 3: unknown type (type=99)
+        add_u32(&mut payload, 3); // index
+        add_u32(&mut payload, 0xDD); // handle
+        add_utf16(&mut payload, "LAB\\unknown_user");
+        add_u32(&mut payload, 4000); // pid
+        add_u32(&mut payload, 99); // type = unknown
+        add_u32(&mut payload, 0); // impersonating = No
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 56, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("token list multi response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(message.info.extra.get("Type").and_then(|v| v.as_str()), Some("Info"));
+        let output = &message.info.output;
+        assert!(output.contains("stolen"));
+        assert!(output.contains("make (local)"));
+        assert!(output.contains("make (network)"));
+        assert!(output.contains("unknown"));
+        assert!(output.contains("LAB\\stolen_user"));
+        assert!(output.contains("LAB\\local_user"));
+        assert!(output.contains("LAB\\net_user"));
+        assert!(output.contains("LAB\\unknown_user"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_find_tokens_integrity_levels_formatted_correctly()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::FindTokens));
+        add_u32(&mut payload, 1); // success
+        add_u32(&mut payload, 4); // num_tokens
+        // Token 1: Low integrity (0x0800 < LOW_RID 0x1000)
+        add_utf16(&mut payload, "LOW\\user");
+        add_u32(&mut payload, 100); // pid
+        add_u32(&mut payload, 0x01); // handle
+        add_u32(&mut payload, 0x0800); // integrity = Low
+        add_u32(&mut payload, 0); // impersonation
+        add_u32(&mut payload, 2); // Impersonation token
+        // Token 2: Medium integrity (0x2000)
+        add_utf16(&mut payload, "MED\\user");
+        add_u32(&mut payload, 200); // pid
+        add_u32(&mut payload, 0x02); // handle
+        add_u32(&mut payload, 0x2000); // integrity = Medium
+        add_u32(&mut payload, 1); // impersonation = Identification
+        add_u32(&mut payload, 2); // Impersonation token
+        // Token 3: High integrity (0x3000)
+        add_utf16(&mut payload, "HIGH\\user");
+        add_u32(&mut payload, 300); // pid
+        add_u32(&mut payload, 0x03); // handle
+        add_u32(&mut payload, 0x3000); // integrity = High
+        add_u32(&mut payload, 2); // impersonation = Impersonation
+        add_u32(&mut payload, 2); // Impersonation token
+        // Token 4: System integrity (0x4000)
+        add_utf16(&mut payload, "SYS\\user");
+        add_u32(&mut payload, 400); // pid
+        add_u32(&mut payload, 0x04); // handle
+        add_u32(&mut payload, 0x4000); // integrity = System
+        add_u32(&mut payload, 0); // impersonation = Anonymous
+        add_u32(&mut payload, 2); // Impersonation token
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 57, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("find tokens integrity response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        let output = &message.info.output;
+        // Verify each integrity level is correctly mapped
+        assert!(output.contains("Low"));
+        assert!(output.contains("Medium"));
+        assert!(output.contains("High"));
+        assert!(output.contains("System"));
+        // Verify impersonation level labels
+        assert!(output.contains("Anonymous"));
+        assert!(output.contains("Identification"));
+        // "Impersonation" appears as both token type and impersonation level
+        assert!(output.contains("Impersonation"));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn token_list_callback_rejects_truncated_row() -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());

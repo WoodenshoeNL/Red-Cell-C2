@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 249 | 195 | 31 |
+| Tasks closed | 255 | 195 | 31 |
 | Bugs filed against | 40 | 34 | 9 |
 | Bug rate (bugs/task) | 0.16 | 0.17 | 0.29 |
 | Quality score | 84% | 83% | 71% |
@@ -2055,3 +2055,14 @@ Notes: Test count stable at 175 (new tests replace none; test binary count uncha
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (921+ tests, 0 failures)
 Notes: Clean review — no code quality, security, or architecture issues. All changes are well-structured test additions. Claude's quality score improved from 83% to 84%. Previous workflow issue (35dz left in_progress) was resolved — now properly closed. One task (ildv) currently claimed and in_progress.
+
+### QA Review — 2026-03-18 01:30 — f798090..97098a4
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (dev02-opus) | 6 | 0 | Closed ildv, kkvs, jlfs, nynt, u61j, d3y7. All test additions: AgentEncryptionInfo base64 rejection (3 tests), DNS ListenerConfig round-trip (already existed — closed as verified), deserialize_u16_from_any edge cases (4 tests), DemonPackage::command() error path, AgentInfo JSON key Havoc wire protocol assertions (2 tests), crypto IV non-zero assertion. Currently has abm8 claimed. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (1035+ tests, 0 failures)
+Notes: Clean review — no code quality, security, or architecture issues. All changes are well-structured test additions with no production code modified. kkvs was closed after verifying tests already existed (legitimate). Claude running total now 255 tasks closed, quality score holds at 84%.

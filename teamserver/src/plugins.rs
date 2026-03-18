@@ -2162,4 +2162,55 @@ havoc.RegisterCommand(\n\
         }
         Ok(())
     }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn invoke_command_against_unknown_agent_returns_error_and_no_broadcast()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        // Do NOT insert any agent into the registry — the agent ID will be unknown.
+        let (_database, _registry, events, _sockets, runtime) =
+            runtime_fixture("plugins-unknown-agent-task").await?;
+
+        // Register a command that calls agent.task() inside its callback.
+        let handle = std::thread::spawn({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| -> PyResult<()> {
+                    runtime.install_api_module(py)?;
+                    let module = py.import("red_cell")?;
+                    let callback = py.eval(
+                        pyo3::ffi::c_str!("lambda agent, args: agent.task(99, 'payload')"),
+                        None,
+                        None,
+                    )?;
+                    module.call_method1(
+                        "register_command",
+                        ("fail_cmd", "command that will fail", callback),
+                    )?;
+                    Ok(())
+                })
+            }
+        });
+        handle.join().map_err(|_| "python test thread panicked")??;
+
+        let mut receiver = events.subscribe();
+
+        // Invoke against a non-existent agent.
+        let result = runtime
+            .invoke_registered_command("fail_cmd", "operator", 0xDEAD_BEEF, vec!["arg1".to_owned()])
+            .await;
+
+        // The call must return an error (propagated from enqueue_job → AgentNotFound).
+        assert!(result.is_err(), "expected error for unknown agent, got {result:?}");
+
+        // No AgentTask broadcast should have been emitted.
+        let recv_result =
+            tokio::time::timeout(std::time::Duration::from_millis(100), receiver.recv()).await;
+        assert!(
+            recv_result.is_err(),
+            "expected no broadcast, but received a message: {recv_result:?}",
+        );
+        Ok(())
+    }
 }

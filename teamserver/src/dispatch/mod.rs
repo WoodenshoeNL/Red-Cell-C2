@@ -6727,6 +6727,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn builtin_exit_handler_process_exit_broadcasts_process_message()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        registry
+            .insert(sample_agent_info(
+                0xBBCC_DD01,
+                [0x51; AGENT_KEY_LENGTH],
+                [0x34; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database,
+            sockets,
+            None,
+        );
+
+        dispatcher
+            .dispatch(0xBBCC_DD01, u32::from(DemonCommand::CommandExit), 42, &2_u32.to_le_bytes())
+            .await?;
+
+        // First event: AgentUpdate marking dead.
+        let event = receiver.recv().await.ok_or("agent update missing")?;
+        let OperatorMessage::AgentUpdate(message) = event else {
+            panic!("expected agent update event");
+        };
+        assert_eq!(message.info.agent_id, "BBCCDD01");
+        assert_eq!(message.info.marked, "Dead");
+
+        // Second event: AgentResponse with the process-exit message.
+        let event = receiver.recv().await.ok_or("agent response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String(
+                "Agent has been tasked to cleanup and exit process. cya...".to_owned(),
+            ))
+        );
+
+        let agent = registry.get(0xBBCC_DD01).await.ok_or("agent should remain tracked")?;
+        assert!(!agent.active);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_exit_handler_unknown_method_broadcasts_generic_message()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        registry
+            .insert(sample_agent_info(
+                0xBBCC_DD02,
+                [0x52; AGENT_KEY_LENGTH],
+                [0x35; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database,
+            sockets,
+            None,
+        );
+
+        dispatcher
+            .dispatch(
+                0xBBCC_DD02,
+                u32::from(DemonCommand::CommandExit),
+                43,
+                &0x99_u32.to_le_bytes(),
+            )
+            .await?;
+
+        // First event: AgentUpdate marking dead.
+        let event = receiver.recv().await.ok_or("agent update missing")?;
+        let OperatorMessage::AgentUpdate(message) = event else {
+            panic!("expected agent update event");
+        };
+        assert_eq!(message.info.agent_id, "BBCCDD02");
+        assert_eq!(message.info.marked, "Dead");
+
+        // Second event: AgentResponse with the generic fallback message.
+        let event = receiver.recv().await.ok_or("agent response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Agent exited".to_owned()))
+        );
+
+        let agent = registry.get(0xBBCC_DD02).await.ok_or("agent should remain tracked")?;
+        assert!(!agent.active);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn builtin_kill_date_handler_marks_agent_dead_and_broadcasts_response()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;

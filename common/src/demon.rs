@@ -1009,4 +1009,147 @@ mod tests {
             Err(DemonProtocolError::UnknownEnumValue { kind: "DemonCommand", value: 0xffff_ffff })
         ));
     }
+
+    // ── Golden-vector tests ────────────────────────────────────────────────
+    //
+    // These tests verify decoding and re-encoding of hand-constructed byte
+    // sequences that match the original Havoc Demon binary protocol layout.
+    // They pin the on-wire format so that internal refactors cannot silently
+    // drift from Havoc compatibility.
+
+    /// Golden vector: DemonEnvelope carrying a two-package DemonMessage.
+    ///
+    /// Wire layout (41 bytes total):
+    ///   Header (12 bytes, big-endian):
+    ///     size    = 0x00000025 (37 = 29 payload + 8)
+    ///     magic   = 0xDEADBEEF
+    ///     agent_id= 0xCAFEBABE
+    ///   Package 1 (12 bytes, little-endian): CommandGetJob(1), req=0, 0-byte payload
+    ///   Package 2 (17 bytes, little-endian): CommandOutput(90), req=0x42, 5-byte payload "Hello"
+    #[test]
+    fn golden_vector_envelope_with_two_packages() {
+        #[rustfmt::skip]
+        let wire: &[u8] = &[
+            // -- DemonHeader (big-endian) --
+            0x00, 0x00, 0x00, 0x25, // size = 37
+            0xDE, 0xAD, 0xBE, 0xEF, // magic
+            0xCA, 0xFE, 0xBA, 0xBE, // agent_id
+            // -- Package 1: CommandGetJob --
+            0x01, 0x00, 0x00, 0x00, // command_id = 1 (LE)
+            0x00, 0x00, 0x00, 0x00, // request_id = 0 (LE)
+            0x00, 0x00, 0x00, 0x00, // payload_len = 0 (LE)
+            // -- Package 2: CommandOutput --
+            0x5A, 0x00, 0x00, 0x00, // command_id = 90 (LE)
+            0x42, 0x00, 0x00, 0x00, // request_id = 0x42 (LE)
+            0x05, 0x00, 0x00, 0x00, // payload_len = 5 (LE)
+            0x48, 0x65, 0x6C, 0x6C, 0x6F, // "Hello"
+        ];
+
+        // Decode envelope.
+        let envelope = DemonEnvelope::from_bytes(wire).expect("golden vector must decode");
+        assert_eq!(envelope.header.magic, DEMON_MAGIC_VALUE);
+        assert_eq!(envelope.header.agent_id, 0xCAFE_BABE);
+
+        // Decode packages from the envelope payload.
+        let message =
+            DemonMessage::from_bytes(&envelope.payload).expect("packages must decode from payload");
+        assert_eq!(message.packages.len(), 2, "expected exactly two packages");
+
+        let pkg1 = &message.packages[0];
+        assert_eq!(pkg1.command().expect("should recognize"), DemonCommand::CommandGetJob);
+        assert_eq!(pkg1.request_id, 0);
+        assert!(pkg1.payload.is_empty());
+
+        let pkg2 = &message.packages[1];
+        assert_eq!(pkg2.command().expect("should recognize"), DemonCommand::CommandOutput);
+        assert_eq!(pkg2.request_id, 0x42);
+        assert_eq!(pkg2.payload, b"Hello");
+
+        // Re-encode and compare byte-for-byte.
+        let reencoded = envelope.to_bytes();
+        assert_eq!(reencoded.as_slice(), wire, "re-encoded envelope must match golden vector");
+    }
+
+    /// Golden vector: single-package envelope with CommandExit.
+    ///
+    /// Wire layout (28 bytes total):
+    ///   Header (12 bytes, big-endian):
+    ///     size    = 0x00000018 (24 = 16 payload + 8)
+    ///     magic   = 0xDEADBEEF
+    ///     agent_id= 0x00001337
+    ///   Package (16 bytes, little-endian):
+    ///     CommandExit(92), req=0xFF, 4-byte payload: exit_method=2 (LE)
+    #[test]
+    fn golden_vector_single_package_command_exit() {
+        #[rustfmt::skip]
+        let wire: &[u8] = &[
+            // -- DemonHeader (big-endian) --
+            0x00, 0x00, 0x00, 0x18, // size = 24
+            0xDE, 0xAD, 0xBE, 0xEF, // magic
+            0x00, 0x00, 0x13, 0x37, // agent_id
+            // -- Package: CommandExit --
+            0x5C, 0x00, 0x00, 0x00, // command_id = 92 (LE)
+            0xFF, 0x00, 0x00, 0x00, // request_id = 0xFF (LE)
+            0x04, 0x00, 0x00, 0x00, // payload_len = 4 (LE)
+            0x02, 0x00, 0x00, 0x00, // exit_method = 2 (LE, process exit)
+        ];
+
+        let envelope = DemonEnvelope::from_bytes(wire).expect("golden vector must decode");
+        assert_eq!(envelope.header.agent_id, 0x0000_1337);
+
+        let message = DemonMessage::from_bytes(&envelope.payload).expect("packages must decode");
+        assert_eq!(message.packages.len(), 1);
+
+        let pkg = &message.packages[0];
+        assert_eq!(pkg.command().expect("should recognize"), DemonCommand::CommandExit);
+        assert_eq!(pkg.request_id, 0xFF);
+        assert_eq!(pkg.payload, [0x02, 0x00, 0x00, 0x00]);
+
+        let reencoded = envelope.to_bytes();
+        assert_eq!(reencoded.as_slice(), wire, "re-encoded envelope must match golden vector");
+    }
+
+    /// Golden vector: multi-package message stream ordering.
+    ///
+    /// Verifies that DemonMessage preserves the exact package order from
+    /// the wire, which matters for command dispatch sequencing.
+    #[test]
+    fn golden_vector_message_stream_ordering() {
+        #[rustfmt::skip]
+        let packages_wire: &[u8] = &[
+            // Package 1: CommandCheckin(100), req=1, empty
+            0x64, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+            // Package 2: CommandGetJob(1), req=2, empty
+            0x01, 0x00, 0x00, 0x00,
+            0x02, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+            // Package 3: CommandNoJob(10), req=3, empty
+            0x0A, 0x00, 0x00, 0x00,
+            0x03, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+        ];
+
+        let message = DemonMessage::from_bytes(packages_wire).expect("message must decode");
+        assert_eq!(message.packages.len(), 3, "expected exactly three packages");
+
+        // Verify ordering is preserved.
+        assert_eq!(message.packages[0].command().expect("cmd"), DemonCommand::CommandCheckin);
+        assert_eq!(message.packages[0].request_id, 1);
+
+        assert_eq!(message.packages[1].command().expect("cmd"), DemonCommand::CommandGetJob);
+        assert_eq!(message.packages[1].request_id, 2);
+
+        assert_eq!(message.packages[2].command().expect("cmd"), DemonCommand::CommandNoJob);
+        assert_eq!(message.packages[2].request_id, 3);
+
+        // Re-encode and verify byte-for-byte.
+        let reencoded = message.to_bytes().expect("message must encode");
+        assert_eq!(
+            reencoded.as_slice(),
+            packages_wire,
+            "re-encoded message must match golden vector"
+        );
+    }
 }

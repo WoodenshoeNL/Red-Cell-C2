@@ -28,6 +28,29 @@ fn bof_ran_ok_payload() -> Vec<u8> {
     3u32.to_le_bytes().to_vec()
 }
 
+/// Build a BOF_EXCEPTION (1) payload: u32 LE sub-type + u32 LE exception code + u64 LE address.
+fn bof_exception_payload(exception_code: u32, address: u64) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&1u32.to_le_bytes()); // BOF_EXCEPTION
+    p.extend_from_slice(&exception_code.to_le_bytes());
+    p.extend_from_slice(&address.to_le_bytes());
+    p
+}
+
+/// Build a BOF_SYMBOL_NOT_FOUND (2) payload: u32 LE sub-type + length-prefixed UTF-8 symbol name.
+fn bof_symbol_not_found_payload(symbol: &str) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&2u32.to_le_bytes()); // BOF_SYMBOL_NOT_FOUND
+    p.extend_from_slice(&(symbol.len() as u32).to_le_bytes());
+    p.extend_from_slice(symbol.as_bytes());
+    p
+}
+
+/// Build a BOF_COULD_NOT_RUN (4) payload: just the u32 LE sub-type, no extra data.
+fn bof_could_not_run_payload() -> Vec<u8> {
+    4u32.to_le_bytes().to_vec()
+}
+
 /// Build a DOTNET_INFO_NET_VERSION (0x2) payload for `CommandAssemblyInlineExecute`.
 /// The CLR version string is encoded as a LE-length-prefixed UTF-16 LE string.
 fn assembly_clr_version_payload(version: &str) -> Vec<u8> {
@@ -377,5 +400,184 @@ async fn assembly_inline_execute_clr_version_broadcast() -> Result<(), Box<dyn s
 
     socket.close(None).await?;
     listeners.stop("asm-test-clr-ver").await?;
+    Ok(())
+}
+
+/// A BOF inline-execute callback with BOF_EXCEPTION must broadcast an `AgentResponse`
+/// with kind "Error" and a message containing the exception code and address.
+#[tokio::test]
+async fn bof_exception_callback_broadcasts_error_with_details()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("asm-test-bof-exc", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("asm-test-bof-exc").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xAB01_0005_u32;
+    let key = [0x99; AGENT_KEY_LENGTH];
+    let iv = [0xAA; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let exception_code = 0xC000_0005_u32;
+    let exception_addr = 0x00007FFE_1234_5678_u64;
+    let payload = bof_exception_payload(exception_code, exception_addr);
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandInlineExecute),
+            0x50,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse, got {event:?}");
+    };
+    assert_eq!(msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::CommandInlineExecute).to_string());
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Error"));
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).expect("Message field");
+    assert!(message.contains("C0000005"), "expected exception code in message, got {message:?}");
+    assert!(
+        message.contains("00007FFE12345678"),
+        "expected exception address in message, got {message:?}"
+    );
+
+    socket.close(None).await?;
+    listeners.stop("asm-test-bof-exc").await?;
+    Ok(())
+}
+
+/// A BOF inline-execute callback with BOF_SYMBOL_NOT_FOUND must broadcast an
+/// `AgentResponse` with kind "Error" and the missing symbol name in the message.
+#[tokio::test]
+async fn bof_symbol_not_found_callback_broadcasts_error_with_symbol()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("asm-test-bof-sym", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("asm-test-bof-sym").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xAB01_0006_u32;
+    let key = [0xBB; AGENT_KEY_LENGTH];
+    let iv = [0xCC; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let missing_symbol = "KERNEL32$VirtualAllocEx";
+    let payload = bof_symbol_not_found_payload(missing_symbol);
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandInlineExecute),
+            0x60,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse, got {event:?}");
+    };
+    assert_eq!(msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::CommandInlineExecute).to_string());
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Error"));
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).expect("Message field");
+    assert!(
+        message.contains(missing_symbol),
+        "expected missing symbol name in message, got {message:?}"
+    );
+
+    socket.close(None).await?;
+    listeners.stop("asm-test-bof-sym").await?;
+    Ok(())
+}
+
+/// A BOF inline-execute callback with BOF_COULD_NOT_RUN must broadcast an
+/// `AgentResponse` with kind "Error" and the expected failure message.
+#[tokio::test]
+async fn bof_could_not_run_callback_broadcasts_error() -> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("asm-test-bof-cnr", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("asm-test-bof-cnr").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xAB01_0007_u32;
+    let key = [0xDD; AGENT_KEY_LENGTH];
+    let iv = [0xEE; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let payload = bof_could_not_run_payload();
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandInlineExecute),
+            0x70,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse, got {event:?}");
+    };
+    assert_eq!(msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::CommandInlineExecute).to_string());
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Error"));
+    assert_eq!(
+        msg.info.extra.get("Message").and_then(|v| v.as_str()),
+        Some("Failed to execute object file")
+    );
+
+    socket.close(None).await?;
+    listeners.stop("asm-test-bof-cnr").await?;
     Ok(())
 }

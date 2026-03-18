@@ -1734,6 +1734,57 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn negotiate_socks5_empty_stream() -> io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut client, mut server) = connected_stream_pair().await?;
+
+        // Send nothing and immediately close the connection.
+        let client_task = tokio::spawn(async move { client.shutdown().await });
+
+        let result = super::negotiate_socks5(&mut server).await;
+
+        assert!(result.is_err(), "should error on empty stream");
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+
+        let _ = client_task.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_socks_connect_request_partial_port() -> io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut client, mut server) = connected_stream_pair().await?;
+
+        // Complete IPv4 address but only 1 of 2 port bytes, then close.
+        let client_task = tokio::spawn(async move {
+            client
+                .write_all(&[
+                    super::SOCKS_VERSION,
+                    super::SOCKS_COMMAND_CONNECT,
+                    0,
+                    super::SOCKS_ATYP_IPV4,
+                    10,
+                    0,
+                    0,
+                    1,    // 4 address bytes — complete
+                    0x1F, // only 1 of 2 port bytes
+                ])
+                .await?;
+            client.shutdown().await
+        });
+
+        let result = super::read_socks_connect_request(&mut server).await;
+
+        assert!(result.is_err(), "should error when only 1 of 2 port bytes are sent");
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+
+        let _ = client_task.await;
+        Ok(())
+    }
+
     /// Build a registered `PendingClient` for `agent_id`/`socket_id` and return the read half of
     /// the peer socket so the caller can verify what the manager writes to the client.
     ///

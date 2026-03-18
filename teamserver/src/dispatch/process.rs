@@ -1022,4 +1022,517 @@ mod tests {
 
         assert!(result.is_err(), "expected no broadcast when verbose=0, success=1, piped=1");
     }
+
+    // ── payload builder helpers ─────────────────────────────────────────────
+
+    fn add_u32(buf: &mut Vec<u8>, value: u32) {
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn add_utf16(buf: &mut Vec<u8>, value: &str) {
+        let mut encoded: Vec<u8> = value.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        encoded.extend_from_slice(&[0, 0]); // null terminator
+        buf.extend_from_slice(&u32::try_from(encoded.len()).unwrap().to_le_bytes());
+        buf.extend_from_slice(&encoded);
+    }
+
+    /// Build a binary payload for `handle_proc_ppid_spoof_callback`.
+    fn build_ppid_spoof_payload(ppid: u32) -> Vec<u8> {
+        let mut buf = Vec::new();
+        add_u32(&mut buf, ppid);
+        buf
+    }
+
+    /// Build a binary payload for `handle_process_list_callback`.
+    fn build_process_list_payload(
+        from_process_manager: u32,
+        rows: &[(&str, u32, u32, u32, u32, u32, &str)], // name, pid, is_wow, ppid, session, threads, user
+    ) -> Vec<u8> {
+        let mut buf = Vec::new();
+        add_u32(&mut buf, from_process_manager);
+        for &(name, pid, is_wow, ppid, session, threads, user) in rows {
+            add_utf16(&mut buf, name);
+            add_u32(&mut buf, pid);
+            add_u32(&mut buf, is_wow);
+            add_u32(&mut buf, ppid);
+            add_u32(&mut buf, session);
+            add_u32(&mut buf, threads);
+            add_utf16(&mut buf, user);
+        }
+        buf
+    }
+
+    /// Build a payload containing a single u32 status code (for inject/spawn handlers).
+    fn build_status_payload(status: u32) -> Vec<u8> {
+        let mut buf = Vec::new();
+        add_u32(&mut buf, status);
+        buf
+    }
+
+    // ── handle_proc_ppid_spoof_callback ─────────────────────────────────────
+
+    fn temp_db_path() -> std::path::PathBuf {
+        std::env::temp_dir()
+            .join(format!("red-cell-dispatch-process-{}.sqlite", uuid::Uuid::new_v4()))
+    }
+
+    async fn test_registry() -> AgentRegistry {
+        let db = crate::Database::connect(temp_db_path()).await.unwrap();
+        AgentRegistry::new(db)
+    }
+
+    fn sample_agent(agent_id: u32) -> red_cell_common::AgentRecord {
+        use red_cell_common::AgentEncryptionInfo;
+        use zeroize::Zeroizing;
+        red_cell_common::AgentRecord {
+            agent_id,
+            active: true,
+            reason: String::new(),
+            note: String::new(),
+            encryption: AgentEncryptionInfo {
+                aes_key: Zeroizing::new(b"0123456789abcdef0123456789abcdef".to_vec()),
+                aes_iv: Zeroizing::new(b"0123456789abcdef".to_vec()),
+            },
+            hostname: "wkstn-01".to_owned(),
+            username: "operator".to_owned(),
+            domain_name: "LAB".to_owned(),
+            external_ip: "127.0.0.1".to_owned(),
+            internal_ip: "10.0.0.25".to_owned(),
+            process_name: "explorer.exe".to_owned(),
+            process_path: "C:\\Windows\\explorer.exe".to_owned(),
+            base_address: 0x1000,
+            process_pid: 1337,
+            process_tid: 7331,
+            process_ppid: 512,
+            process_arch: "x64".to_owned(),
+            elevated: true,
+            os_version: "Windows 11".to_owned(),
+            os_build: 0,
+            os_arch: "x64".to_owned(),
+            sleep_delay: 10,
+            sleep_jitter: 25,
+            kill_date: None,
+            working_hours: None,
+            first_call_in: "2026-03-09T20:00:00Z".to_owned(),
+            last_call_in: "2026-03-09T20:00:00Z".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn ppid_spoof_updates_registry_and_broadcasts() {
+        let registry = test_registry().await;
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let agent_id = 0xABCD_0001;
+        let agent = sample_agent(agent_id);
+        registry.insert(agent).await.unwrap();
+
+        let payload = build_ppid_spoof_payload(9999);
+        handle_proc_ppid_spoof_callback(&registry, &events, agent_id, 1, &payload)
+            .await
+            .expect("handler should succeed");
+
+        // Agent's process_ppid should be updated in the registry.
+        let updated = registry.get(agent_id).await.expect("agent should exist");
+        assert_eq!(updated.process_ppid, 9999);
+
+        // Two events: agent_mark_event + agent_response_event
+        let _mark_event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("should receive mark event")
+            .expect("mark event");
+
+        let response_event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("should receive response event")
+            .expect("response event");
+
+        let (kind, message) = extract_response_kind_and_message(&response_event);
+        assert_eq!(kind, "Good");
+        assert!(message.contains("9999"), "expected ppid in message, got: {message}");
+    }
+
+    #[tokio::test]
+    async fn ppid_spoof_missing_agent_still_broadcasts_response() {
+        let registry = test_registry().await;
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let agent_id = 0xDEAD_BEEF;
+
+        let payload = build_ppid_spoof_payload(42);
+        let result =
+            handle_proc_ppid_spoof_callback(&registry, &events, agent_id, 5, &payload).await;
+
+        assert!(result.is_ok(), "handler should not panic for missing agent");
+
+        // Only the response event should be broadcast (no mark event).
+        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("should receive response event")
+            .expect("response event");
+
+        let (kind, message) = extract_response_kind_and_message(&event);
+        assert_eq!(kind, "Good");
+        assert!(message.contains("42"), "expected ppid in message, got: {message}");
+    }
+
+    #[tokio::test]
+    async fn ppid_spoof_truncated_payload_returns_error() {
+        let registry = test_registry().await;
+        let events = EventBus::default();
+        // Payload too short — only 2 bytes instead of 4.
+        let result = handle_proc_ppid_spoof_callback(&registry, &events, 1, 1, &[0x01, 0x02]).await;
+
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload, got: {result:?}"
+        );
+    }
+
+    // ── handle_process_list_callback ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn process_list_happy_path_broadcasts_table_and_json() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let payload = build_process_list_payload(
+            0, // from_process_manager
+            &[
+                ("svchost.exe", 800, 0, 4, 0, 12, "SYSTEM"),
+                ("explorer.exe", 1200, 1, 800, 1, 32, "user1"),
+            ],
+        );
+
+        let result = handle_process_list_callback(&events, 0xAA, 1, &payload).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("should receive event")
+            .expect("broadcast event");
+
+        let OperatorMessage::AgentResponse(ref msg) = event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+
+        // Check structured JSON extra
+        let rows_json = msg.info.extra.get("ProcessListRows").expect("missing ProcessListRows");
+        let arr = rows_json.as_array().expect("ProcessListRows should be array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["Name"], "svchost.exe");
+        assert_eq!(arr[0]["PID"], 800);
+        assert_eq!(arr[0]["Arch"], "x64"); // is_wow=0 → x64
+        assert_eq!(arr[1]["Name"], "explorer.exe");
+        assert_eq!(arr[1]["Arch"], "x86"); // is_wow=1 → x86
+        assert_eq!(arr[1]["User"], "user1");
+
+        // Check the message type
+        let kind = msg.info.extra.get("Type").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(kind, "Info");
+    }
+
+    #[tokio::test]
+    async fn process_list_empty_returns_none_without_broadcasting() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        // No rows, just the from_process_manager flag.
+        let payload = build_process_list_payload(0, &[]);
+
+        let result = handle_process_list_callback(&events, 0xBB, 2, &payload).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+
+        let timeout_result =
+            tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
+        assert!(timeout_result.is_err(), "expected no broadcast for empty process list");
+    }
+
+    #[tokio::test]
+    async fn process_list_truncated_row_returns_error() {
+        let events = EventBus::default();
+        // Payload with the flag but a truncated row (just 2 bytes of garbage).
+        let mut payload = Vec::new();
+        add_u32(&mut payload, 0); // from_process_manager
+        payload.extend_from_slice(&[0x01, 0x02]); // truncated — not enough for a utf16 length
+
+        let result = handle_process_list_callback(&events, 0xCC, 3, &payload).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload for truncated row, got: {result:?}"
+        );
+    }
+
+    // ── handle_inject_shellcode_callback ────────────────────────────────────
+
+    #[tokio::test]
+    async fn inject_shellcode_success_broadcasts_good() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let payload = build_status_payload(u32::from(DemonInjectError::Success));
+
+        handle_inject_shellcode_callback(&events, 0xAA, 1, &payload).await.expect("should succeed");
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("event");
+        let (kind, message) = extract_response_kind_and_message(&event);
+        assert_eq!(kind, "Good");
+        assert!(message.contains("Successfully"), "got: {message}");
+    }
+
+    #[tokio::test]
+    async fn inject_shellcode_failed_broadcasts_error() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let payload = build_status_payload(u32::from(DemonInjectError::Failed));
+
+        handle_inject_shellcode_callback(&events, 0xAA, 1, &payload).await.expect("should succeed");
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("event");
+        let (kind, _) = extract_response_kind_and_message(&event);
+        assert_eq!(kind, "Error");
+    }
+
+    #[tokio::test]
+    async fn inject_shellcode_invalid_param_broadcasts_error() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let payload = build_status_payload(u32::from(DemonInjectError::InvalidParam));
+
+        handle_inject_shellcode_callback(&events, 0xAA, 1, &payload).await.expect("should succeed");
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("event");
+        let (kind, message) = extract_response_kind_and_message(&event);
+        assert_eq!(kind, "Error");
+        assert!(message.contains("Invalid parameter"), "got: {message}");
+    }
+
+    #[tokio::test]
+    async fn inject_shellcode_arch_mismatch_broadcasts_error() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let payload = build_status_payload(u32::from(DemonInjectError::ProcessArchMismatch));
+
+        handle_inject_shellcode_callback(&events, 0xAA, 1, &payload).await.expect("should succeed");
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("event");
+        let (kind, message) = extract_response_kind_and_message(&event);
+        assert_eq!(kind, "Error");
+        assert!(message.contains("architecture mismatch"), "got: {message}");
+    }
+
+    #[tokio::test]
+    async fn inject_shellcode_unknown_status_returns_error() {
+        let events = EventBus::default();
+        let payload = build_status_payload(0xFFFF);
+
+        let result = handle_inject_shellcode_callback(&events, 0xAA, 1, &payload).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload for unknown status, got: {result:?}"
+        );
+    }
+
+    // ── handle_inject_dll_callback ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn inject_dll_success_broadcasts_good() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let payload = build_status_payload(u32::from(DemonInjectError::Success));
+
+        handle_inject_dll_callback(&events, 0xBB, 1, &payload).await.expect("should succeed");
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("event");
+        let (kind, message) = extract_response_kind_and_message(&event);
+        assert_eq!(kind, "Good");
+        assert!(message.contains("Successfully"), "got: {message}");
+    }
+
+    #[tokio::test]
+    async fn inject_dll_failed_broadcasts_error() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let payload = build_status_payload(u32::from(DemonInjectError::Failed));
+
+        handle_inject_dll_callback(&events, 0xBB, 1, &payload).await.expect("should succeed");
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("event");
+        let (kind, _) = extract_response_kind_and_message(&event);
+        assert_eq!(kind, "Error");
+    }
+
+    #[tokio::test]
+    async fn inject_dll_invalid_param_broadcasts_error() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let payload = build_status_payload(u32::from(DemonInjectError::InvalidParam));
+
+        handle_inject_dll_callback(&events, 0xBB, 1, &payload).await.expect("should succeed");
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("event");
+        let (kind, message) = extract_response_kind_and_message(&event);
+        assert_eq!(kind, "Error");
+        assert!(message.contains("invalid parameter"), "got: {message}");
+    }
+
+    #[tokio::test]
+    async fn inject_dll_arch_mismatch_broadcasts_error() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let payload = build_status_payload(u32::from(DemonInjectError::ProcessArchMismatch));
+
+        handle_inject_dll_callback(&events, 0xBB, 1, &payload).await.expect("should succeed");
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("event");
+        let (kind, message) = extract_response_kind_and_message(&event);
+        assert_eq!(kind, "Error");
+        assert!(message.contains("architecture mismatch"), "got: {message}");
+    }
+
+    #[tokio::test]
+    async fn inject_dll_unknown_status_returns_error() {
+        let events = EventBus::default();
+        let payload = build_status_payload(0xFFFF);
+
+        let result = handle_inject_dll_callback(&events, 0xBB, 1, &payload).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload, got: {result:?}"
+        );
+    }
+
+    // ── handle_spawn_dll_callback ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn spawn_dll_success_broadcasts_good() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let payload = build_status_payload(u32::from(DemonInjectError::Success));
+
+        handle_spawn_dll_callback(&events, 0xCC, 1, &payload).await.expect("should succeed");
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("event");
+        let (kind, message) = extract_response_kind_and_message(&event);
+        assert_eq!(kind, "Good");
+        assert!(message.contains("Successfully"), "got: {message}");
+    }
+
+    #[tokio::test]
+    async fn spawn_dll_failed_broadcasts_error() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let payload = build_status_payload(u32::from(DemonInjectError::Failed));
+
+        handle_spawn_dll_callback(&events, 0xCC, 1, &payload).await.expect("should succeed");
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("event");
+        let (kind, _) = extract_response_kind_and_message(&event);
+        assert_eq!(kind, "Error");
+    }
+
+    #[tokio::test]
+    async fn spawn_dll_invalid_param_broadcasts_error() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let payload = build_status_payload(u32::from(DemonInjectError::InvalidParam));
+
+        handle_spawn_dll_callback(&events, 0xCC, 1, &payload).await.expect("should succeed");
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("event");
+        let (kind, message) = extract_response_kind_and_message(&event);
+        assert_eq!(kind, "Error");
+        assert!(message.contains("invalid parameter"), "got: {message}");
+    }
+
+    #[tokio::test]
+    async fn spawn_dll_arch_mismatch_broadcasts_error() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let payload = build_status_payload(u32::from(DemonInjectError::ProcessArchMismatch));
+
+        handle_spawn_dll_callback(&events, 0xCC, 1, &payload).await.expect("should succeed");
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("event");
+        let (kind, message) = extract_response_kind_and_message(&event);
+        assert_eq!(kind, "Error");
+        assert!(message.contains("architecture mismatch"), "got: {message}");
+    }
+
+    #[tokio::test]
+    async fn spawn_dll_unknown_status_returns_error() {
+        let events = EventBus::default();
+        let payload = build_status_payload(0xFFFF);
+
+        let result = handle_spawn_dll_callback(&events, 0xCC, 1, &payload).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn inject_shellcode_truncated_payload_returns_error() {
+        let events = EventBus::default();
+        let result = handle_inject_shellcode_callback(&events, 0xAA, 1, &[0x01]).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload for truncated payload, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn inject_dll_truncated_payload_returns_error() {
+        let events = EventBus::default();
+        let result = handle_inject_dll_callback(&events, 0xBB, 1, &[]).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload for truncated payload, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_dll_truncated_payload_returns_error() {
+        let events = EventBus::default();
+        let result = handle_spawn_dll_callback(&events, 0xCC, 1, &[0xFF, 0xFF]).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload for truncated payload, got: {result:?}"
+        );
+    }
 }

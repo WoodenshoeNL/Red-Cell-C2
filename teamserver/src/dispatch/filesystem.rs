@@ -525,8 +525,320 @@ pub(super) fn download_complete_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{AgentRegistry, Database, EventBus};
+    use red_cell_common::demon::{DemonCommand, DemonFilesystemCommand};
+    use red_cell_common::operator::OperatorMessage;
+    use tokio::time::{Duration, timeout};
 
     const CMD_ID: u32 = 0x1234;
+
+    // --- Dir callback test helpers ---
+
+    /// Encode a UTF-16 LE string with a LE u32 length prefix (matching CallbackParser::read_utf16).
+    fn add_utf16_le(buf: &mut Vec<u8>, value: &str) {
+        let mut encoded: Vec<u8> = value.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        encoded.extend_from_slice(&[0, 0]); // null terminator
+        buf.extend_from_slice(&u32::try_from(encoded.len()).unwrap().to_le_bytes());
+        buf.extend_from_slice(&encoded);
+    }
+
+    fn add_u32_le(buf: &mut Vec<u8>, value: u32) {
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn add_u64_le(buf: &mut Vec<u8>, value: u64) {
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn add_bool_le(buf: &mut Vec<u8>, value: bool) {
+        add_u32_le(buf, u32::from(value));
+    }
+
+    /// Build a Dir subcommand payload for `handle_filesystem_callback`.
+    ///
+    /// Each `DirEntry` contains the directory-level info plus its items.
+    struct DirItem {
+        name: String,
+        is_dir: bool,
+        size: u64,
+        day: u32,
+        month: u32,
+        year: u32,
+        minute: u32,
+        hour: u32,
+    }
+
+    struct DirEntry {
+        path: String,
+        file_count: u32,
+        dir_count: u32,
+        total_size: Option<u64>, // None when list_only
+        items: Vec<DirItem>,
+    }
+
+    fn build_dir_payload(
+        explorer: bool,
+        list_only: bool,
+        root_path: &str,
+        success: bool,
+        entries: &[DirEntry],
+    ) -> Vec<u8> {
+        let mut buf = Vec::new();
+        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::Dir));
+        add_bool_le(&mut buf, explorer);
+        add_bool_le(&mut buf, list_only);
+        add_utf16_le(&mut buf, root_path);
+        add_bool_le(&mut buf, success);
+
+        if success {
+            for entry in entries {
+                add_utf16_le(&mut buf, &entry.path);
+                add_u32_le(&mut buf, entry.file_count);
+                add_u32_le(&mut buf, entry.dir_count);
+                if !list_only {
+                    add_u64_le(&mut buf, entry.total_size.unwrap_or(0));
+                }
+                for item in &entry.items {
+                    add_utf16_le(&mut buf, &item.name);
+                    if list_only {
+                        continue;
+                    }
+                    add_bool_le(&mut buf, item.is_dir);
+                    add_u64_le(&mut buf, item.size);
+                    add_u32_le(&mut buf, item.day);
+                    add_u32_le(&mut buf, item.month);
+                    add_u32_le(&mut buf, item.year);
+                    add_u32_le(&mut buf, item.minute);
+                    add_u32_le(&mut buf, item.hour);
+                }
+            }
+        }
+
+        buf
+    }
+
+    async fn dir_test_deps() -> (AgentRegistry, Database, EventBus, DownloadTracker) {
+        let db = Database::connect_in_memory().await.expect("in-memory db");
+        let registry = AgentRegistry::new(db.clone());
+        let events = EventBus::default();
+        let downloads = DownloadTracker::new(1024 * 1024);
+        (registry, db, events, downloads)
+    }
+
+    #[tokio::test]
+    async fn dir_explorer_mode_broadcasts_file_explorer_misc_data() {
+        let (registry, db, events, downloads) = dir_test_deps().await;
+        let mut rx = events.subscribe();
+
+        let payload = build_dir_payload(
+            true,  // explorer
+            false, // list_only
+            "C:\\Users\\admin",
+            true, // success
+            &[DirEntry {
+                path: "C:\\Users\\admin\\*".to_owned(),
+                file_count: 1,
+                dir_count: 1,
+                total_size: Some(4096),
+                items: vec![
+                    DirItem {
+                        name: "Documents".to_owned(),
+                        is_dir: true,
+                        size: 0,
+                        day: 15,
+                        month: 3,
+                        year: 2026,
+                        minute: 30,
+                        hour: 14,
+                    },
+                    DirItem {
+                        name: "notes.txt".to_owned(),
+                        is_dir: false,
+                        size: 2048,
+                        day: 10,
+                        month: 1,
+                        year: 2026,
+                        minute: 0,
+                        hour: 9,
+                    },
+                ],
+            }],
+        );
+
+        handle_filesystem_callback(&registry, &db, &events, &downloads, None, 0xAA, 1, &payload)
+            .await
+            .expect("handler should succeed");
+
+        let event = timeout(Duration::from_millis(50), rx.recv())
+            .await
+            .expect("should receive event within timeout")
+            .expect("should have a broadcast event");
+
+        let OperatorMessage::AgentResponse(msg) = &event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+
+        // Should be a FileExplorer misc type
+        let misc_type = msg.info.extra.get("MiscType").and_then(|v| v.as_str());
+        assert_eq!(misc_type, Some("FileExplorer"), "expected FileExplorer MiscType");
+
+        // Decode MiscData from base64 → JSON
+        let misc_data_b64 = msg
+            .info
+            .extra
+            .get("MiscData")
+            .and_then(|v| v.as_str())
+            .expect("MiscData should be present");
+        let misc_data_bytes =
+            BASE64_STANDARD.decode(misc_data_b64).expect("MiscData should be valid base64");
+        let misc_data: Value =
+            serde_json::from_slice(&misc_data_bytes).expect("MiscData should be valid JSON");
+
+        assert_eq!(
+            misc_data["Path"].as_str(),
+            Some("C:\\Users\\admin"),
+            "MiscData.Path should match root_path"
+        );
+        let files = misc_data["Files"].as_array().expect("MiscData.Files should be array");
+        assert_eq!(files.len(), 2, "should have 2 file rows");
+
+        // First row is the directory
+        assert_eq!(files[0]["Name"].as_str(), Some("Documents"));
+        assert_eq!(files[0]["Type"].as_str(), Some("dir"));
+        assert_eq!(files[0]["Size"].as_str(), Some(""));
+
+        // Second row is the file
+        assert_eq!(files[1]["Name"].as_str(), Some("notes.txt"));
+        assert_eq!(files[1]["Type"].as_str(), Some(""));
+        // byte_count(2048) = "2.05 kB" (decimal)
+        assert!(!files[1]["Size"].as_str().unwrap_or("").is_empty(), "file size should be present");
+
+        // In explorer mode, lines stay empty so output/message is the "not found" fallback —
+        // the real data lives in MiscData.  Verify that the event was still broadcast.
+        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(message, "No file or folder was found");
+    }
+
+    #[tokio::test]
+    async fn dir_list_only_mode_outputs_concatenated_paths() {
+        let (registry, db, events, downloads) = dir_test_deps().await;
+        let mut rx = events.subscribe();
+
+        let payload = build_dir_payload(
+            false, // explorer
+            true,  // list_only
+            "C:\\tmp",
+            true,
+            &[DirEntry {
+                path: "C:\\tmp\\*".to_owned(),
+                file_count: 2,
+                dir_count: 0,
+                total_size: None,
+                items: vec![
+                    DirItem {
+                        name: "a.log".to_owned(),
+                        is_dir: false,
+                        size: 0,
+                        day: 0,
+                        month: 0,
+                        year: 0,
+                        minute: 0,
+                        hour: 0,
+                    },
+                    DirItem {
+                        name: "b.log".to_owned(),
+                        is_dir: false,
+                        size: 0,
+                        day: 0,
+                        month: 0,
+                        year: 0,
+                        minute: 0,
+                        hour: 0,
+                    },
+                ],
+            }],
+        );
+
+        handle_filesystem_callback(&registry, &db, &events, &downloads, None, 0xBB, 2, &payload)
+            .await
+            .expect("handler should succeed");
+
+        let event = timeout(Duration::from_millis(50), rx.recv())
+            .await
+            .expect("should receive event within timeout")
+            .expect("should have a broadcast event");
+
+        let OperatorMessage::AgentResponse(msg) = &event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+
+        // list_only paths: root "C:\tmp\*" trimmed to "C:\tmp\" + name
+        let output = &msg.info.output;
+        assert!(
+            output.contains("C:\\tmp\\a.log"),
+            "output should contain first file path, got: {output}"
+        );
+        assert!(
+            output.contains("C:\\tmp\\b.log"),
+            "output should contain second file path, got: {output}"
+        );
+
+        // No MiscType for non-explorer mode
+        assert!(
+            msg.info.extra.get("MiscType").is_none(),
+            "non-explorer Dir should not set MiscType"
+        );
+    }
+
+    #[tokio::test]
+    async fn dir_success_zero_rows_outputs_no_file_found_message() {
+        let (registry, db, events, downloads) = dir_test_deps().await;
+        let mut rx = events.subscribe();
+
+        // success=true but no directory entries → empty lines → "No file or folder was found"
+        let payload = build_dir_payload(false, false, "C:\\empty", true, &[]);
+
+        handle_filesystem_callback(&registry, &db, &events, &downloads, None, 0xCC, 3, &payload)
+            .await
+            .expect("handler should succeed");
+
+        let event = timeout(Duration::from_millis(50), rx.recv())
+            .await
+            .expect("should receive event within timeout")
+            .expect("should have a broadcast event");
+
+        let OperatorMessage::AgentResponse(msg) = &event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+
+        assert_eq!(msg.info.output, "No file or folder was found");
+        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(message, "No file or folder was found");
+    }
+
+    #[tokio::test]
+    async fn dir_failure_outputs_no_file_found_message() {
+        let (registry, db, events, downloads) = dir_test_deps().await;
+        let mut rx = events.subscribe();
+
+        // success=false → loop body skipped → lines empty → "No file or folder was found"
+        let payload = build_dir_payload(false, false, "C:\\denied", false, &[]);
+
+        handle_filesystem_callback(&registry, &db, &events, &downloads, None, 0xDD, 4, &payload)
+            .await
+            .expect("handler should succeed");
+
+        let event = timeout(Duration::from_millis(50), rx.recv())
+            .await
+            .expect("should receive event within timeout")
+            .expect("should have a broadcast event");
+
+        let OperatorMessage::AgentResponse(msg) = &event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+
+        assert_eq!(msg.info.output, "No file or folder was found");
+    }
 
     // parse_file_open_header tests
 

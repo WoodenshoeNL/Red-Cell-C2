@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 236 | 195 | 31 |
+| Tasks closed | 243 | 195 | 31 |
 | Bugs filed against | 40 | 34 | 9 |
 | Bug rate (bugs/task) | 0.17 | 0.17 | 0.29 |
 | Quality score | 83% | 83% | 71% |
@@ -37,6 +37,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-18 19:15 — 91f7a32..ea2d5c4
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (dev02-opus) | 7 | 0 | Closed xmo7, f6o2, tc5q, d53r, jvax, w9qh, baok. CTR concurrency collision test, restore_running port-in-use error path, duplicate listener name error path, RBAC Admin AgentRemove positive test, major test dedup refactor (TestServer/DemonTestHarness), assembly dispatch malformed payload tests. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (all passing)
+Notes: Clean review — all 6 closures are test additions plus an excellent dedup refactor that extracted ~200 lines of duplicated TeamserverState setup into a shared TestServer struct and DemonTestHarness. No production code touched. Two in-progress issues: baok (assembly handler tests, actively being worked with unstaged code) and 35dz (LootRepository tests, P3, still lingering). No bugs filed.
 
 ### QA Review — 2026-03-18 18:15 — 7603a1c..91f7a32
 

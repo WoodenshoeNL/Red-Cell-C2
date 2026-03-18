@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 342 | 195 | 31 |
+| Tasks closed | 346 | 195 | 31 |
 | Bugs filed against | 41 | 34 | 9 |
 | Bug rate (bugs/task) | 0.12 | 0.17 | 0.29 |
 | Quality score | 88% | 83% | 71% |
@@ -38,6 +38,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-18 22:15 — 2fcd12d..e8f423f
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 4 | 0 | Closed 20ql, 1w8f, 25fb, 2f41. Added 587 lines of token dispatch tests + plugin unknown-agent test. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: passed — `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (1,849 tests, 0 failures)
 
 ### Arch Review — 2026-03-18 21:00
 

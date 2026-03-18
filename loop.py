@@ -42,17 +42,17 @@ DEV_SLEEP_TOKEN_LIMIT = 1200   # wait after Claude context limit hit
 
 # Dev loops use agent-specific prompts (Co-Authored-By differs per agent)
 DEV_PROMPTS = {
-    "claude": "CLAUDE_DEV_PROMPT.md",
-    "codex":  "CODEX_PROMPT.md",
-    "cursor": "CURSOR_PROMPT.md",
+    "claude": "prompts/CLAUDE_DEV_PROMPT.md",
+    "codex":  "prompts/CODEX_PROMPT.md",
+    "cursor": "prompts/CURSOR_PROMPT.md",
 }
 
 # Review loops use a single best-of prompt per loop type (agent-independent)
 REVIEW_PROMPTS = {
-    "qa":       "CLAUDE_PROMPT.md",        # identical across agents
-    "arch":     "CLAUDE_ARCH_PROMPT.md",   # Claude version is more thorough
-    "quality":  "CLAUDE_TEST_PROMPT.md",   # quality-focused test review
-    "coverage": "CODEX_TEST_PROMPT.md",    # breadth-focused coverage scan
+    "qa":       "prompts/CLAUDE_PROMPT.md",        # identical across agents
+    "arch":     "prompts/CLAUDE_ARCH_PROMPT.md",   # Claude version is more thorough
+    "quality":  "prompts/CLAUDE_TEST_PROMPT.md",   # quality-focused test review
+    "coverage": "prompts/CODEX_TEST_PROMPT.md",    # breadth-focused coverage scan
 }
 
 # Review loop types that write a per-run timestamped log in addition to the rolling log

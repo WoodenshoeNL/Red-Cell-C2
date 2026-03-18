@@ -27,10 +27,18 @@ use tokio_tungstenite::{WebSocketStream, tungstenite::Message as ClientMessage};
 /// A WebSocket client stream connected to the test teamserver.
 pub type WsClient = WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-/// Bind a free TCP port, start a teamserver from `profile`, and return the socket address.
-pub async fn spawn_test_server(
-    profile: Profile,
-) -> Result<std::net::SocketAddr, Box<dyn std::error::Error>> {
+/// Handles returned by [`spawn_test_server`] so tests can interact with
+/// the teamserver's listener manager and agent registry without duplicating
+/// construction boilerplate.
+pub struct TestServer {
+    pub addr: std::net::SocketAddr,
+    pub listeners: ListenerManager,
+    pub agent_registry: AgentRegistry,
+}
+
+/// Bind a free TCP port, start a teamserver from `profile`, and return a
+/// [`TestServer`] with the socket address and shared handles.
+pub async fn spawn_test_server(profile: Profile) -> Result<TestServer, Box<dyn std::error::Error>> {
     let database = Database::connect_in_memory().await?;
     let registry = AgentRegistry::new(database.clone());
     let events = EventBus::default();
@@ -50,7 +58,7 @@ pub async fn spawn_test_server(
         events,
         connections: OperatorConnectionManager::new(),
         agent_registry: registry.clone(),
-        listeners,
+        listeners: listeners.clone(),
         payload_builder: PayloadBuilderService::disabled_for_tests(),
         sockets,
         webhooks: AuditWebhookNotifier::from_profile(&profile),
@@ -65,7 +73,7 @@ pub async fn spawn_test_server(
         let _ = axum::serve(tcp, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await;
     });
-    Ok(addr)
+    Ok(TestServer { addr, listeners, agent_registry: registry })
 }
 
 /// Authenticate over WebSocket as `"operator"` / `"password1234"` and consume the

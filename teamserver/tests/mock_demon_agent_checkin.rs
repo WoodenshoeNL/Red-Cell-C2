@@ -1,11 +1,6 @@
 mod common;
 
 use futures_util::SinkExt;
-use red_cell::{
-    AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
-    ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
-    SocketRelayManager, TeamserverState, websocket_routes,
-};
 use red_cell_common::HttpListenerConfig;
 use red_cell_common::config::Profile;
 use red_cell_common::crypto::{
@@ -15,8 +10,92 @@ use red_cell_common::demon::{DemonCommand, DemonMessage};
 use red_cell_common::operator::{
     AgentResponseInfo, AgentTaskInfo, EventCode, Message, MessageHead, OperatorMessage,
 };
-use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
+
+fn demon_test_profile() -> Profile {
+    Profile::parse(
+        r#"
+        Teamserver {
+          Host = "127.0.0.1"
+          Port = 0
+        }
+
+        Operators {
+          user "operator" {
+            Password = "password1234"
+            Role = "Operator"
+          }
+        }
+
+        Demon {}
+        "#,
+    )
+    .expect("test profile should parse")
+}
+
+/// Spawn a test server, create and start an HTTP listener, connect a WebSocket
+/// operator, and return the handles needed by the test body.
+async fn spawn_server_with_http_listener(
+    listener_name: &str,
+) -> Result<DemonTestHarness, Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(demon_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    server
+        .listeners
+        .create(red_cell_common::ListenerConfig::from(HttpListenerConfig {
+            name: listener_name.to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["127.0.0.1".to_owned()],
+            host_bind: "127.0.0.1".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: listener_port,
+            port_conn: Some(listener_port),
+            method: Some("POST".to_owned()),
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: vec!["/".to_owned()],
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: None,
+            proxy: None,
+        }))
+        .await?;
+    drop(listener_guard);
+    server.listeners.start(listener_name).await?;
+    common::wait_for_listener(listener_port).await?;
+
+    Ok(DemonTestHarness {
+        server,
+        listener_port,
+        listener_name: listener_name.to_owned(),
+        client,
+        socket,
+    })
+}
+
+struct DemonTestHarness {
+    server: common::TestServer,
+    listener_port: u16,
+    listener_name: String,
+    client: reqwest::Client,
+    socket: common::WsClient,
+}
+
+impl DemonTestHarness {
+    async fn shutdown(mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.socket.close(None).await?;
+        self.server.listeners.stop(&self.listener_name).await?;
+        Ok(())
+    }
+}
 
 fn operator_task_message(
     task_id: &str,
@@ -66,112 +145,27 @@ fn assert_agent_output(
 
 #[tokio::test]
 async fn mock_demon_checkin_get_job_and_output_flow() -> Result<(), Box<dyn std::error::Error>> {
-    let profile = Profile::parse(
-        r#"
-        Teamserver {
-          Host = "127.0.0.1"
-          Port = 40056
-        }
-
-        Operators {
-          user "operator" {
-            Password = "password1234"
-            Role = "Operator"
-          }
-        }
-
-        Demon {}
-        "#,
-    )?;
-
-    let database = Database::connect_in_memory().await?;
-    let registry = AgentRegistry::new(database.clone());
-    let events = EventBus::default();
-    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let listeners = ListenerManager::new(
-        database.clone(),
-        registry.clone(),
-        events.clone(),
-        sockets.clone(),
-        None,
-    );
-    let state = TeamserverState {
-        profile: profile.clone(),
-        database: database.clone(),
-        auth: AuthService::from_profile(&profile).expect("auth service should initialize"),
-        api: ApiRuntime::from_profile(&profile).expect("rng should work in tests"),
-        events,
-        connections: OperatorConnectionManager::new(),
-        agent_registry: registry.clone(),
-        listeners: listeners.clone(),
-        payload_builder: PayloadBuilderService::disabled_for_tests(),
-        sockets,
-        webhooks: AuditWebhookNotifier::from_profile(&profile),
-        login_rate_limiter: LoginRateLimiter::new(),
-        shutdown: red_cell::ShutdownController::new(),
-    };
-
-    let server_listener = TcpListener::bind("127.0.0.1:0").await?;
-    let server_addr = server_listener.local_addr()?;
-    let server = tokio::spawn(async move {
-        let app = websocket_routes().with_state(state);
-        let _ = axum::serve(
-            server_listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await;
-    });
-
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
-    let client = reqwest::Client::new();
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
-    common::login(&mut socket).await?;
-
-    listeners
-        .create(red_cell_common::ListenerConfig::from(HttpListenerConfig {
-            name: "edge-http".to_owned(),
-            kill_date: None,
-            working_hours: None,
-            hosts: vec!["127.0.0.1".to_owned()],
-            host_bind: "127.0.0.1".to_owned(),
-            host_rotation: "round-robin".to_owned(),
-            port_bind: listener_port,
-            port_conn: Some(listener_port),
-            method: Some("POST".to_owned()),
-            behind_redirector: false,
-            trusted_proxy_peers: Vec::new(),
-            user_agent: None,
-            headers: Vec::new(),
-            uris: vec!["/".to_owned()],
-            host_header: None,
-            secure: false,
-            cert: None,
-            response: None,
-            proxy: None,
-        }))
-        .await?;
-    drop(listener_guard);
-    listeners.start("edge-http").await?;
-    common::wait_for_listener(listener_port).await?;
+    let mut harness = spawn_server_with_http_listener("edge-http").await?;
+    let listener_port = harness.listener_port;
 
     let agent_id = 0x1234_5678;
     let key = [0x41; AGENT_KEY_LENGTH];
     let iv = [0x24; AGENT_IV_LENGTH];
     let mut ctr_offset = 0_u64;
 
-    let init_response = client
+    let init_response = harness
+        .client
         .post(format!("http://127.0.0.1:{listener_port}/"))
         .body(common::valid_demon_init_body(agent_id, key, iv))
         .send()
         .await?
         .error_for_status()?;
     let init_bytes = init_response.bytes().await?;
-    let init_ack =
-        red_cell_common::crypto::decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
+    let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
     ctr_offset += ctr_blocks_for_len(init_bytes.len());
 
-    let agent_new = common::read_operator_message(&mut socket).await?;
+    let agent_new = common::read_operator_message(&mut harness.socket).await?;
     let OperatorMessage::AgentNew(message) = agent_new else {
         panic!("expected agent registration event");
     };
@@ -180,16 +174,17 @@ async fn mock_demon_checkin_get_job_and_output_flow() -> Result<(), Box<dyn std:
     assert_eq!(message.info.hostname, "wkstn-01");
 
     let task = operator_task_message("2A", "checkin", "12345678", DemonCommand::CommandCheckin)?;
-    socket.send(ClientMessage::Text(task.into())).await?;
+    harness.socket.send(ClientMessage::Text(task.into())).await?;
 
-    let task_echo = common::read_operator_message(&mut socket).await?;
+    let task_echo = common::read_operator_message(&mut harness.socket).await?;
     let OperatorMessage::AgentTask(message) = task_echo else {
         panic!("expected agent task echo");
     };
     assert_eq!(message.info.demon_id, "12345678");
     assert_eq!(message.info.task_id, "2A");
 
-    let get_job_response = client
+    let get_job_response = harness
+        .client
         .post(format!("http://127.0.0.1:{listener_port}/"))
         .body(common::valid_demon_callback_body(
             agent_id,
@@ -212,7 +207,8 @@ async fn mock_demon_checkin_get_job_and_output_flow() -> Result<(), Box<dyn std:
     ctr_offset += ctr_blocks_for_len(4);
 
     let output_text = "hello from demon";
-    let callback_response = client
+    let callback_response = harness
+        .client
         .post(format!("http://127.0.0.1:{listener_port}/"))
         .body(common::valid_demon_callback_body(
             agent_id,
@@ -228,7 +224,7 @@ async fn mock_demon_checkin_get_job_and_output_flow() -> Result<(), Box<dyn std:
         .error_for_status()?;
     assert!(callback_response.bytes().await?.is_empty());
 
-    let output_event = common::read_operator_message(&mut socket).await?;
+    let output_event = common::read_operator_message(&mut harness.socket).await?;
     let OperatorMessage::AgentResponse(message) = output_event else {
         panic!("expected agent response event");
     };
@@ -236,111 +232,25 @@ async fn mock_demon_checkin_get_job_and_output_flow() -> Result<(), Box<dyn std:
     assert_eq!(message.info.command_id, u32::from(DemonCommand::CommandOutput).to_string());
     assert_eq!(message.info.output, output_text);
     assert_eq!(message.info.command_line.as_deref(), Some("checkin"));
-    assert_eq!(message.info.extra.get("RequestID").and_then(serde_json::Value::as_str), Some("2A"));
+    assert_eq!(message.info.extra.get("RequestID").and_then(serde_json::Value::as_str), Some("2A"),);
 
-    socket.close(None).await?;
-    listeners.stop("edge-http").await?;
-    server.abort();
+    harness.shutdown().await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn mock_demon_checkin_streams_multiple_output_events_for_one_task()
 -> Result<(), Box<dyn std::error::Error>> {
-    let profile = Profile::parse(
-        r#"
-        Teamserver {
-          Host = "127.0.0.1"
-          Port = 40058
-        }
-
-        Operators {
-          user "operator" {
-            Password = "password1234"
-            Role = "Operator"
-          }
-        }
-
-        Demon {}
-        "#,
-    )?;
-
-    let database = Database::connect_in_memory().await?;
-    let registry = AgentRegistry::new(database.clone());
-    let events = EventBus::default();
-    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let listeners = ListenerManager::new(
-        database.clone(),
-        registry.clone(),
-        events.clone(),
-        sockets.clone(),
-        None,
-    );
-    let state = TeamserverState {
-        profile: profile.clone(),
-        database: database.clone(),
-        auth: AuthService::from_profile(&profile).expect("auth service should initialize"),
-        api: ApiRuntime::from_profile(&profile).expect("rng should work in tests"),
-        events,
-        connections: OperatorConnectionManager::new(),
-        agent_registry: registry.clone(),
-        listeners: listeners.clone(),
-        payload_builder: PayloadBuilderService::disabled_for_tests(),
-        sockets,
-        webhooks: AuditWebhookNotifier::from_profile(&profile),
-        login_rate_limiter: LoginRateLimiter::new(),
-        shutdown: red_cell::ShutdownController::new(),
-    };
-
-    let server_listener = TcpListener::bind("127.0.0.1:0").await?;
-    let server_addr = server_listener.local_addr()?;
-    let server = tokio::spawn(async move {
-        let app = websocket_routes().with_state(state);
-        let _ = axum::serve(
-            server_listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await;
-    });
-
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
-    let client = reqwest::Client::new();
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
-    common::login(&mut socket).await?;
-
-    listeners
-        .create(red_cell_common::ListenerConfig::from(HttpListenerConfig {
-            name: "edge-http-streaming-single".to_owned(),
-            kill_date: None,
-            working_hours: None,
-            hosts: vec!["127.0.0.1".to_owned()],
-            host_bind: "127.0.0.1".to_owned(),
-            host_rotation: "round-robin".to_owned(),
-            port_bind: listener_port,
-            port_conn: Some(listener_port),
-            method: Some("POST".to_owned()),
-            behind_redirector: false,
-            trusted_proxy_peers: Vec::new(),
-            user_agent: None,
-            headers: Vec::new(),
-            uris: vec!["/".to_owned()],
-            host_header: None,
-            secure: false,
-            cert: None,
-            response: None,
-            proxy: None,
-        }))
-        .await?;
-    drop(listener_guard);
-    listeners.start("edge-http-streaming-single").await?;
-    common::wait_for_listener(listener_port).await?;
+    let mut harness = spawn_server_with_http_listener("edge-http-streaming-single").await?;
+    let listener_port = harness.listener_port;
 
     let agent_id = 0x1234_5678;
     let key = [0x41; AGENT_KEY_LENGTH];
     let iv = [0x24; AGENT_IV_LENGTH];
     let mut ctr_offset = 0_u64;
 
-    let init_response = client
+    let init_response = harness
+        .client
         .post(format!("http://127.0.0.1:{listener_port}/"))
         .body(common::valid_demon_init_body(agent_id, key, iv))
         .send()
@@ -351,20 +261,21 @@ async fn mock_demon_checkin_streams_multiple_output_events_for_one_task()
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
     ctr_offset += ctr_blocks_for_len(init_bytes.len());
 
-    let agent_new = common::read_operator_message(&mut socket).await?;
+    let agent_new = common::read_operator_message(&mut harness.socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
 
     let task =
         operator_task_message("2A", "shell whoami", "12345678", DemonCommand::CommandCheckin)?;
-    socket.send(ClientMessage::Text(task.into())).await?;
+    harness.socket.send(ClientMessage::Text(task.into())).await?;
 
-    let task_echo = common::read_operator_message(&mut socket).await?;
+    let task_echo = common::read_operator_message(&mut harness.socket).await?;
     let OperatorMessage::AgentTask(message) = task_echo else {
         panic!("expected agent task echo");
     };
     assert_eq!(message.info.task_id, "2A");
 
-    let get_job_response = client
+    let get_job_response = harness
+        .client
         .post(format!("http://127.0.0.1:{listener_port}/"))
         .body(common::valid_demon_callback_body(
             agent_id,
@@ -387,7 +298,8 @@ async fn mock_demon_checkin_streams_multiple_output_events_for_one_task()
     let outputs = ["chunk one\n", "chunk two\n", "chunk three"];
     for output in outputs {
         let payload = common::command_output_payload(output);
-        client
+        harness
+            .client
             .post(format!("http://127.0.0.1:{listener_port}/"))
             .body(common::valid_demon_callback_body(
                 agent_id,
@@ -405,116 +317,30 @@ async fn mock_demon_checkin_streams_multiple_output_events_for_one_task()
     }
 
     for output in outputs {
-        let event = common::read_operator_message(&mut socket).await?;
+        let event = common::read_operator_message(&mut harness.socket).await?;
         let OperatorMessage::AgentResponse(message) = event else {
             panic!("expected agent response event");
         };
         assert_agent_output(&message.info, "2A", 0x2A, "shell whoami", output);
     }
 
-    socket.close(None).await?;
-    listeners.stop("edge-http-streaming-single").await?;
-    server.abort();
+    harness.shutdown().await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn mock_demon_checkin_interleaved_output_keeps_task_attribution()
 -> Result<(), Box<dyn std::error::Error>> {
-    let profile = Profile::parse(
-        r#"
-        Teamserver {
-          Host = "127.0.0.1"
-          Port = 40059
-        }
-
-        Operators {
-          user "operator" {
-            Password = "password1234"
-            Role = "Operator"
-          }
-        }
-
-        Demon {}
-        "#,
-    )?;
-
-    let database = Database::connect_in_memory().await?;
-    let registry = AgentRegistry::new(database.clone());
-    let events = EventBus::default();
-    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let listeners = ListenerManager::new(
-        database.clone(),
-        registry.clone(),
-        events.clone(),
-        sockets.clone(),
-        None,
-    );
-    let state = TeamserverState {
-        profile: profile.clone(),
-        database: database.clone(),
-        auth: AuthService::from_profile(&profile).expect("auth service should initialize"),
-        api: ApiRuntime::from_profile(&profile).expect("rng should work in tests"),
-        events,
-        connections: OperatorConnectionManager::new(),
-        agent_registry: registry.clone(),
-        listeners: listeners.clone(),
-        payload_builder: PayloadBuilderService::disabled_for_tests(),
-        sockets,
-        webhooks: AuditWebhookNotifier::from_profile(&profile),
-        login_rate_limiter: LoginRateLimiter::new(),
-        shutdown: red_cell::ShutdownController::new(),
-    };
-
-    let server_listener = TcpListener::bind("127.0.0.1:0").await?;
-    let server_addr = server_listener.local_addr()?;
-    let server = tokio::spawn(async move {
-        let app = websocket_routes().with_state(state);
-        let _ = axum::serve(
-            server_listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await;
-    });
-
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
-    let client = reqwest::Client::new();
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
-    common::login(&mut socket).await?;
-
-    listeners
-        .create(red_cell_common::ListenerConfig::from(HttpListenerConfig {
-            name: "edge-http-streaming-interleaved".to_owned(),
-            kill_date: None,
-            working_hours: None,
-            hosts: vec!["127.0.0.1".to_owned()],
-            host_bind: "127.0.0.1".to_owned(),
-            host_rotation: "round-robin".to_owned(),
-            port_bind: listener_port,
-            port_conn: Some(listener_port),
-            method: Some("POST".to_owned()),
-            behind_redirector: false,
-            trusted_proxy_peers: Vec::new(),
-            user_agent: None,
-            headers: Vec::new(),
-            uris: vec!["/".to_owned()],
-            host_header: None,
-            secure: false,
-            cert: None,
-            response: None,
-            proxy: None,
-        }))
-        .await?;
-    drop(listener_guard);
-    listeners.start("edge-http-streaming-interleaved").await?;
-    common::wait_for_listener(listener_port).await?;
+    let mut harness = spawn_server_with_http_listener("edge-http-streaming-interleaved").await?;
+    let listener_port = harness.listener_port;
 
     let agent_id = 0x1234_5678;
     let key = [0x41; AGENT_KEY_LENGTH];
     let iv = [0x24; AGENT_IV_LENGTH];
     let mut ctr_offset = 0_u64;
 
-    let init_response = client
+    let init_response = harness
+        .client
         .post(format!("http://127.0.0.1:{listener_port}/"))
         .body(common::valid_demon_init_body(agent_id, key, iv))
         .send()
@@ -525,13 +351,13 @@ async fn mock_demon_checkin_interleaved_output_keeps_task_attribution()
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
     ctr_offset += ctr_blocks_for_len(init_bytes.len());
 
-    let agent_new = common::read_operator_message(&mut socket).await?;
+    let agent_new = common::read_operator_message(&mut harness.socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
 
     let first_task =
         operator_task_message("2A", "shell whoami", "12345678", DemonCommand::CommandCheckin)?;
-    socket.send(ClientMessage::Text(first_task.into())).await?;
-    let first_task_echo = common::read_operator_message(&mut socket).await?;
+    harness.socket.send(ClientMessage::Text(first_task.into())).await?;
+    let first_task_echo = common::read_operator_message(&mut harness.socket).await?;
     assert!(matches!(first_task_echo, OperatorMessage::AgentTask(_)));
 
     let second_task = operator_task_message(
@@ -540,11 +366,12 @@ async fn mock_demon_checkin_interleaved_output_keeps_task_attribution()
         "12345678",
         DemonCommand::CommandCheckin,
     )?;
-    socket.send(ClientMessage::Text(second_task.into())).await?;
-    let second_task_echo = common::read_operator_message(&mut socket).await?;
+    harness.socket.send(ClientMessage::Text(second_task.into())).await?;
+    let second_task_echo = common::read_operator_message(&mut harness.socket).await?;
     assert!(matches!(second_task_echo, OperatorMessage::AgentTask(_)));
 
-    let get_job_response = client
+    let get_job_response = harness
+        .client
         .post(format!("http://127.0.0.1:{listener_port}/"))
         .body(common::valid_demon_callback_body(
             agent_id,
@@ -573,7 +400,8 @@ async fn mock_demon_checkin_interleaved_output_keeps_task_attribution()
     ];
     for (request_id, _, output) in callbacks {
         let payload = common::command_output_payload(output);
-        client
+        harness
+            .client
             .post(format!("http://127.0.0.1:{listener_port}/"))
             .body(common::valid_demon_callback_body(
                 agent_id,
@@ -591,7 +419,7 @@ async fn mock_demon_checkin_interleaved_output_keeps_task_attribution()
     }
 
     for (request_id, command_line, output) in callbacks {
-        let event = common::read_operator_message(&mut socket).await?;
+        let event = common::read_operator_message(&mut harness.socket).await?;
         let OperatorMessage::AgentResponse(message) = event else {
             panic!("expected agent response event");
         };
@@ -599,9 +427,7 @@ async fn mock_demon_checkin_interleaved_output_keeps_task_attribution()
         assert_agent_output(&message.info, &task_id, request_id, command_line, output);
     }
 
-    socket.close(None).await?;
-    listeners.stop("edge-http-streaming-interleaved").await?;
-    server.abort();
+    harness.shutdown().await?;
     Ok(())
 }
 
@@ -626,93 +452,8 @@ async fn mock_demon_checkin_interleaved_output_keeps_task_attribution()
 #[tokio::test]
 async fn reconnect_then_subsequent_callback_remains_synchronised()
 -> Result<(), Box<dyn std::error::Error>> {
-    let profile = Profile::parse(
-        r#"
-        Teamserver {
-          Host = "127.0.0.1"
-          Port = 40057
-        }
-
-        Operators {
-          user "operator" {
-            Password = "password1234"
-            Role = "Operator"
-          }
-        }
-
-        Demon {}
-        "#,
-    )?;
-
-    let database = Database::connect_in_memory().await?;
-    let registry = AgentRegistry::new(database.clone());
-    let events = EventBus::default();
-    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let listeners = ListenerManager::new(
-        database.clone(),
-        registry.clone(),
-        events.clone(),
-        sockets.clone(),
-        None,
-    );
-    let state = TeamserverState {
-        profile: profile.clone(),
-        database: database.clone(),
-        auth: AuthService::from_profile(&profile).expect("auth service should initialize"),
-        api: ApiRuntime::from_profile(&profile).expect("rng should work in tests"),
-        events,
-        connections: OperatorConnectionManager::new(),
-        agent_registry: registry.clone(),
-        listeners: listeners.clone(),
-        payload_builder: PayloadBuilderService::disabled_for_tests(),
-        sockets,
-        webhooks: AuditWebhookNotifier::from_profile(&profile),
-        login_rate_limiter: LoginRateLimiter::new(),
-        shutdown: red_cell::ShutdownController::new(),
-    };
-
-    let server_listener = TcpListener::bind("127.0.0.1:0").await?;
-    let server_addr = server_listener.local_addr()?;
-    let server = tokio::spawn(async move {
-        let app = websocket_routes().with_state(state);
-        let _ = axum::serve(
-            server_listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await;
-    });
-
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
-    let client = reqwest::Client::new();
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
-    common::login(&mut socket).await?;
-
-    listeners
-        .create(red_cell_common::ListenerConfig::from(HttpListenerConfig {
-            name: "edge-http-reconnect-e2e".to_owned(),
-            kill_date: None,
-            working_hours: None,
-            hosts: vec!["127.0.0.1".to_owned()],
-            host_bind: "127.0.0.1".to_owned(),
-            host_rotation: "round-robin".to_owned(),
-            port_bind: listener_port,
-            port_conn: Some(listener_port),
-            method: Some("POST".to_owned()),
-            behind_redirector: false,
-            trusted_proxy_peers: Vec::new(),
-            user_agent: None,
-            headers: Vec::new(),
-            uris: vec!["/".to_owned()],
-            host_header: None,
-            secure: false,
-            cert: None,
-            response: None,
-            proxy: None,
-        }))
-        .await?;
-    drop(listener_guard);
-    listeners.start("edge-http-reconnect-e2e").await?;
-    common::wait_for_listener(listener_port).await?;
+    let mut harness = spawn_server_with_http_listener("edge-http-reconnect-e2e").await?;
+    let listener_port = harness.listener_port;
 
     let agent_id = 0xDEAD_C0DE_u32;
     let key = [0x9A; AGENT_KEY_LENGTH];
@@ -722,7 +463,8 @@ async fn reconnect_then_subsequent_callback_remains_synchronised()
     // The agent tracks its own CTR offset mirror to simulate what a real agent does.
     let mut agent_ctr_offset = 0_u64;
 
-    let init_bytes = client
+    let init_bytes = harness
+        .client
         .post(format!("http://127.0.0.1:{listener_port}/"))
         .body(common::valid_demon_init_body(agent_id, key, iv))
         .send()
@@ -739,7 +481,7 @@ async fn reconnect_then_subsequent_callback_remains_synchronised()
     agent_ctr_offset += ctr_blocks_for_len(init_bytes.len());
 
     // Consume the AgentNew operator event.
-    let agent_new = common::read_operator_message(&mut socket).await?;
+    let agent_new = common::read_operator_message(&mut harness.socket).await?;
     assert!(
         matches!(agent_new, OperatorMessage::AgentNew(_)),
         "expected AgentNew event after init"
@@ -747,7 +489,8 @@ async fn reconnect_then_subsequent_callback_remains_synchronised()
 
     // --- Step 2: reconnect probe --------------------------------------------------
     // The reconnect probe carries no encrypted payload — agent counter does NOT change.
-    let reconnect_bytes = client
+    let reconnect_bytes = harness
+        .client
         .post(format!("http://127.0.0.1:{listener_port}/"))
         .body(common::valid_demon_reconnect_body(agent_id))
         .send()
@@ -770,7 +513,7 @@ async fn reconnect_then_subsequent_callback_remains_synchronised()
 
     // Confirm the server's stored offset also did not advance.
     assert_eq!(
-        registry.ctr_offset(agent_id).await?,
+        harness.server.agent_registry.ctr_offset(agent_id).await?,
         agent_ctr_offset,
         "server CTR offset must not advance after sending a reconnect ACK"
     );
@@ -783,7 +526,8 @@ async fn reconnect_then_subsequent_callback_remains_synchronised()
     // desync would cause the server to fail parsing the decrypted garbage and return HTTP 400,
     // which `error_for_status()` would surface as an error that fails the test.
     // The body itself may be empty (no queued jobs) — that is also a valid 200 response.
-    client
+    harness
+        .client
         .post(format!("http://127.0.0.1:{listener_port}/"))
         .body(common::valid_demon_callback_body(
             agent_id,
@@ -798,8 +542,6 @@ async fn reconnect_then_subsequent_callback_remains_synchronised()
         .await?
         .error_for_status()?;
 
-    socket.close(None).await?;
-    listeners.stop("edge-http-reconnect-e2e").await?;
-    server.abort();
+    harness.shutdown().await?;
     Ok(())
 }

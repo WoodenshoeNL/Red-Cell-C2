@@ -522,7 +522,7 @@ where
 
 #[tokio::test]
 async fn analyst_cannot_send_agent_task_message() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = common::spawn_test_server(multi_role_profile()).await?;
+    let addr = common::spawn_test_server(multi_role_profile()).await?.addr;
     let (mut socket, _) = connect_async(format!("ws://{addr}/")).await?;
     common::login_as(&mut socket, "analyst", "analystpw").await?;
 
@@ -548,7 +548,7 @@ async fn analyst_cannot_send_agent_task_message() -> Result<(), Box<dyn std::err
 
 #[tokio::test]
 async fn analyst_cannot_create_listener() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = common::spawn_test_server(multi_role_profile()).await?;
+    let addr = common::spawn_test_server(multi_role_profile()).await?.addr;
     let (mut socket, _) = connect_async(format!("ws://{addr}/")).await?;
     common::login_as(&mut socket, "analyst", "analystpw").await?;
 
@@ -572,7 +572,7 @@ async fn analyst_cannot_create_listener() -> Result<(), Box<dyn std::error::Erro
 
 #[tokio::test]
 async fn operator_cannot_send_admin_message() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = common::spawn_test_server(multi_role_profile()).await?;
+    let addr = common::spawn_test_server(multi_role_profile()).await?.addr;
     let (mut socket, _) = connect_async(format!("ws://{addr}/")).await?;
     common::login_as(&mut socket, "operator", "operatorpw").await?;
 
@@ -596,7 +596,7 @@ async fn wrong_password_receives_error_and_connection_closes()
     use red_cell_common::crypto::hash_password_sha3;
     use red_cell_common::operator::LoginInfo;
 
-    let addr = common::spawn_test_server(multi_role_profile()).await?;
+    let addr = common::spawn_test_server(multi_role_profile()).await?.addr;
     let (mut socket, _) = connect_async(format!("ws://{addr}/")).await?;
 
     // Send correct username but wrong password hash.
@@ -656,7 +656,7 @@ async fn repeated_wrong_passwords_trigger_rate_limiter_lockout()
     // lockout, then one more attempt to observe the rejection.
     const MAX_FAILURES: usize = 5;
 
-    let addr = common::spawn_test_server(multi_role_profile()).await?;
+    let addr = common::spawn_test_server(multi_role_profile()).await?.addr;
 
     let bad_login = serde_json::to_string(&OperatorMessage::Login(Message {
         head: MessageHead {
@@ -748,7 +748,7 @@ async fn repeated_wrong_passwords_trigger_rate_limiter_lockout()
 #[tokio::test]
 async fn analyst_can_send_chat_message_without_disconnection()
 -> Result<(), Box<dyn std::error::Error>> {
-    let addr = common::spawn_test_server(multi_role_profile()).await?;
+    let addr = common::spawn_test_server(multi_role_profile()).await?.addr;
     let (mut socket, _) = connect_async(format!("ws://{addr}/")).await?;
     common::login_as(&mut socket, "analyst", "analystpw").await?;
 
@@ -772,7 +772,7 @@ async fn analyst_can_send_chat_message_without_disconnection()
 #[tokio::test]
 async fn admin_can_send_agent_remove_without_disconnection()
 -> Result<(), Box<dyn std::error::Error>> {
-    let addr = common::spawn_test_server(multi_role_profile()).await?;
+    let addr = common::spawn_test_server(multi_role_profile()).await?.addr;
     let (mut socket, _) = connect_async(format!("ws://{addr}/")).await?;
     common::login_as(&mut socket, "admin", "adminpw").await?;
 

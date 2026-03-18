@@ -575,6 +575,12 @@ mod tests {
         assert_eq!(kind, "Good");
         assert!(message.contains("stopped"), "expected 'stopped'; got: {message}");
         assert!(message.contains(&format!("{file_id:x}")));
+
+        // Stop must NOT clear the tracked download.
+        assert!(
+            !downloads.active_for_agent(agent_id).await.is_empty(),
+            "Stop success path must not clear the tracked download"
+        );
         Ok(())
     }
 
@@ -642,6 +648,12 @@ mod tests {
         assert_eq!(kind, "Good");
         assert!(message.contains("resumed"), "expected 'resumed'; got: {message}");
         assert!(message.contains(&format!("{file_id:x}")));
+
+        // Resume must NOT clear the tracked download.
+        assert!(
+            !downloads.active_for_agent(agent_id).await.is_empty(),
+            "Resume success path must not clear the tracked download"
+        );
         Ok(())
     }
 

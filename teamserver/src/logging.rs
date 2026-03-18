@@ -453,6 +453,15 @@ mod tests {
     }
 
     #[test]
+    fn no_profile_with_rust_log_override_uses_override_and_json_format() {
+        let resolved = resolve_logging_config_with_override(None, false, Some("trace".to_owned()));
+
+        assert_eq!(resolved.filter_directive, "trace");
+        assert_eq!(resolved.format, LogFormat::Json);
+        assert_eq!(resolved.file, None);
+    }
+
+    #[test]
     fn init_tracing_succeeds_with_file_logging_enabled() {
         let temp_dir = match TempDir::new() {
             Ok(dir) => dir,

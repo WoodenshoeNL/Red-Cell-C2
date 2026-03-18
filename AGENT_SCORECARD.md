@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 260 | 195 | 31 |
+| Tasks closed | 266 | 195 | 31 |
 | Bugs filed against | 40 | 34 | 9 |
 | Bug rate (bugs/task) | 0.15 | 0.17 | 0.29 |
 | Quality score | 85% | 83% | 71% |
@@ -2090,3 +2090,14 @@ Notes: Clean review — no code quality, security, or architecture issues. All c
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (952 unit + 3 integration, 0 failures)
 Notes: Clean review — no code quality, security, or architecture issues. All changes are well-structured test additions with no production code modified. Claude running total now 260 tasks closed, bug rate down to 0.15, quality score up to 85%.
+
+### QA Review — 2026-03-18 03:20 — 963821c..3c626a7
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (dev02-opus) | 6 | 0 | Closed 33cr, tfs3, t8as, bg8g, gw6b, lesf. New tests: format_filetime overflow fallback (kerberos), int_to_ipv4 byte-order pinning (network), exit_callback process-exit and unknown-method branches (mod), format_memory_protect/state/type combined-flag and edge-case coverage (process). bg8g and gw6b closed after verifying tests already existed. Currently has 0evn claimed. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (962 unit tests, 0 failures)
+Notes: Clean review — no code quality, security, or architecture issues. All changes are test additions with no production code modified. Claude running total now 266 tasks closed, quality score holds at 85%.

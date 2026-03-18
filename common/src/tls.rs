@@ -438,6 +438,38 @@ mod tests {
     }
 
     #[test]
+    fn resolve_tls_identity_fails_when_configured_pem_files_are_corrupt() {
+        let temp_dir = TempDir::new().expect("temporary directory should be created");
+        let cert_path = temp_dir.path().join("listener.crt");
+        let key_path = temp_dir.path().join("listener.key");
+
+        std::fs::write(
+            &cert_path,
+            b"-----BEGIN CERTIFICATE-----\n%%%invalid-base64%%%\n-----END CERTIFICATE-----\n",
+        )
+        .expect("certificate fixture should write");
+        std::fs::write(
+            &key_path,
+            b"-----BEGIN PRIVATE KEY-----\n%%%invalid-base64%%%\n-----END PRIVATE KEY-----\n",
+        )
+        .expect("key fixture should write");
+
+        let cert_config = HttpListenerCertConfig {
+            cert: cert_path.display().to_string(),
+            key: key_path.display().to_string(),
+        };
+
+        let error = resolve_tls_identity(
+            &["ignored.local".to_owned()],
+            Some(&cert_config),
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect_err("corrupt configured PEM should fail without fallback generation");
+
+        assert!(matches!(error, TlsError::Pem(_)), "expected PEM parse error, got: {error:?}");
+    }
+
+    #[test]
     fn resolve_tls_identity_generates_material_when_profile_cert_paths_are_absent() {
         let resolved =
             resolve_tls_identity(&["ws.local".to_owned()], None, TlsKeyAlgorithm::EcdsaP256)
@@ -712,6 +744,53 @@ mod tests {
         assert!(
             !auto_cert_path.exists(),
             "auto-persist paths should not be written when explicit cert is configured"
+        );
+    }
+
+    #[test]
+    fn resolve_or_persist_fails_when_configured_pem_files_are_corrupt() {
+        let temp_dir = tempfile::TempDir::new().expect("temporary directory should be created");
+        let configured_cert_path = temp_dir.path().join("configured.crt");
+        let configured_key_path = temp_dir.path().join("configured.key");
+        std::fs::write(
+            &configured_cert_path,
+            b"-----BEGIN CERTIFICATE-----\n%%%invalid-base64%%%\n-----END CERTIFICATE-----\n",
+        )
+        .expect("certificate fixture should be written");
+        std::fs::write(
+            &configured_key_path,
+            b"-----BEGIN PRIVATE KEY-----\n%%%invalid-base64%%%\n-----END PRIVATE KEY-----\n",
+        )
+        .expect("key fixture should be written");
+
+        let auto_cert_path = temp_dir.path().join("teamserver.tls.crt");
+        let auto_key_path = temp_dir.path().join("teamserver.tls.key");
+
+        let cert_config = HttpListenerCertConfig {
+            cert: configured_cert_path.display().to_string(),
+            key: configured_key_path.display().to_string(),
+        };
+
+        let error = resolve_or_persist_tls_identity(
+            &["ignored.local".to_owned()],
+            Some(&cert_config),
+            &auto_cert_path,
+            &auto_key_path,
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect_err("corrupt configured PEM should fail without writing fallback material");
+
+        assert!(
+            matches!(error, PersistTlsError::Tls(TlsError::Pem(_))),
+            "expected PersistTlsError::Tls(TlsError::Pem(_)), got: {error:?}"
+        );
+        assert!(
+            !auto_cert_path.exists(),
+            "fallback certificate path should remain untouched on PEM parse failure"
+        );
+        assert!(
+            !auto_key_path.exists(),
+            "fallback key path should remain untouched on PEM parse failure"
         );
     }
 

@@ -199,7 +199,8 @@ impl DemonPacketParser {
         let decrypted = self
             .registry
             .decrypt_from_agent_without_advancing(envelope.header.agent_id, remaining)
-            .await?;
+            .await
+            .map_err(|e| lift_crypto_encoding_error(envelope.header.agent_id, e))?;
         let packages = parse_callback_packages(command_id, request_id, &decrypted)?;
 
         // Parse succeeded: advance the offset now that we know the payload was genuine.
@@ -215,7 +216,10 @@ pub async fn build_init_ack(
     agent_id: u32,
 ) -> Result<Vec<u8>, DemonParserError> {
     let payload = agent_id.to_le_bytes();
-    Ok(registry.encrypt_for_agent(agent_id, &payload).await?)
+    registry
+        .encrypt_for_agent(agent_id, &payload)
+        .await
+        .map_err(|e| lift_crypto_encoding_error(agent_id, e))
 }
 
 /// Build the encrypted acknowledgement body returned for a reconnect probe.
@@ -247,7 +251,25 @@ pub async fn build_reconnect_ack(
     agent_id: u32,
 ) -> Result<Vec<u8>, DemonParserError> {
     let payload = agent_id.to_le_bytes();
-    Ok(registry.encrypt_for_agent_without_advancing(agent_id, &payload).await?)
+    registry
+        .encrypt_for_agent_without_advancing(agent_id, &payload)
+        .await
+        .map_err(|e| lift_crypto_encoding_error(agent_id, e))
+}
+
+/// Lift a [`TeamserverError::InvalidPersistedValue`] for AES key/IV fields into the
+/// more specific [`DemonParserError::InvalidStoredCryptoEncoding`] variant, preserving
+/// the originating agent identifier.  All other errors pass through as
+/// [`DemonParserError::Registry`].
+fn lift_crypto_encoding_error(agent_id: u32, error: TeamserverError) -> DemonParserError {
+    match error {
+        TeamserverError::InvalidPersistedValue { field, message }
+            if field == "aes_key" || field == "aes_iv" =>
+        {
+            DemonParserError::InvalidStoredCryptoEncoding { agent_id, field, message }
+        }
+        other => DemonParserError::Registry(other),
+    }
 }
 
 fn parse_callback_packages(
@@ -1706,5 +1728,156 @@ mod tests {
         // Zero is not a valid DemonCommand discriminant — the lowest is CommandGetJob = 1.
         let err = pkg.command().expect_err("zero command ID must return Err");
         assert_eq!(err, DemonProtocolError::UnknownEnumValue { kind: "DemonCommand", value: 0 });
+    }
+
+    // ---- InvalidStoredCryptoEncoding coverage ----
+
+    /// Build an [`AgentRecord`] whose encryption material has arbitrary raw bytes.
+    /// Passing wrong-length vectors simulates what happens when persisted base64
+    /// decodes to an unexpected number of bytes (i.e. database corruption).
+    fn agent_with_raw_crypto(agent_id: u32, aes_key: Vec<u8>, aes_iv: Vec<u8>) -> AgentRecord {
+        AgentRecord {
+            agent_id,
+            active: true,
+            reason: String::new(),
+            note: String::new(),
+            encryption: AgentEncryptionInfo {
+                aes_key: Zeroizing::new(aes_key),
+                aes_iv: Zeroizing::new(aes_iv),
+            },
+            hostname: "wkstn-corrupt".to_owned(),
+            username: "operator".to_owned(),
+            domain_name: "REDCELL".to_owned(),
+            external_ip: "198.51.100.1".to_owned(),
+            internal_ip: "10.0.0.50".to_owned(),
+            process_name: "svchost.exe".to_owned(),
+            process_path: "C:\\Windows\\svchost.exe".to_owned(),
+            base_address: 0x401000,
+            process_pid: 2000,
+            process_tid: 2001,
+            process_ppid: 800,
+            process_arch: "x64".to_owned(),
+            elevated: false,
+            os_version: "Windows 11".to_owned(),
+            os_build: 22000,
+            os_arch: "x64/AMD64".to_owned(),
+            sleep_delay: 10,
+            sleep_jitter: 5,
+            kill_date: None,
+            working_hours: None,
+            first_call_in: "2026-03-10T12:00:00Z".to_owned(),
+            last_call_in: "2026-03-10T12:00:00Z".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn build_init_ack_returns_invalid_stored_crypto_for_bad_key() {
+        let registry = test_registry().await;
+        let agent_id: u32 = 0xBAD0_0001;
+        let agent = agent_with_raw_crypto(agent_id, vec![0xAA; 5], vec![0xBB; AGENT_IV_LENGTH]);
+        registry.insert(agent).await.expect("insert should succeed");
+
+        let error =
+            build_init_ack(&registry, agent_id).await.expect_err("bad key must be rejected");
+
+        match &error {
+            DemonParserError::InvalidStoredCryptoEncoding { agent_id: err_id, field, .. } => {
+                assert_eq!(*err_id, agent_id);
+                assert_eq!(*field, "aes_key");
+            }
+            other => panic!("expected InvalidStoredCryptoEncoding for aes_key, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn build_init_ack_returns_invalid_stored_crypto_for_bad_iv() {
+        let registry = test_registry().await;
+        let agent_id: u32 = 0xBAD0_0002;
+        let agent = agent_with_raw_crypto(agent_id, vec![0xCC; AGENT_KEY_LENGTH], vec![0xDD; 3]);
+        registry.insert(agent).await.expect("insert should succeed");
+
+        let error = build_init_ack(&registry, agent_id).await.expect_err("bad IV must be rejected");
+
+        match &error {
+            DemonParserError::InvalidStoredCryptoEncoding { agent_id: err_id, field, .. } => {
+                assert_eq!(*err_id, agent_id);
+                assert_eq!(*field, "aes_iv");
+            }
+            other => panic!("expected InvalidStoredCryptoEncoding for aes_iv, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn build_reconnect_ack_returns_invalid_stored_crypto_for_bad_key() {
+        let registry = test_registry().await;
+        let agent_id: u32 = 0xBAD0_0003;
+        let agent = agent_with_raw_crypto(agent_id, vec![0xEE; 10], vec![0xFF; AGENT_IV_LENGTH]);
+        registry.insert(agent).await.expect("insert should succeed");
+
+        let error =
+            build_reconnect_ack(&registry, agent_id).await.expect_err("bad key must be rejected");
+
+        match &error {
+            DemonParserError::InvalidStoredCryptoEncoding { agent_id: err_id, field, .. } => {
+                assert_eq!(*err_id, agent_id);
+                assert_eq!(*field, "aes_key");
+            }
+            other => panic!("expected InvalidStoredCryptoEncoding for aes_key, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn callback_parse_returns_invalid_stored_crypto_for_bad_key() {
+        let registry = test_registry().await;
+        let agent_id: u32 = 0xBAD0_0004;
+        // Insert agent with corrupted key directly — no init handshake needed.
+        let agent = agent_with_raw_crypto(agent_id, vec![0xAA; 7], vec![0xBB; AGENT_IV_LENGTH]);
+        registry.insert(agent).await.expect("insert should succeed");
+
+        // Build a callback envelope — the ciphertext content does not matter because
+        // the error fires before decryption, when the stored key fails length check.
+        let dummy_key = [0x55; AGENT_KEY_LENGTH];
+        let dummy_iv = [0x66; AGENT_IV_LENGTH];
+        let callback_packet = build_callback_packet(agent_id, dummy_key, dummy_iv, 0);
+        let parser = DemonPacketParser::new(registry);
+
+        let error = parser
+            .parse_at(&callback_packet, "10.0.0.99".to_owned(), datetime!(2026-03-10 14:01:00 UTC))
+            .await
+            .expect_err("callback with corrupted key must fail");
+
+        match &error {
+            DemonParserError::InvalidStoredCryptoEncoding { agent_id: err_id, field, .. } => {
+                assert_eq!(*err_id, agent_id);
+                assert_eq!(*field, "aes_key");
+            }
+            other => panic!("expected InvalidStoredCryptoEncoding for aes_key, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn callback_parse_returns_invalid_stored_crypto_for_bad_iv() {
+        let registry = test_registry().await;
+        let agent_id: u32 = 0xBAD0_0005;
+        let agent = agent_with_raw_crypto(agent_id, vec![0xCC; AGENT_KEY_LENGTH], vec![0xDD; 2]);
+        registry.insert(agent).await.expect("insert should succeed");
+
+        let dummy_key = [0x57; AGENT_KEY_LENGTH];
+        let dummy_iv = [0x68; AGENT_IV_LENGTH];
+        let callback_packet = build_callback_packet(agent_id, dummy_key, dummy_iv, 0);
+        let parser = DemonPacketParser::new(registry);
+
+        let error = parser
+            .parse_at(&callback_packet, "10.0.0.99".to_owned(), datetime!(2026-03-10 14:01:00 UTC))
+            .await
+            .expect_err("callback with corrupted IV must fail");
+
+        match &error {
+            DemonParserError::InvalidStoredCryptoEncoding { agent_id: err_id, field, .. } => {
+                assert_eq!(*err_id, agent_id);
+                assert_eq!(*field, "aes_iv");
+            }
+            other => panic!("expected InvalidStoredCryptoEncoding for aes_iv, got: {other}"),
+        }
     }
 }

@@ -3833,4 +3833,100 @@ havocui.RegisterCommand('recon scan', 'Run a recon scan', [{{'name': 'target', '
             "script should log the caught ValueError for cross-script mutation"
         );
     }
+
+    // ── task_agent cleanup on enqueue failure ─────────────────────────────
+
+    #[test]
+    fn task_agent_cleans_up_waiter_when_no_sender_configured() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+        {
+            let mut state = lock_mutex(&app_state);
+            state.agents.push(sample_agent("AABB0001"));
+        }
+
+        let _runtime = PythonRuntime::initialize(app_state.clone(), temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        // Do NOT attach an outgoing sender — queue_task_message should fail.
+        let result = Python::with_gil(|py| -> PyResult<String> {
+            install_api_module(py)?;
+            let module = py.import("red_cell")?;
+            module.call_method("task_agent", ("AABB0001", "ps"), None)?.extract::<String>()
+        });
+
+        assert!(result.is_err(), "task_agent should fail when no sender is configured");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("not connected"),
+            "error should mention transport not connected, got: {err_msg}"
+        );
+
+        // Verify no stale waiter state was left behind.
+        let api_state = Python::with_gil(|py| -> PyResult<Arc<PythonApiState>> {
+            install_api_module(py)?;
+            active_api_state()
+        })
+        .unwrap_or_else(|error| panic!("active_api_state should be available: {error}"));
+        assert!(
+            lock_mutex(&api_state.task_result_senders).is_empty(),
+            "task_result_senders should be empty after enqueue failure"
+        );
+        assert!(
+            lock_mutex(&api_state.task_result_receivers).is_empty(),
+            "task_result_receivers should be empty after enqueue failure"
+        );
+    }
+
+    #[test]
+    fn task_agent_cleans_up_waiter_when_sender_is_closed() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+        {
+            let mut state = lock_mutex(&app_state);
+            state.agents.push(sample_agent("AABB0002"));
+        }
+
+        let runtime = PythonRuntime::initialize(app_state.clone(), temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        // Attach a sender then immediately close it by dropping the receiver.
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<OperatorMessage>();
+        runtime.set_outgoing_sender(tx);
+        drop(rx);
+
+        let result = Python::with_gil(|py| -> PyResult<String> {
+            install_api_module(py)?;
+            let module = py.import("red_cell")?;
+            module.call_method("task_agent", ("AABB0002", "ps"), None)?.extract::<String>()
+        });
+
+        assert!(result.is_err(), "task_agent should fail when the sender channel is closed");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("closed"),
+            "error should mention the queue being closed, got: {err_msg}"
+        );
+
+        // Verify no stale waiter state was left behind.
+        let api_state = Python::with_gil(|py| -> PyResult<Arc<PythonApiState>> {
+            install_api_module(py)?;
+            active_api_state()
+        })
+        .unwrap_or_else(|error| panic!("active_api_state should be available: {error}"));
+        assert!(
+            lock_mutex(&api_state.task_result_senders).is_empty(),
+            "task_result_senders should be empty after closed-sender enqueue failure"
+        );
+        assert!(
+            lock_mutex(&api_state.task_result_receivers).is_empty(),
+            "task_result_receivers should be empty after closed-sender enqueue failure"
+        );
+    }
 }

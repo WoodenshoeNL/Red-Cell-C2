@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 362 | 212 | 31 |
-| Bugs filed against | 41 | 34 | 9 |
-| Bug rate (bugs/task) | 0.11 | 0.16 | 0.29 |
-| Quality score | 89% | 84% | 71% |
+| Tasks closed | 368 | 212 | 31 |
+| Bugs filed against | 43 | 34 | 9 |
+| Bug rate (bugs/task) | 0.12 | 0.16 | 0.29 |
+| Quality score | 88% | 84% | 71% |
 
-*Bug rates: Claude 41/362=0.11, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 43/368=0.12, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -25,13 +25,13 @@ Each loop run updates the running totals and appends a review entry.
 | Clippy warnings | 2 | 0 | 1 |
 | Protocol errors | 6 | 27 | 3 |
 | Security issues | 19 | 36 | 0 |
-| Architecture drift | 2 | 21 | 0 |
+| Architecture drift | 3 | 21 | 0 |
 | Memory / resource leaks | 2 | 10 | 1 |
 | Startup / lifecycle regressions | 1 | 8 | 0 |
 | Test infrastructure / flakiness | 1 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
-| Correctness / pagination | 11 | 6 | 1 |
+| Correctness / pagination | 12 | 6 | 1 |
 | Workflow / close-hygiene | 12 | 0 | 0 |
 | Code reuse / duplication | 5 | 0 | 0 |
 
@@ -50,6 +50,20 @@ Each loop run updates the running totals and appends a review entry.
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: cargo check ✓, clippy ✓, cargo test FAILED (linker: `-lpython3.12` not found after `.cargo/config.toml` removal — tracked as red-cell-c2-2693)
+
+### QA Review — 2026-03-19 08:15 — b02bae9..8cbded8
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 6 | 2 | Closed 3sql (transfer stop/resume state), 23e8 (logging init failures), 34bb (pivot malformed envelopes), 38c0 (process callback branches), 1s51 (kerberos callbacks), 2fj5 (filesystem callbacks). All test-only changes. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Bugs filed:
+- red-cell-c2-3qy2: Grammar error in copy/move failure messages ("Failed to copied/moved") — correctness (Claude)
+- red-cell-c2-gg8i: .cargo/config.toml hardcodes machine-local library path — architecture drift (Claude)
+
+Build: cargo check ✓, clippy ✓ (0 warnings), cargo test ✓ (all pass)
 
 ### QA Review — 2026-03-19 00:15 — 738579b..0d70085
 

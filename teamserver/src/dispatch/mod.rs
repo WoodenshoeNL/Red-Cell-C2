@@ -5939,6 +5939,136 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn token_list_callback_rejects_truncated_row() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        // Build a List payload with one complete row followed by a truncated second row.
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::List));
+        // First complete row
+        add_u32(&mut payload, 0); // index
+        add_u32(&mut payload, 0xAB); // handle
+        add_utf16(&mut payload, "LAB\\svc"); // domain_user
+        add_u32(&mut payload, 4444); // pid
+        add_u32(&mut payload, 1); // type
+        add_u32(&mut payload, 1); // impersonating
+        // Second row: truncated — only index, missing the rest
+        add_u32(&mut payload, 1); // index only
+
+        let err = dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 30, &payload)
+            .await
+            .expect_err("truncated token list row must be rejected");
+        assert!(
+            matches!(
+                err,
+                CommandDispatchError::InvalidCallbackPayload { command_id, .. }
+                if command_id == u32::from(DemonCommand::CommandToken)
+            ),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+        // Verify no event was broadcast by checking recv times out.
+        assert!(
+            timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),
+            "no event should be broadcast on parse failure"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_privs_list_callback_rejects_truncated_row()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        // PrivsGetOrList with priv_list=1 (list mode), one complete priv followed by truncation.
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::PrivsGetOrList));
+        add_u32(&mut payload, 1); // priv_list flag
+        // First complete privilege entry
+        add_bytes(&mut payload, b"SeDebugPrivilege\0");
+        add_u32(&mut payload, 3); // state = Enabled
+        // Second row: privilege name present but state truncated
+        add_bytes(&mut payload, b"SeShutdownPrivilege\0");
+        // Missing: state u32
+
+        let err = dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 31, &payload)
+            .await
+            .expect_err("truncated privilege list row must be rejected");
+        assert!(
+            matches!(
+                err,
+                CommandDispatchError::InvalidCallbackPayload { command_id, .. }
+                if command_id == u32::from(DemonCommand::CommandToken)
+            ),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+        assert!(
+            timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),
+            "no event should be broadcast on parse failure"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn token_find_tokens_callback_rejects_truncated_row()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        // FindTokens with success=1, num_tokens=2 but only one complete token row,
+        // the second row truncated after domain_user.
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonTokenCommand::FindTokens));
+        add_u32(&mut payload, 1); // success
+        add_u32(&mut payload, 2); // num_tokens
+        // First complete token entry
+        add_utf16(&mut payload, "LAB\\admin"); // domain_user
+        add_u32(&mut payload, 5678); // pid
+        add_u32(&mut payload, 0x10); // handle
+        add_u32(&mut payload, 0x3000); // integrity
+        add_u32(&mut payload, 2); // impersonation level
+        add_u32(&mut payload, 1); // token type
+        // Second token: only domain_user, missing remaining fields
+        add_utf16(&mut payload, "LAB\\guest");
+
+        let err = dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandToken), 32, &payload)
+            .await
+            .expect_err("truncated found-token row must be rejected");
+        assert!(
+            matches!(
+                err,
+                CommandDispatchError::InvalidCallbackPayload { command_id, .. }
+                if command_id == u32::from(DemonCommand::CommandToken)
+            ),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+        assert!(
+            timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),
+            "no event should be broadcast on parse failure"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn socket_read_callback_broadcasts_error_when_relay_delivery_fails()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;

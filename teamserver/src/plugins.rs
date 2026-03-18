@@ -2070,4 +2070,96 @@ havoc.RegisterCommand(\n\
         );
         Ok(())
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn load_plugins_rejects_nonexistent_plugin_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let bogus_path = unique_test_dir("plugins-no-such-dir");
+        // Ensure the directory really doesn't exist.
+        assert!(!bogus_path.exists());
+
+        let database = Database::connect(unique_test_dir("plugins-invalid-dir-db")).await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let runtime = PluginRuntime::initialize(
+            database,
+            registry,
+            events,
+            sockets,
+            Some(bogus_path.clone()),
+        )
+        .await?;
+
+        let result = runtime.load_plugins().await;
+        match result {
+            Err(PluginError::InvalidPluginDirectory { path }) => {
+                assert_eq!(path, bogus_path);
+            }
+            other => panic!("expected Err(InvalidPluginDirectory), got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn load_plugins_rejects_interior_nul_in_plugin_source()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let temp_dir = TempDir::new()?;
+        let plugin_path = temp_dir.path().join("nul_plugin.py");
+        // Write a plugin whose source contains an interior NUL byte — this must
+        // trigger the CString conversion guard.
+        std::fs::write(&plugin_path, b"x = 1\0\ny = 2\n")?;
+
+        let database = Database::connect(unique_test_dir("plugins-nul-source")).await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let runtime = PluginRuntime::initialize(
+            database,
+            registry,
+            events,
+            sockets,
+            Some(temp_dir.path().to_path_buf()),
+        )
+        .await?;
+
+        let result = runtime.load_plugins().await;
+        match result {
+            Err(PluginError::InvalidCStringPath { path }) => {
+                assert!(
+                    path.contains("nul_plugin.py"),
+                    "error path should reference the offending file, got: {path}",
+                );
+            }
+            other => panic!("expected Err(InvalidCStringPath), got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn load_plugins_rejects_regular_file_as_plugin_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp_dir = TempDir::new()?;
+        let file_path = temp_dir.path().join("not_a_dir.txt");
+        std::fs::write(&file_path, "hello")?;
+
+        let database = Database::connect(unique_test_dir("plugins-file-not-dir-db")).await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let runtime =
+            PluginRuntime::initialize(database, registry, events, sockets, Some(file_path.clone()))
+                .await?;
+
+        let result = runtime.load_plugins().await;
+        match result {
+            Err(PluginError::InvalidPluginDirectory { path }) => {
+                assert_eq!(path, file_path);
+            }
+            other => panic!("expected Err(InvalidPluginDirectory), got {other:?}"),
+        }
+        Ok(())
+    }
 }

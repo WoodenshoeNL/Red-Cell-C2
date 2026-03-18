@@ -76,6 +76,38 @@ fn assembly_clr_version_payload(version: &str) -> Vec<u8> {
     p
 }
 
+/// Build a DOTNET_INFO_PATCHED (0x1) payload for `CommandAssemblyInlineExecute`.
+/// No extra data beyond the u32 LE info-id.
+fn assembly_patched_payload() -> Vec<u8> {
+    1u32.to_le_bytes().to_vec()
+}
+
+/// Build a DOTNET_INFO_ENTRYPOINT_EXECUTED (0x3) payload for `CommandAssemblyInlineExecute`.
+/// Contains the info-id followed by a u32 LE thread ID.
+fn assembly_entrypoint_executed_payload(thread_id: u32) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&3u32.to_le_bytes()); // DOTNET_INFO_ENTRYPOINT_EXECUTED
+    p.extend_from_slice(&thread_id.to_le_bytes());
+    p
+}
+
+/// Build a DOTNET_INFO_FINISHED (0x4) payload for `CommandAssemblyInlineExecute`.
+/// No extra data beyond the u32 LE info-id.
+fn assembly_finished_payload() -> Vec<u8> {
+    4u32.to_le_bytes().to_vec()
+}
+
+/// Build a DOTNET_INFO_FAILED (0x5) payload for `CommandAssemblyInlineExecute`.
+/// No extra data beyond the u32 LE info-id.
+fn assembly_failed_payload() -> Vec<u8> {
+    5u32.to_le_bytes().to_vec()
+}
+
+/// Build an unknown info-id payload for `CommandAssemblyInlineExecute`.
+fn assembly_unknown_info_id_payload(info_id: u32) -> Vec<u8> {
+    info_id.to_le_bytes().to_vec()
+}
+
 /// Build a `CommandAssemblyListVersions` payload: a sequence of LE-length-prefixed
 /// UTF-16 LE strings, one per version.
 fn assembly_list_versions_payload(versions: &[&str]) -> Vec<u8> {
@@ -697,5 +729,298 @@ async fn bof_unknown_subtype_succeeds_without_operator_broadcast()
 
     socket.close(None).await?;
     listeners.stop("asm-test-bof-unk").await?;
+    Ok(())
+}
+
+/// `handle_assembly_inline_execute_callback` with DOTNET_INFO_PATCHED must
+/// broadcast an `AgentResponse` with kind "Info" and a message mentioning Amsi/Etw patching.
+#[tokio::test]
+async fn assembly_inline_execute_patched_broadcasts_info() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("asm-test-patched", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("asm-test-patched").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xAB01_000A_u32;
+    let key = [0xC1; AGENT_KEY_LENGTH];
+    let iv = [0xC2; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let payload = assembly_patched_payload();
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandAssemblyInlineExecute),
+            0xA0,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse, got {event:?}");
+    };
+    assert_eq!(msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(
+        msg.info.command_id,
+        u32::from(DemonCommand::CommandAssemblyInlineExecute).to_string()
+    );
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Info"));
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).expect("Message field");
+    assert!(
+        message.contains("Amsi/Etw"),
+        "expected patched message to mention Amsi/Etw, got {message:?}"
+    );
+
+    socket.close(None).await?;
+    listeners.stop("asm-test-patched").await?;
+    Ok(())
+}
+
+/// `handle_assembly_inline_execute_callback` with DOTNET_INFO_ENTRYPOINT_EXECUTED must
+/// broadcast an `AgentResponse` with kind "Good" and a message containing the thread ID.
+#[tokio::test]
+async fn assembly_inline_execute_entrypoint_executed_broadcasts_thread_id()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("asm-test-entry", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("asm-test-entry").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xAB01_000B_u32;
+    let key = [0xD1; AGENT_KEY_LENGTH];
+    let iv = [0xD2; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let thread_id = 4242_u32;
+    let payload = assembly_entrypoint_executed_payload(thread_id);
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandAssemblyInlineExecute),
+            0xB0,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse, got {event:?}");
+    };
+    assert_eq!(msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(
+        msg.info.command_id,
+        u32::from(DemonCommand::CommandAssemblyInlineExecute).to_string()
+    );
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).expect("Message field");
+    assert!(message.contains("4242"), "expected thread id in message, got {message:?}");
+    assert!(message.contains("Thread"), "expected 'Thread' label in message, got {message:?}");
+
+    socket.close(None).await?;
+    listeners.stop("asm-test-entry").await?;
+    Ok(())
+}
+
+/// `handle_assembly_inline_execute_callback` with DOTNET_INFO_FINISHED must
+/// broadcast an `AgentResponse` with kind "Good" and a completion message.
+#[tokio::test]
+async fn assembly_inline_execute_finished_broadcasts_good() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("asm-test-finished", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("asm-test-finished").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xAB01_000C_u32;
+    let key = [0xE1; AGENT_KEY_LENGTH];
+    let iv = [0xE2; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let payload = assembly_finished_payload();
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandAssemblyInlineExecute),
+            0xC0,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse, got {event:?}");
+    };
+    assert_eq!(msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(
+        msg.info.command_id,
+        u32::from(DemonCommand::CommandAssemblyInlineExecute).to_string()
+    );
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).expect("Message field");
+    assert!(message.contains("Finished"), "expected 'Finished' in message, got {message:?}");
+
+    socket.close(None).await?;
+    listeners.stop("asm-test-finished").await?;
+    Ok(())
+}
+
+/// `handle_assembly_inline_execute_callback` with DOTNET_INFO_FAILED must
+/// broadcast an `AgentResponse` with kind "Error" and a failure message.
+#[tokio::test]
+async fn assembly_inline_execute_failed_broadcasts_error() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("asm-test-failed", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("asm-test-failed").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xAB01_000D_u32;
+    let key = [0xF1; AGENT_KEY_LENGTH];
+    let iv = [0xF2; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let payload = assembly_failed_payload();
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandAssemblyInlineExecute),
+            0xD0,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse, got {event:?}");
+    };
+    assert_eq!(msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(
+        msg.info.command_id,
+        u32::from(DemonCommand::CommandAssemblyInlineExecute).to_string()
+    );
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Error"));
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).expect("Message field");
+    assert!(message.contains("Failed"), "expected 'Failed' in message, got {message:?}");
+
+    socket.close(None).await?;
+    listeners.stop("asm-test-failed").await?;
+    Ok(())
+}
+
+/// An unknown info-id for `CommandAssemblyInlineExecute` must succeed at the HTTP layer
+/// but must NOT broadcast any operator message — unknown IDs are silently ignored.
+#[tokio::test]
+async fn assembly_inline_execute_unknown_info_id_no_broadcast()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("asm-test-unk-id", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("asm-test-unk-id").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xAB01_000E_u32;
+    let key = [0xA3; AGENT_KEY_LENGTH];
+    let iv = [0xA4; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let payload = assembly_unknown_info_id_payload(0xBEEF);
+    let response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandAssemblyInlineExecute),
+            0xE0,
+            &payload,
+        ))
+        .send()
+        .await?;
+    assert!(
+        response.status().is_success(),
+        "HTTP callback should succeed for unknown assembly info-id"
+    );
+
+    // No operator message should be broadcast for an unknown info-id.
+    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(250)).await;
+
+    socket.close(None).await?;
+    listeners.stop("asm-test-unk-id").await?;
     Ok(())
 }

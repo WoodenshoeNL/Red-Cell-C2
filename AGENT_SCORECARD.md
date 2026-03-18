@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 294 | 195 | 31 |
+| Tasks closed | 297 | 195 | 31 |
 | Bugs filed against | 40 | 34 | 9 |
-| Bug rate (bugs/task) | 0.14 | 0.17 | 0.29 |
-| Quality score | 86% | 83% | 71% |
+| Bug rate (bugs/task) | 0.13 | 0.17 | 0.29 |
+| Quality score | 87% | 83% | 71% |
 
 ## Violation Breakdown
 
@@ -37,6 +37,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-18 23:00 — 298e4ca..f1fb997
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (dev02-opus) | 3 | 0 | Closed 1g9x, yk2g, 2f2f. Transfer stop/resume/remove branch coverage, DemonInfo MemExec/MemProtect/ProcCreate/unknown-class coverage, token table truncated-payload malformed-input tests. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (all passing)
+Notes: Clean review — all 3 closures are test-only additions. 16 new tests total: 3 token truncated-payload tests (dispatch/mod.rs), 9 transfer stop/resume/remove tests (dispatch/transfer.rs), 4 DemonInfo integration tests (output_dispatch.rs). One task in progress: 2v2g (payload_builder cache accessor tests, uncommitted code in working tree). No bugs filed.
 
 ### QA Review — 2026-03-18 22:30 — 4e4611a..add2a0c
 

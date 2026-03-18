@@ -872,6 +872,93 @@ mod tests {
         Ok(())
     }
 
+    /// Helper: builds a valid `AgentRecord` JSON value, then applies overrides.
+    fn agent_record_json(overrides: serde_json::Value) -> serde_json::Value {
+        let mut base = json!({
+            "AgentID": "ABCD1234",
+            "Active": true,
+            "Encryption": {
+                "AESKey": "YWVzLWtleQ==",
+                "AESIv": "aXY="
+            },
+            "Hostname": "wkstn-1",
+            "Username": "operator",
+            "DomainName": "LAB",
+            "ExternalIP": "203.0.113.10",
+            "InternalIP": "10.0.0.10",
+            "ProcessName": "explorer.exe",
+            "BaseAddress": 1,
+            "ProcessPID": 1,
+            "ProcessTID": 1,
+            "ProcessPPID": 1,
+            "ProcessArch": "x64",
+            "Elevated": false,
+            "OSVersion": "Windows 10",
+            "OSArch": "x64",
+            "SleepDelay": 5,
+            "SleepJitter": 10,
+            "FirstCallIn": "09/03/2026 19:04:00",
+            "LastCallIn": "09/03/2026 19:05:00"
+        });
+        if let (Some(base_map), Some(over_map)) = (base.as_object_mut(), overrides.as_object()) {
+            for (k, v) in over_map {
+                base_map.insert(k.clone(), v.clone());
+            }
+        }
+        base
+    }
+
+    #[test]
+    fn agent_encryption_rejects_invalid_base64_aes_key() {
+        let payload = agent_record_json(json!({
+            "Encryption": {
+                "AESKey": "%%%not-base64%%%",
+                "AESIv": "aXY="
+            }
+        }));
+
+        let error = serde_json::from_value::<AgentRecord>(payload)
+            .expect_err("invalid base64 AESKey must fail");
+        let msg = error.to_string().to_lowercase();
+        assert!(
+            msg.contains("base64") || msg.contains("invalid"),
+            "error should mention base64 or invalid, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn agent_encryption_rejects_invalid_base64_aes_iv() {
+        let payload = agent_record_json(json!({
+            "Encryption": {
+                "AESKey": "YWVzLWtleQ==",
+                "AESIv": "%%%not-base64%%%"
+            }
+        }));
+
+        let error = serde_json::from_value::<AgentRecord>(payload)
+            .expect_err("invalid base64 AESIv must fail");
+        let msg = error.to_string().to_lowercase();
+        assert!(
+            msg.contains("base64") || msg.contains("invalid"),
+            "error should mention base64 or invalid, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn agent_encryption_accepts_empty_base64_strings() -> Result<(), Box<dyn std::error::Error>> {
+        let payload = agent_record_json(json!({
+            "Encryption": {
+                "AESKey": "",
+                "AESIv": ""
+            }
+        }));
+
+        let record: AgentRecord = serde_json::from_value(payload)?;
+        assert!(record.encryption.aes_key.is_empty(), "empty base64 should decode to empty bytes");
+        assert!(record.encryption.aes_iv.is_empty(), "empty base64 should decode to empty bytes");
+        Ok(())
+    }
+
     #[test]
     fn operator_info_supports_profile_and_presence_fields() -> Result<(), Box<dyn std::error::Error>>
     {

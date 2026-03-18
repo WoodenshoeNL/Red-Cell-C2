@@ -647,6 +647,158 @@ async fn socket_connect_callback_routes_to_relay_finish_connect()
     Ok(())
 }
 
+/// A `CommandSocket/Connect` callback with `success=0` must call
+/// `relay.finish_connect` with `success=false`, causing the pending SOCKS5
+/// client to receive a failure reply.
+#[tokio::test]
+async fn socket_connect_failure_callback_sends_socks_failure_reply()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners, registry, relay) = start_dispatch_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    listeners
+        .create(common::http_listener_config("sock-dispatch-connect-fail", listener_port))
+        .await?;
+    drop(listener_guard);
+    listeners.start("sock-dispatch-connect-fail").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xBB01_0003_u32;
+    let key = [0x55; AGENT_KEY_LENGTH];
+    let iv = [0x66; AGENT_IV_LENGTH];
+    let ctr_offset = dispatch_register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    // Start a SOCKS server and connect a client.
+    let (socks_port, socks_guard) = common::available_port()?;
+    drop(socks_guard);
+    relay.add_socks_server(agent_id, &socks_port.to_string()).await?;
+
+    let mut socks_client =
+        timeout(Duration::from_secs(2), TcpStream::connect(format!("127.0.0.1:{socks_port}")))
+            .await??;
+    socks5_handshake(&mut socks_client).await?;
+    socks5_connect_ipv4(&mut socks_client, [93, 184, 216, 34], 80).await?;
+
+    let socket_id = dequeue_socket_id(&registry, agent_id).await?;
+
+    // Build and send the CommandSocket/Connect callback with success=0 (failure).
+    let mut connect_payload = Vec::new();
+    connect_payload.extend_from_slice(&u32::from(DemonSocketCommand::Connect).to_le_bytes());
+    connect_payload.extend_from_slice(&0_u32.to_le_bytes()); // success=0 (failure)
+    connect_payload.extend_from_slice(&socket_id.to_le_bytes());
+    connect_payload.extend_from_slice(&1_u32.to_le_bytes()); // error_code=1
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandSocket),
+            0x03,
+            &connect_payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // The relay should have called finish_connect(success=false), which sends
+    // a SOCKS5 failure reply to the waiting client.
+    let (reply, _addr, _port) =
+        timeout(Duration::from_secs(2), read_socks5_reply(&mut socks_client, SOCKS_ATYP_IPV4))
+            .await??;
+    assert_ne!(
+        reply, SOCKS_REPLY_SUCCEEDED,
+        "SOCKS client must receive a failure reply after a Connect callback with success=0"
+    );
+
+    relay.clear_socks_servers(agent_id).await?;
+    listeners.stop("sock-dispatch-connect-fail").await?;
+    Ok(())
+}
+
+/// A `CommandSocket/Read` callback with `success=1` for a `ReverseProxy` socket
+/// must call `relay.write_client_data`, delivering the payload bytes to the
+/// waiting SOCKS5 client.
+#[tokio::test]
+async fn socket_read_callback_delivers_data_to_socks_client()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners, registry, relay) = start_dispatch_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    listeners.create(common::http_listener_config("sock-dispatch-read", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("sock-dispatch-read").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xBB01_0004_u32;
+    let key = [0x77; AGENT_KEY_LENGTH];
+    let iv = [0x88; AGENT_IV_LENGTH];
+    let ctr_offset = dispatch_register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    // Start a SOCKS server and connect a client.
+    let (socks_port, socks_guard) = common::available_port()?;
+    drop(socks_guard);
+    relay.add_socks_server(agent_id, &socks_port.to_string()).await?;
+
+    let mut socks_client =
+        timeout(Duration::from_secs(2), TcpStream::connect(format!("127.0.0.1:{socks_port}")))
+            .await??;
+    socks5_handshake(&mut socks_client).await?;
+    socks5_connect_ipv4(&mut socks_client, [93, 184, 216, 34], 80).await?;
+
+    // Get the socket_id and complete the relay setup directly so the client is
+    // in the relay's connected-socket table.
+    let socket_id = dequeue_socket_id(&registry, agent_id).await?;
+    relay.finish_connect(agent_id, socket_id, true, 0).await?;
+    // Drain the SOCKS5 success reply so the client is in a clean read state.
+    let _ = timeout(Duration::from_secs(1), read_socks5_reply(&mut socks_client, SOCKS_ATYP_IPV4))
+        .await;
+
+    // Build the CommandSocket/Read callback with success=1 carrying relay data.
+    let relay_data = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+    let mut read_payload = Vec::new();
+    read_payload.extend_from_slice(&u32::from(DemonSocketCommand::Read).to_le_bytes());
+    read_payload.extend_from_slice(&socket_id.to_le_bytes());
+    read_payload.extend_from_slice(&u32::from(DemonSocketType::ReverseProxy).to_le_bytes());
+    read_payload.extend_from_slice(&1_u32.to_le_bytes()); // success=1
+    // Length-prefixed data (LE u32 length followed by bytes).
+    read_payload.extend_from_slice(&u32::try_from(relay_data.len()).unwrap().to_le_bytes());
+    read_payload.extend_from_slice(relay_data);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandSocket),
+            0x04,
+            &read_payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // The relay should have called write_client_data — the SOCKS client
+    // must receive the exact payload bytes.
+    let mut received = vec![0u8; relay_data.len()];
+    timeout(Duration::from_secs(2), socks_client.read_exact(&mut received)).await??;
+    assert_eq!(
+        received,
+        relay_data.as_slice(),
+        "SOCKS client must receive the exact data from the Read callback"
+    );
+
+    relay.clear_socks_servers(agent_id).await?;
+    listeners.stop("sock-dispatch-read").await?;
+    Ok(())
+}
+
 /// A `CommandSocket/Close` callback for a `ReverseProxy` socket must call
 /// `relay.close_client`, which closes the SOCKS5 client connection (EOF).
 #[tokio::test]

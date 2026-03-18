@@ -442,3 +442,49 @@ Dev agents should prioritize:
 [2026-03-18 04:36:48] [Ubuntu-C2-dev02-claude] === Arch review run 3 ===
 [2026-03-18 04:36:48] [Ubuntu-C2-dev02-claude] WARNING: git pull --rebase failed, continuing with local state
 [2026-03-18 04:36:48] [Ubuntu-C2-dev02-claude] Run log: claude_arch_20260318_043648.log
+---
+
+## Arch Review Report — 2026-03-18
+
+### 1. Codebase Health: **On Track**
+
+The codebase is in excellent shape. 87,651 lines of Rust across 3 crates, 1,571 tests all passing, zero clippy warnings, clean `cargo check`. The architecture closely follows AGENTS.md specifications.
+
+### 2. Security Posture: **Strong**
+
+No exploitable vulnerabilities found. Key security properties verified:
+- **Crypto**: AES-256-CTR with per-agent keys, running CTR block offset prevents keystream reuse, offset only advanced after successful parse (prevents desync attacks)
+- **Key material**: Wrapped in `Zeroizing<Vec<u8>>`, never logged
+- **Auth**: Constant-time comparisons via `subtle::ConstantTimeEq`, Argon2 password hashing
+- **Input validation**: All length-prefixed reads validated against remaining buffer, bounded by `MAX_AGENT_MESSAGE_LEN` (30 MiB)
+- **DoS protection**: Per-IP DEMON_INIT rate limiting, MAX_REGISTERED_AGENTS cap (10,000), MAX_JOB_QUEUE_DEPTH (1,000), bounded download tracking
+- **No `unwrap()`/`expect()` in production code** — all instances are in test modules
+- **No `unsafe` blocks** anywhere in the codebase
+
+### 3. Biggest Blindspot
+
+DNS listener has ~750 lines of implementation code (upload chunking, download polling, base32hex encoding, rate limiting) but **zero integration tests**. This is the most complex untested code path. (Existing issue `red-cell-c2-a0ac`.)
+
+### 4. Issues Filed
+
+| ID | Agent | Description |
+|----|-------|-------------|
+| `red-cell-c2-olvs` | Codex | DownloadTracker error messages hardcode `BeaconOutput` command_id even when called from `CommandFs` path |
+| `red-cell-c2-pk8h` | Claude Sonnet | Duplicate open issues: `k9mp` is identical to `197z` |
+| `red-cell-c2-v5fb` | Claude Sonnet | `is_weak_aes_key`/`is_weak_aes_iv` return `true` for empty slices — misleading contract |
+
+### 5. Agent Quality
+
+- **Claude (Opus + Sonnet)**: Best overall code quality. Clean architecture, proper error handling, comprehensive test coverage. Minor issues: duplicate issue filing, weak-key API edge case.
+- **Codex**: Good contributor (195 tasks closed) but carries most protocol/architecture drift findings historically (27 protocol errors, 21 architecture drift, 34 security issues). This review found 1 new correctness issue.
+- **Cursor**: Lowest volume (31 tasks) and highest bug rate (0.29). No new findings this review but historically the weakest.
+
+### 6. Recommendation
+
+Dev agents should prioritize:
+1. **DNS listener integration tests** (`red-cell-c2-a0ac`, P2) — most dangerous coverage gap
+2. **Close duplicate issue** `red-cell-c2-k9mp` — housekeeping
+3. **`CommandPsImport` handler** (`red-cell-c2-4be2`, P3) — agent callbacks silently dropped
+[2026-03-18 04:50:46] [Ubuntu-C2-dev02-claude] Arch review completed successfully
+[2026-03-18 04:50:47] [Ubuntu-C2-dev02-claude] ========================LOOP=========================
+[2026-03-18 04:50:47] [Ubuntu-C2-dev02-claude] Next run in 120m (at 06:50:47)

@@ -374,6 +374,7 @@ impl PayloadBuilderService {
         let compiler_x64 = resolve_executable(
             build.and_then(|config| config.compiler64.as_deref()),
             "x86_64-w64-mingw32-gcc",
+            Some(repo_root),
         )?;
         let compiler_x64_version =
             verify_tool_version(&compiler_x64, parse_gcc_version, &GCC_MIN_VERSION)?;
@@ -381,11 +382,16 @@ impl PayloadBuilderService {
         let compiler_x86 = resolve_executable(
             build.and_then(|config| config.compiler86.as_deref()),
             "i686-w64-mingw32-gcc",
+            Some(repo_root),
         )?;
         let compiler_x86_version =
             verify_tool_version(&compiler_x86, parse_gcc_version, &GCC_MIN_VERSION)?;
 
-        let nasm = resolve_executable(build.and_then(|config| config.nasm.as_deref()), "nasm")?;
+        let nasm = resolve_executable(
+            build.and_then(|config| config.nasm.as_deref()),
+            "nasm",
+            Some(repo_root),
+        )?;
         let nasm_version = verify_tool_version(&nasm, parse_nasm_version, &NASM_MIN_VERSION)?;
 
         tracing::info!(
@@ -944,9 +950,17 @@ fn workspace_root() -> Result<PathBuf, PayloadBuildError> {
 fn resolve_executable(
     configured: Option<&str>,
     fallback_name: &str,
+    repo_root: Option<&Path>,
 ) -> Result<PathBuf, PayloadBuildError> {
     let candidate = configured
-        .map(PathBuf::from)
+        .map(|path| {
+            let path = PathBuf::from(path);
+            if path.is_relative() {
+                repo_root.map_or(path.clone(), |repo_root| repo_root.join(path))
+            } else {
+                path
+            }
+        })
         .or_else(|| find_in_path_or_common_locations(fallback_name))
         .ok_or_else(|| PayloadBuildError::ToolchainUnavailable {
             message: format!(
@@ -2131,6 +2145,57 @@ mod tests {
             PayloadBuildError::ToolchainUnavailable { message }
                 if message.contains("executable does not exist")
                     && message.contains("missing-x64-gcc")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn from_profile_with_repo_root_resolves_relative_toolchain_paths_against_repo_root()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        let compiler_x64 = write_fake_gcc(
+            &temp.path().join("data/x86_64-w64-mingw32-cross/bin/x86_64-w64-mingw32-gcc"),
+        )?;
+        let compiler_x86 = write_fake_gcc(
+            &temp.path().join("data/i686-w64-mingw32-cross/bin/i686-w64-mingw32-gcc"),
+        )?;
+        let nasm = write_fake_nasm(&temp.path().join("data/nasm/bin/nasm"))?;
+        create_payload_assets(temp.path())?;
+        let profile = constructor_test_profile(
+            Path::new("data/x86_64-w64-mingw32-cross/bin/x86_64-w64-mingw32-gcc"),
+            Path::new("data/i686-w64-mingw32-cross/bin/i686-w64-mingw32-gcc"),
+            Path::new("data/nasm/bin/nasm"),
+        );
+
+        let service = PayloadBuilderService::from_profile_with_repo_root(&profile, temp.path())?;
+
+        assert_eq!(service.inner.toolchain.compiler_x64, compiler_x64.canonicalize()?);
+        assert_eq!(service.inner.toolchain.compiler_x86, compiler_x86.canonicalize()?);
+        assert_eq!(service.inner.toolchain.nasm, nasm.canonicalize()?);
+        Ok(())
+    }
+
+    #[test]
+    fn from_profile_with_repo_root_reports_missing_relative_toolchain_from_repo_root()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        let compiler_x86 = write_fake_gcc(
+            &temp.path().join("data/i686-w64-mingw32-cross/bin/i686-w64-mingw32-gcc"),
+        )?;
+        let nasm = write_fake_nasm(&temp.path().join("data/nasm/bin/nasm"))?;
+        create_payload_assets(temp.path())?;
+        let missing_relative = Path::new("data/x86_64-w64-mingw32-cross/bin/missing-gcc");
+        let profile = constructor_test_profile(missing_relative, &compiler_x86, &nasm);
+
+        let error = PayloadBuilderService::from_profile_with_repo_root(&profile, temp.path())
+            .expect_err("missing relative compiler should be rejected");
+
+        let expected = temp.path().join(missing_relative);
+        assert!(matches!(
+            error,
+            PayloadBuildError::ToolchainUnavailable { message }
+                if message.contains("executable does not exist")
+                    && message.contains(&expected.display().to_string())
         ));
         Ok(())
     }

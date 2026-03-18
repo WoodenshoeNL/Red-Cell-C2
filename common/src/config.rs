@@ -1714,6 +1714,36 @@ mod tests {
     }
 
     #[test]
+    fn rejects_rest_api_configuration_without_keys() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Api {
+              RateLimitPerMinute = 120
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("profile should be invalid");
+        assert!(
+            error.errors.iter().any(|message| message.contains("Api must define at least one key"))
+        );
+    }
+
+    #[test]
     fn parses_teamserver_plugins_dir() {
         let profile = Profile::parse(
             r#"

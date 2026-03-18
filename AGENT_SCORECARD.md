@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Startup / lifecycle regressions | 1 | 8 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
-| Correctness / pagination | 10 | 6 | 1 |
+| Correctness / pagination | 11 | 6 | 1 |
 | Workflow / close-hygiene | 12 | 0 | 0 |
 | Code reuse / duplication | 5 | 0 | 0 |
 
@@ -37,6 +37,22 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-18 15:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude (Opus) | 2 | 1 correctness bug, 1 impl task | SMB handler drops valid empty-payload responses (g84l, P2 bug). Network dispatch Computer/DcList callbacks unimplemented (maci, P3 task). |
+| Claude (Sonnet) | 1 | 1 impl task | Socket dispatch 6 subcommand callbacks are no-ops (m527, P3 task). |
+| Codex | 0 | — | No new issues found. |
+| Cursor | 0 | — | No new issues found. |
+
+Overall codebase health: **on track**
+Biggest blindspot: SMB transport correctness — the empty-payload check at listeners.rs:1706 would stall SMB agents with no queued jobs. Fix is already in progress (12s4).
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (all 193 unit tests passing, 0 failures)
+
+Deep review covered: full structural map (95k lines across 3 crates), all dispatch handlers (14 files), crypto design (CTR offset management, key material redaction, constant-time comparisons), protocol parsing (integer overflow guards, magic precheck, size validation), authentication (Argon2, API key HMAC, RBAC extractors), all listener implementations (HTTP/HTTPS/DNS/SMB), plugin system completeness, REST API routes, WebSocket handlers, client transport. Security posture remains strong — no key material in logs, bounded allocations, SSRF protections, proper error propagation throughout.
 
 ### QA Review — 2026-03-18 14:15 — 217d606..0798348
 

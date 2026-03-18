@@ -1393,6 +1393,63 @@ mod tests {
     }
 
     #[test]
+    fn accepts_ipv6_trusted_proxy_peers() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {
+              TrustXForwardedFor = true
+              TrustedProxyPeers = ["::1", "2001:db8::/128"]
+            }
+            "#,
+        )
+        .expect("profile should parse");
+
+        profile.validate().expect("IPv6 trusted proxy peers should validate");
+    }
+
+    #[test]
+    fn rejects_ipv6_trusted_proxy_peer_with_invalid_prefix_length() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {
+              TrustXForwardedFor = true
+              TrustedProxyPeers = ["2001:db8::/129"]
+            }
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("profile should be invalid");
+        assert!(error.errors.iter().any(|message| {
+            message.contains("TrustedProxyPeers")
+                && message.contains("2001:db8::/129")
+                && message.contains("invalid prefix length")
+        }));
+    }
+
+    #[test]
     fn accepts_service_block_with_warning() {
         let profile = Profile::parse(
             r#"

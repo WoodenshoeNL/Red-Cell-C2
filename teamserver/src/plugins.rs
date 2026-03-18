@@ -2009,4 +2009,65 @@ havoc.RegisterCommand(\n\
         assert_eq!(cmd_line, "shell whoami");
         Ok(())
     }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn listener_start_fails_before_manager_attached() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-listener-unavailable-start").await?;
+
+        // Do NOT call attach_listener_manager — the manager stays None.
+        let handle = std::thread::spawn({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| -> PyResult<String> {
+                    runtime.install_api_module(py)?;
+                    let module = py.import("havoc")?;
+                    let listener = module.getattr("Listener")?.call1(("nonexistent",))?;
+                    match listener.call_method0("start") {
+                        Ok(_) => Ok("unexpected success".to_owned()),
+                        Err(err) => Ok(err.to_string()),
+                    }
+                })
+            }
+        });
+        let error_message = handle.join().map_err(|_| "python test thread panicked")??;
+        assert!(
+            error_message.contains("listener manager is not available"),
+            "expected ListenerManagerUnavailable error, got: {error_message}",
+        );
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn listener_stop_fails_before_manager_attached() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-listener-unavailable-stop").await?;
+
+        let handle = std::thread::spawn({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| -> PyResult<String> {
+                    runtime.install_api_module(py)?;
+                    let module = py.import("havoc")?;
+                    let listener = module.getattr("Listener")?.call1(("nonexistent",))?;
+                    match listener.call_method0("stop") {
+                        Ok(_) => Ok("unexpected success".to_owned()),
+                        Err(err) => Ok(err.to_string()),
+                    }
+                })
+            }
+        });
+        let error_message = handle.join().map_err(|_| "python test thread panicked")??;
+        assert!(
+            error_message.contains("listener manager is not available"),
+            "expected ListenerManagerUnavailable error, got: {error_message}",
+        );
+        Ok(())
+    }
 }

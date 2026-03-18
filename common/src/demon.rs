@@ -974,6 +974,42 @@ mod tests {
     }
 
     #[test]
+    fn demon_package_rejects_buffer_too_short_for_request_id() {
+        for actual in 1..=3 {
+            let bytes = vec![0u8; 4 + actual];
+            let error = DemonPackage::from_bytes(&bytes)
+                .expect_err("buffer shorter than 8 bytes must reject request id parsing");
+
+            assert_eq!(
+                error,
+                DemonProtocolError::BufferTooShort {
+                    context: "Demon package request id",
+                    expected: 4,
+                    actual,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn demon_package_rejects_buffer_too_short_for_payload_length() {
+        for actual in 1..=3 {
+            let bytes = vec![0u8; 8 + actual];
+            let error = DemonPackage::from_bytes(&bytes)
+                .expect_err("buffer shorter than 12 bytes must reject payload length parsing");
+
+            assert_eq!(
+                error,
+                DemonProtocolError::BufferTooShort {
+                    context: "Demon package payload length",
+                    expected: 4,
+                    actual,
+                }
+            );
+        }
+    }
+
+    #[test]
     fn enum_conversions_match_havoc_constants() {
         assert_eq!(u32::from(DemonCommand::DemonInit), 99);
         assert_eq!(u32::from(DemonCommand::CommandKerberos), 2550);

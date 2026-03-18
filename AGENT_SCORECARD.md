@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 348 | 195 | 31 |
+| Tasks closed | 362 | 212 | 31 |
 | Bugs filed against | 41 | 34 | 9 |
-| Bug rate (bugs/task) | 0.12 | 0.17 | 0.29 |
-| Quality score | 88% | 83% | 71% |
+| Bug rate (bugs/task) | 0.11 | 0.16 | 0.29 |
+| Quality score | 89% | 84% | 71% |
 
-*Bug rates: Claude 41/348=0.12, Codex 34/195=0.17, Cursor 9/31=0.29*
+*Bug rates: Claude 41/362=0.11, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-19 02:30 — 0d70085..b02bae9
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 14 | 0 | Closed 5gkw (logging test), 2bhj (rate_limiter test), 34pn/2108/24rc/3hug (assembly/protocol tests), 1c9x/1t5x (audit tests), 36er (client auth fix), 1s13 (TrustCertificate fix), 3aba (agents queue-full rollback), 7bad (set_last_call_in rollback), 35q0 (add_link test), 2y40 (test-review scan). Also reorganized scripts/prompts. |
+| Codex | 17 | 0 | Closed 12q2 (common API tests), 2ufp (TLS PEM test), rmm0 (API keys test), 1upo (cert paths test), 32yd (IPv6 proxy test), 3cr0 (Demon header test), l0tq (uv Python switch), i6zu (loot download tests), 2axt (loot export test), 39lo (TLS CA test), 1drm (scripts dir test), 2udy (login UI tests), 1rcz (script unload test), 3a7a (CommandJob test), 10mb (compiler paths fix), 3d2m (toolchain bootstrap). Switched pyo3 to abi3. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check ✓, clippy ✓, cargo test FAILED (linker: `-lpython3.12` not found after `.cargo/config.toml` removal — tracked as red-cell-c2-2693)
 
 ### QA Review — 2026-03-19 00:15 — 738579b..0d70085
 

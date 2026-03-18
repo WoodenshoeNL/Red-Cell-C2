@@ -7,7 +7,7 @@ use red_cell::{
 };
 use red_cell_common::config::Profile;
 use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len};
-use red_cell_common::demon::{DemonCommand, DemonInfoClass};
+use red_cell_common::demon::{DemonCallbackError, DemonCommand, DemonConfigKey, DemonInfoClass};
 use red_cell_common::operator::OperatorMessage;
 use tokio::net::TcpListener;
 use tokio_tungstenite::connect_async;
@@ -1203,6 +1203,71 @@ async fn job_kill_remove_failure_broadcasts_error_response()
     Ok(())
 }
 
+// ── additional payload builders ──────────────────────────────────────────────
+
+/// Build a `CommandError/Win32` payload: error_class(1) + win32_code(u32).
+fn command_error_win32_payload(win32_code: u32) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&u32::from(DemonCallbackError::Win32).to_le_bytes());
+    p.extend_from_slice(&win32_code.to_le_bytes());
+    p
+}
+
+/// Build a `CommandError/Token` payload: error_class(3) + status(u32).
+fn command_error_token_payload(status: u32) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&u32::from(DemonCallbackError::Token).to_le_bytes());
+    p.extend_from_slice(&status.to_le_bytes());
+    p
+}
+
+/// Build a `CommandError/Coffee` payload: error_class(2) only.
+fn command_error_coffee_payload() -> Vec<u8> {
+    u32::from(DemonCallbackError::Coffee).to_le_bytes().to_vec()
+}
+
+/// Build a `CommandError` payload with an unknown error class.
+fn command_error_unknown_payload(class: u32) -> Vec<u8> {
+    class.to_le_bytes().to_vec()
+}
+
+/// Build a `CommandSleep` payload: delay(u32) + jitter(u32).
+fn sleep_payload(delay: u32, jitter: u32) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&delay.to_le_bytes());
+    p.extend_from_slice(&jitter.to_le_bytes());
+    p
+}
+
+/// Build a `CommandConfig/KillDate` payload: key(u32=154) + raw_date(u64).
+fn config_kill_date_payload(raw_date: u64) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&u32::from(DemonConfigKey::KillDate).to_le_bytes());
+    p.extend_from_slice(&raw_date.to_le_bytes());
+    p
+}
+
+/// Build a `CommandConfig/WorkingHours` payload: key(u32=155) + raw(u32).
+fn config_working_hours_payload(raw: u32) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&u32::from(DemonConfigKey::WorkingHours).to_le_bytes());
+    p.extend_from_slice(&raw.to_le_bytes());
+    p
+}
+
+/// Build a `CommandConfig/MemoryAlloc` payload: key(u32=101) + value(u32).
+fn config_memory_alloc_payload(value: u32) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&u32::from(DemonConfigKey::MemoryAlloc).to_le_bytes());
+    p.extend_from_slice(&value.to_le_bytes());
+    p
+}
+
+/// Build a `CommandConfig` payload with an invalid key discriminant.
+fn config_invalid_key_payload(key: u32) -> Vec<u8> {
+    key.to_le_bytes().to_vec()
+}
+
 /// `handle_job_callback` with `Died` subcommand must succeed (2xx) but must NOT
 /// broadcast any `AgentResponse` to operators.
 #[tokio::test]
@@ -1254,5 +1319,1014 @@ async fn job_died_no_broadcast() -> Result<(), Box<dyn std::error::Error>> {
 
     socket.close(None).await?;
     listeners.stop("out-job-died").await?;
+    Ok(())
+}
+
+// ── handle_command_output_callback ──────────────────────────────────────────
+
+/// `handle_command_output_callback` with non-empty output must broadcast an
+/// `AgentResponse` containing the output text and a "Received Output" message.
+#[tokio::test]
+async fn command_output_happy_path_broadcasts_response() -> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-output-ok", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-output-ok").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0030_u32;
+    let key = [0x30; AGENT_KEY_LENGTH];
+    let iv = [0x31; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let output_text = "whoami output: REDCELL\\operator";
+    let payload = common::command_output_payload(output_text);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandOutput),
+            0x70,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for CommandOutput, got {event:?}");
+    };
+    assert_eq!(msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::CommandOutput).to_string());
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.contains("Received Output"),
+        "message should contain 'Received Output': {message:?}"
+    );
+    assert!(
+        message.contains(&output_text.len().to_string()),
+        "message should contain byte count {}: {message:?}",
+        output_text.len()
+    );
+
+    // The output field should contain the actual command output text.
+    assert!(
+        msg.info.output.contains(output_text),
+        "output should contain the command text: {:?}",
+        msg.info.output
+    );
+
+    socket.close(None).await?;
+    listeners.stop("out-output-ok").await?;
+    Ok(())
+}
+
+/// `handle_command_output_callback` with empty output must return `Ok(None)`
+/// without broadcasting any `AgentResponse`.
+#[tokio::test]
+async fn command_output_empty_does_not_broadcast() -> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-output-empty", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-output-empty").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0031_u32;
+    let key = [0x32; AGENT_KEY_LENGTH];
+    let iv = [0x33; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let payload = common::command_output_payload("");
+
+    let response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandOutput),
+            0x71,
+            &payload,
+        ))
+        .send()
+        .await?;
+
+    assert!(
+        response.status().is_success(),
+        "empty output should succeed silently, got {}",
+        response.status()
+    );
+
+    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
+
+    socket.close(None).await?;
+    listeners.stop("out-output-empty").await?;
+    Ok(())
+}
+
+// ── handle_command_error_callback ───────────────────────────────────────────
+
+/// `handle_command_error_callback` with Win32 error class and a known error code
+/// must broadcast an `AgentResponse` with Type="Error" containing the symbolic name.
+#[tokio::test]
+async fn command_error_win32_known_code_broadcasts_error() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-err-win32-known", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-err-win32-known").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0040_u32;
+    let key = [0x40; AGENT_KEY_LENGTH];
+    let iv = [0x41; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // Win32 error code 5 = ERROR_ACCESS_DENIED
+    let payload = command_error_win32_payload(5);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandError),
+            0x80,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for CommandError/Win32, got {event:?}");
+    };
+    assert_eq!(msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::CommandError).to_string());
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Error"));
+
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.contains("ERROR_ACCESS_DENIED"),
+        "message should contain symbolic name: {message:?}"
+    );
+    assert!(message.contains("[5]"), "message should contain error code [5]: {message:?}");
+
+    socket.close(None).await?;
+    listeners.stop("out-err-win32-known").await?;
+    Ok(())
+}
+
+/// `handle_command_error_callback` with Win32 error class and an unknown code
+/// must broadcast an `AgentResponse` with just the numeric code.
+#[tokio::test]
+async fn command_error_win32_unknown_code_broadcasts_numeric()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-err-win32-unk", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-err-win32-unk").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0041_u32;
+    let key = [0x42; AGENT_KEY_LENGTH];
+    let iv = [0x43; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // Unknown Win32 code 9999
+    let payload = command_error_win32_payload(9999);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandError),
+            0x81,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for CommandError/Win32 unknown, got {event:?}");
+    };
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Error"));
+
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(message.contains("Win32 Error"), "message should contain 'Win32 Error': {message:?}");
+    assert!(message.contains("[9999]"), "message should contain code [9999]: {message:?}");
+
+    socket.close(None).await?;
+    listeners.stop("out-err-win32-unk").await?;
+    Ok(())
+}
+
+/// `handle_command_error_callback` with Token error class and status 0x1
+/// must broadcast "No tokens inside the token vault".
+#[tokio::test]
+async fn command_error_token_empty_vault_broadcasts_message()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-err-token-empty", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-err-token-empty").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0042_u32;
+    let key = [0x44; AGENT_KEY_LENGTH];
+    let iv = [0x45; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let payload = command_error_token_payload(0x1);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandError),
+            0x82,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for CommandError/Token, got {event:?}");
+    };
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Error"));
+
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.contains("No tokens inside the token vault"),
+        "message should mention empty vault: {message:?}"
+    );
+
+    socket.close(None).await?;
+    listeners.stop("out-err-token-empty").await?;
+    Ok(())
+}
+
+/// `handle_command_error_callback` with Token error class and a non-0x1 status
+/// must broadcast a generic "Token operation failed" message with the hex status.
+#[tokio::test]
+async fn command_error_token_other_status_broadcasts_hex() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-err-token-hex", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-err-token-hex").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0043_u32;
+    let key = [0x46; AGENT_KEY_LENGTH];
+    let iv = [0x47; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let payload = command_error_token_payload(0xBEEF);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandError),
+            0x83,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for CommandError/Token other, got {event:?}");
+    };
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Error"));
+
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.contains("Token operation failed"),
+        "message should mention token failure: {message:?}"
+    );
+    assert!(message.contains("BEEF"), "message should contain hex status BEEF: {message:?}");
+
+    socket.close(None).await?;
+    listeners.stop("out-err-token-hex").await?;
+    Ok(())
+}
+
+/// `handle_command_error_callback` with Coffee error class must succeed (2xx)
+/// without broadcasting any `AgentResponse`.
+#[tokio::test]
+async fn command_error_coffee_no_broadcast() -> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-err-coffee", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-err-coffee").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0044_u32;
+    let key = [0x48; AGENT_KEY_LENGTH];
+    let iv = [0x49; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let payload = command_error_coffee_payload();
+
+    let response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandError),
+            0x84,
+            &payload,
+        ))
+        .send()
+        .await?;
+
+    assert!(
+        response.status().is_success(),
+        "Coffee error class should succeed silently, got {}",
+        response.status()
+    );
+
+    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
+
+    socket.close(None).await?;
+    listeners.stop("out-err-coffee").await?;
+    Ok(())
+}
+
+/// `handle_command_error_callback` with an unknown error class must succeed (2xx)
+/// without broadcasting any `AgentResponse`.
+#[tokio::test]
+async fn command_error_unknown_class_no_broadcast() -> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-err-unk-class", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-err-unk-class").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0045_u32;
+    let key = [0x4A; AGENT_KEY_LENGTH];
+    let iv = [0x4B; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let payload = command_error_unknown_payload(0xFF);
+
+    let response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandError),
+            0x85,
+            &payload,
+        ))
+        .send()
+        .await?;
+
+    assert!(
+        response.status().is_success(),
+        "unknown error class should succeed silently, got {}",
+        response.status()
+    );
+
+    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
+
+    socket.close(None).await?;
+    listeners.stop("out-err-unk-class").await?;
+    Ok(())
+}
+
+// ── handle_kill_date_callback ───────────────────────────────────────────────
+
+/// `handle_kill_date_callback` must mark the agent dead, broadcast `AgentUpdate`
+/// with Marked="Dead", and broadcast an `AgentResponse` with the kill date message.
+#[tokio::test]
+async fn kill_date_callback_marks_agent_dead_and_broadcasts()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-killdate-test", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-killdate-test").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0050_u32;
+    let key = [0x50; AGENT_KEY_LENGTH];
+    let iv = [0x51; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // Kill date callback takes _payload — content is ignored.
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandKillDate),
+            0x90,
+            &[],
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // First broadcast: AgentUpdate with Marked="Dead".
+    let update_event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentUpdate(update_msg) = update_event else {
+        panic!("expected AgentUpdate after kill date callback, got {update_event:?}");
+    };
+    assert_eq!(update_msg.info.agent_id, format!("{agent_id:08X}"));
+    assert_eq!(
+        update_msg.info.marked, "Dead",
+        "agent should be marked Dead after kill date callback"
+    );
+
+    // Second broadcast: AgentResponse with kill date message.
+    let response_event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(response_msg) = response_event else {
+        panic!("expected AgentResponse after kill date callback, got {response_event:?}");
+    };
+    assert_eq!(response_msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(response_msg.info.command_id, u32::from(DemonCommand::CommandKillDate).to_string());
+    assert_eq!(response_msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+
+    let message = response_msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(message.contains("kill date"), "message should mention kill date: {message:?}");
+
+    socket.close(None).await?;
+    listeners.stop("out-killdate-test").await?;
+    Ok(())
+}
+
+// ── handle_sleep_callback ───────────────────────────────────────────────────
+
+/// `handle_sleep_callback` must update the agent's sleep delay/jitter in the registry,
+/// broadcast an `AgentUpdate`, and broadcast an `AgentResponse` with the new values.
+#[tokio::test]
+async fn sleep_callback_updates_agent_and_broadcasts() -> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-sleep-test", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-sleep-test").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0060_u32;
+    let key = [0x60; AGENT_KEY_LENGTH];
+    let iv = [0x61; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let delay = 30_u32;
+    let jitter = 25_u32;
+    let payload = sleep_payload(delay, jitter);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandSleep),
+            0xA0,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // First broadcast: AgentUpdate (agent_mark_event with updated sleep values).
+    let update_event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentUpdate(update_msg) = update_event else {
+        panic!("expected AgentUpdate after sleep callback, got {update_event:?}");
+    };
+    assert_eq!(update_msg.info.agent_id, format!("{agent_id:08X}"));
+    assert_eq!(update_msg.info.marked, "Alive", "agent should remain Alive after sleep callback");
+
+    // Second broadcast: AgentResponse with sleep interval message.
+    let response_event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(response_msg) = response_event else {
+        panic!("expected AgentResponse after sleep callback, got {response_event:?}");
+    };
+    assert_eq!(response_msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(response_msg.info.command_id, u32::from(DemonCommand::CommandSleep).to_string());
+    assert_eq!(response_msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+
+    let message = response_msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.contains(&delay.to_string()),
+        "message should contain delay {delay}: {message:?}"
+    );
+    assert!(
+        message.contains(&jitter.to_string()),
+        "message should contain jitter {jitter}: {message:?}"
+    );
+
+    socket.close(None).await?;
+    listeners.stop("out-sleep-test").await?;
+    Ok(())
+}
+
+// ── handle_config_callback ──────────────────────────────────────────────────
+
+/// `handle_config_callback` with `KillDate` key and a non-zero value must broadcast
+/// "KillDate has been set" and update the agent's kill_date in the registry.
+#[tokio::test]
+async fn config_kill_date_set_broadcasts_and_updates_agent()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-cfg-kd-set", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-cfg-kd-set").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0070_u32;
+    let key = [0x70; AGENT_KEY_LENGTH];
+    let iv = [0x71; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // Non-zero kill date value (epoch timestamp).
+    let payload = config_kill_date_payload(1_893_456_000);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandConfig),
+            0xB0,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // First: AgentUpdate from the registry update.
+    let update_event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentUpdate(update_msg) = update_event else {
+        panic!("expected AgentUpdate for config KillDate set, got {update_event:?}");
+    };
+    assert_eq!(update_msg.info.agent_id, format!("{agent_id:08X}"));
+
+    // Second: AgentResponse with "KillDate has been set".
+    let response_event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(response_msg) = response_event else {
+        panic!("expected AgentResponse for config KillDate set, got {response_event:?}");
+    };
+    assert_eq!(response_msg.info.command_id, u32::from(DemonCommand::CommandConfig).to_string());
+    assert_eq!(response_msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+
+    let message = response_msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.contains("KillDate has been set"),
+        "message should contain 'KillDate has been set': {message:?}"
+    );
+
+    socket.close(None).await?;
+    listeners.stop("out-cfg-kd-set").await?;
+    Ok(())
+}
+
+/// `handle_config_callback` with `KillDate` key and raw=0 must broadcast
+/// "KillDate was disabled" and clear the agent's kill_date.
+#[tokio::test]
+async fn config_kill_date_zero_disables_and_broadcasts() -> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-cfg-kd-zero", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-cfg-kd-zero").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0071_u32;
+    let key = [0x72; AGENT_KEY_LENGTH];
+    let iv = [0x73; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let payload = config_kill_date_payload(0);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandConfig),
+            0xB1,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // First: AgentUpdate from the registry update.
+    let update_event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentUpdate(update_msg) = update_event else {
+        panic!("expected AgentUpdate for config KillDate disable, got {update_event:?}");
+    };
+    assert_eq!(update_msg.info.agent_id, format!("{agent_id:08X}"));
+
+    // Second: AgentResponse with "KillDate was disabled".
+    let response_event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(response_msg) = response_event else {
+        panic!("expected AgentResponse for config KillDate disable, got {response_event:?}");
+    };
+    let message = response_msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.contains("KillDate was disabled"),
+        "message should contain 'KillDate was disabled': {message:?}"
+    );
+
+    socket.close(None).await?;
+    listeners.stop("out-cfg-kd-zero").await?;
+    Ok(())
+}
+
+/// `handle_config_callback` with `WorkingHours` key and a non-zero value must
+/// broadcast "WorkingHours has been set" and update agent state.
+#[tokio::test]
+async fn config_working_hours_set_broadcasts_and_updates() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-cfg-wh-set", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-cfg-wh-set").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0072_u32;
+    let key = [0x74; AGENT_KEY_LENGTH];
+    let iv = [0x75; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // Non-zero working hours value.
+    let payload = config_working_hours_payload(0b101010);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandConfig),
+            0xB2,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // First: AgentUpdate.
+    let update_event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentUpdate(update_msg) = update_event else {
+        panic!("expected AgentUpdate for config WorkingHours set, got {update_event:?}");
+    };
+    assert_eq!(update_msg.info.agent_id, format!("{agent_id:08X}"));
+
+    // Second: AgentResponse.
+    let response_event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(response_msg) = response_event else {
+        panic!("expected AgentResponse for config WorkingHours set, got {response_event:?}");
+    };
+    let message = response_msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.contains("WorkingHours has been set"),
+        "message should contain 'WorkingHours has been set': {message:?}"
+    );
+
+    socket.close(None).await?;
+    listeners.stop("out-cfg-wh-set").await?;
+    Ok(())
+}
+
+/// `handle_config_callback` with `WorkingHours` key and raw=0 must broadcast
+/// "WorkingHours was disabled".
+#[tokio::test]
+async fn config_working_hours_zero_disables() -> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-cfg-wh-zero", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-cfg-wh-zero").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0073_u32;
+    let key = [0x76; AGENT_KEY_LENGTH];
+    let iv = [0x77; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let payload = config_working_hours_payload(0);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandConfig),
+            0xB3,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // First: AgentUpdate.
+    let update_event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentUpdate(update_msg) = update_event else {
+        panic!("expected AgentUpdate for config WorkingHours disable, got {update_event:?}");
+    };
+    assert_eq!(update_msg.info.agent_id, format!("{agent_id:08X}"));
+
+    // Second: AgentResponse.
+    let response_event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(response_msg) = response_event else {
+        panic!("expected AgentResponse for config WorkingHours disable, got {response_event:?}");
+    };
+    let message = response_msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.contains("WorkingHours was disabled"),
+        "message should contain 'WorkingHours was disabled': {message:?}"
+    );
+
+    socket.close(None).await?;
+    listeners.stop("out-cfg-wh-zero").await?;
+    Ok(())
+}
+
+/// `handle_config_callback` with `MemoryAlloc` key must broadcast an `AgentResponse`
+/// with the allocation value in the message.
+#[tokio::test]
+async fn config_memory_alloc_broadcasts_value() -> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-cfg-memalloc", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-cfg-memalloc").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0074_u32;
+    let key = [0x78; AGENT_KEY_LENGTH];
+    let iv = [0x79; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let alloc_value = 64_u32; // PAGE_EXECUTE_READWRITE
+    let payload = config_memory_alloc_payload(alloc_value);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandConfig),
+            0xB4,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for config MemoryAlloc, got {event:?}");
+    };
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::CommandConfig).to_string());
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.contains("memory allocation")
+            || message.contains("Memory Alloc")
+            || message.contains("memory alloc"),
+        "message should mention memory allocation: {message:?}"
+    );
+    assert!(
+        message.contains(&alloc_value.to_string()),
+        "message should contain alloc value {alloc_value}: {message:?}"
+    );
+
+    socket.close(None).await?;
+    listeners.stop("out-cfg-memalloc").await?;
+    Ok(())
+}
+
+/// `handle_config_callback` with an invalid config key must return a non-2xx
+/// HTTP status (`InvalidCallbackPayload`) and must NOT broadcast.
+#[tokio::test]
+async fn config_invalid_key_returns_error() -> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-cfg-bad-key", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-cfg-bad-key").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0075_u32;
+    let key = [0x7A; AGENT_KEY_LENGTH];
+    let iv = [0x7B; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // 0xFFFF is not a valid DemonConfigKey.
+    let payload = config_invalid_key_payload(0xFFFF);
+
+    let response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandConfig),
+            0xB5,
+            &payload,
+        ))
+        .send()
+        .await?;
+
+    assert!(
+        !response.status().is_success(),
+        "invalid config key should return error, got {}",
+        response.status()
+    );
+
+    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
+
+    socket.close(None).await?;
+    listeners.stop("out-cfg-bad-key").await?;
     Ok(())
 }

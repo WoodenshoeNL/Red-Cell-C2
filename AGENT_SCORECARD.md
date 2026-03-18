@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 281 | 195 | 31 |
+| Tasks closed | 285 | 195 | 31 |
 | Bugs filed against | 40 | 34 | 9 |
 | Bug rate (bugs/task) | 0.14 | 0.17 | 0.29 |
 | Quality score | 86% | 83% | 71% |
@@ -37,6 +37,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-18 20:30 — b5d8cb8..4e4611a
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (dev02-opus) | 4 | 0 | Closed 2eid, 2jxt, 3gwj, 3ptb. Malformed BuildPayload tests, pre-shutdown waiter tests, webhook shutdown timeout test, http_listener_config dedup refactor across 4 integration test files. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (all passing)
+Notes: Clean review — all 4 task closures are test additions and a dedup refactor. The http_listener_config extraction removed ~100 lines of duplicated HttpListenerConfig construction from assembly_dispatch, output_dispatch, screenshot_dispatch, and socks5_relay tests. One in-progress issue: 19lu (multi-listener drain test, actively being worked with unstaged code in sockets.rs). No bugs filed.
 
 ### Arch Review — 2026-03-18 02:30
 

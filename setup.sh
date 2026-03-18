@@ -37,7 +37,7 @@ check_tool() {
 
 MISSING=0
 check_tool "git"     git     "sudo apt install git"
-check_tool "python3" python3 "sudo apt install python3"
+check_tool "uv"      uv      "curl -LsSf https://astral.sh/uv/install.sh | sh"
 check_tool "br"      br      "Download from the project releases page and place in /usr/local/bin"
 check_tool "claude"  claude  "npm install -g @anthropic-ai/claude-code  (needs Node.js)"
 check_tool "codex"   codex   "npm install -g @openai/codex              (needs Node.js)"
@@ -47,6 +47,14 @@ if [[ "$MISSING" -eq 1 ]]; then
     warn "Some tools are missing. Install them and re-run this script."
     exit 1
 fi
+
+if ! uv python find --managed-python 3.12 &>/dev/null; then
+    echo "Installing Python via uv..."
+    uv python install 3.12
+fi
+
+UV_PYTHON="$(uv python find --managed-python 3.12)"
+ok "Python: $UV_PYTHON"
 
 # ── 2. Git sync ───────────────────────────────────────────────────────────────
 echo ""
@@ -114,7 +122,7 @@ else
 fi
 
 if br sync --import-only --rename-prefix --quiet 2>/dev/null; then
-    OPEN_COUNT="$(br list --status=open --json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d) if isinstance(d,list) else len(d.get("issues",[])))' 2>/dev/null || echo '?')"
+    OPEN_COUNT="$(br list --status=open --json 2>/dev/null | "$UV_PYTHON" -c 'import json,sys; d=json.load(sys.stdin); print(len(d) if isinstance(d,list) else len(d.get("issues",[])))' 2>/dev/null || echo '?')"
     ok "beads DB ready ($OPEN_COUNT open issues)"
 else
     fail "br sync failed — check br version and JSONL integrity"
@@ -137,7 +145,7 @@ if ! br sync --flush-only --quiet 2>/dev/null; then
 fi
 
 # Show any tasks currently in_progress (left over from another VM's session)
-IN_PROGRESS="$(br list --status=in_progress --json 2>/dev/null | python3 -c '
+IN_PROGRESS="$(br list --status=in_progress --json 2>/dev/null | "$UV_PYTHON" -c '
 import json, sys
 issues = json.load(sys.stdin)
 if not isinstance(issues, list): issues = issues.get("issues", [])

@@ -994,4 +994,19 @@ mod tests {
             DemonProtocolError::UnknownEnumValue { kind: "DemonCommand", value: 0xffff_ffff }
         );
     }
+
+    #[test]
+    fn demon_package_command_returns_error_for_unrecognized_command_id() {
+        let package = DemonPackage { command_id: 0xffff_ffff, request_id: 1, payload: vec![] };
+        let bytes = package.to_bytes().expect("package encoding should succeed");
+        let parsed = DemonPackage::from_bytes(&bytes).expect("package decoding should succeed");
+
+        let result = parsed.command();
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(DemonProtocolError::UnknownEnumValue { kind: "DemonCommand", value: 0xffff_ffff })
+        ));
+    }
 }

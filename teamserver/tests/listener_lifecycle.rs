@@ -306,6 +306,50 @@ async fn restore_running_restarts_persisted_running_listeners()
     Ok(())
 }
 
+#[tokio::test]
+async fn restore_running_with_port_in_use_transitions_to_error_state()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = Database::connect_in_memory().await?;
+    let (port, guard) = common::available_port()?;
+
+    // Simulate a stale Running entry left behind by a crashed teamserver.
+    {
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::new(database.clone(), registry, events, sockets, None);
+        manager.create(http_config("lc-restore-err", port)).await?;
+        manager.repository().set_state("lc-restore-err", ListenerStatus::Running, None).await?;
+    }
+
+    // Build a new manager over the same DB — keep the guard alive so the port
+    // remains occupied and restore_running() cannot bind it.
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let restored = ListenerManager::new(database, registry, events, sockets, None);
+
+    let result = restored.restore_running().await;
+    assert!(result.is_err(), "restore_running must propagate the bind failure");
+
+    // Even though restore_running returned an error, the DB should have been
+    // transitioned to Error with a descriptive message.
+    let summary = restored.summary("lc-restore-err").await?;
+    assert_eq!(
+        summary.state.status,
+        ListenerStatus::Error,
+        "listener must be in Error state when port is occupied"
+    );
+    assert!(
+        summary.state.last_error.is_some(),
+        "Error state must include a non-empty last_error message"
+    );
+
+    // Ensure the guard kept the port occupied for the duration of the test.
+    drop(guard);
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Concurrent operations test
 // ---------------------------------------------------------------------------

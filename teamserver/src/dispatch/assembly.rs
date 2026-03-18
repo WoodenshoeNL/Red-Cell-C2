@@ -320,6 +320,160 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn assembly_inline_execute_patched_broadcasts_info() {
+        let events = EventBus::new(8);
+        let mut receiver = events.subscribe();
+        let mut payload = Vec::new();
+        add_u32(&mut payload, DOTNET_INFO_PATCHED);
+
+        let result =
+            handle_assembly_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(matches!(result, Ok(None)));
+
+        let msg = receiver.recv().await.expect("should receive broadcast");
+        match msg {
+            OperatorMessage::AgentResponse(resp) => {
+                let extra = &resp.info.extra;
+                assert_eq!(extra.get("Type"), Some(&serde_json::Value::String("Info".to_owned())),);
+                let message = extra.get("Message").unwrap().as_str().unwrap();
+                assert!(
+                    message.contains("Amsi/Etw"),
+                    "expected patched message to mention Amsi/Etw, got {message:?}"
+                );
+            }
+            other => panic!("expected AgentResponse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn assembly_inline_execute_net_version_broadcasts_clr_version() {
+        let events = EventBus::new(8);
+        let mut receiver = events.subscribe();
+        let mut payload = Vec::new();
+        add_u32(&mut payload, DOTNET_INFO_NET_VERSION);
+        add_utf16(&mut payload, "v4.0.30319");
+
+        let result =
+            handle_assembly_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(matches!(result, Ok(None)));
+
+        let msg = receiver.recv().await.expect("should receive broadcast");
+        match msg {
+            OperatorMessage::AgentResponse(resp) => {
+                let extra = &resp.info.extra;
+                assert_eq!(extra.get("Type"), Some(&serde_json::Value::String("Info".to_owned())),);
+                let message = extra.get("Message").unwrap().as_str().unwrap();
+                assert!(
+                    message.contains("v4.0.30319"),
+                    "expected CLR version in message, got {message:?}"
+                );
+            }
+            other => panic!("expected AgentResponse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn assembly_inline_execute_entrypoint_executed_broadcasts_thread_id() {
+        let events = EventBus::new(8);
+        let mut receiver = events.subscribe();
+        let mut payload = Vec::new();
+        add_u32(&mut payload, DOTNET_INFO_ENTRYPOINT_EXECUTED);
+        add_u32(&mut payload, 1337); // thread id
+
+        let result =
+            handle_assembly_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(matches!(result, Ok(None)));
+
+        let msg = receiver.recv().await.expect("should receive broadcast");
+        match msg {
+            OperatorMessage::AgentResponse(resp) => {
+                let extra = &resp.info.extra;
+                assert_eq!(extra.get("Type"), Some(&serde_json::Value::String("Good".to_owned())),);
+                let message = extra.get("Message").unwrap().as_str().unwrap();
+                assert!(
+                    message.contains("1337"),
+                    "expected thread id 1337 in message, got {message:?}"
+                );
+                assert!(
+                    message.contains("Thread"),
+                    "expected 'Thread' label in message, got {message:?}"
+                );
+            }
+            other => panic!("expected AgentResponse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn assembly_inline_execute_entrypoint_truncated_returns_error() {
+        let events = EventBus::new(8);
+        // DOTNET_INFO_ENTRYPOINT_EXECUTED requires a subsequent read_u32 for thread id.
+        let mut payload = Vec::new();
+        add_u32(&mut payload, DOTNET_INFO_ENTRYPOINT_EXECUTED);
+
+        let result =
+            handle_assembly_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+
+        match result {
+            Err(CommandDispatchError::InvalidCallbackPayload { command_id, .. }) => {
+                assert_eq!(command_id, u32::from(DemonCommand::CommandAssemblyInlineExecute));
+            }
+            other => panic!("expected InvalidCallbackPayload, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn assembly_inline_execute_finished_broadcasts_good() {
+        let events = EventBus::new(8);
+        let mut receiver = events.subscribe();
+        let mut payload = Vec::new();
+        add_u32(&mut payload, DOTNET_INFO_FINISHED);
+
+        let result =
+            handle_assembly_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(matches!(result, Ok(None)));
+
+        let msg = receiver.recv().await.expect("should receive broadcast");
+        match msg {
+            OperatorMessage::AgentResponse(resp) => {
+                let extra = &resp.info.extra;
+                assert_eq!(extra.get("Type"), Some(&serde_json::Value::String("Good".to_owned())),);
+                let message = extra.get("Message").unwrap().as_str().unwrap();
+                assert!(
+                    message.contains("Finished"),
+                    "expected 'Finished' in message, got {message:?}"
+                );
+            }
+            other => panic!("expected AgentResponse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn assembly_inline_execute_failed_broadcasts_error() {
+        let events = EventBus::new(8);
+        let mut receiver = events.subscribe();
+        let mut payload = Vec::new();
+        add_u32(&mut payload, DOTNET_INFO_FAILED);
+
+        let result =
+            handle_assembly_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(matches!(result, Ok(None)));
+
+        let msg = receiver.recv().await.expect("should receive broadcast");
+        match msg {
+            OperatorMessage::AgentResponse(resp) => {
+                let extra = &resp.info.extra;
+                assert_eq!(extra.get("Type"), Some(&serde_json::Value::String("Error".to_owned())),);
+                let message = extra.get("Message").unwrap().as_str().unwrap();
+                assert!(
+                    message.contains("Failed"),
+                    "expected 'Failed' in message, got {message:?}"
+                );
+            }
+            other => panic!("expected AgentResponse, got {other:?}"),
+        }
+    }
+
     // --- handle_assembly_list_versions_callback ---
 
     #[tokio::test]

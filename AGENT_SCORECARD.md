@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 285 | 195 | 31 |
+| Tasks closed | 290 | 195 | 31 |
 | Bugs filed against | 40 | 34 | 9 |
 | Bug rate (bugs/task) | 0.14 | 0.17 | 0.29 |
 | Quality score | 86% | 83% | 71% |
@@ -37,6 +37,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-18 22:30 — 4e4611a..add2a0c
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (dev02-opus) | 5 | 0 | Closed 19lu, 1aqm, 3gx0, iv04, m5p9. Multi-listener drain test, public API smoke tests, job list assertion hardening, egui login dialog widget tests, corrupted persisted row rejection tests. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (all passing)
+Notes: Clean review — all 5 closures are test additions. Database corruption rejection tests add 11 new tests covering invalid base64, negative values, overflowed fields, unsupported enums, and corrupt JSON across agents, listeners, and operators. Egui widget tests exercise Enter-key submission, connecting-state blocking, and trust-certificate button scanning. One task in progress: 22lv (assembly inline execute status mappings). No bugs filed.
 
 ### Arch Review — 2026-03-18 22:00
 

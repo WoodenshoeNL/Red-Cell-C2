@@ -1978,6 +1978,124 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_audit_log_since_boundary_is_inclusive() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_timestamped_audit_rows(&database).await;
+
+        // Query where since == exact timestamp of the middle row (2026-01-20T16:00:00Z).
+        // That row must be included in the results.
+        let query =
+            AuditQuery { since: Some("2026-01-20T16:00:00Z".to_owned()), ..AuditQuery::default() };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        assert!(
+            page.items.iter().any(|r| r.occurred_at == "2026-01-20T16:00:00Z"),
+            "row exactly at the since boundary must be included"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_until_boundary_is_inclusive() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_timestamped_audit_rows(&database).await;
+
+        // Query where until == exact timestamp of Jan 15 row.
+        let query =
+            AuditQuery { until: Some("2026-01-15T12:00:00Z".to_owned()), ..AuditQuery::default() };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        assert!(
+            page.items.iter().any(|r| r.occurred_at == "2026-01-15T12:00:00Z"),
+            "row exactly at the until boundary must be included"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_offset_timezone_returns_same_items_as_utc() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_timestamped_audit_rows(&database).await;
+
+        // UTC query
+        let utc_query = AuditQuery {
+            since: Some("2026-01-20T16:00:00Z".to_owned()),
+            until: Some("2026-01-25T20:00:00Z".to_owned()),
+            ..AuditQuery::default()
+        };
+        let utc_page =
+            query_audit_log(&database, &utc_query).await.expect("utc query should succeed");
+
+        // Equivalent query with +05:30 offset:
+        //   2026-01-20T21:30:00+05:30 == 2026-01-20T16:00:00Z
+        //   2026-01-26T01:30:00+05:30 == 2026-01-25T20:00:00Z
+        let offset_query = AuditQuery {
+            since: Some("2026-01-20T21:30:00+05:30".to_owned()),
+            until: Some("2026-01-26T01:30:00+05:30".to_owned()),
+            ..AuditQuery::default()
+        };
+        let offset_page =
+            query_audit_log(&database, &offset_query).await.expect("offset query should succeed");
+
+        assert_eq!(
+            utc_page.total, offset_page.total,
+            "UTC and offset queries must return same total"
+        );
+        let utc_ids: Vec<i64> = utc_page.items.iter().map(|r| r.id).collect();
+        let offset_ids: Vec<i64> = offset_page.items.iter().map(|r| r.id).collect();
+        assert_eq!(utc_ids, offset_ids, "UTC and offset queries must return the same rows");
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_negative_offset_timezone_normalizes_correctly() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_timestamped_audit_rows(&database).await;
+
+        // UTC reference: since 2026-01-15T12:00:00Z → 3 rows (Jan 15, 20, 25, 30 → wait, 4 rows)
+        // Actually: Jan 15 12:00, Jan 20 16:00, Jan 25 20:00, Jan 30 23:59:59 → 4 rows
+        let utc_query =
+            AuditQuery { since: Some("2026-01-15T12:00:00Z".to_owned()), ..AuditQuery::default() };
+        let utc_page =
+            query_audit_log(&database, &utc_query).await.expect("utc query should succeed");
+
+        // Equivalent with -08:00 offset:
+        //   2026-01-15T04:00:00-08:00 == 2026-01-15T12:00:00Z
+        let neg_offset_query = AuditQuery {
+            since: Some("2026-01-15T04:00:00-08:00".to_owned()),
+            ..AuditQuery::default()
+        };
+        let neg_page = query_audit_log(&database, &neg_offset_query)
+            .await
+            .expect("negative offset query should succeed");
+
+        assert_eq!(
+            utc_page.total, neg_page.total,
+            "negative UTC offset must produce same total as equivalent UTC timestamp"
+        );
+        let utc_ids: Vec<i64> = utc_page.items.iter().map(|r| r.id).collect();
+        let neg_ids: Vec<i64> = neg_page.items.iter().map(|r| r.id).collect();
+        assert_eq!(utc_ids, neg_ids, "negative offset must return the same rows as UTC");
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_since_until_single_row_boundary() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_timestamped_audit_rows(&database).await;
+
+        // Window exactly matching one row: since == until == row timestamp.
+        let query = AuditQuery {
+            since: Some("2026-01-20T16:00:00Z".to_owned()),
+            until: Some("2026-01-20T16:00:00Z".to_owned()),
+            ..AuditQuery::default()
+        };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        assert_eq!(
+            page.total, 1,
+            "since == until == row timestamp must return exactly that one row"
+        );
+        assert_eq!(page.items[0].occurred_at, "2026-01-20T16:00:00Z");
+    }
+
+    #[tokio::test]
     async fn actor_filter_falls_back_to_actor_when_operator_absent() {
         let database = Database::connect_in_memory().await.expect("database should initialize");
         seed_audit_rows(&database, 100).await;

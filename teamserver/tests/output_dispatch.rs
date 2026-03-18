@@ -480,3 +480,155 @@ async fn demon_info_truncated_payload_returns_error_no_broadcast()
     listeners.stop("out-trunc-test").await?;
     Ok(())
 }
+
+/// A `CommandExit` callback with an empty payload (zero bytes) must return a
+/// non-2xx HTTP status and must NOT broadcast `AgentUpdate` or `AgentResponse`.
+#[tokio::test]
+async fn exit_callback_empty_payload_returns_error_no_broadcast()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners
+        .create(red_cell_common::ListenerConfig::from(HttpListenerConfig {
+            name: "out-exit-empty-test".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["127.0.0.1".to_owned()],
+            host_bind: "127.0.0.1".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: listener_port,
+            port_conn: Some(listener_port),
+            method: Some("POST".to_owned()),
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: vec!["/".to_owned()],
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: None,
+            proxy: None,
+        }))
+        .await?;
+    drop(listener_guard);
+    listeners.start("out-exit-empty-test").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0005_u32;
+    let key = [0x09; AGENT_KEY_LENGTH];
+    let iv = [0x0A; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // Send a CommandExit callback with zero bytes — no exit_method u32 at all.
+    let response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandExit),
+            0x40,
+            &[], // empty payload
+        ))
+        .send()
+        .await?;
+
+    assert!(
+        !response.status().is_success(),
+        "empty CommandExit payload must not return 2xx, got {}",
+        response.status()
+    );
+
+    // Neither AgentUpdate nor AgentResponse should be broadcast.
+    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
+
+    socket.close(None).await?;
+    listeners.stop("out-exit-empty-test").await?;
+    Ok(())
+}
+
+/// A `CommandExit` callback with fewer than four bytes (truncated exit_method)
+/// must return a non-2xx HTTP status and must NOT broadcast any events.
+#[tokio::test]
+async fn exit_callback_truncated_exit_method_returns_error_no_broadcast()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners
+        .create(red_cell_common::ListenerConfig::from(HttpListenerConfig {
+            name: "out-exit-short-test".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["127.0.0.1".to_owned()],
+            host_bind: "127.0.0.1".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: listener_port,
+            port_conn: Some(listener_port),
+            method: Some("POST".to_owned()),
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: vec!["/".to_owned()],
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: None,
+            proxy: None,
+        }))
+        .await?;
+    drop(listener_guard);
+    listeners.start("out-exit-short-test").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0006_u32;
+    let key = [0x0B; AGENT_KEY_LENGTH];
+    let iv = [0x0C; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // Send a CommandExit callback with only 2 bytes — too short for a u32 exit_method.
+    let response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandExit),
+            0x41,
+            &[0x01, 0x00], // only 2 bytes, need 4
+        ))
+        .send()
+        .await?;
+
+    assert!(
+        !response.status().is_success(),
+        "truncated CommandExit payload must not return 2xx, got {}",
+        response.status()
+    );
+
+    // Neither AgentUpdate nor AgentResponse should be broadcast.
+    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
+
+    socket.close(None).await?;
+    listeners.stop("out-exit-short-test").await?;
+    Ok(())
+}

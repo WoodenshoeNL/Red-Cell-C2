@@ -2487,6 +2487,201 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pivot_connect_failure_unknown_error_code_omits_name()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database,
+            sockets,
+            None,
+        );
+        let parent_id = 0x8182_8384;
+        let parent_key = [0x81; AGENT_KEY_LENGTH];
+        let parent_iv = [0x82; AGENT_IV_LENGTH];
+        registry
+            .insert_with_listener(sample_agent_info(parent_id, parent_key, parent_iv), "http-main")
+            .await?;
+
+        // Error code 9999 is not in win32_error_code_name — should produce "[9999]" without a name.
+        let response = dispatcher
+            .dispatch(
+                parent_id,
+                u32::from(DemonCommand::CommandPivot),
+                33,
+                &pivot_connect_failure_payload(9999),
+            )
+            .await?;
+
+        assert_eq!(response, None);
+        let event =
+            receiver.recv().await.ok_or_else(|| "expected error event for unknown error code")?;
+        let OperatorMessage::AgentResponse(msg) = event else {
+            return Err(format!("expected AgentResponse, got {event:?}").into());
+        };
+        let msg_text = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            msg_text.contains("[9999]"),
+            "message must include numeric error code: {msg_text:?}"
+        );
+        // The message should NOT contain a named error — just the bracketed code.
+        assert_eq!(
+            msg_text, "[SMB] Failed to connect: [9999]",
+            "unknown error code should produce message without error name"
+        );
+        Ok(())
+    }
+
+    fn pivot_disconnect_success_payload(child_agent_id: u32) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u32::from(DemonPivotCommand::SmbDisconnect).to_le_bytes());
+        payload.extend_from_slice(&1_u32.to_le_bytes()); // success == 1
+        payload.extend_from_slice(&child_agent_id.to_le_bytes());
+        payload
+    }
+
+    #[tokio::test]
+    async fn pivot_disconnect_callback_success_marks_affected_and_broadcasts_info()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database,
+            sockets,
+            None,
+        );
+        let parent_id = 0x9192_9394;
+        let child_id = 0xA1A2_A3A4;
+        let parent_key = [0x91; AGENT_KEY_LENGTH];
+        let parent_iv = [0x92; AGENT_IV_LENGTH];
+        let child_key = [0xA1; AGENT_KEY_LENGTH];
+        let child_iv = [0xA2; AGENT_IV_LENGTH];
+
+        // Register parent and child, then link them.
+        registry
+            .insert_with_listener(sample_agent_info(parent_id, parent_key, parent_iv), "smb-test")
+            .await?;
+        registry
+            .insert_with_listener(sample_agent_info(child_id, child_key, child_iv), "smb-test")
+            .await?;
+        registry.add_link(parent_id, child_id).await?;
+        assert_eq!(registry.parent_of(child_id).await, Some(parent_id));
+
+        let response = dispatcher
+            .dispatch(
+                parent_id,
+                u32::from(DemonCommand::CommandPivot),
+                88,
+                &pivot_disconnect_success_payload(child_id),
+            )
+            .await?;
+
+        assert_eq!(response, None);
+
+        // First event: AgentUpdate (mark) for the disconnected child.
+        let event = receiver
+            .recv()
+            .await
+            .ok_or_else(|| "expected AgentUpdate event for disconnected child")?;
+        let OperatorMessage::AgentUpdate(mark_msg) = event else {
+            return Err(format!("expected AgentUpdate (mark), got {event:?}").into());
+        };
+        assert_eq!(mark_msg.info.agent_id, format!("{child_id:08X}"));
+        assert_eq!(mark_msg.info.marked, "Dead", "disconnected agent must be marked Dead");
+
+        // Second event: AgentResponse with Info about successful disconnect.
+        let event =
+            receiver.recv().await.ok_or_else(|| "expected AgentResponse event after disconnect")?;
+        let OperatorMessage::AgentResponse(resp_msg) = event else {
+            return Err(format!("expected AgentResponse, got {event:?}").into());
+        };
+        assert_eq!(resp_msg.info.demon_id, format!("{parent_id:08X}"));
+        let kind = resp_msg.info.extra.get("Type").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(kind, "Info", "successful disconnect must emit Info type");
+        let msg_text = resp_msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            msg_text.contains(&format!("{child_id:08X}")),
+            "message must include child agent id: {msg_text:?}"
+        );
+        assert!(
+            msg_text.contains("disconnected"),
+            "message must mention disconnection: {msg_text:?}"
+        );
+
+        // Link should be removed.
+        assert_eq!(
+            registry.parent_of(child_id).await,
+            None,
+            "child should no longer have parent after disconnect"
+        );
+        assert_eq!(
+            registry.children_of(parent_id).await,
+            Vec::<u32>::new(),
+            "parent should have no children after disconnect"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pivot_disconnect_callback_success_no_link_emits_response_without_marks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database,
+            sockets,
+            None,
+        );
+        let parent_id = 0xB1B2_B3B4;
+        let child_id = 0xC1C2_C3C4;
+        let parent_key = [0xB1; AGENT_KEY_LENGTH];
+        let parent_iv = [0xB2; AGENT_IV_LENGTH];
+
+        // Only register parent — no link exists to child.
+        registry
+            .insert_with_listener(sample_agent_info(parent_id, parent_key, parent_iv), "smb-test")
+            .await?;
+
+        let response = dispatcher
+            .dispatch(
+                parent_id,
+                u32::from(DemonCommand::CommandPivot),
+                44,
+                &pivot_disconnect_success_payload(child_id),
+            )
+            .await?;
+
+        assert_eq!(response, None);
+
+        // With no link, disconnect_link returns empty affected list, so the only event
+        // should be the AgentResponse Info — no AgentUpdate marks.
+        let event = receiver.recv().await.ok_or_else(|| "expected AgentResponse event")?;
+        let OperatorMessage::AgentResponse(resp_msg) = event else {
+            return Err(format!("expected AgentResponse, got {event:?}").into());
+        };
+        let kind = resp_msg.info.extra.get("Type").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(kind, "Info");
+        let msg_text = resp_msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(msg_text.contains(&format!("{child_id:08X}")));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn builtin_checkin_handler_updates_last_call_in_and_broadcasts()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;

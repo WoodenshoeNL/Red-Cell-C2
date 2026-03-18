@@ -1290,6 +1290,101 @@ mod tests {
     }
 
     #[test]
+    fn build_payload_missing_request_fields_falls_through_to_message()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Info has neither request nor response fields — should fall through
+        // to BuildPayloadMessage.
+        let value = json!({
+            "Head": { "Event": 5, "Time": "09/03/2026 19:00:00" },
+            "Body": {
+                "SubEvent": 2,
+                "Info": {
+                    "MessageType": "Info",
+                    "Message": "building payload..."
+                }
+            }
+        });
+
+        let decoded: OperatorMessage = serde_json::from_value(value)?;
+        assert!(
+            matches!(decoded, OperatorMessage::BuildPayloadMessage(_)),
+            "payload with only message fields should decode as BuildPayloadMessage, got {decoded:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn build_payload_wrong_type_in_response_fields_rejects_cleanly() {
+        // PayloadArray is a number instead of string — response parsing fails,
+        // request parsing fails (missing required fields), and fallback message
+        // parsing also fails (missing MessageType/Message). The entire
+        // deserialization must fail rather than silently accepting the wrong variant.
+        let value = json!({
+            "Head": { "Event": 5, "Time": "09/03/2026 19:00:00" },
+            "Body": {
+                "SubEvent": 2,
+                "Info": {
+                    "PayloadArray": 12345,
+                    "Format": "shellcode",
+                    "FileName": "payload.bin"
+                }
+            }
+        });
+
+        let result = serde_json::from_value::<OperatorMessage>(value);
+        assert!(
+            result.is_err(),
+            "wrong-typed fields matching no variant must fail deserialization"
+        );
+    }
+
+    #[test]
+    fn build_payload_empty_info_rejects_cleanly() {
+        // Empty Info object — neither request, response, nor message fields present.
+        // All three try-parses fail, returning a clean deserialization error.
+        let value = json!({
+            "Head": { "Event": 5, "Time": "09/03/2026 19:00:00" },
+            "Body": {
+                "SubEvent": 2,
+                "Info": {}
+            }
+        });
+
+        let result = serde_json::from_value::<OperatorMessage>(value);
+        assert!(
+            result.is_err(),
+            "empty Info matching no BuildPayload variant must fail deserialization"
+        );
+    }
+
+    #[test]
+    fn build_payload_request_rejects_wrong_type_for_required_field() {
+        // AgentType as a number instead of string — should fail direct deserialization.
+        let value = json!({
+            "AgentType": 42,
+            "Listener": "http",
+            "Arch": "x64",
+            "Format": "Windows Exe",
+            "Config": "{}"
+        });
+
+        let result = serde_json::from_value::<BuildPayloadRequestInfo>(value);
+        assert!(result.is_err(), "BuildPayloadRequestInfo must reject non-string AgentType");
+    }
+
+    #[test]
+    fn build_payload_response_rejects_missing_required_field() {
+        // Missing FileName — should fail deserialization.
+        let value = json!({
+            "PayloadArray": "QUJD",
+            "Format": "shellcode"
+        });
+
+        let result = serde_json::from_value::<BuildPayloadResponseInfo>(value);
+        assert!(result.is_err(), "BuildPayloadResponseInfo must reject missing FileName");
+    }
+
+    #[test]
     fn accepts_legacy_teamserver_profile_shape() -> Result<(), Box<dyn std::error::Error>> {
         let value = json!({
             "Head": { "Event": 16, "Time": "09/03/2026 19:00:00" },

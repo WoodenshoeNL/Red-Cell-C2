@@ -9,10 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 346 | 195 | 31 |
+| Tasks closed | 348 | 195 | 31 |
 | Bugs filed against | 41 | 34 | 9 |
 | Bug rate (bugs/task) | 0.12 | 0.17 | 0.29 |
 | Quality score | 88% | 83% | 71% |
+
+*Bug rates: Claude 41/348=0.12, Codex 34/195=0.17, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -38,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-19 00:15 — 738579b..0d70085
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed 1ps8 (socket callback tests: read failure, write success, non-proxy read, truncated rportfwd list), aq81 (transfer callback tests: UTF-16 output, OEM output, error message, file transfer lifecycle, orphan FileWrite, truncated file open). Also ran test-review scans (batches 2→22→59), arch review, and claimed 5gkw. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: passed — `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (1,840+ tests, 0 failures)
 
 ### Arch Review — 2026-03-18 23:30
 

@@ -3839,6 +3839,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_operator_duplicate_username_returns_conflict() {
+        let (app, _, _auth) = test_router_with_registry(Some((
+            60,
+            "rest-admin",
+            "secret-admin",
+            OperatorRole::Admin,
+        )))
+        .await;
+
+        // First creation should succeed.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/operators")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"username":"trinity","password":"zion","role":"Operator"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        // Second creation with the same username should return 409 Conflict.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/operators")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"username":"trinity","password":"different","role":"Operator"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "operator_exists");
+    }
+
+    #[tokio::test]
+    async fn create_operator_empty_username_returns_bad_request() {
+        let (app, _, _auth) = test_router_with_registry(Some((
+            60,
+            "rest-admin",
+            "secret-admin",
+            OperatorRole::Admin,
+        )))
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/operators")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"username":"","password":"zion","role":"Operator"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_operator");
+    }
+
+    #[tokio::test]
+    async fn create_operator_empty_password_returns_bad_request() {
+        let (app, _, _auth) = test_router_with_registry(Some((
+            60,
+            "rest-admin",
+            "secret-admin",
+            OperatorRole::Admin,
+        )))
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/operators")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"username":"trinity","password":"","role":"Operator"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_operator");
+    }
+
+    #[tokio::test]
     async fn operators_endpoint_includes_persisted_runtime_accounts_loaded_at_startup() {
         let database = Database::connect_in_memory().await.expect("database");
         database

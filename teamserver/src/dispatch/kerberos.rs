@@ -269,7 +269,8 @@ pub(super) fn format_ticket_flags(flags: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use red_cell_common::demon::DemonCommand;
+    use red_cell_common::demon::{DemonCommand, DemonKerberosCommand};
+    use red_cell_common::operator::OperatorMessage;
 
     // ── Byte-builder helpers for CallbackParser inputs ──
 
@@ -904,5 +905,194 @@ mod tests {
         let flags: u32 = 1 << 31;
         let result = format_ticket_flags(flags);
         assert!(result.contains("reserved"), "Expected 'reserved', got: {result}");
+    }
+
+    // ── handle_kerberos_callback tests ──
+
+    const AGENT_ID: u32 = 0xCAFE_BABE;
+    const REQUEST_ID: u32 = 42;
+
+    /// Build a payload for handle_kerberos_callback with the given subcommand and body.
+    fn build_kerberos_payload(subcommand: DemonKerberosCommand, body: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        push_u32(&mut buf, u32::from(subcommand));
+        buf.extend_from_slice(body);
+        buf
+    }
+
+    #[tokio::test]
+    async fn handle_kerberos_luid_success_formats_hex_output() {
+        let events = EventBus::new(8);
+        let mut receiver = events.subscribe();
+
+        let mut body = Vec::new();
+        push_u32(&mut body, 1); // success = 1
+        push_u32(&mut body, 0xAB); // high
+        push_u32(&mut body, 0xCD); // low
+        let payload = build_kerberos_payload(DemonKerberosCommand::Luid, &body);
+
+        let result = handle_kerberos_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(matches!(result, Ok(None)));
+
+        let msg = receiver.recv().await.expect("should receive broadcast");
+        match msg {
+            OperatorMessage::AgentResponse(resp) => {
+                assert_eq!(
+                    resp.info.extra.get("Type"),
+                    Some(&serde_json::Value::String("Good".to_owned())),
+                    "Luid success should produce Type=Good"
+                );
+                let message = resp
+                    .info
+                    .extra
+                    .get("Message")
+                    .and_then(|v| v.as_str())
+                    .expect("should have Message");
+                assert!(
+                    message.contains("ab:0xcd"),
+                    "Expected 'ab:0xcd' in message, got: {message}"
+                );
+            }
+            other => panic!("expected AgentResponse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_kerberos_luid_failure_broadcasts_error() {
+        let events = EventBus::new(8);
+        let mut receiver = events.subscribe();
+
+        let mut body = Vec::new();
+        push_u32(&mut body, 0); // success = 0
+        let payload = build_kerberos_payload(DemonKerberosCommand::Luid, &body);
+
+        let result = handle_kerberos_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(matches!(result, Ok(None)));
+
+        let msg = receiver.recv().await.expect("should receive broadcast");
+        match msg {
+            OperatorMessage::AgentResponse(resp) => {
+                assert_eq!(
+                    resp.info.extra.get("Type"),
+                    Some(&serde_json::Value::String("Error".to_owned())),
+                    "Luid failure should produce Type=Error"
+                );
+            }
+            other => panic!("expected AgentResponse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_kerberos_purge_success_broadcasts_good() {
+        let events = EventBus::new(8);
+        let mut receiver = events.subscribe();
+
+        let mut body = Vec::new();
+        push_u32(&mut body, 1); // success = 1
+        let payload = build_kerberos_payload(DemonKerberosCommand::Purge, &body);
+
+        let result = handle_kerberos_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(matches!(result, Ok(None)));
+
+        let msg = receiver.recv().await.expect("should receive broadcast");
+        match msg {
+            OperatorMessage::AgentResponse(resp) => {
+                assert_eq!(
+                    resp.info.extra.get("Type"),
+                    Some(&serde_json::Value::String("Good".to_owned())),
+                    "Purge success should produce Type=Good"
+                );
+                let message = resp
+                    .info
+                    .extra
+                    .get("Message")
+                    .and_then(|v| v.as_str())
+                    .expect("should have Message");
+                assert!(message.contains("purge"), "Expected purge in message, got: {message}");
+            }
+            other => panic!("expected AgentResponse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_kerberos_purge_failure_broadcasts_error() {
+        let events = EventBus::new(8);
+        let mut receiver = events.subscribe();
+
+        let mut body = Vec::new();
+        push_u32(&mut body, 0); // success = 0
+        let payload = build_kerberos_payload(DemonKerberosCommand::Purge, &body);
+
+        let result = handle_kerberos_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(matches!(result, Ok(None)));
+
+        let msg = receiver.recv().await.expect("should receive broadcast");
+        match msg {
+            OperatorMessage::AgentResponse(resp) => {
+                assert_eq!(
+                    resp.info.extra.get("Type"),
+                    Some(&serde_json::Value::String("Error".to_owned())),
+                    "Purge failure should produce Type=Error"
+                );
+            }
+            other => panic!("expected AgentResponse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_kerberos_ptt_success_broadcasts_good() {
+        let events = EventBus::new(8);
+        let mut receiver = events.subscribe();
+
+        let mut body = Vec::new();
+        push_u32(&mut body, 1); // success = 1
+        let payload = build_kerberos_payload(DemonKerberosCommand::Ptt, &body);
+
+        let result = handle_kerberos_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(matches!(result, Ok(None)));
+
+        let msg = receiver.recv().await.expect("should receive broadcast");
+        match msg {
+            OperatorMessage::AgentResponse(resp) => {
+                assert_eq!(
+                    resp.info.extra.get("Type"),
+                    Some(&serde_json::Value::String("Good".to_owned())),
+                    "Ptt success should produce Type=Good"
+                );
+                let message = resp
+                    .info
+                    .extra
+                    .get("Message")
+                    .and_then(|v| v.as_str())
+                    .expect("should have Message");
+                assert!(message.contains("import"), "Expected import in message, got: {message}");
+            }
+            other => panic!("expected AgentResponse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_kerberos_ptt_failure_broadcasts_error() {
+        let events = EventBus::new(8);
+        let mut receiver = events.subscribe();
+
+        let mut body = Vec::new();
+        push_u32(&mut body, 0); // success = 0
+        let payload = build_kerberos_payload(DemonKerberosCommand::Ptt, &body);
+
+        let result = handle_kerberos_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(matches!(result, Ok(None)));
+
+        let msg = receiver.recv().await.expect("should receive broadcast");
+        match msg {
+            OperatorMessage::AgentResponse(resp) => {
+                assert_eq!(
+                    resp.info.extra.get("Type"),
+                    Some(&serde_json::Value::String("Error".to_owned())),
+                    "Ptt failure should produce Type=Error"
+                );
+            }
+            other => panic!("expected AgentResponse, got {other:?}"),
+        }
     }
 }

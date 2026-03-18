@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 243 | 195 | 31 |
+| Tasks closed | 249 | 195 | 31 |
 | Bugs filed against | 40 | 34 | 9 |
-| Bug rate (bugs/task) | 0.17 | 0.17 | 0.29 |
-| Quality score | 83% | 83% | 71% |
+| Bug rate (bugs/task) | 0.16 | 0.17 | 0.29 |
+| Quality score | 84% | 83% | 71% |
 
 ## Violation Breakdown
 
@@ -2044,3 +2044,14 @@ Notes: No QA findings were upheld in this window. A transient failure seen durin
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (175 tests, 0 failures)
 Notes: Test count stable at 175 (new tests replace none; test binary count unchanged). One workflow issue: 35dz work fully committed but issue left in_progress due to session interruption. No code quality, security, or architecture issues found — all changes are well-structured test additions following existing patterns.
+
+### QA Review — 2026-03-18 00:52 — ec5f7c7..1d90286
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (dev02-opus) | 6 | 0 | Closed 0dau, w08j, cov0, 35dz, ovnk, xz11. All test additions: audit time-range filters (7 tests), crypto AgentNotFound error paths (2 tests), agent_events None→Null coverage, agent_liveness sweep clamp, audit actor_filter precedence. ildv currently in_progress. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (921+ tests, 0 failures)
+Notes: Clean review — no code quality, security, or architecture issues. All changes are well-structured test additions. Claude's quality score improved from 83% to 84%. Previous workflow issue (35dz left in_progress) was resolved — now properly closed. One task (ildv) currently claimed and in_progress.

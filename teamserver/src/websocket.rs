@@ -5259,4 +5259,100 @@ mod tests {
         assert_eq!(cmd_line, "checkin");
         Ok(())
     }
+
+    // ---- Route wiring tests for `routes()` ----
+
+    /// Helper: build a `Router` from `routes()` backed by `TestState`.
+    async fn build_ws_router() -> axum::Router {
+        let state = TestState::new().await;
+        routes::<TestState>().with_state(state)
+    }
+
+    #[tokio::test]
+    async fn routes_get_root_reaches_websocket_handler() {
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let app = build_ws_router().await;
+
+        // Send a GET / with WebSocket upgrade headers. Through `oneshot()` the
+        // actual protocol switch cannot complete (no real TCP connection), but
+        // the route *is* matched — so we must not see 404 or 405.
+        let mut req = Request::builder()
+            .uri("/")
+            .header("host", "localhost")
+            .header("connection", "Upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .body(axum::body::Body::empty())
+            .expect("request should build");
+
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 9999))));
+
+        let response = app.oneshot(req).await.expect("router should respond");
+        assert_ne!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "GET / must be routed to the WebSocket handler, not fall through to 404"
+        );
+        assert_ne!(
+            response.status(),
+            StatusCode::METHOD_NOT_ALLOWED,
+            "GET / must be an accepted method"
+        );
+    }
+
+    #[tokio::test]
+    async fn routes_post_root_is_method_not_allowed() {
+        use axum::http::{Method, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let app = build_ws_router().await;
+
+        let mut req = Request::builder()
+            .method(Method::POST)
+            .uri("/")
+            .body(axum::body::Body::empty())
+            .expect("request should build");
+
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 9999))));
+
+        let response = app.oneshot(req).await.expect("router should respond");
+        assert_eq!(
+            response.status(),
+            StatusCode::METHOD_NOT_ALLOWED,
+            "POST / must be rejected — only GET is registered"
+        );
+    }
+
+    #[tokio::test]
+    async fn routes_non_root_path_returns_not_found() {
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let app = build_ws_router().await;
+
+        let mut req = Request::builder()
+            .uri("/some/other/path")
+            .header("host", "localhost")
+            .header("connection", "Upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .body(axum::body::Body::empty())
+            .expect("request should build");
+
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 9999))));
+
+        let response = app.oneshot(req).await.expect("router should respond");
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "non-root path must not be registered"
+        );
+    }
 }

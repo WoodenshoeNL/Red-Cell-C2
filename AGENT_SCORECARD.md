@@ -19,12 +19,12 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 2 | 0 | 0 |
-| Missing tests | 11 | 13 | 5 |
+| Missing tests | 14 | 13 | 5 |
 | Clippy warnings | 1 | 0 | 1 |
 | Protocol errors | 6 | 27 | 3 |
-| Security issues | 17 | 34 | 0 |
+| Security issues | 18 | 34 | 0 |
 | Architecture drift | 2 | 21 | 0 |
-| Memory / resource leaks | 1 | 10 | 1 |
+| Memory / resource leaks | 2 | 10 | 1 |
 | Startup / lifecycle regressions | 1 | 8 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
@@ -2202,3 +2202,15 @@ Notes: Clean review — all 9 closed tasks are test additions with no production
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (1021 unit + all integration, 0 failures)
 Notes: Clean review — all changes are test additions, no production code modified. Tests are well-structured with proper async patterns and error handling. One task in progress: 1v7a (SOCKS connect-failure routing tests). No bugs filed.
+
+### Arch Review — 2026-03-18 09:45
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude (Sonnet) | 3 | security(1), memory/resource(1), missing-tests(3) | SOCKS relay unbounded connections, plugin Mutex deadlock potential, CTR overflow untested |
+| Claude (Opus) | 0 | — | Recent test additions are clean |
+| Codex | 0 | — | No new findings this review |
+| Cursor | 0 | — | No new findings this review |
+
+Overall codebase health: on track
+Biggest blindspot: SOCKS5 relay has no connection limits — a compromised agent can exhaust server resources

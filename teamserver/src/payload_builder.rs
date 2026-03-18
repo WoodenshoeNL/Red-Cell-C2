@@ -4385,4 +4385,102 @@ mod tests {
         );
         Ok(())
     }
+
+    // ── PayloadCache isolated unit tests ────────────────────────────────
+
+    fn test_cache_key(hex: &str, ext: &'static str) -> CacheKey {
+        CacheKey { hex: hex.to_owned(), ext }
+    }
+
+    #[test]
+    fn artifact_path_concatenates_hex_and_extension() {
+        let cache = PayloadCache::new(PathBuf::from("/tmp/cache"));
+        let key = test_cache_key("abcdef01", ".exe");
+        assert_eq!(cache.artifact_path(&key), PathBuf::from("/tmp/cache/abcdef01.exe"));
+    }
+
+    #[test]
+    fn artifact_path_bin_extension() {
+        let cache = PayloadCache::new(PathBuf::from("/tmp/cache"));
+        let key = test_cache_key("0123456789abcdef", ".bin");
+        assert_eq!(cache.artifact_path(&key), PathBuf::from("/tmp/cache/0123456789abcdef.bin"));
+    }
+
+    #[test]
+    fn artifact_path_dll_extension() {
+        let cache = PayloadCache::new(PathBuf::from("/tmp/cache"));
+        let key = test_cache_key("ff", ".dll");
+        assert_eq!(cache.artifact_path(&key), PathBuf::from("/tmp/cache/ff.dll"));
+    }
+
+    #[tokio::test]
+    async fn get_returns_none_for_absent_key() {
+        let temp = TempDir::new().unwrap();
+        let cache = PayloadCache::new(temp.path().to_path_buf());
+        let key = test_cache_key("nonexistent", ".exe");
+        assert!(cache.get(&key).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn put_then_get_round_trips_bytes() {
+        let temp = TempDir::new().unwrap();
+        let cache = PayloadCache::new(temp.path().to_path_buf());
+        let key = test_cache_key("deadbeef", ".dll");
+        let payload = b"MZ\x90\x00payload-bytes";
+
+        cache.put(&key, payload).await;
+
+        let got = cache.get(&key).await.expect("cache hit expected after put");
+        assert_eq!(got, payload);
+    }
+
+    #[tokio::test]
+    async fn get_returns_none_when_cache_dir_missing() {
+        let temp = TempDir::new().unwrap();
+        // Point at a sub-directory that does not exist.
+        let cache = PayloadCache::new(temp.path().join("does-not-exist"));
+        let key = test_cache_key("abc", ".bin");
+        assert!(cache.get(&key).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn flush_then_get_returns_none() {
+        let temp = TempDir::new().unwrap();
+        let cache = PayloadCache::new(temp.path().to_path_buf());
+        let key = test_cache_key("flushme", ".exe");
+
+        cache.put(&key, b"data").await;
+        assert!(cache.get(&key).await.is_some(), "should be present before flush");
+
+        cache.flush().await.expect("flush should succeed");
+        assert!(cache.get(&key).await.is_none(), "should be gone after flush");
+    }
+
+    #[tokio::test]
+    async fn put_creates_cache_dir_if_absent() {
+        let temp = TempDir::new().unwrap();
+        let nested = temp.path().join("sub/dir");
+        let cache = PayloadCache::new(nested.clone());
+        let key = test_cache_key("cafebabe", ".bin");
+
+        cache.put(&key, b"shellcode").await;
+
+        assert!(nested.exists(), "put should create the cache directory");
+        let got = cache.get(&key).await.expect("should read back after put");
+        assert_eq!(got, b"shellcode");
+    }
+
+    #[tokio::test]
+    async fn distinct_keys_do_not_collide() {
+        let temp = TempDir::new().unwrap();
+        let cache = PayloadCache::new(temp.path().to_path_buf());
+        let k1 = test_cache_key("samehex", ".exe");
+        let k2 = test_cache_key("samehex", ".dll");
+
+        cache.put(&k1, b"exe-bytes").await;
+        cache.put(&k2, b"dll-bytes").await;
+
+        assert_eq!(cache.get(&k1).await.unwrap(), b"exe-bytes");
+        assert_eq!(cache.get(&k2).await.unwrap(), b"dll-bytes");
+    }
 }

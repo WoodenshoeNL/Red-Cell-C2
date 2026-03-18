@@ -446,6 +446,81 @@ mod tests {
         }
     }
 
+    // -- validate_checkin_transport_material unit tests --
+
+    #[test]
+    fn validate_checkin_transport_material_rejects_all_zero_key() {
+        let key = [0u8; AGENT_KEY_LENGTH];
+        let iv = [0xAAu8; AGENT_IV_LENGTH];
+        let err = validate_checkin_transport_material(0x1234, &key, &iv)
+            .expect_err("all-zero key must be rejected");
+        match err {
+            CommandDispatchError::InvalidCallbackPayload { message, .. } => {
+                assert!(message.contains("key"), "message should mention key: {message}");
+            }
+            other => panic!("expected InvalidCallbackPayload, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_checkin_transport_material_rejects_all_zero_iv() {
+        let key = [0xBBu8; AGENT_KEY_LENGTH];
+        let iv = [0u8; AGENT_IV_LENGTH];
+        let err = validate_checkin_transport_material(0x1234, &key, &iv)
+            .expect_err("all-zero IV must be rejected");
+        match err {
+            CommandDispatchError::InvalidCallbackPayload { message, .. } => {
+                assert!(message.contains("IV"), "message should mention IV: {message}");
+            }
+            other => panic!("expected InvalidCallbackPayload, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_checkin_transport_material_rejects_both_zero() {
+        let key = [0u8; AGENT_KEY_LENGTH];
+        let iv = [0u8; AGENT_IV_LENGTH];
+        // When both are zero, key check fires first.
+        let err = validate_checkin_transport_material(0x1234, &key, &iv)
+            .expect_err("all-zero key+IV must be rejected");
+        match err {
+            CommandDispatchError::InvalidCallbackPayload { message, .. } => {
+                assert!(message.contains("key"), "key should be checked first: {message}");
+            }
+            other => panic!("expected InvalidCallbackPayload, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_checkin_transport_material_accepts_valid_material() {
+        let key = [0xAAu8; AGENT_KEY_LENGTH];
+        let iv = [0xBBu8; AGENT_IV_LENGTH];
+        validate_checkin_transport_material(0x1234, &key, &iv)
+            .expect("valid key and IV must be accepted");
+    }
+
+    /// A key with only the last byte non-zero is NOT considered weak by
+    /// `is_weak_aes_key` (which only rejects all-zero keys).  Verify that
+    /// `validate_checkin_transport_material` passes this boundary case.
+    #[test]
+    fn validate_checkin_transport_material_accepts_partially_zeroed_key() {
+        let mut key = [0u8; AGENT_KEY_LENGTH];
+        key[AGENT_KEY_LENGTH - 1] = 1;
+        let iv = [0xCCu8; AGENT_IV_LENGTH];
+        validate_checkin_transport_material(0x1234, &key, &iv)
+            .expect("partially-zeroed key (last byte non-zero) must be accepted");
+    }
+
+    /// Same boundary test for IV: only the first byte is non-zero.
+    #[test]
+    fn validate_checkin_transport_material_accepts_partially_zeroed_iv() {
+        let key = [0xAAu8; AGENT_KEY_LENGTH];
+        let mut iv = [0u8; AGENT_IV_LENGTH];
+        iv[0] = 1;
+        validate_checkin_transport_material(0x1234, &key, &iv)
+            .expect("partially-zeroed IV (first byte non-zero) must be accepted");
+    }
+
     /// When the agent ID inside the payload differs from the outer envelope's
     /// agent ID, `parse_checkin_metadata` must return `InvalidCallbackPayload`.
     /// This prevents silent state corruption from misrouted or tampered frames.

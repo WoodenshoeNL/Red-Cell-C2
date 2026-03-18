@@ -389,6 +389,66 @@ async fn restore_running_with_port_in_use_transitions_to_error_state()
     Ok(())
 }
 
+#[tokio::test]
+async fn restore_running_failure_halts_before_remaining_listeners()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = Database::connect_in_memory().await?;
+    let (port_fail, guard_fail) = common::available_port()?;
+    let (port_ok, guard_ok) = common::available_port_excluding(port_fail)?;
+
+    // Seed two listeners as Running in the DB.  Names are chosen so that the
+    // failing listener ("lc-restore-aa-fail") sorts before the healthy one
+    // ("lc-restore-bb-ok") in the `ORDER BY name` iteration that
+    // `restore_running` uses.
+    {
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::new(database.clone(), registry, events, sockets, None);
+        manager.create(http_config("lc-restore-aa-fail", port_fail)).await?;
+        manager.create(http_config("lc-restore-bb-ok", port_ok)).await?;
+        manager.repository().set_state("lc-restore-aa-fail", ListenerStatus::Running, None).await?;
+        manager.repository().set_state("lc-restore-bb-ok", ListenerStatus::Running, None).await?;
+    }
+
+    // Build a new manager over the same DB.  Keep `guard_fail` alive so
+    // "lc-restore-aa-fail" cannot bind, but release `guard_ok` so the other
+    // port is free.
+    drop(guard_ok);
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let restored = ListenerManager::new(database, registry, events, sockets, None);
+
+    let result = restored.restore_running().await;
+    assert!(result.is_err(), "restore_running must return an error when a listener cannot rebind");
+
+    // The failing listener must have been transitioned to Error with a message.
+    let fail_summary = restored.summary("lc-restore-aa-fail").await?;
+    assert_eq!(
+        fail_summary.state.status,
+        ListenerStatus::Error,
+        "the failing listener must be in Error state"
+    );
+    assert!(
+        fail_summary.state.last_error.is_some(),
+        "the failing listener must record an error message"
+    );
+
+    // Because restore_running returns early on the first bind failure, the
+    // second listener is never attempted — it still has its stale Running
+    // status from the previous session, with no live runtime behind it.
+    let ok_summary = restored.summary("lc-restore-bb-ok").await?;
+    assert_eq!(
+        ok_summary.state.status,
+        ListenerStatus::Running,
+        "the second listener is left with stale Running state (early return)"
+    );
+
+    drop(guard_fail);
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Concurrent operations test
 // ---------------------------------------------------------------------------

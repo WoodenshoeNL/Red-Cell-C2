@@ -19,7 +19,7 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 2 | 0 | 0 |
-| Missing tests | 16 | 13 | 5 |
+| Missing tests | 20 | 13 | 5 |
 | Clippy warnings | 2 | 0 | 1 |
 | Protocol errors | 6 | 27 | 3 |
 | Security issues | 19 | 36 | 0 |
@@ -38,6 +38,21 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-18 23:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude (Opus) | 4 | 4 missing tests | Webhook delivery, payload builder, agent liveness, API key auth — all lack integration tests. |
+| Codex | 0 | — | No new issues found. |
+| Cursor | 0 | — | No new issues found. |
+
+Overall codebase health: **on track**
+Biggest blindspot: Integration test coverage for cross-cutting concerns — webhook delivery, payload generation, agent liveness enforcement, and API key auth all have unit-level coverage but no end-to-end validation. These are the last major untested subsystems.
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (all tests passing, 0 failures)
+
+Deep review covered: full structural map (97k lines, 68 .rs files), all common crate modules, all teamserver modules (22 source files + 14 dispatch handlers), all integration tests (16 files across 3 crates), client source (6 files), Cargo.toml dependency audit. Security posture verified: AES-256-CTR offset management correct, DEMON_INIT validation comprehensive (agent_id!=0, duplicate rejection, weak key/IV rejection, decrypted ID cross-check), constant-time token/password comparison via `subtle` crate, Argon2id password hashing with dummy verifier for user enumeration prevention, per-IP rate limiting on DEMON_INIT and login, download memory bounded (30 MiB per request, 2 GB aggregate), DNS upload capped (1000 pending, 256 chunks, 120s timeout), agent registration capped at 10k, job queue capped at 1000/agent. Architecture decisions all honored: Axum+Tokio, SQLite/sqlx, HCL config, thiserror/anyhow separation, egui client, edition 2024. No todo!/unimplemented!/println!/eprintln! in production code. No unwrap/expect in production code paths. No clippy warnings.
 
 ### QA Review — 2026-03-18 22:15 — 2fcd12d..e8f423f
 

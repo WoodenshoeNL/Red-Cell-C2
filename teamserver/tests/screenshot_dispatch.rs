@@ -5,6 +5,8 @@
 
 mod common;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use red_cell::{
     AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
     ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
@@ -239,6 +241,28 @@ async fn screenshot_callback_stores_loot_and_broadcasts_events()
         "screenshot response must have Type=Good"
     );
 
+    // Verify MiscData contains the base64-encoded image bytes.
+    let misc_data = resp_msg
+        .info
+        .extra
+        .get("MiscData")
+        .and_then(|v| v.as_str())
+        .expect("screenshot response must contain MiscData");
+    let decoded_bytes = BASE64_STANDARD.decode(misc_data).expect("MiscData must be valid base64");
+    assert_eq!(decoded_bytes, png, "MiscData base64 must decode to the original PNG bytes");
+
+    // Verify MiscData2 contains the generated screenshot filename.
+    let misc_data2 = resp_msg
+        .info
+        .extra
+        .get("MiscData2")
+        .and_then(|v| v.as_str())
+        .expect("screenshot response must contain MiscData2");
+    assert!(
+        misc_data2.starts_with("Desktop_") && misc_data2.ends_with(".png"),
+        "MiscData2 should be a Desktop_*.png filename, got: {misc_data2}"
+    );
+
     // Verify loot record is persisted in the database.
     let loot_records = database.loot().list_for_agent(agent_id).await?;
     assert_eq!(loot_records.len(), 1, "exactly one loot record must be stored");
@@ -248,6 +272,12 @@ async fn screenshot_callback_stores_loot_and_broadcasts_events()
         loot_records[0].data.as_deref(),
         Some(png.as_slice()),
         "loot data must contain the raw image bytes"
+    );
+
+    // MiscData2 must match the persisted loot record name.
+    assert_eq!(
+        misc_data2, loot_records[0].name,
+        "MiscData2 must match the persisted loot record name"
     );
 
     socket.close(None).await?;

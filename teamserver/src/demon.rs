@@ -1922,4 +1922,47 @@ mod tests {
             other => panic!("expected InvalidStoredCryptoEncoding for aes_iv, got: {other}"),
         }
     }
+
+    #[tokio::test]
+    async fn callback_for_unregistered_agent_returns_not_found_without_creating_state() {
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry.clone());
+        let unregistered_id: u32 = 0xBADA_9E00;
+
+        // Build a well-formed callback envelope targeting an agent ID the registry does not know.
+        let dummy_key = [0x41; AGENT_KEY_LENGTH];
+        let dummy_iv = [0x24; AGENT_IV_LENGTH];
+        let callback_packet = build_callback_packet(unregistered_id, dummy_key, dummy_iv, 0);
+
+        let error = parser
+            .parse_at(
+                &callback_packet,
+                "198.51.100.99".to_owned(),
+                datetime!(2026-03-15 12:00:00 UTC),
+            )
+            .await
+            .expect_err("callback for unregistered agent must fail");
+
+        assert!(
+            matches!(
+                error,
+                DemonParserError::Registry(crate::TeamserverError::AgentNotFound {
+                    agent_id: 0xBADA_9E00,
+                })
+            ),
+            "expected AgentNotFound, got: {error}"
+        );
+
+        // No agent should have been inserted as a side effect.
+        assert!(
+            registry.get(unregistered_id).await.is_none(),
+            "unregistered agent must not be inserted by a callback"
+        );
+
+        // No CTR state should have been created.
+        assert!(
+            registry.ctr_offset(unregistered_id).await.is_err(),
+            "no CTR offset should exist for an unregistered agent"
+        );
+    }
 }

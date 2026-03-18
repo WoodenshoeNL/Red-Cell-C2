@@ -1383,4 +1383,48 @@ mod tests {
         assert_eq!(page.total, 0, "until before all rows should return nothing");
         assert!(page.items.is_empty());
     }
+
+    #[tokio::test]
+    async fn actor_filter_operator_takes_precedence_over_actor() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_audit_rows(&database, 100).await;
+
+        // Both `operator` and `actor` are set — `operator` must win.
+        let query = AuditQuery {
+            operator: Some("alice".to_owned()),
+            actor: Some("bob".to_owned()),
+            ..AuditQuery::default()
+        };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        assert!(page.total > 0, "alice rows should be present");
+        assert!(
+            page.items.iter().all(|r| r.actor == "alice"),
+            "operator field should take precedence — only alice rows expected, \
+             but found: {:?}",
+            page.items.iter().map(|r| &r.actor).collect::<Vec<_>>()
+        );
+        assert!(
+            page.items.iter().all(|r| r.actor != "bob"),
+            "bob rows must not appear when operator=alice takes precedence"
+        );
+    }
+
+    #[tokio::test]
+    async fn actor_filter_falls_back_to_actor_when_operator_absent() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_audit_rows(&database, 100).await;
+
+        // Only `actor` set, no `operator` — should fall back to actor value.
+        let query = AuditQuery { actor: Some("bob".to_owned()), ..AuditQuery::default() };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        assert!(page.total > 0, "bob rows should be present");
+        assert!(
+            page.items.iter().all(|r| r.actor == "bob"),
+            "actor fallback should filter to bob only, \
+             but found: {:?}",
+            page.items.iter().map(|r| &r.actor).collect::<Vec<_>>()
+        );
+    }
 }

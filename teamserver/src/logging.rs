@@ -541,6 +541,73 @@ mod tests {
     }
 
     #[test]
+    fn file_rotation_defaults_to_daily_when_omitted() {
+        let profile = parse_profile(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+              Logging {
+                Level = "info"
+                Format = "Json"
+                File {
+                  Directory = "logs"
+                  Prefix = "teamserver.log"
+                }
+              }
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {}
+            "#,
+        );
+
+        let resolved = resolve_logging_config_with_override(Some(&profile), false, None);
+
+        let file = resolved.file.expect("file logging should be resolved");
+        assert_eq!(file.rotation, LogRotation::Daily);
+    }
+
+    #[test]
+    fn file_rotation_preserves_minutely_when_configured() {
+        let profile = parse_profile(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+              Logging {
+                Level = "info"
+                Format = "Json"
+                File {
+                  Directory = "logs"
+                  Prefix = "teamserver.log"
+                  Rotation = "Minutely"
+                }
+              }
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {}
+            "#,
+        );
+
+        let resolved = resolve_logging_config_with_override(Some(&profile), false, None);
+
+        let file = resolved.file.expect("file logging should be resolved");
+        assert_eq!(file.rotation, LogRotation::Minutely);
+    }
+
+    #[test]
     fn init_tracing_succeeds_once_per_process_without_profile_in_non_debug_mode() {
         let output =
             run_init_tracing_subprocess("default_config_once", &[(SUBPROCESS_DEBUG_ENV, "0")]);

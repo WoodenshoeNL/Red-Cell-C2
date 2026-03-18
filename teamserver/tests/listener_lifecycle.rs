@@ -9,7 +9,8 @@ mod common;
 use std::time::Duration;
 
 use red_cell::{
-    AgentRegistry, Database, EventBus, ListenerManager, ListenerStatus, SocketRelayManager,
+    AgentRegistry, Database, EventBus, ListenerManager, ListenerManagerError, ListenerStatus,
+    SocketRelayManager,
 };
 use red_cell_common::{HttpListenerConfig, ListenerConfig};
 use tokio::time::timeout;
@@ -193,6 +194,44 @@ async fn start_nonexistent_listener_returns_error() -> Result<(), Box<dyn std::e
 
     let result = manager.start("no-such-listener").await;
     assert!(result.is_err(), "starting a listener that does not exist must return an error");
+    Ok(())
+}
+
+#[tokio::test]
+async fn create_duplicate_name_returns_error_and_preserves_original()
+-> Result<(), Box<dyn std::error::Error>> {
+    let manager = test_manager().await?;
+    let (port_a, _guard_a) = common::available_port()?;
+    let (port_b, _guard_b) = common::available_port_excluding(port_a)?;
+
+    // First create succeeds.
+    manager.create(http_config("lc-dup", port_a)).await?;
+
+    // Second create with the same name but different port must fail.
+    let result = manager.create(http_config("lc-dup", port_b)).await;
+    assert!(result.is_err(), "duplicate create must return an error");
+
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, ListenerManagerError::DuplicateListener { .. }),
+        "error must be DuplicateListener, got: {err}"
+    );
+
+    // The original config must be unchanged — still bound to port_a.
+    let summary = manager.summary("lc-dup").await?;
+    assert_eq!(summary.state.status, ListenerStatus::Created);
+    match &summary.config {
+        ListenerConfig::Http(http) => {
+            assert_eq!(http.port_bind, port_a, "original port must be preserved");
+        }
+        other => panic!("expected Http config, got {:?}", other.protocol()),
+    }
+
+    // Only one listener entry must exist.
+    let all = manager.list().await?;
+    let dup_count = all.iter().filter(|s| s.name == "lc-dup").count();
+    assert_eq!(dup_count, 1, "exactly one listener with the name must exist");
+
     Ok(())
 }
 

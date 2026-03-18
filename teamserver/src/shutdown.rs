@@ -247,4 +247,72 @@ mod tests {
         assert_eq!(controller.active_callback_count(), 0);
         assert!(controller.wait_for_callback_drain(Duration::from_millis(10)).await);
     }
+
+    #[tokio::test]
+    async fn pre_shutdown_waiters_all_wake_on_initiate() {
+        use tokio::sync::oneshot;
+
+        let controller = ShutdownController::new();
+
+        // Spawn 5 waiter tasks that await notified() before shutdown.
+        let mut receivers = Vec::new();
+        for _ in 0..5 {
+            let ctrl = controller.clone();
+            let (tx, rx) = oneshot::channel::<()>();
+            tokio::spawn(async move {
+                ctrl.notified().await;
+                let _ = tx.send(());
+            });
+            receivers.push(rx);
+        }
+
+        // Yield to let waiters register their notified() futures.
+        tokio::task::yield_now().await;
+
+        // No waiter should have completed yet.
+        for rx in &mut receivers {
+            assert!(rx.try_recv().is_err(), "waiter must remain pending before shutdown");
+        }
+
+        // Initiate shutdown — all waiters should unblock.
+        controller.initiate();
+
+        for (i, rx) in receivers.into_iter().enumerate() {
+            tokio::time::timeout(Duration::from_millis(100), rx)
+                .await
+                .unwrap_or_else(|_| panic!("waiter {i} did not complete after initiate()"))
+                .unwrap_or_else(|_| panic!("waiter {i} sender was dropped unexpectedly"));
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_initiate_does_not_break_waiter_semantics() {
+        use tokio::sync::oneshot;
+
+        let controller = ShutdownController::new();
+
+        let ctrl = controller.clone();
+        let (tx, rx) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            ctrl.notified().await;
+            let _ = tx.send(());
+        });
+
+        tokio::task::yield_now().await;
+
+        // Multiple initiate() calls should be idempotent.
+        controller.initiate();
+        controller.initiate();
+        controller.initiate();
+
+        tokio::time::timeout(Duration::from_millis(100), rx)
+            .await
+            .expect("waiter must complete after initiate()")
+            .expect("sender must not be dropped");
+
+        // A new waiter after repeated initiate() should also return immediately.
+        tokio::time::timeout(Duration::from_millis(10), controller.notified())
+            .await
+            .expect("notified() after repeated initiate() must return immediately");
+    }
 }

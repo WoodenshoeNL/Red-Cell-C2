@@ -204,6 +204,24 @@ mod tests {
         assert_eq!(config.resolved_scripts_dir(), Some(PathBuf::from("/tmp/client-scripts")));
     }
 
+    #[test]
+    fn resolved_scripts_dir_falls_back_to_default_location_when_unset() {
+        let config = LocalConfig::default();
+
+        assert_eq!(config.resolved_scripts_dir(), default_scripts_dir());
+    }
+
+    #[test]
+    fn resolved_scripts_dir_returns_none_when_default_location_is_unavailable() {
+        let config = LocalConfig::default();
+
+        if default_scripts_dir().is_some() {
+            return;
+        }
+
+        assert_eq!(config.resolved_scripts_dir(), None);
+    }
+
     // Mutex to serialize tests that share the platform config file.  These
     // tests write to (and restore) the real config path, so they must not run
     // concurrently with each other.

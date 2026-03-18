@@ -142,11 +142,27 @@ else
 fi
 
 uv python install 3.12
-PYTHON_LIB_DIR="$(dirname "$(uv python find --managed-python 3.12)")/../lib"
 
+# Resolve the lib directory for the uv-managed Python 3.12
+PYTHON_BIN="$(uv python find 3.12 2>/dev/null || uv python find)"
+PYTHON_LIB_DIR="$(realpath "$(dirname "$PYTHON_BIN")/../lib")"
+
+# Register with runtime dynamic linker (needed at run time)
 echo "$PYTHON_LIB_DIR" > /etc/ld.so.conf.d/uv-python.conf
 ldconfig
 ok "libpython registered with ldconfig: $PYTHON_LIB_DIR"
+
+# Create the linker symlink libpython3.12.so in /usr/lib/x86_64-linux-gnu so
+# lld can find it at build time. The system already ships libpython3.12.so.1.0
+# there; we just add the unversioned symlink that libpython3.12-dev would
+# normally provide. Using a relative target keeps this self-contained.
+if [[ ! -e /usr/lib/x86_64-linux-gnu/libpython3.12.so ]]; then
+    ln -sf libpython3.12.so.1.0 /usr/lib/x86_64-linux-gnu/libpython3.12.so
+    ok "linker symlink: /usr/lib/x86_64-linux-gnu/libpython3.12.so -> libpython3.12.so.1.0"
+else
+    ok "linker symlink already present: /usr/lib/x86_64-linux-gnu/libpython3.12.so"
+fi
+ldconfig
 
 # ── 3. Payload build toolchains (teamserver only) ─────────────────────────────
 

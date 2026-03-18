@@ -16,6 +16,7 @@ use red_cell_common::tls::{
     TlsKeyAlgorithm, install_default_crypto_provider, resolve_or_persist_tls_identity,
 };
 use tokio::net::lookup_host;
+use tower_http::normalize_path::NormalizePathLayer;
 use tracing::{info, instrument};
 
 mod logging;
@@ -109,7 +110,8 @@ async fn main() -> Result<()> {
         login_rate_limiter: LoginRateLimiter::new(),
         shutdown: shutdown.clone(),
     };
-    let router = build_router(state.clone());
+    let router = build_router(state.clone())
+        .layer(NormalizePathLayer::trim_trailing_slash());
     let handle = Handle::new();
 
     let shutdown_task =

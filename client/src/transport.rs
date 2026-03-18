@@ -472,6 +472,9 @@ pub(crate) struct AppState {
     pub(crate) connected_operators: BTreeMap<String, ConnectedOperatorState>,
     /// Set when the last connection attempt failed due to a TLS certificate error.
     pub(crate) tls_failure: Option<TlsFailure>,
+    /// Stores the most recent authentication error message so it remains accessible
+    /// even after the connection status transitions from `Error` to `Retrying`.
+    pub(crate) last_auth_error: Option<String>,
 }
 
 impl AppState {
@@ -490,6 +493,7 @@ impl AppState {
             online_operators: BTreeSet::new(),
             connected_operators: BTreeMap::new(),
             tls_failure: None,
+            last_auth_error: None,
         }
     }
 
@@ -516,6 +520,7 @@ impl AppState {
                 );
             }
             OperatorMessage::InitConnectionError(message) => {
+                self.last_auth_error = Some(message.info.message.clone());
                 self.connection_status = ConnectionStatus::Error(message.info.message.clone());
                 self.push_event(
                     EventKind::System,

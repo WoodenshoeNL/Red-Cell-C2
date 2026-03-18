@@ -32,7 +32,7 @@ use transport::{
 };
 
 const WINDOW_TITLE: &str = "Red Cell Client";
-const DEFAULT_SERVER_URL: &str = "wss://127.0.0.1:40056/havoc/";
+const DEFAULT_SERVER_URL: &str = "wss://127.0.0.1:40056/havoc";
 const INITIAL_WINDOW_SIZE: [f32; 2] = [1600.0, 900.0];
 const MINIMUM_WINDOW_SIZE: [f32; 2] = [1280.0, 720.0];
 const SESSION_GRAPH_HEIGHT: f32 = 280.0;
@@ -517,6 +517,12 @@ impl ClientApp {
                 let snap = Self::snapshot(app_state);
                 let error = match &snap.connection_status {
                     ConnectionStatus::Error(msg) => Some(msg.clone()),
+                    // The transport may overwrite an Error state with Retrying before the
+                    // UI gets a chance to observe Error. Fall back to the stored auth error
+                    // so the login dialog shows the actual failure reason.
+                    ConnectionStatus::Retrying(_) | ConnectionStatus::Disconnected => {
+                        snap.last_auth_error.clone()
+                    }
                     _ => None,
                 };
                 (snap, error)

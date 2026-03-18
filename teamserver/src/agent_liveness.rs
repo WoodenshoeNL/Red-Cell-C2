@@ -884,6 +884,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sweep_side_effects_persist_when_audit_database_fails() -> Result<(), TeamserverError> {
+        // The audit write is spawned as a background task.  If the database pool
+        // used for auditing is closed, that write must fail silently (logged via
+        // tracing::warn) while the important side effects — agent marked dead,
+        // AgentUpdate event broadcast, and SOCKS relay state pruned — still occur.
+        let profile = sample_profile(None, 5); // sleep=5 → timeout=15 s
+        let config = AgentLivenessConfig::from_profile(&profile);
+
+        // Working database for the registry (agent state).
+        let registry_db = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(registry_db.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+
+        let agent = sample_agent(0xFA11_FA11);
+        registry.insert(agent.clone()).await?;
+        sockets.add_socks_server(agent.agent_id, "0").await.map_err(|error| {
+            TeamserverError::InvalidPersistedValue {
+                field: "socket_relay",
+                message: error.to_string(),
+            }
+        })?;
+
+        // Separate database for audit writes — close it so every INSERT fails.
+        let audit_db = Database::connect_in_memory().await?;
+        audit_db.close().await;
+
+        let mut receiver = events.subscribe();
+
+        let dead = sweep_dead_agents_at(
+            &registry,
+            &sockets,
+            &events,
+            &audit_db, // closed → audit write will fail
+            config,
+            time::macros::datetime!(2026-03-10 10:00:15 UTC),
+        )
+        .await?;
+
+        // Side-effect 1: stale agent is returned as dead.
+        assert_eq!(dead, vec![agent.agent_id]);
+
+        // Side-effect 2: agent is marked dead in the registry.
+        let stored = registry
+            .get(agent.agent_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?;
+        assert!(!stored.active);
+        assert_eq!(stored.reason, "agent timed out after 15 seconds without callback");
+
+        // Side-effect 3: SOCKS relay state is pruned.
+        assert_eq!(sockets.list_socks_servers(agent.agent_id).await, "No active SOCKS5 servers");
+
+        // Side-effect 4: AgentUpdate event was broadcast to operators.
+        let event = receiver.recv().await.ok_or(TeamserverError::InvalidPersistedValue {
+            field: "operator_event",
+            message: "missing dead-agent event".to_owned(),
+        })?;
+        let OperatorMessage::AgentUpdate(message) = event else {
+            return Err(TeamserverError::InvalidPersistedValue {
+                field: "operator_event",
+                message: "expected AgentUpdate event".to_owned(),
+            });
+        };
+        assert_eq!(message.info.agent_id, "FA11FA11");
+        assert_eq!(message.info.marked, "Dead");
+
+        // Give the spawned audit task a moment to run and fail gracefully
+        // (it should log a warning, not panic).
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Confirm no audit entry was written (the audit DB is closed).
+        // Use the registry DB to show that no audit row leaked there either.
+        let entries = registry_db.audit_log().list().await?;
+        assert!(
+            entries.iter().all(|e| e.action != "agent.dead"),
+            "no agent.dead audit entry should exist when the audit database is closed",
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn sweep_records_agent_dead_audit_entry() -> Result<(), TeamserverError> {
         // Verify that marking a stale agent dead via the sweep writes an
         // agent.dead audit log entry with actor="teamserver".

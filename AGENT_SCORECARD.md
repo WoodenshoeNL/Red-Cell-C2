@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 297 | 195 | 31 |
+| Tasks closed | 300 | 195 | 31 |
 | Bugs filed against | 40 | 34 | 9 |
 | Bug rate (bugs/task) | 0.13 | 0.17 | 0.29 |
 | Quality score | 87% | 83% | 71% |
@@ -37,6 +37,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-18 05:00 — c909dc2..c2e141e
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (dev02-opus) | 3 | 0 | Closed 30bu, 2m78, 3aw9. WebSocket route wiring tests, SOCKS5 empty-stream and partial-port truncation tests, RBAC unknown-token rejection tests. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (1,043 tests passing, 0 warnings)
+Notes: Clean review — all 3 closures are test-only additions. 7 new tests total: 3 websocket route wiring tests (websocket.rs), 2 SOCKS5 edge case tests (sockets.rs), 2 RBAC extractor tests (rbac.rs). One task in progress: cr4b (plugin runtime failure tests, just claimed). No bugs filed.
 
 ### QA Review — 2026-03-18 23:00 — 298e4ca..f1fb997
 

@@ -257,6 +257,137 @@ mod tests {
         );
     }
 
+    /// Verify that the serialized JSON field names match the Havoc wire protocol.
+    ///
+    /// A `#[serde(rename = "...")]` change or field rename in `AgentInfo` would
+    /// silently break Havoc client compatibility — all Rust-level assertions would
+    /// still pass but the operator client would receive unknown keys.
+    #[test]
+    fn operator_agent_info_serialized_json_keys_match_havoc_wire_protocol() {
+        let agent = sample_agent(0x1112_1314);
+        let pivots =
+            PivotInfo { parent: Some(0x0102_0304), children: vec![0x2122_2324, 0x3132_3334] };
+
+        let info = operator_agent_info("http-main", 0xDEAD_BEEF, &agent, &pivots);
+        let json = serde_json::to_value(&info).expect("AgentInfo must serialize to JSON");
+        let obj = json.as_object().expect("serialized AgentInfo must be a JSON object");
+
+        // Assert every Havoc-expected key is present with the correct value.
+        assert_eq!(obj["NameID"], "11121314");
+        assert_eq!(obj["MagicValue"], "deadbeef");
+        assert_eq!(obj["Active"], "true");
+        assert_eq!(obj["Listener"], "http-main");
+
+        // Identity / host fields
+        assert_eq!(obj["Hostname"], "wkstn-01");
+        assert_eq!(obj["Username"], "operator");
+        assert_eq!(obj["DomainName"], "REDCELL");
+        assert_eq!(obj["ExternalIP"], "203.0.113.10");
+        assert_eq!(obj["InternalIP"], "10.0.0.25");
+
+        // Process fields
+        assert_eq!(obj["ProcessName"], "explorer.exe");
+        assert_eq!(obj["ProcessPath"], "C:\\Windows\\explorer.exe");
+        assert_eq!(obj["ProcessPID"], "1337");
+        assert_eq!(obj["ProcessPPID"], "512");
+        assert_eq!(obj["ProcessArch"], "x64");
+
+        // OS fields
+        assert_eq!(obj["OSVersion"], "Windows 11");
+        assert_eq!(obj["OSBuild"], "22000");
+        assert_eq!(obj["OSArch"], "x64");
+
+        // Timing / sleep fields
+        assert_eq!(obj["SleepDelay"], 15);
+        assert_eq!(obj["SleepJitter"], 20);
+        assert_eq!(obj["FirstCallIn"], "2026-03-09T18:45:00Z");
+        assert_eq!(obj["LastCallIn"], "2026-03-09T18:46:00Z");
+        assert_eq!(obj["KillDate"], 1_893_456_000);
+        assert_eq!(obj["WorkingHours"], 0b101010);
+
+        // Pivot fields
+        assert_eq!(obj["PivotParent"], "01020304");
+        let pivots_obj = obj["Pivots"].as_object().expect("Pivots must be a JSON object");
+        assert_eq!(pivots_obj["Parent"], "01020304");
+        assert_eq!(pivots_obj["Links"], serde_json::json!(["21222324", "31323334"]));
+
+        // Boolean / state fields
+        assert_eq!(obj["BackgroundCheck"], false);
+        assert_eq!(obj["TaskedOnce"], false);
+        assert_eq!(obj["Elevated"], true);
+
+        // Collection fields
+        assert_eq!(obj["PortFwds"], serde_json::json!([]));
+        assert_eq!(obj["SocksCli"], serde_json::json!([]));
+        assert_eq!(obj["SocksSvr"], serde_json::json!([]));
+
+        // Verify no unexpected keys are present — the full set of required keys.
+        let expected_keys: std::collections::BTreeSet<&str> = [
+            "Active",
+            "BackgroundCheck",
+            "DomainName",
+            "Elevated",
+            "InternalIP",
+            "ExternalIP",
+            "FirstCallIn",
+            "LastCallIn",
+            "Hostname",
+            "Listener",
+            "MagicValue",
+            "NameID",
+            "OSArch",
+            "OSBuild",
+            "OSVersion",
+            "Pivots",
+            "PortFwds",
+            "ProcessArch",
+            "ProcessName",
+            "ProcessPID",
+            "ProcessPPID",
+            "ProcessPath",
+            "Reason",
+            "SleepDelay",
+            "SleepJitter",
+            "KillDate",
+            "WorkingHours",
+            "SocksCli",
+            "SocksSvr",
+            "TaskedOnce",
+            "Username",
+            "PivotParent",
+        ]
+        .iter()
+        .copied()
+        .collect();
+
+        let actual_keys: std::collections::BTreeSet<&str> =
+            obj.keys().map(String::as_str).collect();
+
+        assert_eq!(
+            expected_keys, actual_keys,
+            "serialized AgentInfo keys must exactly match the Havoc wire protocol"
+        );
+    }
+
+    /// When `note` is non-empty, the `Note` key must appear in the serialized JSON.
+    /// When `SocksCliMtx` is `Some`, it must also appear. These fields use
+    /// `skip_serializing_if` and could silently vanish if the condition is wrong.
+    #[test]
+    fn operator_agent_info_conditional_fields_appear_when_populated() {
+        let mut agent = sample_agent(0x1112_1314);
+        agent.note = "high-value target".to_owned();
+        let pivots = PivotInfo { parent: None, children: vec![] };
+
+        let mut info = operator_agent_info("http", 0xDEAD_BEEF, &agent, &pivots);
+        info.socks_cli_mtx = Some(serde_json::Value::String("mutex-1".to_owned()));
+
+        let json = serde_json::to_value(&info).expect("AgentInfo must serialize to JSON");
+        let obj = json.as_object().expect("serialized AgentInfo must be a JSON object");
+
+        assert_eq!(obj["Note"], "high-value target", "Note must appear when non-empty");
+        assert_eq!(obj["SocksCliMtx"], "mutex-1", "SocksCliMtx must appear when Some");
+    }
+
     #[test]
     fn operator_agent_info_none_kill_date_and_working_hours_emit_null() {
         let mut agent = sample_agent(0x1112_1314);

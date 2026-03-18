@@ -12,7 +12,6 @@ use red_cell::{
     ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
     SocketRelayManager, TeamserverState, websocket_routes,
 };
-use red_cell_common::HttpListenerConfig;
 use red_cell_common::config::Profile;
 use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len};
 use red_cell_common::demon::DemonCommand;
@@ -105,31 +104,6 @@ async fn register_agent(
     Ok(ctr_blocks_for_len(bytes.len()))
 }
 
-/// Build an HTTP listener config with the given `name` and `port`.
-fn http_listener(name: &str, port: u16) -> red_cell_common::ListenerConfig {
-    red_cell_common::ListenerConfig::from(HttpListenerConfig {
-        name: name.to_owned(),
-        kill_date: None,
-        working_hours: None,
-        hosts: vec!["127.0.0.1".to_owned()],
-        host_bind: "127.0.0.1".to_owned(),
-        host_rotation: "round-robin".to_owned(),
-        port_bind: port,
-        port_conn: Some(port),
-        method: Some("POST".to_owned()),
-        behind_redirector: false,
-        trusted_proxy_peers: Vec::new(),
-        user_agent: None,
-        headers: Vec::new(),
-        uris: vec!["/".to_owned()],
-        host_header: None,
-        secure: false,
-        cert: None,
-        response: None,
-        proxy: None,
-    })
-}
-
 // ---------------------------------------------------------------------------
 // Payload builders
 // ---------------------------------------------------------------------------
@@ -176,7 +150,9 @@ async fn screenshot_callback_stores_loot_and_broadcasts_events()
     let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(http_listener("screenshot-success-test", listener_port)).await?;
+    listeners
+        .create(common::http_listener_config("screenshot-success-test", listener_port))
+        .await?;
     drop(listener_guard);
     listeners.start("screenshot-success-test").await?;
     common::wait_for_listener(listener_port).await?;
@@ -297,7 +273,7 @@ async fn screenshot_callback_failure_broadcasts_error_no_loot()
     let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(http_listener("screenshot-fail-test", listener_port)).await?;
+    listeners.create(common::http_listener_config("screenshot-fail-test", listener_port)).await?;
     drop(listener_guard);
     listeners.start("screenshot-fail-test").await?;
     common::wait_for_listener(listener_port).await?;
@@ -357,7 +333,7 @@ async fn screenshot_callback_empty_bytes_broadcasts_error_no_loot()
     let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(http_listener("screenshot-empty-test", listener_port)).await?;
+    listeners.create(common::http_listener_config("screenshot-empty-test", listener_port)).await?;
     drop(listener_guard);
     listeners.start("screenshot-empty-test").await?;
     common::wait_for_listener(listener_port).await?;
@@ -442,7 +418,9 @@ async fn screenshot_callback_truncated_after_success_flag_rejects()
     let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(http_listener("screenshot-trunc-flag-test", listener_port)).await?;
+    listeners
+        .create(common::http_listener_config("screenshot-trunc-flag-test", listener_port))
+        .await?;
     drop(listener_guard);
     listeners.start("screenshot-trunc-flag-test").await?;
     common::wait_for_listener(listener_port).await?;
@@ -496,7 +474,9 @@ async fn screenshot_callback_overstated_length_rejects() -> Result<(), Box<dyn s
     let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(http_listener("screenshot-overlen-test", listener_port)).await?;
+    listeners
+        .create(common::http_listener_config("screenshot-overlen-test", listener_port))
+        .await?;
     drop(listener_guard);
     listeners.start("screenshot-overlen-test").await?;
     common::wait_for_listener(listener_port).await?;

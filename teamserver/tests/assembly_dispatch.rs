@@ -5,7 +5,6 @@ use red_cell::{
     ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
     SocketRelayManager, TeamserverState, websocket_routes,
 };
-use red_cell_common::HttpListenerConfig;
 use red_cell_common::config::Profile;
 use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len};
 use red_cell_common::demon::DemonCommand;
@@ -148,29 +147,7 @@ async fn bof_output_callback_broadcasts_output_to_operator()
     let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
     common::login(&mut socket).await?;
 
-    listeners
-        .create(red_cell_common::ListenerConfig::from(HttpListenerConfig {
-            name: "asm-test-bof-out".to_owned(),
-            kill_date: None,
-            working_hours: None,
-            hosts: vec!["127.0.0.1".to_owned()],
-            host_bind: "127.0.0.1".to_owned(),
-            host_rotation: "round-robin".to_owned(),
-            port_bind: listener_port,
-            port_conn: Some(listener_port),
-            method: Some("POST".to_owned()),
-            behind_redirector: false,
-            trusted_proxy_peers: Vec::new(),
-            user_agent: None,
-            headers: Vec::new(),
-            uris: vec!["/".to_owned()],
-            host_header: None,
-            secure: false,
-            cert: None,
-            response: None,
-            proxy: None,
-        }))
-        .await?;
+    listeners.create(common::http_listener_config("asm-test-bof-out", listener_port)).await?;
     drop(listener_guard);
     listeners.start("asm-test-bof-out").await?;
     common::wait_for_listener(listener_port).await?;
@@ -229,29 +206,7 @@ async fn bof_ran_ok_callback_broadcasts_completion() -> Result<(), Box<dyn std::
     let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
     common::login(&mut socket).await?;
 
-    listeners
-        .create(red_cell_common::ListenerConfig::from(HttpListenerConfig {
-            name: "asm-test-bof-ok".to_owned(),
-            kill_date: None,
-            working_hours: None,
-            hosts: vec!["127.0.0.1".to_owned()],
-            host_bind: "127.0.0.1".to_owned(),
-            host_rotation: "round-robin".to_owned(),
-            port_bind: listener_port,
-            port_conn: Some(listener_port),
-            method: Some("POST".to_owned()),
-            behind_redirector: false,
-            trusted_proxy_peers: Vec::new(),
-            user_agent: None,
-            headers: Vec::new(),
-            uris: vec!["/".to_owned()],
-            host_header: None,
-            secure: false,
-            cert: None,
-            response: None,
-            proxy: None,
-        }))
-        .await?;
+    listeners.create(common::http_listener_config("asm-test-bof-ok", listener_port)).await?;
     drop(listener_guard);
     listeners.start("asm-test-bof-ok").await?;
     common::wait_for_listener(listener_port).await?;
@@ -308,29 +263,7 @@ async fn assembly_list_versions_broadcasts_formatted_list() -> Result<(), Box<dy
     let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
     common::login(&mut socket).await?;
 
-    listeners
-        .create(red_cell_common::ListenerConfig::from(HttpListenerConfig {
-            name: "asm-test-list-ver".to_owned(),
-            kill_date: None,
-            working_hours: None,
-            hosts: vec!["127.0.0.1".to_owned()],
-            host_bind: "127.0.0.1".to_owned(),
-            host_rotation: "round-robin".to_owned(),
-            port_bind: listener_port,
-            port_conn: Some(listener_port),
-            method: Some("POST".to_owned()),
-            behind_redirector: false,
-            trusted_proxy_peers: Vec::new(),
-            user_agent: None,
-            headers: Vec::new(),
-            uris: vec!["/".to_owned()],
-            host_header: None,
-            secure: false,
-            cert: None,
-            response: None,
-            proxy: None,
-        }))
-        .await?;
+    listeners.create(common::http_listener_config("asm-test-list-ver", listener_port)).await?;
     drop(listener_guard);
     listeners.start("asm-test-list-ver").await?;
     common::wait_for_listener(listener_port).await?;
@@ -395,29 +328,7 @@ async fn assembly_inline_execute_clr_version_broadcast() -> Result<(), Box<dyn s
     let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
     common::login(&mut socket).await?;
 
-    listeners
-        .create(red_cell_common::ListenerConfig::from(HttpListenerConfig {
-            name: "asm-test-clr-ver".to_owned(),
-            kill_date: None,
-            working_hours: None,
-            hosts: vec!["127.0.0.1".to_owned()],
-            host_bind: "127.0.0.1".to_owned(),
-            host_rotation: "round-robin".to_owned(),
-            port_bind: listener_port,
-            port_conn: Some(listener_port),
-            method: Some("POST".to_owned()),
-            behind_redirector: false,
-            trusted_proxy_peers: Vec::new(),
-            user_agent: None,
-            headers: Vec::new(),
-            uris: vec!["/".to_owned()],
-            host_header: None,
-            secure: false,
-            cert: None,
-            response: None,
-            proxy: None,
-        }))
-        .await?;
+    listeners.create(common::http_listener_config("asm-test-clr-ver", listener_port)).await?;
     drop(listener_guard);
     listeners.start("asm-test-clr-ver").await?;
     common::wait_for_listener(listener_port).await?;

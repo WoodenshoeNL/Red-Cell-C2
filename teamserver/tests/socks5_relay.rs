@@ -16,7 +16,6 @@ use red_cell::{
     SocketRelayManager, TeamserverState, websocket_routes,
 };
 use red_cell_common::AgentEncryptionInfo;
-use red_cell_common::HttpListenerConfig;
 use red_cell_common::config::Profile;
 use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len};
 use red_cell_common::demon::{DemonCommand, DemonSocketCommand, DemonSocketType};
@@ -558,31 +557,6 @@ async fn start_dispatch_server() -> Result<
     Ok((addr, listeners, registry, sockets))
 }
 
-/// Build an HTTP listener config bound to `port` with the given `name`.
-fn dispatch_http_listener(name: &str, port: u16) -> red_cell_common::ListenerConfig {
-    red_cell_common::ListenerConfig::from(HttpListenerConfig {
-        name: name.to_owned(),
-        kill_date: None,
-        working_hours: None,
-        hosts: vec!["127.0.0.1".to_owned()],
-        host_bind: "127.0.0.1".to_owned(),
-        host_rotation: "round-robin".to_owned(),
-        port_bind: port,
-        port_conn: Some(port),
-        method: Some("POST".to_owned()),
-        behind_redirector: false,
-        trusted_proxy_peers: Vec::new(),
-        user_agent: None,
-        headers: Vec::new(),
-        uris: vec!["/".to_owned()],
-        host_header: None,
-        secure: false,
-        cert: None,
-        response: None,
-        proxy: None,
-    })
-}
-
 /// Register an agent via `DEMON_INIT` and return the AES-CTR block offset after init.
 async fn dispatch_register_agent(
     client: &reqwest::Client,
@@ -611,7 +585,7 @@ async fn socket_connect_callback_routes_to_relay_finish_connect()
     let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
     let client = reqwest::Client::new();
 
-    listeners.create(dispatch_http_listener("sock-dispatch-connect", listener_port)).await?;
+    listeners.create(common::http_listener_config("sock-dispatch-connect", listener_port)).await?;
     drop(listener_guard);
     listeners.start("sock-dispatch-connect").await?;
     common::wait_for_listener(listener_port).await?;
@@ -682,7 +656,7 @@ async fn socket_close_callback_routes_to_relay_close_client()
     let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
     let client = reqwest::Client::new();
 
-    listeners.create(dispatch_http_listener("sock-dispatch-close", listener_port)).await?;
+    listeners.create(common::http_listener_config("sock-dispatch-close", listener_port)).await?;
     drop(listener_guard);
     listeners.start("sock-dispatch-close").await?;
     common::wait_for_listener(listener_port).await?;

@@ -12,6 +12,7 @@ use red_cell::{
     ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
     SocketRelayManager, TeamserverState, websocket_routes,
 };
+use red_cell_common::HttpListenerConfig;
 use red_cell_common::OperatorInfo;
 use red_cell_common::config::Profile;
 use red_cell_common::crypto::{
@@ -295,6 +296,32 @@ pub fn command_output_payload(output: &str) -> Vec<u8> {
     payload.extend_from_slice(&u32::try_from(output.len()).unwrap_or_default().to_le_bytes());
     payload.extend_from_slice(output.as_bytes());
     payload
+}
+
+/// Build an [`HttpListenerConfig`] wrapped in a [`ListenerConfig`] with sensible
+/// test defaults.  Only `name` and `port` vary across tests.
+pub fn http_listener_config(name: &str, port: u16) -> red_cell_common::ListenerConfig {
+    red_cell_common::ListenerConfig::from(HttpListenerConfig {
+        name: name.to_owned(),
+        kill_date: None,
+        working_hours: None,
+        hosts: vec!["127.0.0.1".to_owned()],
+        host_bind: "127.0.0.1".to_owned(),
+        host_rotation: "round-robin".to_owned(),
+        port_bind: port,
+        port_conn: Some(port),
+        method: Some("POST".to_owned()),
+        behind_redirector: false,
+        trusted_proxy_peers: Vec::new(),
+        user_agent: None,
+        headers: Vec::new(),
+        uris: vec!["/".to_owned()],
+        host_header: None,
+        secure: false,
+        cert: None,
+        response: None,
+        proxy: None,
+    })
 }
 
 /// Append `value` to `buffer` as a BE-length-prefixed byte slice.

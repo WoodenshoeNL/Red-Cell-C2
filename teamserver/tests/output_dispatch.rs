@@ -5,7 +5,6 @@ use red_cell::{
     ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
     SocketRelayManager, TeamserverState, websocket_routes,
 };
-use red_cell_common::HttpListenerConfig;
 use red_cell_common::config::Profile;
 use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len};
 use red_cell_common::demon::{DemonCommand, DemonInfoClass};
@@ -138,29 +137,7 @@ async fn exit_callback_marks_agent_dead_and_broadcasts_update()
     let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
     common::login(&mut socket).await?;
 
-    listeners
-        .create(red_cell_common::ListenerConfig::from(HttpListenerConfig {
-            name: "out-exit-test".to_owned(),
-            kill_date: None,
-            working_hours: None,
-            hosts: vec!["127.0.0.1".to_owned()],
-            host_bind: "127.0.0.1".to_owned(),
-            host_rotation: "round-robin".to_owned(),
-            port_bind: listener_port,
-            port_conn: Some(listener_port),
-            method: Some("POST".to_owned()),
-            behind_redirector: false,
-            trusted_proxy_peers: Vec::new(),
-            user_agent: None,
-            headers: Vec::new(),
-            uris: vec!["/".to_owned()],
-            host_header: None,
-            secure: false,
-            cert: None,
-            response: None,
-            proxy: None,
-        }))
-        .await?;
+    listeners.create(common::http_listener_config("out-exit-test", listener_port)).await?;
     drop(listener_guard);
     listeners.start("out-exit-test").await?;
     common::wait_for_listener(listener_port).await?;
@@ -241,29 +218,7 @@ async fn demon_info_mem_alloc_broadcasts_response() -> Result<(), Box<dyn std::e
     let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
     common::login(&mut socket).await?;
 
-    listeners
-        .create(red_cell_common::ListenerConfig::from(HttpListenerConfig {
-            name: "out-info-test".to_owned(),
-            kill_date: None,
-            working_hours: None,
-            hosts: vec!["127.0.0.1".to_owned()],
-            host_bind: "127.0.0.1".to_owned(),
-            host_rotation: "round-robin".to_owned(),
-            port_bind: listener_port,
-            port_conn: Some(listener_port),
-            method: Some("POST".to_owned()),
-            behind_redirector: false,
-            trusted_proxy_peers: Vec::new(),
-            user_agent: None,
-            headers: Vec::new(),
-            uris: vec!["/".to_owned()],
-            host_header: None,
-            secure: false,
-            cert: None,
-            response: None,
-            proxy: None,
-        }))
-        .await?;
+    listeners.create(common::http_listener_config("out-info-test", listener_port)).await?;
     drop(listener_guard);
     listeners.start("out-info-test").await?;
     common::wait_for_listener(listener_port).await?;
@@ -330,29 +285,7 @@ async fn job_list_callback_broadcasts_formatted_table() -> Result<(), Box<dyn st
     let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
     common::login(&mut socket).await?;
 
-    listeners
-        .create(red_cell_common::ListenerConfig::from(HttpListenerConfig {
-            name: "out-job-test".to_owned(),
-            kill_date: None,
-            working_hours: None,
-            hosts: vec!["127.0.0.1".to_owned()],
-            host_bind: "127.0.0.1".to_owned(),
-            host_rotation: "round-robin".to_owned(),
-            port_bind: listener_port,
-            port_conn: Some(listener_port),
-            method: Some("POST".to_owned()),
-            behind_redirector: false,
-            trusted_proxy_peers: Vec::new(),
-            user_agent: None,
-            headers: Vec::new(),
-            uris: vec!["/".to_owned()],
-            host_header: None,
-            secure: false,
-            cert: None,
-            response: None,
-            proxy: None,
-        }))
-        .await?;
+    listeners.create(common::http_listener_config("out-job-test", listener_port)).await?;
     drop(listener_guard);
     listeners.start("out-job-test").await?;
     common::wait_for_listener(listener_port).await?;
@@ -415,29 +348,7 @@ async fn demon_info_truncated_payload_returns_error_no_broadcast()
     let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
     common::login(&mut socket).await?;
 
-    listeners
-        .create(red_cell_common::ListenerConfig::from(HttpListenerConfig {
-            name: "out-trunc-test".to_owned(),
-            kill_date: None,
-            working_hours: None,
-            hosts: vec!["127.0.0.1".to_owned()],
-            host_bind: "127.0.0.1".to_owned(),
-            host_rotation: "round-robin".to_owned(),
-            port_bind: listener_port,
-            port_conn: Some(listener_port),
-            method: Some("POST".to_owned()),
-            behind_redirector: false,
-            trusted_proxy_peers: Vec::new(),
-            user_agent: None,
-            headers: Vec::new(),
-            uris: vec!["/".to_owned()],
-            host_header: None,
-            secure: false,
-            cert: None,
-            response: None,
-            proxy: None,
-        }))
-        .await?;
+    listeners.create(common::http_listener_config("out-trunc-test", listener_port)).await?;
     drop(listener_guard);
     listeners.start("out-trunc-test").await?;
     common::wait_for_listener(listener_port).await?;
@@ -493,29 +404,7 @@ async fn exit_callback_empty_payload_returns_error_no_broadcast()
     let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
     common::login(&mut socket).await?;
 
-    listeners
-        .create(red_cell_common::ListenerConfig::from(HttpListenerConfig {
-            name: "out-exit-empty-test".to_owned(),
-            kill_date: None,
-            working_hours: None,
-            hosts: vec!["127.0.0.1".to_owned()],
-            host_bind: "127.0.0.1".to_owned(),
-            host_rotation: "round-robin".to_owned(),
-            port_bind: listener_port,
-            port_conn: Some(listener_port),
-            method: Some("POST".to_owned()),
-            behind_redirector: false,
-            trusted_proxy_peers: Vec::new(),
-            user_agent: None,
-            headers: Vec::new(),
-            uris: vec!["/".to_owned()],
-            host_header: None,
-            secure: false,
-            cert: None,
-            response: None,
-            proxy: None,
-        }))
-        .await?;
+    listeners.create(common::http_listener_config("out-exit-empty-test", listener_port)).await?;
     drop(listener_guard);
     listeners.start("out-exit-empty-test").await?;
     common::wait_for_listener(listener_port).await?;
@@ -569,29 +458,7 @@ async fn exit_callback_truncated_exit_method_returns_error_no_broadcast()
     let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
     common::login(&mut socket).await?;
 
-    listeners
-        .create(red_cell_common::ListenerConfig::from(HttpListenerConfig {
-            name: "out-exit-short-test".to_owned(),
-            kill_date: None,
-            working_hours: None,
-            hosts: vec!["127.0.0.1".to_owned()],
-            host_bind: "127.0.0.1".to_owned(),
-            host_rotation: "round-robin".to_owned(),
-            port_bind: listener_port,
-            port_conn: Some(listener_port),
-            method: Some("POST".to_owned()),
-            behind_redirector: false,
-            trusted_proxy_peers: Vec::new(),
-            user_agent: None,
-            headers: Vec::new(),
-            uris: vec!["/".to_owned()],
-            host_header: None,
-            secure: false,
-            cert: None,
-            response: None,
-            proxy: None,
-        }))
-        .await?;
+    listeners.create(common::http_listener_config("out-exit-short-test", listener_port)).await?;
     drop(listener_guard);
     listeners.start("out-exit-short-test").await?;
     common::wait_for_listener(listener_port).await?;

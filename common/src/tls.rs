@@ -527,6 +527,90 @@ mod tests {
     }
 
     #[test]
+    fn mismatched_cert_and_key_fails_server_config() {
+        let identity_a = generate_self_signed_tls_identity(
+            &["identity-a.local".to_owned()],
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("identity A generation should succeed");
+
+        let identity_b = generate_self_signed_tls_identity(
+            &["identity-b.local".to_owned()],
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("identity B generation should succeed");
+
+        // Combine cert from A with key from B — a realistic misconfiguration.
+        let mismatched =
+            load_tls_identity(identity_a.certificate_pem(), identity_b.private_key_pem())
+                .expect("PEM parsing should succeed even with mismatched material");
+
+        let error =
+            mismatched.server_config().expect_err("mismatched cert/key must be rejected by rustls");
+
+        assert!(
+            matches!(error, TlsError::Rustls(_)),
+            "expected TlsError::Rustls for mismatched cert/key, got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn mismatched_cert_and_key_fails_tls_acceptor() {
+        let identity_a = generate_self_signed_tls_identity(
+            &["acceptor-a.local".to_owned()],
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("identity A generation should succeed");
+
+        let identity_b = generate_self_signed_tls_identity(
+            &["acceptor-b.local".to_owned()],
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("identity B generation should succeed");
+
+        let mismatched =
+            load_tls_identity(identity_a.certificate_pem(), identity_b.private_key_pem())
+                .expect("PEM parsing should succeed even with mismatched material");
+
+        let error = match mismatched.tls_acceptor() {
+            Err(e) => e,
+            Ok(_) => panic!("mismatched cert/key must be rejected by tls_acceptor"),
+        };
+
+        assert!(
+            matches!(error, TlsError::Rustls(_)),
+            "expected TlsError::Rustls for mismatched cert/key via tls_acceptor, got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn mismatched_rsa_cert_and_ecdsa_key_fails_server_config() {
+        let rsa_identity =
+            generate_self_signed_tls_identity(&["rsa.local".to_owned()], TlsKeyAlgorithm::Rsa2048)
+                .expect("RSA identity generation should succeed");
+
+        let ecdsa_identity = generate_self_signed_tls_identity(
+            &["ecdsa.local".to_owned()],
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("ECDSA identity generation should succeed");
+
+        // Cross-algorithm mismatch: RSA cert with ECDSA key.
+        let mismatched =
+            load_tls_identity(rsa_identity.certificate_pem(), ecdsa_identity.private_key_pem())
+                .expect("PEM parsing should succeed even with cross-algorithm material");
+
+        let error = mismatched
+            .server_config()
+            .expect_err("cross-algorithm cert/key must be rejected by rustls");
+
+        assert!(
+            matches!(error, TlsError::Rustls(_)),
+            "expected TlsError::Rustls for cross-algorithm mismatch, got: {error:?}"
+        );
+    }
+
+    #[test]
     fn resolve_or_persist_generates_and_writes_pem_files_on_first_boot() {
         let temp_dir = tempfile::TempDir::new().expect("temporary directory should be created");
         let cert_path = temp_dir.path().join("teamserver.tls.crt");

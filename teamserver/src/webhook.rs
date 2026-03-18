@@ -968,4 +968,45 @@ mod tests {
 
         server.abort();
     }
+
+    /// When an in-flight delivery never completes before the shutdown deadline,
+    /// `shutdown()` must return `false` rather than hanging or reporting success.
+    #[tokio::test]
+    async fn shutdown_returns_false_when_delivery_exceeds_timeout() {
+        // Spin up a server that accepts connections but never sends a response.
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener should bind");
+        let address = listener.local_addr().expect("listener address should resolve");
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = listener.accept().await else {
+                    break;
+                };
+                // Hold the connection open without responding.
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(300)).await;
+                    drop(socket);
+                });
+            }
+        });
+
+        let notifier = AuditWebhookNotifier {
+            retry_delays: Arc::from([].as_slice()),
+            ..AuditWebhookNotifier::from_profile(&discord_profile(address))
+        };
+
+        // Fire a detached notification — it will hang waiting for a response.
+        notifier.notify_audit_record_detached(sample_record(50));
+
+        // Give the spawned task a moment to start the HTTP request.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // shutdown with a very short timeout must return false.
+        let drained = notifier.shutdown(Duration::from_millis(50)).await;
+        assert!(
+            !drained,
+            "shutdown must return false when a delivery is still in-flight past the deadline"
+        );
+
+        server.abort();
+    }
 }

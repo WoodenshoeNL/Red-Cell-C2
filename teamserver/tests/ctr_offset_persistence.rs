@@ -267,3 +267,81 @@ async fn concurrent_encrypt_for_agent_no_offset_collision() -> Result<(), Box<dy
 
     Ok(())
 }
+
+/// After a reload, `decrypt_from_agent` must decrypt ciphertext produced at the persisted CTR
+/// offset and advance the offset correctly — proving the inbound decryption path also resumes
+/// from the stored keystream position rather than resetting to block 0.
+#[tokio::test]
+async fn decrypt_from_agent_uses_persisted_ctr_offset_after_reload()
+-> Result<(), Box<dyn std::error::Error>> {
+    let key = [0x55_u8; AGENT_KEY_LENGTH];
+    let iv = [0x66_u8; AGENT_IV_LENGTH];
+    let agent_id: u32 = 0xDE_C0DE_01;
+
+    let database = Database::connect_in_memory().await?;
+
+    // --- Phase 1: register agent and advance CTR offset with outbound encryptions ---
+    let pre_messages: &[&[u8]] =
+        &[b"outbound message one", b"outbound message two, a bit longer to push the block counter"];
+
+    let offset_before_reload = {
+        let registry = AgentRegistry::new(database.clone());
+        let agent = sample_agent_with_crypto(agent_id, key, iv);
+        registry.insert(agent).await?;
+
+        let mut running_offset: u64 = 0;
+        for msg in pre_messages {
+            registry.encrypt_for_agent(agent_id, msg).await?;
+            running_offset += ctr_blocks_for_len(msg.len());
+        }
+
+        let stored = registry.ctr_offset(agent_id).await?;
+        assert_eq!(stored, running_offset, "pre-reload offset mismatch");
+        running_offset
+        // registry dropped — simulated restart
+    };
+
+    // --- Phase 2: prepare a ciphertext that the *agent* would send at the persisted offset ---
+    // In the real protocol the agent encrypts from the same offset the teamserver expects.
+    let inbound_plaintext = b"callback payload sent by agent after teamserver restart";
+    let reference_ciphertext =
+        encrypt_agent_data_at_offset(&key, &iv, offset_before_reload, inbound_plaintext)?;
+
+    // --- Phase 3: reload the registry and decrypt the inbound ciphertext ---
+    let reloaded = AgentRegistry::load(database).await?;
+
+    // Sanity: the reloaded offset should match what was persisted.
+    assert_eq!(
+        reloaded.ctr_offset(agent_id).await?,
+        offset_before_reload,
+        "reloaded offset mismatch before decrypt"
+    );
+
+    let decrypted = reloaded.decrypt_from_agent(agent_id, &reference_ciphertext).await?;
+    assert_eq!(
+        decrypted, inbound_plaintext,
+        "decrypt_from_agent after reload must recover the original plaintext; \
+         failure means the inbound CTR offset was not restored from the database"
+    );
+
+    // --- Phase 4: verify the offset advanced by the correct number of blocks ---
+    let expected_post_decrypt_offset =
+        offset_before_reload + ctr_blocks_for_len(inbound_plaintext.len());
+    let post_decrypt_offset = reloaded.ctr_offset(agent_id).await?;
+    assert_eq!(
+        post_decrypt_offset, expected_post_decrypt_offset,
+        "after decrypt_from_agent the CTR offset should advance from {offset_before_reload} \
+         to {expected_post_decrypt_offset}, got {post_decrypt_offset}"
+    );
+
+    // --- Phase 5: confirm that decrypting at offset 0 would NOT produce valid plaintext ---
+    let wrong_plaintext = decrypt_agent_data_at_offset(&key, &iv, 0, &reference_ciphertext)?;
+    assert_ne!(
+        wrong_plaintext.as_slice(),
+        inbound_plaintext,
+        "test invariant violated: ciphertext at persisted offset is identical to offset 0; \
+         increase pre-reload messages to push the offset further"
+    );
+
+    Ok(())
+}

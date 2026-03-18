@@ -671,9 +671,18 @@ impl AgentRegistry {
     ) -> Result<AgentRecord, TeamserverError> {
         let entry =
             self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
+        let last_call_in = last_call_in.into();
+
+        // Snapshot the fields we are about to mutate so we can roll back on
+        // persistence failure and keep in-memory state consistent with SQLite.
+        let (prev_last_call_in, prev_active, prev_reason) = {
+            let info = entry.info.read().await;
+            (info.last_call_in.clone(), info.active, info.reason.clone())
+        };
+
         let updated = {
             let mut info = entry.info.write().await;
-            info.last_call_in = last_call_in.into();
+            info.last_call_in = last_call_in;
             if !info.active {
                 info.active = true;
                 info.reason.clear();
@@ -682,7 +691,15 @@ impl AgentRegistry {
         };
 
         let listener_name = entry.listener_name.read().await.clone();
-        self.repository.update_with_listener(&updated, &listener_name).await?;
+        if let Err(err) = self.repository.update_with_listener(&updated, &listener_name).await {
+            // Roll back the in-memory mutation so callers never observe a
+            // state that diverges from what is persisted.
+            let mut info = entry.info.write().await;
+            info.last_call_in = prev_last_call_in;
+            info.active = prev_active;
+            info.reason = prev_reason;
+            return Err(err);
+        }
         Ok(updated)
     }
 
@@ -2452,6 +2469,43 @@ mod tests {
         assert!(
             matches!(error, TeamserverError::AgentNotFound { agent_id } if agent_id == unknown_id)
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn set_last_call_in_rolls_back_in_memory_state_on_persistence_failure()
+    -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let mut agent = sample_agent(0x1000_00C3);
+        // Start the agent as inactive with a reason so the revival branch is exercised.
+        agent.active = false;
+        agent.reason = "connection lost".to_owned();
+        agent.last_call_in = "2026-03-09T18:00:00Z".to_owned();
+        registry.insert(agent.clone()).await?;
+        // Mark dead through the registry so persistence is consistent.
+        registry.mark_dead(agent.agent_id, "connection lost").await?;
+
+        let before = registry
+            .get(agent.agent_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?;
+
+        // Close the pool to force any subsequent DB write to fail.
+        database.close().await;
+
+        let result = registry.set_last_call_in(agent.agent_id, "2026-03-10T12:00:00Z").await;
+        assert!(result.is_err(), "set_last_call_in must fail when the database is closed");
+
+        // The in-memory record must be unchanged — no partial mutation.
+        let after = registry
+            .get(agent.agent_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?;
+        assert_eq!(after.last_call_in, before.last_call_in);
+        assert_eq!(after.active, before.active);
+        assert_eq!(after.reason, before.reason);
 
         Ok(())
     }

@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 272 | 195 | 31 |
+| Tasks closed | 281 | 195 | 31 |
 | Bugs filed against | 40 | 34 | 9 |
-| Bug rate (bugs/task) | 0.15 | 0.17 | 0.29 |
-| Quality score | 85% | 83% | 71% |
+| Bug rate (bugs/task) | 0.14 | 0.17 | 0.29 |
+| Quality score | 86% | 83% | 71% |
 
 ## Violation Breakdown
 
@@ -2112,3 +2112,14 @@ Notes: Clean review — no code quality, security, or architecture issues. All c
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (985 unit tests, 0 failures)
 Notes: Clean review — no code quality, security, or architecture issues. All changes are test additions with no production code modified. Claude running total now 272 tasks closed, quality score holds at 85%.
+
+### QA Review — 2026-03-18 03:00 — a1dc499..3941e90
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 9 | 0 | All test-only: TLS connector, auth, checkin, payload cache, SOCKS5, exit/screenshot dispatch |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (995 unit + 189 integration, 0 failures)
+Notes: Clean review — all 9 closed tasks are test additions with no production code changes. No unwrap in prod paths, no security issues, no architecture drift. Claude quality score improved to 86% (bug rate 0.14). One issue (red-cell-c2-2f7k) currently in_progress — recently claimed, not stale.

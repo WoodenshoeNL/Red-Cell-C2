@@ -141,3 +141,221 @@ pub(super) async fn handle_assembly_list_versions_callback(
     )?);
     Ok(None)
 }
+
+#[cfg(test)]
+mod tests {
+    use red_cell_common::demon::DemonCommand;
+    use red_cell_common::operator::OperatorMessage;
+
+    use super::*;
+
+    const AGENT_ID: u32 = 0xCAFE_BABE;
+    const REQUEST_ID: u32 = 42;
+
+    fn add_u32(buf: &mut Vec<u8>, value: u32) {
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn add_bytes(buf: &mut Vec<u8>, value: &[u8]) {
+        add_u32(buf, u32::try_from(value.len()).unwrap_or_default());
+        buf.extend_from_slice(value);
+    }
+
+    fn add_utf16(buf: &mut Vec<u8>, value: &str) {
+        let mut encoded: Vec<u8> = value.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        encoded.extend_from_slice(&[0, 0]);
+        add_bytes(buf, &encoded);
+    }
+
+    // --- handle_inline_execute_callback ---
+
+    #[tokio::test]
+    async fn inline_execute_empty_payload_returns_error() {
+        let events = EventBus::new(8);
+        let result = handle_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &[]).await;
+
+        match result {
+            Err(CommandDispatchError::InvalidCallbackPayload { command_id, .. }) => {
+                assert_eq!(command_id, u32::from(DemonCommand::CommandInlineExecute));
+            }
+            other => panic!("expected InvalidCallbackPayload, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn inline_execute_unknown_callback_type_returns_ok_none() {
+        let events = EventBus::new(8);
+        let mut payload = Vec::new();
+        add_u32(&mut payload, 0xDEAD);
+
+        let result = handle_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(matches!(result, Ok(None)));
+    }
+
+    #[tokio::test]
+    async fn inline_execute_truncated_after_callback_type_returns_error() {
+        let events = EventBus::new(8);
+        // BOF_CALLBACK_OUTPUT requires a subsequent read_string; give only the type.
+        let mut payload = Vec::new();
+        add_u32(&mut payload, BOF_CALLBACK_OUTPUT);
+
+        let result = handle_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+
+        match result {
+            Err(CommandDispatchError::InvalidCallbackPayload { command_id, .. }) => {
+                assert_eq!(command_id, u32::from(DemonCommand::CommandInlineExecute));
+            }
+            other => panic!("expected InvalidCallbackPayload, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn inline_execute_bof_ran_ok_broadcasts_event() {
+        let events = EventBus::new(8);
+        let mut receiver = events.subscribe();
+        let mut payload = Vec::new();
+        add_u32(&mut payload, BOF_RAN_OK);
+
+        let result = handle_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(matches!(result, Ok(None)));
+
+        let msg = receiver.recv().await.expect("should receive broadcast");
+        match msg {
+            OperatorMessage::AgentResponse(resp) => {
+                assert!(resp.info.output.is_empty() || resp.info.output.contains("BOF"));
+            }
+            other => panic!("expected AgentResponse, got {other:?}"),
+        }
+    }
+
+    // --- handle_assembly_inline_execute_callback ---
+
+    #[tokio::test]
+    async fn assembly_inline_execute_empty_payload_returns_error() {
+        let events = EventBus::new(8);
+        let result =
+            handle_assembly_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &[]).await;
+
+        match result {
+            Err(CommandDispatchError::InvalidCallbackPayload { command_id, .. }) => {
+                assert_eq!(command_id, u32::from(DemonCommand::CommandAssemblyInlineExecute));
+            }
+            other => panic!("expected InvalidCallbackPayload, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn assembly_inline_execute_unknown_info_id_returns_ok_none() {
+        let events = EventBus::new(8);
+        let mut payload = Vec::new();
+        add_u32(&mut payload, 0xDEAD);
+
+        let result =
+            handle_assembly_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(matches!(result, Ok(None)));
+    }
+
+    #[tokio::test]
+    async fn assembly_inline_execute_truncated_clr_version_returns_error() {
+        let events = EventBus::new(8);
+        // DOTNET_INFO_NET_VERSION requires a subsequent read_utf16; give only the info id.
+        let mut payload = Vec::new();
+        add_u32(&mut payload, DOTNET_INFO_NET_VERSION);
+
+        let result =
+            handle_assembly_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+
+        match result {
+            Err(CommandDispatchError::InvalidCallbackPayload { command_id, .. }) => {
+                assert_eq!(command_id, u32::from(DemonCommand::CommandAssemblyInlineExecute));
+            }
+            other => panic!("expected InvalidCallbackPayload, got {other:?}"),
+        }
+    }
+
+    // --- handle_assembly_list_versions_callback ---
+
+    #[tokio::test]
+    async fn list_versions_empty_payload_broadcasts_empty_output() {
+        let events = EventBus::new(8);
+        let mut receiver = events.subscribe();
+
+        let result =
+            handle_assembly_list_versions_callback(&events, AGENT_ID, REQUEST_ID, &[]).await;
+        assert!(matches!(result, Ok(None)));
+
+        let msg = receiver.recv().await.expect("should receive broadcast");
+        match msg {
+            OperatorMessage::AgentResponse(resp) => {
+                assert!(
+                    resp.info.output.is_empty(),
+                    "expected empty output for zero versions, got {:?}",
+                    resp.info.output,
+                );
+            }
+            other => panic!("expected AgentResponse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_versions_truncated_utf16_returns_error() {
+        let events = EventBus::new(8);
+        // Provide a length prefix that claims more bytes than available.
+        let mut payload = Vec::new();
+        add_u32(&mut payload, 100); // claim 100 bytes of UTF-16 data
+        payload.push(0x41); // only 1 byte present
+
+        let result =
+            handle_assembly_list_versions_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+
+        match result {
+            Err(CommandDispatchError::InvalidCallbackPayload { command_id, .. }) => {
+                assert_eq!(command_id, u32::from(DemonCommand::CommandAssemblyListVersions));
+            }
+            other => panic!("expected InvalidCallbackPayload, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_versions_odd_byte_utf16_returns_error() {
+        let events = EventBus::new(8);
+        // Provide an odd number of bytes as UTF-16 data — must be rejected.
+        let mut payload = Vec::new();
+        add_u32(&mut payload, 3); // 3 bytes — not even
+        payload.extend_from_slice(&[0x41, 0x00, 0x42]);
+
+        let result =
+            handle_assembly_list_versions_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+
+        match result {
+            Err(CommandDispatchError::InvalidCallbackPayload { command_id, .. }) => {
+                assert_eq!(command_id, u32::from(DemonCommand::CommandAssemblyListVersions));
+            }
+            other => panic!("expected InvalidCallbackPayload, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_versions_valid_single_version_broadcasts_output() {
+        let events = EventBus::new(8);
+        let mut receiver = events.subscribe();
+        let mut payload = Vec::new();
+        add_utf16(&mut payload, "v4.0.30319");
+
+        let result =
+            handle_assembly_list_versions_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(matches!(result, Ok(None)));
+
+        let msg = receiver.recv().await.expect("should receive broadcast");
+        match msg {
+            OperatorMessage::AgentResponse(resp) => {
+                assert!(
+                    resp.info.output.contains("v4.0.30319"),
+                    "expected output to contain version string, got {:?}",
+                    resp.info.output,
+                );
+            }
+            other => panic!("expected AgentResponse, got {other:?}"),
+        }
+    }
+}

@@ -497,3 +497,53 @@ async fn concurrent_create_and_start_for_independent_listeners_do_not_interfere(
     manager.stop("lc-concurrent-c").await?;
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Same-port conflict between managed listeners
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn start_second_listener_on_same_port_fails_and_preserves_first()
+-> Result<(), Box<dyn std::error::Error>> {
+    let manager = test_manager().await?;
+    let (port, guard) = common::available_port()?;
+
+    // Create two listeners with different names but the same bind port.
+    manager.create(http_config("lc-port-first", port)).await?;
+    manager.create(http_config("lc-port-second", port)).await?;
+
+    // Start the first listener — release the port guard so it can bind.
+    drop(guard);
+    manager.start("lc-port-first").await?;
+    common::wait_for_listener(port).await?;
+
+    // Starting the second listener on the same port must fail.
+    let result = manager.start("lc-port-second").await;
+    assert!(result.is_err(), "starting a second listener on an occupied port must fail");
+
+    // The second listener must be in Error state with a recorded error message.
+    let second_summary = manager.summary("lc-port-second").await?;
+    assert_eq!(
+        second_summary.state.status,
+        ListenerStatus::Error,
+        "the colliding listener must be in Error state"
+    );
+    assert!(
+        second_summary.state.last_error.is_some(),
+        "the colliding listener must record a last_error message"
+    );
+
+    // The first listener must still be Running.
+    let first_summary = manager.summary("lc-port-first").await?;
+    assert_eq!(
+        first_summary.state.status,
+        ListenerStatus::Running,
+        "the original listener must remain Running"
+    );
+
+    // The first listener must still be reachable.
+    timeout(Duration::from_secs(2), common::wait_for_listener(port)).await??;
+
+    manager.stop("lc-port-first").await?;
+    Ok(())
+}

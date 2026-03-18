@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 266 | 195 | 31 |
+| Tasks closed | 272 | 195 | 31 |
 | Bugs filed against | 40 | 34 | 9 |
 | Bug rate (bugs/task) | 0.15 | 0.17 | 0.29 |
 | Quality score | 85% | 83% | 71% |
@@ -2101,3 +2101,14 @@ Notes: Clean review — no code quality, security, or architecture issues. All c
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (962 unit tests, 0 failures)
 Notes: Clean review — no code quality, security, or architecture issues. All changes are test additions with no production code modified. Claude running total now 266 tasks closed, quality score holds at 85%.
+
+### QA Review — 2026-03-18 21:30 — ee7609a..a1dc499
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (dev02-opus) | 6 | 0 | Closed 9hnj, 7son, ags8, d3q2, lah3, h87y. New tests: windows_version_label all 11 branches + service pack (5 tests/17 cases), process_arch_label + windows_arch_label known/unknown coverage, prune_expired_windows empty-map + IPv6-key tests, logging no-profile + RUST_LOG override path, evict_oldest_windows empty-map + tied-start edge cases. d3q2 closed after verifying tests already existed. Currently has aa5t claimed. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (985 unit tests, 0 failures)
+Notes: Clean review — no code quality, security, or architecture issues. All changes are test additions with no production code modified. Claude running total now 272 tasks closed, quality score holds at 85%.

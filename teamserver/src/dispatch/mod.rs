@@ -7239,6 +7239,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn socket_read_callback_broadcasts_error_on_agent_read_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonSocketCommand::Read));
+        add_u32(&mut payload, 0x77); // socket_id
+        add_u32(&mut payload, u32::from(DemonSocketType::ReverseProxy));
+        add_u32(&mut payload, 0); // success = 0 (failure)
+        add_u32(&mut payload, 10054); // error_code (WSAECONNRESET)
+
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandSocket), 40, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("missing socket read failure event")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(message.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
+        assert_eq!(
+            message.info.extra.get("Message"),
+            Some(&Value::String("Failed to read from socks target 119: 10054".to_owned()))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn socket_read_callback_success_non_reverse_proxy_is_silent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonSocketCommand::Read));
+        add_u32(&mut payload, 0x33); // socket_id
+        add_u32(&mut payload, u32::from(DemonSocketType::ReversePortForward)); // not ReverseProxy
+        add_u32(&mut payload, 1); // success
+        add_bytes(&mut payload, b"some data");
+
+        dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandSocket), 41, &payload)
+            .await?;
+
+        assert!(
+            timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),
+            "read success with non-ReverseProxy type should not broadcast"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn socket_write_callback_no_broadcast_on_success()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonSocketCommand::Write));
+        add_u32(&mut payload, 0x44); // socket_id
+        add_u32(&mut payload, u32::from(DemonSocketType::ReverseProxy));
+        add_u32(&mut payload, 1); // success
+
+        dispatcher
+            .dispatch(0xFACE_FEED, u32::from(DemonCommand::CommandSocket), 42, &payload)
+            .await?;
+
+        assert!(
+            timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),
+            "write success should not broadcast any event"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn socket_rportfwd_list_callback_rejects_truncated_payload()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        // Build a payload with the list subcommand plus an incomplete row (only 3 of 5 fields).
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonSocketCommand::ReversePortForwardList));
+        add_u32(&mut payload, 0x21); // socket_id
+        add_u32(&mut payload, u32::from_le_bytes([127, 0, 0, 1])); // local_addr
+        add_u32(&mut payload, 8080); // local_port
+        // Missing: forward_addr and forward_port — should trigger InvalidCallbackPayload
+
+        let error = dispatcher
+            .dispatch(0xCAFE_BABE, u32::from(DemonCommand::CommandSocket), 43, &payload)
+            .await
+            .expect_err("truncated rportfwd list payload should fail");
+        assert!(matches!(
+            error,
+            CommandDispatchError::InvalidCallbackPayload { command_id, .. }
+                if command_id == u32::from(DemonCommand::CommandSocket)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn builtin_process_modules_handler_broadcasts_module_list()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;

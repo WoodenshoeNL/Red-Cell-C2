@@ -1410,6 +1410,241 @@ mod tests {
         );
     }
 
+    // ---- malformed details coverage ----
+
+    #[test]
+    fn audit_record_rejects_malformed_details_json() {
+        // `result_status` is required but set to an invalid enum variant.
+        let malformed = json!({"result_status": "bogus", "agent_id": null});
+        let error = AuditRecord::try_from(AuditLogEntry {
+            id: Some(1),
+            actor: "operator".to_owned(),
+            action: "agent.task".to_owned(),
+            target_kind: "agent".to_owned(),
+            target_id: None,
+            details: Some(malformed),
+            occurred_at: "2026-03-10T12:00:00Z".to_owned(),
+        })
+        .expect_err("malformed details should fail conversion");
+
+        assert!(
+            matches!(error, TeamserverError::Json(_)),
+            "expected Json error variant, got {error}"
+        );
+    }
+
+    #[test]
+    fn audit_record_rejects_details_with_wrong_type() {
+        // details is a JSON string instead of an object.
+        let error = AuditRecord::try_from(AuditLogEntry {
+            id: Some(1),
+            actor: "operator".to_owned(),
+            action: "agent.task".to_owned(),
+            target_kind: "agent".to_owned(),
+            target_id: None,
+            details: Some(json!("not-an-object")),
+            occurred_at: "2026-03-10T12:00:00Z".to_owned(),
+        })
+        .expect_err("string details should fail conversion");
+
+        assert!(
+            matches!(error, TeamserverError::Json(_)),
+            "expected Json error variant, got {error}"
+        );
+    }
+
+    #[test]
+    fn audit_record_rejects_details_missing_required_field() {
+        // Object present but missing `result_status` entirely.
+        let error = AuditRecord::try_from(AuditLogEntry {
+            id: Some(1),
+            actor: "operator".to_owned(),
+            action: "agent.task".to_owned(),
+            target_kind: "agent".to_owned(),
+            target_id: None,
+            details: Some(json!({"agent_id": "DEADBEEF"})),
+            occurred_at: "2026-03-10T12:00:00Z".to_owned(),
+        })
+        .expect_err("missing result_status should fail conversion");
+
+        assert!(
+            matches!(error, TeamserverError::Json(_)),
+            "expected Json error variant, got {error}"
+        );
+    }
+
+    #[test]
+    fn session_activity_record_rejects_malformed_details_json() {
+        let malformed = json!({"result_status": "bogus"});
+        let error = SessionActivityRecord::try_from(AuditLogEntry {
+            id: Some(1),
+            actor: "operator".to_owned(),
+            action: "operator.connect".to_owned(),
+            target_kind: "operator".to_owned(),
+            target_id: None,
+            details: Some(malformed),
+            occurred_at: "2026-03-10T12:00:00Z".to_owned(),
+        })
+        .expect_err("malformed details should fail conversion");
+
+        assert!(
+            matches!(error, TeamserverError::Json(_)),
+            "expected Json error variant, got {error}"
+        );
+    }
+
+    #[test]
+    fn session_activity_record_rejects_details_with_wrong_type() {
+        let error = SessionActivityRecord::try_from(AuditLogEntry {
+            id: Some(1),
+            actor: "operator".to_owned(),
+            action: "operator.chat".to_owned(),
+            target_kind: "operator".to_owned(),
+            target_id: None,
+            details: Some(json!(42)),
+            occurred_at: "2026-03-10T12:00:00Z".to_owned(),
+        })
+        .expect_err("numeric details should fail conversion");
+
+        assert!(
+            matches!(error, TeamserverError::Json(_)),
+            "expected Json error variant, got {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_fails_deterministically_on_malformed_details_row() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+
+        // Insert a well-formed row followed by a malformed one.
+        let repo = database.audit_log();
+        let good_details =
+            serde_json::to_value(audit_details(AuditResultStatus::Success, None, None, None))
+                .expect("details should serialize");
+        repo.create(&AuditLogEntry {
+            id: None,
+            actor: "operator".to_owned(),
+            action: "agent.task".to_owned(),
+            target_kind: "agent".to_owned(),
+            target_id: None,
+            details: Some(good_details),
+            occurred_at: "2026-03-10T12:00:00Z".to_owned(),
+        })
+        .await
+        .expect("good row should insert");
+
+        // Malformed: result_status has an invalid enum value.
+        repo.create(&AuditLogEntry {
+            id: None,
+            actor: "operator".to_owned(),
+            action: "agent.task".to_owned(),
+            target_kind: "agent".to_owned(),
+            target_id: None,
+            details: Some(json!({"result_status": "bogus"})),
+            occurred_at: "2026-03-10T13:00:00Z".to_owned(),
+        })
+        .await
+        .expect("malformed row should insert into DB");
+
+        let result = query_audit_log(&database, &AuditQuery::default()).await;
+        assert!(
+            result.is_err(),
+            "query_audit_log must fail when a row has malformed details, not return partial results"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_session_activity_fails_deterministically_on_malformed_details_row() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+
+        let repo = database.audit_log();
+        // Well-formed session activity row.
+        repo.create(&AuditLogEntry {
+            id: None,
+            actor: "operator".to_owned(),
+            action: "operator.connect".to_owned(),
+            target_kind: "operator".to_owned(),
+            target_id: None,
+            details: Some(
+                serde_json::to_value(audit_details(AuditResultStatus::Success, None, None, None))
+                    .expect("details should serialize"),
+            ),
+            occurred_at: "2026-03-10T12:00:00Z".to_owned(),
+        })
+        .await
+        .expect("good row should insert");
+
+        // Malformed session activity row.
+        repo.create(&AuditLogEntry {
+            id: None,
+            actor: "operator".to_owned(),
+            action: "operator.chat".to_owned(),
+            target_kind: "operator".to_owned(),
+            target_id: None,
+            details: Some(json!({"result_status": "invalid_enum_value"})),
+            occurred_at: "2026-03-10T13:00:00Z".to_owned(),
+        })
+        .await
+        .expect("malformed row should insert into DB");
+
+        let result = query_session_activity(&database, &SessionActivityQuery::default()).await;
+        assert!(
+            result.is_err(),
+            "query_session_activity must fail when a row has malformed details, \
+             not return partial results"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_succeeds_when_details_is_null() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+
+        database
+            .audit_log()
+            .create(&AuditLogEntry {
+                id: None,
+                actor: "operator".to_owned(),
+                action: "agent.task".to_owned(),
+                target_kind: "agent".to_owned(),
+                target_id: None,
+                details: None,
+                occurred_at: "2026-03-10T12:00:00Z".to_owned(),
+            })
+            .await
+            .expect("row should insert");
+
+        let page = query_audit_log(&database, &AuditQuery::default())
+            .await
+            .expect("null details should not prevent query");
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].result_status, AuditResultStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn query_session_activity_succeeds_when_details_is_null() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+
+        database
+            .audit_log()
+            .create(&AuditLogEntry {
+                id: None,
+                actor: "operator".to_owned(),
+                action: "operator.connect".to_owned(),
+                target_kind: "operator".to_owned(),
+                target_id: None,
+                details: None,
+                occurred_at: "2026-03-10T12:00:00Z".to_owned(),
+            })
+            .await
+            .expect("row should insert");
+
+        let page = query_session_activity(&database, &SessionActivityQuery::default())
+            .await
+            .expect("null details should not prevent query");
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].result_status, AuditResultStatus::Success);
+    }
+
     #[tokio::test]
     async fn actor_filter_falls_back_to_actor_when_operator_absent() {
         let database = Database::connect_in_memory().await.expect("database should initialize");

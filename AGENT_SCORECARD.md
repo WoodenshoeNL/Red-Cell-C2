@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 300 | 195 | 31 |
+| Tasks closed | 305 | 195 | 31 |
 | Bugs filed against | 40 | 34 | 9 |
 | Bug rate (bugs/task) | 0.13 | 0.17 | 0.29 |
 | Quality score | 87% | 83% | 71% |
@@ -37,6 +37,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-18 06:30 — c2e141e..b24964e
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (dev02-opus) | 5 | 0 | Closed cr4b, 19eq, 31vi, 27pq, 2csy. Plugin ListenerManagerUnavailable error paths, logging portable CreateLogDirectory test, listener operator_requests_start/action_from_mark edge cases, sync_profile create/update/mixed coverage. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (1,647 tests passing, 0 warnings)
+Notes: Clean review — all 5 closures are test-only additions. 13 new committed tests: 2 plugin ListenerManagerUnavailable tests (plugins.rs), 1 portable log directory error test (logging.rs), 7 listener action/operator-requests tests (listeners.rs), 3 sync_profile branch coverage tests (listeners.rs). One task in progress: eixe (just claimed, no code yet). Uncommitted WIP in plugins.rs adds 3 more load_plugins error path tests for eixe. No bugs filed.
 
 ### QA Review — 2026-03-18 05:00 — c909dc2..c2e141e
 

@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 317 | 195 | 31 |
+| Tasks closed | 319 | 195 | 31 |
 | Bugs filed against | 41 | 34 | 9 |
 | Bug rate (bugs/task) | 0.13 | 0.17 | 0.29 |
 | Quality score | 87% | 83% | 71% |
@@ -2288,3 +2288,14 @@ Biggest blindspot: Python plugins have unrestricted API access regardless of ope
 | Cursor | 0 | 0 | No activity. |
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (1,265 tests passing, 0 warnings)
+
+### QA Review — 2026-03-18 13:30 — a85a646..152fbde
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (dev02-opus) | 2 | 0 | Closed 2asc (4 error-path tests for handle_net_callback), 3no5 (15 integration tests for output callback dispatch: command_output, command_error, kill_date, sleep, config). Currently has 2qur in progress (process callback coverage). |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (1,110 tests passing, 0 failures)
+Notes: Clean review — all changes are test additions only. No production code modified. Network dispatch error-path tests cover invalid subcommand, empty payload, and truncated Sessions/Users rows. Output dispatch integration tests cover all five untested handler paths with happy, error, and edge cases. No code quality issues found.

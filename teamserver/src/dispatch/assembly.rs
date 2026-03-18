@@ -210,6 +210,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inline_execute_bof_callback_error_broadcasts_error_event() {
+        let events = EventBus::new(8);
+        let mut receiver = events.subscribe();
+        let mut payload = Vec::new();
+        add_u32(&mut payload, BOF_CALLBACK_ERROR);
+        add_bytes(&mut payload, b"something went wrong in BOF");
+
+        let result = handle_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(matches!(result, Ok(None)));
+
+        let msg = receiver.recv().await.expect("should receive broadcast");
+        match msg {
+            OperatorMessage::AgentResponse(resp) => {
+                let extra = &resp.info.extra;
+                assert_eq!(
+                    extra.get("Type"),
+                    Some(&serde_json::Value::String("Error".to_owned())),
+                    "BOF_CALLBACK_ERROR should produce Type=Error"
+                );
+                assert_eq!(
+                    extra.get("Message"),
+                    Some(&serde_json::Value::String("something went wrong in BOF".to_owned())),
+                    "BOF_CALLBACK_ERROR should forward the error string as Message"
+                );
+            }
+            other => panic!("expected AgentResponse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn inline_execute_bof_callback_error_truncated_returns_error() {
+        let events = EventBus::new(8);
+        // BOF_CALLBACK_ERROR requires a subsequent read_string; give only the type.
+        let mut payload = Vec::new();
+        add_u32(&mut payload, BOF_CALLBACK_ERROR);
+
+        let result = handle_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+
+        match result {
+            Err(CommandDispatchError::InvalidCallbackPayload { command_id, .. }) => {
+                assert_eq!(command_id, u32::from(DemonCommand::CommandInlineExecute));
+            }
+            other => panic!("expected InvalidCallbackPayload, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn inline_execute_bof_ran_ok_broadcasts_event() {
         let events = EventBus::new(8);
         let mut receiver = events.subscribe();

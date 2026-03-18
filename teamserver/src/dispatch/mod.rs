@@ -8202,6 +8202,23 @@ mod tests {
             Some(&Value::String("Failed to execute object file".to_owned()))
         );
 
+        // BOF_CALLBACK_ERROR (0x0d): error output text from the BOF
+        let mut err_output = Vec::new();
+        add_u32(&mut err_output, 0x0d);
+        add_bytes(&mut err_output, b"access denied to target process");
+        dispatcher
+            .dispatch(0xB0B1B2B3, u32::from(DemonCommand::CommandInlineExecute), 6, &err_output)
+            .await?;
+        let event = receiver.recv().await.ok_or("bof error-output response missing")?;
+        let OperatorMessage::AgentResponse(err_message) = event else {
+            panic!("expected agent response event");
+        };
+        assert_eq!(err_message.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
+        assert_eq!(
+            err_message.info.extra.get("Message"),
+            Some(&Value::String("access denied to target process".to_owned()))
+        );
+
         Ok(())
     }
 

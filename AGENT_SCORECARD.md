@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 305 | 195 | 31 |
+| Tasks closed | 309 | 195 | 31 |
 | Bugs filed against | 40 | 34 | 9 |
 | Bug rate (bugs/task) | 0.13 | 0.17 | 0.29 |
 | Quality score | 87% | 83% | 71% |
@@ -37,6 +37,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-18 08:00 — 9b3a2ca..d25c259
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (dev02-opus) | 4 | 0 | Closed 1t9d, lo09, 2rxc, rlf0. CTR offset persistence integration tests, BOF exception/symbol-not-found/could-not-run callback tests, CommandJob action callback and Died no-broadcast tests, checkin handle_checkin callback coverage. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (1,663 tests passing, 0 warnings)
+Notes: Clean review — all 4 closures are test-only additions. New test files: ctr_offset_persistence.rs (5 tests covering reload, zero offset, block boundary, concurrency, decrypt persistence), assembly_dispatch.rs (BOF callback integration tests), output_dispatch.rs (CommandJob/DemonInfo integration tests). Checkin unit tests added inline (7 new tests: happy-path metadata update, weak key/IV rejection, parse_checkin_metadata, empty payload heartbeat). One task in progress: 3tpy (just claimed). No bugs filed.
 
 ### QA Review — 2026-03-18 06:30 — c2e141e..b24964e
 

@@ -67,6 +67,8 @@ cd Red-Cell-C2
 
 `setup.sh` checks required tools, enforces the correct `br` issue prefix, and builds the local beads DB from the committed JSONL.
 
+On the first run it also downloads the musl.cc MinGW-w64 cross-compilers into `data/` so Havoc-compatible payload builds can use the default profile paths.
+
 ### Switching between machines during the day
 
 Run `setup.sh` at the start of every session — it is idempotent and safe to run repeatedly:
@@ -79,9 +81,23 @@ It will:
 1. Check required tools
 2. `git pull --ff-only` to fetch work committed on another VM (skips if you have uncommitted changes)
 3. Enforce `br issue_prefix = red-cell-c2`
-4. Rebuild the beads DB from the updated JSONL
-5. Warn about any `in_progress` tasks left running on another VM
-6. Print the agent loop commands for this machine
+4. Download and extract the musl.cc MinGW-w64 toolchains into `data/` when they are missing
+5. Rebuild the beads DB from the updated JSONL
+6. Warn about any `in_progress` tasks left running on another VM
+7. Print the agent loop commands for this machine
+
+### Payload toolchain bootstrap
+
+If you only need the payload build toolchains without the rest of the session bootstrap, run:
+
+```bash
+./scripts/install-toolchains.sh
+```
+
+The installer is idempotent. It ensures these default Havoc-compatible compiler paths exist:
+
+- `data/x86_64-w64-mingw32-cross/bin/x86_64-w64-mingw32-gcc`
+- `data/i686-w64-mingw32-cross/bin/i686-w64-mingw32-gcc`
 
 ### Build (once crates exist)
 

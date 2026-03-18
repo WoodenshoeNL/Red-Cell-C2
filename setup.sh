@@ -7,8 +7,9 @@
 #   1. Checks required tools are installed
 #   2. git pull to get latest work from other VMs
 #   3. Enforces br issue_prefix = red-cell-c2
-#   4. Rebuilds beads DB from JSONL
-#   5. Shows open issues count and any in_progress tasks
+#   4. Installs the MinGW payload build toolchains into data/
+#   5. Rebuilds beads DB from JSONL
+#   6. Shows open issues count and any in_progress tasks
 
 set -euo pipefail
 
@@ -95,7 +96,13 @@ else
     ok "br issue_prefix set to $EXPECTED_PREFIX"
 fi
 
-# ── 5. Build / refresh the beads DB from JSONL ────────────────────────────────
+# ── 5. Payload build toolchains ────────────────────────────────────────────────
+echo ""
+echo "--- payload toolchains ---"
+
+"$SCRIPT_DIR/scripts/install-toolchains.sh"
+
+# ── 6. Build / refresh the beads DB from JSONL ────────────────────────────────
 echo ""
 echo "--- beads DB ---"
 
@@ -142,7 +149,7 @@ if [[ -n "$IN_PROGRESS" ]]; then
     echo "$IN_PROGRESS"
 fi
 
-# ── 6. Git identity ────────────────────────────────────────────────────────────
+# ── 7. Git identity ────────────────────────────────────────────────────────────
 echo ""
 echo "--- Git identity ---"
 GIT_USER="$(git config user.name 2>/dev/null || echo '')"
@@ -156,11 +163,11 @@ else
     ok "Git identity: $GIT_USER <$GIT_EMAIL>"
 fi
 
-# ── 7. Logs directory ─────────────────────────────────────────────────────────
+# ── 8. Logs directory ─────────────────────────────────────────────────────────
 mkdir -p "$SCRIPT_DIR/logs"
 ok "logs/ directory ready"
 
-# ── 8. Summary ────────────────────────────────────────────────────────────────
+# ── 9. Summary ────────────────────────────────────────────────────────────────
 echo ""
 HOSTNAME_ID="${HOSTNAME:-$(hostname)}"
 echo "=== Ready on ${HOSTNAME_ID} ==="

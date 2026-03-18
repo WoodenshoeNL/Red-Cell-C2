@@ -36,3 +36,4 @@ logs/
 .tmp/
 Running
 target-codex-x86m/
+data/

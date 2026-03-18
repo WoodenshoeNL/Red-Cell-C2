@@ -1451,6 +1451,48 @@ mod tests {
         );
     }
 
+    // ── parse_callback_packages — first-callback truncation ─────────────────
+
+    #[test]
+    fn parse_callback_packages_empty_buffer_returns_error() {
+        let buf: &[u8] = &[];
+        let error =
+            super::parse_callback_packages(1, 1, buf).expect_err("empty buffer must be rejected");
+
+        assert!(
+            matches!(error, super::DemonParserError::Protocol(_)),
+            "expected Protocol error, got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn parse_callback_packages_first_length_prefix_truncated_returns_error() {
+        // Only 2 bytes — not enough for the 4-byte length prefix of the first payload.
+        let buf: &[u8] = &[0x00, 0x05];
+        let error = super::parse_callback_packages(1, 1, buf)
+            .expect_err("truncated first length prefix must be rejected");
+
+        assert!(
+            matches!(error, super::DemonParserError::Protocol(_)),
+            "expected Protocol error, got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn parse_callback_packages_first_payload_exceeds_remaining_returns_error() {
+        // Length prefix claims 100 bytes but buffer only has 4 (the prefix itself) + 2 data bytes.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&u32_be(100)); // first payload length = 100
+        buf.extend_from_slice(&[0xAA, 0xBB]); // only 2 bytes available
+        let error = super::parse_callback_packages(1, 1, &buf)
+            .expect_err("oversized first payload length must be rejected");
+
+        assert!(
+            matches!(error, super::DemonParserError::Protocol(_)),
+            "expected Protocol error, got: {error:?}"
+        );
+    }
+
     // ── DemonPacketParser COMMAND_CHECKIN truncated inner payload ────────────
 
     /// Build a COMMAND_CHECKIN callback packet whose encrypted inner payload,

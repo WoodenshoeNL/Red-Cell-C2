@@ -1592,4 +1592,85 @@ mod tests {
             .await;
         assert!(matches!(result, AuthenticationResult::Success(_)));
     }
+
+    #[tokio::test]
+    async fn from_profile_with_database_returns_error_on_malformed_password_verifier() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        database
+            .operators()
+            .create(&PersistedOperator {
+                username: "corrupted".to_owned(),
+                password_verifier: "not-a-valid-phc-string".to_owned(),
+                role: red_cell_common::config::OperatorRole::Operator,
+            })
+            .await
+            .expect("runtime operator should persist");
+
+        let result = AuthService::from_profile_with_database(&profile(), &database).await;
+
+        let error = result.expect_err(
+            "from_profile_with_database should fail when a persisted operator has an invalid \
+             password verifier",
+        );
+        assert!(
+            matches!(
+                error,
+                AuthError::Persistence(crate::TeamserverError::InvalidPersistedValue { .. })
+            ),
+            "expected Persistence(InvalidPersistedValue), got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn from_profile_with_database_does_not_override_profile_operators() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        // Persist a runtime operator whose username collides with a profile operator.
+        database
+            .operators()
+            .create(&PersistedOperator {
+                username: "operator".to_owned(),
+                password_verifier: password_verifier_for_sha3(&hash_password_sha3("runtimepw"))
+                    .expect("password verifier should be generated"),
+                role: red_cell_common::config::OperatorRole::Analyst,
+            })
+            .await
+            .expect("runtime operator should persist");
+
+        let service = AuthService::from_profile_with_database(&profile(), &database)
+            .await
+            .expect("auth service should load without error");
+
+        // The profile password ("password1234") should still work — profile takes precedence.
+        let result = service
+            .authenticate_login(
+                Uuid::new_v4(),
+                &LoginInfo {
+                    user: "operator".to_owned(),
+                    password: hash_password_sha3("password1234"),
+                },
+            )
+            .await;
+        assert!(
+            matches!(result, AuthenticationResult::Success(_)),
+            "profile operator credentials should take precedence over persisted runtime duplicate"
+        );
+
+        // The persisted password should NOT authenticate.
+        let result = service
+            .authenticate_login(
+                Uuid::new_v4(),
+                &LoginInfo {
+                    user: "operator".to_owned(),
+                    password: hash_password_sha3("runtimepw"),
+                },
+            )
+            .await;
+        assert!(
+            matches!(
+                result,
+                AuthenticationResult::Failure(AuthenticationFailure::InvalidCredentials)
+            ),
+            "persisted runtime credentials must not override profile-configured operator"
+        );
+    }
 }

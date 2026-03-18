@@ -1236,4 +1236,151 @@ mod tests {
             "only DEADBEEF rows should be returned"
         );
     }
+
+    /// Seed audit rows with specific timestamps for time-range filter testing.
+    async fn seed_timestamped_audit_rows(database: &Database) {
+        let repo = database.audit_log();
+        let timestamps = [
+            "2026-01-10T08:00:00Z",
+            "2026-01-15T12:00:00Z",
+            "2026-01-20T16:00:00Z",
+            "2026-01-25T20:00:00Z",
+            "2026-01-30T23:59:59Z",
+        ];
+        for (i, ts) in timestamps.iter().enumerate() {
+            let details = audit_details(AuditResultStatus::Success, None, Some("test"), None);
+            repo.create(&AuditLogEntry {
+                id: None,
+                actor: "operator".to_owned(),
+                action: format!("action.{i}"),
+                target_kind: "agent".to_owned(),
+                target_id: None,
+                details: Some(serde_json::to_value(&details).expect("details should serialize")),
+                occurred_at: (*ts).to_owned(),
+            })
+            .await
+            .expect("seed row should insert");
+        }
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_since_filter_excludes_older_rows() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_timestamped_audit_rows(&database).await;
+
+        // since = Jan 20 at 16:00 UTC — should include rows at Jan 20, Jan 25, Jan 30
+        let query =
+            AuditQuery { since: Some("2026-01-20T16:00:00Z".to_owned()), ..AuditQuery::default() };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        assert_eq!(page.total, 3, "since filter should include 3 rows at or after the cutoff");
+        assert!(
+            page.items.iter().all(|r| r.occurred_at.as_str() >= "2026-01-20T16:00:00Z"),
+            "all returned rows must be at or after the since timestamp"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_until_filter_excludes_newer_rows() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_timestamped_audit_rows(&database).await;
+
+        // until = Jan 15 at 12:00 UTC — should include rows at Jan 10 and Jan 15
+        let query =
+            AuditQuery { until: Some("2026-01-15T12:00:00Z".to_owned()), ..AuditQuery::default() };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        assert_eq!(page.total, 2, "until filter should include 2 rows at or before the cutoff");
+        assert!(
+            page.items.iter().all(|r| r.occurred_at.as_str() <= "2026-01-15T12:00:00Z"),
+            "all returned rows must be at or before the until timestamp"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_since_and_until_combined_returns_window() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_timestamped_audit_rows(&database).await;
+
+        // Window: Jan 15 through Jan 25 — should include rows at Jan 15, Jan 20, Jan 25
+        let query = AuditQuery {
+            since: Some("2026-01-15T12:00:00Z".to_owned()),
+            until: Some("2026-01-25T20:00:00Z".to_owned()),
+            ..AuditQuery::default()
+        };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        assert_eq!(page.total, 3, "combined since/until should return 3 rows in window");
+        assert!(
+            page.items.iter().all(|r| {
+                r.occurred_at.as_str() >= "2026-01-15T12:00:00Z"
+                    && r.occurred_at.as_str() <= "2026-01-25T20:00:00Z"
+            }),
+            "all returned rows must fall within the since/until window"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_since_filter_normalizes_non_utc_offset() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_timestamped_audit_rows(&database).await;
+
+        // 2026-01-20T21:30:00+05:30 == 2026-01-20T16:00:00Z
+        // So this should produce the same results as since=2026-01-20T16:00:00Z
+        let query = AuditQuery {
+            since: Some("2026-01-20T21:30:00+05:30".to_owned()),
+            ..AuditQuery::default()
+        };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        assert_eq!(
+            page.total, 3,
+            "non-UTC offset should be normalized to UTC; 3 rows at or after 2026-01-20T16:00:00Z"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_until_filter_normalizes_non_utc_offset() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_timestamped_audit_rows(&database).await;
+
+        // 2026-01-15T17:30:00+05:30 == 2026-01-15T12:00:00Z
+        // So this should produce the same results as until=2026-01-15T12:00:00Z
+        let query = AuditQuery {
+            until: Some("2026-01-15T17:30:00+05:30".to_owned()),
+            ..AuditQuery::default()
+        };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        assert_eq!(
+            page.total, 2,
+            "non-UTC offset should be normalized to UTC; 2 rows at or before 2026-01-15T12:00:00Z"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_since_after_all_rows_returns_empty() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_timestamped_audit_rows(&database).await;
+
+        let query =
+            AuditQuery { since: Some("2026-12-01T00:00:00Z".to_owned()), ..AuditQuery::default() };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        assert_eq!(page.total, 0, "since after all rows should return nothing");
+        assert!(page.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_until_before_all_rows_returns_empty() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_timestamped_audit_rows(&database).await;
+
+        let query =
+            AuditQuery { until: Some("2025-01-01T00:00:00Z".to_owned()), ..AuditQuery::default() };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        assert_eq!(page.total, 0, "until before all rows should return nothing");
+        assert!(page.items.is_empty());
+    }
 }

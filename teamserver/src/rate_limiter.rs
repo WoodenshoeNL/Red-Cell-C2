@@ -203,4 +203,38 @@ mod tests {
         assert!(!windows.contains_key(&v6_expired), "expired IPv6 entry must be pruned");
         assert!(windows.contains_key(&v6_fresh), "fresh IPv6 entry must be retained");
     }
+
+    #[test]
+    fn evict_empty_map_with_target_zero_is_noop() {
+        let mut windows: HashMap<IpAddr, AttemptWindow> = HashMap::new();
+
+        evict_oldest_windows(&mut windows, 0);
+
+        assert!(windows.is_empty(), "empty map with target_size=0 must remain empty");
+    }
+
+    #[test]
+    fn evict_with_tied_window_starts_removes_correct_count() {
+        let mut windows: HashMap<IpAddr, AttemptWindow> = HashMap::new();
+        let now = Instant::now();
+        let old = now - Duration::from_secs(100);
+
+        // 3 entries share the same old window_start.
+        for i in 0u8..3 {
+            windows.insert(ip(10, 0, 0, i), AttemptWindow { attempts: 1, window_start: old });
+        }
+        // 2 entries with a newer window_start.
+        for i in 3u8..5 {
+            windows.insert(ip(10, 0, 0, i), AttemptWindow { attempts: 1, window_start: now });
+        }
+
+        // Evict down to 2: must remove 3 entries. The 2 newer ones must survive;
+        // which of the 3 tied-oldest entries are evicted is unspecified.
+        evict_oldest_windows(&mut windows, 2);
+
+        assert_eq!(windows.len(), 2, "exactly target_size entries must remain");
+        // The two newer entries must survive since they have a strictly later window_start.
+        assert!(windows.contains_key(&ip(10, 0, 0, 3)));
+        assert!(windows.contains_key(&ip(10, 0, 0, 4)));
+    }
 }

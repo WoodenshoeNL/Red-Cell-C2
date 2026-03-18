@@ -1544,6 +1544,196 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn negotiate_socks5_truncated_version_only() -> io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut client, mut server) = connected_stream_pair().await?;
+
+        // Send only the version byte, then close — no method count.
+        let client_task = tokio::spawn(async move {
+            client.write_all(&[super::SOCKS_VERSION]).await?;
+            client.shutdown().await
+        });
+
+        let result = super::negotiate_socks5(&mut server).await;
+
+        assert!(result.is_err(), "should error on truncated handshake (version only)");
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+
+        let _ = client_task.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn negotiate_socks5_truncated_method_list() -> io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut client, mut server) = connected_stream_pair().await?;
+
+        // Advertise 3 methods but send only 1 byte of method data, then close.
+        let client_task = tokio::spawn(async move {
+            client.write_all(&[super::SOCKS_VERSION, 3, super::SOCKS_METHOD_NO_AUTH]).await?;
+            client.shutdown().await
+        });
+
+        let result = super::negotiate_socks5(&mut server).await;
+
+        assert!(result.is_err(), "should error when method list is shorter than method_count");
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+
+        let _ = client_task.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_socks_connect_request_truncated_header() -> io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut client, mut server) = connected_stream_pair().await?;
+
+        // Send only 2 of the required 4 header bytes (version, command), then close.
+        let client_task = tokio::spawn(async move {
+            client.write_all(&[super::SOCKS_VERSION, super::SOCKS_COMMAND_CONNECT]).await?;
+            client.shutdown().await
+        });
+
+        let result = super::read_socks_connect_request(&mut server).await;
+
+        assert!(result.is_err(), "should error on truncated request header");
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+
+        let _ = client_task.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_socks_connect_request_truncated_ipv4_address() -> io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut client, mut server) = connected_stream_pair().await?;
+
+        // Full header but only 2 of 4 IPv4 address bytes, then close.
+        let client_task = tokio::spawn(async move {
+            client
+                .write_all(&[
+                    super::SOCKS_VERSION,
+                    super::SOCKS_COMMAND_CONNECT,
+                    0,
+                    super::SOCKS_ATYP_IPV4,
+                    127,
+                    0, // only 2 of 4 address bytes
+                ])
+                .await?;
+            client.shutdown().await
+        });
+
+        let result = super::read_socks_connect_request(&mut server).await;
+
+        assert!(result.is_err(), "should error on truncated IPv4 address");
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+
+        let _ = client_task.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_socks_connect_request_truncated_ipv6_address() -> io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut client, mut server) = connected_stream_pair().await?;
+
+        // Full header but only 4 of 16 IPv6 address bytes, then close.
+        let client_task = tokio::spawn(async move {
+            client
+                .write_all(&[
+                    super::SOCKS_VERSION,
+                    super::SOCKS_COMMAND_CONNECT,
+                    0,
+                    super::SOCKS_ATYP_IPV6,
+                    0,
+                    0,
+                    0,
+                    1, // only 4 of 16 bytes
+                ])
+                .await?;
+            client.shutdown().await
+        });
+
+        let result = super::read_socks_connect_request(&mut server).await;
+
+        assert!(result.is_err(), "should error on truncated IPv6 address");
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+
+        let _ = client_task.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_socks_connect_request_truncated_domain_body() -> io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut client, mut server) = connected_stream_pair().await?;
+
+        // Domain length says 11 but only 3 bytes follow, then close.
+        let client_task = tokio::spawn(async move {
+            client
+                .write_all(&[
+                    super::SOCKS_VERSION,
+                    super::SOCKS_COMMAND_CONNECT,
+                    0,
+                    super::SOCKS_ATYP_DOMAIN,
+                    11, // domain length = 11
+                    b'f',
+                    b'o',
+                    b'o', // only 3 bytes
+                ])
+                .await?;
+            client.shutdown().await
+        });
+
+        let result = super::read_socks_connect_request(&mut server).await;
+
+        assert!(result.is_err(), "should error on truncated domain body");
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+
+        let _ = client_task.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_socks_connect_request_missing_port_bytes() -> io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut client, mut server) = connected_stream_pair().await?;
+
+        // Complete IPv4 address but no port bytes, then close.
+        let client_task = tokio::spawn(async move {
+            client
+                .write_all(&[
+                    super::SOCKS_VERSION,
+                    super::SOCKS_COMMAND_CONNECT,
+                    0,
+                    super::SOCKS_ATYP_IPV4,
+                    10,
+                    0,
+                    0,
+                    1, // 4 address bytes — complete
+                       // no port bytes
+                ])
+                .await?;
+            client.shutdown().await
+        });
+
+        let result = super::read_socks_connect_request(&mut server).await;
+
+        assert!(result.is_err(), "should error when port bytes are missing");
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+
+        let _ = client_task.await;
+        Ok(())
+    }
+
     /// Build a registered `PendingClient` for `agent_id`/`socket_id` and return the read half of
     /// the peer socket so the caller can verify what the manager writes to the client.
     ///

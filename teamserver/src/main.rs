@@ -655,6 +655,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_auto_starts_new_smb_profile_listener() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "operator" {
+                Password = "password1234"
+              }
+            }
+
+            Listeners {
+              Smb = [{
+                Name = "smb-pipe"
+                PipeName = "test-pipe"
+              }]
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let listeners = ListenerManager::new(database, registry, events, sockets, None);
+
+        listeners.sync_profile(&profile).await.expect("profile listeners should sync");
+        start_new_profile_listeners(&listeners, &profile)
+            .await
+            .expect("new SMB profile listener should auto-start");
+
+        let smb = listeners.summary("smb-pipe").await.expect("SMB listener should exist");
+        assert_eq!(
+            smb.state.status,
+            ListenerStatus::Running,
+            "SMB listener should transition to Running during startup"
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_auto_starts_new_dns_profile_listener() {
+        let port = available_udp_port().expect("ephemeral UDP port should be available");
+        let profile = Profile::parse(&format!(
+            r#"
+            Teamserver {{
+              Host = "127.0.0.1"
+              Port = 40056
+            }}
+
+            Operators {{
+              user "operator" {{
+                Password = "password1234"
+              }}
+            }}
+
+            Listeners {{
+              Dns = [{{
+                Name = "dns-c2"
+                HostBind = "127.0.0.1"
+                PortBind = {port}
+                Domain = "c2.example.com"
+                RecordTypes = ["TXT"]
+              }}]
+            }}
+
+            Demon {{}}
+            "#
+        ))
+        .expect("profile should parse");
+
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let listeners = ListenerManager::new(database, registry, events, sockets, None);
+
+        listeners.sync_profile(&profile).await.expect("profile listeners should sync");
+        start_new_profile_listeners(&listeners, &profile)
+            .await
+            .expect("new DNS profile listener should auto-start");
+
+        let dns = listeners.summary("dns-c2").await.expect("DNS listener should exist");
+        assert_eq!(
+            dns.state.status,
+            ListenerStatus::Running,
+            "DNS listener should transition to Running during startup"
+        );
+    }
+
+    #[tokio::test]
     async fn startup_removes_profile_listener_deleted_before_next_boot() {
         let old_port = available_port().expect("ephemeral port should be available");
         let old_profile = Profile::parse(&format!(
@@ -964,6 +1060,11 @@ mod tests {
     fn available_port() -> std::io::Result<u16> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         Ok(listener.local_addr()?.port())
+    }
+
+    fn available_udp_port() -> std::io::Result<u16> {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
+        Ok(socket.local_addr()?.port())
     }
 
     #[tokio::test]

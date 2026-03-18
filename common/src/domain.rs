@@ -1467,4 +1467,38 @@ mod tests {
             "missing Encryption field must produce empty aes_key"
         );
     }
+
+    #[test]
+    fn agent_record_rejects_malformed_base64_aes_key() {
+        let record = minimal_agent_record();
+        let serialised = serde_json::to_value(&record).expect("serialisation must succeed");
+        let mut map = serialised.as_object().expect("top-level value must be an object").clone();
+        map.insert(
+            "Encryption".to_string(),
+            serde_json::json!({
+                "AESKey": "NOT-VALID-BASE64!!!@@@",
+                "AESIv": "AAAAAAAAAAAAAAAAAAAAAA==",
+            }),
+        );
+
+        let result: Result<AgentRecord, _> = serde_json::from_value(serde_json::Value::Object(map));
+        assert!(result.is_err(), "malformed base64 in AESKey must fail deserialization");
+    }
+
+    #[test]
+    fn agent_record_rejects_malformed_base64_aes_iv() {
+        let record = minimal_agent_record();
+        let serialised = serde_json::to_value(&record).expect("serialisation must succeed");
+        let mut map = serialised.as_object().expect("top-level value must be an object").clone();
+        map.insert(
+            "Encryption".to_string(),
+            serde_json::json!({
+                "AESKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                "AESIv": "~~~INVALID~~~",
+            }),
+        );
+
+        let result: Result<AgentRecord, _> = serde_json::from_value(serde_json::Value::Object(map));
+        assert!(result.is_err(), "malformed base64 in AESIv must fail deserialization");
+    }
 }

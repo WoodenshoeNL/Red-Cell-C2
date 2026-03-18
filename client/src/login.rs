@@ -431,4 +431,148 @@ mod tests {
         state.set_error("auth failed".to_owned());
         assert_eq!(state.tls_failure, Some(failure));
     }
+
+    // --- egui widget interaction tests ---
+
+    use egui::{Event, Modifiers, Pos2, Rect};
+
+    /// Helper: create a `RawInput` with a reasonable screen rect so widgets get laid out.
+    fn base_raw_input() -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))),
+            ..Default::default()
+        }
+    }
+
+    /// Helper: prepare a `LoginState` with valid credentials ready to submit.
+    fn submittable_login_state() -> LoginState {
+        let mut state = default_login_state();
+        state.username = "operator".to_owned();
+        state.password = "secret".to_owned();
+        state
+    }
+
+    /// Run `render_login_dialog` inside a headless egui frame and return the `LoginAction`.
+    fn run_dialog(
+        ctx: &egui::Context,
+        input: egui::RawInput,
+        state: &mut LoginState,
+    ) -> LoginAction {
+        let mut action = LoginAction::Waiting;
+        let _ = ctx.run(input, |ctx| {
+            action = render_login_dialog(ctx, state);
+        });
+        action
+    }
+
+    /// Build a `RawInput` that injects an Enter key press.
+    fn input_with_enter() -> egui::RawInput {
+        let mut input = base_raw_input();
+        input.events.push(Event::Key {
+            key: Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        });
+        input
+    }
+
+    /// Build a `RawInput` that simulates a pointer click at `pos`.
+    fn input_with_click(pos: Pos2) -> egui::RawInput {
+        let mut input = base_raw_input();
+        input.events.push(Event::PointerMoved(pos));
+        input.events.push(Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+        });
+        input.events.push(Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+        });
+        input
+    }
+
+    #[test]
+    fn render_enter_key_submits_when_form_valid() {
+        let ctx = egui::Context::default();
+        let mut state = submittable_login_state();
+
+        // First frame: lay out widgets.
+        run_dialog(&ctx, base_raw_input(), &mut state);
+
+        // Second frame: inject Enter key press.
+        let action = run_dialog(&ctx, input_with_enter(), &mut state);
+        assert_eq!(action, LoginAction::Submit);
+    }
+
+    #[test]
+    fn render_enter_key_does_not_submit_while_connecting() {
+        let ctx = egui::Context::default();
+        let mut state = submittable_login_state();
+        state.set_connecting();
+
+        // First frame: lay out.
+        run_dialog(&ctx, base_raw_input(), &mut state);
+
+        // Second frame: inject Enter key — should not submit.
+        let action = run_dialog(&ctx, input_with_enter(), &mut state);
+        assert_eq!(action, LoginAction::Waiting);
+    }
+
+    #[test]
+    fn render_trust_certificate_button_returns_fingerprint() {
+        let ctx = egui::Context::default();
+        let fingerprint = "aabbccdd11223344";
+        let mut state = submittable_login_state();
+        state.set_tls_failure(make_tls_failure("cert error", Some(fingerprint)));
+
+        // First frame: lay out widgets.
+        run_dialog(&ctx, base_raw_input(), &mut state);
+
+        // Scan the central panel area for a click that produces
+        // `TrustCertificate`. The dialog is centred in 800x600 with a
+        // 400px panel, so widgets sit within roughly x 150–650, y 50–550.
+        let mut found = false;
+        'outer: for y in (50..550).step_by(10) {
+            for x in (150..650).step_by(10) {
+                let pos = Pos2::new(x as f32, y as f32);
+                state.tls_failure = Some(make_tls_failure("cert error", Some(fingerprint)));
+                let action = run_dialog(&ctx, input_with_click(pos), &mut state);
+                if action == LoginAction::TrustCertificate(fingerprint.to_owned()) {
+                    found = true;
+                    break 'outer;
+                }
+            }
+        }
+        assert!(found, "should find and click 'Trust this certificate' button");
+    }
+
+    #[test]
+    fn render_tls_failure_without_fingerprint_has_no_trust_button() {
+        let ctx = egui::Context::default();
+        let mut state = submittable_login_state();
+        state.set_tls_failure(make_tls_failure("cert error", None));
+
+        // First frame: lay out.
+        run_dialog(&ctx, base_raw_input(), &mut state);
+
+        // Scan the entire interactive area — no click should produce
+        // TrustCertificate when the fingerprint is absent.
+        for y in (50..550).step_by(10) {
+            for x in (150..650).step_by(10) {
+                let pos = Pos2::new(x as f32, y as f32);
+                state.tls_failure = Some(make_tls_failure("cert error", None));
+                let action = run_dialog(&ctx, input_with_click(pos), &mut state);
+                assert!(
+                    !matches!(action, LoginAction::TrustCertificate(_)),
+                    "TrustCertificate should not be possible without a fingerprint"
+                );
+            }
+        }
+    }
 }

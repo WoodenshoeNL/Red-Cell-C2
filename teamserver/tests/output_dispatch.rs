@@ -298,8 +298,10 @@ async fn job_list_callback_broadcasts_formatted_table() -> Result<(), Box<dyn st
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
 
-    // Two jobs: (id=1, type=0, state=0) and (id=2, type=1, state=1)
-    let jobs = [(1u32, 0u32, 0u32), (2u32, 1u32, 1u32)];
+    // Two jobs with distinct type/state combos so labels are unambiguous:
+    //   id=10, type=2 (Process),       state=3 (Dead)
+    //   id=42, type=3 (Track Process), state=2 (Suspended)
+    let jobs = [(10u32, 2u32, 3u32), (42u32, 3u32, 2u32)];
     let payload = job_list_payload(&jobs);
 
     client
@@ -325,11 +327,43 @@ async fn job_list_callback_broadcasts_formatted_table() -> Result<(), Box<dyn st
     assert_eq!(msg.info.command_id, u32::from(DemonCommand::CommandJob).to_string());
     assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Info"));
 
-    // Output should contain a row for each job ID.
     let output = &msg.info.output;
-    assert!(output.contains('1'), "output should contain job id 1: {output:?}");
-    assert!(output.contains('2'), "output should contain job id 2: {output:?}");
+
+    // Verify the header and separator are present.
     assert!(output.contains("Job ID"), "output should contain header row: {output:?}");
+    assert!(output.contains("Type"), "output should contain Type column header: {output:?}");
+    assert!(output.contains("State"), "output should contain State column header: {output:?}");
+    assert!(output.contains("------"), "output should contain separator row: {output:?}");
+
+    // Normalize output lines for row-level assertions.
+    let lines: Vec<String> =
+        output.lines().map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")).collect();
+
+    // Row for job 10: type=2 → "Process", state=3 → "Dead"
+    assert!(
+        lines.iter().any(|l| l.contains("10") && l.contains("Process") && l.contains("Dead")),
+        "expected row with job 10, type Process, state Dead in output:\n{output}"
+    );
+
+    // Row for job 42: type=3 → "Track Process", state=2 → "Suspended"
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("42") && l.contains("Track Process") && l.contains("Suspended")),
+        "expected row with job 42, type Track Process, state Suspended in output:\n{output}"
+    );
+
+    // Verify exactly two data rows (not counting header/separator).
+    let data_rows: Vec<_> = lines
+        .iter()
+        .filter(|l| !l.is_empty() && !l.contains("Job ID") && !l.contains("------"))
+        .collect();
+    assert_eq!(
+        data_rows.len(),
+        2,
+        "expected exactly 2 data rows, got {}: {data_rows:?}",
+        data_rows.len()
+    );
 
     socket.close(None).await?;
     listeners.stop("out-job-test").await?;

@@ -3383,4 +3383,59 @@ mod tests {
         assert!(!is_tls_cert_error("Connection refused (os error 111)"));
         assert!(!is_tls_cert_error("broken pipe"));
     }
+
+    #[test]
+    fn build_tls_connector_rejects_empty_pem_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let empty_pem = dir.path().join("empty.pem");
+        std::fs::write(&empty_pem, b"").expect("write empty pem");
+        let sink = Arc::new(std::sync::Mutex::new(None));
+
+        let result = build_tls_connector(&TlsVerification::CustomCa(empty_pem.clone()), sink);
+
+        assert!(result.is_err(), "empty PEM file must fail");
+        let err = result.err().expect("should be Err");
+        assert!(
+            matches!(err, TransportError::CustomCaEmpty(_)),
+            "expected CustomCaEmpty, got: {err}"
+        );
+    }
+
+    #[test]
+    fn build_tls_connector_rejects_malformed_pem_content() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bad_pem = dir.path().join("bad.pem");
+        // Write something that looks like PEM structure but has garbage inside.
+        std::fs::write(
+            &bad_pem,
+            b"-----BEGIN CERTIFICATE-----\nNOT-VALID-BASE64!!!@@@\n-----END CERTIFICATE-----\n",
+        )
+        .expect("write bad pem");
+        let sink = Arc::new(std::sync::Mutex::new(None));
+
+        let result = build_tls_connector(&TlsVerification::CustomCa(bad_pem.clone()), sink);
+
+        assert!(result.is_err(), "malformed PEM must fail");
+        let err = result.err().expect("should be Err");
+        assert!(
+            matches!(err, TransportError::CustomCaParse(_)),
+            "expected CustomCaParse, got: {err}"
+        );
+    }
+
+    #[test]
+    fn build_tls_connector_rejects_nonexistent_ca_file() {
+        let sink = Arc::new(std::sync::Mutex::new(None));
+        let result = build_tls_connector(
+            &TlsVerification::CustomCa(PathBuf::from("/nonexistent/path/ca.pem")),
+            sink,
+        );
+
+        assert!(result.is_err(), "nonexistent CA file must fail");
+        let err = result.err().expect("should be Err");
+        assert!(
+            matches!(err, TransportError::CustomCaRead { .. }),
+            "expected CustomCaRead, got: {err}"
+        );
+    }
 }

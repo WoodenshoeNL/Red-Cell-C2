@@ -545,3 +545,155 @@ async fn reconnect_then_subsequent_callback_remains_synchronised()
     harness.shutdown().await?;
     Ok(())
 }
+
+/// An unauthenticated WebSocket client must not be able to inject tasks for a
+/// live agent.  The server should reject the pre-auth `AgentTask` message and
+/// the agent's subsequent `COMMAND_GET_JOB` poll must return no queued jobs.
+#[tokio::test]
+async fn unauthenticated_operator_cannot_inject_agent_task()
+-> Result<(), Box<dyn std::error::Error>> {
+    let harness = spawn_server_with_http_listener("edge-http-unauth-inject").await?;
+    let listener_port = harness.listener_port;
+
+    // --- Register a live agent via the Demon init handshake -----------------------
+    let agent_id = 0x1234_5678;
+    let key = [0x41; AGENT_KEY_LENGTH];
+    let iv = [0x24; AGENT_IV_LENGTH];
+    let mut ctr_offset = 0_u64;
+
+    let init_response = harness
+        .client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_init_body(agent_id, key, iv))
+        .send()
+        .await?
+        .error_for_status()?;
+    let init_bytes = init_response.bytes().await?;
+    let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
+    assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
+    ctr_offset += ctr_blocks_for_len(init_bytes.len());
+
+    // --- Open a second (unauthenticated) WebSocket client -------------------------
+    let (mut unauth_socket, _) = connect_async(format!("ws://{}/", harness.server.addr)).await?;
+
+    // Send an AgentTask as the very first frame — no login attempt at all.
+    let task =
+        operator_task_message("FF", "shell whoami", "12345678", DemonCommand::CommandCheckin)?;
+    unauth_socket.send(ClientMessage::Text(task.into())).await?;
+
+    // The server must reject the non-login message during the auth phase.
+    // It responds with `InitConnectionError` and closes the connection.
+    let rejection = common::read_operator_message(&mut unauth_socket).await?;
+    assert!(
+        matches!(rejection, OperatorMessage::InitConnectionError(_)),
+        "expected InitConnectionError for unauthenticated AgentTask, got {rejection:?}"
+    );
+
+    // --- Agent polls for jobs — must receive nothing ------------------------------
+    let get_job_response = harness
+        .client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandGetJob),
+            1,
+            &[],
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+    let job_bytes = get_job_response.bytes().await?;
+    assert!(
+        job_bytes.is_empty(),
+        "agent must receive no jobs after unauthenticated task injection attempt, got {} bytes",
+        job_bytes.len()
+    );
+
+    // Clean up: close the unauthenticated socket (may already be closed by the
+    // server — ignore errors).
+    let _ = unauth_socket.close(None).await;
+
+    harness.shutdown().await?;
+    Ok(())
+}
+
+/// A WebSocket client that fails authentication (wrong password) must not be
+/// able to queue agent tasks either.
+#[tokio::test]
+async fn failed_login_operator_cannot_inject_agent_task() -> Result<(), Box<dyn std::error::Error>>
+{
+    let harness = spawn_server_with_http_listener("edge-http-badcred-inject").await?;
+    let listener_port = harness.listener_port;
+
+    // --- Register a live agent ----------------------------------------------------
+    let agent_id = 0x1234_5678;
+    let key = [0x41; AGENT_KEY_LENGTH];
+    let iv = [0x24; AGENT_IV_LENGTH];
+    let mut ctr_offset = 0_u64;
+
+    let init_response = harness
+        .client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_init_body(agent_id, key, iv))
+        .send()
+        .await?
+        .error_for_status()?;
+    let init_bytes = init_response.bytes().await?;
+    let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
+    assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
+    ctr_offset += ctr_blocks_for_len(init_bytes.len());
+
+    // --- Attempt login with wrong password ----------------------------------------
+    let (mut bad_socket, _) = connect_async(format!("ws://{}/", harness.server.addr)).await?;
+    let login_payload =
+        serde_json::to_string(&OperatorMessage::Login(red_cell_common::operator::Message {
+            head: MessageHead {
+                event: EventCode::InitConnection,
+                user: "operator".to_owned(),
+                timestamp: String::new(),
+                one_time: String::new(),
+            },
+            info: red_cell_common::operator::LoginInfo {
+                user: "operator".to_owned(),
+                password: red_cell_common::crypto::hash_password_sha3("wrong_password"),
+            },
+        }))?;
+    bad_socket.send(ClientMessage::Text(login_payload.into())).await?;
+
+    // Server responds with InitConnectionError for bad credentials.
+    let rejection = common::read_operator_message(&mut bad_socket).await?;
+    assert!(
+        matches!(rejection, OperatorMessage::InitConnectionError(_)),
+        "expected InitConnectionError for wrong password, got {rejection:?}"
+    );
+
+    // --- Agent polls — must receive no jobs ---------------------------------------
+    let get_job_response = harness
+        .client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandGetJob),
+            1,
+            &[],
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+    let job_bytes = get_job_response.bytes().await?;
+    assert!(
+        job_bytes.is_empty(),
+        "agent must receive no jobs after failed-auth task injection attempt, got {} bytes",
+        job_bytes.len()
+    );
+
+    let _ = bad_socket.close(None).await;
+    harness.shutdown().await?;
+    Ok(())
+}

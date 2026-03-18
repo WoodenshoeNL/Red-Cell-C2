@@ -521,6 +521,64 @@ mod tests {
             .expect("partially-zeroed IV (first byte non-zero) must be accepted");
     }
 
+    /// An empty CHECKIN payload (heartbeat-only, no metadata) must leave the
+    /// existing agent record unchanged except for `last_call_in`.
+    #[tokio::test]
+    async fn handle_checkin_empty_payload_updates_last_call_in_only()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let key = [0xAA; AGENT_KEY_LENGTH];
+        let iv = [0xBB; AGENT_IV_LENGTH];
+        let agent_id = 0xDEAD_0010;
+
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+
+        let original = sample_agent(agent_id, key, iv);
+        registry.insert(original.clone()).await?;
+
+        handle_checkin(&registry, &events, &database, None, agent_id, &[]).await?;
+
+        let agent = registry.get(agent_id).await.ok_or("agent should still exist")?;
+        assert_eq!(agent.hostname, original.hostname, "hostname must not change on empty checkin");
+        assert_eq!(agent.username, original.username, "username must not change on empty checkin");
+        assert_ne!(agent.last_call_in, original.last_call_in, "last_call_in must be updated");
+
+        Ok(())
+    }
+
+    /// A rejected checkin (truncated payload) must not modify the stored agent
+    /// record — the original metadata must be preserved unchanged.
+    #[tokio::test]
+    async fn handle_checkin_truncated_payload_does_not_mutate_agent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let key = [0xAA; AGENT_KEY_LENGTH];
+        let iv = [0xBB; AGENT_IV_LENGTH];
+        let agent_id = 0xDEAD_0011;
+
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+
+        let original = sample_agent(agent_id, key, iv);
+        registry.insert(original.clone()).await?;
+
+        // 10 bytes — too short for the 48-byte metadata prefix.
+        let result =
+            handle_checkin(&registry, &events, &database, None, agent_id, &[0x42; 10]).await;
+        assert!(result.is_err(), "truncated payload must be rejected");
+
+        let agent = registry.get(agent_id).await.ok_or("agent should still exist")?;
+        assert_eq!(agent.hostname, original.hostname, "hostname must not change after rejection");
+        assert_eq!(agent.username, original.username, "username must not change after rejection");
+        assert_eq!(
+            agent.last_call_in, original.last_call_in,
+            "last_call_in must not change after rejection"
+        );
+
+        Ok(())
+    }
+
     /// When the agent ID inside the payload differs from the outer envelope's
     /// agent ID, `parse_checkin_metadata` must return `InvalidCallbackPayload`.
     /// This prevents silent state corruption from misrouted or tampered frames.

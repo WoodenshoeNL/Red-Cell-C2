@@ -1,7 +1,10 @@
 use red_cell_common::{
-    CommonError, HttpListenerConfig, HttpListenerProxyConfig, HttpListenerResponseConfig,
-    ListenerConfig, ListenerProtocol, ListenerTlsConfig,
+    AgentEncryptionInfo, AgentRecord, CommonError, DnsListenerConfig, HttpListenerConfig,
+    HttpListenerProxyConfig, HttpListenerResponseConfig, ListenerConfig, ListenerProtocol,
+    ListenerTlsConfig, OperatorInfo, SmbListenerConfig,
 };
+use serde_json::json;
+use zeroize::Zeroizing;
 
 #[test]
 fn crate_root_exports_round_trip_listener_config() -> Result<(), Box<dyn std::error::Error>> {
@@ -94,4 +97,110 @@ fn crate_root_exports_compile_without_private_module_paths() {
 
     assert_eq!(listener.protocol(), ListenerProtocol::Http);
     assert_eq!(listener.name(), "edge-compile");
+}
+
+#[test]
+fn crate_root_exports_round_trip_dns_and_smb_listener_configs()
+-> Result<(), Box<dyn std::error::Error>> {
+    let smb = SmbListenerConfig {
+        name: "pivot".to_string(),
+        pipe_name: r"\\.\pipe\red-cell".to_string(),
+        kill_date: Some("2026-04-01 00:00:00".to_string()),
+        working_hours: Some("09:00-17:00".to_string()),
+    };
+    let dns = DnsListenerConfig {
+        name: "beacon-dns".to_string(),
+        host_bind: "0.0.0.0".to_string(),
+        port_bind: 53,
+        domain: "c2.example.com".to_string(),
+        record_types: vec!["TXT".to_string(), "A".to_string()],
+        kill_date: Some("2026-04-01 00:00:00".to_string()),
+        working_hours: Some("09:00-17:00".to_string()),
+    };
+
+    let smb_listener = ListenerConfig::from(smb.clone());
+    let dns_listener = ListenerConfig::from(dns.clone());
+
+    assert_eq!(
+        serde_json::from_value::<ListenerConfig>(serde_json::to_value(&smb_listener)?)?,
+        smb_listener
+    );
+    assert_eq!(
+        serde_json::from_value::<ListenerConfig>(serde_json::to_value(&dns_listener)?)?,
+        dns_listener
+    );
+    assert_eq!(smb_listener.protocol(), ListenerProtocol::Smb);
+    assert_eq!(dns_listener.protocol(), ListenerProtocol::Dns);
+    assert_eq!(smb_listener.name(), smb.name);
+    assert_eq!(dns_listener.name(), dns.name);
+
+    Ok(())
+}
+
+#[test]
+fn crate_root_exports_deserialize_agent_record_and_operator_info()
+-> Result<(), Box<dyn std::error::Error>> {
+    let record: AgentRecord = serde_json::from_value(json!({
+        "AgentID": "ABCD1234",
+        "Active": true,
+        "Reason": "checkin",
+        "Note": "external-api-smoke",
+        "Encryption": {
+            "AESKey": "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqo=",
+            "AESIv": "u7u7u7u7u7u7u7u7u7u7uw=="
+        },
+        "Hostname": "wkstn-1",
+        "Username": "operator",
+        "DomainName": "LAB",
+        "ExternalIP": "203.0.113.10",
+        "InternalIP": "10.0.0.10",
+        "ProcessName": "explorer.exe",
+        "ProcessPath": "C:\\Windows\\explorer.exe",
+        "BaseAddress": 1,
+        "ProcessPID": 1234,
+        "ProcessTID": 5678,
+        "ProcessPPID": 4321,
+        "ProcessArch": "x64",
+        "Elevated": false,
+        "OSVersion": "Windows 11",
+        "OSBuild": 22631,
+        "OSArch": "x64",
+        "SleepDelay": 5,
+        "SleepJitter": 10,
+        "KillDate": null,
+        "WorkingHours": null,
+        "FirstCallIn": "09/03/2026 19:04:00",
+        "LastCallIn": "09/03/2026 19:05:00"
+    }))?;
+    let operator: OperatorInfo = serde_json::from_value(json!({
+        "User": "michel",
+        "PasswordHash": "abc123",
+        "Role": "admin",
+        "Online": true,
+        "LastSeen": "09/03/2026 19:05:00"
+    }))?;
+
+    assert_eq!(record.name_id(), "ABCD1234");
+    assert_eq!(*record.encryption.aes_key, vec![0xAA; 32]);
+    assert_eq!(*record.encryption.aes_iv, vec![0xBB; 16]);
+    assert_eq!(operator.username, "michel");
+    assert_eq!(operator.role.as_deref(), Some("admin"));
+    assert!(operator.online);
+
+    Ok(())
+}
+
+#[test]
+fn crate_root_exports_round_trip_agent_encryption_info() -> Result<(), Box<dyn std::error::Error>> {
+    let original = AgentEncryptionInfo {
+        aes_key: Zeroizing::new(vec![0x11; 32]),
+        aes_iv: Zeroizing::new(vec![0x22; 16]),
+    };
+
+    let encoded = serde_json::to_value(&original)?;
+    let decoded: AgentEncryptionInfo = serde_json::from_value(encoded)?;
+
+    assert_eq!(decoded, original);
+
+    Ok(())
 }

@@ -28,8 +28,8 @@ Each loop run updates the running totals and appends a review entry.
 | Startup / lifecycle regressions | 1 | 8 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
-| Correctness / pagination | 9 | 5 | 1 |
-| Workflow / close-hygiene | 11 | 0 | 0 |
+| Correctness / pagination | 10 | 6 | 1 |
+| Workflow / close-hygiene | 12 | 0 | 0 |
 | Code reuse / duplication | 5 | 0 | 0 |
 
 ---
@@ -37,6 +37,19 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-18 22:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude Sonnet | 2 | correctness (1), workflow (1) | is_weak_aes_key empty-slice edge case (v5fb), duplicate open issue k9mp=197z (pk8h) |
+| Codex | 1 | correctness (1) | DownloadTracker hardcodes BeaconOutput command_id in errors even for CommandFs downloads (olvs) |
+| Cursor | 0 | — | No new findings |
+
+Overall codebase health: **on track**
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (1,571 tests passing, 0 warnings)
+Biggest blindspot: DNS listener has ~750 lines of implementation but zero integration tests (existing issue a0ac)
+Security posture: Strong — constant-time comparisons for auth, Zeroizing wrappers for keys, CTR offset only advanced after successful parse, per-IP rate limiting on DEMON_INIT, bounded agent registration, bounded download tracking. No exploitable issues found.
 
 ### QA Review — 2026-03-18 20:30 — b5d8cb8..4e4611a
 

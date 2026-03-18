@@ -369,6 +369,101 @@ mod tests {
         );
     }
 
+    #[test]
+    fn agent_new_event_message_head_has_session_event_teamserver_user_and_one_time_true() {
+        let agent = sample_agent(0x1112_1314);
+        let pivots = PivotInfo { parent: None, children: vec![] };
+
+        let event = agent_new_event("http", 0xDEAD_BEEF, &agent, &pivots);
+
+        let OperatorMessage::AgentNew(message) = event else {
+            panic!("expected AgentNew event");
+        };
+        assert_eq!(
+            message.head.event,
+            red_cell_common::operator::EventCode::Session,
+            "agent_new_event must use EventCode::Session"
+        );
+        assert_eq!(
+            message.head.user, "teamserver",
+            "agent_new_event must set user to 'teamserver'"
+        );
+        assert_eq!(message.head.one_time, "true", "agent_new_event must set one_time to 'true'");
+        assert_eq!(message.head.timestamp, agent.last_call_in);
+    }
+
+    #[test]
+    fn agent_mark_event_message_head_has_session_event_teamserver_user_and_empty_one_time() {
+        let agent = sample_agent(0x1112_1314);
+
+        let event = agent_mark_event(&agent);
+
+        let OperatorMessage::AgentUpdate(message) = event else {
+            panic!("expected AgentUpdate event");
+        };
+        assert_eq!(
+            message.head.event,
+            red_cell_common::operator::EventCode::Session,
+            "agent_mark_event must use EventCode::Session"
+        );
+        assert_eq!(
+            message.head.user, "teamserver",
+            "agent_mark_event must set user to 'teamserver'"
+        );
+        assert!(
+            message.head.one_time.is_empty(),
+            "agent_mark_event must leave one_time empty, got: {:?}",
+            message.head.one_time
+        );
+        assert_eq!(message.head.timestamp, agent.last_call_in);
+    }
+
+    #[test]
+    fn agent_new_event_includes_kill_date_and_working_hours_when_present() {
+        let agent = sample_agent(0x1112_1314);
+        let pivots = PivotInfo { parent: None, children: vec![] };
+
+        let event = agent_new_event("http", 0xDEAD_BEEF, &agent, &pivots);
+
+        let OperatorMessage::AgentNew(message) = event else {
+            panic!("expected AgentNew event");
+        };
+        assert_eq!(
+            message.info.kill_date,
+            serde_json::Value::from(1_893_456_000_i64),
+            "kill_date must be present when agent has a kill_date"
+        );
+        assert_eq!(
+            message.info.working_hours,
+            serde_json::Value::from(0b101010),
+            "working_hours must be present when agent has working_hours"
+        );
+    }
+
+    #[test]
+    fn agent_new_event_emits_null_kill_date_and_working_hours_when_absent() {
+        let mut agent = sample_agent(0x1112_1314);
+        agent.kill_date = None;
+        agent.working_hours = None;
+        let pivots = PivotInfo { parent: None, children: vec![] };
+
+        let event = agent_new_event("http", 0xDEAD_BEEF, &agent, &pivots);
+
+        let OperatorMessage::AgentNew(message) = event else {
+            panic!("expected AgentNew event");
+        };
+        assert_eq!(
+            message.info.kill_date,
+            serde_json::Value::Null,
+            "kill_date must be null when agent has no kill_date"
+        );
+        assert_eq!(
+            message.info.working_hours,
+            serde_json::Value::Null,
+            "working_hours must be null when agent has no working_hours"
+        );
+    }
+
     /// When `note` is non-empty, the `Note` key must appear in the serialized JSON.
     /// When `SocksCliMtx` is `Some`, it must also appear. These fields use
     /// `skip_serializing_if` and could silently vanish if the condition is wrong.

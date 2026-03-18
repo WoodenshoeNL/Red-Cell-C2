@@ -2821,6 +2821,11 @@ impl eframe::App for ClientApp {
                 let action = render_login_dialog(ctx, login_state);
                 if action == LoginAction::Submit {
                     self.handle_login_submit(ctx);
+                } else if let LoginAction::TrustCertificate(fingerprint) = action {
+                    self.local_config.cert_fingerprint = Some(fingerprint.clone());
+                    self.tls_verification = TlsVerification::Fingerprint(fingerprint);
+                    self.local_config.save();
+                    self.handle_login_submit(ctx);
                 }
             }
             AppPhase::Authenticating { app_state, .. } => {

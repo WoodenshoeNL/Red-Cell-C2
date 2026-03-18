@@ -22,7 +22,7 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests | 16 | 13 | 5 |
 | Clippy warnings | 2 | 0 | 1 |
 | Protocol errors | 6 | 27 | 3 |
-| Security issues | 19 | 35 | 0 |
+| Security issues | 19 | 36 | 0 |
 | Architecture drift | 2 | 21 | 0 |
 | Memory / resource leaks | 2 | 10 | 1 |
 | Startup / lifecycle regressions | 1 | 8 | 0 |

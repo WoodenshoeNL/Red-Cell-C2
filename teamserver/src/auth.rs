@@ -1264,6 +1264,26 @@ mod tests {
     }
 
     #[test]
+    fn authentication_failure_invalid_credentials_message_returns_expected_string() {
+        assert_eq!(AuthenticationFailure::InvalidCredentials.message(), "Authentication failed");
+    }
+
+    #[test]
+    fn login_failure_message_embeds_variant_message_unchanged() {
+        let variants =
+            [AuthenticationFailure::InvalidCredentials, AuthenticationFailure::SessionCapExceeded];
+        for variant in &variants {
+            let msg = login_failure_message("user", variant);
+            let value = serde_json::to_value(&msg).expect("message should serialize");
+            assert_eq!(
+                value["Body"]["Info"]["Message"],
+                json!(variant.message()),
+                "login_failure_message must embed {variant:?}.message() unchanged"
+            );
+        }
+    }
+
+    #[test]
     fn login_failure_message_uses_generic_authentication_error_text() {
         let message = login_failure_message("ghost", &AuthenticationFailure::InvalidCredentials);
         let value = serde_json::to_value(&message).expect("message should serialize");

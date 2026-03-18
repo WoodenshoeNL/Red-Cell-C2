@@ -255,6 +255,16 @@ async fn smb_listener_processes_callback_after_init() -> Result<(), Box<dyn std:
     );
     write_smb_frame(&mut callback_stream, agent_id, &callback_body).await?;
 
+    // Read the SMB response frame and verify it echoes the agent_id with an empty payload.
+    let (resp_agent_id, resp_payload) =
+        timeout(Duration::from_secs(5), read_smb_frame(&mut callback_stream)).await??;
+    assert_eq!(resp_agent_id, agent_id, "callback response must echo the agent_id");
+    assert!(
+        resp_payload.is_empty(),
+        "checkin callback response payload must be empty, got {} bytes",
+        resp_payload.len()
+    );
+
     // The teamserver should emit an AgentUpdate event.
     let event = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
     let Some(OperatorMessage::AgentUpdate(message)) = event else {

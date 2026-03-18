@@ -1703,7 +1703,7 @@ async fn handle_smb_connection(state: Arc<SmbListenerState>, mut stream: LocalSo
         .await
         {
             Ok(response) => {
-                if response.payload.is_empty() {
+                if response.http_disposition == DemonHttpDisposition::Fake404 {
                     continue;
                 }
 

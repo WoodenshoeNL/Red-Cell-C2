@@ -437,9 +437,13 @@ async fn operator_session_smb_listener_and_mock_demon_round_trip()
         ),
     )
     .await?;
+    let (resp_agent_id, resp_payload) =
+        timeout(Duration::from_secs(5), read_smb_frame(&mut callback_stream)).await??;
+    assert_eq!(resp_agent_id, agent_id, "output callback response must echo agent_id");
     assert!(
-        timeout(Duration::from_millis(250), read_smb_frame(&mut callback_stream)).await.is_err(),
-        "output callback should not produce an SMB response frame"
+        resp_payload.is_empty(),
+        "output callback response payload must be empty, got {} bytes",
+        resp_payload.len()
     );
 
     let output_event = read_until_operator_message(&mut socket, |message| {

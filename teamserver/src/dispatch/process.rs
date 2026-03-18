@@ -806,6 +806,10 @@ mod tests {
     fn format_memory_protect_unknown_constant_returns_hex_fallback() {
         assert_eq!(format_memory_protect(0x99), "0x99");
         assert_eq!(format_memory_protect(0), "0x0");
+        // Combined flags (e.g. PAGE_GUARD | PAGE_READWRITE) fall through to hex
+        assert_eq!(format_memory_protect(0x104), "0x104");
+        // Uppercase hex must be preserved for consistency
+        assert_eq!(format_memory_protect(0xAB), "0xAB");
     }
 
     // ── format_memory_state ──────────────────────────────────────────────────
@@ -820,6 +824,9 @@ mod tests {
     #[test]
     fn format_memory_state_unknown_constant_returns_hex_fallback() {
         assert_eq!(format_memory_state(0xABCD), "0xABCD");
+        // Combined flags (e.g. MEM_COMMIT | MEM_RESERVE) fall through to hex
+        assert_eq!(format_memory_state(0x3000), "0x3000");
+        assert_eq!(format_memory_state(0), "0x0");
     }
 
     // ── format_memory_type ───────────────────────────────────────────────────
@@ -834,6 +841,8 @@ mod tests {
     #[test]
     fn format_memory_type_unknown_constant_returns_hex_fallback() {
         assert_eq!(format_memory_type(0x99999), "0x99999");
+        assert_eq!(format_memory_type(0x9999), "0x9999");
+        assert_eq!(format_memory_type(0), "0x0");
     }
 
     // ── win32_error_code_name ────────────────────────────────────────────────

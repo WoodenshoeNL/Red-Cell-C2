@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 323 | 195 | 31 |
+| Tasks closed | 327 | 195 | 31 |
 | Bugs filed against | 41 | 34 | 9 |
 | Bug rate (bugs/task) | 0.13 | 0.17 | 0.29 |
 | Quality score | 87% | 83% | 71% |
@@ -2326,3 +2326,14 @@ Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --works
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (1,110 tests passing, 0 failures)
 Notes: Clean review — all changes are test additions only. No production code modified. Network dispatch error-path tests cover invalid subcommand, empty payload, and truncated Sessions/Users rows. Output dispatch integration tests cover all five untested handler paths with happy, error, and edge cases. No code quality issues found.
+
+### QA Review — 2026-03-18 16:00 — 1a04542..f22f905
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (dev02-opus) | 4 | 0 | Closed in2t (malformed CommandJob/List dispatch coverage), 3mro (unauthenticated operator task injection test), 2pdw (same-port listener conflict test), 3p15 (truncated SMB frame headers/partial payloads test). Currently has 12s4 in progress (SMB checkin callback response assertion). |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` 1 pre-existing failure (operator_session_smb_listener_and_mock_demon_round_trip — timeout caused by known bug red-cell-c2-g84l, fix in progress via 12s4). 1,134 unit tests passing.
+Notes: Clean review — all 4 closed tasks are test additions only. No production code modified in this range. Tests are well-structured with proper `?` error propagation, no unwraps, good edge case coverage. SMB truncated-frame test exercises both header and payload truncation plus recovery. Auth injection tests cover both unauthenticated and failed-login paths. No new issues filed.

@@ -352,11 +352,29 @@ mod tests {
     }
 
     #[test]
-    fn tls_subject_alt_names_expand_unspecified_bind_hosts() {
+    fn tls_subject_alt_names_expand_ipv4_unspecified() {
         assert_eq!(
             tls_subject_alt_names("0.0.0.0"),
             vec!["0.0.0.0".to_owned(), "127.0.0.1".to_owned(), "localhost".to_owned()]
         );
+    }
+
+    #[test]
+    fn tls_subject_alt_names_expand_ipv6_unspecified() {
+        assert_eq!(
+            tls_subject_alt_names("::"),
+            vec!["::".to_owned(), "127.0.0.1".to_owned(), "localhost".to_owned()]
+        );
+    }
+
+    #[test]
+    fn tls_subject_alt_names_specific_ipv4_returns_only_itself() {
+        assert_eq!(tls_subject_alt_names("127.0.0.1"), vec!["127.0.0.1".to_owned()]);
+    }
+
+    #[test]
+    fn tls_subject_alt_names_hostname_returns_only_itself() {
+        assert_eq!(tls_subject_alt_names("example.com"), vec!["example.com".to_owned()]);
     }
 
     #[tokio::test]

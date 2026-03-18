@@ -1,8 +1,14 @@
-//! Integration test: AES-CTR block offset persists across a simulated teamserver restart.
+//! Integration tests for AES-CTR block offset persistence and concurrency safety.
 //!
 //! Verifies that `AgentRegistry::load()` correctly reloads the per-agent CTR block
 //! offset from SQLite, so that encryption after a restart continues from the correct
 //! keystream position rather than silently resetting to block 0 (two-time-pad collision).
+//!
+//! Also verifies that concurrent `encrypt_for_agent` calls on the same agent never
+//! produce overlapping keystream offsets (two-time-pad collision).
+
+use std::collections::HashSet;
+use std::sync::Arc;
 
 use red_cell::{AgentRegistry, database::Database};
 use red_cell_common::{
@@ -196,6 +202,67 @@ async fn ctr_offset_exact_block_boundary_is_preserved() -> Result<(), Box<dyn st
         reloaded.ctr_offset(agent_id).await?,
         1,
         "reloaded offset must be 1 after one 16-byte message"
+    );
+
+    Ok(())
+}
+
+/// Concurrent `encrypt_for_agent` calls on the same agent must never reuse a CTR offset.
+///
+/// Spawns N tasks that each encrypt a payload for the same agent simultaneously.
+/// Verifies:
+/// 1. All returned ciphertexts are pairwise distinct (no two-time-pad collision).
+/// 2. The final persisted CTR offset equals the sum of blocks consumed by all N calls.
+#[tokio::test]
+async fn concurrent_encrypt_for_agent_no_offset_collision() -> Result<(), Box<dyn std::error::Error>>
+{
+    const NUM_CONCURRENT: usize = 20;
+
+    let key = [0xAA_u8; AGENT_KEY_LENGTH];
+    let iv = [0xBB_u8; AGENT_IV_LENGTH];
+    let agent_id: u32 = 0xC0C0_CAFE;
+
+    let database = Database::connect_in_memory().await?;
+    let registry = Arc::new(AgentRegistry::new(database));
+    let agent = sample_agent_with_crypto(agent_id, key, iv);
+    registry.insert(agent).await?;
+
+    // Each task encrypts the same plaintext so that any keystream overlap would produce
+    // identical ciphertext — making collision detection trivial.
+    let payload = b"concurrent-test-payload-32-bytes!";
+    let blocks_per_call = ctr_blocks_for_len(payload.len());
+
+    // Spawn N concurrent encrypt tasks.
+    let mut handles = Vec::with_capacity(NUM_CONCURRENT);
+    for _ in 0..NUM_CONCURRENT {
+        let reg = Arc::clone(&registry);
+        let data = payload.to_vec();
+        handles.push(tokio::spawn(async move { reg.encrypt_for_agent(agent_id, &data).await }));
+    }
+
+    // Collect all results.
+    let mut ciphertexts = Vec::with_capacity(NUM_CONCURRENT);
+    for handle in handles {
+        ciphertexts.push(handle.await??);
+    }
+
+    // 1. All ciphertexts must be pairwise distinct.
+    let unique: HashSet<&Vec<u8>> = ciphertexts.iter().collect();
+    assert_eq!(
+        unique.len(),
+        NUM_CONCURRENT,
+        "expected {NUM_CONCURRENT} distinct ciphertexts but got {}; \
+         duplicate ciphertext means two calls shared the same CTR offset (two-time-pad)",
+        unique.len(),
+    );
+
+    // 2. The final CTR offset must equal blocks_per_call * NUM_CONCURRENT.
+    let expected_total_offset = blocks_per_call * NUM_CONCURRENT as u64;
+    let final_offset = registry.ctr_offset(agent_id).await?;
+    assert_eq!(
+        final_offset, expected_total_offset,
+        "final CTR offset should be {expected_total_offset} \
+         ({blocks_per_call} blocks/call * {NUM_CONCURRENT} calls), got {final_offset}"
     );
 
     Ok(())

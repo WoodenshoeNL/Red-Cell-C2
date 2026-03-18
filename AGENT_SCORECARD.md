@@ -19,7 +19,7 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 2 | 0 | 0 |
-| Missing tests | 10 | 12 | 5 |
+| Missing tests | 11 | 13 | 5 |
 | Clippy warnings | 1 | 0 | 1 |
 | Protocol errors | 6 | 27 | 3 |
 | Security issues | 17 | 34 | 0 |
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Startup / lifecycle regressions | 1 | 8 | 0 |
 | Audit attribution errors | 0 | 1 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
-| Correctness / pagination | 7 | 5 | 1 |
+| Correctness / pagination | 9 | 5 | 1 |
 | Workflow / close-hygiene | 11 | 0 | 0 |
 | Code reuse / duplication | 5 | 0 | 0 |
 
@@ -37,6 +37,19 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-18 02:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 5 | missing handler (1), correctness (2), test gap (1), error swallowing (1) | PsImport handler missing, kerberos timestamp overflow, weak-key empty-slice API, poison lock recovery, websocket shutdown error swallowing |
+| Codex | 1 | test gap (1) | DNS listener lacks E2E pipeline test |
+| Cursor | 0 | — | No new findings |
+
+Overall codebase health: **on track**
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (all passing, 0 warnings)
+Biggest blindspot: CommandPsImport (0x1011) has no dispatch handler — agent PsImport callbacks are silently dropped
+Security posture: Strong — constant-time comparisons, Zeroizing wrappers, no unsafe, no key leaks in logs, proper input validation. No exploitable issues found.
 
 ### QA Review — 2026-03-18 19:15 — 91f7a32..ea2d5c4
 

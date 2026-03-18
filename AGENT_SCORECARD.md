@@ -26,6 +26,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 2 | 21 | 0 |
 | Memory / resource leaks | 2 | 10 | 1 |
 | Startup / lifecycle regressions | 1 | 8 | 0 |
+| Test infrastructure / flakiness | 1 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
 | Correctness / pagination | 11 | 6 | 1 |
@@ -2359,3 +2360,19 @@ Notes: Clean review — all 4 closed tasks are test additions only. No productio
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (all tests passing)
 Notes: Clean review — all 4 closed tasks are test additions only. No production code modified. Tests are thorough: audit.rs adds 9 new tests covering result_status/target_kind/target_id/command filters, pagination ordering across pages, operator alias, combined filters, and time-window intersection. TLS tests cover mismatched cert/key (same algo + cross-algo) and partial-state regeneration (cert-only, key-only). Agent event tests verify metadata fields (event code, user, one_time, timestamp) and optional kill_date/working_hours. No new issues filed.
+
+### Arch Review — 2026-03-18 19:15
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude (Sonnet) | 1 | 1 test infrastructure bug | Plugin test mutex poisoning cascade (08ds, P2) — `load_plugins_registers_callbacks_and_commands` assertion failure poisons `PLUGIN_RUNTIME_TEST_MUTEX`, causing 6 tests to fail in full suite runs. Tests pass in isolation. |
+| Claude (Opus) | 0 | — | No new issues found. |
+| Codex | 0 | — | No new issues found. |
+| Cursor | 0 | — | No new issues found. |
+
+Overall codebase health: **on track**
+Biggest blindspot: Plugin test isolation — the Python GIL global state creates a fragile test ordering dependency that masks 6 tests as failing in CI-like full-suite runs.
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (zero warnings), `cargo test --workspace` — 1144 passed, 6 failed (all from plugin mutex poisoning cascade)
+
+Deep review covered: full structural map (96k lines across 3 crates, 66 .rs files), all dispatch handlers (14 files), crypto implementation (AES-256-CTR with offset persistence, Zeroizing key material, constant-time comparisons), protocol parsing (integer overflow guards via checked_* and try_from, magic precheck, size validation), authentication (Argon2 + dummy verifier timing defense, session caps, API key HMAC), all listener implementations (HTTP/HTTPS/DNS/SMB with rate limiting), plugin system (PyO3 + GIL), REST API routes, WebSocket handlers, client UI + transport. Security posture remains strong — no key material in logs, no unwrap in production code, no println/eprintln anywhere, bounded allocations throughout, proper error propagation. Architecture fully aligned with AGENTS.md specifications (Axum+Tokio, SQLite/sqlx, HCL config, thiserror in libraries, anyhow only in main.rs, edition 2024).

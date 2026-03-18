@@ -4300,6 +4300,60 @@ mod tests {
     }
 
     #[test]
+    fn resolve_tls_uses_custom_ca_when_cli_ca_cert_is_set() {
+        let cli = Cli {
+            server: DEFAULT_SERVER_URL.to_owned(),
+            scripts_dir: None,
+            ca_cert: Some(PathBuf::from("/tmp/cli-ca.pem")),
+            cert_fingerprint: None,
+            accept_invalid_certs: false,
+        };
+        let config = LocalConfig::default();
+        assert!(matches!(
+            resolve_tls_verification(&cli, &config),
+            TlsVerification::CustomCa(ref path) if path == &PathBuf::from("/tmp/cli-ca.pem")
+        ));
+    }
+
+    #[test]
+    fn resolve_tls_prefers_cli_custom_ca_over_config_custom_ca() {
+        let cli = Cli {
+            server: DEFAULT_SERVER_URL.to_owned(),
+            scripts_dir: None,
+            ca_cert: Some(PathBuf::from("/tmp/cli-ca.pem")),
+            cert_fingerprint: None,
+            accept_invalid_certs: false,
+        };
+        let config = LocalConfig {
+            ca_cert: Some(PathBuf::from("/tmp/config-ca.pem")),
+            ..LocalConfig::default()
+        };
+        assert!(matches!(
+            resolve_tls_verification(&cli, &config),
+            TlsVerification::CustomCa(ref path) if path == &PathBuf::from("/tmp/cli-ca.pem")
+        ));
+    }
+
+    #[test]
+    fn resolve_tls_falls_back_to_config_custom_ca() {
+        let cli = Cli {
+            server: DEFAULT_SERVER_URL.to_owned(),
+            scripts_dir: None,
+            ca_cert: None,
+            cert_fingerprint: None,
+            accept_invalid_certs: false,
+        };
+        let config = LocalConfig {
+            ca_cert: Some(PathBuf::from("/tmp/config-ca.pem")),
+            ..LocalConfig::default()
+        };
+        assert!(matches!(
+            resolve_tls_verification(&cli, &config),
+            TlsVerification::CustomCa(ref path) if path == &PathBuf::from("/tmp/config-ca.pem")
+        ));
+    }
+
+    #[test]
     fn resolve_tls_defaults_to_certificate_authority() {
         let cli = Cli {
             server: DEFAULT_SERVER_URL.to_owned(),

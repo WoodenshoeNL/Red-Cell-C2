@@ -492,6 +492,104 @@ async fn smb_listener_ignores_invalid_demon_frame() -> Result<(), Box<dyn std::e
     Ok(())
 }
 
+/// Truncated frame headers and partial payloads must not hang the read loop,
+/// panic on partial buffers, or register partially parsed agent state.  After
+/// the bad connections close, a valid DEMON_INIT on a fresh connection must
+/// still succeed.
+#[cfg(unix)]
+#[tokio::test]
+async fn smb_listener_rejects_truncated_header_and_partial_payload()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_, registry, events, manager) = test_manager().await?;
+    let mut event_receiver = events.subscribe();
+    let pipe_name = unique_pipe_name("truncated");
+
+    manager.create(smb_config("smb-test-truncated", &pipe_name)).await?;
+    manager.start("smb-test-truncated").await?;
+    wait_for_smb_listener(&pipe_name).await?;
+
+    let bogus_agent_id = 0xAAAA_BBBB_u32;
+
+    // --- Case 1: truncated header (only 4 of the 8 header bytes) ---
+    {
+        let mut stream = connect_smb(&pipe_name).await?;
+        // Write only the agent_id field (4 bytes) — the payload_len is missing.
+        stream.write_all(&bogus_agent_id.to_le_bytes()).await?;
+        stream.flush().await?;
+        drop(stream); // disconnect before the server can read a full header
+    }
+
+    // Give the server a moment to process the disconnect.
+    sleep(Duration::from_millis(100)).await;
+
+    assert!(
+        registry.get(bogus_agent_id).await.is_none(),
+        "truncated header must not register an agent"
+    );
+
+    // --- Case 2: full header but truncated payload ---
+    {
+        let mut stream = connect_smb(&pipe_name).await?;
+        // Write a full 8-byte header claiming 1024 bytes of payload…
+        stream.write_u32_le(bogus_agent_id).await?;
+        stream.write_u32_le(1024).await?;
+        // …but only deliver 16 bytes before disconnecting.
+        stream.write_all(&[0xCC_u8; 16]).await?;
+        stream.flush().await?;
+        drop(stream);
+    }
+
+    sleep(Duration::from_millis(100)).await;
+
+    assert!(
+        registry.get(bogus_agent_id).await.is_none(),
+        "truncated payload must not register an agent"
+    );
+
+    // --- Verify the listener is still healthy: a valid DEMON_INIT must succeed ---
+    let valid_agent_id = 0xBEEF_CAFE_u32;
+    let key = [0x55_u8; AGENT_KEY_LENGTH];
+    let iv = [0x33_u8; AGENT_IV_LENGTH];
+
+    let mut stream = connect_smb(&pipe_name).await?;
+    write_smb_frame(
+        &mut stream,
+        valid_agent_id,
+        &common::valid_demon_init_body(valid_agent_id, key, iv),
+    )
+    .await?;
+
+    let (ack_agent_id, ack_payload) =
+        timeout(Duration::from_secs(5), read_smb_frame(&mut stream)).await??;
+    assert_eq!(ack_agent_id, valid_agent_id, "ack agent_id must match");
+
+    let decrypted = decrypt_agent_data(&key, &iv, &ack_payload)?;
+    assert_eq!(
+        decrypted.as_slice(),
+        &valid_agent_id.to_le_bytes(),
+        "init ack must contain agent_id as LE bytes"
+    );
+
+    let stored = registry.get(valid_agent_id).await.ok_or("agent should be registered")?;
+    assert_eq!(stored.hostname, "wkstn-01");
+
+    // Drain the AgentNew event to confirm registration completed.
+    let event = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
+    let Some(OperatorMessage::AgentNew(message)) = event else {
+        panic!("expected AgentNew event after valid init");
+    };
+    assert_eq!(message.info.name_id, format!("{valid_agent_id:08X}"));
+
+    // No spurious events from the truncated connections.
+    assert!(
+        timeout(Duration::from_millis(200), event_receiver.recv()).await.is_err(),
+        "truncated connections must not emit extra operator events"
+    );
+
+    manager.stop("smb-test-truncated").await?;
+    Ok(())
+}
+
 /// After an SMB listener is stopped, connections to the named pipe are refused.
 #[cfg(unix)]
 #[tokio::test]

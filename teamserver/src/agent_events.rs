@@ -256,4 +256,25 @@ mod tests {
             "process_path must be the full path, not the basename"
         );
     }
+
+    #[test]
+    fn operator_agent_info_none_kill_date_and_working_hours_emit_null() {
+        let mut agent = sample_agent(0x1112_1314);
+        agent.kill_date = None;
+        agent.working_hours = None;
+        let pivots = PivotInfo { parent: None, children: vec![] };
+
+        let info = operator_agent_info("http", 0xDEAD_BEEF, &agent, &pivots);
+
+        assert_eq!(
+            info.kill_date,
+            serde_json::Value::Null,
+            "kill_date must be Value::Null when None"
+        );
+        assert_eq!(
+            info.working_hours,
+            serde_json::Value::Null,
+            "working_hours must be Value::Null when None"
+        );
+    }
 }

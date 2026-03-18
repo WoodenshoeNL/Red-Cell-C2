@@ -2330,3 +2330,67 @@ async fn config_invalid_key_returns_error() -> Result<(), Box<dyn std::error::Er
     listeners.stop("out-cfg-bad-key").await?;
     Ok(())
 }
+
+/// A `CommandJob/List` callback with an incomplete trailing row (only job_id, missing
+/// type and state) must return a non-2xx HTTP status and must NOT broadcast any
+/// `AgentResponse` to the operator socket.
+#[tokio::test]
+async fn job_list_malformed_incomplete_row_returns_error_no_broadcast()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-job-malformed", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-job-malformed").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0076_u32;
+    let key = [0x77; AGENT_KEY_LENGTH];
+    let iv = [0x78; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // Build a malformed CommandJob/List payload: one complete row followed by a
+    // truncated row that only contains job_id (missing job_type and state).
+    let mut malformed = Vec::new();
+    malformed.extend_from_slice(&1u32.to_le_bytes()); // DemonJobCommand::List = 1
+    // Complete row: id=10, type=2, state=1
+    malformed.extend_from_slice(&10u32.to_le_bytes());
+    malformed.extend_from_slice(&2u32.to_le_bytes());
+    malformed.extend_from_slice(&1u32.to_le_bytes());
+    // Incomplete trailing row: only job_id, no type or state
+    malformed.extend_from_slice(&99u32.to_le_bytes());
+
+    let response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandJob),
+            0x20,
+            &malformed,
+        ))
+        .send()
+        .await?;
+
+    assert!(
+        !response.status().is_success(),
+        "expected error HTTP status for malformed job list payload, got {}",
+        response.status()
+    );
+
+    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
+
+    socket.close(None).await?;
+    listeners.stop("out-job-malformed").await?;
+    Ok(())
+}

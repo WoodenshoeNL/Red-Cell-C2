@@ -171,4 +171,36 @@ mod tests {
         );
         assert!(windows.contains_key(&ip(10, 0, 0, 2)));
     }
+
+    #[test]
+    fn prune_empty_map_is_noop() {
+        let mut windows: HashMap<IpAddr, AttemptWindow> = HashMap::new();
+        prune_expired_windows(&mut windows, Duration::from_secs(60), Instant::now());
+        assert!(windows.is_empty());
+    }
+
+    #[test]
+    fn prune_works_with_ipv6_keys() {
+        use std::net::Ipv6Addr;
+
+        let mut windows: HashMap<IpAddr, AttemptWindow> = HashMap::new();
+        let duration = Duration::from_secs(60);
+        let now = Instant::now();
+
+        let v6_expired = IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1));
+        let v6_fresh = IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 2));
+
+        // Expired: exactly at boundary (age == duration → pruned).
+        windows.insert(v6_expired, AttemptWindow { attempts: 3, window_start: now - duration });
+        // Fresh: well within the window.
+        windows.insert(
+            v6_fresh,
+            AttemptWindow { attempts: 1, window_start: now - Duration::from_secs(10) },
+        );
+
+        prune_expired_windows(&mut windows, duration, now);
+
+        assert!(!windows.contains_key(&v6_expired), "expired IPv6 entry must be pruned");
+        assert!(windows.contains_key(&v6_fresh), "fresh IPv6 entry must be retained");
+    }
 }

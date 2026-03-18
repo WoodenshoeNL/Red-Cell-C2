@@ -2112,4 +2112,180 @@ mod tests {
             page.items.iter().map(|r| &r.actor).collect::<Vec<_>>()
         );
     }
+
+    #[tokio::test]
+    async fn query_audit_log_result_status_success_filter_narrows_correctly() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_diverse_audit_rows(&database).await;
+
+        let query =
+            AuditQuery { result_status: Some(AuditResultStatus::Success), ..AuditQuery::default() };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        // Rows 1, 2, 4, 6, 7, 9 are successes = 6 total
+        assert_eq!(page.total, 6, "exactly 6 success rows should match");
+        assert!(
+            page.items.iter().all(|r| r.result_status == AuditResultStatus::Success),
+            "only success rows should be returned"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_target_kind_and_result_status_combined() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_diverse_audit_rows(&database).await;
+
+        // agent + Failure → rows 3, 8
+        let query = AuditQuery {
+            target_kind: Some("agent".to_owned()),
+            result_status: Some(AuditResultStatus::Failure),
+            ..AuditQuery::default()
+        };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        assert_eq!(page.total, 2, "agent + failure should yield 2 rows");
+        assert!(
+            page.items
+                .iter()
+                .all(|r| r.target_kind == "agent" && r.result_status == AuditResultStatus::Failure),
+            "all rows must match both filters"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_target_id_and_actor_combined() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_diverse_audit_rows(&database).await;
+
+        // actor=alice + target_id=A1 → only row 1
+        let query = AuditQuery {
+            actor: Some("alice".to_owned()),
+            target_id: Some("A1".to_owned()),
+            ..AuditQuery::default()
+        };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        assert_eq!(page.total, 1, "alice + target_id=A1 should yield 1 row");
+        assert_eq!(page.items[0].actor, "alice");
+        assert_eq!(page.items[0].target_id.as_deref(), Some("A1"));
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_operator_and_target_kind_combined() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_diverse_audit_rows(&database).await;
+
+        // operator=bob + target_kind=agent → rows 4, 6, 8
+        let query = AuditQuery {
+            operator: Some("bob".to_owned()),
+            target_kind: Some("agent".to_owned()),
+            ..AuditQuery::default()
+        };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        assert_eq!(page.total, 3, "bob + agent should yield 3 rows");
+        assert!(
+            page.items.iter().all(|r| r.actor == "bob" && r.target_kind == "agent"),
+            "all rows must match both operator and target_kind"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_target_id_and_result_status_combined() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_diverse_audit_rows(&database).await;
+
+        // target_id=A1 + Success → rows 1, 4
+        let query = AuditQuery {
+            target_id: Some("A1".to_owned()),
+            result_status: Some(AuditResultStatus::Success),
+            ..AuditQuery::default()
+        };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        assert_eq!(page.total, 2, "A1 + success should yield 2 rows");
+        assert!(
+            page.items.iter().all(|r| r.target_id.as_deref() == Some("A1")
+                && r.result_status == AuditResultStatus::Success),
+            "all rows must match both filters"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_nonexistent_target_kind_returns_empty() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_diverse_audit_rows(&database).await;
+
+        let query =
+            AuditQuery { target_kind: Some("nonexistent".to_owned()), ..AuditQuery::default() };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        assert_eq!(page.total, 0, "no rows should match a nonexistent target_kind");
+        assert!(page.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_nonexistent_target_id_returns_empty() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_diverse_audit_rows(&database).await;
+
+        let query = AuditQuery { target_id: Some("ZZZZZ".to_owned()), ..AuditQuery::default() };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        assert_eq!(page.total, 0, "no rows should match a nonexistent target_id");
+        assert!(page.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_target_id_substring_match() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_diverse_audit_rows(&database).await;
+
+        // "L" should match both "L1" (rows 2, 5) and "L2" (row 9) via instr()
+        let query = AuditQuery { target_id: Some("L".to_owned()), ..AuditQuery::default() };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        assert_eq!(page.total, 3, "substring 'L' should match L1 and L2 target_ids");
+        assert!(
+            page.items.iter().all(|r| r.target_id.as_deref().is_some_and(|id| id.contains('L'))),
+            "all returned target_ids must contain 'L'"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_target_kind_substring_match() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_diverse_audit_rows(&database).await;
+
+        // "lis" should match "listener" (rows 2, 5, 9) via instr()
+        let query = AuditQuery { target_kind: Some("lis".to_owned()), ..AuditQuery::default() };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        assert_eq!(page.total, 3, "substring 'lis' should match listener target_kind");
+        assert!(
+            page.items.iter().all(|r| r.target_kind.contains("lis")),
+            "all returned target_kinds must contain 'lis'"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_triple_filter_target_kind_target_id_result_status() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_diverse_audit_rows(&database).await;
+
+        // listener + L1 + Failure → only row 5
+        let query = AuditQuery {
+            target_kind: Some("listener".to_owned()),
+            target_id: Some("L1".to_owned()),
+            result_status: Some(AuditResultStatus::Failure),
+            ..AuditQuery::default()
+        };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        assert_eq!(page.total, 1, "listener + L1 + failure should yield exactly 1 row");
+        let item = &page.items[0];
+        assert_eq!(item.target_kind, "listener");
+        assert_eq!(item.target_id.as_deref(), Some("L1"));
+        assert_eq!(item.result_status, AuditResultStatus::Failure);
+    }
 }

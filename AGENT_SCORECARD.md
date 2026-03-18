@@ -38,6 +38,25 @@ Each loop run updates the running totals and appends a review entry.
 
 <!-- QA and arch loops append entries below this line -->
 
+### Arch Review — 2026-03-18 11:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 0 | — | No new issues found in code authored by Claude |
+| Codex | 0 | — | No new issues found in code authored by Codex |
+| Cursor | 0 | — | No new issues found in code authored by Cursor |
+
+Overall codebase health: **on track**
+Biggest blindspot: Test coverage for dispatch/socket.rs (SOCKS relay callbacks) and injection handlers — already tracked in existing issues.
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (1,701 tests passing, 0 failures)
+
+Deep review covered: crypto (AES-256-CTR offset design, key material handling, Zeroizing wrappers), Demon protocol (envelope/package parsing, golden vectors, byte-order correctness), authentication (Argon2 + constant-time comparison), RBAC enforcement, API key security, webhook SSRF mitigations, download size bounding, mutex poisoning handling, shutdown coordination, all dispatch handlers.
+
+Security posture: Strong. No key material in logs (Debug impls redacted), no unbounded allocations from untrusted input (all length-prefixed reads bounded by buffer), constant-time secret comparisons throughout, SSRF protections on webhook client, proper CTR offset management preventing two-time-pad. 50+ open issues already tracked for remaining work.
+
+No new issues filed — all findings from this review were already covered by existing beads issues.
+
 ### QA Review — 2026-03-18 09:30 — ed6ad75..18fb1b7
 
 | Agent | Tasks closed | Bugs filed | Notes |

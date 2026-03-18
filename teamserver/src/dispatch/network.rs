@@ -453,6 +453,63 @@ mod tests {
         }
     }
 
+    // ── handle_net_callback: error paths ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn invalid_subcommand_returns_invalid_callback_payload() {
+        // Subcommand 0xFF is outside the valid range (1..=9)
+        let payload = encode_u32(0xFF);
+        let events = EventBus::default();
+        let result = handle_net_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_payload_returns_invalid_callback_payload() {
+        // No bytes at all — cannot even read the subcommand u32
+        let events = EventBus::default();
+        let result = handle_net_callback(&events, AGENT_ID, REQUEST_ID, &[]).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload for empty payload, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn truncated_sessions_row_returns_invalid_callback_payload() {
+        // Sessions: valid target, then start a row but truncate before the idle u32
+        let mut rest = encode_utf16("DC01");
+        rest.extend(encode_utf16("10.0.0.5")); // client
+        rest.extend(encode_utf16("admin")); // user
+        rest.extend(encode_u32(120)); // active
+        // missing: idle u32 — parser should fail
+        let payload = net_payload(DemonNetCommand::Sessions, &rest);
+        let events = EventBus::default();
+        let result = handle_net_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload for truncated Sessions row, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn truncated_users_row_returns_invalid_callback_payload() {
+        // Users: valid target, then a username but missing the is_admin bool
+        let mut rest = encode_utf16("HOST01");
+        rest.extend(encode_utf16("Administrator")); // username
+        // missing: is_admin bool — parser should fail
+        let payload = net_payload(DemonNetCommand::Users, &rest);
+        let events = EventBus::default();
+        let result = handle_net_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload for truncated Users row, got {result:?}"
+        );
+    }
+
     // ── format_net_sessions ───────────────────────────────────────────────────
 
     #[test]

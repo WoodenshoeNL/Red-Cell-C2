@@ -9,8 +9,8 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 312 | 195 | 31 |
-| Bugs filed against | 40 | 34 | 9 |
+| Tasks closed | 314 | 195 | 31 |
+| Bugs filed against | 41 | 34 | 9 |
 | Bug rate (bugs/task) | 0.13 | 0.17 | 0.29 |
 | Quality score | 87% | 83% | 71% |
 
@@ -20,7 +20,7 @@ Each loop run updates the running totals and appends a review entry.
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 2 | 0 | 0 |
 | Missing tests | 16 | 13 | 5 |
-| Clippy warnings | 1 | 0 | 1 |
+| Clippy warnings | 2 | 0 | 1 |
 | Protocol errors | 6 | 27 | 3 |
 | Security issues | 19 | 35 | 0 |
 | Architecture drift | 2 | 21 | 0 |
@@ -37,6 +37,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-18 09:30 — ed6ad75..18fb1b7
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (dev02-opus) | 2 | 1 | Closed 3scs (CommandNet dispatcher tests), osdk (filesystem download callback/event tests). 1 clippy bug filed (ol6e) for WIP needless_question_mark in demon.rs. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (committed code), `cargo test --workspace` ✓ (1,689 tests passing, 0 failures)
+Notes: Clean committed code — 21 new tests total: 10 CommandNet dispatcher tests (network.rs covering Domain, Logons, Sessions, Share, LocalGroup, Group, Users, Computer/DcList no-broadcast), 11 filesystem download tests (filesystem.rs covering happy-path open/chunk/close lifecycle, progress/complete events, persist_download path extraction and metadata). WIP in demon.rs for n7gj has clippy issue (needless Ok wrapper around map_err) — filed as ol6e. Also 2 test-review chore commits that filed quality issues at scan indices 24 and 34.
 
 ### QA Review — 2026-03-18 08:00 — 9b3a2ca..d25c259
 

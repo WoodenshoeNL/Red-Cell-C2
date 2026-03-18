@@ -3929,4 +3929,298 @@ havocui.RegisterCommand('recon scan', 'Run a recon scan', [{{'name': 'target', '
             "task_result_receivers should be empty after closed-sender enqueue failure"
         );
     }
+
+    // ---------------------------------------------------------------
+    // Error-path tests: invalid callbacks and option-schema failures
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn register_command_rejects_non_callable_callback() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        write_script(
+            &temp_dir.path().join("bad_cb.py"),
+            "import red_cell\nred_cell.register_command('oops', 'not_a_function')\n",
+        );
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        assert!(
+            runtime.command_names().is_empty(),
+            "no command should be registered when the callback is not callable"
+        );
+        let descriptor = runtime
+            .script_descriptors()
+            .into_iter()
+            .find(|s| s.name == "bad_cb")
+            .expect("script descriptor should exist");
+        assert_eq!(descriptor.status, ScriptLoadStatus::Error);
+        assert!(
+            descriptor.error.as_ref().is_some_and(|e| e.contains("callback must be callable")),
+            "error should mention non-callable callback, got: {:?}",
+            descriptor.error,
+        );
+    }
+
+    #[test]
+    fn havocui_register_command_rejects_non_callable_callback() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        write_script(
+            &temp_dir.path().join("bad_ui_cb.py"),
+            "import havocui\nhavocui.RegisterCommand('oops', 42)\n",
+        );
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        assert!(
+            runtime.command_names().is_empty(),
+            "no command should be registered when havocui callback is not callable"
+        );
+        let descriptor = runtime
+            .script_descriptors()
+            .into_iter()
+            .find(|s| s.name == "bad_ui_cb")
+            .expect("script descriptor should exist");
+        assert_eq!(descriptor.status, ScriptLoadStatus::Error);
+        assert!(
+            descriptor
+                .error
+                .as_ref()
+                .is_some_and(|e| { e.contains("callable") || e.contains("callback") }),
+            "error should mention callable requirement, got: {:?}",
+            descriptor.error,
+        );
+    }
+
+    #[test]
+    fn register_callback_rejects_non_callable() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        write_script(
+            &temp_dir.path().join("bad_event.py"),
+            "import red_cell\nred_cell.register_callback('agent_checkin', 'not_callable')\n",
+        );
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        let descriptor = runtime
+            .script_descriptors()
+            .into_iter()
+            .find(|s| s.name == "bad_event")
+            .expect("script descriptor should exist");
+        assert_eq!(descriptor.status, ScriptLoadStatus::Error);
+        assert!(
+            descriptor.error.as_ref().is_some_and(|e| e.contains("callback must be callable")),
+            "error should mention non-callable callback, got: {:?}",
+            descriptor.error,
+        );
+    }
+
+    #[test]
+    fn register_callback_rejects_unsupported_event_type() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        write_script(
+            &temp_dir.path().join("bad_event_type.py"),
+            "import red_cell\nred_cell.register_callback('no_such_event', lambda: None)\n",
+        );
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        let descriptor = runtime
+            .script_descriptors()
+            .into_iter()
+            .find(|s| s.name == "bad_event_type")
+            .expect("script descriptor should exist");
+        assert_eq!(descriptor.status, ScriptLoadStatus::Error);
+        assert!(
+            descriptor.error.as_ref().is_some_and(|e| e.contains("unsupported client callback")),
+            "error should mention unsupported event type, got: {:?}",
+            descriptor.error,
+        );
+    }
+
+    #[test]
+    fn register_command_rejects_malformed_options_item() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        // Options list contains a string instead of a dict.
+        write_script(
+            &temp_dir.path().join("bad_opts.py"),
+            "import red_cell\nred_cell.register_command('oops', lambda a, b: None, options=['not_a_dict'])\n",
+        );
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        assert!(
+            runtime.command_names().is_empty(),
+            "no command should be registered with a malformed options list"
+        );
+        let descriptor = runtime
+            .script_descriptors()
+            .into_iter()
+            .find(|s| s.name == "bad_opts")
+            .expect("script descriptor should exist");
+        assert_eq!(descriptor.status, ScriptLoadStatus::Error);
+        assert!(
+            descriptor.error.as_ref().is_some_and(|e| e.contains("each option must be a dict")),
+            "error should mention dict requirement, got: {:?}",
+            descriptor.error,
+        );
+    }
+
+    #[test]
+    fn register_command_rejects_unknown_option_type() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        write_script(
+            &temp_dir.path().join("bad_type.py"),
+            "import red_cell\nred_cell.register_command(\n    'oops', lambda a, b: None,\n    options=[{'name': 'x', 'type': 'quaternion'}]\n)\n",
+        );
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        assert!(
+            runtime.command_names().is_empty(),
+            "no command should be registered with an unknown option type"
+        );
+        let descriptor = runtime
+            .script_descriptors()
+            .into_iter()
+            .find(|s| s.name == "bad_type")
+            .expect("script descriptor should exist");
+        assert_eq!(descriptor.status, ScriptLoadStatus::Error);
+        assert!(
+            descriptor
+                .error
+                .as_ref()
+                .is_some_and(|e| e.contains("unknown option type `quaternion`")),
+            "error should mention unknown option type, got: {:?}",
+            descriptor.error,
+        );
+    }
+
+    #[test]
+    fn register_command_rejects_option_missing_name() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        write_script(
+            &temp_dir.path().join("no_name.py"),
+            "import red_cell\nred_cell.register_command(\n    'oops', lambda a, b: None,\n    options=[{'type': 'string'}]\n)\n",
+        );
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        assert!(
+            runtime.command_names().is_empty(),
+            "no command should be registered when option name is missing"
+        );
+        let descriptor = runtime
+            .script_descriptors()
+            .into_iter()
+            .find(|s| s.name == "no_name")
+            .expect("script descriptor should exist");
+        assert_eq!(descriptor.status, ScriptLoadStatus::Error);
+        assert!(
+            descriptor.error.as_ref().is_some_and(|e| e.contains("option is missing 'name'")),
+            "error should mention missing name, got: {:?}",
+            descriptor.error,
+        );
+    }
+
+    #[test]
+    fn havocui_register_command_rejects_unknown_option_type() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        write_script(
+            &temp_dir.path().join("ui_bad_type.py"),
+            "import havocui\nhavocui.RegisterCommand(\n    'oops', 'desc',\n    [{'name': 'x', 'type': 'imaginary'}],\n    lambda: None\n)\n",
+        );
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        assert!(
+            runtime.command_names().is_empty(),
+            "no command should be registered with an unknown option type via havocui"
+        );
+        let descriptor = runtime
+            .script_descriptors()
+            .into_iter()
+            .find(|s| s.name == "ui_bad_type")
+            .expect("script descriptor should exist");
+        assert_eq!(descriptor.status, ScriptLoadStatus::Error);
+        assert!(
+            descriptor
+                .error
+                .as_ref()
+                .is_some_and(|e| e.contains("unknown option type `imaginary`")),
+            "error should mention unknown option type, got: {:?}",
+            descriptor.error,
+        );
+    }
+
+    #[test]
+    fn register_command_rejects_non_iterable_options() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        write_script(
+            &temp_dir.path().join("opts_int.py"),
+            "import red_cell\nred_cell.register_command('oops', lambda a, b: None, options=999)\n",
+        );
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        assert!(
+            runtime.command_names().is_empty(),
+            "no command should be registered when options is not iterable"
+        );
+        let descriptor = runtime
+            .script_descriptors()
+            .into_iter()
+            .find(|s| s.name == "opts_int")
+            .expect("script descriptor should exist");
+        assert_eq!(descriptor.status, ScriptLoadStatus::Error);
+        assert!(
+            descriptor.error.as_ref().is_some_and(|e| e.contains("options must be a list")),
+            "error should mention list requirement, got: {:?}",
+            descriptor.error,
+        );
+    }
 }

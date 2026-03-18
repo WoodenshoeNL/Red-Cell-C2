@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 232 | 195 | 31 |
+| Tasks closed | 236 | 195 | 31 |
 | Bugs filed against | 40 | 34 | 9 |
 | Bug rate (bugs/task) | 0.17 | 0.17 | 0.29 |
 | Quality score | 83% | 83% | 71% |
@@ -37,6 +37,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-18 18:15 — 7603a1c..91f7a32
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (dev02-opus) | 4 | 0 | Closed lhgi, ycyb, ji38, dhs9. One production fix (cache_tag for OutputFormat collision) plus three test additions: SOCKS5 zero-methods, auth rate limiter lockout e2e, HTTP listener malformed bodies. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (1419 tests, 0 failures)
+Notes: Clean review. The cache_tag fix (bb4f632) correctly eliminates cache key collisions between Exe/ServiceExe variants that shared the same `.exe` extension — well-tested with all-dimensions-distinct assertion. Test count grew from 931 to 1419. Two in-progress issues remain: f6o2 (CTR concurrency, active today) and 35dz (LootRepository tests, P3, claimed yesterday). No bugs filed.
 
 ### QA Review — 2026-03-18 17:00 — a3b6141..ee1a918
 

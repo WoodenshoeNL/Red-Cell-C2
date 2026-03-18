@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 337 | 195 | 31 |
+| Tasks closed | 340 | 195 | 31 |
 | Bugs filed against | 41 | 34 | 9 |
 | Bug rate (bugs/task) | 0.12 | 0.17 | 0.29 |
 | Quality score | 88% | 83% | 71% |
@@ -38,6 +38,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-18 18:00 — 8f7d49d..cfc3be3
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (dev02-opus) | 3 | 0 | Closed 22p2 (auth field name assertion), 1hz0 (auth profile role override test), 2i7l (protocol unregistered agent callback test). Currently has 21ea in progress. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (1,151 tests passing, 0 failures)
+Notes: Clean review — all 3 closures are test quality improvements. auth.rs gains tighter field-name assertion on invalid persisted verifier and a new role-override assertion confirming profile-defined role takes precedence over persisted runtime row. demon.rs gains a test ensuring callback for an unregistered agent returns AgentNotFound without inserting state or CTR offsets. No code quality issues found. d24ce96 filed plugin test cascade bug (08ds) via arch-review chore — correctly attributed. 5fbd310 filed test quality issues via test-review scan.
 
 ### QA Review — 2026-03-18 16:30 — a3457e9..ab2d171
 

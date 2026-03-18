@@ -236,6 +236,20 @@ async fn wait_for_shutdown_signal(
 
     signal.await;
     info!(timeout_seconds = timeout.as_secs(), "shutdown signal received");
+    run_shutdown_sequence(handle, shutdown, state, timeout).await
+}
+
+/// Orchestrates the shutdown sequence after a signal has been received.
+///
+/// Steps: initiate the shutdown controller, trigger Axum graceful shutdown,
+/// drain listener callbacks, drain audit webhooks, and close the database.
+#[instrument(skip(handle, shutdown, state))]
+async fn run_shutdown_sequence(
+    handle: Handle<SocketAddr>,
+    shutdown: red_cell::ShutdownController,
+    state: TeamserverState,
+    timeout: Duration,
+) -> Result<()> {
     shutdown.initiate();
     handle.graceful_shutdown(Some(timeout));
 
@@ -291,18 +305,23 @@ fn profile_listener_names(profile: &Profile) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     use super::{
         Cli, build_tls_config, load_profile, profile_listener_names, resolve_bind_addr,
-        resolve_database_path, start_new_profile_listeners, tls_subject_alt_names,
+        resolve_database_path, run_shutdown_sequence, start_new_profile_listeners,
+        tls_subject_alt_names,
     };
     use axum::extract::FromRef;
+    use axum_server::Handle;
     use clap::Parser;
     use red_cell::{
         AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
         ListenerManager, ListenerManagerError, ListenerStatus, LoginRateLimiter,
-        OperatorConnectionManager, PayloadBuilderService, SocketRelayManager, TeamserverState,
+        OperatorConnectionManager, PayloadBuilderService, ShutdownController, SocketRelayManager,
+        TeamserverState,
     };
     use red_cell_common::config::{OperatorRole, Profile};
     use red_cell_common::tls::{TlsKeyAlgorithm, generate_self_signed_tls_identity};
@@ -1193,5 +1212,182 @@ mod tests {
             !auto_cert_path.exists(),
             "auto-persist cert should not be written when explicit cert is configured"
         );
+    }
+
+    /// Build a minimal [`TeamserverState`] backed by an in-memory database for
+    /// shutdown orchestration tests.
+    async fn build_shutdown_test_state() -> (TeamserverState, ShutdownController) {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "operator" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        let agent_registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(agent_registry.clone(), events.clone());
+        let listeners = ListenerManager::new(
+            database.clone(),
+            agent_registry.clone(),
+            events.clone(),
+            sockets.clone(),
+            None,
+        );
+        let shutdown = listeners.shutdown_controller();
+
+        let state = TeamserverState {
+            auth: AuthService::from_profile(&profile).expect("auth service should initialize"),
+            api: ApiRuntime::from_profile(&profile).expect("rng should work in tests"),
+            database,
+            events,
+            connections: OperatorConnectionManager::new(),
+            agent_registry,
+            listeners,
+            payload_builder: PayloadBuilderService::disabled_for_tests(),
+            sockets,
+            webhooks: AuditWebhookNotifier::from_profile(&profile),
+            profile,
+            login_rate_limiter: LoginRateLimiter::new(),
+            shutdown: shutdown.clone(),
+        };
+
+        (state, shutdown)
+    }
+
+    #[tokio::test]
+    async fn shutdown_sequence_closes_database() {
+        let (state, shutdown) = build_shutdown_test_state().await;
+        let pool = state.database.pool().clone();
+        let handle: Handle<SocketAddr> = Handle::new();
+
+        run_shutdown_sequence(handle, shutdown, state, Duration::from_secs(5))
+            .await
+            .expect("shutdown sequence should succeed");
+
+        assert!(pool.is_closed(), "database pool should be closed after shutdown");
+    }
+
+    #[tokio::test]
+    async fn shutdown_sequence_initiates_shutdown_controller() {
+        let (state, shutdown) = build_shutdown_test_state().await;
+        let handle: Handle<SocketAddr> = Handle::new();
+
+        assert!(!shutdown.is_shutting_down(), "shutdown should not be active before sequence");
+
+        run_shutdown_sequence(handle, shutdown.clone(), state, Duration::from_secs(5))
+            .await
+            .expect("shutdown sequence should succeed");
+
+        assert!(
+            shutdown.is_shutting_down(),
+            "shutdown controller should be in shutdown state after sequence"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_sequence_completes_with_no_active_listeners() {
+        let (state, shutdown) = build_shutdown_test_state().await;
+        let pool = state.database.pool().clone();
+        let handle: Handle<SocketAddr> = Handle::new();
+
+        // With no active listeners or webhooks, shutdown should complete quickly
+        // without hitting the timeout path.
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_shutdown_sequence(handle, shutdown.clone(), state, Duration::from_secs(5)),
+        )
+        .await
+        .expect("shutdown should complete within timeout");
+
+        result.expect("shutdown sequence should succeed");
+        assert!(shutdown.is_shutting_down());
+        assert!(pool.is_closed());
+    }
+
+    #[tokio::test]
+    async fn shutdown_sequence_drains_active_listener_before_closing_database() {
+        let port = available_port().expect("ephemeral port should be available");
+        let profile = Profile::parse(&format!(
+            r#"
+            Teamserver {{
+              Host = "127.0.0.1"
+              Port = 40056
+            }}
+
+            Operators {{
+              user "operator" {{
+                Password = "password1234"
+              }}
+            }}
+
+            Listeners {{
+              Http = [{{
+                Name = "http-shutdown-test"
+                Hosts = ["127.0.0.1"]
+                HostBind = "127.0.0.1"
+                HostRotation = "round-robin"
+                PortBind = {port}
+                Secure = false
+              }}]
+            }}
+
+            Demon {{}}
+            "#,
+        ))
+        .expect("profile should parse");
+
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        let agent_registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(agent_registry.clone(), events.clone());
+        let listeners = ListenerManager::new(
+            database.clone(),
+            agent_registry.clone(),
+            events.clone(),
+            sockets.clone(),
+            None,
+        );
+        let shutdown = listeners.shutdown_controller();
+
+        listeners.sync_profile(&profile).await.expect("profile should sync");
+        listeners.start("http-shutdown-test").await.expect("listener should start");
+
+        let pool = database.pool().clone();
+        let handle: Handle<SocketAddr> = Handle::new();
+        let state = TeamserverState {
+            auth: AuthService::from_profile(&profile).expect("auth service should initialize"),
+            api: ApiRuntime::from_profile(&profile).expect("rng should work in tests"),
+            database,
+            events,
+            connections: OperatorConnectionManager::new(),
+            agent_registry,
+            listeners,
+            payload_builder: PayloadBuilderService::disabled_for_tests(),
+            sockets,
+            webhooks: AuditWebhookNotifier::from_profile(&profile),
+            profile,
+            login_rate_limiter: LoginRateLimiter::new(),
+            shutdown: shutdown.clone(),
+        };
+
+        run_shutdown_sequence(handle, shutdown.clone(), state, Duration::from_secs(5))
+            .await
+            .expect("shutdown sequence should succeed with active listener");
+
+        assert!(shutdown.is_shutting_down());
+        assert!(pool.is_closed(), "database should be closed even with an active listener");
     }
 }

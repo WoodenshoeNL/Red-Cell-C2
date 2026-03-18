@@ -771,6 +771,24 @@ mod tests {
         assert!(result.contains("1970-01-01"), "Expected 1970-01-01 epoch date, got: {result}");
     }
 
+    #[test]
+    fn format_filetime_overflow_falls_back_to_raw_seconds() {
+        // A filetime so far in the future that OffsetDateTime::from_unix_timestamp rejects it.
+        // This exercises the unwrap_or_else fallback that returns the raw second count as a string.
+        let high: u32 = 0x7FFF_FFFF;
+        let low: u32 = 0xFFFF_FFFF;
+        let result = format_filetime(high, low);
+
+        // The result should NOT be the sentinel string
+        assert_ne!(result, "1970-01-01 00:00:00 +00:00:00");
+        // It should be a numeric string (the raw unix seconds), not a formatted date
+        // Verify it parses as a number (the fallback path returns unix_seconds.to_string())
+        assert!(
+            result.parse::<i64>().is_ok(),
+            "Expected raw numeric seconds fallback, got: {result}"
+        );
+    }
+
     // logon_type_name tests
 
     #[test]

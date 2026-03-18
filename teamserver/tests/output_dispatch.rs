@@ -860,6 +860,205 @@ async fn demon_info_unknown_class_no_broadcast() -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
+/// `handle_demon_info_callback` with `ProcCreate`, `verbose=true`, and `success=true`
+/// must broadcast an `AgentResponse` containing the path and PID.
+#[tokio::test]
+async fn demon_info_proc_create_verbose_success_broadcasts_response()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-proc-vs-test", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-proc-vs-test").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0014_u32;
+    let key = [0x19; AGENT_KEY_LENGTH];
+    let iv = [0x1A; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let payload =
+        demon_info_proc_create_payload("C:\\Windows\\System32\\cmd.exe", 5678, true, true, true);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::DemonInfo),
+            0x54,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for DemonInfo/ProcCreate verbose success, got {event:?}");
+    };
+    assert_eq!(msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::DemonInfo).to_string());
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Info"));
+
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.contains("Process started"),
+        "response should contain 'Process started': {message:?}"
+    );
+    assert!(message.contains("cmd.exe"), "response should contain path: {message:?}");
+    assert!(message.contains("5678"), "response should contain PID 5678: {message:?}");
+
+    socket.close(None).await?;
+    listeners.stop("out-proc-vs-test").await?;
+    Ok(())
+}
+
+/// `handle_demon_info_callback` with `ProcCreate`, `verbose=true`, `success=false`, and
+/// `piped=false` must broadcast an `AgentResponse` indicating the process could not be started.
+#[tokio::test]
+async fn demon_info_proc_create_verbose_failure_broadcasts_response()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-proc-vf-test", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-proc-vf-test").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0015_u32;
+    let key = [0x1B; AGENT_KEY_LENGTH];
+    let iv = [0x1C; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // success=false, piped=false → "Process could not be started"
+    let payload =
+        demon_info_proc_create_payload("C:\\Windows\\System32\\bad.exe", 0, false, false, true);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::DemonInfo),
+            0x55,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for DemonInfo/ProcCreate verbose failure, got {event:?}");
+    };
+    assert_eq!(msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::DemonInfo).to_string());
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Info"));
+
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.contains("could not be started"),
+        "response should contain 'could not be started': {message:?}"
+    );
+    assert!(message.contains("bad.exe"), "response should contain path: {message:?}");
+
+    socket.close(None).await?;
+    listeners.stop("out-proc-vf-test").await?;
+    Ok(())
+}
+
+/// `handle_demon_info_callback` with `ProcCreate`, `verbose=true`, `success=false`, and
+/// `piped=true` must broadcast an `AgentResponse` indicating the process started without
+/// an output pipe.
+#[tokio::test]
+async fn demon_info_proc_create_verbose_no_pipe_broadcasts_response()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-proc-np-test", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-proc-np-test").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0016_u32;
+    let key = [0x1D; AGENT_KEY_LENGTH];
+    let iv = [0x1E; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // success=false, piped=true → "Process started without output pipe"
+    let payload = demon_info_proc_create_payload(
+        "C:\\Windows\\System32\\notepad.exe",
+        9999,
+        false,
+        true,
+        true,
+    );
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::DemonInfo),
+            0x56,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for DemonInfo/ProcCreate verbose no-pipe, got {event:?}");
+    };
+    assert_eq!(msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::DemonInfo).to_string());
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Info"));
+
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.contains("without output pipe"),
+        "response should contain 'without output pipe': {message:?}"
+    );
+    assert!(message.contains("notepad.exe"), "response should contain path: {message:?}");
+    assert!(message.contains("9999"), "response should contain PID 9999: {message:?}");
+
+    socket.close(None).await?;
+    listeners.stop("out-proc-np-test").await?;
+    Ok(())
+}
+
 /// `handle_job_callback` with `Suspend` subcommand and `success=true` must broadcast
 /// an `AgentResponse` with Type="Good" and a message mentioning "suspended".
 #[tokio::test]

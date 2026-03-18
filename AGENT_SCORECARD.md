@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 333 | 195 | 31 |
+| Tasks closed | 337 | 195 | 31 |
 | Bugs filed against | 41 | 34 | 9 |
 | Bug rate (bugs/task) | 0.12 | 0.17 | 0.29 |
 | Quality score | 88% | 83% | 71% |
@@ -2348,3 +2348,14 @@ Notes: Clean review — all changes are test additions only. No production code 
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` 1 pre-existing failure (operator_session_smb_listener_and_mock_demon_round_trip — timeout caused by known bug red-cell-c2-g84l, fix in progress via 12s4). 1,134 unit tests passing.
 Notes: Clean review — all 4 closed tasks are test additions only. No production code modified in this range. Tests are well-structured with proper `?` error propagation, no unwraps, good edge case coverage. SMB truncated-frame test exercises both header and payload truncation plus recovery. Auth injection tests cover both unauthenticated and failed-login paths. No new issues filed.
+
+### QA Review — 2026-03-18 18:45 — 2cbd5ec..cf19686
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (dev02-opus) | 4 | 0 | Closed 3uls (audit query pagination/filter tests), 9mpv (TLS mismatched cert/key failure tests), hfjz (TLS partial-state regeneration tests), 3pkw (agent_events operator metadata tests). Also ran test-coverage scan batch 12-24 with no new gaps. Currently has 3ptg in progress. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (all tests passing)
+Notes: Clean review — all 4 closed tasks are test additions only. No production code modified. Tests are thorough: audit.rs adds 9 new tests covering result_status/target_kind/target_id/command filters, pagination ordering across pages, operator alias, combined filters, and time-window intersection. TLS tests cover mismatched cert/key (same algo + cross-algo) and partial-state regeneration (cert-only, key-only). Agent event tests verify metadata fields (event code, user, one_time, timestamp) and optional kill_date/working_hours. No new issues filed.

@@ -1354,6 +1354,213 @@ mod tests {
         );
     }
 
+    // ------------------------------------------------------------------
+    // Malformed-payload tests — CommandTransfer
+    // ------------------------------------------------------------------
+
+    /// After an error return the event bus must contain zero messages.
+    async fn assert_no_events_broadcast(events: EventBus) {
+        let mut rx = events.subscribe();
+        // Drop the bus so recv() resolves immediately with None if empty.
+        drop(events);
+        assert_eq!(rx.recv().await, None, "no events should be broadcast on error path");
+    }
+
+    #[tokio::test]
+    async fn transfer_callback_invalid_subcommand_returns_error() {
+        let events = EventBus::default();
+        let downloads = DownloadTracker::new(1024 * 1024);
+
+        // Subcommand 0xFF is not a valid DemonTransferCommand.
+        let payload = le32(0xFF);
+
+        let result = handle_transfer_callback(&events, &downloads, 0x1111_0001, 1, &payload).await;
+
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "invalid subcommand must yield InvalidCallbackPayload; got: {result:?}"
+        );
+        assert_no_events_broadcast(events).await;
+    }
+
+    #[tokio::test]
+    async fn transfer_list_truncated_mid_entry_returns_error() {
+        let events = EventBus::default();
+        let downloads = DownloadTracker::new(1024 * 1024);
+
+        // List subcommand + file_id only (missing progress and state).
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&le32(u32::from(DemonTransferCommand::List)));
+        payload.extend_from_slice(&le32(0x0000_0001)); // file_id
+        // Missing: progress (u32) and state (u32)
+
+        let result = handle_transfer_callback(&events, &downloads, 0x1111_0002, 1, &payload).await;
+
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "truncated List entry must yield InvalidCallbackPayload; got: {result:?}"
+        );
+        assert_no_events_broadcast(events).await;
+    }
+
+    #[tokio::test]
+    async fn transfer_stop_truncated_missing_found_returns_error() {
+        let events = EventBus::default();
+        let downloads = DownloadTracker::new(1024 * 1024);
+
+        // Stop subcommand only — missing found bool and file_id.
+        let payload = le32(u32::from(DemonTransferCommand::Stop));
+
+        let result = handle_transfer_callback(&events, &downloads, 0x1111_0003, 1, &payload).await;
+
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "Stop with missing found bool must yield InvalidCallbackPayload; got: {result:?}"
+        );
+        assert_no_events_broadcast(events).await;
+    }
+
+    #[tokio::test]
+    async fn transfer_stop_truncated_missing_file_id_returns_error() {
+        let events = EventBus::default();
+        let downloads = DownloadTracker::new(1024 * 1024);
+
+        // Stop subcommand + found bool — missing file_id.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&le32(u32::from(DemonTransferCommand::Stop)));
+        payload.extend_from_slice(&le32(1)); // found = true
+
+        let result = handle_transfer_callback(&events, &downloads, 0x1111_0004, 1, &payload).await;
+
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "Stop with missing file_id must yield InvalidCallbackPayload; got: {result:?}"
+        );
+        assert_no_events_broadcast(events).await;
+    }
+
+    #[tokio::test]
+    async fn transfer_resume_truncated_missing_found_returns_error() {
+        let events = EventBus::default();
+        let downloads = DownloadTracker::new(1024 * 1024);
+
+        let payload = le32(u32::from(DemonTransferCommand::Resume));
+
+        let result = handle_transfer_callback(&events, &downloads, 0x1111_0005, 1, &payload).await;
+
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "Resume with missing found bool must yield InvalidCallbackPayload; got: {result:?}"
+        );
+        assert_no_events_broadcast(events).await;
+    }
+
+    #[tokio::test]
+    async fn transfer_remove_truncated_missing_file_id_returns_error() {
+        let events = EventBus::default();
+        let downloads = DownloadTracker::new(1024 * 1024);
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&le32(u32::from(DemonTransferCommand::Remove)));
+        payload.extend_from_slice(&le32(0)); // found = false
+
+        let result = handle_transfer_callback(&events, &downloads, 0x1111_0006, 1, &payload).await;
+
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "Remove with missing file_id must yield InvalidCallbackPayload; got: {result:?}"
+        );
+        assert_no_events_broadcast(events).await;
+    }
+
+    // ------------------------------------------------------------------
+    // Malformed-payload tests — CommandMemFile
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn mem_file_callback_empty_payload_returns_error() {
+        let events = EventBus::default();
+
+        let result = handle_mem_file_callback(&events, 0x2222_0001, 1, &[]).await;
+
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "empty mem-file payload must yield InvalidCallbackPayload; got: {result:?}"
+        );
+        assert_no_events_broadcast(events).await;
+    }
+
+    #[tokio::test]
+    async fn mem_file_callback_truncated_missing_success_returns_error() {
+        let events = EventBus::default();
+
+        // Has mem_file_id but missing the success bool.
+        let payload = le32(0x0000_0099);
+
+        let result = handle_mem_file_callback(&events, 0x2222_0002, 1, &payload).await;
+
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "mem-file missing success bool must yield InvalidCallbackPayload; got: {result:?}"
+        );
+        assert_no_events_broadcast(events).await;
+    }
+
+    // ------------------------------------------------------------------
+    // Malformed-payload tests — CommandPackageDropped
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn package_dropped_callback_empty_payload_returns_error() {
+        let events = EventBus::default();
+
+        let result = handle_package_dropped_callback(&events, 0x3333_0001, 1, &[]).await;
+
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "empty package-dropped payload must yield InvalidCallbackPayload; got: {result:?}"
+        );
+        assert_no_events_broadcast(events).await;
+    }
+
+    #[tokio::test]
+    async fn package_dropped_callback_truncated_missing_max_length_returns_error() {
+        let events = EventBus::default();
+
+        // Has package_length but missing max_length.
+        let payload = le32(8192);
+
+        let result = handle_package_dropped_callback(&events, 0x3333_0002, 1, &payload).await;
+
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "package-dropped missing max_length must yield InvalidCallbackPayload; got: {result:?}"
+        );
+        assert_no_events_broadcast(events).await;
+    }
+
+    // ------------------------------------------------------------------
+    // Existing truncated-transfer test also asserts no events
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn transfer_callback_truncated_returns_error_no_events() {
+        let events = EventBus::default();
+        let downloads = DownloadTracker::new(1024 * 1024);
+
+        let result = handle_transfer_callback(&events, &downloads, 0x1111_1111, 1, &[]).await;
+
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "empty payload must yield InvalidCallbackPayload; got: {result:?}"
+        );
+        assert_no_events_broadcast(events).await;
+    }
+
+    // ------------------------------------------------------------------
+    // byte_count / transfer_progress_text / transfer_state_name tests
+    // ------------------------------------------------------------------
+
     #[test]
     fn byte_count_zero() {
         assert_eq!(byte_count(0), "0 B");

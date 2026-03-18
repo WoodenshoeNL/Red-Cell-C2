@@ -171,6 +171,21 @@ fn job_list_payload(jobs: &[(u32, u32, u32)]) -> Vec<u8> {
     p
 }
 
+/// Build a `CommandJob` action payload (Suspend/Resume/KillRemove).
+/// `subcommand` is the `DemonJobCommand` discriminant (2, 3, or 4).
+fn job_action_payload(subcommand: u32, job_id: u32, success: bool) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&subcommand.to_le_bytes());
+    p.extend_from_slice(&job_id.to_le_bytes());
+    p.extend_from_slice(&u32::from(success).to_le_bytes());
+    p
+}
+
+/// Build a `CommandJob/Died` payload — subcommand only, no additional fields.
+fn job_died_payload() -> Vec<u8> {
+    5u32.to_le_bytes().to_vec() // DemonJobCommand::Died = 5
+}
+
 // ── tests ────────────────────────────────────────────────────────────────────
 
 /// `mark_agent_dead_and_broadcast` (called via CommandExit callback) must mark the agent
@@ -842,5 +857,402 @@ async fn demon_info_unknown_class_no_broadcast() -> Result<(), Box<dyn std::erro
 
     socket.close(None).await?;
     listeners.stop("out-info-unk-test").await?;
+    Ok(())
+}
+
+/// `handle_job_callback` with `Suspend` subcommand and `success=true` must broadcast
+/// an `AgentResponse` with Type="Good" and a message mentioning "suspended".
+#[tokio::test]
+async fn job_suspend_success_broadcasts_good_response() -> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-job-susp-ok", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-job-susp-ok").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0020_u32;
+    let key = [0x20; AGENT_KEY_LENGTH];
+    let iv = [0x21; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let payload = job_action_payload(2, 77, true); // Suspend=2, job_id=77, success
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandJob),
+            0x60,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for job Suspend success, got {event:?}");
+    };
+    assert_eq!(msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::CommandJob).to_string());
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.contains("suspended") || message.contains("Suspended"),
+        "message should mention suspended: {message:?}"
+    );
+    assert!(message.contains("77"), "message should contain job id 77: {message:?}");
+
+    socket.close(None).await?;
+    listeners.stop("out-job-susp-ok").await?;
+    Ok(())
+}
+
+/// `handle_job_callback` with `Suspend` subcommand and `success=false` must broadcast
+/// an `AgentResponse` with Type="Error".
+#[tokio::test]
+async fn job_suspend_failure_broadcasts_error_response() -> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-job-susp-fail", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-job-susp-fail").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0021_u32;
+    let key = [0x22; AGENT_KEY_LENGTH];
+    let iv = [0x23; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let payload = job_action_payload(2, 88, false); // Suspend=2, job_id=88, failure
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandJob),
+            0x61,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for job Suspend failure, got {event:?}");
+    };
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Error"));
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.to_lowercase().contains("suspend"),
+        "message should mention suspend: {message:?}"
+    );
+    assert!(message.contains("88"), "message should contain job id 88: {message:?}");
+
+    socket.close(None).await?;
+    listeners.stop("out-job-susp-fail").await?;
+    Ok(())
+}
+
+/// `handle_job_callback` with `Resume` subcommand and `success=true` must broadcast
+/// an `AgentResponse` with Type="Good" and a message mentioning "resumed".
+#[tokio::test]
+async fn job_resume_success_broadcasts_good_response() -> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-job-res-ok", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-job-res-ok").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0022_u32;
+    let key = [0x24; AGENT_KEY_LENGTH];
+    let iv = [0x25; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let payload = job_action_payload(3, 55, true); // Resume=3, job_id=55, success
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandJob),
+            0x62,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for job Resume success, got {event:?}");
+    };
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.to_lowercase().contains("resum"),
+        "message should mention resumed: {message:?}"
+    );
+    assert!(message.contains("55"), "message should contain job id 55: {message:?}");
+
+    socket.close(None).await?;
+    listeners.stop("out-job-res-ok").await?;
+    Ok(())
+}
+
+/// `handle_job_callback` with `Resume` subcommand and `success=false` must broadcast
+/// an `AgentResponse` with Type="Error".
+#[tokio::test]
+async fn job_resume_failure_broadcasts_error_response() -> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-job-res-fail", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-job-res-fail").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0023_u32;
+    let key = [0x26; AGENT_KEY_LENGTH];
+    let iv = [0x27; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let payload = job_action_payload(3, 66, false); // Resume=3, job_id=66, failure
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandJob),
+            0x63,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for job Resume failure, got {event:?}");
+    };
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Error"));
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(message.to_lowercase().contains("resum"), "message should mention resume: {message:?}");
+    assert!(message.contains("66"), "message should contain job id 66: {message:?}");
+
+    socket.close(None).await?;
+    listeners.stop("out-job-res-fail").await?;
+    Ok(())
+}
+
+/// `handle_job_callback` with `KillRemove` subcommand and `success=true` must broadcast
+/// an `AgentResponse` with Type="Good" and a message mentioning "killed".
+#[tokio::test]
+async fn job_kill_remove_success_broadcasts_good_response() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-job-kill-ok", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-job-kill-ok").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0024_u32;
+    let key = [0x28; AGENT_KEY_LENGTH];
+    let iv = [0x29; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let payload = job_action_payload(4, 99, true); // KillRemove=4, job_id=99, success
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandJob),
+            0x64,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for job KillRemove success, got {event:?}");
+    };
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(message.to_lowercase().contains("kill"), "message should mention killed: {message:?}");
+    assert!(message.contains("99"), "message should contain job id 99: {message:?}");
+
+    socket.close(None).await?;
+    listeners.stop("out-job-kill-ok").await?;
+    Ok(())
+}
+
+/// `handle_job_callback` with `KillRemove` subcommand and `success=false` must broadcast
+/// an `AgentResponse` with Type="Error".
+#[tokio::test]
+async fn job_kill_remove_failure_broadcasts_error_response()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-job-kill-fail", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-job-kill-fail").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0025_u32;
+    let key = [0x2A; AGENT_KEY_LENGTH];
+    let iv = [0x2B; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let payload = job_action_payload(4, 100, false); // KillRemove=4, job_id=100, failure
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandJob),
+            0x65,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for job KillRemove failure, got {event:?}");
+    };
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Error"));
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(message.to_lowercase().contains("kill"), "message should mention kill: {message:?}");
+    assert!(message.contains("100"), "message should contain job id 100: {message:?}");
+
+    socket.close(None).await?;
+    listeners.stop("out-job-kill-fail").await?;
+    Ok(())
+}
+
+/// `handle_job_callback` with `Died` subcommand must succeed (2xx) but must NOT
+/// broadcast any `AgentResponse` to operators.
+#[tokio::test]
+async fn job_died_no_broadcast() -> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-job-died", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-job-died").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0026_u32;
+    let key = [0x2C; AGENT_KEY_LENGTH];
+    let iv = [0x2D; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let payload = job_died_payload();
+
+    let response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandJob),
+            0x66,
+            &payload,
+        ))
+        .send()
+        .await?;
+
+    assert!(
+        response.status().is_success(),
+        "Died subcommand should succeed, got {}",
+        response.status()
+    );
+
+    // Died intentionally emits nothing — verify no broadcast.
+    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
+
+    socket.close(None).await?;
+    listeners.stop("out-job-died").await?;
     Ok(())
 }

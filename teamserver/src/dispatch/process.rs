@@ -862,4 +862,164 @@ mod tests {
         assert_eq!(win32_error_code_name(1), None);
         assert_eq!(win32_error_code_name(9999), None);
     }
+
+    // ── handle_process_command_callback — Create branch ─────────────────────
+
+    use red_cell_common::operator::OperatorMessage;
+
+    /// Build a binary payload for the `Create` subcommand of `CommandProc`.
+    fn build_process_create_payload(
+        path: &str,
+        pid: u32,
+        success: u32,
+        piped: u32,
+        verbose: u32,
+    ) -> Vec<u8> {
+        let mut buf = Vec::new();
+        // subcommand
+        buf.extend_from_slice(&u32::from(DemonProcessCommand::Create).to_le_bytes());
+        // path (UTF-16 LE, null-terminated, length-prefixed)
+        let mut encoded: Vec<u8> = path.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        encoded.extend_from_slice(&[0, 0]); // null terminator
+        buf.extend_from_slice(&u32::try_from(encoded.len()).unwrap().to_le_bytes());
+        buf.extend_from_slice(&encoded);
+        // pid, success, piped, verbose
+        buf.extend_from_slice(&pid.to_le_bytes());
+        buf.extend_from_slice(&success.to_le_bytes());
+        buf.extend_from_slice(&piped.to_le_bytes());
+        buf.extend_from_slice(&verbose.to_le_bytes());
+        buf
+    }
+
+    /// Helper: extract the `Type` and `Message` extra fields from an `AgentResponse`.
+    fn extract_response_kind_and_message(msg: &OperatorMessage) -> (String, String) {
+        let OperatorMessage::AgentResponse(m) = msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        let kind = m.info.extra.get("Type").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+        let message = m.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+        (kind, message)
+    }
+
+    #[tokio::test]
+    async fn process_create_verbose_success_broadcasts_info_with_path_and_pid() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let payload = build_process_create_payload("C:\\cmd.exe", 1234, 1, 0, 1);
+
+        handle_process_command_callback(&events, 0xAA, 1, &payload)
+            .await
+            .expect("handler should succeed");
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("should receive event within timeout")
+            .expect("should have a broadcast event");
+
+        let (kind, message) = extract_response_kind_and_message(&event);
+        assert_eq!(kind, "Info");
+        assert!(
+            message.contains("C:\\cmd.exe") && message.contains("1234"),
+            "expected path and pid in message, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_create_verbose_failure_broadcasts_error() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let payload = build_process_create_payload("C:\\bad.exe", 0, 0, 0, 1);
+
+        handle_process_command_callback(&events, 0xBB, 2, &payload)
+            .await
+            .expect("handler should succeed");
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("should receive event within timeout")
+            .expect("should have a broadcast event");
+
+        let (kind, message) = extract_response_kind_and_message(&event);
+        assert_eq!(kind, "Error");
+        assert!(message.contains("C:\\bad.exe"), "expected path in error message, got: {message}");
+    }
+
+    #[tokio::test]
+    async fn process_create_non_verbose_failure_unpiped_broadcasts_fallback() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        // verbose=0, success=0, piped=0
+        let payload = build_process_create_payload("C:\\app.exe", 0, 0, 0, 0);
+
+        handle_process_command_callback(&events, 0xCC, 3, &payload)
+            .await
+            .expect("handler should succeed");
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("should receive event within timeout")
+            .expect("should have a broadcast event");
+
+        let (kind, message) = extract_response_kind_and_message(&event);
+        assert_eq!(kind, "Info");
+        assert_eq!(message, "Process create completed");
+    }
+
+    #[tokio::test]
+    async fn process_create_non_verbose_failure_piped_broadcasts_fallback() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        // verbose=0, success=0, piped=1
+        let payload = build_process_create_payload("C:\\app.exe", 0, 0, 1, 0);
+
+        handle_process_command_callback(&events, 0xDD, 4, &payload)
+            .await
+            .expect("handler should succeed");
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("should receive event within timeout")
+            .expect("should have a broadcast event");
+
+        let (kind, message) = extract_response_kind_and_message(&event);
+        assert_eq!(kind, "Info");
+        assert_eq!(message, "Process create completed");
+    }
+
+    #[tokio::test]
+    async fn process_create_non_verbose_success_unpiped_broadcasts_fallback() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        // verbose=0, success=1, piped=0
+        let payload = build_process_create_payload("C:\\app.exe", 999, 1, 0, 0);
+
+        handle_process_command_callback(&events, 0xEE, 5, &payload)
+            .await
+            .expect("handler should succeed");
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("should receive event within timeout")
+            .expect("should have a broadcast event");
+
+        let (kind, message) = extract_response_kind_and_message(&event);
+        assert_eq!(kind, "Info");
+        assert_eq!(message, "Process create completed");
+    }
+
+    #[tokio::test]
+    async fn process_create_non_verbose_success_piped_does_not_broadcast() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        // verbose=0, success=1, piped=1 → no broadcast
+        let payload = build_process_create_payload("C:\\app.exe", 999, 1, 1, 0);
+
+        handle_process_command_callback(&events, 0xFF, 6, &payload)
+            .await
+            .expect("handler should succeed");
+
+        let result = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
+
+        assert!(result.is_err(), "expected no broadcast when verbose=0, success=1, piped=1");
+    }
 }

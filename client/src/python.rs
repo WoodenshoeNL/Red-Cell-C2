@@ -2653,6 +2653,21 @@ mod tests {
         false
     }
 
+    fn output_occurrences(runtime: &PythonRuntime, needle: &str) -> usize {
+        runtime.script_output().iter().map(|entry| entry.text.matches(needle).count()).sum()
+    }
+
+    fn wait_for_output_occurrences(runtime: &PythonRuntime, needle: &str, expected: usize) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if output_occurrences(runtime, needle) >= expected {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        false
+    }
+
     #[test]
     fn runtime_loads_scripts_and_registers_commands() {
         let _guard = lock_mutex(&TEST_GUARD);
@@ -2718,28 +2733,87 @@ mod tests {
         let script_path = temp_dir.path().join("sample.py");
         write_script(
             &script_path,
-            "import red_cell\nred_cell.register_command('demo', lambda: None)\n",
+            "import havocui\nimport red_cell\n\
+def on_checkin(agent):\n    print('checkin:' + agent.id)\n\
+def render():\n    havocui.SetTabLayout('Status', 'operator layout')\n\
+red_cell.register_command('demo', lambda: None)\n\
+red_cell.on_agent_checkin(on_checkin)\n\
+havocui.CreateTab('Status', render)\n",
         );
         let app_state =
             Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+        {
+            let mut state = lock_app_state(&app_state);
+            state.agents.push(sample_agent("00ABCDEF"));
+        }
 
         let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
             .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
-        assert_eq!(runtime.command_names(), vec!["demo".to_owned()]);
+        assert_eq!(runtime.command_names(), vec!["__tab__ status".to_owned(), "demo".to_owned()]);
+        assert_eq!(
+            runtime.script_tabs(),
+            vec![ScriptTabDescriptor {
+                title: "Status".to_owned(),
+                script_name: "sample".to_owned(),
+                layout: String::new(),
+                has_callback: true,
+            }]
+        );
+
+        runtime
+            .emit_agent_checkin("00ABCDEF".to_owned())
+            .unwrap_or_else(|error| panic!("agent checkin dispatch should succeed: {error}"));
+        assert!(wait_for_output_occurrences(&runtime, "checkin:00ABCDEF", 1));
 
         write_script(
             &script_path,
-            "import red_cell\nred_cell.register_command('updated', lambda: None)\n",
+            "import havocui\nimport red_cell\n\
+def on_checkin(agent):\n    print('checkin:' + agent.id)\n\
+def render():\n    havocui.SetTabLayout('Status', 'reloaded layout')\n\
+red_cell.register_command('updated', lambda: None)\n\
+red_cell.on_agent_checkin(on_checkin)\n\
+havocui.CreateTab('Status', render)\n",
         );
         runtime
             .reload_script("sample")
             .unwrap_or_else(|error| panic!("reload should succeed: {error}"));
-        assert_eq!(runtime.command_names(), vec!["updated".to_owned()]);
+        assert_eq!(
+            runtime.command_names(),
+            vec!["__tab__ status".to_owned(), "updated".to_owned()]
+        );
+        assert_eq!(
+            runtime.script_tabs(),
+            vec![ScriptTabDescriptor {
+                title: "Status".to_owned(),
+                script_name: "sample".to_owned(),
+                layout: String::new(),
+                has_callback: true,
+            }]
+        );
+        runtime
+            .emit_agent_checkin("00ABCDEF".to_owned())
+            .unwrap_or_else(|error| panic!("agent checkin dispatch should succeed: {error}"));
+        assert!(
+            wait_for_output_occurrences(&runtime, "checkin:00ABCDEF", 2),
+            "reload should register exactly one active callback"
+        );
 
         runtime
             .unload_script("sample")
             .unwrap_or_else(|error| panic!("unload should succeed: {error}"));
         assert!(runtime.command_names().is_empty());
+        assert!(runtime.script_tabs().is_empty(), "unload should remove script tabs");
+
+        let output_count_before_unload_emit = output_occurrences(&runtime, "checkin:00ABCDEF");
+        runtime
+            .emit_agent_checkin("00ABCDEF".to_owned())
+            .unwrap_or_else(|error| panic!("agent checkin dispatch should succeed: {error}"));
+        thread::sleep(Duration::from_millis(150));
+        assert_eq!(
+            output_occurrences(&runtime, "checkin:00ABCDEF"),
+            output_count_before_unload_emit,
+            "unload should remove agent checkin callbacks"
+        );
         assert!(
             runtime
                 .script_descriptors()

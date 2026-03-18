@@ -422,6 +422,93 @@ async fn http_listener_pipeline_rejects_duplicate_init_preserves_original_key()
     Ok(())
 }
 
+#[tokio::test]
+async fn http_listener_rejects_malformed_and_truncated_bodies()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let (port, guard) = common::available_port()?;
+
+    manager.create(http_listener("edge-http-malformed", port)).await?;
+    drop(guard);
+    manager.start("edge-http-malformed").await?;
+    common::wait_for_listener(port).await?;
+
+    let client = Client::new();
+    let url = format!("http://127.0.0.1:{port}/");
+
+    // Case 1: Empty body (zero-length POST).
+    let response = client.post(&url).body(Vec::<u8>::new()).send().await?;
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "empty body must be rejected with 404"
+    );
+
+    // Case 2: Body shorter than minimum envelope length (1–3 bytes).
+    for len in 1..=3 {
+        let response = client.post(&url).body(vec![0xAA; len]).send().await?;
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "body of {len} bytes must be rejected with 404"
+        );
+    }
+
+    // Case 3: Body with wrong magic number (0xCAFEBABE instead of 0xDEADBEEF).
+    // Build a 16-byte buffer: 4-byte size (BE) + 4-byte bad magic + 4-byte agent_id + padding.
+    let mut bad_magic_body = Vec::new();
+    bad_magic_body.extend_from_slice(&12_u32.to_be_bytes()); // size = rest of packet
+    bad_magic_body.extend_from_slice(&0xCAFE_BABE_u32.to_be_bytes()); // wrong magic
+    bad_magic_body.extend_from_slice(&0x1111_2222_u32.to_be_bytes()); // agent_id
+    bad_magic_body.extend_from_slice(&[0x00; 4]); // padding
+    let response = client.post(&url).body(bad_magic_body).send().await?;
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "wrong magic number must be rejected with 404"
+    );
+
+    // Case 4: Body with correct length prefix but truncated payload.
+    // The size field claims 100 bytes follow, but only 8 bytes are present.
+    let mut truncated_body = Vec::new();
+    truncated_body.extend_from_slice(&100_u32.to_be_bytes()); // size = 100 (lie)
+    truncated_body.extend_from_slice(&0xDEAD_BEEF_u32.to_be_bytes()); // correct magic
+    truncated_body.extend_from_slice(&0x3333_4444_u32.to_be_bytes()); // agent_id
+    // Payload should be 100 - 8 = 92 bytes, but we provide nothing — truncated.
+    let response = client.post(&url).body(truncated_body).send().await?;
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "truncated payload must be rejected with 404"
+    );
+
+    // Verify the listener is still alive and accepting requests after all malformed inputs.
+    let key = [0x41; AGENT_KEY_LENGTH];
+    let iv = [0x24; AGENT_IV_LENGTH];
+    let agent_id = 0xAAAA_BBBB;
+    let valid_response = client
+        .post(&url)
+        .body(common::valid_demon_init_body(agent_id, key, iv))
+        .send()
+        .await?
+        .error_for_status()?;
+    assert!(
+        !valid_response.bytes().await?.is_empty(),
+        "valid init must succeed after malformed inputs"
+    );
+    assert!(
+        registry.get(agent_id).await.is_some(),
+        "agent must be registered — listener survived malformed inputs"
+    );
+
+    manager.stop("edge-http-malformed").await?;
+    Ok(())
+}
+
 fn http_listener(name: &str, port: u16) -> ListenerConfig {
     ListenerConfig::from(HttpListenerConfig {
         name: name.to_owned(),

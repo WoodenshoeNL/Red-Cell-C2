@@ -4473,6 +4473,699 @@ mod tests {
         Ok(())
     }
 
+    // ── Filesystem subcommand tests (non-Download) ──────────────────────────
+
+    #[tokio::test]
+    async fn builtin_filesystem_upload_broadcasts_info() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xF500_0001,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonFilesystemCommand::Upload));
+        add_u32(&mut payload, 4096); // size
+        add_utf16(&mut payload, "C:\\Temp\\payload.bin");
+        dispatcher
+            .dispatch(0xF500_0001, u32::from(DemonCommand::CommandFs), 0xA1, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("missing upload event")?;
+        let OperatorMessage::AgentResponse(msg) = event else {
+            panic!("expected AgentResponse for upload");
+        };
+        assert_eq!(
+            msg.info.extra.get("Message"),
+            Some(&Value::String("Uploaded file: C:\\Temp\\payload.bin (4096 bytes)".to_owned()))
+        );
+        assert_eq!(msg.info.extra.get("Type"), Some(&Value::String("Info".to_owned())));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_filesystem_cd_broadcasts_changed_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xF500_0002,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonFilesystemCommand::Cd));
+        add_utf16(&mut payload, "C:\\Users\\Admin\\Desktop");
+        dispatcher
+            .dispatch(0xF500_0002, u32::from(DemonCommand::CommandFs), 0xA2, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("missing cd event")?;
+        let OperatorMessage::AgentResponse(msg) = event else {
+            panic!("expected AgentResponse for cd");
+        };
+        assert_eq!(
+            msg.info.extra.get("Message"),
+            Some(&Value::String("Changed directory: C:\\Users\\Admin\\Desktop".to_owned()))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_filesystem_remove_file_broadcasts_info()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xF500_0003,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        // Remove a file (is_dir = false = 0)
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonFilesystemCommand::Remove));
+        add_u32(&mut payload, 0); // is_dir = false
+        add_utf16(&mut payload, "C:\\Temp\\old.txt");
+        dispatcher
+            .dispatch(0xF500_0003, u32::from(DemonCommand::CommandFs), 0xA3, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("missing remove event")?;
+        let OperatorMessage::AgentResponse(msg) = event else {
+            panic!("expected AgentResponse for remove");
+        };
+        assert_eq!(
+            msg.info.extra.get("Message"),
+            Some(&Value::String("Removed file: C:\\Temp\\old.txt".to_owned()))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_filesystem_remove_directory_broadcasts_info()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xF500_0004,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        // Remove a directory (is_dir = true = 1)
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonFilesystemCommand::Remove));
+        add_u32(&mut payload, 1); // is_dir = true
+        add_utf16(&mut payload, "C:\\Temp\\subdir");
+        dispatcher
+            .dispatch(0xF500_0004, u32::from(DemonCommand::CommandFs), 0xA4, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("missing remove dir event")?;
+        let OperatorMessage::AgentResponse(msg) = event else {
+            panic!("expected AgentResponse for remove dir");
+        };
+        assert_eq!(
+            msg.info.extra.get("Message"),
+            Some(&Value::String("Removed directory: C:\\Temp\\subdir".to_owned()))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_filesystem_mkdir_broadcasts_info() -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xF500_0005,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonFilesystemCommand::Mkdir));
+        add_utf16(&mut payload, "C:\\Temp\\newdir");
+        dispatcher
+            .dispatch(0xF500_0005, u32::from(DemonCommand::CommandFs), 0xA5, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("missing mkdir event")?;
+        let OperatorMessage::AgentResponse(msg) = event else {
+            panic!("expected AgentResponse for mkdir");
+        };
+        assert_eq!(
+            msg.info.extra.get("Message"),
+            Some(&Value::String("Created directory: C:\\Temp\\newdir".to_owned()))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_filesystem_copy_success_broadcasts_good()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xF500_0006,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonFilesystemCommand::Copy));
+        add_u32(&mut payload, 1); // success = true
+        add_utf16(&mut payload, "C:\\src\\file.txt");
+        add_utf16(&mut payload, "C:\\dst\\file.txt");
+        dispatcher
+            .dispatch(0xF500_0006, u32::from(DemonCommand::CommandFs), 0xA6, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("missing copy event")?;
+        let OperatorMessage::AgentResponse(msg) = event else {
+            panic!("expected AgentResponse for copy");
+        };
+        assert_eq!(
+            msg.info.extra.get("Message"),
+            Some(&Value::String(
+                "Successfully copied file C:\\src\\file.txt to C:\\dst\\file.txt".to_owned()
+            ))
+        );
+        assert_eq!(msg.info.extra.get("Type"), Some(&Value::String("Good".to_owned())));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_filesystem_copy_failure_broadcasts_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xF500_0007,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonFilesystemCommand::Copy));
+        add_u32(&mut payload, 0); // success = false
+        add_utf16(&mut payload, "C:\\nope\\a.txt");
+        add_utf16(&mut payload, "C:\\nope\\b.txt");
+        dispatcher
+            .dispatch(0xF500_0007, u32::from(DemonCommand::CommandFs), 0xA7, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("missing copy failure event")?;
+        let OperatorMessage::AgentResponse(msg) = event else {
+            panic!("expected AgentResponse for copy failure");
+        };
+        assert_eq!(
+            msg.info.extra.get("Message"),
+            Some(&Value::String(
+                "Failed to copied file C:\\nope\\a.txt to C:\\nope\\b.txt".to_owned()
+            ))
+        );
+        assert_eq!(msg.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_filesystem_move_success_broadcasts_good()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xF500_0008,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonFilesystemCommand::Move));
+        add_u32(&mut payload, 1); // success = true
+        add_utf16(&mut payload, "C:\\old\\data.bin");
+        add_utf16(&mut payload, "C:\\new\\data.bin");
+        dispatcher
+            .dispatch(0xF500_0008, u32::from(DemonCommand::CommandFs), 0xA8, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("missing move event")?;
+        let OperatorMessage::AgentResponse(msg) = event else {
+            panic!("expected AgentResponse for move");
+        };
+        assert_eq!(
+            msg.info.extra.get("Message"),
+            Some(&Value::String(
+                "Successfully moved file C:\\old\\data.bin to C:\\new\\data.bin".to_owned()
+            ))
+        );
+        assert_eq!(msg.info.extra.get("Type"), Some(&Value::String("Good".to_owned())));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_filesystem_move_failure_broadcasts_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xF500_0009,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonFilesystemCommand::Move));
+        add_u32(&mut payload, 0); // success = false
+        add_utf16(&mut payload, "C:\\locked\\x.dll");
+        add_utf16(&mut payload, "C:\\dest\\x.dll");
+        dispatcher
+            .dispatch(0xF500_0009, u32::from(DemonCommand::CommandFs), 0xA9, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("missing move failure event")?;
+        let OperatorMessage::AgentResponse(msg) = event else {
+            panic!("expected AgentResponse for move failure");
+        };
+        assert_eq!(
+            msg.info.extra.get("Message"),
+            Some(&Value::String(
+                "Failed to moved file C:\\locked\\x.dll to C:\\dest\\x.dll".to_owned()
+            ))
+        );
+        assert_eq!(msg.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_filesystem_getpwd_broadcasts_current_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xF500_000A,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonFilesystemCommand::GetPwd));
+        add_utf16(&mut payload, "C:\\Windows\\System32");
+        dispatcher
+            .dispatch(0xF500_000A, u32::from(DemonCommand::CommandFs), 0xAA, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("missing getpwd event")?;
+        let OperatorMessage::AgentResponse(msg) = event else {
+            panic!("expected AgentResponse for getpwd");
+        };
+        assert_eq!(
+            msg.info.extra.get("Message"),
+            Some(&Value::String("Current directory: C:\\Windows\\System32".to_owned()))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_filesystem_cat_success_broadcasts_content()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xF500_000B,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let file_content = "Hello, world!\nLine two.";
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonFilesystemCommand::Cat));
+        add_utf16(&mut payload, "C:\\flag.txt");
+        add_u32(&mut payload, 1); // success = true
+        add_bytes(&mut payload, file_content.as_bytes()); // read_string uses read_bytes
+        dispatcher
+            .dispatch(0xF500_000B, u32::from(DemonCommand::CommandFs), 0xAB, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("missing cat event")?;
+        let OperatorMessage::AgentResponse(msg) = event else {
+            panic!("expected AgentResponse for cat");
+        };
+        assert_eq!(
+            msg.info.extra.get("Message"),
+            Some(&Value::String(format!("File content of C:\\flag.txt ({}):", file_content.len())))
+        );
+        assert_eq!(msg.info.extra.get("Type"), Some(&Value::String("Info".to_owned())));
+        assert_eq!(msg.info.output, file_content);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_filesystem_cat_failure_broadcasts_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xF500_000C,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonFilesystemCommand::Cat));
+        add_utf16(&mut payload, "C:\\nonexistent.txt");
+        add_u32(&mut payload, 0); // success = false
+        add_bytes(&mut payload, b"error details");
+        dispatcher
+            .dispatch(0xF500_000C, u32::from(DemonCommand::CommandFs), 0xAC, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("missing cat failure event")?;
+        let OperatorMessage::AgentResponse(msg) = event else {
+            panic!("expected AgentResponse for cat failure");
+        };
+        assert_eq!(
+            msg.info.extra.get("Message"),
+            Some(&Value::String("Failed to read file: C:\\nonexistent.txt".to_owned()))
+        );
+        assert_eq!(msg.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
+        // On failure, output should be empty (None maps to empty string)
+        assert_eq!(msg.info.output, "");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_filesystem_dir_list_only_broadcasts_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xF500_0010,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonFilesystemCommand::Dir));
+        add_u32(&mut payload, 0); // explorer = false
+        add_u32(&mut payload, 1); // list_only = true
+        add_utf16(&mut payload, "C:\\Temp\\*");
+        add_u32(&mut payload, 1); // success = true
+        // One directory entry with 2 files, 0 dirs
+        add_utf16(&mut payload, "C:\\Temp\\");
+        add_u32(&mut payload, 2); // file_count
+        add_u32(&mut payload, 0); // dir_count
+        // No total_size for list_only mode
+        // Item 1
+        add_utf16(&mut payload, "a.txt");
+        // Item 2
+        add_utf16(&mut payload, "b.log");
+
+        dispatcher
+            .dispatch(0xF500_0010, u32::from(DemonCommand::CommandFs), 0xB0, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("missing dir list event")?;
+        let OperatorMessage::AgentResponse(msg) = event else {
+            panic!("expected AgentResponse for dir list_only");
+        };
+        assert_eq!(
+            msg.info.extra.get("Message"),
+            Some(&Value::String("Directory listing completed".to_owned()))
+        );
+        // In list_only mode, output is just path+name lines
+        assert!(msg.info.output.contains("C:\\Temp\\a.txt"), "output should contain a.txt");
+        assert!(msg.info.output.contains("C:\\Temp\\b.log"), "output should contain b.log");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_filesystem_dir_normal_mode_broadcasts_formatted_listing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xF500_0011,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonFilesystemCommand::Dir));
+        add_u32(&mut payload, 0); // explorer = false
+        add_u32(&mut payload, 0); // list_only = false
+        add_utf16(&mut payload, "C:\\Data\\*");
+        add_u32(&mut payload, 1); // success = true
+        // Directory entry
+        add_utf16(&mut payload, "C:\\Data\\");
+        add_u32(&mut payload, 1); // file_count
+        add_u32(&mut payload, 1); // dir_count
+        add_u64(&mut payload, 2048); // total_size (present when not list_only)
+        // Item 1: a directory
+        add_utf16(&mut payload, "subdir");
+        add_u32(&mut payload, 1); // is_dir = true
+        add_u64(&mut payload, 0); // size (ignored for dirs)
+        add_u32(&mut payload, 15); // day
+        add_u32(&mut payload, 3); // month
+        add_u32(&mut payload, 2026); // year
+        add_u32(&mut payload, 30); // minute
+        add_u32(&mut payload, 14); // hour
+        // Item 2: a file
+        add_utf16(&mut payload, "readme.md");
+        add_u32(&mut payload, 0); // is_dir = false
+        add_u64(&mut payload, 2048); // size
+        add_u32(&mut payload, 15); // day
+        add_u32(&mut payload, 3); // month
+        add_u32(&mut payload, 2026); // year
+        add_u32(&mut payload, 0); // minute
+        add_u32(&mut payload, 9); // hour
+
+        dispatcher
+            .dispatch(0xF500_0011, u32::from(DemonCommand::CommandFs), 0xB1, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("missing dir normal event")?;
+        let OperatorMessage::AgentResponse(msg) = event else {
+            panic!("expected AgentResponse for dir normal mode");
+        };
+        let output = &msg.info.output;
+        assert!(output.contains("Directory of C:\\Data\\"), "should contain directory header");
+        assert!(output.contains("<DIR>"), "should contain <DIR> marker for subdirectory");
+        assert!(output.contains("subdir"), "should list subdir name");
+        assert!(output.contains("readme.md"), "should list file name");
+        assert!(output.contains("1 File(s)"), "should show file count");
+        assert!(output.contains("1 Folder(s)"), "should show folder count");
+        // Check date formatting: "15/03/2026  14:30"
+        assert!(output.contains("15/03/2026"), "should contain formatted date");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_filesystem_dir_explorer_mode_broadcasts_base64_json()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xF500_0012,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonFilesystemCommand::Dir));
+        add_u32(&mut payload, 1); // explorer = true
+        add_u32(&mut payload, 0); // list_only = false
+        add_utf16(&mut payload, "C:\\Loot\\");
+        add_u32(&mut payload, 1); // success = true
+        // Directory entry
+        add_utf16(&mut payload, "C:\\Loot\\");
+        add_u32(&mut payload, 1); // file_count
+        add_u32(&mut payload, 0); // dir_count
+        add_u64(&mut payload, 512); // total_size
+        // Item 1: a file
+        add_utf16(&mut payload, "secret.key");
+        add_u32(&mut payload, 0); // is_dir = false
+        add_u64(&mut payload, 512); // size
+        add_u32(&mut payload, 1); // day
+        add_u32(&mut payload, 1); // month
+        add_u32(&mut payload, 2026); // year
+        add_u32(&mut payload, 0); // minute
+        add_u32(&mut payload, 12); // hour
+
+        dispatcher
+            .dispatch(0xF500_0012, u32::from(DemonCommand::CommandFs), 0xB2, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("missing dir explorer event")?;
+        let OperatorMessage::AgentResponse(msg) = event else {
+            panic!("expected AgentResponse for dir explorer");
+        };
+        assert_eq!(msg.info.extra.get("MiscType"), Some(&Value::String("FileExplorer".to_owned())));
+        // MiscData should be base64-encoded JSON with Path and Files
+        let misc_data = msg.info.extra.get("MiscData").expect("MiscData should exist");
+        let Value::String(b64) = misc_data else {
+            panic!("MiscData should be a string");
+        };
+        let decoded = BASE64_STANDARD.decode(b64)?;
+        let json: Value = serde_json::from_slice(&decoded)?;
+        assert_eq!(json["Path"], Value::String("C:\\Loot\\".to_owned()));
+        let files = json["Files"].as_array().expect("Files should be an array");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0]["Name"], Value::String("secret.key".to_owned()));
+        assert_eq!(files[0]["Type"], Value::String("".to_owned())); // file, not dir
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn builtin_filesystem_dir_failure_broadcasts_not_found()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry
+            .insert(sample_agent_info(
+                0xF500_0013,
+                [0x11; AGENT_KEY_LENGTH],
+                [0x22; AGENT_IV_LENGTH],
+            ))
+            .await?;
+        let dispatcher =
+            CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
+
+        // Dir with success=false — no items follow
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonFilesystemCommand::Dir));
+        add_u32(&mut payload, 0); // explorer = false
+        add_u32(&mut payload, 0); // list_only = false
+        add_utf16(&mut payload, "C:\\NoSuchDir\\*");
+        add_u32(&mut payload, 0); // success = false
+
+        dispatcher
+            .dispatch(0xF500_0013, u32::from(DemonCommand::CommandFs), 0xB3, &payload)
+            .await?;
+
+        let event = receiver.recv().await.ok_or("missing dir failure event")?;
+        let OperatorMessage::AgentResponse(msg) = event else {
+            panic!("expected AgentResponse for dir failure");
+        };
+        assert_eq!(
+            msg.info.extra.get("Message"),
+            Some(&Value::String("No file or folder was found".to_owned()))
+        );
+        assert_eq!(msg.info.output, "No file or folder was found");
+        Ok(())
+    }
+
     #[tokio::test]
     async fn builtin_beacon_file_callbacks_drop_downloads_over_limit()
     -> Result<(), Box<dyn std::error::Error>> {

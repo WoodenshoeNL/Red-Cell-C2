@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 314 | 195 | 31 |
+| Tasks closed | 317 | 195 | 31 |
 | Bugs filed against | 41 | 34 | 9 |
 | Bug rate (bugs/task) | 0.13 | 0.17 | 0.29 |
 | Quality score | 87% | 83% | 71% |
@@ -37,6 +37,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-18 12:15 — 18fb1b7..69c06fc
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (dev02-opus) | 3 | 0 | Closed ol6e (clippy fix for needless_question_mark in demon.rs), n7gj (InvalidStoredCryptoEncoding error mapping + 5 tests), vwd7 (kerberos klist callback coverage + 7 tests). Currently has 1hbi in progress. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (1,706 tests passing, 0 failures)
+Notes: Clean review — all closures are test additions and error-handling improvements. lift_crypto_encoding_error helper properly maps InvalidPersistedValue for aes_key/aes_iv into the more specific InvalidStoredCryptoEncoding variant. Kerberos klist tests cover success (with session+ticket broadcast), failure, empty sessions, invalid subcommand, empty payload, and truncated body. No code quality issues found. 1 issue in progress (1hbi: dispatcher constructor tests). Log files cleaned up (net -46k lines of stale logs removed).
 
 ### Arch Review — 2026-03-18 11:00
 

@@ -3648,6 +3648,185 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_profile_creates_new_listener_absent_from_repository()
+    -> Result<(), ListenerManagerError> {
+        let manager = manager().await?;
+        let port = available_port()
+            .map_err(|error| ListenerManagerError::InvalidConfig { message: error.to_string() })?;
+
+        let profile = Profile::parse(&format!(
+            r#"
+            Teamserver {{
+              Host = "127.0.0.1"
+              Port = 40056
+            }}
+
+            Operators {{
+              user "operator" {{
+                Password = "password1234"
+              }}
+            }}
+
+            Listeners {{
+              Http = [{{
+                Name = "fresh"
+                Hosts = ["127.0.0.1"]
+                HostBind = "127.0.0.1"
+                HostRotation = "round-robin"
+                PortBind = {port}
+                Secure = false
+              }}]
+            }}
+
+            Demon {{}}
+            "#
+        ))
+        .map_err(|error| ListenerManagerError::InvalidConfig { message: error.to_string() })?;
+
+        manager.sync_profile(&profile).await?;
+
+        let summary = manager.summary("fresh").await?;
+        assert_eq!(summary.name, "fresh");
+        assert_eq!(summary.state.status, ListenerStatus::Created);
+        assert_eq!(summary.protocol, ListenerProtocol::Http);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sync_profile_updates_existing_listener_via_duplicate_path()
+    -> Result<(), ListenerManagerError> {
+        let manager = manager().await?;
+        let port_a = available_port()
+            .map_err(|error| ListenerManagerError::InvalidConfig { message: error.to_string() })?;
+        let port_b = available_port()
+            .map_err(|error| ListenerManagerError::InvalidConfig { message: error.to_string() })?;
+
+        // Pre-create a listener with port_a.
+        manager.create(http_listener("updatable", port_a)).await?;
+        assert_eq!(manager.summary("updatable").await?.state.status, ListenerStatus::Created);
+
+        // Build a profile that references the same name but with port_b.
+        let profile = Profile::parse(&format!(
+            r#"
+            Teamserver {{
+              Host = "127.0.0.1"
+              Port = 40056
+            }}
+
+            Operators {{
+              user "operator" {{
+                Password = "password1234"
+              }}
+            }}
+
+            Listeners {{
+              Http = [{{
+                Name = "updatable"
+                Hosts = ["127.0.0.1"]
+                HostBind = "127.0.0.1"
+                HostRotation = "round-robin"
+                PortBind = {port_b}
+                Secure = false
+              }}]
+            }}
+
+            Demon {{}}
+            "#
+        ))
+        .map_err(|error| ListenerManagerError::InvalidConfig { message: error.to_string() })?;
+
+        manager.sync_profile(&profile).await?;
+
+        // After sync the listener should exist in Stopped state (update_locked sets Stopped).
+        let summary = manager.summary("updatable").await?;
+        assert_eq!(summary.state.status, ListenerStatus::Stopped);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sync_profile_mixed_remove_update_and_add() -> Result<(), ListenerManagerError> {
+        let manager = manager().await?;
+
+        let port_removed = available_port()
+            .map_err(|error| ListenerManagerError::InvalidConfig { message: error.to_string() })?;
+        let port_existing = available_port()
+            .map_err(|error| ListenerManagerError::InvalidConfig { message: error.to_string() })?;
+        let port_existing_new = available_port()
+            .map_err(|error| ListenerManagerError::InvalidConfig { message: error.to_string() })?;
+        let port_added = available_port()
+            .map_err(|error| ListenerManagerError::InvalidConfig { message: error.to_string() })?;
+
+        // Pre-create two listeners: one to be removed, one to be updated.
+        manager.create(http_listener("to-remove", port_removed)).await?;
+        manager.create(http_listener("to-update", port_existing)).await?;
+
+        // Profile keeps "to-update" (with a new port), adds "to-add", and omits "to-remove".
+        let profile = Profile::parse(&format!(
+            r#"
+            Teamserver {{
+              Host = "127.0.0.1"
+              Port = 40056
+            }}
+
+            Operators {{
+              user "operator" {{
+                Password = "password1234"
+              }}
+            }}
+
+            Listeners {{
+              Http = [
+                {{
+                  Name = "to-update"
+                  Hosts = ["127.0.0.1"]
+                  HostBind = "127.0.0.1"
+                  HostRotation = "round-robin"
+                  PortBind = {port_existing_new}
+                  Secure = false
+                }},
+                {{
+                  Name = "to-add"
+                  Hosts = ["127.0.0.1"]
+                  HostBind = "127.0.0.1"
+                  HostRotation = "round-robin"
+                  PortBind = {port_added}
+                  Secure = false
+                }}
+              ]
+            }}
+
+            Demon {{}}
+            "#
+        ))
+        .map_err(|error| ListenerManagerError::InvalidConfig { message: error.to_string() })?;
+
+        manager.sync_profile(&profile).await?;
+
+        // "to-remove" should be gone.
+        assert!(matches!(
+            manager.summary("to-remove").await,
+            Err(ListenerManagerError::ListenerNotFound { .. })
+        ));
+
+        // "to-update" should exist in Stopped state (went through duplicate-update path).
+        let updated = manager.summary("to-update").await?;
+        assert_eq!(updated.state.status, ListenerStatus::Stopped);
+
+        // "to-add" should exist in Created state (new listener path).
+        let added = manager.summary("to-add").await?;
+        assert_eq!(added.state.status, ListenerStatus::Created);
+        assert_eq!(added.protocol, ListenerProtocol::Http);
+
+        // Exactly two listeners should remain.
+        let all = manager.list().await?;
+        assert_eq!(all.len(), 2);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn start_records_bind_errors() -> Result<(), ListenerManagerError> {
         let blocker = tokio::net::TcpListener::bind("127.0.0.1:32003")
             .await

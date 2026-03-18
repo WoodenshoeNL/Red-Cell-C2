@@ -2825,4 +2825,36 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn encrypt_for_agent_returns_agent_not_found_for_unknown_id()
+    -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let unknown_id: u32 = 0x1234;
+
+        let result = registry.encrypt_for_agent(unknown_id, b"data").await;
+
+        assert!(
+            matches!(&result, Err(TeamserverError::AgentNotFound { agent_id }) if *agent_id == unknown_id),
+            "expected AgentNotFound for 0x{unknown_id:08X}, got {result:?}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn decrypt_from_agent_returns_agent_not_found_for_unknown_id()
+    -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let unknown_id: u32 = 0x1234;
+
+        let result = registry.decrypt_from_agent(unknown_id, b"data").await;
+
+        assert!(
+            matches!(&result, Err(TeamserverError::AgentNotFound { agent_id }) if *agent_id == unknown_id),
+            "expected AgentNotFound for 0x{unknown_id:08X}, got {result:?}"
+        );
+
+        Ok(())
+    }
 }

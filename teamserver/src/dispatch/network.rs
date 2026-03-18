@@ -410,4 +410,12 @@ mod tests {
         // LE bytes of 0xFFFFFFFF: FF FF FF FF → 255.255.255.255
         assert_eq!(int_to_ipv4(0xFFFF_FFFF), "255.255.255.255");
     }
+
+    /// Pin byte-order: 0xC0A8_0101 under `to_le_bytes()` yields [0x01, 0x01, 0xA8, 0xC0],
+    /// i.e. "1.1.168.192". If someone swaps to `to_be_bytes()` this would become
+    /// "192.168.1.1" — the test catches the regression.
+    #[test]
+    fn int_to_ipv4_byte_order_pinned() {
+        assert_eq!(int_to_ipv4(0xC0A8_0101), "1.1.168.192");
+    }
 }

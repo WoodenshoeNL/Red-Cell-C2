@@ -5241,6 +5241,70 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn action_from_mark_accepts_all_start_aliases_case_insensitive()
+    -> Result<(), ListenerManagerError> {
+        for alias in [
+            "Online", "ONLINE", "online", "start", "Start", "START", "running", "Running",
+            "RUNNING",
+        ] {
+            assert_eq!(
+                action_from_mark(alias)?,
+                ListenerEventAction::Started,
+                "expected Started for mark {alias:?}",
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn action_from_mark_accepts_all_stop_aliases_case_insensitive()
+    -> Result<(), ListenerManagerError> {
+        for alias in [
+            "Offline", "OFFLINE", "offline", "stop", "Stop", "STOP", "stopped", "Stopped",
+            "STOPPED",
+        ] {
+            assert_eq!(
+                action_from_mark(alias)?,
+                ListenerEventAction::Stopped,
+                "expected Stopped for mark {alias:?}",
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn action_from_mark_rejects_unsupported_values() {
+        for bad in ["restart", "pause", "unknown", "", " ", "onl ine", "star t"] {
+            assert!(
+                matches!(action_from_mark(bad), Err(ListenerManagerError::UnsupportedMark { .. })),
+                "expected UnsupportedMark for {bad:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn operator_requests_start_accepts_online_and_start_case_insensitive() {
+        for status in ["Online", "ONLINE", "online", "start", "Start", "START"] {
+            let info = ListenerInfo { status: Some(status.to_owned()), ..ListenerInfo::default() };
+            assert!(operator_requests_start(&info), "expected true for status {status:?}",);
+        }
+    }
+
+    #[test]
+    fn operator_requests_start_rejects_stop_and_unknown_statuses() {
+        for status in ["Offline", "stop", "stopped", "running", "unknown", ""] {
+            let info = ListenerInfo { status: Some(status.to_owned()), ..ListenerInfo::default() };
+            assert!(!operator_requests_start(&info), "expected false for status {status:?}",);
+        }
+    }
+
+    #[test]
+    fn operator_requests_start_returns_false_when_status_absent() {
+        let info = ListenerInfo { status: None, ..ListenerInfo::default() };
+        assert!(!operator_requests_start(&info));
+    }
+
     fn available_port() -> Result<u16, Box<dyn std::error::Error>> {
         let listener = StdTcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();

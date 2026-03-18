@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 319 | 195 | 31 |
+| Tasks closed | 323 | 195 | 31 |
 | Bugs filed against | 41 | 34 | 9 |
 | Bug rate (bugs/task) | 0.13 | 0.17 | 0.29 |
 | Quality score | 87% | 83% | 71% |

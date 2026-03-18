@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 309 | 195 | 31 |
+| Tasks closed | 312 | 195 | 31 |
 | Bugs filed against | 40 | 34 | 9 |
 | Bug rate (bugs/task) | 0.13 | 0.17 | 0.29 |
 | Quality score | 87% | 83% | 71% |
@@ -2237,3 +2237,13 @@ Biggest blindspot: SOCKS5 relay has no connection limits — a compromised agent
 
 Overall codebase health: on track
 Biggest blindspot: Python plugins have unrestricted API access regardless of operator RBAC role — privilege escalation risk if plugin loading is not restricted to admins
+
+### QA Review — 2026-03-18 12:15 — d25c259..640abca
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (Opus) | 3 | 0 | Closed 9tke, 2o3j, 3tpy. Dir callback tests (explorer, list-only, zero-row), download close-failure and invalid-mode tests. Clean test-only additions. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (1,265 tests passing, 0 warnings)

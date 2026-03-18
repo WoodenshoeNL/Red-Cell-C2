@@ -769,6 +769,48 @@ async fn analyst_can_send_chat_message_without_disconnection()
     Ok(())
 }
 
+#[tokio::test]
+async fn admin_can_send_agent_remove_without_disconnection()
+-> Result<(), Box<dyn std::error::Error>> {
+    let addr = common::spawn_test_server(multi_role_profile()).await?;
+    let (mut socket, _) = connect_async(format!("ws://{addr}/")).await?;
+    common::login_as(&mut socket, "admin", "adminpw").await?;
+
+    let msg = serde_json::to_string(&OperatorMessage::AgentRemove(Message {
+        head: MessageHead {
+            event: EventCode::Session,
+            user: "admin".to_owned(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info: FlatInfo::default(),
+    }))?;
+    socket.send(ClientMessage::Text(msg.into())).await?;
+
+    // The server must NOT close the connection — Admin is allowed to send AgentRemove.
+    // It may respond with a message (e.g. error about a missing agent), but the key
+    // assertion is that the connection stays open — no Close frame is received.
+    let result = timeout(Duration::from_secs(2), futures_util::StreamExt::next(&mut socket)).await;
+    match result {
+        Err(_) => {} // timeout — no message, connection still open ✓
+        Ok(Some(Ok(ClientMessage::Close(_)))) => {
+            panic!("Admin was disconnected after AgentRemove — RBAC should allow this operation");
+        }
+        Ok(None) => {
+            panic!("connection unexpectedly ended after AgentRemove");
+        }
+        Ok(Some(Ok(_frame))) => {
+            // Server sent a non-Close frame (e.g. an error about the missing agent).
+            // The connection is still alive, which is what we're asserting.
+        }
+        Ok(Some(Err(error))) => {
+            panic!("websocket error after AgentRemove: {error}");
+        }
+    }
+    socket.close(None).await?;
+    Ok(())
+}
+
 fn listener_new_message(user: &str, port: u16) -> String {
     serde_json::to_string(&OperatorMessage::ListenerNew(Message {
         head: MessageHead {

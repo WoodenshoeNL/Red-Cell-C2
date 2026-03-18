@@ -1635,9 +1635,13 @@ mod tests {
         assert!(
             matches!(
                 error,
-                AuthError::Persistence(crate::TeamserverError::InvalidPersistedValue { .. })
+                AuthError::Persistence(crate::TeamserverError::InvalidPersistedValue {
+                    field: "ts_runtime_operators.password_verifier",
+                    ..
+                })
             ),
-            "expected Persistence(InvalidPersistedValue), got {error:?}"
+            "expected Persistence(InvalidPersistedValue) with field \
+             ts_runtime_operators.password_verifier, got {error:?}"
         );
     }
 

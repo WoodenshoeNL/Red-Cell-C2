@@ -9,10 +9,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 327 | 195 | 31 |
+| Tasks closed | 333 | 195 | 31 |
 | Bugs filed against | 41 | 34 | 9 |
-| Bug rate (bugs/task) | 0.13 | 0.17 | 0.29 |
-| Quality score | 87% | 83% | 71% |
+| Bug rate (bugs/task) | 0.12 | 0.17 | 0.29 |
+| Quality score | 88% | 83% | 71% |
 
 ## Violation Breakdown
 
@@ -37,6 +37,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-18 16:30 — a3457e9..ab2d171
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (dev02-opus) | 6 | 0 | Closed 3peg, 1os2, 2nfi, 1fdv, g84l, 12s4. SMB empty-payload bug fix + 5 new client tests (tab error paths, task_agent cleanup). Currently has 1dcs in progress. |
+| Codex | 0 | 0 | Filed 2 test coverage gap issues (vka4, 1tvu) via scan chore. No tasks closed. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (all committed tests passing)
+Notes: Clean review. SMB fix (listeners.rs:1706) correctly changes skip condition from empty-payload to Fake404 disposition, fixing arch-review bug g84l. New client tests well-structured with proper error handling. WIP observation: uncommitted code for 1dcs references `ScriptLoadStatus::Failed` (should be `Error`) — agent will catch on test compile.
 
 ### Arch Review — 2026-03-18 15:30
 

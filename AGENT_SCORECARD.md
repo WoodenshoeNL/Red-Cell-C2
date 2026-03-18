@@ -38,6 +38,17 @@ Each loop run updates the running totals and appends a review entry.
 
 <!-- QA and arch loops append entries below this line -->
 
+### QA Review — 2026-03-18 14:15 — 217d606..0798348
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (dev02-opus) | 4 | 0 | Closed 2qur (process list & injection status callback tests), 2i57 (SMB/DNS profile listener startup tests), 8pys (shutdown coordinator e2e tests), 1zx0 (TLS SAN helper IPv6 coverage). Currently has 2kd0 in progress. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (1,133 tests passing, 1 flaky failure — payload_builder "Text file busy" race, not a real bug)
+Notes: Clean review — all closures are test additions. process.rs gained 24 new tests (ppid spoof, process list, inject shellcode/dll, spawn dll — each with happy path, error variants, and truncated payload coverage). main.rs gained shutdown coordinator tests (database close, controller state, drain with active listener) and SMB/DNS listener auto-start tests. `run_shutdown_sequence` cleanly extracted from `wait_for_shutdown_signal` for testability. No code quality issues found.
+
 ### QA Review — 2026-03-18 12:15 — 18fb1b7..69c06fc
 
 | Agent | Tasks closed | Bugs filed | Notes |

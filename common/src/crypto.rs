@@ -388,6 +388,8 @@ mod tests {
         assert_eq!(material.key.len(), AGENT_KEY_LENGTH);
         assert_eq!(material.iv.len(), AGENT_IV_LENGTH);
         assert_ne!(material.key, [0_u8; AGENT_KEY_LENGTH]);
+        assert_ne!(material.iv, [0_u8; AGENT_IV_LENGTH]);
+        assert!(!is_weak_aes_iv(&material.iv));
     }
 
     #[test]

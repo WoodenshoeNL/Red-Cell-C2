@@ -491,3 +491,60 @@ Dev agents should prioritize:
 [2026-03-18 06:50:47] [Ubuntu-C2-dev02-claude] === Arch review run 4 ===
 [2026-03-18 06:50:47] [Ubuntu-C2-dev02-claude] WARNING: git pull --rebase failed, continuing with local state
 [2026-03-18 06:50:47] [Ubuntu-C2-dev02-claude] Run log: claude_arch_20260318_065047.log
+Push succeeded. Now here's the report.
+
+---
+
+## Architecture Review Report — 2026-03-18
+
+### 1. Codebase Health: **On Track**
+
+The codebase is in excellent shape. 91K lines of Rust across 3 workspace crates, with:
+- Zero clippy warnings (`-D warnings`)
+- All 193 tests passing (unit + integration)
+- No `todo!()` or `unimplemented!()` macros anywhere
+- No bare `println!`/`eprintln!` — consistent `tracing` usage
+- No `unwrap()`/`expect()` in production code (all are in `#[cfg(test)]`)
+- Proper error taxonomy: `thiserror` in library code, `anyhow` only in binary entry points
+- Strong cryptographic hygiene: `Zeroizing` for key material, no secrets in logs
+
+### 2. Security Posture: **Good with one gap**
+
+**Well defended:**
+- AES-256-CTR with monotonically advancing per-agent CTR block offset prevents keystream reuse
+- Weak key/IV rejection at DEMON_INIT
+- Argon2 password hashing with dummy-verifier timing oracle mitigation
+- DemonInit rate limiting (5/IP/60s), login rate limiting (5/IP/60s + 2s delay)
+- 30 MiB body limit with early magic precheck (rejects non-Demon traffic after 8 bytes)
+- DNS listener has per-IP upload limits (10), global limits (1000), and cleanup timers
+- RBAC enforcement with per-operation permission checks
+- sqlx parameterized queries (no SQL injection surface)
+
+**Gap:** SOCKS5 relay has no connection limits — exploitable for resource exhaustion by a compromised agent.
+
+### 3. Biggest Blindspot: **SOCKS5 relay unbounded connections**
+
+`teamserver/src/sockets.rs` — The `SocketRelayManager` spawns an unbounded Tokio task per SOCKS client with no per-agent or global connection limits. A compromised agent can exhaust server memory and file descriptors by opening thousands of relay connections. This is the single most exploitable gap in the current codebase.
+
+### 4. Issues Filed
+
+| ID | Agent | Description |
+|----|-------|-------------|
+| `red-cell-c2-0sgh` | Claude Sonnet | **P2 bug** — SOCKS5 relay lacks per-agent and global connection limits |
+| `red-cell-c2-ss50` | Claude Sonnet | **P3 bug** — Plugin runtime Mutex deadlock if callback re-enters Rust API |
+| `red-cell-c2-m93a` | Claude Sonnet | **P2 task** — Test: SOCKS relay concurrent connection limits untested |
+| `red-cell-c2-7km5` | Claude Sonnet | **P3 task** — Test: plugin deadlock scenario lacks reproduction test |
+| `red-cell-c2-et4z` | Claude Sonnet | **P3 task** — Test: CTR offset u64 overflow boundary untested |
+
+### 5. Agent Quality
+
+**Claude (Opus)** is writing the best code in recent commits — all recent contributions are clean test additions with no production bugs introduced. **Claude (Sonnet)** wrote the original infrastructure that has the SOCKS relay and plugin deadlock issues, but these are design-level oversights in complex systems, not careless errors. **Codex** has no new findings this review.
+
+### 6. Recommendation
+
+Dev agents should prioritize:
+1. **`red-cell-c2-0sgh`** — Add connection limits to SocketRelayManager (P2, security-relevant)
+2. Continue closing the existing 50 open issues, prioritizing P2 bugs (`59m7` DNS resolver binding, `vr4x` external listener validation, `197z`/`k9mp` protocol label consistency)
+[2026-03-18 07:01:06] [Ubuntu-C2-dev02-claude] Arch review completed successfully
+[2026-03-18 07:01:06] [Ubuntu-C2-dev02-claude] ========================LOOP=========================
+[2026-03-18 07:01:06] [Ubuntu-C2-dev02-claude] Next run in 120m (at 09:01:06)

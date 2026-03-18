@@ -1095,4 +1095,201 @@ mod tests {
             other => panic!("expected AgentResponse, got {other:?}"),
         }
     }
+
+    #[tokio::test]
+    async fn handle_kerberos_klist_success_broadcasts_info_with_output() {
+        let events = EventBus::new(8);
+        let mut receiver = events.subscribe();
+
+        let mut body = Vec::new();
+        push_u32(&mut body, 1); // success = 1
+        // Build a klist payload: 1 session, 1 ticket
+        push_u32(&mut body, 1); // session_count = 1
+        push_session_header(
+            &mut body,
+            "operator",
+            "TESTDOM",
+            0x1000,
+            0x0000,
+            0,
+            "S-1-5-21-5555",
+            0,
+            0,
+            2,
+            "Kerberos",
+            "DC01",
+            "testdom.local",
+            "operator@testdom.local",
+            1, // ticket_count = 1
+        );
+        push_ticket(
+            &mut body,
+            "operator",
+            "TESTDOM.LOCAL",
+            "krbtgt/TESTDOM.LOCAL",
+            "TESTDOM.LOCAL",
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            18,                    // AES256_CTS_HMAC_SHA1
+            (1 << 30) | (1 << 23), // forwardable + renewable
+            b"KRBTICKET",
+        );
+        let payload = build_kerberos_payload(DemonKerberosCommand::Klist, &body);
+
+        let result = handle_kerberos_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(matches!(result, Ok(None)));
+
+        let msg = receiver.recv().await.expect("should receive broadcast");
+        match msg {
+            OperatorMessage::AgentResponse(resp) => {
+                assert_eq!(
+                    resp.info.extra.get("Type"),
+                    Some(&serde_json::Value::String("Info".to_owned())),
+                    "Klist success should produce Type=Info"
+                );
+                let message = resp
+                    .info
+                    .extra
+                    .get("Message")
+                    .and_then(|v| v.as_str())
+                    .expect("should have Message");
+                assert!(
+                    message.contains("Kerberos tickets:"),
+                    "Expected 'Kerberos tickets:' in message, got: {message}"
+                );
+                let output = &resp.info.output;
+                assert!(output.contains("operator"), "Output should contain username");
+                assert!(
+                    output.contains("krbtgt/TESTDOM.LOCAL"),
+                    "Output should contain ticket server"
+                );
+                assert!(
+                    output.contains("AES256_CTS_HMAC_SHA1"),
+                    "Output should contain encryption type"
+                );
+                assert!(output.contains("forwardable"), "Output should contain forwardable flag");
+            }
+            other => panic!("expected AgentResponse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_kerberos_klist_failure_broadcasts_error() {
+        let events = EventBus::new(8);
+        let mut receiver = events.subscribe();
+
+        let mut body = Vec::new();
+        push_u32(&mut body, 0); // success = 0
+        let payload = build_kerberos_payload(DemonKerberosCommand::Klist, &body);
+
+        let result = handle_kerberos_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(matches!(result, Ok(None)));
+
+        let msg = receiver.recv().await.expect("should receive broadcast");
+        match msg {
+            OperatorMessage::AgentResponse(resp) => {
+                assert_eq!(
+                    resp.info.extra.get("Type"),
+                    Some(&serde_json::Value::String("Error".to_owned())),
+                    "Klist failure should produce Type=Error"
+                );
+                let message = resp
+                    .info
+                    .extra
+                    .get("Message")
+                    .and_then(|v| v.as_str())
+                    .expect("should have Message");
+                assert!(
+                    message.contains("kerberos tickets"),
+                    "Expected kerberos ticket error, got: {message}"
+                );
+            }
+            other => panic!("expected AgentResponse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_kerberos_klist_empty_sessions_broadcasts_stable_output() {
+        let events = EventBus::new(8);
+        let mut receiver = events.subscribe();
+
+        let mut body = Vec::new();
+        push_u32(&mut body, 1); // success = 1
+        push_u32(&mut body, 0); // session_count = 0
+        let payload = build_kerberos_payload(DemonKerberosCommand::Klist, &body);
+
+        let result = handle_kerberos_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(matches!(result, Ok(None)));
+
+        let msg = receiver.recv().await.expect("should receive broadcast");
+        match msg {
+            OperatorMessage::AgentResponse(resp) => {
+                assert_eq!(
+                    resp.info.extra.get("Type"),
+                    Some(&serde_json::Value::String("Info".to_owned())),
+                    "Klist with zero sessions should still produce Type=Info"
+                );
+                let message = resp
+                    .info
+                    .extra
+                    .get("Message")
+                    .and_then(|v| v.as_str())
+                    .expect("should have Message");
+                assert!(
+                    message.contains("Kerberos tickets:"),
+                    "Expected 'Kerberos tickets:' in message, got: {message}"
+                );
+            }
+            other => panic!("expected AgentResponse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_kerberos_invalid_subcommand_returns_error() {
+        let events = EventBus::new(8);
+
+        let mut payload = Vec::new();
+        push_u32(&mut payload, 0xFF); // invalid subcommand
+        push_u32(&mut payload, 1); // some body data
+
+        let result = handle_kerberos_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(result.is_err(), "invalid subcommand should return Err");
+        match result.unwrap_err() {
+            CommandDispatchError::InvalidCallbackPayload { command_id, .. } => {
+                assert_eq!(
+                    command_id,
+                    u32::from(DemonCommand::CommandKerberos),
+                    "error should reference CommandKerberos"
+                );
+            }
+            other => panic!("expected InvalidCallbackPayload, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_kerberos_empty_payload_returns_error() {
+        let events = EventBus::new(8);
+
+        let payload: Vec<u8> = Vec::new();
+
+        let result = handle_kerberos_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(result.is_err(), "empty payload should fail to read subcommand");
+    }
+
+    #[tokio::test]
+    async fn handle_kerberos_klist_truncated_body_returns_error() {
+        let events = EventBus::new(8);
+
+        let mut body = Vec::new();
+        push_u32(&mut body, 1); // success = 1
+        // No session count follows — truncated
+        let payload = build_kerberos_payload(DemonKerberosCommand::Klist, &body);
+
+        let result = handle_kerberos_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(result.is_err(), "truncated klist body should return error");
+    }
 }

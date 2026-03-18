@@ -3734,4 +3734,103 @@ havocui.RegisterCommand('recon scan', 'Run a recon scan', [{{'name': 'target', '
         assert_eq!(payload["description"], "Run a recon scan");
         assert_eq!(payload["options"], serde_json::json!(["target"]));
     }
+
+    #[test]
+    fn havocui_create_tab_rejects_empty_title() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+
+        // Script tries to create a tab with a whitespace-only title.
+        let script = "import havocui\n\
+            try:\n\
+            \x20   havocui.CreateTab('   ')\n\
+            except ValueError as e:\n\
+            \x20   print(f'caught: {e}')\n";
+        write_script(&temp_dir.path().join("empty_tab.py"), script);
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        // The tab set must remain empty — the create call was rejected.
+        assert!(runtime.script_tabs().is_empty(), "empty-title tab should not be registered");
+        // The script should have caught the ValueError.
+        assert!(
+            wait_for_output(&runtime, "caught: tab title cannot be empty"),
+            "script should log the caught ValueError"
+        );
+    }
+
+    #[test]
+    fn havocui_set_tab_layout_rejects_uncreated_tab() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+
+        // Script calls SetTabLayout on a tab that was never created.
+        let script = "import havocui\n\
+            try:\n\
+            \x20   havocui.SetTabLayout('Ghost', '<html></html>')\n\
+            except ValueError as e:\n\
+            \x20   print(f'caught: {e}')\n";
+        write_script(&temp_dir.path().join("layout_no_tab.py"), script);
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        assert!(runtime.script_tabs().is_empty(), "no tabs should be registered");
+        assert!(
+            wait_for_output(&runtime, "caught: havocui tab `Ghost` has not been created"),
+            "script should log the caught ValueError for uncreated tab"
+        );
+    }
+
+    #[test]
+    fn havocui_set_tab_layout_rejects_cross_script_mutation() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+
+        // First script (alpha) creates a tab named "Dashboard".
+        let script_alpha = "import havocui\n\
+            havocui.CreateTab('Dashboard')\n";
+        write_script(&temp_dir.path().join("alpha.py"), script_alpha);
+
+        // Second script (beta) tries to mutate alpha's tab layout.
+        let script_beta = "import havocui\n\
+            try:\n\
+            \x20   havocui.SetTabLayout('Dashboard', 'evil layout')\n\
+            except ValueError as e:\n\
+            \x20   print(f'caught: {e}')\n";
+        write_script(&temp_dir.path().join("beta.py"), script_beta);
+
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        // Alpha's tab should still exist with an empty layout (never mutated).
+        let tabs = runtime.script_tabs();
+        assert_eq!(tabs.len(), 1, "only alpha's tab should be registered");
+        assert_eq!(tabs[0].title, "Dashboard");
+        assert_eq!(tabs[0].script_name, "alpha");
+        assert_eq!(
+            tabs[0].layout, "",
+            "layout must remain empty — beta's mutation should have been rejected"
+        );
+
+        // Beta should have caught the cross-script error.
+        assert!(
+            wait_for_output(
+                &runtime,
+                "caught: havocui tab `Dashboard` belongs to a different script"
+            ),
+            "script should log the caught ValueError for cross-script mutation"
+        );
+    }
 }

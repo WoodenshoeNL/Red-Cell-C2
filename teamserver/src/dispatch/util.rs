@@ -208,4 +208,51 @@ mod tests {
         let got = windows_version_label(5, 1, VER_NT_WORKSTATION, 3, 0);
         assert_eq!(got, "Unknown Service Pack 3");
     }
+
+    // ── process_arch_label ──────────────────────────────────────────
+
+    #[test]
+    fn process_arch_label_known_values() {
+        assert_eq!(process_arch_label(PROCESS_ARCH_X86), "x86");
+        assert_eq!(process_arch_label(PROCESS_ARCH_X64), "x64");
+        assert_eq!(process_arch_label(PROCESS_ARCH_IA64), "IA64");
+    }
+
+    #[test]
+    fn process_arch_label_unknown_fallback() {
+        for value in [0, 4, 99, u32::MAX] {
+            assert_eq!(
+                process_arch_label(value),
+                "Unknown",
+                "process_arch_label({value}) should be Unknown"
+            );
+        }
+    }
+
+    // ── windows_arch_label ──────────────────────────────────────────
+
+    const WINDOWS_ARCH_CASES: &[(u32, &str)] =
+        &[(0, "x86"), (9, "x64/AMD64"), (5, "ARM"), (12, "ARM64"), (6, "Itanium-based")];
+
+    #[test]
+    fn windows_arch_label_known_values() {
+        for &(value, expected) in WINDOWS_ARCH_CASES {
+            assert_eq!(
+                windows_arch_label(value),
+                expected,
+                "windows_arch_label({value}) = expected {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_arch_label_unknown_fallback() {
+        for value in [1, 2, 3, 4, 7, 8, 10, 11, 99, u32::MAX] {
+            assert_eq!(
+                windows_arch_label(value),
+                "Unknown",
+                "windows_arch_label({value}) should be Unknown"
+            );
+        }
+    }
 }

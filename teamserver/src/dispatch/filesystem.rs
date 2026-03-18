@@ -1696,4 +1696,370 @@ mod tests {
         assert_eq!(meta.get("expected_size").and_then(|v| v.as_str()), Some("999"),);
         assert_eq!(meta.get("started_at").and_then(|v| v.as_str()), Some("2026-03-17T08:30:00Z"),);
     }
+
+    // ---------------------------------------------------------------
+    // Payload builders for non-download filesystem subcommands
+    // ---------------------------------------------------------------
+
+    fn build_upload_payload(size: u32, path: &str) -> Vec<u8> {
+        let mut buf = Vec::new();
+        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::Upload));
+        add_u32_le(&mut buf, size);
+        add_utf16_le(&mut buf, path);
+        buf
+    }
+
+    fn build_cd_payload(path: &str) -> Vec<u8> {
+        let mut buf = Vec::new();
+        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::Cd));
+        add_utf16_le(&mut buf, path);
+        buf
+    }
+
+    fn build_remove_payload(is_dir: bool, path: &str) -> Vec<u8> {
+        let mut buf = Vec::new();
+        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::Remove));
+        add_bool_le(&mut buf, is_dir);
+        add_utf16_le(&mut buf, path);
+        buf
+    }
+
+    fn build_mkdir_payload(path: &str) -> Vec<u8> {
+        let mut buf = Vec::new();
+        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::Mkdir));
+        add_utf16_le(&mut buf, path);
+        buf
+    }
+
+    fn build_copy_move_payload(copy: bool, success: bool, from: &str, to: &str) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let subcmd = if copy { DemonFilesystemCommand::Copy } else { DemonFilesystemCommand::Move };
+        add_u32_le(&mut buf, u32::from(subcmd));
+        add_bool_le(&mut buf, success);
+        add_utf16_le(&mut buf, from);
+        add_utf16_le(&mut buf, to);
+        buf
+    }
+
+    fn build_getpwd_payload(path: &str) -> Vec<u8> {
+        let mut buf = Vec::new();
+        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::GetPwd));
+        add_utf16_le(&mut buf, path);
+        buf
+    }
+
+    /// Build a Cat subcommand payload.  `output` is encoded via `read_string`
+    /// (u32-LE length prefix + raw UTF-8 bytes).
+    fn build_cat_payload(path: &str, success: bool, output: &str) -> Vec<u8> {
+        let mut buf = Vec::new();
+        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::Cat));
+        add_utf16_le(&mut buf, path);
+        add_bool_le(&mut buf, success);
+        // read_string = read_bytes (u32 LE len + raw bytes)
+        let raw = output.as_bytes();
+        add_u32_le(&mut buf, u32::try_from(raw.len()).unwrap());
+        buf.extend_from_slice(raw);
+        buf
+    }
+
+    /// Helper: invoke handle_filesystem_callback and return the first broadcast event.
+    async fn call_and_recv(payload: &[u8], agent_id: u32, request_id: u32) -> OperatorMessage {
+        let (registry, db, events, downloads) = dir_test_deps().await;
+        let mut rx = events.subscribe();
+        handle_filesystem_callback(
+            &registry, &db, &events, &downloads, None, agent_id, request_id, payload,
+        )
+        .await
+        .expect("handler should succeed");
+        timeout(Duration::from_millis(50), rx.recv())
+            .await
+            .expect("should receive event")
+            .expect("broadcast")
+    }
+
+    // ---------------------------------------------------------------
+    // Upload callback
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn upload_callback_emits_info_with_size_and_path() {
+        let event =
+            call_and_recv(&build_upload_payload(4096, "C:\\Temp\\payload.bin"), 0xA1, 10).await;
+        let OperatorMessage::AgentResponse(msg) = &event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(message.contains("Uploaded file"), "message: {message}");
+        assert!(message.contains("C:\\Temp\\payload.bin"), "message: {message}");
+        assert!(message.contains("4096 bytes"), "message: {message}");
+        assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Info"));
+    }
+
+    // ---------------------------------------------------------------
+    // Cd callback
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn cd_callback_emits_changed_directory() {
+        let event = call_and_recv(&build_cd_payload("C:\\Windows\\System32"), 0xA2, 20).await;
+        let OperatorMessage::AgentResponse(msg) = &event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(message.contains("Changed directory"), "message: {message}");
+        assert!(message.contains("C:\\Windows\\System32"), "message: {message}");
+        assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Info"));
+    }
+
+    // ---------------------------------------------------------------
+    // Remove callback — file and directory variants
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn remove_file_callback_emits_removed_file() {
+        let event =
+            call_and_recv(&build_remove_payload(false, "C:\\Temp\\old.log"), 0xA3, 30).await;
+        let OperatorMessage::AgentResponse(msg) = &event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(message.contains("Removed file"), "message: {message}");
+        assert!(message.contains("C:\\Temp\\old.log"), "message: {message}");
+    }
+
+    #[tokio::test]
+    async fn remove_directory_callback_emits_removed_directory() {
+        let event = call_and_recv(&build_remove_payload(true, "C:\\Temp\\cache"), 0xA4, 31).await;
+        let OperatorMessage::AgentResponse(msg) = &event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(message.contains("Removed directory"), "message: {message}");
+        assert!(message.contains("C:\\Temp\\cache"), "message: {message}");
+    }
+
+    // ---------------------------------------------------------------
+    // Mkdir callback
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn mkdir_callback_emits_created_directory() {
+        let event =
+            call_and_recv(&build_mkdir_payload("C:\\Users\\admin\\new_dir"), 0xA5, 40).await;
+        let OperatorMessage::AgentResponse(msg) = &event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(message.contains("Created directory"), "message: {message}");
+        assert!(message.contains("C:\\Users\\admin\\new_dir"), "message: {message}");
+    }
+
+    // ---------------------------------------------------------------
+    // Copy callback — success and failure
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn copy_success_callback_emits_good_message() {
+        let event = call_and_recv(
+            &build_copy_move_payload(true, true, "C:\\src.txt", "C:\\dst.txt"),
+            0xA6,
+            50,
+        )
+        .await;
+        let OperatorMessage::AgentResponse(msg) = &event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(message.contains("Successfully copied"), "message: {message}");
+        assert!(message.contains("C:\\src.txt"), "message: {message}");
+        assert!(message.contains("C:\\dst.txt"), "message: {message}");
+        assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+    }
+
+    #[tokio::test]
+    async fn copy_failure_callback_emits_error_message() {
+        let event = call_and_recv(
+            &build_copy_move_payload(true, false, "C:\\nope.txt", "C:\\dest.txt"),
+            0xA7,
+            51,
+        )
+        .await;
+        let OperatorMessage::AgentResponse(msg) = &event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(message.contains("Failed to copied"), "message: {message}");
+        assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Error"));
+    }
+
+    // ---------------------------------------------------------------
+    // Move callback — success and failure
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn move_success_callback_emits_good_message() {
+        let event = call_and_recv(
+            &build_copy_move_payload(false, true, "C:\\old.dat", "C:\\new.dat"),
+            0xA8,
+            60,
+        )
+        .await;
+        let OperatorMessage::AgentResponse(msg) = &event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(message.contains("Successfully moved"), "message: {message}");
+        assert!(message.contains("C:\\old.dat"), "message: {message}");
+        assert!(message.contains("C:\\new.dat"), "message: {message}");
+        assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+    }
+
+    #[tokio::test]
+    async fn move_failure_callback_emits_error_message() {
+        let event = call_and_recv(
+            &build_copy_move_payload(false, false, "C:\\locked.sys", "C:\\target.sys"),
+            0xA9,
+            61,
+        )
+        .await;
+        let OperatorMessage::AgentResponse(msg) = &event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(message.contains("Failed to moved"), "message: {message}");
+        assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Error"));
+    }
+
+    // ---------------------------------------------------------------
+    // GetPwd callback
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn getpwd_callback_emits_current_directory() {
+        let event = call_and_recv(&build_getpwd_payload("C:\\Users\\admin"), 0xAA, 70).await;
+        let OperatorMessage::AgentResponse(msg) = &event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(message.contains("Current directory"), "message: {message}");
+        assert!(message.contains("C:\\Users\\admin"), "message: {message}");
+    }
+
+    // ---------------------------------------------------------------
+    // Cat callback — success and failure
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn cat_success_callback_emits_file_content() {
+        let content = "Hello, World!\nLine 2\n";
+        let event =
+            call_and_recv(&build_cat_payload("C:\\readme.txt", true, content), 0xAB, 80).await;
+        let OperatorMessage::AgentResponse(msg) = &event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(message.contains("File content of"), "message: {message}");
+        assert!(message.contains("C:\\readme.txt"), "message: {message}");
+        assert!(
+            message.contains(&format!("{})", content.len())),
+            "message should contain size: {message}"
+        );
+        assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Info"));
+        assert_eq!(msg.info.output, content, "output should contain file content");
+    }
+
+    #[tokio::test]
+    async fn cat_failure_callback_emits_error_with_no_content() {
+        let event = call_and_recv(
+            &build_cat_payload("C:\\secret.key", false, "ignored error data"),
+            0xAC,
+            81,
+        )
+        .await;
+        let OperatorMessage::AgentResponse(msg) = &event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(message.contains("Failed to read file"), "message: {message}");
+        assert!(message.contains("C:\\secret.key"), "message: {message}");
+        assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Error"));
+        // On failure, output should be empty (no file contents attached)
+        assert!(msg.info.output.is_empty(), "failure should not attach file content");
+    }
+
+    // ---------------------------------------------------------------
+    // Dir normal mode (non-explorer, non-list-only) with items
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn dir_normal_mode_formats_directory_listing() {
+        let (registry, db, events, downloads) = dir_test_deps().await;
+        let mut rx = events.subscribe();
+
+        let payload = build_dir_payload(
+            false, // explorer
+            false, // list_only
+            "C:\\work",
+            true,
+            &[DirEntry {
+                path: "C:\\work\\*".to_owned(),
+                file_count: 1,
+                dir_count: 1,
+                total_size: Some(8192),
+                items: vec![
+                    DirItem {
+                        name: "src".to_owned(),
+                        is_dir: true,
+                        size: 0,
+                        day: 1,
+                        month: 6,
+                        year: 2025,
+                        minute: 0,
+                        hour: 12,
+                    },
+                    DirItem {
+                        name: "Cargo.toml".to_owned(),
+                        is_dir: false,
+                        size: 512,
+                        day: 2,
+                        month: 6,
+                        year: 2025,
+                        minute: 30,
+                        hour: 9,
+                    },
+                ],
+            }],
+        );
+
+        handle_filesystem_callback(&registry, &db, &events, &downloads, None, 0xB0, 90, &payload)
+            .await
+            .expect("handler should succeed");
+
+        let event = timeout(Duration::from_millis(50), rx.recv())
+            .await
+            .expect("should receive event")
+            .expect("broadcast");
+
+        let OperatorMessage::AgentResponse(msg) = &event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+
+        let output = &msg.info.output;
+        // Should contain directory header
+        assert!(output.contains("Directory of C:\\work\\*"), "output: {output}");
+        // Should contain <DIR> marker for the directory entry
+        assert!(output.contains("<DIR>"), "output should contain <DIR>: {output}");
+        assert!(output.contains("src"), "output should contain dir name: {output}");
+        assert!(output.contains("Cargo.toml"), "output should contain file name: {output}");
+        // Should contain file/folder summary
+        assert!(output.contains("1 File(s)"), "output should contain file count: {output}");
+        assert!(output.contains("1 Folder(s)"), "output should contain folder count: {output}");
+
+        // Message should indicate completion
+        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(message, "Directory listing completed");
+
+        // No MiscType in normal mode
+        assert!(msg.info.extra.get("MiscType").is_none());
+    }
 }

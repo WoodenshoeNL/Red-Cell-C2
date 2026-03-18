@@ -13,7 +13,7 @@ clap = { version = "4.5", features = ["derive"] }
 dirs = "6"
 eframe = "0.32.3"
 futures-util = "0.3"
-pyo3 = "0.23"
+pyo3 = { version = "0.23", features = ["abi3-py310"] }
 red-cell-common = { path = "../common" }
 rfd = "0.15"
 rustls-pemfile = "2.2"

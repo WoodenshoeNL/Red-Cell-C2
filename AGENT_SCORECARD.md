@@ -9,7 +9,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 340 | 195 | 31 |
+| Tasks closed | 342 | 195 | 31 |
 | Bugs filed against | 41 | 34 | 9 |
 | Bug rate (bugs/task) | 0.12 | 0.17 | 0.29 |
 | Quality score | 88% | 83% | 71% |
@@ -38,6 +38,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-18 19:30 — cfc3be3..a1cf1aa
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (dev02-opus) | 2 | 0 | Closed 21ea (pivot callback coverage), 10p4 (process Kill/Modules/Grep/Memory callback tests). Claimed 20ql (token callbacks, in progress). Filed 8 test coverage issues for client/src/main.rs. Ran test coverage scans wrapping batches 34-58 and 58-4. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` 1157 passed, 6 failed (all plugin mutex poisoning — pre-existing, tracked as red-cell-c2-08ds)
+Notes: Clean review — both closures add well-structured test coverage for dispatch callback branches. New tests in dispatch/mod.rs cover pivot disconnect success (link removal + Dead mark), pivot connect failure with unknown error code, and no-link disconnect edge case. New tests in dispatch/process.rs cover Kill success/failure, Modules (with and without entries), Grep (arch detection), Memory (protect filter), invalid subcommand rejection, and truncated payload handling. All new test code follows established patterns. No production code changes. No new issues found.
 
 ### QA Review — 2026-03-18 18:00 — 8f7d49d..cfc3be3
 

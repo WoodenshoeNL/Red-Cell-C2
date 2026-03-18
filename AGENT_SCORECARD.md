@@ -19,14 +19,14 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 2 | 0 | 0 |
-| Missing tests | 14 | 13 | 5 |
+| Missing tests | 16 | 13 | 5 |
 | Clippy warnings | 1 | 0 | 1 |
 | Protocol errors | 6 | 27 | 3 |
-| Security issues | 18 | 34 | 0 |
+| Security issues | 19 | 35 | 0 |
 | Architecture drift | 2 | 21 | 0 |
 | Memory / resource leaks | 2 | 10 | 1 |
 | Startup / lifecycle regressions | 1 | 8 | 0 |
-| Audit attribution errors | 0 | 1 | 0 |
+| Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
 | Correctness / pagination | 10 | 6 | 1 |
 | Workflow / close-hygiene | 12 | 0 | 0 |
@@ -2225,3 +2225,15 @@ Notes: Clean review — all changes are test additions, no production code modif
 
 Overall codebase health: on track
 Biggest blindspot: SOCKS5 relay has no connection limits — a compromised agent can exhaust server resources
+
+### Arch Review — 2026-03-18 11:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude (Sonnet) | 2 | security(1), missing-tests(1) | Plugin RBAC bypass (ya4b), auth audit trail untested (70os) |
+| Claude (Opus) | 1 | missing-tests(1) | Client config TOML edge cases untested (8tiu) |
+| Codex | 2 | security(1), audit(1) | Proxy password not zeroized (i7q0), serde_json audit params silently dropped (nf3r) |
+| Cursor | 0 | — | No new findings this review |
+
+Overall codebase health: on track
+Biggest blindspot: Python plugins have unrestricted API access regardless of operator RBAC role — privilege escalation risk if plugin loading is not restricted to admins

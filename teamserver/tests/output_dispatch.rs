@@ -110,6 +110,55 @@ fn demon_info_truncated_payload() -> Vec<u8> {
     u32::from(DemonInfoClass::MemAlloc).to_le_bytes().to_vec()
 }
 
+/// Build a `DemonInfo/MemExec` payload: info_class(11) + function(u64) + thread_id(u32).
+fn demon_info_mem_exec_payload(function: u64, thread_id: u32) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&u32::from(DemonInfoClass::MemExec).to_le_bytes());
+    p.extend_from_slice(&function.to_le_bytes());
+    p.extend_from_slice(&thread_id.to_le_bytes());
+    p
+}
+
+/// Build a `DemonInfo/MemProtect` payload: info_class(12) + memory(u64) + size(u32) + old(u32) + new(u32).
+fn demon_info_mem_protect_payload(memory: u64, size: u32, old: u32, new: u32) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&u32::from(DemonInfoClass::MemProtect).to_le_bytes());
+    p.extend_from_slice(&memory.to_le_bytes());
+    p.extend_from_slice(&size.to_le_bytes());
+    p.extend_from_slice(&old.to_le_bytes());
+    p.extend_from_slice(&new.to_le_bytes());
+    p
+}
+
+/// Build a `DemonInfo/ProcCreate` payload: info_class(21) + utf16_path + pid(u32) + success(u32) + piped(u32) + verbose(u32).
+fn demon_info_proc_create_payload(
+    path: &str,
+    pid: u32,
+    success: bool,
+    piped: bool,
+    verbose: bool,
+) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&u32::from(DemonInfoClass::ProcCreate).to_le_bytes());
+    // UTF-16LE path, length-prefixed with u32 byte count
+    let utf16: Vec<u16> = path.encode_utf16().collect();
+    let byte_len = (utf16.len() * 2) as u32;
+    p.extend_from_slice(&byte_len.to_le_bytes());
+    for word in &utf16 {
+        p.extend_from_slice(&word.to_le_bytes());
+    }
+    p.extend_from_slice(&pid.to_le_bytes());
+    p.extend_from_slice(&u32::from(success).to_le_bytes());
+    p.extend_from_slice(&u32::from(piped).to_le_bytes());
+    p.extend_from_slice(&u32::from(verbose).to_le_bytes());
+    p
+}
+
+/// Build a `DemonInfo` payload with an unknown info class value.
+fn demon_info_unknown_class_payload(class: u32) -> Vec<u8> {
+    class.to_le_bytes().to_vec()
+}
+
 /// Build a `CommandJob/List` payload with the given jobs (id, type, state).
 fn job_list_payload(jobs: &[(u32, u32, u32)]) -> Vec<u8> {
     let mut p = Vec::new();
@@ -531,5 +580,267 @@ async fn exit_callback_truncated_exit_method_returns_error_no_broadcast()
 
     socket.close(None).await?;
     listeners.stop("out-exit-short-test").await?;
+    Ok(())
+}
+
+/// `handle_demon_info_callback` with a `MemExec` payload must broadcast an `AgentResponse`
+/// containing the function pointer and thread ID.
+#[tokio::test]
+async fn demon_info_mem_exec_broadcasts_response() -> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-mexec-test", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-mexec-test").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0010_u32;
+    let key = [0x11; AGENT_KEY_LENGTH];
+    let iv = [0x12; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let function: u64 = 0xAABB_CCDD_EEFF_0011;
+    let thread_id: u32 = 42;
+    let payload = demon_info_mem_exec_payload(function, thread_id);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::DemonInfo),
+            0x50,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for DemonInfo/MemExec, got {event:?}");
+    };
+    assert_eq!(msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::DemonInfo).to_string());
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Info"));
+
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.contains(&format!("{function:x}")),
+        "response should contain function pointer {function:#x}: {message:?}"
+    );
+    assert!(
+        message.contains(&thread_id.to_string()),
+        "response should contain thread id {thread_id}: {message:?}"
+    );
+    assert!(
+        message.contains("Memory Executed"),
+        "response should contain 'Memory Executed': {message:?}"
+    );
+
+    socket.close(None).await?;
+    listeners.stop("out-mexec-test").await?;
+    Ok(())
+}
+
+/// `handle_demon_info_callback` with a `MemProtect` payload must broadcast an `AgentResponse`
+/// containing the memory address, size, and old/new protection values.
+#[tokio::test]
+async fn demon_info_mem_protect_broadcasts_response() -> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-mprot-test", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-mprot-test").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0011_u32;
+    let key = [0x13; AGENT_KEY_LENGTH];
+    let iv = [0x14; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let memory: u64 = 0x7FFE_0000_1000;
+    let size: u32 = 8192;
+    let old_prot: u32 = 0x04; // PAGE_READWRITE
+    let new_prot: u32 = 0x20; // PAGE_EXECUTE_READ
+    let payload = demon_info_mem_protect_payload(memory, size, old_prot, new_prot);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::DemonInfo),
+            0x51,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for DemonInfo/MemProtect, got {event:?}");
+    };
+    assert_eq!(msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::DemonInfo).to_string());
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Info"));
+
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.contains(&format!("{memory:x}")),
+        "response should contain memory address {memory:#x}: {message:?}"
+    );
+    assert!(
+        message.contains(&size.to_string()),
+        "response should contain size {size}: {message:?}"
+    );
+    assert!(
+        message.contains("PAGE_READWRITE"),
+        "response should contain old protection PAGE_READWRITE: {message:?}"
+    );
+    assert!(
+        message.contains("PAGE_EXECUTE_READ"),
+        "response should contain new protection PAGE_EXECUTE_READ: {message:?}"
+    );
+    assert!(
+        message.contains("Memory Protection"),
+        "response should contain 'Memory Protection': {message:?}"
+    );
+
+    socket.close(None).await?;
+    listeners.stop("out-mprot-test").await?;
+    Ok(())
+}
+
+/// `handle_demon_info_callback` with `ProcCreate` and `verbose=false` must return `Ok(None)`
+/// without broadcasting any `AgentResponse`.
+#[tokio::test]
+async fn demon_info_proc_create_non_verbose_no_broadcast() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-proc-nv-test", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-proc-nv-test").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0012_u32;
+    let key = [0x15; AGENT_KEY_LENGTH];
+    let iv = [0x16; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // ProcCreate with verbose=false — should silently return Ok(None).
+    let payload =
+        demon_info_proc_create_payload("C:\\Windows\\System32\\cmd.exe", 1234, true, true, false);
+
+    let response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::DemonInfo),
+            0x52,
+            &payload,
+        ))
+        .send()
+        .await?;
+
+    // The callback should succeed (2xx) but produce no broadcast.
+    assert!(
+        response.status().is_success(),
+        "ProcCreate non-verbose should succeed, got {}",
+        response.status()
+    );
+
+    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
+
+    socket.close(None).await?;
+    listeners.stop("out-proc-nv-test").await?;
+    Ok(())
+}
+
+/// `handle_demon_info_callback` with an unrecognized info class value must return `Ok(None)`
+/// without broadcasting any `AgentResponse`.
+#[tokio::test]
+async fn demon_info_unknown_class_no_broadcast() -> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("out-info-unk-test", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("out-info-unk-test").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0013_u32;
+    let key = [0x17; AGENT_KEY_LENGTH];
+    let iv = [0x18; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // Use an info class value (0xFF) that doesn't map to any DemonInfoClass variant.
+    let payload = demon_info_unknown_class_payload(0xFF);
+
+    let response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::DemonInfo),
+            0x53,
+            &payload,
+        ))
+        .send()
+        .await?;
+
+    // The callback should succeed (2xx) but produce no broadcast.
+    assert!(
+        response.status().is_success(),
+        "unknown info class should succeed silently, got {}",
+        response.status()
+    );
+
+    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
+
+    socket.close(None).await?;
+    listeners.stop("out-info-unk-test").await?;
     Ok(())
 }

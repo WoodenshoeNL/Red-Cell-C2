@@ -526,7 +526,7 @@ pub(super) fn download_complete_event(
 mod tests {
     use super::*;
     use crate::{AgentRegistry, Database, EventBus};
-    use red_cell_common::demon::{DemonCommand, DemonFilesystemCommand};
+    use red_cell_common::demon::DemonFilesystemCommand;
     use red_cell_common::operator::OperatorMessage;
     use tokio::time::{Duration, timeout};
 
@@ -1071,5 +1071,180 @@ mod tests {
         // Calling finish on non-existent download should not affect buffered bytes.
         let _ = tracker.finish(0xDEAD, 0xBEEF).await;
         assert_eq!(tracker.buffered_bytes().await, 0);
+    }
+
+    // --- Download payload helpers (match CallbackParser LE encoding) ---
+
+    fn add_bytes_le(buf: &mut Vec<u8>, value: &[u8]) {
+        add_u32_le(buf, u32::try_from(value.len()).unwrap_or_default());
+        buf.extend_from_slice(value);
+    }
+
+    fn build_download_open_payload(file_id: u32, expected_size: u64, remote_path: &str) -> Vec<u8> {
+        let mut buf = Vec::new();
+        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::Download));
+        add_u32_le(&mut buf, 0); // mode = open
+        add_u32_le(&mut buf, file_id);
+        add_u64_le(&mut buf, expected_size);
+        add_utf16_le(&mut buf, remote_path);
+        buf
+    }
+
+    fn build_download_write_payload(file_id: u32, chunk: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::Download));
+        add_u32_le(&mut buf, 1); // mode = write
+        add_u32_le(&mut buf, file_id);
+        add_bytes_le(&mut buf, chunk);
+        buf
+    }
+
+    fn build_download_close_payload(file_id: u32, reason: u32) -> Vec<u8> {
+        let mut buf = Vec::new();
+        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::Download));
+        add_u32_le(&mut buf, 2); // mode = close
+        add_u32_le(&mut buf, file_id);
+        add_u32_le(&mut buf, reason);
+        buf
+    }
+
+    fn build_download_invalid_mode_payload(file_id: u32, mode: u32) -> Vec<u8> {
+        let mut buf = Vec::new();
+        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::Download));
+        add_u32_le(&mut buf, mode);
+        add_u32_le(&mut buf, file_id);
+        buf
+    }
+
+    // --- Download close-failure and invalid-mode tests ---
+
+    #[tokio::test]
+    async fn download_close_nonzero_reason_emits_removed_and_discards_loot() {
+        let (registry, db, events, downloads) = dir_test_deps().await;
+        let mut rx = events.subscribe();
+        let agent_id = 0xFA01;
+        let file_id = 0x77;
+        let request_id = 0xBB;
+        let remote_path = "C:\\Temp\\partial.bin";
+
+        // Open the download.
+        handle_filesystem_callback(
+            &registry,
+            &db,
+            &events,
+            &downloads,
+            None,
+            agent_id,
+            request_id,
+            &build_download_open_payload(file_id, 1024, remote_path),
+        )
+        .await
+        .expect("open should succeed");
+
+        // Drain the "Started" event.
+        let _ =
+            timeout(Duration::from_millis(50), rx.recv()).await.expect("should receive open event");
+
+        // Append one chunk.
+        handle_filesystem_callback(
+            &registry,
+            &db,
+            &events,
+            &downloads,
+            None,
+            agent_id,
+            request_id,
+            &build_download_write_payload(file_id, b"partial-data"),
+        )
+        .await
+        .expect("write should succeed");
+
+        // Drain the "InProgress" event.
+        let _ = timeout(Duration::from_millis(50), rx.recv())
+            .await
+            .expect("should receive progress event");
+
+        // Close with non-zero reason (failure).
+        handle_filesystem_callback(
+            &registry,
+            &db,
+            &events,
+            &downloads,
+            None,
+            agent_id,
+            request_id,
+            &build_download_close_payload(file_id, 1),
+        )
+        .await
+        .expect("close should succeed even with non-zero reason");
+
+        // The close should emit a "Removed" progress event.
+        let event = timeout(Duration::from_millis(50), rx.recv())
+            .await
+            .expect("should receive close event")
+            .expect("should have broadcast event");
+
+        let OperatorMessage::AgentResponse(msg) = &event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+        assert_eq!(
+            msg.info.extra.get("State").and_then(|v| v.as_str()),
+            Some("Removed"),
+            "failed download close should report State=Removed"
+        );
+
+        // No loot should have been persisted.
+        let loot = db.loot().list_for_agent(agent_id).await.expect("loot query should work");
+        assert!(loot.is_empty(), "failed download should not persist loot");
+
+        // Tracker should be drained — no active downloads for this agent.
+        let active = downloads.active_for_agent(agent_id).await;
+        assert!(active.is_empty(), "tracker should be drained after failed close");
+
+        // No further events expected.
+        assert!(
+            timeout(Duration::from_millis(50), rx.recv()).await.is_err(),
+            "no extra events should be emitted after failed close"
+        );
+    }
+
+    #[tokio::test]
+    async fn download_unsupported_mode_returns_invalid_callback_payload() {
+        let (registry, db, events, downloads) = dir_test_deps().await;
+        let mut rx = events.subscribe();
+        let agent_id = 0xFA02;
+        let request_id = 0xCC;
+
+        let err = handle_filesystem_callback(
+            &registry,
+            &db,
+            &events,
+            &downloads,
+            None,
+            agent_id,
+            request_id,
+            &build_download_invalid_mode_payload(0x99, 42),
+        )
+        .await
+        .expect_err("unsupported mode should return error");
+
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+
+        // No events should have been emitted.
+        assert!(
+            timeout(Duration::from_millis(50), rx.recv()).await.is_err(),
+            "no events should be emitted for unsupported download mode"
+        );
+
+        // No active downloads left behind.
+        let active = downloads.active_for_agent(agent_id).await;
+        assert!(active.is_empty(), "no partial state should remain after invalid mode");
+
+        // No loot persisted.
+        let loot = db.loot().list_for_agent(agent_id).await.expect("loot query should work");
+        assert!(loot.is_empty(), "no loot should be stored for invalid mode");
     }
 }

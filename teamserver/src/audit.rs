@@ -1645,6 +1645,338 @@ mod tests {
         assert_eq!(page.items[0].result_status, AuditResultStatus::Success);
     }
 
+    /// Seed audit rows with varied fields for filter and pagination testing.
+    ///
+    /// Creates 10 rows with distinct timestamps, result statuses, target kinds,
+    /// target ids, and commands so each filter dimension can be tested in isolation.
+    async fn seed_diverse_audit_rows(database: &Database) {
+        let repo = database.audit_log();
+        let rows: Vec<(&str, &str, &str, &str, Option<&str>, Option<&str>, AuditResultStatus)> = vec![
+            // (actor, action, target_kind, occurred_at, target_id, command, result_status)
+            (
+                "alice",
+                "agent.task",
+                "agent",
+                "2026-02-01T01:00:00Z",
+                Some("A1"),
+                Some("shell"),
+                AuditResultStatus::Success,
+            ),
+            (
+                "bob",
+                "listener.create",
+                "listener",
+                "2026-02-02T02:00:00Z",
+                Some("L1"),
+                Some("create"),
+                AuditResultStatus::Success,
+            ),
+            (
+                "alice",
+                "agent.task",
+                "agent",
+                "2026-02-03T03:00:00Z",
+                Some("A2"),
+                Some("upload"),
+                AuditResultStatus::Failure,
+            ),
+            (
+                "bob",
+                "agent.task",
+                "agent",
+                "2026-02-04T04:00:00Z",
+                Some("A1"),
+                Some("shell"),
+                AuditResultStatus::Success,
+            ),
+            (
+                "alice",
+                "listener.delete",
+                "listener",
+                "2026-02-05T05:00:00Z",
+                Some("L1"),
+                Some("delete"),
+                AuditResultStatus::Failure,
+            ),
+            (
+                "bob",
+                "agent.task",
+                "agent",
+                "2026-02-06T06:00:00Z",
+                Some("A3"),
+                Some("upload"),
+                AuditResultStatus::Success,
+            ),
+            (
+                "alice",
+                "config.update",
+                "config",
+                "2026-02-07T07:00:00Z",
+                None,
+                Some("profile"),
+                AuditResultStatus::Success,
+            ),
+            (
+                "bob",
+                "agent.task",
+                "agent",
+                "2026-02-08T08:00:00Z",
+                Some("A1"),
+                Some("shell"),
+                AuditResultStatus::Failure,
+            ),
+            (
+                "alice",
+                "listener.create",
+                "listener",
+                "2026-02-09T09:00:00Z",
+                Some("L2"),
+                Some("create"),
+                AuditResultStatus::Success,
+            ),
+            (
+                "bob",
+                "config.update",
+                "config",
+                "2026-02-10T10:00:00Z",
+                None,
+                Some("profile"),
+                AuditResultStatus::Failure,
+            ),
+        ];
+        for (actor, action, target_kind, occurred_at, target_id, command, result_status) in rows {
+            let details = audit_details(result_status, None, command, None);
+            repo.create(&AuditLogEntry {
+                id: None,
+                actor: actor.to_owned(),
+                action: action.to_owned(),
+                target_kind: target_kind.to_owned(),
+                target_id: target_id.map(ToOwned::to_owned),
+                details: Some(serde_json::to_value(&details).expect("details should serialize")),
+                occurred_at: occurred_at.to_owned(),
+            })
+            .await
+            .expect("seed row should insert");
+        }
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_result_status_filter_narrows_correctly() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_diverse_audit_rows(&database).await;
+
+        let query =
+            AuditQuery { result_status: Some(AuditResultStatus::Failure), ..AuditQuery::default() };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        // Rows 3, 5, 8, 10 are failures = 4 total
+        assert_eq!(page.total, 4, "exactly 4 failure rows should match");
+        assert!(
+            page.items.iter().all(|r| r.result_status == AuditResultStatus::Failure),
+            "only failure rows should be returned"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_target_kind_filter_narrows_correctly() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_diverse_audit_rows(&database).await;
+
+        let query =
+            AuditQuery { target_kind: Some("listener".to_owned()), ..AuditQuery::default() };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        // Rows 2, 5, 9 have target_kind=listener
+        assert_eq!(page.total, 3, "exactly 3 listener rows should match");
+        assert!(
+            page.items.iter().all(|r| r.target_kind == "listener"),
+            "only listener rows should be returned"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_target_id_filter_narrows_correctly() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_diverse_audit_rows(&database).await;
+
+        let query = AuditQuery { target_id: Some("A1".to_owned()), ..AuditQuery::default() };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        // Rows 1, 4, 8 have target_id=A1
+        assert_eq!(page.total, 3, "exactly 3 rows with target_id=A1 should match");
+        assert!(
+            page.items.iter().all(|r| r.target_id.as_deref() == Some("A1")),
+            "only rows with target_id=A1 should be returned"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_command_filter_narrows_correctly() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_diverse_audit_rows(&database).await;
+
+        let query = AuditQuery { command: Some("shell".to_owned()), ..AuditQuery::default() };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        // Rows 1, 4, 8 have command=shell
+        assert_eq!(page.total, 3, "exactly 3 rows with command=shell should match");
+        assert!(
+            page.items.iter().all(|r| r.command.as_deref() == Some("shell")),
+            "only rows with command=shell should be returned"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_newest_first_ordering() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_diverse_audit_rows(&database).await;
+
+        let query = AuditQuery::default();
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        assert_eq!(page.total, 10);
+        // Verify strict descending order by occurred_at
+        for window in page.items.windows(2) {
+            assert!(
+                window[0].occurred_at >= window[1].occurred_at,
+                "results must be ordered newest-to-oldest, but {} came before {}",
+                window[0].occurred_at,
+                window[1].occurred_at
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_pagination_preserves_newest_first_across_pages() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_diverse_audit_rows(&database).await;
+
+        // Page 1: first 3 rows
+        let page1_query = AuditQuery { limit: Some(3), offset: Some(0), ..AuditQuery::default() };
+        let page1 = query_audit_log(&database, &page1_query).await.expect("page 1 should succeed");
+
+        // Page 2: next 3 rows
+        let page2_query = AuditQuery { limit: Some(3), offset: Some(3), ..AuditQuery::default() };
+        let page2 = query_audit_log(&database, &page2_query).await.expect("page 2 should succeed");
+
+        // Page 3: next 3 rows
+        let page3_query = AuditQuery { limit: Some(3), offset: Some(6), ..AuditQuery::default() };
+        let page3 = query_audit_log(&database, &page3_query).await.expect("page 3 should succeed");
+
+        // Page 4: last row
+        let page4_query = AuditQuery { limit: Some(3), offset: Some(9), ..AuditQuery::default() };
+        let page4 = query_audit_log(&database, &page4_query).await.expect("page 4 should succeed");
+
+        // All pages report the same total
+        assert_eq!(page1.total, 10);
+        assert_eq!(page2.total, 10);
+        assert_eq!(page3.total, 10);
+        assert_eq!(page4.total, 10);
+
+        // Page sizes correct
+        assert_eq!(page1.items.len(), 3);
+        assert_eq!(page2.items.len(), 3);
+        assert_eq!(page3.items.len(), 3);
+        assert_eq!(page4.items.len(), 1);
+
+        // Concatenate all pages and verify global ordering
+        let mut all_timestamps: Vec<String> = Vec::new();
+        for page in [&page1, &page2, &page3, &page4] {
+            for item in &page.items {
+                all_timestamps.push(item.occurred_at.clone());
+            }
+        }
+        for window in all_timestamps.windows(2) {
+            assert!(
+                window[0] >= window[1],
+                "cross-page ordering must be newest-to-oldest, but {} came before {}",
+                window[0],
+                window[1]
+            );
+        }
+
+        // The last item on page 1 must be newer-or-equal to the first item on page 2
+        assert!(
+            page1.items.last().expect("page1 non-empty").occurred_at
+                >= page2.items.first().expect("page2 non-empty").occurred_at,
+            "page boundary must preserve newest-first ordering"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_operator_alias_behaves_like_actor() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_diverse_audit_rows(&database).await;
+
+        // Query using `operator` field alone — should filter by actor.
+        let by_operator =
+            AuditQuery { operator: Some("alice".to_owned()), ..AuditQuery::default() };
+        let page_op = query_audit_log(&database, &by_operator).await.expect("query should succeed");
+
+        // Query using `actor` field alone — should produce identical results.
+        let by_actor = AuditQuery { actor: Some("alice".to_owned()), ..AuditQuery::default() };
+        let page_act = query_audit_log(&database, &by_actor).await.expect("query should succeed");
+
+        assert_eq!(page_op.total, page_act.total, "operator and actor must produce the same total");
+        assert_eq!(
+            page_op.items.len(),
+            page_act.items.len(),
+            "operator and actor must return the same number of items"
+        );
+        assert!(
+            page_op.items.iter().all(|r| r.actor == "alice"),
+            "operator filter must narrow to alice"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_combined_filters_intersect() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_diverse_audit_rows(&database).await;
+
+        // alice + agent.task + failure → only row 3
+        let query = AuditQuery {
+            actor: Some("alice".to_owned()),
+            action: Some("agent.task".to_owned()),
+            result_status: Some(AuditResultStatus::Failure),
+            ..AuditQuery::default()
+        };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        assert_eq!(page.total, 1, "combined filters should yield exactly 1 row");
+        assert_eq!(page.items[0].actor, "alice");
+        assert_eq!(page.items[0].action, "agent.task");
+        assert_eq!(page.items[0].result_status, AuditResultStatus::Failure);
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_time_window_with_filter_intersects() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_diverse_audit_rows(&database).await;
+
+        // Window Feb 3 through Feb 7 + target_kind=agent → rows 3, 4, 6
+        let query = AuditQuery {
+            since: Some("2026-02-03T00:00:00Z".to_owned()),
+            until: Some("2026-02-07T00:00:00Z".to_owned()),
+            target_kind: Some("agent".to_owned()),
+            ..AuditQuery::default()
+        };
+        let page = query_audit_log(&database, &query).await.expect("query should succeed");
+
+        assert_eq!(page.total, 3, "time window + target_kind=agent should yield 3 rows");
+        assert!(
+            page.items.iter().all(|r| r.target_kind == "agent"),
+            "all returned rows must have target_kind=agent"
+        );
+        assert!(
+            page.items.iter().all(|r| {
+                r.occurred_at.as_str() >= "2026-02-03T00:00:00Z"
+                    && r.occurred_at.as_str() <= "2026-02-07T00:00:00Z"
+            }),
+            "all returned rows must fall within the time window"
+        );
+    }
+
     #[tokio::test]
     async fn actor_filter_falls_back_to_actor_when_operator_absent() {
         let database = Database::connect_in_memory().await.expect("database should initialize");

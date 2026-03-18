@@ -39,6 +39,21 @@ Each loop run updates the running totals and appends a review entry.
 
 <!-- QA and arch loops append entries below this line -->
 
+### Arch Review — 2026-03-18 21:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Codex | 1 | 1 security | Argon2 password hashing uses unconfigured default parameters (94ap, P3). |
+| Claude | 0 | — | No new issues found. |
+| Cursor | 0 | — | No new issues found. |
+
+Overall codebase health: **on track**
+Biggest blindspot: Argon2 default parameters — not exploitable today but reduces margin against offline brute-force of exfiltrated database. All other security mechanisms (constant-time comparisons, bounded allocations, CTR offset management, rate limiting, RBAC, SSRF protection) are correctly implemented.
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (1,829 tests passing, 0 failures)
+
+Deep review covered: full structural map (97k lines across 3 crates, 68 .rs files), all common crate modules (crypto, demon protocol, TLS, config, domain types), all teamserver modules (22 source files), all dispatch handlers (14 files), all integration tests (14 files), client source (6 files). Verified: AES-256-CTR offset management correct with deferred-advance pattern, DEMON_INIT validation (agent_id!=0, no duplicate init, weak key/IV rejection), length-prefixed reads bounded by buffer size, agent registration capped at 10k with per-IP rate limiting, download memory bounded at 2GB aggregate, event bus ring buffer bounded at 256 entries, request context eviction at 10k threshold. Found 2 pairs of duplicate issues in tracker (197z/k9mp, v5fb/6wo8) — filed housekeeping chore. No todo!/unimplemented! macros, no println!/eprintln!, no unwrap/expect in production code. Architecture decisions (Axum+Tokio, SQLite/sqlx, HCL config, thiserror/anyhow separation, edition 2024) all honored.
+
 ### QA Review — 2026-03-18 19:30 — cfc3be3..a1cf1aa
 
 | Agent | Tasks closed | Bugs filed | Notes |

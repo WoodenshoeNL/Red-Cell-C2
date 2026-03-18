@@ -552,22 +552,16 @@ impl AgentRegistry {
     #[instrument(skip(self, job), fields(agent_id = format_args!("0x{:08X}", agent_id), command = job.command, request_id = job.request_id))]
     pub async fn enqueue_job(&self, agent_id: u32, job: Job) -> Result<(), TeamserverError> {
         self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
-        {
-            let mut contexts = self.request_contexts.write().await;
-            contexts.insert(
-                (agent_id, job.request_id),
-                JobContext {
-                    request_id: job.request_id,
-                    command_line: job.command_line.clone(),
-                    task_id: job.task_id.clone(),
-                    created_at: job.created_at.clone(),
-                    operator: job.operator.clone(),
-                },
-            );
-            if contexts.len() > MAX_REQUEST_CONTEXTS {
-                evict_oldest_contexts(&mut contexts, MAX_REQUEST_CONTEXTS / 2);
-            }
-        }
+
+        // Build the context before we move `job` into a queue.
+        let context = JobContext {
+            request_id: job.request_id,
+            command_line: job.command_line.clone(),
+            task_id: job.task_id.clone(),
+            created_at: job.created_at.clone(),
+            operator: job.operator.clone(),
+        };
+        let request_key = (agent_id, job.request_id);
 
         if let Some(parent_agent_id) = self.parent_of(agent_id).await {
             let (queue_agent_id, pivot_job) =
@@ -585,20 +579,30 @@ impl AgentRegistry {
                 });
             }
             jobs.push_back(pivot_job);
-            return Ok(());
+        } else {
+            let entry =
+                self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
+            let mut jobs = entry.jobs.lock().await;
+            if jobs.len() >= MAX_JOB_QUEUE_DEPTH {
+                return Err(TeamserverError::QueueFull {
+                    agent_id,
+                    max_queue_depth: MAX_JOB_QUEUE_DEPTH,
+                    queued: jobs.len(),
+                });
+            }
+            jobs.push_back(job);
         }
 
-        let entry =
-            self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
-        let mut jobs = entry.jobs.lock().await;
-        if jobs.len() >= MAX_JOB_QUEUE_DEPTH {
-            return Err(TeamserverError::QueueFull {
-                agent_id,
-                max_queue_depth: MAX_JOB_QUEUE_DEPTH,
-                queued: jobs.len(),
-            });
+        // Insert request context only after the job was successfully enqueued,
+        // so that a QueueFull rejection leaves no stale context behind.
+        {
+            let mut contexts = self.request_contexts.write().await;
+            contexts.insert(request_key, context);
+            if contexts.len() > MAX_REQUEST_CONTEXTS {
+                evict_oldest_contexts(&mut contexts, MAX_REQUEST_CONTEXTS / 2);
+            }
         }
-        jobs.push_back(job);
+
         Ok(())
     }
 
@@ -2353,6 +2357,37 @@ mod tests {
         // The queue depth must not have grown beyond the limit.
         let queued = registry.queued_jobs(agent.agent_id).await?;
         assert_eq!(queued.len(), MAX_JOB_QUEUE_DEPTH);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn enqueue_job_queue_full_does_not_retain_request_context() -> Result<(), TeamserverError>
+    {
+        let registry = AgentRegistry::new(test_database().await?);
+        let agent = sample_agent(0x1000_0202);
+        registry.insert(agent.clone()).await?;
+
+        // Fill the queue to exactly the limit.
+        for i in 0..MAX_JOB_QUEUE_DEPTH as u32 {
+            registry.enqueue_job(agent.agent_id, sample_job(i)).await?;
+        }
+
+        let rejected_request_id = MAX_JOB_QUEUE_DEPTH as u32;
+        let rejected_job = sample_job(rejected_request_id);
+
+        // Attempt one more — must be rejected.
+        let err = registry.enqueue_job(agent.agent_id, rejected_job).await.unwrap_err();
+        assert!(matches!(err, TeamserverError::QueueFull { .. }), "expected QueueFull, got: {err}");
+
+        // The rejected job must not leave a stale request context behind.
+        assert!(
+            registry.request_context(agent.agent_id, rejected_request_id).await.is_none(),
+            "rejected enqueue must not retain request context"
+        );
+
+        // Queue depth must remain unchanged at the capacity limit.
+        assert_eq!(registry.queued_jobs(agent.agent_id).await?.len(), MAX_JOB_QUEUE_DEPTH,);
+
         Ok(())
     }
 

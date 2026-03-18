@@ -173,6 +173,28 @@ mod tests {
     }
 
     #[test]
+    fn prune_retains_window_just_under_expiry_boundary() {
+        let mut windows: HashMap<IpAddr, AttemptWindow> = HashMap::new();
+        let duration = Duration::from_secs(60);
+        let now = Instant::now();
+
+        // Window started 1 nanosecond less than `duration` ago — duration_since
+        // is duration - 1ns, which IS < duration, so it must survive.
+        windows.insert(
+            ip(10, 0, 0, 1),
+            AttemptWindow { attempts: 5, window_start: now - duration + Duration::from_nanos(1) },
+        );
+
+        prune_expired_windows(&mut windows, duration, now);
+
+        assert!(
+            windows.contains_key(&ip(10, 0, 0, 1)),
+            "window 1ns under the expiry boundary must be retained",
+        );
+        assert_eq!(windows[&ip(10, 0, 0, 1)].attempts, 5, "attempt count must be preserved");
+    }
+
+    #[test]
     fn prune_empty_map_is_noop() {
         let mut windows: HashMap<IpAddr, AttemptWindow> = HashMap::new();
         prune_expired_windows(&mut windows, Duration::from_secs(60), Instant::now());

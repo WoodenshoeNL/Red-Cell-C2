@@ -2770,6 +2770,63 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn add_link_reparent_removes_previous_parent_child_relationship()
+    -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let agent_a = sample_agent(0x1000_00E1);
+        let agent_b = sample_agent(0x1000_00E2);
+        let agent_c = sample_agent(0x1000_00E3);
+        registry.insert(agent_a.clone()).await?;
+        registry.insert(agent_b.clone()).await?;
+        registry.insert(agent_c.clone()).await?;
+
+        // Link A → C
+        registry.add_link(agent_a.agent_id, agent_c.agent_id).await?;
+        assert_eq!(registry.parent_of(agent_c.agent_id).await, Some(agent_a.agent_id));
+        assert_eq!(registry.children_of(agent_a.agent_id).await, vec![agent_c.agent_id]);
+
+        // Reparent: B → C (should remove A → C)
+        registry.add_link(agent_b.agent_id, agent_c.agent_id).await?;
+
+        // In-memory: parent_of(C) must now be B
+        assert_eq!(
+            registry.parent_of(agent_c.agent_id).await,
+            Some(agent_b.agent_id),
+            "parent_of(C) should be B after reparent"
+        );
+        // In-memory: A should have no children
+        assert!(
+            registry.children_of(agent_a.agent_id).await.is_empty(),
+            "children_of(A) should be empty after reparent"
+        );
+        // In-memory: B should have exactly C
+        assert_eq!(
+            registry.children_of(agent_b.agent_id).await,
+            vec![agent_c.agent_id],
+            "children_of(B) should contain only C"
+        );
+
+        // Persisted: only B → C should exist in the link table
+        let persisted = database.links().list().await?;
+        assert_eq!(
+            persisted.len(),
+            1,
+            "expected exactly one persisted link row after reparent, got {persisted:?}"
+        );
+        assert_eq!(persisted[0].parent_agent_id, agent_b.agent_id);
+        assert_eq!(persisted[0].link_agent_id, agent_c.agent_id);
+
+        // Persisted: A → C must not exist
+        assert!(
+            !database.links().exists(agent_a.agent_id, agent_c.agent_id).await?,
+            "old A → C link must not exist in the database after reparent"
+        );
+
+        Ok(())
+    }
+
     #[test]
     fn encode_pivot_job_payload_normal_input() -> Result<(), TeamserverError> {
         let payload = b"hello";

@@ -1367,6 +1367,92 @@ mod tests {
     }
 
     #[test]
+    fn rejects_http_listener_with_blank_certificate_path() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Listeners {
+              Http {
+                Name = "edge"
+                Hosts = ["listener.local"]
+                HostBind = "127.0.0.1"
+                HostRotation = "round-robin"
+                PortBind = 443
+                Secure = true
+
+                Cert {
+                  Cert = "   "
+                  Key = "/tmp/server.key"
+                }
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("profile should be invalid");
+        assert!(error.errors.iter().any(|message| {
+            message.contains("Listeners.Http \"edge\"")
+                && message.contains("non-empty Cert and Key paths")
+        }));
+    }
+
+    #[test]
+    fn rejects_http_listener_with_blank_certificate_key_path() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Listeners {
+              Http {
+                Name = "edge"
+                Hosts = ["listener.local"]
+                HostBind = "127.0.0.1"
+                HostRotation = "round-robin"
+                PortBind = 443
+                Secure = true
+
+                Cert {
+                  Cert = "/tmp/server.crt"
+                  Key = "   "
+                }
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("profile should be invalid");
+        assert!(error.errors.iter().any(|message| {
+            message.contains("Listeners.Http \"edge\"")
+                && message.contains("non-empty Cert and Key paths")
+        }));
+    }
+
+    #[test]
     fn rejects_invalid_trusted_proxy_peer_configuration() {
         let profile = Profile::parse(
             r#"

@@ -215,7 +215,243 @@ pub(super) fn int_to_ipv4(value: u32) -> String {
 
 #[cfg(test)]
 mod tests {
+    use red_cell_common::demon::{DemonCommand, DemonNetCommand};
+    use red_cell_common::operator::OperatorMessage;
+    use serde_json::Value;
+
     use super::*;
+    use crate::EventBus;
+
+    // ── payload encoding helpers ────────────────────────────────────────────
+
+    fn encode_u32(v: u32) -> Vec<u8> {
+        v.to_le_bytes().to_vec()
+    }
+
+    fn encode_string(s: &str) -> Vec<u8> {
+        let mut buf = encode_u32(s.len() as u32);
+        buf.extend_from_slice(s.as_bytes());
+        buf
+    }
+
+    fn encode_utf16(s: &str) -> Vec<u8> {
+        let words: Vec<u16> = s.encode_utf16().collect();
+        let byte_len = (words.len() * 2) as u32;
+        let mut buf = encode_u32(byte_len);
+        for w in &words {
+            buf.extend_from_slice(&w.to_le_bytes());
+        }
+        buf
+    }
+
+    fn encode_bool(v: bool) -> Vec<u8> {
+        encode_u32(u32::from(v))
+    }
+
+    fn net_payload(subcommand: DemonNetCommand, rest: &[u8]) -> Vec<u8> {
+        let mut payload = encode_u32(subcommand as u32);
+        payload.extend_from_slice(rest);
+        payload
+    }
+
+    const AGENT_ID: u32 = 0xDEAD_BEEF;
+    const REQUEST_ID: u32 = 42;
+
+    async fn call_and_recv(
+        payload: &[u8],
+    ) -> (Result<Option<Vec<u8>>, CommandDispatchError>, Option<OperatorMessage>) {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let result = handle_net_callback(&events, AGENT_ID, REQUEST_ID, payload).await;
+        drop(events);
+        let msg = rx.recv().await;
+        (result, msg)
+    }
+
+    fn assert_agent_response<'a>(
+        msg: &'a OperatorMessage,
+        expected_kind: &str,
+        expected_message: &str,
+    ) -> &'a str {
+        let OperatorMessage::AgentResponse(m) = msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        assert_eq!(m.info.demon_id, format!("{AGENT_ID:08X}"));
+        assert_eq!(m.info.command_id, u32::from(DemonCommand::CommandNet).to_string());
+        assert_eq!(m.info.extra.get("Type").and_then(Value::as_str), Some(expected_kind));
+        assert_eq!(m.info.extra.get("Message").and_then(Value::as_str), Some(expected_message));
+        &m.info.output
+    }
+
+    // ── handle_net_callback: Domain ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn domain_non_empty_broadcasts_domain_name() {
+        let payload = net_payload(DemonNetCommand::Domain, &encode_string("CORP.LOCAL"));
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+        let msg = msg.expect("should broadcast");
+        let output = assert_agent_response(&msg, "Good", "Domain for this Host: CORP.LOCAL");
+        assert!(output.is_empty());
+    }
+
+    #[tokio::test]
+    async fn domain_empty_broadcasts_not_joined_message() {
+        let payload = net_payload(DemonNetCommand::Domain, &encode_string(""));
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+        let msg = msg.expect("should broadcast");
+        assert_agent_response(&msg, "Good", "The machine does not seem to be joined to a domain");
+    }
+
+    // ── handle_net_callback: Logons ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn logons_broadcasts_user_list() {
+        let mut rest = encode_utf16("SERVER01");
+        rest.extend(encode_utf16("alice"));
+        rest.extend(encode_utf16("bob"));
+        let payload = net_payload(DemonNetCommand::Logons, &rest);
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+        let msg = msg.expect("should broadcast");
+        let output = assert_agent_response(&msg, "Info", "Logged on users at SERVER01 [2]: ");
+        assert!(output.contains("alice"));
+        assert!(output.contains("bob"));
+        assert!(output.contains("Usernames"));
+    }
+
+    // ── handle_net_callback: Sessions ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn sessions_broadcasts_session_table() {
+        let mut rest = encode_utf16("DC01");
+        // one session row
+        rest.extend(encode_utf16("10.0.0.5"));
+        rest.extend(encode_utf16("admin"));
+        rest.extend(encode_u32(120));
+        rest.extend(encode_u32(5));
+        let payload = net_payload(DemonNetCommand::Sessions, &rest);
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        let output = assert_agent_response(&msg, "Info", "Sessions for DC01 [1]: ");
+        assert!(output.contains("10.0.0.5"));
+        assert!(output.contains("admin"));
+        assert!(output.contains("120"));
+    }
+
+    // ── handle_net_callback: Computer / DcList (no-op) ──────────────────────
+
+    #[tokio::test]
+    async fn computer_returns_none_without_broadcast() {
+        let payload = net_payload(DemonNetCommand::Computer, &[]);
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let result = handle_net_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+        drop(events);
+        // No message should have been broadcast
+        let msg = rx.recv().await;
+        assert!(msg.is_none(), "Computer should not broadcast");
+    }
+
+    #[tokio::test]
+    async fn dclist_returns_none_without_broadcast() {
+        let payload = net_payload(DemonNetCommand::DcList, &[]);
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let result = handle_net_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+        drop(events);
+        let msg = rx.recv().await;
+        assert!(msg.is_none(), "DcList should not broadcast");
+    }
+
+    // ── handle_net_callback: Share ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn share_broadcasts_share_table() {
+        let mut rest = encode_utf16("FILESERV");
+        rest.extend(encode_utf16("ADMIN$"));
+        rest.extend(encode_utf16("C:\\Windows"));
+        rest.extend(encode_utf16("Remote Admin"));
+        rest.extend(encode_u32(0));
+        let payload = net_payload(DemonNetCommand::Share, &rest);
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        let output = assert_agent_response(&msg, "Info", "Shares for FILESERV [1]: ");
+        assert!(output.contains("ADMIN$"));
+        assert!(output.contains("C:\\Windows"));
+        assert!(output.contains("Remote Admin"));
+    }
+
+    // ── handle_net_callback: LocalGroup ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn localgroup_broadcasts_group_table() {
+        let mut rest = encode_utf16("WORKSTATION");
+        rest.extend(encode_utf16("Administrators"));
+        rest.extend(encode_utf16("Full control"));
+        rest.extend(encode_utf16("Users"));
+        rest.extend(encode_utf16("Ordinary users"));
+        let payload = net_payload(DemonNetCommand::LocalGroup, &rest);
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        let output = assert_agent_response(&msg, "Info", "Local Groups for WORKSTATION: ");
+        assert!(output.contains("Administrators"));
+        assert!(output.contains("Full control"));
+        assert!(output.contains("Users"));
+        assert!(output.contains("Ordinary users"));
+    }
+
+    // ── handle_net_callback: Group ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn group_broadcasts_group_table() {
+        let mut rest = encode_utf16("DC01");
+        rest.extend(encode_utf16("Domain Admins"));
+        rest.extend(encode_utf16("DA group"));
+        let payload = net_payload(DemonNetCommand::Group, &rest);
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        let output = assert_agent_response(&msg, "Info", "List groups on DC01: ");
+        assert!(output.contains("Domain Admins"));
+        assert!(output.contains("DA group"));
+    }
+
+    // ── handle_net_callback: Users ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn users_broadcasts_user_list_with_admin_flag() {
+        let mut rest = encode_utf16("HOST01");
+        rest.extend(encode_utf16("Administrator"));
+        rest.extend(encode_bool(true));
+        rest.extend(encode_utf16("guest"));
+        rest.extend(encode_bool(false));
+        let payload = net_payload(DemonNetCommand::Users, &rest);
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        let output = assert_agent_response(&msg, "Info", "Users on HOST01: ");
+        assert!(output.contains("Administrator"));
+        assert!(output.contains("(Admin)"));
+        assert!(output.contains("guest"));
+        // guest should NOT have (Admin)
+        for line in output.lines() {
+            if line.contains("guest") {
+                assert!(!line.contains("(Admin)"), "guest should not be admin: {line}");
+            }
+        }
+    }
 
     // ── format_net_sessions ───────────────────────────────────────────────────
 

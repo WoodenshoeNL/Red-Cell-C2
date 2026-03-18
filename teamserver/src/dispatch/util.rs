@@ -137,4 +137,75 @@ mod tests {
     fn basename_root_forward_slash() {
         assert_eq!(basename("/"), "");
     }
+
+    /// Table-driven tests for `windows_version_label` covering every branch.
+    ///
+    /// Each entry is (major, minor, product_type, service_pack, build, expected).
+    const VERSION_CASES: &[(u32, u32, u32, u32, u32, &str)] = &[
+        // Windows Server 2022 22H2 — exact build 20348, non-workstation
+        (10, 0, 3, 0, 20_348, "Windows 2022 Server 22H2"),
+        // Windows Server 2019 — exact build 17763, non-workstation
+        (10, 0, 3, 0, 17_763, "Windows 2019 Server"),
+        // Windows 11 — workstation, build in [22000, 22621]
+        (10, 0, VER_NT_WORKSTATION, 0, 22_000, "Windows 11"),
+        (10, 0, VER_NT_WORKSTATION, 0, 22_621, "Windows 11"),
+        (10, 0, VER_NT_WORKSTATION, 0, 22_300, "Windows 11"),
+        // Windows 2016 Server fallback — non-workstation, build != 20348/17763
+        (10, 0, 3, 0, 14_393, "Windows 2016 Server"),
+        // Windows 10 — workstation, build outside Win11 range
+        (10, 0, VER_NT_WORKSTATION, 0, 19_045, "Windows 10"),
+        (10, 0, VER_NT_WORKSTATION, 0, 21_999, "Windows 10"),
+        (10, 0, VER_NT_WORKSTATION, 0, 22_622, "Windows 10"),
+        // Windows Server 2012 R2
+        (6, 3, 3, 0, 0, "Windows Server 2012 R2"),
+        // Windows 8.1
+        (6, 3, VER_NT_WORKSTATION, 0, 0, "Windows 8.1"),
+        // Windows Server 2012
+        (6, 2, 3, 0, 0, "Windows Server 2012"),
+        // Windows 8
+        (6, 2, VER_NT_WORKSTATION, 0, 0, "Windows 8"),
+        // Windows Server 2008 R2
+        (6, 1, 3, 0, 0, "Windows Server 2008 R2"),
+        // Windows 7
+        (6, 1, VER_NT_WORKSTATION, 0, 0, "Windows 7"),
+        // Unknown fallback
+        (5, 1, VER_NT_WORKSTATION, 0, 0, "Unknown"),
+        (0, 0, 0, 0, 0, "Unknown"),
+    ];
+
+    #[test]
+    fn windows_version_label_all_branches() {
+        for &(major, minor, pt, sp, build, expected) in VERSION_CASES {
+            let got = windows_version_label(major, minor, pt, sp, build);
+            assert_eq!(
+                got, expected,
+                "windows_version_label({major}, {minor}, {pt}, {sp}, {build}) = {got:?}, expected {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_version_label_service_pack_appended() {
+        let got = windows_version_label(6, 1, VER_NT_WORKSTATION, 2, 0);
+        assert_eq!(got, "Windows 7 Service Pack 2");
+    }
+
+    #[test]
+    fn windows_version_label_service_pack_zero_omitted() {
+        let got = windows_version_label(6, 1, VER_NT_WORKSTATION, 0, 0);
+        assert_eq!(got, "Windows 7");
+        assert!(!got.contains("Service Pack"));
+    }
+
+    #[test]
+    fn windows_version_label_service_pack_on_server() {
+        let got = windows_version_label(6, 1, 3, 1, 0);
+        assert_eq!(got, "Windows Server 2008 R2 Service Pack 1");
+    }
+
+    #[test]
+    fn windows_version_label_service_pack_on_unknown() {
+        let got = windows_version_label(5, 1, VER_NT_WORKSTATION, 3, 0);
+        assert_eq!(got, "Unknown Service Pack 3");
+    }
 }

@@ -9763,6 +9763,155 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pivot_connect_callback_non_init_inner_returns_invalid_callback()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // When the inner envelope in a pivot connect payload decodes successfully but
+        // is a Callback (not Init), the handler must reject it with InvalidCallbackPayload
+        // and must NOT create a link or broadcast any events.
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database,
+            sockets,
+            None,
+        );
+
+        let parent_id = 0xD1D2_D3D4;
+        let parent_key = [0xD1; AGENT_KEY_LENGTH];
+        let parent_iv = [0xD2; AGENT_IV_LENGTH];
+        let child_id = 0xE1E2_E3E4;
+        let child_key = [0xE1; AGENT_KEY_LENGTH];
+        let child_iv = [0xE2; AGENT_IV_LENGTH];
+
+        // Register both agents so the parser can look up the child's key to decrypt.
+        registry
+            .insert_with_listener(sample_agent_info(parent_id, parent_key, parent_iv), "smb-test")
+            .await?;
+        registry.insert(sample_agent_info(child_id, child_key, child_iv)).await?;
+
+        // Build a callback envelope (not init) for the child — this is the wrong message
+        // type for a pivot connect inner payload.
+        let mut inner_output = Vec::new();
+        add_bytes(&mut inner_output, b"fake callback data");
+        let callback_envelope = valid_callback_envelope(
+            child_id,
+            &child_key,
+            &child_iv,
+            u32::from(DemonCommand::CommandOutput),
+            0x99,
+            &inner_output,
+        );
+
+        let payload = pivot_connect_payload(&callback_envelope);
+        let result = dispatcher
+            .dispatch(parent_id, u32::from(DemonCommand::CommandPivot), 77, &payload)
+            .await;
+
+        let err = result.expect_err("non-init inner envelope must be rejected");
+        assert!(
+            matches!(
+                err,
+                CommandDispatchError::InvalidCallbackPayload { command_id, ref message }
+                    if command_id == u32::from(DemonCommand::CommandPivot)
+                        && message.contains("init")
+            ),
+            "expected InvalidCallbackPayload mentioning init, got {err:?}"
+        );
+
+        // No link should have been created.
+        assert_eq!(
+            registry.parent_of(child_id).await,
+            None,
+            "child must not have a parent link after malformed connect"
+        );
+        assert_eq!(
+            registry.children_of(parent_id).await,
+            Vec::<u32>::new(),
+            "parent must not have children after malformed connect"
+        );
+
+        // No events should have been broadcast.
+        assert!(
+            timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),
+            "no event should be broadcast when inner envelope is not an init"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pivot_command_callback_non_callback_inner_returns_invalid_callback()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // When the inner envelope in a pivot command payload decodes successfully but
+        // is an Init (not Callback), the handler must reject it with InvalidCallbackPayload
+        // and must NOT update liveness or broadcast any events.
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry.clone(),
+            events,
+            database,
+            sockets,
+            None,
+        );
+
+        let parent_id = 0xF1F2_F3F4;
+        let parent_key = [0xF1; AGENT_KEY_LENGTH];
+        let parent_iv = [0xF2; AGENT_IV_LENGTH];
+        let child_id = 0xA5A6_A7A8;
+        let child_key = [0xA5; AGENT_KEY_LENGTH];
+        let child_iv = [0xA6; AGENT_IV_LENGTH];
+
+        registry.insert(sample_agent_info(parent_id, parent_key, parent_iv)).await?;
+
+        // Capture the initial state of the parent's last_call_in so we can verify
+        // no liveness update occurs on the (unregistered) child.
+        let parent_before =
+            registry.get(parent_id).await.ok_or("parent should exist")?.last_call_in.clone();
+
+        // Build an init body (not callback) for an unregistered child agent —
+        // this is the wrong message type for a pivot command inner payload.
+        let init_envelope = valid_demon_init_body(child_id, child_key, child_iv);
+        let payload = pivot_command_payload(&init_envelope);
+
+        let result = dispatcher
+            .dispatch(parent_id, u32::from(DemonCommand::CommandPivot), 88, &payload)
+            .await;
+
+        let err = result.expect_err("non-callback inner envelope must be rejected");
+        assert!(
+            matches!(
+                err,
+                CommandDispatchError::InvalidCallbackPayload { command_id, ref message }
+                    if command_id == u32::from(DemonCommand::CommandPivot)
+                        && message.contains("callback")
+            ),
+            "expected InvalidCallbackPayload mentioning callback, got {err:?}"
+        );
+
+        // Parent's state must be unchanged.
+        let parent_after = registry.get(parent_id).await.ok_or("parent should still exist")?;
+        assert_eq!(
+            parent_after.last_call_in, parent_before,
+            "parent's last_call_in must be unchanged after malformed pivot command"
+        );
+
+        // No events should have been broadcast.
+        assert!(
+            timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),
+            "no event should be broadcast when inner envelope is not a callback"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn builtin_config_handler_memory_alloc() -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());

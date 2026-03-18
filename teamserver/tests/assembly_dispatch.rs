@@ -51,6 +51,20 @@ fn bof_could_not_run_payload() -> Vec<u8> {
     4u32.to_le_bytes().to_vec()
 }
 
+/// Build a BOF_CALLBACK_ERROR (0x0d) payload: u32 LE type + length-prefixed UTF-8 string.
+fn bof_callback_error_payload(text: &str) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&0x0du32.to_le_bytes()); // BOF_CALLBACK_ERROR
+    p.extend_from_slice(&(text.len() as u32).to_le_bytes());
+    p.extend_from_slice(text.as_bytes());
+    p
+}
+
+/// Build an unknown BOF sub-type payload: u32 LE with a value that doesn't match any known variant.
+fn bof_unknown_subtype_payload(subtype: u32) -> Vec<u8> {
+    subtype.to_le_bytes().to_vec()
+}
+
 /// Build a DOTNET_INFO_NET_VERSION (0x2) payload for `CommandAssemblyInlineExecute`.
 /// The CLR version string is encoded as a LE-length-prefixed UTF-16 LE string.
 fn assembly_clr_version_payload(version: &str) -> Vec<u8> {
@@ -579,5 +593,109 @@ async fn bof_could_not_run_callback_broadcasts_error() -> Result<(), Box<dyn std
 
     socket.close(None).await?;
     listeners.stop("asm-test-bof-cnr").await?;
+    Ok(())
+}
+
+/// A BOF inline-execute callback with BOF_CALLBACK_ERROR (0x0d) must broadcast an
+/// `AgentResponse` with kind "Error" and the error text in the message.
+#[tokio::test]
+async fn bof_callback_error_broadcasts_error_with_text() -> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("asm-test-bof-err", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("asm-test-bof-err").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xAB01_0008_u32;
+    let key = [0xA1; AGENT_KEY_LENGTH];
+    let iv = [0xA2; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let error_text = "BOF stderr: access violation reading 0x0";
+    let payload = bof_callback_error_payload(error_text);
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandInlineExecute),
+            0x80,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse, got {event:?}");
+    };
+    assert_eq!(msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::CommandInlineExecute).to_string());
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Error"));
+    assert_eq!(msg.info.extra.get("Message").and_then(|v| v.as_str()), Some(error_text));
+
+    socket.close(None).await?;
+    listeners.stop("asm-test-bof-err").await?;
+    Ok(())
+}
+
+/// An unknown BOF inline-execute sub-type must succeed at the HTTP layer (200 OK)
+/// but must NOT broadcast any operator message.
+#[tokio::test]
+async fn bof_unknown_subtype_succeeds_without_operator_broadcast()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("asm-test-bof-unk", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("asm-test-bof-unk").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xAB01_0009_u32;
+    let key = [0xB1; AGENT_KEY_LENGTH];
+    let iv = [0xB2; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let payload = bof_unknown_subtype_payload(0xDEAD);
+    let response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandInlineExecute),
+            0x90,
+            &payload,
+        ))
+        .send()
+        .await?;
+    assert!(response.status().is_success(), "HTTP callback should succeed for unknown sub-type");
+
+    // No operator message should be broadcast for an unknown sub-type.
+    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(250)).await;
+
+    socket.close(None).await?;
+    listeners.stop("asm-test-bof-unk").await?;
     Ok(())
 }

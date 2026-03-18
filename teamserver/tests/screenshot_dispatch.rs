@@ -374,3 +374,136 @@ async fn screenshot_callback_empty_bytes_broadcasts_error_no_loot()
     listeners.stop("screenshot-empty-test").await?;
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Truncated payload builders
+// ---------------------------------------------------------------------------
+
+/// Build a `CommandScreenshot` callback payload that has `success=1` but no
+/// subsequent length-prefixed bytes — the payload ends right after the flag.
+fn screenshot_truncated_after_success_flag() -> Vec<u8> {
+    1_u32.to_le_bytes().to_vec() // success = 1, then EOF
+}
+
+/// Build a `CommandScreenshot` callback payload where the declared byte length
+/// is larger than the bytes actually present.
+fn screenshot_overstated_length_payload() -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&1_u32.to_le_bytes()); // success = 1
+    p.extend_from_slice(&1024_u32.to_le_bytes()); // claims 1024 bytes
+    p.extend_from_slice(b"short"); // only 5 bytes
+    p
+}
+
+// ---------------------------------------------------------------------------
+// Truncated-input tests
+// ---------------------------------------------------------------------------
+
+/// A screenshot callback whose payload ends immediately after `success=1` (no
+/// length prefix for the image bytes) must be rejected. No loot row should be
+/// stored and no success event should be broadcast.
+#[tokio::test]
+async fn screenshot_callback_truncated_after_success_flag_rejects()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners, database) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(http_listener("screenshot-trunc-flag-test", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("screenshot-trunc-flag-test").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xFB01_0010_u32;
+    let key = [0x11; AGENT_KEY_LENGTH];
+    let iv = [0x22; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let resp = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandScreenshot),
+            0x10,
+            &screenshot_truncated_after_success_flag(),
+        ))
+        .send()
+        .await?;
+
+    assert!(
+        !resp.status().is_success(),
+        "truncated payload (no bytes after success=1) must not return 2xx, got {}",
+        resp.status()
+    );
+
+    // No loot record should be stored.
+    let loot_records = database.loot().list_for_agent(agent_id).await?;
+    assert!(loot_records.is_empty(), "no loot must be stored for truncated screenshot payload");
+
+    socket.close(None).await?;
+    listeners.stop("screenshot-trunc-flag-test").await?;
+    Ok(())
+}
+
+/// A screenshot callback whose byte-length prefix overstates the available
+/// bytes must be rejected. No loot row should be stored and no success event
+/// should be broadcast.
+#[tokio::test]
+async fn screenshot_callback_overstated_length_rejects() -> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners, database) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(http_listener("screenshot-overlen-test", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("screenshot-overlen-test").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xFB01_0011_u32;
+    let key = [0x33; AGENT_KEY_LENGTH];
+    let iv = [0x44; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let resp = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandScreenshot),
+            0x11,
+            &screenshot_overstated_length_payload(),
+        ))
+        .send()
+        .await?;
+
+    assert!(
+        !resp.status().is_success(),
+        "overstated-length payload must not return 2xx, got {}",
+        resp.status()
+    );
+
+    // No loot record should be stored.
+    let loot_records = database.loot().list_for_agent(agent_id).await?;
+    assert!(loot_records.is_empty(), "no loot must be stored for overstated-length screenshot");
+
+    socket.close(None).await?;
+    listeners.stop("screenshot-overlen-test").await?;
+    Ok(())
+}

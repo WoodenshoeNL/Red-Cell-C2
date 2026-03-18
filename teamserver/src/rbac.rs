@@ -926,4 +926,36 @@ mod tests {
 
         assert_eq!(error, AuthorizationError::InvalidAuthorizationHeader);
     }
+
+    #[tokio::test]
+    async fn authenticated_operator_extractor_rejects_unknown_bearer_token() {
+        let auth = AuthService::from_profile(&profile()).expect("auth service should initialize");
+        let request = Request::builder()
+            .header(AUTHORIZATION, "Bearer totally-valid-but-unknown-token")
+            .body(())
+            .expect("request should build");
+        let (mut parts, _) = request.into_parts();
+
+        let error = AuthenticatedOperator::from_request_parts(&mut parts, &TestState { auth })
+            .await
+            .expect_err("unknown bearer token should be rejected");
+
+        assert_eq!(error, AuthorizationError::UnknownSessionToken);
+    }
+
+    #[tokio::test]
+    async fn authenticated_operator_extractor_rejects_unknown_x_session_token() {
+        let auth = AuthService::from_profile(&profile()).expect("auth service should initialize");
+        let request = Request::builder()
+            .header("x-session-token", "totally-valid-but-unknown-token")
+            .body(())
+            .expect("request should build");
+        let (mut parts, _) = request.into_parts();
+
+        let error = AuthenticatedOperator::from_request_parts(&mut parts, &TestState { auth })
+            .await
+            .expect_err("unknown x-session-token should be rejected");
+
+        assert_eq!(error, AuthorizationError::UnknownSessionToken);
+    }
 }

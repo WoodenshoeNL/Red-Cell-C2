@@ -504,10 +504,19 @@ mod tests {
 
     #[test]
     fn init_tracing_returns_create_log_directory_error_for_uncreatable_path() {
-        let impossible_dir = "/proc/red_cell_test/impossible/log/dir";
+        let temp_dir = match TempDir::new() {
+            Ok(dir) => dir,
+            Err(error) => panic!("tempdir should be created: {error}"),
+        };
+        // Create a regular file; using it as a directory makes create_dir_all fail.
+        let blocker = temp_dir.path().join("not_a_dir");
+        std::fs::write(&blocker, b"").expect("blocker file should be created");
+        let impossible_dir = blocker.join("logs");
+        let impossible_dir_str = impossible_dir.to_string_lossy().into_owned();
+
         let output = run_init_tracing_subprocess(
             "create_log_dir_error",
-            &[(SUBPROCESS_LOG_DIR_ENV, impossible_dir)],
+            &[(SUBPROCESS_LOG_DIR_ENV, impossible_dir_str.as_str())],
         );
 
         assert!(

@@ -110,8 +110,7 @@ async fn main() -> Result<()> {
         login_rate_limiter: LoginRateLimiter::new(),
         shutdown: shutdown.clone(),
     };
-    let router = build_router(state.clone())
-        .layer(NormalizePathLayer::trim_trailing_slash());
+    let router = build_router(state.clone()).layer(NormalizePathLayer::trim_trailing_slash());
     let handle = Handle::new();
 
     let shutdown_task =

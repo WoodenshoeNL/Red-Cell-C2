@@ -146,6 +146,14 @@ impl ClientTransport {
     pub(crate) fn outgoing_sender(&self) -> mpsc::UnboundedSender<OperatorMessage> {
         self.outgoing_tx.clone()
     }
+
+    /// Create a dummy transport for unit tests (no runtime, no real connection).
+    #[cfg(test)]
+    pub(crate) fn dummy() -> Self {
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let (outgoing_tx, _outgoing_rx) = mpsc::unbounded_channel();
+        Self { runtime: None, shutdown_tx, outgoing_tx }
+    }
 }
 
 impl Drop for ClientTransport {

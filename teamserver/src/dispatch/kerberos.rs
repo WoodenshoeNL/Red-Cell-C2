@@ -198,7 +198,10 @@ pub(super) fn format_filetime(high: u32, low: u32) -> String {
         return "1970-01-01 00:00:00 +00:00:00".to_owned();
     }
 
-    let unix_seconds = ((filetime - 0x019D_B1DE_D53E_8000) / 10_000_000) as i64;
+    let intervals = (filetime - 0x019D_B1DE_D53E_8000) / 10_000_000;
+    let Ok(unix_seconds) = i64::try_from(intervals) else {
+        return format!("{intervals} (overflow)");
+    };
     OffsetDateTime::from_unix_timestamp(unix_seconds)
         .map(|time| time.to_string())
         .unwrap_or_else(|_| unix_seconds.to_string())
@@ -1291,5 +1294,37 @@ mod tests {
 
         let result = handle_kerberos_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
         assert!(result.is_err(), "truncated klist body should return error");
+    }
+
+    // ------------------------------------------------------------------
+    // format_filetime edge cases
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn format_filetime_unix_epoch_returns_1970() {
+        // Value at the epoch boundary should return epoch string.
+        let result = super::format_filetime(0, 0);
+        assert!(result.contains("1970"), "zero filetime should map to epoch; got: {result}");
+    }
+
+    #[test]
+    fn format_filetime_known_date_returns_expected() {
+        // 2024-01-01 00:00:00 UTC in FILETIME = 133_486_464_000_000_000
+        let filetime: u64 = 133_486_464_000_000_000;
+        let high = (filetime >> 32) as u32;
+        let low = filetime as u32;
+        let result = super::format_filetime(high, low);
+        assert!(result.contains("2024"), "expected year 2024; got: {result}");
+    }
+
+    #[test]
+    fn format_filetime_u64_max_does_not_panic() {
+        // u64::MAX fits in i64 after epoch subtraction and division,
+        // so it should produce a date string rather than panicking.
+        let high = u32::MAX;
+        let low = u32::MAX;
+        let result = super::format_filetime(high, low);
+        // Should not panic — the result is either a date or a raw number.
+        assert!(!result.is_empty(), "u64::MAX filetime should produce non-empty output");
     }
 }

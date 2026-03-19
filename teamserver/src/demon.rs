@@ -1965,4 +1965,159 @@ mod tests {
             "no CTR offset should exist for an unregistered agent"
         );
     }
+
+    // ── Round-trip wire-format verification for build_init_ack / build_reconnect_ack ──
+
+    #[tokio::test]
+    async fn build_init_ack_wire_format_is_exactly_four_le_bytes_of_agent_id() {
+        let registry = test_registry().await;
+        let key = [0xA1; AGENT_KEY_LENGTH];
+        let iv = [0xB2; AGENT_IV_LENGTH];
+        let agent_id: u32 = 0x1234_5678;
+
+        let init_packet = build_init_packet(agent_id, key, iv);
+        let parser = DemonPacketParser::new(registry.clone());
+        parser
+            .parse_at(&init_packet, "10.0.0.10".to_owned(), datetime!(2026-03-19 10:00:00 UTC))
+            .await
+            .expect("init should succeed");
+
+        let ack = build_init_ack(&registry, agent_id).await.expect("ack should build");
+
+        // CTR mode preserves plaintext length — the ciphertext must be exactly 4 bytes
+        // (the LE-encoded agent_id with no framing, padding, or length prefix).
+        assert_eq!(
+            ack.len(),
+            4,
+            "init ACK ciphertext must be exactly 4 bytes (agent_id LE), got {}",
+            ack.len()
+        );
+
+        // Decrypt at offset 0 (first encryption after init) and verify exact field layout.
+        let plaintext =
+            decrypt_agent_data_at_offset(&key, &iv, 0, &ack).expect("ack should decrypt");
+        assert_eq!(plaintext.len(), 4, "plaintext must be exactly 4 bytes");
+
+        // Verify each byte position matches the LE encoding of agent_id.
+        let expected = agent_id.to_le_bytes();
+        assert_eq!(plaintext[0], expected[0], "byte 0 mismatch");
+        assert_eq!(plaintext[1], expected[1], "byte 1 mismatch");
+        assert_eq!(plaintext[2], expected[2], "byte 2 mismatch");
+        assert_eq!(plaintext[3], expected[3], "byte 3 mismatch");
+    }
+
+    #[tokio::test]
+    async fn build_init_ack_successive_calls_produce_different_ciphertext() {
+        let registry = test_registry().await;
+        let key = [0xC3; AGENT_KEY_LENGTH];
+        let iv = [0xD4; AGENT_IV_LENGTH];
+        let agent_id: u32 = 0xAAAA_BBBB;
+
+        let init_packet = build_init_packet(agent_id, key, iv);
+        let parser = DemonPacketParser::new(registry.clone());
+        parser
+            .parse_at(&init_packet, "10.0.0.11".to_owned(), datetime!(2026-03-19 10:01:00 UTC))
+            .await
+            .expect("init should succeed");
+
+        let ack1 = build_init_ack(&registry, agent_id).await.expect("first ack");
+        let ack2 = build_init_ack(&registry, agent_id).await.expect("second ack");
+
+        // Both decrypt to the same plaintext (agent_id LE)…
+        let pt1 = decrypt_agent_data_at_offset(&key, &iv, 0, &ack1).expect("decrypt ack1");
+        let pt2 = decrypt_agent_data_at_offset(&key, &iv, 1, &ack2).expect("decrypt ack2");
+        assert_eq!(pt1, agent_id.to_le_bytes());
+        assert_eq!(pt2, agent_id.to_le_bytes());
+
+        // …but the ciphertext differs because each call advances the CTR offset.
+        assert_ne!(ack1, ack2, "successive ACKs must use different keystream blocks");
+        assert_eq!(registry.ctr_offset(agent_id).await.expect("offset"), 2);
+    }
+
+    #[tokio::test]
+    async fn build_reconnect_ack_wire_format_at_various_ctr_offsets() {
+        let registry = test_registry().await;
+        let key = [0xE5; AGENT_KEY_LENGTH];
+        let iv = [0xF6; AGENT_IV_LENGTH];
+        let agent_id: u32 = 0xCCDD_EEFF;
+
+        let init_packet = build_init_packet(agent_id, key, iv);
+        let parser = DemonPacketParser::new(registry.clone());
+        parser
+            .parse_at(&init_packet, "10.0.0.12".to_owned(), datetime!(2026-03-19 10:02:00 UTC))
+            .await
+            .expect("init should succeed");
+
+        // Advance CTR offset to 3 by sending three init ACKs.
+        for _ in 0..3 {
+            let _ = build_init_ack(&registry, agent_id).await.expect("ack should build");
+        }
+        let offset = registry.ctr_offset(agent_id).await.expect("offset");
+        assert_eq!(offset, 3);
+
+        // Now send a reconnect ACK — it should encrypt at offset 3 without advancing.
+        let reconnect_ack =
+            build_reconnect_ack(&registry, agent_id).await.expect("reconnect ack");
+
+        // Wire format: exactly 4 bytes of ciphertext, no framing.
+        assert_eq!(
+            reconnect_ack.len(),
+            4,
+            "reconnect ACK ciphertext must be exactly 4 bytes, got {}",
+            reconnect_ack.len()
+        );
+
+        // Decrypt at the pre-reconnect offset.
+        let plaintext = decrypt_agent_data_at_offset(&key, &iv, offset, &reconnect_ack)
+            .expect("reconnect ack should decrypt at current offset");
+        assert_eq!(plaintext, agent_id.to_le_bytes());
+
+        // CTR offset must not have changed.
+        assert_eq!(
+            registry.ctr_offset(agent_id).await.expect("offset after reconnect"),
+            offset,
+            "reconnect ACK must not advance CTR offset"
+        );
+
+        // A second reconnect ACK at the same offset must produce identical ciphertext
+        // (same keystream block, same plaintext → same output).
+        let reconnect_ack2 =
+            build_reconnect_ack(&registry, agent_id).await.expect("second reconnect ack");
+        assert_eq!(
+            reconnect_ack, reconnect_ack2,
+            "repeated reconnect ACKs at the same offset must be byte-identical"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_reconnect_ack_decrypting_at_wrong_offset_yields_garbage() {
+        let registry = test_registry().await;
+        let key = [0x17; AGENT_KEY_LENGTH];
+        let iv = [0x28; AGENT_IV_LENGTH];
+        let agent_id: u32 = 0x1111_2222;
+
+        let init_packet = build_init_packet(agent_id, key, iv);
+        let parser = DemonPacketParser::new(registry.clone());
+        parser
+            .parse_at(&init_packet, "10.0.0.13".to_owned(), datetime!(2026-03-19 10:03:00 UTC))
+            .await
+            .expect("init should succeed");
+
+        // Advance to offset 1.
+        let _ = build_init_ack(&registry, agent_id).await.expect("ack");
+        let offset = registry.ctr_offset(agent_id).await.expect("offset");
+        assert_eq!(offset, 1);
+
+        let reconnect_ack =
+            build_reconnect_ack(&registry, agent_id).await.expect("reconnect ack");
+
+        // Decrypting at the wrong offset (0 instead of 1) must NOT produce the agent_id.
+        let wrong_plaintext = decrypt_agent_data_at_offset(&key, &iv, 0, &reconnect_ack)
+            .expect("decryption itself succeeds");
+        assert_ne!(
+            wrong_plaintext,
+            agent_id.to_le_bytes(),
+            "decrypting reconnect ACK at wrong CTR offset must not yield the correct agent_id"
+        );
+    }
 }

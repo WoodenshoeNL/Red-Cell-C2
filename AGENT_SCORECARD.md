@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 516 | 212 | 31 |
+| Tasks closed | 519 | 212 | 31 |
 | Bugs filed against | 46 | 34 | 9 |
 | Bug rate (bugs/task) | 0.09 | 0.16 | 0.29 |
 | Quality score | 91% | 84% | 71% |
 
-*Bug rates: Claude 46/516=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 46/519=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-19 19:30 — 41dab70..73b93b1
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 0 | Closed 94ap (Argon2 OWASP params fix — originally a Codex bug), hnmp (duplicate issue cleanup), d4bp (SHA3 crypto test coverage with Python-verified reference digests and NFC/NFD normalization tests). Updated e2e test timeouts for stronger Argon2id hashing. Issue hxq6 in_progress (pivot dispatch tests — untracked file compiles, clearly WIP). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (0 warnings), cargo test passed (all suites, 0 failures)
 
 ### QA Review — 2026-03-19 16:00 — 5a21aa9..36a404b
 

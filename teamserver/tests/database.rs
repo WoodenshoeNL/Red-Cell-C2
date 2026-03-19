@@ -1193,6 +1193,48 @@ async fn agent_response_delete_nonexistent_id_is_silent_noop() -> Result<(), Tea
 }
 
 #[tokio::test]
+async fn agent_response_repository_rejects_insert_for_unknown_agent_id()
+-> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let responses = database.agent_responses();
+
+    // Attempt to insert an agent response whose agent_id was never created.
+    let record = AgentResponseRecord {
+        id: None,
+        agent_id: 0xDEAD_FFFF,
+        command_id: 1,
+        request_id: 0x01,
+        response_type: "Good".to_owned(),
+        message: "orphan response".to_owned(),
+        output: "should not persist".to_owned(),
+        command_line: Some("shell whoami".to_owned()),
+        task_id: Some("01".to_owned()),
+        operator: Some("neo".to_owned()),
+        received_at: "2026-03-19T10:00:00Z".to_owned(),
+        extra: None,
+    };
+
+    let error = responses
+        .create(&record)
+        .await
+        .expect_err("agent response insert with unknown agent_id should fail");
+
+    assert!(
+        matches!(error, TeamserverError::Database(_)),
+        "expected Database error for missing agent FK, got: {error:?}"
+    );
+
+    // No response rows should have been stored.
+    assert!(responses.list().await?.is_empty(), "list() must remain empty after rejected insert");
+    assert!(
+        responses.list_for_agent(0xDEAD_FFFF).await?.is_empty(),
+        "list_for_agent() must remain empty after rejected insert"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn audit_helpers_persist_and_filter_structured_records() -> Result<(), TeamserverError> {
     let database = test_database().await?;
 

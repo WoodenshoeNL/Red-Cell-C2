@@ -2048,6 +2048,7 @@ mod tests {
 
     use super::*;
     use red_cell_common::HttpListenerProxyConfig as DomainHttpListenerProxyConfig;
+    use red_cell_common::config::HeaderConfig;
     use serde_json::json;
 
     #[test]
@@ -4076,6 +4077,145 @@ mod tests {
         assert_ne!(
             key_a.hex, key_b.hex,
             "different binary_patch content must produce different cache keys"
+        );
+    }
+
+    #[test]
+    fn compute_cache_key_differs_by_header_fields() {
+        let patch_a = BinaryConfig {
+            header: Some(HeaderConfig {
+                magic_mz_x64: Some("MZ-A".into()),
+                magic_mz_x86: None,
+                compile_time: None,
+                image_size_x64: None,
+                image_size_x86: None,
+            }),
+            replace_strings_x64: std::collections::BTreeMap::new(),
+            replace_strings_x86: std::collections::BTreeMap::new(),
+        };
+        let patch_b = BinaryConfig {
+            header: Some(HeaderConfig {
+                magic_mz_x64: Some("MZ-B".into()),
+                magic_mz_x86: None,
+                compile_time: None,
+                image_size_x64: None,
+                image_size_x86: None,
+            }),
+            replace_strings_x64: std::collections::BTreeMap::new(),
+            replace_strings_x86: std::collections::BTreeMap::new(),
+        };
+        let key_a = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch_a));
+        let key_b = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch_b));
+        assert_ne!(
+            key_a.hex, key_b.hex,
+            "different header magic_mz_x64 must produce different cache keys"
+        );
+    }
+
+    #[test]
+    fn compute_cache_key_differs_by_header_compile_time() {
+        let patch_a = BinaryConfig {
+            header: Some(HeaderConfig {
+                magic_mz_x64: None,
+                magic_mz_x86: None,
+                compile_time: Some("2024-01-01".into()),
+                image_size_x64: None,
+                image_size_x86: None,
+            }),
+            replace_strings_x64: std::collections::BTreeMap::new(),
+            replace_strings_x86: std::collections::BTreeMap::new(),
+        };
+        let patch_b = BinaryConfig {
+            header: Some(HeaderConfig {
+                magic_mz_x64: None,
+                magic_mz_x86: None,
+                compile_time: Some("2025-06-15".into()),
+                image_size_x64: None,
+                image_size_x86: None,
+            }),
+            replace_strings_x64: std::collections::BTreeMap::new(),
+            replace_strings_x86: std::collections::BTreeMap::new(),
+        };
+        let key_a = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch_a));
+        let key_b = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch_b));
+        assert_ne!(
+            key_a.hex, key_b.hex,
+            "different header compile_time must produce different cache keys"
+        );
+    }
+
+    #[test]
+    fn compute_cache_key_differs_by_header_image_size() {
+        let patch_a = BinaryConfig {
+            header: Some(HeaderConfig {
+                magic_mz_x64: None,
+                magic_mz_x86: None,
+                compile_time: None,
+                image_size_x64: Some(0x1000),
+                image_size_x86: None,
+            }),
+            replace_strings_x64: std::collections::BTreeMap::new(),
+            replace_strings_x86: std::collections::BTreeMap::new(),
+        };
+        let patch_b = BinaryConfig {
+            header: Some(HeaderConfig {
+                magic_mz_x64: None,
+                magic_mz_x86: None,
+                compile_time: None,
+                image_size_x64: Some(0x2000),
+                image_size_x86: None,
+            }),
+            replace_strings_x64: std::collections::BTreeMap::new(),
+            replace_strings_x86: std::collections::BTreeMap::new(),
+        };
+        let key_a = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch_a));
+        let key_b = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch_b));
+        assert_ne!(
+            key_a.hex, key_b.hex,
+            "different header image_size_x64 must produce different cache keys"
+        );
+    }
+
+    #[test]
+    fn compute_cache_key_differs_by_replace_strings_x86() {
+        let patch_a = BinaryConfig {
+            header: None,
+            replace_strings_x64: std::collections::BTreeMap::new(),
+            replace_strings_x86: [("old".into(), "new-a".into())].into_iter().collect(),
+        };
+        let patch_b = BinaryConfig {
+            header: None,
+            replace_strings_x64: std::collections::BTreeMap::new(),
+            replace_strings_x86: [("old".into(), "new-b".into())].into_iter().collect(),
+        };
+        let key_a = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch_a));
+        let key_b = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch_b));
+        assert_ne!(
+            key_a.hex, key_b.hex,
+            "different replace_strings_x86 must produce different cache keys"
+        );
+    }
+
+    #[test]
+    fn compute_cache_key_stable_for_identical_binary_patch() {
+        let patch = BinaryConfig {
+            header: Some(HeaderConfig {
+                magic_mz_x64: Some("MZ".into()),
+                magic_mz_x86: Some("MZ86".into()),
+                compile_time: Some("2025-01-01".into()),
+                image_size_x64: Some(0x1000),
+                image_size_x86: Some(0x800),
+            }),
+            replace_strings_x64: [("a".into(), "b".into()), ("c".into(), "d".into())]
+                .into_iter()
+                .collect(),
+            replace_strings_x86: [("e".into(), "f".into())].into_iter().collect(),
+        };
+        let key_1 = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch));
+        let key_2 = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch));
+        assert_eq!(
+            key_1.hex, key_2.hex,
+            "identical binary_patch configs must produce identical cache keys"
         );
     }
 

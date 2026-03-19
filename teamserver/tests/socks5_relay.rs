@@ -454,6 +454,76 @@ async fn finish_connect_failure_closes_client_socket() -> Result<(), Box<dyn std
 }
 
 #[tokio::test]
+async fn client_write_enqueues_socket_write_job_for_agent() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (_database, registry, manager) = test_manager().await?;
+    let agent_id = 0xAABB_0030_u32;
+    registry.insert(sample_agent(agent_id)).await?;
+
+    let (port, guard) = common::available_port()?;
+    drop(guard);
+    manager.add_socks_server(agent_id, &port.to_string()).await?;
+
+    let mut client =
+        timeout(Duration::from_secs(2), TcpStream::connect(format!("127.0.0.1:{port}"))).await??;
+    socks5_handshake(&mut client).await?;
+    socks5_connect_ipv4(&mut client, [93, 184, 216, 34], 80).await?;
+
+    // Wait for the connect job and retrieve the socket_id.
+    let socket_id = dequeue_socket_id(&registry, agent_id).await?;
+
+    // Drain the connect job so we can cleanly detect the write job.
+    let _ = registry.dequeue_jobs(agent_id).await?;
+
+    // Complete the connection — this starts the client reader task.
+    manager.finish_connect(agent_id, socket_id, true, 0).await?;
+
+    // Drain the SOCKS5 success reply so the client is in relay mode.
+    let (reply, _addr, _port) =
+        timeout(Duration::from_secs(2), read_socks5_reply(&mut client, SOCKS_ATYP_IPV4)).await??;
+    assert_eq!(reply, SOCKS_REPLY_SUCCEEDED);
+
+    // Write data from the SOCKS5 client — this should be enqueued as a
+    // CommandSocket/Write job for the agent.
+    let upstream_data = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    client.write_all(upstream_data).await?;
+    client.flush().await?;
+
+    // Poll the agent's job queue for the write job.
+    let write_cmd = u32::from(DemonSocketCommand::Write).to_le_bytes();
+    let mut write_job_payload = None;
+    for _ in 0..50 {
+        let jobs = registry.queued_jobs(agent_id).await?;
+        if let Some(job) = jobs.iter().find(|j| {
+            j.command == u32::from(DemonCommand::CommandSocket)
+                && j.payload.len() >= 4
+                && j.payload[..4] == write_cmd
+        }) {
+            write_job_payload = Some(job.payload.clone());
+            break;
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+
+    let payload = write_job_payload.expect("CommandSocket/Write job must appear in agent queue");
+
+    // Verify payload layout: [subcmd:4][socket_id:4][data_len:4][data:N]
+    assert!(payload.len() >= 12, "payload must contain at least header fields");
+    let job_socket_id = u32::from_le_bytes(payload[4..8].try_into()?);
+    assert_eq!(job_socket_id, socket_id, "write job must reference the correct socket_id");
+    let data_len = u32::from_le_bytes(payload[8..12].try_into()?) as usize;
+    assert_eq!(data_len, upstream_data.len(), "data length field must match sent bytes");
+    assert_eq!(
+        &payload[12..12 + data_len],
+        upstream_data.as_slice(),
+        "write job must contain the exact bytes the SOCKS5 client sent"
+    );
+
+    manager.clear_socks_servers(agent_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn write_client_data_after_remove_agent_returns_error()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_database, registry, manager) = test_manager().await?;

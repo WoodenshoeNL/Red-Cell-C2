@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 519 | 212 | 31 |
+| Tasks closed | 523 | 212 | 31 |
 | Bugs filed against | 46 | 34 | 9 |
 | Bug rate (bugs/task) | 0.09 | 0.16 | 0.29 |
 | Quality score | 91% | 84% | 71% |
 
-*Bug rates: Claude 46/519=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 46/523=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -2773,3 +2773,13 @@ Build: cargo check passed, clippy passed (0 warnings), cargo test passed (1503+ 
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: cargo check passed, clippy passed (0 warnings), cargo test passed (all workspace tests pass; e2e_operator_agent_session timeouts on full-suite run are resource contention, pass when run isolated)
+
+### QA Review — 2026-03-19 23:45 — 9b06446..9d4099f
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 4 | 0 | Closed 8twu (4 pivot SmbCommand forwarding and dispatch_builtin_packages tests — happy path, non-callback envelope, truncated payload, CommandOutput round-trip), o1z0 (pivot list callback tests already existed — verified and closed), exbf (ctr_blocks_for_len usize::MAX boundary test already existed — verified and closed), ggap (26 filesystem subcommand tests — truncated payloads and edge cases for Cd/Remove/Mkdir/Copy/Move/GetPwd/Cat/Upload plus invalid subcommand and empty payload). Also fixed WebSocket routing with NormalizePathLayer (app.rs) and TLS ALPN to HTTP/1.1-only for WebSocket compatibility (main.rs). Currently has qav1 claimed (database CRUD unit tests — WIP in database.rs). Zero issues found. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (0 warnings), cargo test passed (2283 tests across all crates, 0 failures)

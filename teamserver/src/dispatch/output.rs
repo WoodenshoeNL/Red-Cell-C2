@@ -1039,4 +1039,162 @@ mod tests {
             "expected InvalidCallbackPayload, got {err:?}"
         );
     }
+
+    // -- handle_demon_info_callback tests ────────────────────────────────────
+
+    fn demon_info_payload_mem_alloc(pointer: u64, size: u32, protection: u32) -> Vec<u8> {
+        let mut buf = Vec::new();
+        push_u32(&mut buf, u32::from(DemonInfoClass::MemAlloc));
+        push_u64(&mut buf, pointer);
+        push_u32(&mut buf, size);
+        push_u32(&mut buf, protection);
+        buf
+    }
+
+    fn demon_info_payload_mem_exec(function: u64, thread_id: u32) -> Vec<u8> {
+        let mut buf = Vec::new();
+        push_u32(&mut buf, u32::from(DemonInfoClass::MemExec));
+        push_u64(&mut buf, function);
+        push_u32(&mut buf, thread_id);
+        buf
+    }
+
+    fn demon_info_payload_mem_protect(memory: u64, size: u32, old: u32, new: u32) -> Vec<u8> {
+        let mut buf = Vec::new();
+        push_u32(&mut buf, u32::from(DemonInfoClass::MemProtect));
+        push_u64(&mut buf, memory);
+        push_u32(&mut buf, size);
+        push_u32(&mut buf, old);
+        push_u32(&mut buf, new);
+        buf
+    }
+
+    #[tokio::test]
+    async fn demon_info_mem_alloc_formats_message() {
+        let (_registry, events) = setup().await;
+        let mut rx = events.subscribe();
+        let payload = demon_info_payload_mem_alloc(0x7FFE_0000_1000, 4096, 0x04);
+
+        let result = handle_demon_info_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert_eq!(result.expect("must succeed"), None);
+
+        let msg = rx.recv().await.expect("should receive broadcast");
+        let OperatorMessage::AgentResponse(resp) = &msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(message.contains("0x7ffe00001000"), "expected pointer in message, got {message:?}");
+        assert!(message.contains("4096"), "expected size in message, got {message:?}");
+        assert!(
+            message.contains("PAGE_READWRITE"),
+            "expected protection name in message, got {message:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn demon_info_mem_exec_formats_message() {
+        let (_registry, events) = setup().await;
+        let mut rx = events.subscribe();
+        let payload = demon_info_payload_mem_exec(0xDEAD_BEEF_CAFE, 42);
+
+        let result = handle_demon_info_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert_eq!(result.expect("must succeed"), None);
+
+        let msg = rx.recv().await.expect("should receive broadcast");
+        let OperatorMessage::AgentResponse(resp) = &msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            message.contains("0xdeadbeefcafe"),
+            "expected function pointer in message, got {message:?}"
+        );
+        assert!(message.contains("42"), "expected thread id in message, got {message:?}");
+    }
+
+    #[tokio::test]
+    async fn demon_info_mem_protect_formats_both_protections() {
+        let (_registry, events) = setup().await;
+        let mut rx = events.subscribe();
+        let payload = demon_info_payload_mem_protect(0x1000_2000, 8192, 0x02, 0x40);
+
+        let result = handle_demon_info_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert_eq!(result.expect("must succeed"), None);
+
+        let msg = rx.recv().await.expect("should receive broadcast");
+        let OperatorMessage::AgentResponse(resp) = &msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            message.contains("0x10002000"),
+            "expected memory address in message, got {message:?}"
+        );
+        assert!(message.contains("8192"), "expected size in message, got {message:?}");
+        assert!(
+            message.contains("PAGE_READONLY"),
+            "expected old protection in message, got {message:?}"
+        );
+        assert!(
+            message.contains("PAGE_EXECUTE_READWRITE"),
+            "expected new protection in message, got {message:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn demon_info_unknown_class_returns_ok_none() {
+        let (_registry, events) = setup().await;
+        // Use a class value that doesn't map to any DemonInfoClass variant.
+        let mut payload = Vec::new();
+        push_u32(&mut payload, 0xFF);
+
+        let result = handle_demon_info_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert_eq!(result.expect("unknown class must not error"), None);
+    }
+
+    #[tokio::test]
+    async fn demon_info_mem_alloc_truncated_returns_error() {
+        let (_registry, events) = setup().await;
+        // Only info class, missing pointer/size/protection.
+        let mut payload = Vec::new();
+        push_u32(&mut payload, u32::from(DemonInfoClass::MemAlloc));
+
+        let result = handle_demon_info_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        let err = result.expect_err("truncated MemAlloc payload must fail");
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn demon_info_mem_exec_truncated_returns_error() {
+        let (_registry, events) = setup().await;
+        // Only info class, missing function/thread_id.
+        let mut payload = Vec::new();
+        push_u32(&mut payload, u32::from(DemonInfoClass::MemExec));
+
+        let result = handle_demon_info_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        let err = result.expect_err("truncated MemExec payload must fail");
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn demon_info_mem_protect_truncated_returns_error() {
+        let (_registry, events) = setup().await;
+        // Only info class + memory address, missing size/old/new.
+        let mut payload = Vec::new();
+        push_u32(&mut payload, u32::from(DemonInfoClass::MemProtect));
+        push_u64(&mut payload, 0x1000);
+
+        let result = handle_demon_info_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        let err = result.expect_err("truncated MemProtect payload must fail");
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+    }
 }

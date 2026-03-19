@@ -269,16 +269,36 @@ pub(super) fn inner_demon_agent_id(bytes: &[u8]) -> Result<u32, DemonProtocolErr
 #[cfg(test)]
 mod tests {
     use red_cell_common::demon::{
-        DEMON_MAGIC_VALUE, DemonEnvelope, DemonProtocolError, MIN_ENVELOPE_SIZE,
+        DEMON_MAGIC_VALUE, DemonCommand, DemonEnvelope, DemonProtocolError, MIN_ENVELOPE_SIZE,
     };
+    use red_cell_common::operator::OperatorMessage;
+    use serde_json::Value;
 
-    use super::inner_demon_agent_id;
+    use super::{CallbackParser, handle_pivot_list_callback, inner_demon_agent_id};
+    use crate::EventBus;
+
+    const AGENT_ID: u32 = 0xBEEF_0001;
+    const REQUEST_ID: u32 = 42;
 
     /// Build a minimal valid Demon envelope wire encoding for `agent_id` with no payload.
     fn valid_envelope_bytes(agent_id: u32) -> Vec<u8> {
         DemonEnvelope::new(agent_id, Vec::new())
             .expect("envelope construction must succeed")
             .to_bytes()
+    }
+
+    fn push_u32(buf: &mut Vec<u8>, val: u32) {
+        buf.extend_from_slice(&val.to_le_bytes());
+    }
+
+    /// Append a length-prefixed UTF-16LE string (as `CallbackParser::read_utf16` expects).
+    fn push_utf16(buf: &mut Vec<u8>, s: &str) {
+        let words: Vec<u16> = s.encode_utf16().collect();
+        let byte_len = (words.len() * 2) as u32;
+        push_u32(buf, byte_len);
+        for w in &words {
+            buf.extend_from_slice(&w.to_le_bytes());
+        }
     }
 
     #[test]
@@ -323,5 +343,78 @@ mod tests {
             error,
             DemonProtocolError::InvalidMagic { expected: DEMON_MAGIC_VALUE, actual: 0xDEAD_BEEE }
         );
+    }
+
+    #[tokio::test]
+    async fn pivot_list_empty_payload_returns_no_pivots_message() {
+        let events = EventBus::new(16);
+        let mut rx = events.subscribe();
+        let payload: Vec<u8> = Vec::new();
+        let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandPivot));
+
+        let result = handle_pivot_list_callback(&events, AGENT_ID, REQUEST_ID, &mut parser).await;
+
+        assert!(result.is_ok());
+        assert!(matches!(result.as_ref(), Ok(None)));
+
+        let msg = rx.recv().await.expect("should receive agent response");
+        let OperatorMessage::AgentResponse(resp) = &msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert_eq!(message, "No pivots connected");
+        assert!(resp.info.output.is_empty(), "empty list should have no output table");
+    }
+
+    #[tokio::test]
+    async fn pivot_list_two_entries_returns_table_with_both() {
+        let events = EventBus::new(16);
+        let mut rx = events.subscribe();
+
+        let mut payload = Vec::new();
+        let demon_id_1: u32 = 0xAAAA_BBBB;
+        let demon_id_2: u32 = 0xCCCC_DDDD;
+        let pipe_1 = r"\\.\pipe\pivot_one";
+        let pipe_2 = r"\\.\pipe\pivot_two";
+        push_u32(&mut payload, demon_id_1);
+        push_utf16(&mut payload, pipe_1);
+        push_u32(&mut payload, demon_id_2);
+        push_utf16(&mut payload, pipe_2);
+
+        let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandPivot));
+
+        let result = handle_pivot_list_callback(&events, AGENT_ID, REQUEST_ID, &mut parser).await;
+
+        assert!(result.is_ok());
+        assert!(matches!(result.as_ref(), Ok(None)));
+
+        let msg = rx.recv().await.expect("should receive agent response");
+        let OperatorMessage::AgentResponse(resp) = &msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(message.contains("[2]"), "expected count [2] in message, got {message:?}");
+
+        let output = &resp.info.output;
+        assert!(output.contains("aaaabbbb"), "expected demon_id_1 hex in output, got {output:?}");
+        assert!(output.contains("ccccdddd"), "expected demon_id_2 hex in output, got {output:?}");
+        assert!(output.contains(pipe_1), "expected pipe_1 in output, got {output:?}");
+        assert!(output.contains(pipe_2), "expected pipe_2 in output, got {output:?}");
+    }
+
+    #[tokio::test]
+    async fn pivot_list_truncated_payload_returns_error() {
+        let events = EventBus::new(16);
+
+        // Build a payload with one demon_id but no pipe name bytes.
+        let mut payload = Vec::new();
+        push_u32(&mut payload, 0x1111_2222);
+        // No pipe name follows — parser should fail on read_utf16.
+
+        let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandPivot));
+
+        let result = handle_pivot_list_callback(&events, AGENT_ID, REQUEST_ID, &mut parser).await;
+
+        assert!(result.is_err(), "truncated payload must return an error");
     }
 }

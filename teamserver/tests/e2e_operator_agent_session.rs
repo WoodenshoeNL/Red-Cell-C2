@@ -12,11 +12,6 @@ use interprocess::local_socket::tokio::Stream as LocalSocketStream;
 use interprocess::local_socket::traits::tokio::Stream as _;
 #[cfg(unix)]
 use interprocess::os::unix::local_socket::AbstractNsUdSocket;
-use red_cell::{
-    AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
-    ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
-    SocketRelayManager, TeamserverState, websocket_routes,
-};
 use red_cell_common::config::Profile;
 use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len};
 use red_cell_common::demon::{DemonCommand, DemonMessage};
@@ -28,73 +23,18 @@ use red_cell_common::{HttpListenerConfig, ListenerConfig, SmbListenerConfig};
 use serde_json::Value;
 #[cfg(unix)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
 use tokio::time::{sleep, timeout};
 use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
 
 #[tokio::test]
 async fn operator_session_listener_and_mock_demon_round_trip()
 -> Result<(), Box<dyn std::error::Error>> {
-    let profile = Profile::parse(
-        r#"
-        Teamserver {
-          Host = "127.0.0.1"
-          Port = 40156
-        }
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
 
-        Operators {
-          user "operator" {
-            Password = "password1234"
-            Role = "Operator"
-          }
-        }
-
-        Demon {}
-        "#,
-    )?;
-
-    let database = Database::connect_in_memory().await?;
-    let registry = AgentRegistry::new(database.clone());
-    let events = EventBus::default();
-    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let listeners = ListenerManager::new(
-        database.clone(),
-        registry.clone(),
-        events.clone(),
-        sockets.clone(),
-        None,
-    );
-    let state = TeamserverState {
-        profile: profile.clone(),
-        database: database.clone(),
-        auth: AuthService::from_profile(&profile).expect("auth service should initialize"),
-        api: ApiRuntime::from_profile(&profile).expect("rng should work in tests"),
-        events,
-        connections: OperatorConnectionManager::new(),
-        agent_registry: registry.clone(),
-        listeners: listeners.clone(),
-        payload_builder: PayloadBuilderService::disabled_for_tests(),
-        sockets,
-        webhooks: AuditWebhookNotifier::from_profile(&profile),
-        login_rate_limiter: LoginRateLimiter::new(),
-        shutdown: red_cell::ShutdownController::new(),
-    };
-
-    let server_listener = TcpListener::bind("127.0.0.1:0").await?;
-    let server_addr = server_listener.local_addr()?;
-    let server = tokio::spawn(async move {
-        let app = websocket_routes().with_state(state);
-        let _ = axum::serve(
-            server_listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await;
-    });
-
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
-    assert_ne!(listener_port, server_addr.port());
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    assert_ne!(listener_port, server.addr.port());
     let client = reqwest::Client::new();
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
 
     common::login(&mut socket).await?;
     common::assert_no_operator_message(&mut socket, Duration::from_millis(200)).await;
@@ -123,7 +63,7 @@ async fn operator_session_listener_and_mock_demon_round_trip()
         ListenerMarkInfo { name: "edge-http".to_owned(), mark: "Online".to_owned() }
     );
 
-    listeners.update(http_listener_config(listener_port)).await?;
+    server.listeners.update(http_listener_config(listener_port)).await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0x1234_5678;
@@ -210,7 +150,7 @@ async fn operator_session_listener_and_mock_demon_round_trip()
     // Verify that the WebSocket handlers persisted the expected audit entries
     // during the session so that a regression (accidentally removing an audit
     // call) would be caught here rather than silently skipped.
-    let audit_entries = database.audit_log().list().await?;
+    let audit_entries = server.database.audit_log().list().await?;
 
     let login_entry = audit_entries
         .iter()
@@ -238,8 +178,7 @@ async fn operator_session_listener_and_mock_demon_round_trip()
     );
 
     socket.close(None).await?;
-    listeners.stop("edge-http").await?;
-    server.abort();
+    server.listeners.stop("edge-http").await?;
     Ok(())
 }
 
@@ -247,65 +186,11 @@ async fn operator_session_listener_and_mock_demon_round_trip()
 #[tokio::test]
 async fn operator_session_smb_listener_and_mock_demon_round_trip()
 -> Result<(), Box<dyn std::error::Error>> {
-    let profile = Profile::parse(
-        r#"
-        Teamserver {
-          Host = "127.0.0.1"
-          Port = 40156
-        }
-
-        Operators {
-          user "operator" {
-            Password = "password1234"
-            Role = "Operator"
-          }
-        }
-
-        Demon {}
-        "#,
-    )?;
-
-    let database = Database::connect_in_memory().await?;
-    let registry = AgentRegistry::new(database.clone());
-    let events = EventBus::default();
-    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let listeners = ListenerManager::new(
-        database.clone(),
-        registry.clone(),
-        events.clone(),
-        sockets.clone(),
-        None,
-    );
-    let state = TeamserverState {
-        profile: profile.clone(),
-        database: database.clone(),
-        auth: AuthService::from_profile(&profile).expect("auth service should initialize"),
-        api: ApiRuntime::from_profile(&profile).expect("rng should work in tests"),
-        events,
-        connections: OperatorConnectionManager::new(),
-        agent_registry: registry,
-        listeners: listeners.clone(),
-        payload_builder: PayloadBuilderService::disabled_for_tests(),
-        sockets,
-        webhooks: AuditWebhookNotifier::from_profile(&profile),
-        login_rate_limiter: LoginRateLimiter::new(),
-        shutdown: red_cell::ShutdownController::new(),
-    };
-
-    let server_listener = TcpListener::bind("127.0.0.1:0").await?;
-    let server_addr = server_listener.local_addr()?;
-    let server = tokio::spawn(async move {
-        let app = websocket_routes().with_state(state);
-        let _ = axum::serve(
-            server_listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await;
-    });
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
 
     let pipe_name = unique_pipe_name("operator-round-trip");
     let listener_name = "edge-smb";
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
 
     common::login(&mut socket).await?;
     common::assert_no_operator_message(&mut socket, Duration::from_millis(200)).await;
@@ -339,7 +224,7 @@ async fn operator_session_smb_listener_and_mock_demon_round_trip()
         ListenerMarkInfo { name: listener_name.to_owned(), mark: "Online".to_owned() }
     );
 
-    listeners.update(smb_listener_config(listener_name, &pipe_name)).await?;
+    server.listeners.update(smb_listener_config(listener_name, &pipe_name)).await?;
     wait_for_smb_listener(&pipe_name).await?;
 
     let agent_id = 0x1234_5678;
@@ -368,7 +253,7 @@ async fn operator_session_smb_listener_and_mock_demon_round_trip()
     assert_eq!(message.info.listener, listener_name);
     assert_eq!(message.info.hostname, "wkstn-01");
 
-    let (mut snapshot_socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut snapshot_socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut snapshot_socket).await?;
     let snapshot_agent = read_until_operator_message(&mut snapshot_socket, |message| {
         matches!(message, OperatorMessage::AgentNew(_))
@@ -456,8 +341,7 @@ async fn operator_session_smb_listener_and_mock_demon_round_trip()
     assert_agent_output(&message.info, output_text);
 
     socket.close(None).await?;
-    listeners.stop(listener_name).await?;
-    server.abort();
+    server.listeners.stop(listener_name).await?;
     Ok(())
 }
 

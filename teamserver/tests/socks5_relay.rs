@@ -10,14 +10,9 @@ mod common;
 
 use std::time::Duration;
 
-use red_cell::{
-    AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
-    ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
-    SocketRelayManager, TeamserverState, websocket_routes,
-};
+use red_cell::{AgentRegistry, Database, EventBus, SocketRelayManager};
 use red_cell_common::AgentEncryptionInfo;
-use red_cell_common::config::Profile;
-use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len};
+use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
 use red_cell_common::demon::{DemonCommand, DemonSocketCommand, DemonSocketType};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -496,84 +491,8 @@ async fn write_client_data_after_remove_agent_returns_error()
 // (HTTP listener + WebSocket + relay) is used so the path mirrors production.
 // ---------------------------------------------------------------------------
 
-const DISPATCH_PROFILE: &str = r#"
-    Teamserver {
-      Host = "127.0.0.1"
-      Port = 0
-    }
-
-    Operators {
-      user "operator" {
-        Password = "password1234"
-        Role = "Operator"
-      }
-    }
-
-    Demon {}
-"#;
-
-/// Boot a full teamserver and return its WS address, the listener manager,
-/// the agent registry, and a clone of the socket relay manager.
-async fn start_dispatch_server() -> Result<
-    (std::net::SocketAddr, ListenerManager, AgentRegistry, SocketRelayManager),
-    Box<dyn std::error::Error>,
-> {
-    let profile = Profile::parse(DISPATCH_PROFILE)?;
-    let database = Database::connect_in_memory().await?;
-    let registry = AgentRegistry::new(database.clone());
-    let events = EventBus::default();
-    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let listeners = ListenerManager::new(
-        database.clone(),
-        registry.clone(),
-        events.clone(),
-        sockets.clone(),
-        None,
-    );
-    let state = TeamserverState {
-        profile: profile.clone(),
-        database,
-        auth: AuthService::from_profile(&profile).expect("auth service should init"),
-        api: ApiRuntime::from_profile(&profile).expect("rng should work in tests"),
-        events,
-        connections: OperatorConnectionManager::new(),
-        agent_registry: registry.clone(),
-        listeners: listeners.clone(),
-        payload_builder: PayloadBuilderService::disabled_for_tests(),
-        sockets: sockets.clone(),
-        webhooks: AuditWebhookNotifier::from_profile(&profile),
-        login_rate_limiter: LoginRateLimiter::new(),
-        shutdown: red_cell::ShutdownController::new(),
-    };
-
-    let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let addr = tcp.local_addr()?;
-    tokio::spawn(async move {
-        let app = websocket_routes().with_state(state);
-        let _ = axum::serve(tcp, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-            .await;
-    });
-
-    Ok((addr, listeners, registry, sockets))
-}
-
-/// Register an agent via `DEMON_INIT` and return the AES-CTR block offset after init.
-async fn dispatch_register_agent(
-    client: &reqwest::Client,
-    listener_port: u16,
-    agent_id: u32,
-    key: [u8; AGENT_KEY_LENGTH],
-    iv: [u8; AGENT_IV_LENGTH],
-) -> Result<u64, Box<dyn std::error::Error>> {
-    let resp = client
-        .post(format!("http://127.0.0.1:{listener_port}/"))
-        .body(common::valid_demon_init_body(agent_id, key, iv))
-        .send()
-        .await?
-        .error_for_status()?;
-    let bytes = resp.bytes().await?;
-    Ok(ctr_blocks_for_len(bytes.len()))
-}
+// The dispatch tests below use `common::spawn_test_server` and
+// `common::register_agent` — no per-file server/profile boilerplate needed.
 
 /// A `CommandSocket/Connect` callback with `success=1` must call
 /// `relay.finish_connect`, which causes the pending SOCKS5 client to receive
@@ -581,24 +500,27 @@ async fn dispatch_register_agent(
 #[tokio::test]
 async fn socket_connect_callback_routes_to_relay_finish_connect()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners, registry, relay) = start_dispatch_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    listeners.create(common::http_listener_config("sock-dispatch-connect", listener_port)).await?;
+    server
+        .listeners
+        .create(common::http_listener_config("sock-dispatch-connect", listener_port))
+        .await?;
     drop(listener_guard);
-    listeners.start("sock-dispatch-connect").await?;
+    server.listeners.start("sock-dispatch-connect").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xBB01_0001_u32;
     let key = [0x11; AGENT_KEY_LENGTH];
     let iv = [0x22; AGENT_IV_LENGTH];
-    let ctr_offset = dispatch_register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     // Start a SOCKS server on the relay so a client can connect.
     let (socks_port, socks_guard) = common::available_port()?;
     drop(socks_guard);
-    relay.add_socks_server(agent_id, &socks_port.to_string()).await?;
+    server.sockets.add_socks_server(agent_id, &socks_port.to_string()).await?;
 
     // Connect a SOCKS5 client and issue an IPv4 CONNECT request.
     let mut socks_client =
@@ -608,7 +530,7 @@ async fn socket_connect_callback_routes_to_relay_finish_connect()
     socks5_connect_ipv4(&mut socks_client, [93, 184, 216, 34], 80).await?;
 
     // Retrieve the socket_id that the relay assigned for this connection.
-    let socket_id = dequeue_socket_id(&registry, agent_id).await?;
+    let socket_id = dequeue_socket_id(&server.agent_registry, agent_id).await?;
 
     // Build and send the CommandSocket/Connect callback (success=1, error_code=0).
     let mut connect_payload = Vec::new();
@@ -642,8 +564,8 @@ async fn socket_connect_callback_routes_to_relay_finish_connect()
         "SOCKS client must receive a success reply after the Connect callback"
     );
 
-    relay.clear_socks_servers(agent_id).await?;
-    listeners.stop("sock-dispatch-connect").await?;
+    server.sockets.clear_socks_servers(agent_id).await?;
+    server.listeners.stop("sock-dispatch-connect").await?;
     Ok(())
 }
 
@@ -653,26 +575,27 @@ async fn socket_connect_callback_routes_to_relay_finish_connect()
 #[tokio::test]
 async fn socket_connect_failure_callback_sends_socks_failure_reply()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners, registry, relay) = start_dispatch_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    listeners
+    server
+        .listeners
         .create(common::http_listener_config("sock-dispatch-connect-fail", listener_port))
         .await?;
     drop(listener_guard);
-    listeners.start("sock-dispatch-connect-fail").await?;
+    server.listeners.start("sock-dispatch-connect-fail").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xBB01_0003_u32;
     let key = [0x55; AGENT_KEY_LENGTH];
     let iv = [0x66; AGENT_IV_LENGTH];
-    let ctr_offset = dispatch_register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     // Start a SOCKS server and connect a client.
     let (socks_port, socks_guard) = common::available_port()?;
     drop(socks_guard);
-    relay.add_socks_server(agent_id, &socks_port.to_string()).await?;
+    server.sockets.add_socks_server(agent_id, &socks_port.to_string()).await?;
 
     let mut socks_client =
         timeout(Duration::from_secs(2), TcpStream::connect(format!("127.0.0.1:{socks_port}")))
@@ -680,7 +603,7 @@ async fn socket_connect_failure_callback_sends_socks_failure_reply()
     socks5_handshake(&mut socks_client).await?;
     socks5_connect_ipv4(&mut socks_client, [93, 184, 216, 34], 80).await?;
 
-    let socket_id = dequeue_socket_id(&registry, agent_id).await?;
+    let socket_id = dequeue_socket_id(&server.agent_registry, agent_id).await?;
 
     // Build and send the CommandSocket/Connect callback with success=0 (failure).
     let mut connect_payload = Vec::new();
@@ -714,8 +637,8 @@ async fn socket_connect_failure_callback_sends_socks_failure_reply()
         "SOCKS client must receive a failure reply after a Connect callback with success=0"
     );
 
-    relay.clear_socks_servers(agent_id).await?;
-    listeners.stop("sock-dispatch-connect-fail").await?;
+    server.sockets.clear_socks_servers(agent_id).await?;
+    server.listeners.stop("sock-dispatch-connect-fail").await?;
     Ok(())
 }
 
@@ -725,24 +648,27 @@ async fn socket_connect_failure_callback_sends_socks_failure_reply()
 #[tokio::test]
 async fn socket_read_callback_delivers_data_to_socks_client()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners, registry, relay) = start_dispatch_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    listeners.create(common::http_listener_config("sock-dispatch-read", listener_port)).await?;
+    server
+        .listeners
+        .create(common::http_listener_config("sock-dispatch-read", listener_port))
+        .await?;
     drop(listener_guard);
-    listeners.start("sock-dispatch-read").await?;
+    server.listeners.start("sock-dispatch-read").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xBB01_0004_u32;
     let key = [0x77; AGENT_KEY_LENGTH];
     let iv = [0x88; AGENT_IV_LENGTH];
-    let ctr_offset = dispatch_register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     // Start a SOCKS server and connect a client.
     let (socks_port, socks_guard) = common::available_port()?;
     drop(socks_guard);
-    relay.add_socks_server(agent_id, &socks_port.to_string()).await?;
+    server.sockets.add_socks_server(agent_id, &socks_port.to_string()).await?;
 
     let mut socks_client =
         timeout(Duration::from_secs(2), TcpStream::connect(format!("127.0.0.1:{socks_port}")))
@@ -752,8 +678,8 @@ async fn socket_read_callback_delivers_data_to_socks_client()
 
     // Get the socket_id and complete the relay setup directly so the client is
     // in the relay's connected-socket table.
-    let socket_id = dequeue_socket_id(&registry, agent_id).await?;
-    relay.finish_connect(agent_id, socket_id, true, 0).await?;
+    let socket_id = dequeue_socket_id(&server.agent_registry, agent_id).await?;
+    server.sockets.finish_connect(agent_id, socket_id, true, 0).await?;
     // Drain the SOCKS5 success reply so the client is in a clean read state.
     let _ = timeout(Duration::from_secs(1), read_socks5_reply(&mut socks_client, SOCKS_ATYP_IPV4))
         .await;
@@ -794,8 +720,8 @@ async fn socket_read_callback_delivers_data_to_socks_client()
         "SOCKS client must receive the exact data from the Read callback"
     );
 
-    relay.clear_socks_servers(agent_id).await?;
-    listeners.stop("sock-dispatch-read").await?;
+    server.sockets.clear_socks_servers(agent_id).await?;
+    server.listeners.stop("sock-dispatch-read").await?;
     Ok(())
 }
 
@@ -804,24 +730,27 @@ async fn socket_read_callback_delivers_data_to_socks_client()
 #[tokio::test]
 async fn socket_close_callback_routes_to_relay_close_client()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners, registry, relay) = start_dispatch_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    listeners.create(common::http_listener_config("sock-dispatch-close", listener_port)).await?;
+    server
+        .listeners
+        .create(common::http_listener_config("sock-dispatch-close", listener_port))
+        .await?;
     drop(listener_guard);
-    listeners.start("sock-dispatch-close").await?;
+    server.listeners.start("sock-dispatch-close").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xBB01_0002_u32;
     let key = [0x33; AGENT_KEY_LENGTH];
     let iv = [0x44; AGENT_IV_LENGTH];
-    let ctr_offset = dispatch_register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     // Start a SOCKS server and connect a client.
     let (socks_port, socks_guard) = common::available_port()?;
     drop(socks_guard);
-    relay.add_socks_server(agent_id, &socks_port.to_string()).await?;
+    server.sockets.add_socks_server(agent_id, &socks_port.to_string()).await?;
 
     let mut socks_client =
         timeout(Duration::from_secs(2), TcpStream::connect(format!("127.0.0.1:{socks_port}")))
@@ -831,8 +760,8 @@ async fn socket_close_callback_routes_to_relay_close_client()
 
     // Get the socket_id and complete the relay setup directly so the client is
     // in the relay's connected-socket table.
-    let socket_id = dequeue_socket_id(&registry, agent_id).await?;
-    relay.finish_connect(agent_id, socket_id, true, 0).await?;
+    let socket_id = dequeue_socket_id(&server.agent_registry, agent_id).await?;
+    server.sockets.finish_connect(agent_id, socket_id, true, 0).await?;
     // Drain the SOCKS5 success reply so the client is in a clean read state.
     let _ = timeout(Duration::from_secs(1), read_socks5_reply(&mut socks_client, SOCKS_ATYP_IPV4))
         .await;
@@ -864,7 +793,7 @@ async fn socket_close_callback_routes_to_relay_close_client()
     let n = timeout(Duration::from_secs(2), socks_client.read(&mut buf)).await??;
     assert_eq!(n, 0, "SOCKS client must be closed (EOF) after the Close callback");
 
-    relay.clear_socks_servers(agent_id).await?;
-    listeners.stop("sock-dispatch-close").await?;
+    server.sockets.clear_socks_servers(agent_id).await?;
+    server.listeners.stop("sock-dispatch-close").await?;
     Ok(())
 }

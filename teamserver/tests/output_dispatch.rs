@@ -1,92 +1,9 @@
 mod common;
 
-use red_cell::{
-    AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
-    ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
-    SocketRelayManager, TeamserverState, websocket_routes,
-};
-use red_cell_common::config::Profile;
-use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len};
+use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
 use red_cell_common::demon::{DemonCallbackError, DemonCommand, DemonConfigKey, DemonInfoClass};
 use red_cell_common::operator::OperatorMessage;
-use tokio::net::TcpListener;
 use tokio_tungstenite::connect_async;
-
-// ── shared profile ───────────────────────────────────────────────────────────
-
-const PROFILE: &str = r#"
-    Teamserver {
-      Host = "127.0.0.1"
-      Port = 0
-    }
-
-    Operators {
-      user "operator" {
-        Password = "password1234"
-        Role = "Operator"
-      }
-    }
-
-    Demon {}
-"#;
-
-async fn start_server()
--> Result<(std::net::SocketAddr, ListenerManager), Box<dyn std::error::Error>> {
-    let profile = Profile::parse(PROFILE)?;
-    let database = Database::connect_in_memory().await?;
-    let registry = AgentRegistry::new(database.clone());
-    let events = EventBus::default();
-    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-    let listeners = ListenerManager::new(
-        database.clone(),
-        registry.clone(),
-        events.clone(),
-        sockets.clone(),
-        None,
-    );
-    let state = TeamserverState {
-        profile: profile.clone(),
-        database: database.clone(),
-        auth: AuthService::from_profile(&profile).expect("auth service should init"),
-        api: ApiRuntime::from_profile(&profile).expect("rng should work in tests"),
-        events,
-        connections: OperatorConnectionManager::new(),
-        agent_registry: registry.clone(),
-        listeners: listeners.clone(),
-        payload_builder: PayloadBuilderService::disabled_for_tests(),
-        sockets,
-        webhooks: AuditWebhookNotifier::from_profile(&profile),
-        login_rate_limiter: LoginRateLimiter::new(),
-        shutdown: red_cell::ShutdownController::new(),
-    };
-
-    let tcp = TcpListener::bind("127.0.0.1:0").await?;
-    let addr = tcp.local_addr()?;
-    tokio::spawn(async move {
-        let app = websocket_routes().with_state(state);
-        let _ = axum::serve(tcp, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-            .await;
-    });
-
-    Ok((addr, listeners))
-}
-
-async fn register_agent(
-    client: &reqwest::Client,
-    listener_port: u16,
-    agent_id: u32,
-    key: [u8; AGENT_KEY_LENGTH],
-    iv: [u8; AGENT_IV_LENGTH],
-) -> Result<u64, Box<dyn std::error::Error>> {
-    let resp = client
-        .post(format!("http://127.0.0.1:{listener_port}/"))
-        .body(common::valid_demon_init_body(agent_id, key, iv))
-        .send()
-        .await?
-        .error_for_status()?;
-    let bytes = resp.bytes().await?;
-    Ok(ctr_blocks_for_len(bytes.len()))
-}
 
 // ── payload builders ─────────────────────────────────────────────────────────
 
@@ -194,22 +111,22 @@ fn job_died_payload() -> Vec<u8> {
 #[tokio::test]
 async fn exit_callback_marks_agent_dead_and_broadcasts_update()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-exit-test", listener_port)).await?;
+    server.listeners.create(common::http_listener_config("out-exit-test", listener_port)).await?;
     drop(listener_guard);
-    listeners.start("out-exit-test").await?;
+    server.listeners.start("out-exit-test").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0001_u32;
     let key = [0x01; AGENT_KEY_LENGTH];
     let iv = [0x02; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     // Consume the AgentNew broadcast from registration.
     let agent_new = common::read_operator_message(&mut socket).await?;
@@ -267,7 +184,7 @@ async fn exit_callback_marks_agent_dead_and_broadcasts_update()
     );
 
     socket.close(None).await?;
-    listeners.stop("out-exit-test").await?;
+    server.listeners.stop("out-exit-test").await?;
     Ok(())
 }
 
@@ -275,22 +192,22 @@ async fn exit_callback_marks_agent_dead_and_broadcasts_update()
 /// containing the pointer, size, and memory protection to the operator.
 #[tokio::test]
 async fn demon_info_mem_alloc_broadcasts_response() -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-info-test", listener_port)).await?;
+    server.listeners.create(common::http_listener_config("out-info-test", listener_port)).await?;
     drop(listener_guard);
-    listeners.start("out-info-test").await?;
+    server.listeners.start("out-info-test").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0002_u32;
     let key = [0x03; AGENT_KEY_LENGTH];
     let iv = [0x04; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -334,7 +251,7 @@ async fn demon_info_mem_alloc_broadcasts_response() -> Result<(), Box<dyn std::e
     );
 
     socket.close(None).await?;
-    listeners.stop("out-info-test").await?;
+    server.listeners.stop("out-info-test").await?;
     Ok(())
 }
 
@@ -342,22 +259,22 @@ async fn demon_info_mem_alloc_broadcasts_response() -> Result<(), Box<dyn std::e
 /// `AgentResponse` to the operator whose output contains formatted rows for both jobs.
 #[tokio::test]
 async fn job_list_callback_broadcasts_formatted_table() -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-job-test", listener_port)).await?;
+    server.listeners.create(common::http_listener_config("out-job-test", listener_port)).await?;
     drop(listener_guard);
-    listeners.start("out-job-test").await?;
+    server.listeners.start("out-job-test").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0003_u32;
     let key = [0x05; AGENT_KEY_LENGTH];
     let iv = [0x06; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -430,7 +347,7 @@ async fn job_list_callback_broadcasts_formatted_table() -> Result<(), Box<dyn st
     );
 
     socket.close(None).await?;
-    listeners.stop("out-job-test").await?;
+    server.listeners.stop("out-job-test").await?;
     Ok(())
 }
 
@@ -439,22 +356,22 @@ async fn job_list_callback_broadcasts_formatted_table() -> Result<(), Box<dyn st
 #[tokio::test]
 async fn demon_info_truncated_payload_returns_error_no_broadcast()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-trunc-test", listener_port)).await?;
+    server.listeners.create(common::http_listener_config("out-trunc-test", listener_port)).await?;
     drop(listener_guard);
-    listeners.start("out-trunc-test").await?;
+    server.listeners.start("out-trunc-test").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0004_u32;
     let key = [0x07; AGENT_KEY_LENGTH];
     let iv = [0x08; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -486,7 +403,7 @@ async fn demon_info_truncated_payload_returns_error_no_broadcast()
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
 
     socket.close(None).await?;
-    listeners.stop("out-trunc-test").await?;
+    server.listeners.stop("out-trunc-test").await?;
     Ok(())
 }
 
@@ -495,22 +412,25 @@ async fn demon_info_truncated_payload_returns_error_no_broadcast()
 #[tokio::test]
 async fn exit_callback_empty_payload_returns_error_no_broadcast()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-exit-empty-test", listener_port)).await?;
+    server
+        .listeners
+        .create(common::http_listener_config("out-exit-empty-test", listener_port))
+        .await?;
     drop(listener_guard);
-    listeners.start("out-exit-empty-test").await?;
+    server.listeners.start("out-exit-empty-test").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0005_u32;
     let key = [0x09; AGENT_KEY_LENGTH];
     let iv = [0x0A; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -540,7 +460,7 @@ async fn exit_callback_empty_payload_returns_error_no_broadcast()
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
 
     socket.close(None).await?;
-    listeners.stop("out-exit-empty-test").await?;
+    server.listeners.stop("out-exit-empty-test").await?;
     Ok(())
 }
 
@@ -549,22 +469,25 @@ async fn exit_callback_empty_payload_returns_error_no_broadcast()
 #[tokio::test]
 async fn exit_callback_truncated_exit_method_returns_error_no_broadcast()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-exit-short-test", listener_port)).await?;
+    server
+        .listeners
+        .create(common::http_listener_config("out-exit-short-test", listener_port))
+        .await?;
     drop(listener_guard);
-    listeners.start("out-exit-short-test").await?;
+    server.listeners.start("out-exit-short-test").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0006_u32;
     let key = [0x0B; AGENT_KEY_LENGTH];
     let iv = [0x0C; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -594,7 +517,7 @@ async fn exit_callback_truncated_exit_method_returns_error_no_broadcast()
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
 
     socket.close(None).await?;
-    listeners.stop("out-exit-short-test").await?;
+    server.listeners.stop("out-exit-short-test").await?;
     Ok(())
 }
 
@@ -602,22 +525,22 @@ async fn exit_callback_truncated_exit_method_returns_error_no_broadcast()
 /// containing the function pointer and thread ID.
 #[tokio::test]
 async fn demon_info_mem_exec_broadcasts_response() -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-mexec-test", listener_port)).await?;
+    server.listeners.create(common::http_listener_config("out-mexec-test", listener_port)).await?;
     drop(listener_guard);
-    listeners.start("out-mexec-test").await?;
+    server.listeners.start("out-mexec-test").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0010_u32;
     let key = [0x11; AGENT_KEY_LENGTH];
     let iv = [0x12; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -664,7 +587,7 @@ async fn demon_info_mem_exec_broadcasts_response() -> Result<(), Box<dyn std::er
     );
 
     socket.close(None).await?;
-    listeners.stop("out-mexec-test").await?;
+    server.listeners.stop("out-mexec-test").await?;
     Ok(())
 }
 
@@ -672,22 +595,22 @@ async fn demon_info_mem_exec_broadcasts_response() -> Result<(), Box<dyn std::er
 /// containing the memory address, size, and old/new protection values.
 #[tokio::test]
 async fn demon_info_mem_protect_broadcasts_response() -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-mprot-test", listener_port)).await?;
+    server.listeners.create(common::http_listener_config("out-mprot-test", listener_port)).await?;
     drop(listener_guard);
-    listeners.start("out-mprot-test").await?;
+    server.listeners.start("out-mprot-test").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0011_u32;
     let key = [0x13; AGENT_KEY_LENGTH];
     let iv = [0x14; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -744,7 +667,7 @@ async fn demon_info_mem_protect_broadcasts_response() -> Result<(), Box<dyn std:
     );
 
     socket.close(None).await?;
-    listeners.stop("out-mprot-test").await?;
+    server.listeners.stop("out-mprot-test").await?;
     Ok(())
 }
 
@@ -753,22 +676,25 @@ async fn demon_info_mem_protect_broadcasts_response() -> Result<(), Box<dyn std:
 #[tokio::test]
 async fn demon_info_proc_create_non_verbose_no_broadcast() -> Result<(), Box<dyn std::error::Error>>
 {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-proc-nv-test", listener_port)).await?;
+    server
+        .listeners
+        .create(common::http_listener_config("out-proc-nv-test", listener_port))
+        .await?;
     drop(listener_guard);
-    listeners.start("out-proc-nv-test").await?;
+    server.listeners.start("out-proc-nv-test").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0012_u32;
     let key = [0x15; AGENT_KEY_LENGTH];
     let iv = [0x16; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -801,7 +727,7 @@ async fn demon_info_proc_create_non_verbose_no_broadcast() -> Result<(), Box<dyn
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
 
     socket.close(None).await?;
-    listeners.stop("out-proc-nv-test").await?;
+    server.listeners.stop("out-proc-nv-test").await?;
     Ok(())
 }
 
@@ -809,22 +735,25 @@ async fn demon_info_proc_create_non_verbose_no_broadcast() -> Result<(), Box<dyn
 /// without broadcasting any `AgentResponse`.
 #[tokio::test]
 async fn demon_info_unknown_class_no_broadcast() -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-info-unk-test", listener_port)).await?;
+    server
+        .listeners
+        .create(common::http_listener_config("out-info-unk-test", listener_port))
+        .await?;
     drop(listener_guard);
-    listeners.start("out-info-unk-test").await?;
+    server.listeners.start("out-info-unk-test").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0013_u32;
     let key = [0x17; AGENT_KEY_LENGTH];
     let iv = [0x18; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -856,7 +785,7 @@ async fn demon_info_unknown_class_no_broadcast() -> Result<(), Box<dyn std::erro
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
 
     socket.close(None).await?;
-    listeners.stop("out-info-unk-test").await?;
+    server.listeners.stop("out-info-unk-test").await?;
     Ok(())
 }
 
@@ -865,22 +794,25 @@ async fn demon_info_unknown_class_no_broadcast() -> Result<(), Box<dyn std::erro
 #[tokio::test]
 async fn demon_info_proc_create_verbose_success_broadcasts_response()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-proc-vs-test", listener_port)).await?;
+    server
+        .listeners
+        .create(common::http_listener_config("out-proc-vs-test", listener_port))
+        .await?;
     drop(listener_guard);
-    listeners.start("out-proc-vs-test").await?;
+    server.listeners.start("out-proc-vs-test").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0014_u32;
     let key = [0x19; AGENT_KEY_LENGTH];
     let iv = [0x1A; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -920,7 +852,7 @@ async fn demon_info_proc_create_verbose_success_broadcasts_response()
     assert!(message.contains("5678"), "response should contain PID 5678: {message:?}");
 
     socket.close(None).await?;
-    listeners.stop("out-proc-vs-test").await?;
+    server.listeners.stop("out-proc-vs-test").await?;
     Ok(())
 }
 
@@ -929,22 +861,25 @@ async fn demon_info_proc_create_verbose_success_broadcasts_response()
 #[tokio::test]
 async fn demon_info_proc_create_verbose_failure_broadcasts_response()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-proc-vf-test", listener_port)).await?;
+    server
+        .listeners
+        .create(common::http_listener_config("out-proc-vf-test", listener_port))
+        .await?;
     drop(listener_guard);
-    listeners.start("out-proc-vf-test").await?;
+    server.listeners.start("out-proc-vf-test").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0015_u32;
     let key = [0x1B; AGENT_KEY_LENGTH];
     let iv = [0x1C; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -984,7 +919,7 @@ async fn demon_info_proc_create_verbose_failure_broadcasts_response()
     assert!(message.contains("bad.exe"), "response should contain path: {message:?}");
 
     socket.close(None).await?;
-    listeners.stop("out-proc-vf-test").await?;
+    server.listeners.stop("out-proc-vf-test").await?;
     Ok(())
 }
 
@@ -994,22 +929,25 @@ async fn demon_info_proc_create_verbose_failure_broadcasts_response()
 #[tokio::test]
 async fn demon_info_proc_create_verbose_no_pipe_broadcasts_response()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-proc-np-test", listener_port)).await?;
+    server
+        .listeners
+        .create(common::http_listener_config("out-proc-np-test", listener_port))
+        .await?;
     drop(listener_guard);
-    listeners.start("out-proc-np-test").await?;
+    server.listeners.start("out-proc-np-test").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0016_u32;
     let key = [0x1D; AGENT_KEY_LENGTH];
     let iv = [0x1E; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -1055,7 +993,7 @@ async fn demon_info_proc_create_verbose_no_pipe_broadcasts_response()
     assert!(message.contains("9999"), "response should contain PID 9999: {message:?}");
 
     socket.close(None).await?;
-    listeners.stop("out-proc-np-test").await?;
+    server.listeners.stop("out-proc-np-test").await?;
     Ok(())
 }
 
@@ -1063,22 +1001,22 @@ async fn demon_info_proc_create_verbose_no_pipe_broadcasts_response()
 /// an `AgentResponse` with Type="Good" and a message mentioning "suspended".
 #[tokio::test]
 async fn job_suspend_success_broadcasts_good_response() -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-job-susp-ok", listener_port)).await?;
+    server.listeners.create(common::http_listener_config("out-job-susp-ok", listener_port)).await?;
     drop(listener_guard);
-    listeners.start("out-job-susp-ok").await?;
+    server.listeners.start("out-job-susp-ok").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0020_u32;
     let key = [0x20; AGENT_KEY_LENGTH];
     let iv = [0x21; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -1115,7 +1053,7 @@ async fn job_suspend_success_broadcasts_good_response() -> Result<(), Box<dyn st
     assert!(message.contains("77"), "message should contain job id 77: {message:?}");
 
     socket.close(None).await?;
-    listeners.stop("out-job-susp-ok").await?;
+    server.listeners.stop("out-job-susp-ok").await?;
     Ok(())
 }
 
@@ -1123,22 +1061,25 @@ async fn job_suspend_success_broadcasts_good_response() -> Result<(), Box<dyn st
 /// an `AgentResponse` with Type="Error".
 #[tokio::test]
 async fn job_suspend_failure_broadcasts_error_response() -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-job-susp-fail", listener_port)).await?;
+    server
+        .listeners
+        .create(common::http_listener_config("out-job-susp-fail", listener_port))
+        .await?;
     drop(listener_guard);
-    listeners.start("out-job-susp-fail").await?;
+    server.listeners.start("out-job-susp-fail").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0021_u32;
     let key = [0x22; AGENT_KEY_LENGTH];
     let iv = [0x23; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -1173,7 +1114,7 @@ async fn job_suspend_failure_broadcasts_error_response() -> Result<(), Box<dyn s
     assert!(message.contains("88"), "message should contain job id 88: {message:?}");
 
     socket.close(None).await?;
-    listeners.stop("out-job-susp-fail").await?;
+    server.listeners.stop("out-job-susp-fail").await?;
     Ok(())
 }
 
@@ -1181,22 +1122,22 @@ async fn job_suspend_failure_broadcasts_error_response() -> Result<(), Box<dyn s
 /// an `AgentResponse` with Type="Good" and a message mentioning "resumed".
 #[tokio::test]
 async fn job_resume_success_broadcasts_good_response() -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-job-res-ok", listener_port)).await?;
+    server.listeners.create(common::http_listener_config("out-job-res-ok", listener_port)).await?;
     drop(listener_guard);
-    listeners.start("out-job-res-ok").await?;
+    server.listeners.start("out-job-res-ok").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0022_u32;
     let key = [0x24; AGENT_KEY_LENGTH];
     let iv = [0x25; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -1231,7 +1172,7 @@ async fn job_resume_success_broadcasts_good_response() -> Result<(), Box<dyn std
     assert!(message.contains("55"), "message should contain job id 55: {message:?}");
 
     socket.close(None).await?;
-    listeners.stop("out-job-res-ok").await?;
+    server.listeners.stop("out-job-res-ok").await?;
     Ok(())
 }
 
@@ -1239,22 +1180,25 @@ async fn job_resume_success_broadcasts_good_response() -> Result<(), Box<dyn std
 /// an `AgentResponse` with Type="Error".
 #[tokio::test]
 async fn job_resume_failure_broadcasts_error_response() -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-job-res-fail", listener_port)).await?;
+    server
+        .listeners
+        .create(common::http_listener_config("out-job-res-fail", listener_port))
+        .await?;
     drop(listener_guard);
-    listeners.start("out-job-res-fail").await?;
+    server.listeners.start("out-job-res-fail").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0023_u32;
     let key = [0x26; AGENT_KEY_LENGTH];
     let iv = [0x27; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -1286,7 +1230,7 @@ async fn job_resume_failure_broadcasts_error_response() -> Result<(), Box<dyn st
     assert!(message.contains("66"), "message should contain job id 66: {message:?}");
 
     socket.close(None).await?;
-    listeners.stop("out-job-res-fail").await?;
+    server.listeners.stop("out-job-res-fail").await?;
     Ok(())
 }
 
@@ -1295,22 +1239,22 @@ async fn job_resume_failure_broadcasts_error_response() -> Result<(), Box<dyn st
 #[tokio::test]
 async fn job_kill_remove_success_broadcasts_good_response() -> Result<(), Box<dyn std::error::Error>>
 {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-job-kill-ok", listener_port)).await?;
+    server.listeners.create(common::http_listener_config("out-job-kill-ok", listener_port)).await?;
     drop(listener_guard);
-    listeners.start("out-job-kill-ok").await?;
+    server.listeners.start("out-job-kill-ok").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0024_u32;
     let key = [0x28; AGENT_KEY_LENGTH];
     let iv = [0x29; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -1342,7 +1286,7 @@ async fn job_kill_remove_success_broadcasts_good_response() -> Result<(), Box<dy
     assert!(message.contains("99"), "message should contain job id 99: {message:?}");
 
     socket.close(None).await?;
-    listeners.stop("out-job-kill-ok").await?;
+    server.listeners.stop("out-job-kill-ok").await?;
     Ok(())
 }
 
@@ -1351,22 +1295,25 @@ async fn job_kill_remove_success_broadcasts_good_response() -> Result<(), Box<dy
 #[tokio::test]
 async fn job_kill_remove_failure_broadcasts_error_response()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-job-kill-fail", listener_port)).await?;
+    server
+        .listeners
+        .create(common::http_listener_config("out-job-kill-fail", listener_port))
+        .await?;
     drop(listener_guard);
-    listeners.start("out-job-kill-fail").await?;
+    server.listeners.start("out-job-kill-fail").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0025_u32;
     let key = [0x2A; AGENT_KEY_LENGTH];
     let iv = [0x2B; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -1398,7 +1345,7 @@ async fn job_kill_remove_failure_broadcasts_error_response()
     assert!(message.contains("100"), "message should contain job id 100: {message:?}");
 
     socket.close(None).await?;
-    listeners.stop("out-job-kill-fail").await?;
+    server.listeners.stop("out-job-kill-fail").await?;
     Ok(())
 }
 
@@ -1471,22 +1418,22 @@ fn config_invalid_key_payload(key: u32) -> Vec<u8> {
 /// broadcast any `AgentResponse` to operators.
 #[tokio::test]
 async fn job_died_no_broadcast() -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-job-died", listener_port)).await?;
+    server.listeners.create(common::http_listener_config("out-job-died", listener_port)).await?;
     drop(listener_guard);
-    listeners.start("out-job-died").await?;
+    server.listeners.start("out-job-died").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0026_u32;
     let key = [0x2C; AGENT_KEY_LENGTH];
     let iv = [0x2D; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -1517,7 +1464,7 @@ async fn job_died_no_broadcast() -> Result<(), Box<dyn std::error::Error>> {
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
 
     socket.close(None).await?;
-    listeners.stop("out-job-died").await?;
+    server.listeners.stop("out-job-died").await?;
     Ok(())
 }
 
@@ -1527,22 +1474,22 @@ async fn job_died_no_broadcast() -> Result<(), Box<dyn std::error::Error>> {
 /// `AgentResponse` containing the output text and a "Received Output" message.
 #[tokio::test]
 async fn command_output_happy_path_broadcasts_response() -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-output-ok", listener_port)).await?;
+    server.listeners.create(common::http_listener_config("out-output-ok", listener_port)).await?;
     drop(listener_guard);
-    listeners.start("out-output-ok").await?;
+    server.listeners.start("out-output-ok").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0030_u32;
     let key = [0x30; AGENT_KEY_LENGTH];
     let iv = [0x31; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -1592,7 +1539,7 @@ async fn command_output_happy_path_broadcasts_response() -> Result<(), Box<dyn s
     );
 
     socket.close(None).await?;
-    listeners.stop("out-output-ok").await?;
+    server.listeners.stop("out-output-ok").await?;
     Ok(())
 }
 
@@ -1600,22 +1547,25 @@ async fn command_output_happy_path_broadcasts_response() -> Result<(), Box<dyn s
 /// without broadcasting any `AgentResponse`.
 #[tokio::test]
 async fn command_output_empty_does_not_broadcast() -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-output-empty", listener_port)).await?;
+    server
+        .listeners
+        .create(common::http_listener_config("out-output-empty", listener_port))
+        .await?;
     drop(listener_guard);
-    listeners.start("out-output-empty").await?;
+    server.listeners.start("out-output-empty").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0031_u32;
     let key = [0x32; AGENT_KEY_LENGTH];
     let iv = [0x33; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -1645,7 +1595,7 @@ async fn command_output_empty_does_not_broadcast() -> Result<(), Box<dyn std::er
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
 
     socket.close(None).await?;
-    listeners.stop("out-output-empty").await?;
+    server.listeners.stop("out-output-empty").await?;
     Ok(())
 }
 
@@ -1656,22 +1606,25 @@ async fn command_output_empty_does_not_broadcast() -> Result<(), Box<dyn std::er
 #[tokio::test]
 async fn command_error_win32_known_code_broadcasts_error() -> Result<(), Box<dyn std::error::Error>>
 {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-err-win32-known", listener_port)).await?;
+    server
+        .listeners
+        .create(common::http_listener_config("out-err-win32-known", listener_port))
+        .await?;
     drop(listener_guard);
-    listeners.start("out-err-win32-known").await?;
+    server.listeners.start("out-err-win32-known").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0040_u32;
     let key = [0x40; AGENT_KEY_LENGTH];
     let iv = [0x41; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -1710,7 +1663,7 @@ async fn command_error_win32_known_code_broadcasts_error() -> Result<(), Box<dyn
     assert!(message.contains("[5]"), "message should contain error code [5]: {message:?}");
 
     socket.close(None).await?;
-    listeners.stop("out-err-win32-known").await?;
+    server.listeners.stop("out-err-win32-known").await?;
     Ok(())
 }
 
@@ -1719,22 +1672,25 @@ async fn command_error_win32_known_code_broadcasts_error() -> Result<(), Box<dyn
 #[tokio::test]
 async fn command_error_win32_unknown_code_broadcasts_numeric()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-err-win32-unk", listener_port)).await?;
+    server
+        .listeners
+        .create(common::http_listener_config("out-err-win32-unk", listener_port))
+        .await?;
     drop(listener_guard);
-    listeners.start("out-err-win32-unk").await?;
+    server.listeners.start("out-err-win32-unk").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0041_u32;
     let key = [0x42; AGENT_KEY_LENGTH];
     let iv = [0x43; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -1768,7 +1724,7 @@ async fn command_error_win32_unknown_code_broadcasts_numeric()
     assert!(message.contains("[9999]"), "message should contain code [9999]: {message:?}");
 
     socket.close(None).await?;
-    listeners.stop("out-err-win32-unk").await?;
+    server.listeners.stop("out-err-win32-unk").await?;
     Ok(())
 }
 
@@ -1777,22 +1733,25 @@ async fn command_error_win32_unknown_code_broadcasts_numeric()
 #[tokio::test]
 async fn command_error_token_empty_vault_broadcasts_message()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-err-token-empty", listener_port)).await?;
+    server
+        .listeners
+        .create(common::http_listener_config("out-err-token-empty", listener_port))
+        .await?;
     drop(listener_guard);
-    listeners.start("out-err-token-empty").await?;
+    server.listeners.start("out-err-token-empty").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0042_u32;
     let key = [0x44; AGENT_KEY_LENGTH];
     let iv = [0x45; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -1827,7 +1786,7 @@ async fn command_error_token_empty_vault_broadcasts_message()
     );
 
     socket.close(None).await?;
-    listeners.stop("out-err-token-empty").await?;
+    server.listeners.stop("out-err-token-empty").await?;
     Ok(())
 }
 
@@ -1836,22 +1795,25 @@ async fn command_error_token_empty_vault_broadcasts_message()
 #[tokio::test]
 async fn command_error_token_other_status_broadcasts_hex() -> Result<(), Box<dyn std::error::Error>>
 {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-err-token-hex", listener_port)).await?;
+    server
+        .listeners
+        .create(common::http_listener_config("out-err-token-hex", listener_port))
+        .await?;
     drop(listener_guard);
-    listeners.start("out-err-token-hex").await?;
+    server.listeners.start("out-err-token-hex").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0043_u32;
     let key = [0x46; AGENT_KEY_LENGTH];
     let iv = [0x47; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -1887,7 +1849,7 @@ async fn command_error_token_other_status_broadcasts_hex() -> Result<(), Box<dyn
     assert!(message.contains("BEEF"), "message should contain hex status BEEF: {message:?}");
 
     socket.close(None).await?;
-    listeners.stop("out-err-token-hex").await?;
+    server.listeners.stop("out-err-token-hex").await?;
     Ok(())
 }
 
@@ -1895,22 +1857,22 @@ async fn command_error_token_other_status_broadcasts_hex() -> Result<(), Box<dyn
 /// without broadcasting any `AgentResponse`.
 #[tokio::test]
 async fn command_error_coffee_no_broadcast() -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-err-coffee", listener_port)).await?;
+    server.listeners.create(common::http_listener_config("out-err-coffee", listener_port)).await?;
     drop(listener_guard);
-    listeners.start("out-err-coffee").await?;
+    server.listeners.start("out-err-coffee").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0044_u32;
     let key = [0x48; AGENT_KEY_LENGTH];
     let iv = [0x49; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -1940,7 +1902,7 @@ async fn command_error_coffee_no_broadcast() -> Result<(), Box<dyn std::error::E
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
 
     socket.close(None).await?;
-    listeners.stop("out-err-coffee").await?;
+    server.listeners.stop("out-err-coffee").await?;
     Ok(())
 }
 
@@ -1948,22 +1910,25 @@ async fn command_error_coffee_no_broadcast() -> Result<(), Box<dyn std::error::E
 /// without broadcasting any `AgentResponse`.
 #[tokio::test]
 async fn command_error_unknown_class_no_broadcast() -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-err-unk-class", listener_port)).await?;
+    server
+        .listeners
+        .create(common::http_listener_config("out-err-unk-class", listener_port))
+        .await?;
     drop(listener_guard);
-    listeners.start("out-err-unk-class").await?;
+    server.listeners.start("out-err-unk-class").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0045_u32;
     let key = [0x4A; AGENT_KEY_LENGTH];
     let iv = [0x4B; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -1993,7 +1958,7 @@ async fn command_error_unknown_class_no_broadcast() -> Result<(), Box<dyn std::e
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
 
     socket.close(None).await?;
-    listeners.stop("out-err-unk-class").await?;
+    server.listeners.stop("out-err-unk-class").await?;
     Ok(())
 }
 
@@ -2004,22 +1969,25 @@ async fn command_error_unknown_class_no_broadcast() -> Result<(), Box<dyn std::e
 #[tokio::test]
 async fn kill_date_callback_marks_agent_dead_and_broadcasts()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-killdate-test", listener_port)).await?;
+    server
+        .listeners
+        .create(common::http_listener_config("out-killdate-test", listener_port))
+        .await?;
     drop(listener_guard);
-    listeners.start("out-killdate-test").await?;
+    server.listeners.start("out-killdate-test").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0050_u32;
     let key = [0x50; AGENT_KEY_LENGTH];
     let iv = [0x51; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -2064,7 +2032,7 @@ async fn kill_date_callback_marks_agent_dead_and_broadcasts()
     assert!(message.contains("kill date"), "message should mention kill date: {message:?}");
 
     socket.close(None).await?;
-    listeners.stop("out-killdate-test").await?;
+    server.listeners.stop("out-killdate-test").await?;
     Ok(())
 }
 
@@ -2074,22 +2042,22 @@ async fn kill_date_callback_marks_agent_dead_and_broadcasts()
 /// broadcast an `AgentUpdate`, and broadcast an `AgentResponse` with the new values.
 #[tokio::test]
 async fn sleep_callback_updates_agent_and_broadcasts() -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-sleep-test", listener_port)).await?;
+    server.listeners.create(common::http_listener_config("out-sleep-test", listener_port)).await?;
     drop(listener_guard);
-    listeners.start("out-sleep-test").await?;
+    server.listeners.start("out-sleep-test").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0060_u32;
     let key = [0x60; AGENT_KEY_LENGTH];
     let iv = [0x61; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -2141,7 +2109,7 @@ async fn sleep_callback_updates_agent_and_broadcasts() -> Result<(), Box<dyn std
     );
 
     socket.close(None).await?;
-    listeners.stop("out-sleep-test").await?;
+    server.listeners.stop("out-sleep-test").await?;
     Ok(())
 }
 
@@ -2152,22 +2120,22 @@ async fn sleep_callback_updates_agent_and_broadcasts() -> Result<(), Box<dyn std
 #[tokio::test]
 async fn config_kill_date_set_broadcasts_and_updates_agent()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-cfg-kd-set", listener_port)).await?;
+    server.listeners.create(common::http_listener_config("out-cfg-kd-set", listener_port)).await?;
     drop(listener_guard);
-    listeners.start("out-cfg-kd-set").await?;
+    server.listeners.start("out-cfg-kd-set").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0070_u32;
     let key = [0x70; AGENT_KEY_LENGTH];
     let iv = [0x71; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -2212,7 +2180,7 @@ async fn config_kill_date_set_broadcasts_and_updates_agent()
     );
 
     socket.close(None).await?;
-    listeners.stop("out-cfg-kd-set").await?;
+    server.listeners.stop("out-cfg-kd-set").await?;
     Ok(())
 }
 
@@ -2220,22 +2188,22 @@ async fn config_kill_date_set_broadcasts_and_updates_agent()
 /// "KillDate was disabled" and clear the agent's kill_date.
 #[tokio::test]
 async fn config_kill_date_zero_disables_and_broadcasts() -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-cfg-kd-zero", listener_port)).await?;
+    server.listeners.create(common::http_listener_config("out-cfg-kd-zero", listener_port)).await?;
     drop(listener_guard);
-    listeners.start("out-cfg-kd-zero").await?;
+    server.listeners.start("out-cfg-kd-zero").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0071_u32;
     let key = [0x72; AGENT_KEY_LENGTH];
     let iv = [0x73; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -2276,7 +2244,7 @@ async fn config_kill_date_zero_disables_and_broadcasts() -> Result<(), Box<dyn s
     );
 
     socket.close(None).await?;
-    listeners.stop("out-cfg-kd-zero").await?;
+    server.listeners.stop("out-cfg-kd-zero").await?;
     Ok(())
 }
 
@@ -2285,22 +2253,22 @@ async fn config_kill_date_zero_disables_and_broadcasts() -> Result<(), Box<dyn s
 #[tokio::test]
 async fn config_working_hours_set_broadcasts_and_updates() -> Result<(), Box<dyn std::error::Error>>
 {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-cfg-wh-set", listener_port)).await?;
+    server.listeners.create(common::http_listener_config("out-cfg-wh-set", listener_port)).await?;
     drop(listener_guard);
-    listeners.start("out-cfg-wh-set").await?;
+    server.listeners.start("out-cfg-wh-set").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0072_u32;
     let key = [0x74; AGENT_KEY_LENGTH];
     let iv = [0x75; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -2342,7 +2310,7 @@ async fn config_working_hours_set_broadcasts_and_updates() -> Result<(), Box<dyn
     );
 
     socket.close(None).await?;
-    listeners.stop("out-cfg-wh-set").await?;
+    server.listeners.stop("out-cfg-wh-set").await?;
     Ok(())
 }
 
@@ -2350,22 +2318,22 @@ async fn config_working_hours_set_broadcasts_and_updates() -> Result<(), Box<dyn
 /// "WorkingHours was disabled".
 #[tokio::test]
 async fn config_working_hours_zero_disables() -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-cfg-wh-zero", listener_port)).await?;
+    server.listeners.create(common::http_listener_config("out-cfg-wh-zero", listener_port)).await?;
     drop(listener_guard);
-    listeners.start("out-cfg-wh-zero").await?;
+    server.listeners.start("out-cfg-wh-zero").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0073_u32;
     let key = [0x76; AGENT_KEY_LENGTH];
     let iv = [0x77; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -2406,7 +2374,7 @@ async fn config_working_hours_zero_disables() -> Result<(), Box<dyn std::error::
     );
 
     socket.close(None).await?;
-    listeners.stop("out-cfg-wh-zero").await?;
+    server.listeners.stop("out-cfg-wh-zero").await?;
     Ok(())
 }
 
@@ -2414,22 +2382,25 @@ async fn config_working_hours_zero_disables() -> Result<(), Box<dyn std::error::
 /// with the allocation value in the message.
 #[tokio::test]
 async fn config_memory_alloc_broadcasts_value() -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-cfg-memalloc", listener_port)).await?;
+    server
+        .listeners
+        .create(common::http_listener_config("out-cfg-memalloc", listener_port))
+        .await?;
     drop(listener_guard);
-    listeners.start("out-cfg-memalloc").await?;
+    server.listeners.start("out-cfg-memalloc").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0074_u32;
     let key = [0x78; AGENT_KEY_LENGTH];
     let iv = [0x79; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -2472,7 +2443,7 @@ async fn config_memory_alloc_broadcasts_value() -> Result<(), Box<dyn std::error
     );
 
     socket.close(None).await?;
-    listeners.stop("out-cfg-memalloc").await?;
+    server.listeners.stop("out-cfg-memalloc").await?;
     Ok(())
 }
 
@@ -2480,22 +2451,22 @@ async fn config_memory_alloc_broadcasts_value() -> Result<(), Box<dyn std::error
 /// HTTP status (`InvalidCallbackPayload`) and must NOT broadcast.
 #[tokio::test]
 async fn config_invalid_key_returns_error() -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-cfg-bad-key", listener_port)).await?;
+    server.listeners.create(common::http_listener_config("out-cfg-bad-key", listener_port)).await?;
     drop(listener_guard);
-    listeners.start("out-cfg-bad-key").await?;
+    server.listeners.start("out-cfg-bad-key").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0075_u32;
     let key = [0x7A; AGENT_KEY_LENGTH];
     let iv = [0x7B; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -2526,7 +2497,7 @@ async fn config_invalid_key_returns_error() -> Result<(), Box<dyn std::error::Er
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
 
     socket.close(None).await?;
-    listeners.stop("out-cfg-bad-key").await?;
+    server.listeners.stop("out-cfg-bad-key").await?;
     Ok(())
 }
 
@@ -2536,22 +2507,25 @@ async fn config_invalid_key_returns_error() -> Result<(), Box<dyn std::error::Er
 #[tokio::test]
 async fn job_list_malformed_incomplete_row_returns_error_no_broadcast()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (server_addr, listeners) = start_server().await?;
-    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
     common::login(&mut socket).await?;
 
-    listeners.create(common::http_listener_config("out-job-malformed", listener_port)).await?;
+    server
+        .listeners
+        .create(common::http_listener_config("out-job-malformed", listener_port))
+        .await?;
     drop(listener_guard);
-    listeners.start("out-job-malformed").await?;
+    server.listeners.start("out-job-malformed").await?;
     common::wait_for_listener(listener_port).await?;
 
     let agent_id = 0xDEAD_0076_u32;
     let key = [0x77; AGENT_KEY_LENGTH];
     let iv = [0x78; AGENT_IV_LENGTH];
-    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -2590,6 +2564,6 @@ async fn job_list_malformed_incomplete_row_returns_error_no_broadcast()
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
 
     socket.close(None).await?;
-    listeners.stop("out-job-malformed").await?;
+    server.listeners.stop("out-job-malformed").await?;
     Ok(())
 }

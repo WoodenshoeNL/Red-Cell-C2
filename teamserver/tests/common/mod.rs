@@ -35,6 +35,8 @@ pub struct TestServer {
     pub addr: std::net::SocketAddr,
     pub listeners: ListenerManager,
     pub agent_registry: AgentRegistry,
+    pub database: Database,
+    pub sockets: SocketRelayManager,
 }
 
 /// Bind a free TCP port, start a teamserver from `profile`, and return a
@@ -61,7 +63,7 @@ pub async fn spawn_test_server(profile: Profile) -> Result<TestServer, Box<dyn s
         agent_registry: registry.clone(),
         listeners: listeners.clone(),
         payload_builder: PayloadBuilderService::disabled_for_tests(),
-        sockets,
+        sockets: sockets.clone(),
         webhooks: AuditWebhookNotifier::from_profile(&profile),
         login_rate_limiter: LoginRateLimiter::new(),
         shutdown: red_cell::ShutdownController::new(),
@@ -74,7 +76,7 @@ pub async fn spawn_test_server(profile: Profile) -> Result<TestServer, Box<dyn s
         let _ = axum::serve(tcp, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await;
     });
-    Ok(TestServer { addr, listeners, agent_registry: registry })
+    Ok(TestServer { addr, listeners, agent_registry: registry, database, sockets })
 }
 
 /// Authenticate over WebSocket as `"operator"` / `"password1234"` and consume the
@@ -322,6 +324,49 @@ pub fn http_listener_config(name: &str, port: u16) -> red_cell_common::ListenerC
         response: None,
         proxy: None,
     })
+}
+
+/// Register a fresh agent via `DEMON_INIT` and return the AES-CTR block offset
+/// after the init ACK has been consumed.
+pub async fn register_agent(
+    client: &reqwest::Client,
+    listener_port: u16,
+    agent_id: u32,
+    key: [u8; AGENT_KEY_LENGTH],
+    iv: [u8; AGENT_IV_LENGTH],
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let resp = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(valid_demon_init_body(agent_id, key, iv))
+        .send()
+        .await?
+        .error_for_status()?;
+    let bytes = resp.bytes().await?;
+    Ok(red_cell_common::crypto::ctr_blocks_for_len(bytes.len()))
+}
+
+/// Build a standard test [`Profile`] with a single `operator`/`password1234`
+/// user.  Most integration tests that do not need a custom profile can reuse
+/// this directly.
+pub fn default_test_profile() -> Profile {
+    Profile::parse(
+        r#"
+        Teamserver {
+          Host = "127.0.0.1"
+          Port = 0
+        }
+
+        Operators {
+          user "operator" {
+            Password = "password1234"
+            Role = "Operator"
+          }
+        }
+
+        Demon {}
+        "#,
+    )
+    .expect("default test profile should parse")
 }
 
 /// Append `value` to `buffer` as a BE-length-prefixed byte slice.

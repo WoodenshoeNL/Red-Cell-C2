@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 428 | 212 | 31 |
+| Tasks closed | 441 | 212 | 31 |
 | Bugs filed against | 44 | 34 | 9 |
 | Bug rate (bugs/task) | 0.10 | 0.16 | 0.29 |
 | Quality score | 90% | 84% | 71% |
 
-*Bug rates: Claude 44/428=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 44/441=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-20 00:15 — f6b07cc..c7fffdc
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 13 | 0 | Closed 13 issues (91qt, olvs, v5fb, 1gwf, e0cv, 6wo8, tphz, 42hq, xmexr, hctp+3 dupes). Fixed: crypto empty-slice edge case, kerberos filetime overflow, DownloadTracker error attribution, swallowed errors in sockets/websocket. Major refactor: extracted shared test setup into common helper, removing ~800 lines of duplication across 4 test files. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (0 warnings), cargo test passed (all suites 0 failures)
 
 ### QA Review — 2026-03-19 23:30 — dd1fa62..f6b07cc
 

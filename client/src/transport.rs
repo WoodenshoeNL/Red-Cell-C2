@@ -2028,7 +2028,7 @@ mod tests {
     use red_cell_common::operator::{
         AgentInfo as OperatorAgentInfo, AgentPivotsInfo, AgentResponseInfo, AgentUpdateInfo,
         BuildPayloadMessageInfo, ChatCode, EventCode, InitConnectionCode, ListenerCode,
-        ListenerErrorInfo, LoginInfo, Message, MessageHead, MessageInfo, SessionCode,
+        ListenerErrorInfo, LoginInfo, Message, MessageHead, MessageInfo, NameInfo, SessionCode,
         TeamserverLogInfo,
     };
     use red_cell_common::tls::{TlsKeyAlgorithm, generate_self_signed_tls_identity};
@@ -3740,5 +3740,168 @@ mod tests {
         assert_eq!(entry.message, "Invalid credentials");
 
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn listener_edit_upserts_and_emits_edit_event() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        // Add an initial listener via ListenerNew.
+        state.apply_operator_message(OperatorMessage::ListenerNew(Message {
+            head: head(EventCode::Listener),
+            info: ListenerInfo {
+                name: Some("http".to_owned()),
+                protocol: Some("Https".to_owned()),
+                status: Some("Online".to_owned()),
+                ..ListenerInfo::default()
+            },
+        }));
+        assert_eq!(state.listeners.len(), 1);
+        assert_eq!(state.listeners[0].protocol, "Https");
+
+        // Edit the listener — should update in place, not add a duplicate.
+        let events = state.apply_operator_message(OperatorMessage::ListenerEdit(Message {
+            head: head(EventCode::Listener),
+            info: ListenerInfo {
+                name: Some("http".to_owned()),
+                protocol: Some("Http".to_owned()),
+                status: Some("Offline".to_owned()),
+                ..ListenerInfo::default()
+            },
+        }));
+
+        assert_eq!(state.listeners.len(), 1, "should upsert, not duplicate");
+        assert_eq!(state.listeners[0].protocol, "Http");
+        assert_eq!(state.listeners[0].status, "Offline");
+
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0], AppEvent::ListenerChanged { name, action } if name == "http" && action == "edit"),
+            "expected ListenerChanged edit event, got {events:?}",
+        );
+    }
+
+    #[test]
+    fn listener_edit_creates_new_entry_when_absent() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        let events = state.apply_operator_message(OperatorMessage::ListenerEdit(Message {
+            head: head(EventCode::Listener),
+            info: ListenerInfo {
+                name: Some("smb".to_owned()),
+                protocol: Some("SMB".to_owned()),
+                status: Some("Online".to_owned()),
+                ..ListenerInfo::default()
+            },
+        }));
+
+        assert_eq!(state.listeners.len(), 1);
+        assert_eq!(state.listeners[0].name, "smb");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], AppEvent::ListenerChanged { action, .. } if action == "edit"),);
+    }
+
+    #[test]
+    fn listener_remove_deletes_listener_and_emits_stop_event() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        // Add two listeners.
+        state.apply_operator_message(OperatorMessage::ListenerNew(Message {
+            head: head(EventCode::Listener),
+            info: ListenerInfo {
+                name: Some("http".to_owned()),
+                protocol: Some("Https".to_owned()),
+                status: Some("Online".to_owned()),
+                ..ListenerInfo::default()
+            },
+        }));
+        state.apply_operator_message(OperatorMessage::ListenerNew(Message {
+            head: head(EventCode::Listener),
+            info: ListenerInfo {
+                name: Some("smb".to_owned()),
+                protocol: Some("SMB".to_owned()),
+                status: Some("Online".to_owned()),
+                ..ListenerInfo::default()
+            },
+        }));
+        assert_eq!(state.listeners.len(), 2);
+
+        // Remove the first one.
+        let events = state.apply_operator_message(OperatorMessage::ListenerRemove(Message {
+            head: head(EventCode::Listener),
+            info: NameInfo { name: "http".to_owned() },
+        }));
+
+        assert_eq!(state.listeners.len(), 1);
+        assert_eq!(state.listeners[0].name, "smb", "only 'smb' should remain");
+
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0], AppEvent::ListenerChanged { name, action } if name == "http" && action == "stop"),
+            "expected ListenerChanged stop event, got {events:?}",
+        );
+    }
+
+    #[test]
+    fn listener_remove_is_noop_for_unknown_listener() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        let events = state.apply_operator_message(OperatorMessage::ListenerRemove(Message {
+            head: head(EventCode::Listener),
+            info: NameInfo { name: "nonexistent".to_owned() },
+        }));
+
+        assert!(state.listeners.is_empty());
+        // Event is still emitted even if no listener was present.
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], AppEvent::ListenerChanged { action, .. } if action == "stop"),);
+    }
+
+    #[test]
+    fn listener_mark_updates_status_of_existing_listener() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        // Add a listener.
+        state.apply_operator_message(OperatorMessage::ListenerNew(Message {
+            head: head(EventCode::Listener),
+            info: ListenerInfo {
+                name: Some("http".to_owned()),
+                protocol: Some("Https".to_owned()),
+                status: Some("Online".to_owned()),
+                ..ListenerInfo::default()
+            },
+        }));
+        assert_eq!(state.listeners[0].status, "Online");
+
+        // Mark it as offline.
+        let events = state.apply_operator_message(OperatorMessage::ListenerMark(Message {
+            head: head(EventCode::Listener),
+            info: ListenerMarkInfo { name: "http".to_owned(), mark: "Offline".to_owned() },
+        }));
+
+        assert_eq!(state.listeners.len(), 1);
+        assert_eq!(state.listeners[0].status, "Offline");
+        assert_eq!(state.listeners[0].protocol, "Https", "protocol should be unchanged");
+
+        // ListenerMark does not emit events.
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn listener_mark_creates_placeholder_when_listener_absent() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        state.apply_operator_message(OperatorMessage::ListenerMark(Message {
+            head: head(EventCode::Listener),
+            info: ListenerMarkInfo {
+                name: "unknown-listener".to_owned(),
+                mark: "Offline".to_owned(),
+            },
+        }));
+
+        assert_eq!(state.listeners.len(), 1);
+        assert_eq!(state.listeners[0].name, "unknown-listener");
+        assert_eq!(state.listeners[0].status, "Offline");
+        assert_eq!(state.listeners[0].protocol, "unknown");
     }
 }

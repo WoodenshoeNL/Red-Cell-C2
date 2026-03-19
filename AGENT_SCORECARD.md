@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 463 | 212 | 31 |
+| Tasks closed | 468 | 212 | 31 |
 | Bugs filed against | 46 | 34 | 9 |
 | Bug rate (bugs/task) | 0.10 | 0.16 | 0.29 |
 | Quality score | 90% | 84% | 71% |
 
-*Bug rates: Claude 46/463=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 46/468=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -2642,3 +2642,13 @@ Biggest blindspot: External C2 bridge listener (recently added) has zero integra
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: cargo check passed, clippy passed (0 warnings), cargo test passed (all suites 0 failures)
+
+### QA Review — 2026-03-19 — cfab726..81d2ff0
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 5 | 0 | Closed ya4b, 70os, 8tiu, 4pur, ueby. fix(security): RBAC enforcement in Python plugin API boundary — thread-local CallerRoleGuard propagates operator role into plugin calls, permission checks on all Python-exposed functions (get_agent, list_agents, task, listener start/stop). New tests: reconnection backoff (6 unit tests), corrupt TOML input handling (11 unit tests), auth audit trail integration (6 tests), plugin RBAC enforcement (7 unit tests including cross-Python boundary checks), CTR mode wrong-key property test. All clean, well-tested. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (0 warnings), cargo test passed (2191 tests, 0 failures)

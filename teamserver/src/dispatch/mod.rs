@@ -913,8 +913,10 @@ impl DownloadTracker {
             tracker.downloads.get(&(agent_id, file_id)).map(|download| download.state.data.len())
         else {
             return Err(CommandDispatchError::InvalidCallbackPayload {
-                command_id: u32::from(DemonCommand::BeaconOutput),
-                message: format!("download 0x{file_id:08X} was not opened"),
+                command_id: 0,
+                message: format!(
+                    "download 0x{file_id:08X} for agent 0x{agent_id:08X} was not opened"
+                ),
             });
         };
         let Some(next_len) = current_len.checked_add(chunk.len()) else {
@@ -951,8 +953,10 @@ impl DownloadTracker {
         }
         let Some(download) = tracker.downloads.get_mut(&(agent_id, file_id)) else {
             return Err(CommandDispatchError::InvalidCallbackPayload {
-                command_id: u32::from(DemonCommand::BeaconOutput),
-                message: format!("download 0x{file_id:08X} was not opened"),
+                command_id: 0,
+                message: format!(
+                    "download 0x{file_id:08X} for agent 0x{agent_id:08X} was not opened"
+                ),
             });
         };
         download.state.data.extend_from_slice(chunk);
@@ -4050,8 +4054,9 @@ mod tests {
             CommandDispatchError::InvalidCallbackPayload {
                 command_id,
                 message,
-            } if command_id == u32::from(DemonCommand::BeaconOutput)
-                && message == "download 0x00000035 was not opened"
+            } if command_id == 0
+                && message.contains("0x00000035")
+                && message.contains("was not opened")
         ));
         assert!(
             timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),
@@ -4182,8 +4187,9 @@ mod tests {
             CommandDispatchError::InvalidCallbackPayload {
                 command_id,
                 message,
-            } if command_id == u32::from(DemonCommand::BeaconOutput)
-                && message == "download 0x00000042 was not opened"
+            } if command_id == 0
+                && message.contains("0x00000042")
+                && message.contains("was not opened")
         ));
     }
 
@@ -4578,8 +4584,9 @@ mod tests {
             CommandDispatchError::InvalidCallbackPayload {
                 command_id,
                 message,
-            } if command_id == u32::from(DemonCommand::BeaconOutput)
-                && message == "download 0x00000057 was not opened"
+            } if command_id == 0
+                && message.contains("0x00000057")
+                && message.contains("was not opened")
         ));
         assert!(
             timeout(Duration::from_millis(50), receiver.recv()).await.is_err(),

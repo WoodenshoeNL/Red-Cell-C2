@@ -2220,6 +2220,38 @@ async fn agent_list_active_with_corrupt_row_returns_error() -> Result<(), Teamse
 }
 
 #[tokio::test]
+async fn loot_repository_rejects_insert_for_unknown_agent_id() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let loot = database.loot();
+
+    // Attempt to insert a loot record whose agent_id was never created.
+    let record = LootRecord {
+        id: None,
+        agent_id: 0xDEAD_FFFF,
+        kind: "credential".to_owned(),
+        name: "orphan.dmp".to_owned(),
+        file_path: Some("C:\\Temp\\orphan.dmp".to_owned()),
+        size_bytes: Some(256),
+        captured_at: "2026-03-19T10:00:00Z".to_owned(),
+        data: Some(vec![0xDE, 0xAD]),
+        metadata: None,
+    };
+
+    let error =
+        loot.create(&record).await.expect_err("loot insert with unknown agent_id should fail");
+
+    assert!(
+        matches!(error, TeamserverError::Database(_)),
+        "expected Database error for missing agent FK, got: {error:?}"
+    );
+
+    // No loot row should have been stored.
+    assert!(loot.list().await?.is_empty(), "list() must remain empty after rejected insert");
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn link_repository_rejects_duplicate_insert() -> Result<(), TeamserverError> {
     let database = test_database().await?;
     let agents = database.agents();

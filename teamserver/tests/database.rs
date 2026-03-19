@@ -2371,3 +2371,293 @@ async fn link_repository_rejects_missing_child_agent() -> Result<(), TeamserverE
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Audit & session-activity pagination boundary conditions
+// ---------------------------------------------------------------------------
+
+/// Helper: insert `count` audit log entries with distinct actions.
+async fn insert_audit_entries(database: &Database, count: usize) -> Result<(), TeamserverError> {
+    for i in 0..count {
+        database
+            .audit_log()
+            .create(&AuditLogEntry {
+                id: None,
+                actor: format!("op-{}", i % 3),
+                action: format!("test.action.{i}"),
+                target_kind: "system".to_owned(),
+                target_id: None,
+                details: Some(
+                    serde_json::to_value(audit_details(
+                        AuditResultStatus::Success,
+                        None,
+                        None,
+                        None,
+                    ))
+                    .map_err(TeamserverError::Json)?,
+                ),
+                occurred_at: format!("2026-03-10T10:{:02}:{:02}Z", i / 60, i % 60),
+            })
+            .await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn audit_query_offset_beyond_total_returns_empty() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    insert_audit_entries(&database, 5).await?;
+
+    let page = query_audit_log(
+        &database,
+        &AuditQuery { limit: Some(10), offset: Some(100), ..AuditQuery::default() },
+    )
+    .await?;
+
+    assert_eq!(page.total, 5, "total should reflect all matching rows");
+    assert!(page.items.is_empty(), "offset past total should yield no items");
+    assert_eq!(page.offset, 100);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn audit_query_limit_zero_clamps_to_one() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    insert_audit_entries(&database, 5).await?;
+
+    let page =
+        query_audit_log(&database, &AuditQuery { limit: Some(0), ..AuditQuery::default() }).await?;
+
+    // AuditQuery::limit() clamps to 1..=200, so limit=0 → 1.
+    assert_eq!(page.limit, 1);
+    assert_eq!(page.items.len(), 1, "clamped limit should return exactly 1 item");
+    assert_eq!(page.total, 5);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn audit_query_large_offset_returns_empty() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    insert_audit_entries(&database, 3).await?;
+
+    // Use a very large offset that still fits in i64.
+    let large_offset: usize = i64::MAX as usize;
+
+    let page = query_audit_log(
+        &database,
+        &AuditQuery { offset: Some(large_offset), ..AuditQuery::default() },
+    )
+    .await?;
+
+    assert_eq!(page.total, 3);
+    assert!(page.items.is_empty());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn audit_query_combined_filters_with_pagination() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+
+    // Insert 10 entries, alternating between two actors and two actions.
+    for i in 0..10 {
+        let actor = if i % 2 == 0 { "alice" } else { "bob" };
+        let action = if i < 5 { "deploy.start" } else { "deploy.finish" };
+        database
+            .audit_log()
+            .create(&AuditLogEntry {
+                id: None,
+                actor: actor.to_owned(),
+                action: action.to_owned(),
+                target_kind: "service".to_owned(),
+                target_id: None,
+                details: Some(
+                    serde_json::to_value(audit_details(
+                        AuditResultStatus::Success,
+                        None,
+                        None,
+                        None,
+                    ))
+                    .map_err(TeamserverError::Json)?,
+                ),
+                occurred_at: format!("2026-03-10T10:00:{i:02}Z"),
+            })
+            .await?;
+    }
+
+    // Filter: actor=alice AND action=deploy.start, with limit=2 offset=1.
+    let page = query_audit_log(
+        &database,
+        &AuditQuery {
+            actor: Some("alice".to_owned()),
+            action: Some("deploy.start".to_owned()),
+            limit: Some(2),
+            offset: Some(1),
+            ..AuditQuery::default()
+        },
+    )
+    .await?;
+
+    // alice + deploy.start = indices 0, 2, 4 → 3 entries total.
+    assert_eq!(page.total, 3, "should match alice+deploy.start entries");
+    assert_eq!(page.items.len(), 2, "limit=2 should cap returned items");
+    assert_eq!(page.offset, 1);
+    for item in &page.items {
+        assert_eq!(item.actor, "alice");
+        assert_eq!(item.action, "deploy.start");
+    }
+
+    // Offset past the filtered total.
+    let page = query_audit_log(
+        &database,
+        &AuditQuery {
+            actor: Some("alice".to_owned()),
+            action: Some("deploy.start".to_owned()),
+            offset: Some(50),
+            ..AuditQuery::default()
+        },
+    )
+    .await?;
+
+    assert_eq!(page.total, 3);
+    assert!(page.items.is_empty());
+
+    Ok(())
+}
+
+/// Helper: insert session activity entries.
+async fn insert_session_events(
+    database: &Database,
+    operator: &str,
+    count: usize,
+) -> Result<(), TeamserverError> {
+    for i in 0..count {
+        let action = if i % 2 == 0 { "operator.connect" } else { "operator.disconnect" };
+        record_operator_action(
+            database,
+            operator,
+            action,
+            "operator",
+            Some(operator.to_owned()),
+            audit_details(AuditResultStatus::Success, None, None, None),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_activity_offset_beyond_total_returns_empty() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    insert_session_events(&database, "neo", 5).await?;
+
+    let page = query_session_activity(
+        &database,
+        &SessionActivityQuery {
+            operator: Some("neo".to_owned()),
+            offset: Some(100),
+            ..SessionActivityQuery::default()
+        },
+    )
+    .await?;
+
+    assert_eq!(page.total, 5);
+    assert!(page.items.is_empty(), "offset past total should yield no items");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_activity_limit_zero_clamps_to_one() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    insert_session_events(&database, "neo", 5).await?;
+
+    let page = query_session_activity(
+        &database,
+        &SessionActivityQuery {
+            operator: Some("neo".to_owned()),
+            limit: Some(0),
+            ..SessionActivityQuery::default()
+        },
+    )
+    .await?;
+
+    assert_eq!(page.limit, 1);
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.total, 5);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_activity_large_offset_returns_empty() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    insert_session_events(&database, "neo", 3).await?;
+
+    let large_offset: usize = i64::MAX as usize;
+
+    let page = query_session_activity(
+        &database,
+        &SessionActivityQuery {
+            operator: Some("neo".to_owned()),
+            offset: Some(large_offset),
+            ..SessionActivityQuery::default()
+        },
+    )
+    .await?;
+
+    assert_eq!(page.total, 3);
+    assert!(page.items.is_empty());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_activity_combined_activity_filter_with_pagination() -> Result<(), TeamserverError>
+{
+    let database = test_database().await?;
+
+    // Insert 6 events (3 connect, 3 disconnect) for "neo".
+    insert_session_events(&database, "neo", 6).await?;
+    // Insert 2 events for "trinity" (should not appear in neo's results).
+    insert_session_events(&database, "trinity", 2).await?;
+
+    let page = query_session_activity(
+        &database,
+        &SessionActivityQuery {
+            operator: Some("neo".to_owned()),
+            activity: Some("connect".to_owned()),
+            limit: Some(2),
+            offset: Some(1),
+            ..SessionActivityQuery::default()
+        },
+    )
+    .await?;
+
+    // neo has 3 connect events.
+    assert_eq!(page.total, 3, "should match only neo's connect events");
+    assert_eq!(page.items.len(), 2, "limit=2 should cap returned items");
+    for item in &page.items {
+        assert_eq!(item.operator, "neo");
+        assert_eq!(item.activity, "connect");
+    }
+
+    // Offset past the filtered total.
+    let page = query_session_activity(
+        &database,
+        &SessionActivityQuery {
+            operator: Some("neo".to_owned()),
+            activity: Some("connect".to_owned()),
+            offset: Some(50),
+            ..SessionActivityQuery::default()
+        },
+    )
+    .await?;
+
+    assert_eq!(page.total, 3);
+    assert!(page.items.is_empty());
+
+    Ok(())
+}

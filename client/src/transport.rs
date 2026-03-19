@@ -3464,6 +3464,166 @@ mod tests {
     }
 
     #[test]
+    fn build_tls_connector_succeeds_for_certificate_authority() {
+        red_cell_common::tls::install_default_crypto_provider();
+        let sink = Arc::new(std::sync::Mutex::new(None));
+        let result = build_tls_connector(&TlsVerification::CertificateAuthority, sink);
+        assert!(result.is_ok(), "CertificateAuthority mode should build successfully");
+    }
+
+    #[test]
+    fn build_tls_connector_succeeds_for_fingerprint_mode() {
+        red_cell_common::tls::install_default_crypto_provider();
+        let sink = Arc::new(std::sync::Mutex::new(None));
+        let fingerprint = "ab".repeat(32); // 64 hex chars = SHA-256
+        let result = build_tls_connector(&TlsVerification::Fingerprint(fingerprint), sink);
+        assert!(result.is_ok(), "Fingerprint mode should build successfully");
+    }
+
+    #[test]
+    fn build_tls_connector_succeeds_for_dangerous_skip_verify() {
+        red_cell_common::tls::install_default_crypto_provider();
+        let sink = Arc::new(std::sync::Mutex::new(None));
+        let result = build_tls_connector(&TlsVerification::DangerousSkipVerify, sink);
+        assert!(result.is_ok(), "DangerousSkipVerify mode should build successfully");
+    }
+
+    #[test]
+    fn fingerprint_verifier_accepts_matching_cert() {
+        red_cell_common::tls::install_default_crypto_provider();
+        let identity = generate_self_signed_tls_identity(
+            &["test.local".to_owned()],
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("identity generation should succeed");
+
+        let cert_der = {
+            let mut reader = std::io::BufReader::new(identity.certificate_pem());
+            let certs = rustls_pemfile::certs(&mut reader)
+                .collect::<Result<Vec<_>, _>>()
+                .expect("cert PEM should parse");
+            certs.into_iter().next().expect("should have one cert")
+        };
+        let fingerprint = certificate_fingerprint(cert_der.as_ref());
+
+        let provider = aws_lc_rs::default_provider();
+        let sink = Arc::new(std::sync::Mutex::new(None));
+        let verifier = FingerprintCertificateVerifier {
+            expected_fingerprint: fingerprint.clone(),
+            provider,
+            fingerprint_sink: Arc::clone(&sink),
+        };
+
+        let result = verifier.verify_server_cert(
+            &cert_der,
+            &[],
+            &ServerName::try_from("test.local").expect("valid server name"),
+            &[],
+            UnixTime::now(),
+        );
+        assert!(result.is_ok(), "matching fingerprint should be accepted");
+        assert_eq!(
+            sink.lock().unwrap().as_deref(),
+            Some(fingerprint.as_str()),
+            "fingerprint sink should contain the actual fingerprint"
+        );
+    }
+
+    #[test]
+    fn fingerprint_verifier_rejects_mismatched_cert() {
+        red_cell_common::tls::install_default_crypto_provider();
+        let identity = generate_self_signed_tls_identity(
+            &["test.local".to_owned()],
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("identity generation should succeed");
+
+        let cert_der = {
+            let mut reader = std::io::BufReader::new(identity.certificate_pem());
+            let certs = rustls_pemfile::certs(&mut reader)
+                .collect::<Result<Vec<_>, _>>()
+                .expect("cert PEM should parse");
+            certs.into_iter().next().expect("should have one cert")
+        };
+        let actual_fingerprint = certificate_fingerprint(cert_der.as_ref());
+        let wrong_fingerprint = "00".repeat(32);
+
+        let provider = aws_lc_rs::default_provider();
+        let sink = Arc::new(std::sync::Mutex::new(None));
+        let verifier = FingerprintCertificateVerifier {
+            expected_fingerprint: wrong_fingerprint,
+            provider,
+            fingerprint_sink: Arc::clone(&sink),
+        };
+
+        let result = verifier.verify_server_cert(
+            &cert_der,
+            &[],
+            &ServerName::try_from("test.local").expect("valid server name"),
+            &[],
+            UnixTime::now(),
+        );
+        assert!(result.is_err(), "mismatched fingerprint should be rejected");
+
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("fingerprint mismatch"),
+            "error should mention fingerprint mismatch, got: {err_msg}"
+        );
+        assert_eq!(
+            sink.lock().unwrap().as_deref(),
+            Some(actual_fingerprint.as_str()),
+            "fingerprint sink should be populated even on mismatch"
+        );
+    }
+
+    #[test]
+    fn fingerprint_verifier_case_insensitive_match() {
+        red_cell_common::tls::install_default_crypto_provider();
+        let identity = generate_self_signed_tls_identity(
+            &["test.local".to_owned()],
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("identity generation should succeed");
+
+        let cert_der = {
+            let mut reader = std::io::BufReader::new(identity.certificate_pem());
+            let certs = rustls_pemfile::certs(&mut reader)
+                .collect::<Result<Vec<_>, _>>()
+                .expect("cert PEM should parse");
+            certs.into_iter().next().expect("should have one cert")
+        };
+        let fingerprint = certificate_fingerprint(cert_der.as_ref());
+        // The expected_fingerprint is lowercased in build_tls_connector, so test
+        // that the verifier works when given an already-lowercase fingerprint
+        // (which is what build_tls_connector passes).
+        assert_eq!(fingerprint, fingerprint.to_ascii_lowercase());
+
+        let provider = aws_lc_rs::default_provider();
+        let sink = Arc::new(std::sync::Mutex::new(None));
+        let verifier = FingerprintCertificateVerifier {
+            expected_fingerprint: fingerprint.to_ascii_uppercase(),
+            provider,
+            fingerprint_sink: Arc::clone(&sink),
+        };
+
+        // Upper-case expected vs lower-case actual — should fail because
+        // verify_server_cert does a direct string comparison. The case
+        // normalisation happens in build_tls_connector, not in the verifier.
+        let result = verifier.verify_server_cert(
+            &cert_der,
+            &[],
+            &ServerName::try_from("test.local").expect("valid server name"),
+            &[],
+            UnixTime::now(),
+        );
+        assert!(
+            result.is_err(),
+            "upper-case expected should not match lower-case actual in the verifier itself"
+        );
+    }
+
+    #[test]
     fn next_reconnect_delay_initial_value_doubles() {
         let delay = next_reconnect_delay(INITIAL_RECONNECT_DELAY);
         assert_eq!(delay, Duration::from_secs(2));

@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 540 | 212 | 31 |
+| Tasks closed | 544 | 212 | 31 |
 | Bugs filed against | 50 | 34 | 9 |
 | Bug rate (bugs/task) | 0.09 | 0.16 | 0.29 |
 | Quality score | 91% | 84% | 71% |
 
-*Bug rates: Claude 50/540=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 50/544=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-19 — f49bd40..8b00555
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 4 | 0 | Closed eub1 (REST API key auth integration tests — 8 tests covering auth, RBAC, bearer token), kfla (SOCKS5 client-to-agent write direction test), 7ged (listener error-state recovery path test), g162 (CTR sync verification in empty GET_JOB poll test). Clean run — no issues found. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (clean), cargo test 1590 passed / 3 flaky (pre-existing websocket race conditions, pass on rerun)
 
 ### QA Review — 2026-03-19 — 97bd0af..f52a3b0
 

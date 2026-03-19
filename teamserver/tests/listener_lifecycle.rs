@@ -597,6 +597,50 @@ async fn delete_nonexistent_listener_returns_error() -> Result<(), Box<dyn std::
 }
 
 // ---------------------------------------------------------------------------
+// Error-state recovery tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn start_succeeds_after_error_state_recovery() -> Result<(), Box<dyn std::error::Error>> {
+    let manager = test_manager().await?;
+    let (port, guard) = common::available_port()?;
+
+    // 1. Create a listener and attempt to start it while the port is occupied.
+    manager.create(http_config("lc-error-recovery", port)).await?;
+    let result = manager.start("lc-error-recovery").await;
+    assert!(result.is_err(), "start must fail when port is occupied");
+
+    let summary = manager.summary("lc-error-recovery").await?;
+    assert_eq!(summary.state.status, ListenerStatus::Error);
+    assert!(summary.state.last_error.is_some(), "error state must record a failure message");
+
+    // 2. Release the port so the listener can bind.
+    drop(guard);
+
+    // 3. Retry start — should transition from Error to Running.
+    let running = manager.start("lc-error-recovery").await?;
+    assert_eq!(
+        running.state.status,
+        ListenerStatus::Running,
+        "listener must transition from Error to Running after port is freed"
+    );
+
+    // 4. Verify the DB is consistent.
+    let db_summary = manager.summary("lc-error-recovery").await?;
+    assert_eq!(db_summary.state.status, ListenerStatus::Running);
+    assert!(
+        db_summary.state.last_error.is_none(),
+        "last_error must be cleared after successful restart"
+    );
+
+    // 5. Verify the listener is actually accepting connections.
+    timeout(Duration::from_secs(2), common::wait_for_listener(port)).await??;
+
+    manager.stop("lc-error-recovery").await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Same-port conflict between managed listeners
 // ---------------------------------------------------------------------------
 

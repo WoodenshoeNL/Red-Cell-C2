@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 468 | 212 | 31 |
+| Tasks closed | 474 | 212 | 31 |
 | Bugs filed against | 46 | 34 | 9 |
 | Bug rate (bugs/task) | 0.10 | 0.16 | 0.29 |
 | Quality score | 90% | 84% | 71% |
 
-*Bug rates: Claude 46/468=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 46/474=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -2652,3 +2652,13 @@ Build: cargo check passed, clippy passed (0 warnings), cargo test passed (all su
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: cargo check passed, clippy passed (0 warnings), cargo test passed (2191 tests, 0 failures)
+
+### QA Review — 2026-03-19 — 81d2ff0..5088711
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 6 | 0 | Closed x2in, 182a, fjb8, 53xh, xn9p, zori. All test-only changes: output log and command history eviction at capacity limits (python.rs +125 lines), login persistence test for nonexistent config file path, OperatorMessage missing Head/Body rejection tests and extra-key forward-compat test (operator.rs +69 lines), agent liveness sweep with non-UTC offset timestamps (+100 lines), operator_inventory with empty/closed-db audit log (+43 lines). Clean, well-structured edge-case coverage. One task (fn1f) currently in_progress. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (0 warnings), cargo test passed (all suites 0 failures)

@@ -4424,6 +4424,104 @@ havocui.RegisterCommand('recon scan', 'Run a recon scan', [{{'name': 'target', '
     }
 
     #[test]
+    fn execute_registered_command_captures_callback_exception() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let script = "import red_cell\n\
+def boom(agent, args):\n    raise RuntimeError('plugin exploded')\n\
+red_cell.register_command('boom', boom)\n";
+        write_script(&temp_dir.path().join("boom.py"), script);
+
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+        {
+            let mut state = lock_app_state(&app_state);
+            state.agents.push(sample_agent("00ABCDEF"));
+        }
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        let result = runtime.execute_registered_command("00ABCDEF", "boom");
+        assert!(
+            result.is_err(),
+            "execute_registered_command should return an error when the callback raises"
+        );
+        let error_message = result.unwrap_err().to_string();
+        assert!(
+            error_message.contains("plugin exploded"),
+            "error should contain the exception message, got: {error_message}"
+        );
+
+        // The runtime should still be functional after the exception.
+        let second = runtime.execute_registered_command("00ABCDEF", "boom");
+        assert!(second.is_err(), "callback should still raise on second invocation");
+    }
+
+    #[test]
+    fn reload_script_returns_error_for_unknown_script() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        let result = runtime.reload_script("nonexistent_plugin");
+        assert!(result.is_err(), "reload_script should return an error for an unknown script name");
+        let error_message = result.unwrap_err().to_string();
+        assert!(
+            error_message.contains("nonexistent_plugin"),
+            "error should mention the script name, got: {error_message}"
+        );
+    }
+
+    #[test]
+    fn unload_script_twice_is_idempotent() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        write_script(
+            &temp_dir.path().join("ephemeral.py"),
+            "import red_cell\nred_cell.register_command('temp', lambda: None)\n",
+        );
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        assert_eq!(runtime.command_names(), vec!["temp".to_owned()]);
+
+        runtime
+            .unload_script("ephemeral")
+            .unwrap_or_else(|error| panic!("first unload should succeed: {error}"));
+        assert!(runtime.command_names().is_empty());
+        assert!(
+            runtime
+                .script_descriptors()
+                .iter()
+                .find(|s| s.name == "ephemeral")
+                .is_some_and(|s| s.status == ScriptLoadStatus::Unloaded)
+        );
+
+        // Second unload of the same script should also succeed.
+        runtime
+            .unload_script("ephemeral")
+            .unwrap_or_else(|error| panic!("second unload should succeed (idempotent): {error}"));
+        assert!(
+            runtime
+                .script_descriptors()
+                .iter()
+                .find(|s| s.name == "ephemeral")
+                .is_some_and(|s| s.status == ScriptLoadStatus::Unloaded)
+        );
+    }
+
+    #[test]
     fn load_script_registers_command_and_descriptor() {
         let _guard = lock_mutex(&TEST_GUARD);
         let temp_dir =

@@ -178,7 +178,7 @@ pub(super) async fn mark_agent_dead_and_broadcast(
     message: &str,
 ) -> Result<Option<Vec<u8>>, CommandDispatchError> {
     registry.mark_dead(agent_id, message).await?;
-    let _ = sockets.remove_agent(agent_id).await;
+    sockets.remove_agent(agent_id).await;
     if let Some(agent) = registry.get(agent_id).await {
         events.broadcast(agent_mark_event(&agent));
     }

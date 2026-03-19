@@ -128,7 +128,7 @@ async fn sweep_dead_agents_at(
     }
 
     if !dead_agent_ids.is_empty() {
-        let _ = sockets.prune_stale_agents().await;
+        sockets.prune_stale_agents().await;
     }
 
     dead_agent_ids.sort_unstable();

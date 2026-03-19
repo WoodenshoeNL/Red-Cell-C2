@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 500 | 212 | 31 |
+| Tasks closed | 508 | 212 | 31 |
 | Bugs filed against | 46 | 34 | 9 |
 | Bug rate (bugs/task) | 0.09 | 0.16 | 0.29 |
 | Quality score | 91% | 84% | 71% |
 
-*Bug rates: Claude 46/500=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 46/508=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-19 16:00 — 5a21aa9..36a404b
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 8 | 0 | Closed 8 test-coverage issues (mogx, xjzh, qnn9, xd3l, 6qwd, te53, oao3, 0srt). Added ~1325 lines of client unit tests covering sanitize_file_name, derive_download_file_name, next_available_path, JSON/CSV export, loot filtering, process_task parsing, console completion, agent metadata helpers, UI label helpers. Added 114-line SMB reconnect flow integration test verifying CTR counter synchronisation after reconnect probe. Issue 85p1 in_progress (claimed today, not stuck). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (0 warnings), cargo test passed (all suites, 0 failures)
 
 ### QA Review — 2026-03-19 — ecbfd15..e93a83a
 

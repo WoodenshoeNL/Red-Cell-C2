@@ -1202,6 +1202,52 @@ mod tests {
         );
     }
 
+    /// Concurrent detached deliveries where some succeed and some fail must
+    /// correctly update both the `pending` counter and `discord_failure_count`.
+    ///
+    /// Uses `flaky_webhook_server(2)` with 4 deliveries (zero-delay retries so
+    /// each gets a single attempt).  The first 2 requests the server sees return
+    /// 500; the next 2 return 200.  After shutdown the failure counter must be 2
+    /// and exactly 2 payloads must have reached the server.
+    #[tokio::test]
+    async fn concurrent_mixed_success_and_failure_detached_deliveries() {
+        let (address, mut receiver, server) = flaky_webhook_server(2).await;
+        let notifier = AuditWebhookNotifier {
+            retry_delays: Arc::from([].as_slice()),
+            ..AuditWebhookNotifier::from_profile(&discord_profile(address))
+        };
+
+        // Fire 4 detached deliveries concurrently.
+        for i in 0..4 {
+            notifier.notify_audit_record_detached(sample_record(100 + i));
+        }
+
+        assert!(notifier.shutdown(Duration::from_secs(5)).await, "shutdown should drain all");
+
+        // Exactly 2 deliveries should have permanently failed.
+        assert_eq!(
+            notifier.discord_failure_count(),
+            2,
+            "first 2 server hits return 500 with no retries → 2 permanent failures"
+        );
+
+        // Exactly 2 payloads should have been delivered successfully.
+        let mut delivered = 0;
+        while receiver.try_recv().is_ok() {
+            delivered += 1;
+        }
+        assert_eq!(delivered, 2, "2 of 4 deliveries should reach the server successfully");
+
+        // pending must be fully drained.
+        assert_eq!(
+            notifier.delivery_state.pending.load(Ordering::SeqCst),
+            0,
+            "pending counter must be zero after shutdown"
+        );
+
+        server.abort();
+    }
+
     /// When an in-flight delivery never completes before the shutdown deadline,
     /// `shutdown()` must return `false` rather than hanging or reporting success.
     #[tokio::test]

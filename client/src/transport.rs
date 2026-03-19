@@ -4258,4 +4258,70 @@ mod tests {
         assert_eq!(log.unread_count, 1);
         assert_eq!(log.unread_by_kind(EventKind::System), 1);
     }
+
+    // ── normalize_agent_id ──────────────────────────────────────────
+
+    #[test]
+    fn normalize_agent_id_strips_0x_prefix_and_zero_pads() {
+        assert_eq!(normalize_agent_id("0xAABB0001"), "AABB0001");
+    }
+
+    #[test]
+    fn normalize_agent_id_lowcase_hex_without_prefix() {
+        assert_eq!(normalize_agent_id("aabb0001"), "AABB0001");
+    }
+
+    #[test]
+    fn normalize_agent_id_trims_whitespace_and_prefix() {
+        assert_eq!(normalize_agent_id("  0xAA  "), "000000AA");
+    }
+
+    #[test]
+    fn normalize_agent_id_short_hex_is_zero_padded() {
+        assert_eq!(normalize_agent_id("FF"), "000000FF");
+    }
+
+    #[test]
+    fn normalize_agent_id_empty_string_falls_back_to_uppercase() {
+        // empty after trim → from_str_radix("", 16) fails → fallback
+        assert_eq!(normalize_agent_id(""), "");
+    }
+
+    #[test]
+    fn normalize_agent_id_non_hex_falls_back_to_uppercase() {
+        assert_eq!(normalize_agent_id("not-hex"), "NOT-HEX");
+    }
+
+    #[test]
+    fn normalize_agent_id_max_u32() {
+        assert_eq!(normalize_agent_id("FFFFFFFF"), "FFFFFFFF");
+    }
+
+    #[test]
+    fn normalize_agent_id_overflow_u32_falls_back_to_uppercase() {
+        // 1_0000_0000 hex > u32::MAX → parse fails → fallback
+        assert_eq!(normalize_agent_id("100000000"), "100000000");
+    }
+
+    // ── sanitize_text ───────────────────────────────────────────────
+
+    #[test]
+    fn sanitize_text_empty_returns_connected() {
+        assert_eq!(sanitize_text(""), "Connected");
+    }
+
+    #[test]
+    fn sanitize_text_whitespace_only_returns_connected() {
+        assert_eq!(sanitize_text("   \t\n  "), "Connected");
+    }
+
+    #[test]
+    fn sanitize_text_normal_text_unchanged() {
+        assert_eq!(sanitize_text("hello world"), "hello world");
+    }
+
+    #[test]
+    fn sanitize_text_trims_leading_and_trailing_whitespace() {
+        assert_eq!(sanitize_text("  hello  "), "hello");
+    }
 }

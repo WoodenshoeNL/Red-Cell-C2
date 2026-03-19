@@ -1673,7 +1673,7 @@ fn invalid_value(field: &'static str, message: &str) -> TeamserverError {
 
 #[cfg(test)]
 mod tests {
-    use super::{Database, LootFilter, LootRecord, bool_from_i64, i64_from_u64};
+    use super::{Database, LinkRecord, LootFilter, LootRecord, bool_from_i64, i64_from_u64};
     use red_cell_common::{AgentEncryptionInfo, AgentRecord};
     use serde_json::json;
     use zeroize::Zeroizing;
@@ -1974,5 +1974,133 @@ mod tests {
         let mut deduped = all_ids.clone();
         deduped.dedup();
         assert_eq!(all_ids.len(), deduped.len(), "pages should not overlap");
+    }
+
+    // ── LinkRepository tests ──────────────────────────────────────────
+
+    /// Seed agents and create a link chain A→B→C.
+    async fn seed_link_chain(db: &Database, a: u32, b: u32, c: u32) {
+        seed_agents(db, &[a, b, c]).await;
+        let links = db.links();
+        links.create(LinkRecord { parent_agent_id: a, link_agent_id: b }).await.unwrap();
+        links.create(LinkRecord { parent_agent_id: b, link_agent_id: c }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn link_chain_children_of_returns_direct_children_only() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_link_chain(&db, 1, 2, 3).await;
+        let links = db.links();
+
+        let children_of_a = links.children_of(1).await.unwrap();
+        assert_eq!(children_of_a, vec![2], "A should have only direct child B");
+
+        let children_of_b = links.children_of(2).await.unwrap();
+        assert_eq!(children_of_b, vec![3], "B should have only direct child C");
+
+        let children_of_c = links.children_of(3).await.unwrap();
+        assert!(children_of_c.is_empty(), "C is a leaf and should have no children");
+    }
+
+    #[tokio::test]
+    async fn link_delete_parent_removes_only_direct_link() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_link_chain(&db, 1, 2, 3).await;
+        let links = db.links();
+
+        // Delete A→B link
+        links.delete(1, 2).await.unwrap();
+
+        assert!(!links.exists(1, 2).await.unwrap(), "A→B link should be gone");
+        assert!(links.exists(2, 3).await.unwrap(), "B→C link should still exist");
+        assert_eq!(links.parent_of(2).await.unwrap(), None, "B should have no parent");
+        assert_eq!(links.parent_of(3).await.unwrap(), Some(2), "C still has parent B");
+    }
+
+    #[tokio::test]
+    async fn link_cascade_simulation_marks_all_transitive_children() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_link_chain(&db, 1, 2, 3).await;
+        let links = db.links();
+
+        // Simulate the cascade disconnect_link performs at the repo layer:
+        // 1. Collect the subtree rooted at B by walking children_of recursively
+        let mut affected = vec![2u32];
+        let mut queue = vec![2u32];
+        while let Some(node) = queue.pop() {
+            let children = links.children_of(node).await.unwrap();
+            for &child in &children {
+                affected.push(child);
+                queue.push(child);
+            }
+        }
+        assert_eq!(affected, vec![2, 3], "subtree of B should include B and C");
+
+        // 2. Delete the link A→B
+        links.delete(1, 2).await.unwrap();
+
+        // 3. Verify the remaining state
+        let remaining = links.list().await.unwrap();
+        assert_eq!(remaining.len(), 1, "only B→C should remain");
+        assert_eq!(remaining[0].parent_agent_id, 2);
+        assert_eq!(remaining[0].link_agent_id, 3);
+    }
+
+    #[tokio::test]
+    async fn link_delete_nonexistent_returns_ok() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_agents(&db, &[10, 20]).await;
+        let links = db.links();
+
+        // Deleting a link that was never created should succeed silently
+        let result = links.delete(10, 20).await;
+        assert!(result.is_ok(), "deleting non-existent link should not error");
+    }
+
+    #[tokio::test]
+    async fn link_relink_after_disconnect_succeeds() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_agents(&db, &[1, 2]).await;
+        let links = db.links();
+
+        // Create, delete, re-create
+        links.create(LinkRecord { parent_agent_id: 1, link_agent_id: 2 }).await.unwrap();
+        assert!(links.exists(1, 2).await.unwrap());
+
+        links.delete(1, 2).await.unwrap();
+        assert!(!links.exists(1, 2).await.unwrap());
+
+        links.create(LinkRecord { parent_agent_id: 1, link_agent_id: 2 }).await.unwrap();
+        assert!(links.exists(1, 2).await.unwrap(), "re-linked A→B should exist");
+        assert_eq!(links.parent_of(2).await.unwrap(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn link_list_returns_all_links_in_chain() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_link_chain(&db, 10, 20, 30).await;
+        let links = db.links();
+
+        let all = links.list().await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(
+            all,
+            vec![
+                LinkRecord { parent_agent_id: 10, link_agent_id: 20 },
+                LinkRecord { parent_agent_id: 20, link_agent_id: 30 },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn link_parent_of_returns_correct_parent() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_link_chain(&db, 5, 6, 7).await;
+        let links = db.links();
+
+        assert_eq!(links.parent_of(5).await.unwrap(), None, "root has no parent");
+        assert_eq!(links.parent_of(6).await.unwrap(), Some(5));
+        assert_eq!(links.parent_of(7).await.unwrap(), Some(6));
+        assert_eq!(links.parent_of(99).await.unwrap(), None, "unknown agent has no parent");
     }
 }

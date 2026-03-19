@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 375 | 212 | 31 |
+| Tasks closed | 383 | 212 | 31 |
 | Bugs filed against | 43 | 34 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.16 | 0.29 |
 | Quality score | 89% | 84% | 71% |
 
-*Bug rates: Claude 43/375=0.11, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 43/383=0.11, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-19 16:45 — 62ab041..c181363
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 8 | 0 | Closed 24gl, 2zkn, uchu, 197z, 2x1d, k9mp, 59m7, krej. Protocol fix (3c647c0): corrected lowercase "http"/"smb" to Havoc-compatible "Http"/"Smb". DNS bug fix (cbf465f): removed resolver-IP binding from DnsPendingResponse per 59m7 — anti-spoofing now relies on registry + AES-256-CTR. New fixture_builder_validation.rs (394 lines, 16 tests). Client scripts_dir fallback tests added. Test-review scan filed 6 new issues. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check ✓, clippy ✓ (0 warnings), cargo test ✓ (all pass, 0 failures)
 
 ### QA Review — 2026-03-19 14:30 — 16cafed..c9245fd
 

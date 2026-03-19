@@ -4297,4 +4297,129 @@ havocui.RegisterCommand('recon scan', 'Run a recon scan', [{{'name': 'target', '
             descriptor.error,
         );
     }
+
+    #[test]
+    fn script_output_evicts_oldest_entries_at_capacity() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+
+        // Generate a script that creates 520 distinct output entries by alternating
+        // between stdout and stderr (preventing coalescing of consecutive entries).
+        let total_entries = MAX_SCRIPT_OUTPUT_ENTRIES + 8; // 520
+        let script = format!(
+            "import sys\nfor i in range({total_entries}):\n\
+             \x20   if i % 2 == 0:\n\
+             \x20       sys.stdout.write(f'out-{{i}}\\n')\n\
+             \x20       sys.stdout.flush()\n\
+             \x20   else:\n\
+             \x20       sys.stderr.write(f'err-{{i}}\\n')\n\
+             \x20       sys.stderr.flush()\n",
+        );
+        write_script(&temp_dir.path().join("flood.py"), &script);
+
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        // Wait until the last entry appears in the output log.
+        let last_marker = format!("err-{}", total_entries - 1);
+        assert!(wait_for_output(&runtime, &last_marker), "last output entry should appear",);
+
+        let output = runtime.script_output();
+        assert!(
+            output.len() <= MAX_SCRIPT_OUTPUT_ENTRIES,
+            "output log should be capped at {MAX_SCRIPT_OUTPUT_ENTRIES}, got {}",
+            output.len(),
+        );
+
+        // The oldest entries (indices 0..8) should have been evicted.
+        let has_evicted_entry = output.iter().any(|e| e.text.contains("out-0\n"));
+        assert!(!has_evicted_entry, "oldest entry (out-0) should have been evicted",);
+
+        // The newest entries should still be present.
+        let has_newest = output.iter().any(|e| e.text.contains(&last_marker));
+        assert!(has_newest, "newest entry should still be present");
+    }
+
+    #[test]
+    fn command_history_evicts_oldest_entries_at_capacity() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let output_path = temp_dir.path().join("hist_cap.txt");
+
+        // Register a command that writes the history snapshot to a file.
+        let script = format!(
+            "import json\nimport pathlib\nimport red_cell\n\
+            def cmd(context):\n    pathlib.Path({output:?}).write_text(json.dumps(context.history))\n\
+            red_cell.register_command('hcap', cmd)\n",
+            output = output_path.display().to_string()
+        );
+        write_script(&temp_dir.path().join("hcap.py"), &script);
+
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+        {
+            let mut state = lock_app_state(&app_state);
+            state.agents.push(sample_agent("DEADBEEF"));
+        }
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        let total_invocations = MAX_COMMAND_HISTORY + 5; // 105
+
+        // Invoke the command 105 times to overflow the history buffer.
+        for i in 0..total_invocations {
+            std::fs::remove_file(&output_path).ok();
+            runtime
+                .execute_registered_command("DEADBEEF", &format!("hcap call-{i}"))
+                .unwrap_or_else(|e| panic!("invocation {i} should run: {e}"));
+            let _ = wait_for_file_contents(&output_path)
+                .unwrap_or_else(|| panic!("output should be written for invocation {i}"));
+        }
+
+        // Invoke once more (the 106th call) — the snapshot should contain exactly
+        // MAX_COMMAND_HISTORY entries, with the oldest 5 evicted.
+        std::fs::remove_file(&output_path).ok();
+        runtime
+            .execute_registered_command("DEADBEEF", "hcap final")
+            .unwrap_or_else(|e| panic!("final invocation should run: {e}"));
+        let final_output = wait_for_file_contents(&output_path)
+            .unwrap_or_else(|| panic!("output should be written for final invocation"));
+        let history: Vec<String> = serde_json::from_str(&final_output)
+            .unwrap_or_else(|e| panic!("history should be valid JSON: {e}"));
+
+        assert_eq!(
+            history.len(),
+            MAX_COMMAND_HISTORY,
+            "history should be capped at {MAX_COMMAND_HISTORY}, got {}",
+            history.len(),
+        );
+
+        // The oldest entries (call-0 through call-4) should have been evicted.
+        for evicted_idx in 0..5 {
+            let evicted = format!("hcap call-{evicted_idx}");
+            assert!(
+                !history.iter().any(|h| *h == evicted),
+                "entry {evicted} should have been evicted",
+            );
+        }
+
+        // The first entry in the snapshot should be call-5 (the 6th invocation).
+        assert_eq!(
+            history[0], "hcap call-5",
+            "first history entry should be call-5 after eviction",
+        );
+
+        // The last entry should be the 105th invocation (call-104).
+        assert_eq!(
+            history[MAX_COMMAND_HISTORY - 1],
+            format!("hcap call-{}", total_invocations - 1),
+            "last history entry should be the most recent invocation before the final call",
+        );
+    }
 }

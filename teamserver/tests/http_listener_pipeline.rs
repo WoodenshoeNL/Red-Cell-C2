@@ -509,6 +509,79 @@ async fn http_listener_rejects_malformed_and_truncated_bodies()
     Ok(())
 }
 
+#[tokio::test]
+async fn http_listener_pipeline_reconnect_probe_after_registration()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let (port, guard) = common::available_port()?;
+    let key = [0x41; AGENT_KEY_LENGTH];
+    let iv = [0x24; AGENT_IV_LENGTH];
+    let agent_id = 0x5678_ABCD;
+
+    manager.create(http_listener("edge-http-reconnect", port)).await?;
+    drop(guard);
+    manager.start("edge-http-reconnect").await?;
+    common::wait_for_listener(port).await?;
+
+    let client = Client::new();
+
+    // Step 1: Register the agent via a normal DemonInit.
+    let init_response = client
+        .post(format!("http://127.0.0.1:{port}/"))
+        .body(common::valid_demon_init_body(agent_id, key, iv))
+        .send()
+        .await?
+        .error_for_status()?;
+    let init_ack = init_response.bytes().await?;
+
+    let decrypted_init_ack = decrypt_agent_data_at_offset(&key, &iv, 0, &init_ack)?;
+    assert_eq!(decrypted_init_ack.as_slice(), &agent_id.to_le_bytes());
+    let ctr_offset = ctr_blocks_for_len(init_ack.len());
+    assert_eq!(ctr_offset, 1, "init ACK should consume exactly one AES block");
+
+    // Verify the stored CTR offset matches.
+    assert_eq!(registry.ctr_offset(agent_id).await?, ctr_offset);
+
+    // Step 2: Send a reconnect probe (DemonInit with empty payload).
+    let reconnect_response = client
+        .post(format!("http://127.0.0.1:{port}/"))
+        .body(common::valid_demon_reconnect_body(agent_id))
+        .send()
+        .await?
+        .error_for_status()?;
+    let reconnect_ack = reconnect_response.bytes().await?;
+
+    // Step 3: Verify the reconnect ACK decrypts to agent_id LE bytes at the current CTR offset.
+    let decrypted_reconnect_ack =
+        decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &reconnect_ack)?;
+    assert_eq!(
+        decrypted_reconnect_ack.as_slice(),
+        &agent_id.to_le_bytes(),
+        "reconnect ACK must decrypt to agent_id in little-endian at the current CTR offset"
+    );
+
+    // Step 4: Verify the stored CTR offset did NOT advance — reconnect ACK is not
+    // counter-consuming.
+    assert_eq!(
+        registry.ctr_offset(agent_id).await?,
+        ctr_offset,
+        "reconnect ACK must not advance the stored CTR offset"
+    );
+
+    // Step 5: Verify the agent is still registered and intact.
+    assert!(
+        registry.get(agent_id).await.is_some(),
+        "agent must remain registered after reconnect probe"
+    );
+
+    manager.stop("edge-http-reconnect").await?;
+    Ok(())
+}
+
 fn http_listener(name: &str, port: u16) -> ListenerConfig {
     ListenerConfig::from(HttpListenerConfig {
         name: name.to_owned(),

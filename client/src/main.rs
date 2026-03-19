@@ -6506,4 +6506,69 @@ mod tests {
     fn blank_if_empty_returns_fallback_for_tab_and_newline() {
         assert_eq!(blank_if_empty("\t\n", "fallback"), "fallback");
     }
+
+    // ---- console_completion_candidates tests ----
+
+    #[test]
+    fn completion_empty_prefix_returns_all_commands() {
+        let all = console_completion_candidates("");
+        assert_eq!(all.len(), CONSOLE_COMMANDS.len());
+        for spec in &CONSOLE_COMMANDS {
+            assert!(all.contains(&spec.name), "missing command: {}", spec.name);
+        }
+    }
+
+    #[test]
+    fn completion_prefix_matches_command_names() {
+        let matches = console_completion_candidates("sc");
+        assert_eq!(matches, vec!["screenshot"]);
+    }
+
+    #[test]
+    fn completion_prefix_matches_via_alias() {
+        // "exit" is an alias for "kill"
+        let matches = console_completion_candidates("ex");
+        assert!(matches.contains(&"kill"), "expected 'kill' via alias 'exit'");
+    }
+
+    #[test]
+    fn completion_no_match_returns_empty() {
+        let matches = console_completion_candidates("zzz");
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn completion_case_insensitive() {
+        let matches = console_completion_candidates("SC");
+        assert_eq!(matches, vec!["screenshot"]);
+    }
+
+    #[test]
+    fn completion_whitespace_only_prefix_returns_all() {
+        let all = console_completion_candidates("   ");
+        assert_eq!(all.len(), CONSOLE_COMMANDS.len());
+    }
+
+    // ---- closest_command_usage tests ----
+
+    #[test]
+    fn closest_usage_known_command() {
+        assert_eq!(closest_command_usage("kill"), Some("kill [process]"));
+    }
+
+    #[test]
+    fn closest_usage_via_alias() {
+        // "exit" is an alias for "kill", should return kill's usage
+        assert_eq!(closest_command_usage("exit"), Some("kill [process]"));
+    }
+
+    #[test]
+    fn closest_usage_unknown_returns_none() {
+        assert_eq!(closest_command_usage("nonexistent"), None);
+    }
+
+    #[test]
+    fn closest_usage_empty_string_returns_none() {
+        assert_eq!(closest_command_usage(""), None);
+    }
 }

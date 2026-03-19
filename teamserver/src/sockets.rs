@@ -2968,4 +2968,86 @@ mod tests {
 
         Ok(())
     }
+
+    /// Verify the full data-relay round-trip after a successful `finish_connect`:
+    /// 1. Data written by the SOCKS client produces a `SOCKET_COMMAND_WRITE` job.
+    /// 2. Data delivered via `write_client_data` appears on the SOCKS client socket.
+    #[tokio::test]
+    async fn finish_connect_success_relays_data_round_trip() -> io::Result<()> {
+        use red_cell_common::demon::{DemonCommand, DemonSocketCommand};
+        use tokio::io::AsyncWriteExt;
+
+        let (_database, registry, manager) =
+            test_manager().await.map_err(|e| io::Error::other(e.to_string()))?;
+        registry
+            .insert(sample_agent(0xCAFE_BABE))
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        let agent_id: u32 = 0xCAFE_BABE;
+        let socket_id: u32 = 0x0000_00AA;
+        let (mut peer_read, mut peer_write) =
+            register_pending_client(&manager, agent_id, socket_id).await?;
+
+        // Complete the SOCKS5 handshake successfully.
+        manager
+            .finish_connect(agent_id, socket_id, true, 0)
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        // Consume the SOCKS5 CONNECT reply (10 bytes for IPv4).
+        let mut reply = [0_u8; 10];
+        peer_read.read_exact(&mut reply).await?;
+        assert_eq!(reply[1], super::SOCKS_REPLY_SUCCEEDED, "SOCKS reply must indicate success");
+
+        // --- Direction 1: SOCKS client → agent (produces a write job) ---
+        let client_payload = b"hello from client";
+        peer_write.write_all(client_payload).await?;
+        // Flush to ensure the reader task picks it up.
+        peer_write.flush().await?;
+
+        // Give the spawned reader task a moment to process.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let jobs =
+            registry.dequeue_jobs(agent_id).await.map_err(|e| io::Error::other(e.to_string()))?;
+
+        // Find the write job among any queued jobs.
+        let write_cmd_le = u32::from(DemonSocketCommand::Write).to_le_bytes();
+        let write_job = jobs.iter().find(|j| {
+            j.command == u32::from(DemonCommand::CommandSocket)
+                && j.payload.len() >= 4
+                && j.payload[..4] == write_cmd_le
+        });
+        assert!(write_job.is_some(), "expected a SOCKET_COMMAND_WRITE job in the agent queue");
+
+        let job = write_job.unwrap();
+        // Payload layout: [subcmd:4][socket_id:4][len:4][data:len]
+        let job_socket_id = u32::from_le_bytes(job.payload[4..8].try_into().unwrap());
+        assert_eq!(job_socket_id, socket_id, "job must target the correct socket_id");
+        let data_len = u32::from_le_bytes(job.payload[8..12].try_into().unwrap()) as usize;
+        assert_eq!(data_len, client_payload.len());
+        assert_eq!(
+            &job.payload[12..12 + data_len],
+            client_payload,
+            "job payload must contain the exact bytes written by the SOCKS client"
+        );
+
+        // --- Direction 2: agent → SOCKS client (write_client_data) ---
+        let agent_payload = b"hello from agent";
+        manager
+            .write_client_data(agent_id, socket_id, agent_payload)
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        let mut received = vec![0_u8; agent_payload.len()];
+        peer_read.read_exact(&mut received).await?;
+        assert_eq!(
+            received.as_slice(),
+            agent_payload,
+            "SOCKS client must receive the exact bytes sent by the agent"
+        );
+
+        Ok(())
+    }
 }

@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 491 | 212 | 31 |
+| Tasks closed | 495 | 212 | 31 |
 | Bugs filed against | 46 | 34 | 9 |
 | Bug rate (bugs/task) | 0.09 | 0.16 | 0.29 |
 | Quality score | 91% | 84% | 71% |
 
-*Bug rates: Claude 46/491=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 46/495=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -2723,3 +2723,13 @@ Build: cargo check passed, clippy passed (0 warnings), cargo test passed (229 te
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: cargo check passed, clippy passed (0 warnings), cargo test passed (1477+ tests, 0 failures)
+
+### QA Review — 2026-03-19 — 63600b7..9eaf6e9
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 4 | 0 | Closed gmau, mu21 (LootRepository credential persistence tests — CRUD, filtering, pagination, ~180 lines), l553 (LinkRepository disconnect cascade tests — chain ops, delete, relink, ~150 lines), p85z (truncated payload tests for handle_command_error_callback — 3 edge-case scenarios, ~48 lines). Currently has 08ds claimed (plugin mutex poisoning fix — unstaged WIP visible in plugins.rs/websocket.rs). All committed code is test-only, clean, no issues found. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (0 warnings), cargo test passed (230 tests, 0 failures)

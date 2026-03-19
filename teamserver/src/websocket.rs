@@ -727,6 +727,18 @@ where
     }
 }
 
+/// Attempt to serialize a value for audit logging, warning on failure instead
+/// of silently discarding the error.
+fn serialize_for_audit<T: serde::Serialize>(value: &T, context: &str) -> Option<Value> {
+    match serde_json::to_value(value) {
+        Ok(v) => Some(v),
+        Err(error) => {
+            warn!(%error, context, "failed to serialize audit parameters");
+            None
+        }
+    }
+}
+
 async fn dispatch_operator_command<S>(
     state: &S,
     session: &crate::OperatorSession,
@@ -753,7 +765,7 @@ async fn dispatch_operator_command<S>(
     match message {
         OperatorMessage::ListenerNew(message) => {
             let name = message.info.name.clone().unwrap_or_default();
-            let parameters = serde_json::to_value(&message.info).ok();
+            let parameters = serialize_for_audit(&message.info, "listener.create");
             match listener_config_from_operator(&message.info) {
                 Ok(config) => match listeners.create(config).await {
                     Ok(summary) => {
@@ -880,7 +892,7 @@ async fn dispatch_operator_command<S>(
         }
         OperatorMessage::ListenerEdit(message) => {
             let name = message.info.name.clone().unwrap_or_default();
-            let parameters = serde_json::to_value(&message.info).ok();
+            let parameters = serialize_for_audit(&message.info, "listener.update");
             match listener_config_from_operator(&message.info) {
                 Ok(config) => match listeners.update(config).await {
                     Ok(summary) => {
@@ -895,7 +907,7 @@ async fn dispatch_operator_command<S>(
                                 AuditResultStatus::Success,
                                 None,
                                 Some("update"),
-                                serde_json::to_value(&summary.config).ok(),
+                                serialize_for_audit(&summary.config, "listener.update.config"),
                             ),
                         )
                         .await;
@@ -1182,7 +1194,7 @@ async fn dispatch_operator_command<S>(
                                         &format_diagnostic(diag),
                                     ));
                                 }
-                                serde_json::to_value(diagnostics).ok()
+                                serialize_for_audit(diagnostics, "payload.build.diagnostics")
                             } else {
                                 None
                             };
@@ -1309,7 +1321,7 @@ async fn handle_agent_task(
 ) -> Result<(), AgentCommandError> {
     let agent_id = parse_agent_id(&message.info.demon_id)?;
     let command = message.info.command.clone().unwrap_or_else(|| message.info.command_line.clone());
-    let parameters = serde_json::to_value(&message.info).ok();
+    let parameters = serialize_for_audit(&message.info, "agent.task");
     match execute_agent_task(registry, sockets, events, &session.username, message).await {
         Ok(_) => {
             log_operator_action(
@@ -5377,5 +5389,25 @@ mod tests {
             StatusCode::NOT_FOUND,
             "non-root path must not be registered"
         );
+    }
+
+    #[test]
+    fn serialize_for_audit_returns_value_on_success() {
+        let data = serde_json::json!({"key": "value"});
+        let result = super::serialize_for_audit(&data, "test");
+        assert_eq!(result, Some(data));
+    }
+
+    #[test]
+    fn serialize_for_audit_returns_none_on_failure() {
+        /// A type whose `Serialize` implementation always fails.
+        struct AlwaysFail;
+        impl serde::Serialize for AlwaysFail {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("intentional failure"))
+            }
+        }
+        let result = super::serialize_for_audit(&AlwaysFail, "test.fail");
+        assert!(result.is_none(), "should return None on serialization failure");
     }
 }

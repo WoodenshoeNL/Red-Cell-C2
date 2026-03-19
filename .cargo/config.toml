@@ -1,2 +1,7 @@
-[target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "link-arg=-L/home/michel/Red-Cell-C2/.cargo/lib"]
+# Cargo configuration for Red-Cell-C2
+#
+# No custom linker flags needed — PyO3's build script emits the correct
+# -L path to the system library directory, and install.sh ensures the
+# unversioned libpython3.X.so symlink exists there.
+#
+# To use a custom Python, set PYO3_PYTHON=/path/to/python3 instead.

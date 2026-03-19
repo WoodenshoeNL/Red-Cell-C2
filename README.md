@@ -42,6 +42,9 @@ The original Havoc source lives at `./src/Havoc` and serves as the reference imp
 ### Development tools
 
 - **Rust** (2024 edition, latest stable) — [install](https://rustup.rs)
+- **Python 3.12** shared library — required for PyO3 embedding. Run `sudo ./install.sh`
+  to set up automatically, or install `libpython3.12-dev` manually.
+  See [docs/pyo3-embedding.md](docs/pyo3-embedding.md) for details.
 - **br** (beads_rust issue tracker):
   ```bash
   curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/beads_rust/main/install.sh" | bash

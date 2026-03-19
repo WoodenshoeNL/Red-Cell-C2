@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 486 | 212 | 31 |
+| Tasks closed | 491 | 212 | 31 |
 | Bugs filed against | 46 | 34 | 9 |
 | Bug rate (bugs/task) | 0.09 | 0.16 | 0.29 |
 | Quality score | 91% | 84% | 71% |
 
-*Bug rates: Claude 46/486=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 46/491=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -2713,3 +2713,13 @@ Build: cargo check passed, clippy passed (0 warnings), cargo test passed (all su
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: cargo check passed, clippy passed (0 warnings), cargo test passed (229 tests, 0 failures)
+
+### QA Review — 2026-03-19 23:30 — 903cfb4..3d12601
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 5 | 0 | Closed 1tvu (ClientTransport::spawn and outgoing_sender tests), rc1t (InitConnectionSuccess/Error path tests), 1fef (ListenerEdit/Remove/Mark handler tests), sr8s (ChatMessage/ChatListener/ChatAgent, TeamserverLog, BuildPayload handler tests), ng3c (DemonPackage::to_bytes LengthOverflow error path test). All test-only changes — 540 lines in transport.rs, 39 lines in demon.rs. Clean refactor extracting checked_payload_len helper for testability. Currently has rnot claimed. Zero issues found. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (0 warnings), cargo test passed (1477+ tests, 0 failures)

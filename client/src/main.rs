@@ -5586,4 +5586,421 @@ mod tests {
     fn parent_remote_path_no_separator() {
         assert_eq!(parent_remote_path("file.txt"), None);
     }
+
+    // ── json_str ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn json_str_plain_string() {
+        assert_eq!(json_str("hello"), "\"hello\"");
+    }
+
+    #[test]
+    fn json_str_embedded_quotes() {
+        assert_eq!(json_str(r#"say "hi""#), r#""say \"hi\"""#);
+    }
+
+    #[test]
+    fn json_str_backslashes() {
+        assert_eq!(json_str(r"C:\Users\admin"), r#""C:\\Users\\admin""#);
+    }
+
+    #[test]
+    fn json_str_newlines_and_tabs() {
+        assert_eq!(json_str("line1\nline2\ttab"), r#""line1\nline2\ttab""#);
+    }
+
+    #[test]
+    fn json_str_carriage_return() {
+        assert_eq!(json_str("a\rb"), r#""a\rb""#);
+    }
+
+    #[test]
+    fn json_str_empty_string() {
+        assert_eq!(json_str(""), "\"\"");
+    }
+
+    #[test]
+    fn json_str_combined_escapes() {
+        assert_eq!(json_str("\\\"\n\r\t"), r#""\\\"\n\r\t""#);
+    }
+
+    #[test]
+    fn json_str_null_bytes_passed_through() {
+        // Null bytes are not escaped by json_str — they pass through as-is.
+        let result = json_str("a\0b");
+        assert!(result.starts_with('"') && result.ends_with('"'));
+        assert!(result.contains('\0'));
+    }
+
+    // ── contains_ascii_case_insensitive ──────────────────────────────────
+
+    #[test]
+    fn case_insensitive_match() {
+        assert!(contains_ascii_case_insensitive("Hello World", "hello"));
+    }
+
+    #[test]
+    fn case_insensitive_no_match() {
+        assert!(!contains_ascii_case_insensitive("Hello World", "goodbye"));
+    }
+
+    #[test]
+    fn case_insensitive_empty_needle_matches_all() {
+        assert!(contains_ascii_case_insensitive("anything", ""));
+        assert!(contains_ascii_case_insensitive("", ""));
+    }
+
+    #[test]
+    fn case_insensitive_whitespace_only_needle_matches_all() {
+        assert!(contains_ascii_case_insensitive("anything", "   "));
+    }
+
+    #[test]
+    fn case_insensitive_mixed_case() {
+        assert!(contains_ascii_case_insensitive("NtLmHash", "ntlm"));
+    }
+
+    #[test]
+    fn case_insensitive_needle_with_surrounding_whitespace() {
+        assert!(contains_ascii_case_insensitive("foobar", "  bar  "));
+    }
+
+    // ── loot_is_downloadable ─────────────────────────────────────────────
+
+    fn make_loot(kind: LootKind) -> LootItem {
+        LootItem {
+            id: Some(1),
+            kind,
+            name: "test".to_owned(),
+            agent_id: "agent-1".to_owned(),
+            source: "source".to_owned(),
+            collected_at: "2026-03-18T12:00:00Z".to_owned(),
+            file_path: None,
+            size_bytes: None,
+            content_base64: None,
+            preview: None,
+        }
+    }
+
+    #[test]
+    fn loot_is_downloadable_file_with_content() {
+        let mut item = make_loot(LootKind::File);
+        item.content_base64 = Some("dGVzdA==".to_owned());
+        assert!(loot_is_downloadable(&item));
+    }
+
+    #[test]
+    fn loot_is_downloadable_screenshot_with_content() {
+        let mut item = make_loot(LootKind::Screenshot);
+        item.content_base64 = Some("dGVzdA==".to_owned());
+        assert!(loot_is_downloadable(&item));
+    }
+
+    #[test]
+    fn loot_not_downloadable_file_without_content() {
+        let item = make_loot(LootKind::File);
+        assert!(!loot_is_downloadable(&item));
+    }
+
+    #[test]
+    fn loot_not_downloadable_credential() {
+        let mut item = make_loot(LootKind::Credential);
+        item.content_base64 = Some("dGVzdA==".to_owned());
+        assert!(!loot_is_downloadable(&item));
+    }
+
+    #[test]
+    fn loot_not_downloadable_other() {
+        let item = make_loot(LootKind::Other);
+        assert!(!loot_is_downloadable(&item));
+    }
+
+    // ── matches_loot_type_filter ─────────────────────────────────────────
+
+    #[test]
+    fn type_filter_all_matches_everything() {
+        for kind in [LootKind::Credential, LootKind::File, LootKind::Screenshot, LootKind::Other] {
+            let item = make_loot(kind);
+            assert!(matches_loot_type_filter(
+                &item,
+                LootTypeFilter::All,
+                CredentialSubFilter::All,
+                FileSubFilter::All,
+            ));
+        }
+    }
+
+    #[test]
+    fn type_filter_credentials_matches_credential() {
+        let item = make_loot(LootKind::Credential);
+        assert!(matches_loot_type_filter(
+            &item,
+            LootTypeFilter::Credentials,
+            CredentialSubFilter::All,
+            FileSubFilter::All,
+        ));
+    }
+
+    #[test]
+    fn type_filter_credentials_rejects_file() {
+        let item = make_loot(LootKind::File);
+        assert!(!matches_loot_type_filter(
+            &item,
+            LootTypeFilter::Credentials,
+            CredentialSubFilter::All,
+            FileSubFilter::All,
+        ));
+    }
+
+    #[test]
+    fn type_filter_files_matches_file() {
+        let item = make_loot(LootKind::File);
+        assert!(matches_loot_type_filter(
+            &item,
+            LootTypeFilter::Files,
+            CredentialSubFilter::All,
+            FileSubFilter::All,
+        ));
+    }
+
+    #[test]
+    fn type_filter_files_rejects_credential() {
+        let item = make_loot(LootKind::Credential);
+        assert!(!matches_loot_type_filter(
+            &item,
+            LootTypeFilter::Files,
+            CredentialSubFilter::All,
+            FileSubFilter::All,
+        ));
+    }
+
+    #[test]
+    fn type_filter_screenshots_matches_screenshot() {
+        let item = make_loot(LootKind::Screenshot);
+        assert!(matches_loot_type_filter(
+            &item,
+            LootTypeFilter::Screenshots,
+            CredentialSubFilter::All,
+            FileSubFilter::All,
+        ));
+    }
+
+    #[test]
+    fn type_filter_screenshots_rejects_other() {
+        let item = make_loot(LootKind::Other);
+        assert!(!matches_loot_type_filter(
+            &item,
+            LootTypeFilter::Screenshots,
+            CredentialSubFilter::All,
+            FileSubFilter::All,
+        ));
+    }
+
+    // ── matches_credential_sub_filter ────────────────────────────────────
+
+    #[test]
+    fn credential_sub_filter_all_passes_everything() {
+        let item = make_loot(LootKind::Credential);
+        assert!(matches_credential_sub_filter(&item, CredentialSubFilter::All));
+    }
+
+    #[test]
+    fn credential_sub_filter_ntlm_matches() {
+        let mut item = make_loot(LootKind::Credential);
+        item.name = "NTLM hash dump".to_owned();
+        assert!(matches_credential_sub_filter(&item, CredentialSubFilter::NtlmHash));
+    }
+
+    #[test]
+    fn credential_sub_filter_ntlm_rejects_plaintext() {
+        let mut item = make_loot(LootKind::Credential);
+        item.name = "plaintext password".to_owned();
+        assert!(!matches_credential_sub_filter(&item, CredentialSubFilter::NtlmHash));
+    }
+
+    #[test]
+    fn credential_sub_filter_kerberos_matches() {
+        let mut item = make_loot(LootKind::Credential);
+        item.source = "kerberos ticket".to_owned();
+        assert!(matches_credential_sub_filter(&item, CredentialSubFilter::KerberosTicket));
+    }
+
+    #[test]
+    fn credential_sub_filter_certificate_matches() {
+        let mut item = make_loot(LootKind::Credential);
+        item.name = "client.pfx".to_owned();
+        assert!(matches_credential_sub_filter(&item, CredentialSubFilter::Certificate));
+    }
+
+    #[test]
+    fn credential_sub_filter_plaintext_matches() {
+        let mut item = make_loot(LootKind::Credential);
+        item.preview = Some("plaintext creds".to_owned());
+        assert!(matches_credential_sub_filter(&item, CredentialSubFilter::Plaintext));
+    }
+
+    // ── matches_file_sub_filter ──────────────────────────────────────────
+
+    #[test]
+    fn file_sub_filter_all_passes_everything() {
+        let item = make_loot(LootKind::File);
+        assert!(matches_file_sub_filter(&item, FileSubFilter::All));
+    }
+
+    #[test]
+    fn file_sub_filter_document_matches_pdf() {
+        let mut item = make_loot(LootKind::File);
+        item.file_path = Some("/docs/report.pdf".to_owned());
+        assert!(matches_file_sub_filter(&item, FileSubFilter::Document));
+    }
+
+    #[test]
+    fn file_sub_filter_archive_matches_zip() {
+        let mut item = make_loot(LootKind::File);
+        item.file_path = Some("/tmp/backup.zip".to_owned());
+        assert!(matches_file_sub_filter(&item, FileSubFilter::Archive));
+    }
+
+    #[test]
+    fn file_sub_filter_binary_matches_exe() {
+        let mut item = make_loot(LootKind::File);
+        item.file_path = Some("C:\\tools\\beacon.exe".to_owned());
+        assert!(matches_file_sub_filter(&item, FileSubFilter::Binary));
+    }
+
+    #[test]
+    fn file_sub_filter_document_rejects_exe() {
+        let mut item = make_loot(LootKind::File);
+        item.file_path = Some("/usr/bin/agent.exe".to_owned());
+        assert!(!matches_file_sub_filter(&item, FileSubFilter::Document));
+    }
+
+    #[test]
+    fn file_sub_filter_uses_name_when_no_file_path() {
+        let mut item = make_loot(LootKind::File);
+        item.file_path = None;
+        item.name = "secrets.tar.gz".to_owned();
+        assert!(matches_file_sub_filter(&item, FileSubFilter::Archive));
+    }
+
+    // ── loot_sub_category_label ──────────────────────────────────────────
+
+    #[test]
+    fn sub_category_label_credential_ntlm() {
+        let mut item = make_loot(LootKind::Credential);
+        item.name = "NTLM dump".to_owned();
+        assert_eq!(loot_sub_category_label(&item), "NTLM Hash");
+    }
+
+    #[test]
+    fn sub_category_label_credential_plaintext() {
+        let mut item = make_loot(LootKind::Credential);
+        item.name = "password file".to_owned();
+        assert_eq!(loot_sub_category_label(&item), "Plaintext");
+    }
+
+    #[test]
+    fn sub_category_label_credential_kerberos() {
+        let mut item = make_loot(LootKind::Credential);
+        item.name = "kirbi ticket".to_owned();
+        assert_eq!(loot_sub_category_label(&item), "Kerberos");
+    }
+
+    #[test]
+    fn sub_category_label_credential_certificate() {
+        let mut item = make_loot(LootKind::Credential);
+        item.name = "client.crt".to_owned();
+        assert_eq!(loot_sub_category_label(&item), "Certificate");
+    }
+
+    #[test]
+    fn sub_category_label_credential_unknown() {
+        let item = make_loot(LootKind::Credential);
+        assert_eq!(loot_sub_category_label(&item), "");
+    }
+
+    #[test]
+    fn sub_category_label_file_document() {
+        let mut item = make_loot(LootKind::File);
+        item.file_path = Some("report.docx".to_owned());
+        assert_eq!(loot_sub_category_label(&item), "Document");
+    }
+
+    #[test]
+    fn sub_category_label_file_archive() {
+        let mut item = make_loot(LootKind::File);
+        item.file_path = Some("data.7z".to_owned());
+        assert_eq!(loot_sub_category_label(&item), "Archive");
+    }
+
+    #[test]
+    fn sub_category_label_file_binary() {
+        let mut item = make_loot(LootKind::File);
+        item.file_path = Some("agent.dll".to_owned());
+        assert_eq!(loot_sub_category_label(&item), "Binary");
+    }
+
+    #[test]
+    fn sub_category_label_screenshot_empty() {
+        let item = make_loot(LootKind::Screenshot);
+        assert_eq!(loot_sub_category_label(&item), "");
+    }
+
+    #[test]
+    fn sub_category_label_other_empty() {
+        let item = make_loot(LootKind::Other);
+        assert_eq!(loot_sub_category_label(&item), "");
+    }
+
+    // ── type filter with credential sub-filter integration ───────────────
+
+    #[test]
+    fn type_filter_credentials_with_ntlm_sub_filter() {
+        let mut item = make_loot(LootKind::Credential);
+        item.name = "NTLM hash dump".to_owned();
+        assert!(matches_loot_type_filter(
+            &item,
+            LootTypeFilter::Credentials,
+            CredentialSubFilter::NtlmHash,
+            FileSubFilter::All,
+        ));
+    }
+
+    #[test]
+    fn type_filter_credentials_with_wrong_sub_filter() {
+        let mut item = make_loot(LootKind::Credential);
+        item.name = "NTLM hash dump".to_owned();
+        assert!(!matches_loot_type_filter(
+            &item,
+            LootTypeFilter::Credentials,
+            CredentialSubFilter::Plaintext,
+            FileSubFilter::All,
+        ));
+    }
+
+    // ── type filter with file sub-filter integration ─────────────────────
+
+    #[test]
+    fn type_filter_files_with_document_sub_filter() {
+        let mut item = make_loot(LootKind::File);
+        item.file_path = Some("report.pdf".to_owned());
+        assert!(matches_loot_type_filter(
+            &item,
+            LootTypeFilter::Files,
+            CredentialSubFilter::All,
+            FileSubFilter::Document,
+        ));
+    }
+
+    #[test]
+    fn type_filter_files_with_wrong_sub_filter() {
+        let mut item = make_loot(LootKind::File);
+        item.file_path = Some("report.pdf".to_owned());
+        assert!(!matches_loot_type_filter(
+            &item,
+            LootTypeFilter::Files,
+            CredentialSubFilter::All,
+            FileSubFilter::Archive,
+        ));
+    }
 }

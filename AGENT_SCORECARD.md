@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 453 | 212 | 31 |
+| Tasks closed | 461 | 212 | 31 |
 | Bugs filed against | 46 | 34 | 9 |
 | Bug rate (bugs/task) | 0.10 | 0.16 | 0.29 |
 | Quality score | 90% | 84% | 71% |
 
-*Bug rates: Claude 46/453=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 46/461=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -2611,3 +2611,13 @@ Build: cargo check passed, clippy pre-existing warning (unused doc comment in pl
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: cargo check passed, clippy passed (0 warnings), cargo test passed (all suites 0 failures)
+
+### QA Review — 2026-03-19 — 53de2b9..48c717e
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 8 | 0 | Closed 8 issues (3qr0, 2yyi, nbhs, iz2i, 0c0a, 05ax, e2md, wxol). All test-only changes: webhook embed optional field omission test, concurrent mixed success/failure detached delivery test, listener update lifecycle and delete-nonexistent tests, reconnect probe test, empty BOF output callback test, empty task queue CommandGetJob test, empty job list CommandJob/List test. Clean, well-structured edge-case coverage. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (0 warnings), cargo test passed (2147 tests, 0 failures)

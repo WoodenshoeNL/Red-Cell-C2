@@ -21,10 +21,10 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 2 | 0 | 0 |
-| Missing tests | 20 | 13 | 5 |
+| Missing tests | 21 | 13 | 5 |
 | Clippy warnings | 2 | 0 | 1 |
 | Protocol errors | 6 | 27 | 3 |
-| Security issues | 19 | 36 | 0 |
+| Security issues | 20 | 36 | 0 |
 | Architecture drift | 3 | 21 | 0 |
 | Memory / resource leaks | 2 | 10 | 1 |
 | Startup / lifecycle regressions | 1 | 8 | 0 |
@@ -33,13 +33,29 @@ Each loop run updates the running totals and appends a review entry.
 | Availability / timeout regressions | 1 | 5 | 0 |
 | Correctness / pagination | 12 | 6 | 1 |
 | Workflow / close-hygiene | 12 | 0 | 0 |
-| Code reuse / duplication | 5 | 0 | 0 |
+| Code reuse / duplication | 6 | 0 | 0 |
 
 ---
 
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-19 18:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude (Sonnet) | 1 | 1 security | AgentCryptoMaterial derives Debug — latent key exposure risk (s556, P2). |
+| Claude (Opus) | 2 | 1 missing tests, 1 code duplication | Plugin emit hooks untested (gx4s, P3). HttpListenerResponseConfig/ProxyConfig duplicated across config.rs and domain.rs (5sg6, P3). |
+| Codex | 0 | — | No new issues found. |
+| Cursor | 0 | — | No new issues found. |
+
+Overall codebase health: **on track**
+Biggest blindspot: AgentCryptoMaterial's `#[derive(Debug)]` at `common/src/crypto.rs:49` could leak AES key/IV bytes if the struct is ever debug-printed. The domain-layer equivalent (`AgentEncryptionInfo`) already has a redacting custom Debug impl — `AgentCryptoMaterial` should follow suit.
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` ✓ (all ~1987 tests passing, 0 failures)
+
+Deep review covered: full structural map (102k lines, 68 .rs files across 3 crates), all common crate modules (crypto, demon protocol, TLS, config, domain, operator, error), all teamserver modules (22 source + 14 dispatch), all integration tests (16 files), full client source (6 files). Security posture strong: constant-time comparisons for all secrets (auth tokens via `subtle::ct_eq`, API keys via HMAC+`ct_eq`, passwords via Argon2 with dummy verifier for timing equalization), AES-256-CTR offset management correct with deferred-advance pattern, DEMON_INIT rate-limited (5/60s per IP, 10k window cap), body size bounded (30 MiB), agent registration capped (10k), job queues capped (1k/agent), request contexts LRU-evicted (10k), pivot depth capped (16), operator sessions capped (64 global / 8 per account). All length-prefixed network reads validated against buffer bounds before allocation. No `todo!`/`unimplemented!`/`unwrap`/`expect` in production code (enforced by clippy deny lints). Architecture decisions (Axum+Tokio, SQLite/sqlx, HCL config, thiserror/anyhow separation, egui, edition 2024) all honored. Most previously-identified issues already tracked in beads. 3 new issues filed.
 
 ### QA Review — 2026-03-19 16:45 — 62ab041..c181363
 

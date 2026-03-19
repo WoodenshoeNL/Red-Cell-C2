@@ -7022,4 +7022,268 @@ mod tests {
         let body = read_json(response).await;
         assert_eq!(body["total"], 0);
     }
+
+    // ---- Unit tests for auth failure tracking (is_auth_failure_allowed / record_auth_failure / record_auth_success) ----
+
+    /// Build a minimal `ApiRuntime` with no API keys and a disabled request
+    /// rate-limit, suitable for testing the auth-failure and rate-limit
+    /// internals in isolation.
+    fn test_api_runtime(requests_per_minute: u32) -> ApiRuntime {
+        ApiRuntime {
+            key_hash_secret: Arc::new(
+                ApiRuntime::generate_key_hash_secret().expect("rng should work in tests"),
+            ),
+            keys: Arc::new(Vec::new()),
+            rate_limit: ApiRateLimit { requests_per_minute },
+            windows: Arc::new(Mutex::new(BTreeMap::new())),
+            auth_failure_windows: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn test_ip(last_octet: u8) -> IpAddr {
+        IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, last_octet))
+    }
+
+    #[tokio::test]
+    async fn auth_failure_n_minus_1_attempts_still_allowed() {
+        let api = test_api_runtime(0);
+        let ip = test_ip(1);
+
+        for _ in 0..MAX_FAILED_API_AUTH_ATTEMPTS - 1 {
+            api.record_auth_failure(ip).await;
+        }
+
+        assert!(api.is_auth_failure_allowed(ip).await, "N-1 failures must still be allowed");
+    }
+
+    #[tokio::test]
+    async fn auth_failure_nth_attempt_triggers_lockout() {
+        let api = test_api_runtime(0);
+        let ip = test_ip(2);
+
+        for _ in 0..MAX_FAILED_API_AUTH_ATTEMPTS {
+            api.record_auth_failure(ip).await;
+        }
+
+        assert!(!api.is_auth_failure_allowed(ip).await, "Nth failure must trigger lockout");
+    }
+
+    #[tokio::test]
+    async fn auth_failure_unknown_ip_is_always_allowed() {
+        let api = test_api_runtime(0);
+        assert!(
+            api.is_auth_failure_allowed(test_ip(99)).await,
+            "IP with no failure history must be allowed"
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_success_clears_failure_state() {
+        let api = test_api_runtime(0);
+        let ip = test_ip(3);
+
+        // Accumulate failures up to the lockout threshold.
+        for _ in 0..MAX_FAILED_API_AUTH_ATTEMPTS {
+            api.record_auth_failure(ip).await;
+        }
+        assert!(!api.is_auth_failure_allowed(ip).await);
+
+        // A successful auth must clear the failure window entirely.
+        api.record_auth_success(ip).await;
+
+        assert!(
+            api.is_auth_failure_allowed(ip).await,
+            "successful auth must reset the failure counter"
+        );
+
+        // Verify the window is completely removed, not just zeroed.
+        let windows = api.auth_failure_windows.lock().await;
+        assert!(!windows.contains_key(&ip), "window entry must be removed on success");
+    }
+
+    #[tokio::test]
+    async fn auth_failure_window_expiry_resets_allowance() {
+        let api = test_api_runtime(0);
+        let ip = test_ip(4);
+
+        // Manually insert an expired window that exceeded the failure threshold.
+        {
+            let mut windows = api.auth_failure_windows.lock().await;
+            windows.insert(
+                ip,
+                AttemptWindow {
+                    attempts: MAX_FAILED_API_AUTH_ATTEMPTS + 10,
+                    window_start: Instant::now() - RATE_LIMIT_WINDOW - Duration::from_secs(1),
+                },
+            );
+        }
+
+        assert!(
+            api.is_auth_failure_allowed(ip).await,
+            "expired window must be pruned, allowing the IP again"
+        );
+
+        // The expired entry should have been removed from the map.
+        let windows = api.auth_failure_windows.lock().await;
+        assert!(!windows.contains_key(&ip), "expired window must be removed");
+    }
+
+    #[tokio::test]
+    async fn auth_failure_record_resets_window_after_expiry() {
+        let api = test_api_runtime(0);
+        let ip = test_ip(5);
+
+        // Insert an expired window with many failures.
+        {
+            let mut windows = api.auth_failure_windows.lock().await;
+            windows.insert(
+                ip,
+                AttemptWindow {
+                    attempts: MAX_FAILED_API_AUTH_ATTEMPTS,
+                    window_start: Instant::now() - RATE_LIMIT_WINDOW - Duration::from_secs(1),
+                },
+            );
+        }
+
+        // Recording a new failure should start a fresh window with attempts=1.
+        api.record_auth_failure(ip).await;
+
+        let windows = api.auth_failure_windows.lock().await;
+        let window = windows.get(&ip).expect("window must exist after recording failure");
+        assert_eq!(window.attempts, 1, "expired window must reset to 1 attempt");
+    }
+
+    #[tokio::test]
+    async fn auth_failure_sequential_from_same_ip_count_correctly() {
+        let api = test_api_runtime(0);
+        let ip = test_ip(6);
+
+        // Record failures one at a time (serialised by the mutex) and verify
+        // that they increment linearly — no double-counting.
+        for expected in 1..=MAX_FAILED_API_AUTH_ATTEMPTS {
+            api.record_auth_failure(ip).await;
+            let windows = api.auth_failure_windows.lock().await;
+            let window = windows.get(&ip).expect("window must exist");
+            assert_eq!(
+                window.attempts, expected,
+                "attempt count must equal {expected} after {expected} sequential failures"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_failure_different_ips_are_independent() {
+        let api = test_api_runtime(0);
+        let ip_a = test_ip(10);
+        let ip_b = test_ip(11);
+
+        // Lock out ip_a.
+        for _ in 0..MAX_FAILED_API_AUTH_ATTEMPTS {
+            api.record_auth_failure(ip_a).await;
+        }
+
+        // ip_b should be unaffected.
+        assert!(!api.is_auth_failure_allowed(ip_a).await);
+        assert!(api.is_auth_failure_allowed(ip_b).await);
+    }
+
+    #[tokio::test]
+    async fn auth_failure_success_on_one_ip_does_not_affect_another() {
+        let api = test_api_runtime(0);
+        let ip_a = test_ip(20);
+        let ip_b = test_ip(21);
+
+        for _ in 0..MAX_FAILED_API_AUTH_ATTEMPTS {
+            api.record_auth_failure(ip_a).await;
+            api.record_auth_failure(ip_b).await;
+        }
+
+        // Clear only ip_a.
+        api.record_auth_success(ip_a).await;
+
+        assert!(api.is_auth_failure_allowed(ip_a).await);
+        assert!(!api.is_auth_failure_allowed(ip_b).await);
+    }
+
+    // ---- Unit tests for check_rate_limit ----
+
+    #[tokio::test]
+    async fn rate_limit_allows_requests_under_limit() {
+        let api = test_api_runtime(10);
+        let subject = RateLimitSubject::ClientIp(test_ip(1));
+
+        for _ in 0..10 {
+            assert!(api.check_rate_limit(&subject).await.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn rate_limit_blocks_at_limit() {
+        let api = test_api_runtime(3);
+        let subject = RateLimitSubject::ClientIp(test_ip(2));
+
+        for _ in 0..3 {
+            api.check_rate_limit(&subject).await.expect("should be allowed");
+        }
+
+        let err = api.check_rate_limit(&subject).await.unwrap_err();
+        assert!(
+            matches!(err, ApiAuthError::RateLimited { retry_after_seconds: 60 }),
+            "4th request must be rate-limited, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rate_limit_disabled_allows_everything() {
+        let api = test_api_runtime(0); // 0 means disabled
+        let subject = RateLimitSubject::ClientIp(test_ip(3));
+
+        for _ in 0..100 {
+            assert!(api.check_rate_limit(&subject).await.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn rate_limit_window_expiry_resets_count() {
+        let api = test_api_runtime(2);
+        let subject = RateLimitSubject::ClientIp(test_ip(4));
+
+        // Exhaust the limit.
+        for _ in 0..2 {
+            api.check_rate_limit(&subject).await.expect("should be allowed");
+        }
+        assert!(api.check_rate_limit(&subject).await.is_err());
+
+        // Simulate window expiry by back-dating the window.
+        {
+            let mut windows = api.windows.lock().await;
+            if let Some(w) = windows.get_mut(&subject) {
+                w.started_at = Instant::now() - RATE_LIMIT_WINDOW - Duration::from_secs(1);
+            }
+        }
+
+        // After expiry, a new window starts and the request should succeed.
+        assert!(
+            api.check_rate_limit(&subject).await.is_ok(),
+            "request must be allowed after window expiry"
+        );
+
+        // The window should be reset with count = 1.
+        let windows = api.windows.lock().await;
+        let w = windows.get(&subject).expect("window must exist");
+        assert_eq!(w.request_count, 1, "request count must be 1 after window reset");
+    }
+
+    #[tokio::test]
+    async fn rate_limit_different_subjects_are_independent() {
+        let api = test_api_runtime(1);
+        let subject_a = RateLimitSubject::ClientIp(test_ip(5));
+        let subject_b = RateLimitSubject::ClientIp(test_ip(6));
+
+        api.check_rate_limit(&subject_a).await.expect("first request for A");
+        assert!(api.check_rate_limit(&subject_a).await.is_err(), "A must be rate-limited");
+
+        // B should still be allowed.
+        assert!(api.check_rate_limit(&subject_b).await.is_ok(), "B must be independent");
+    }
 }

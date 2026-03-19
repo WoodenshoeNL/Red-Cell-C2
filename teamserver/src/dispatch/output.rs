@@ -1245,4 +1245,113 @@ mod tests {
             "expected InvalidCallbackPayload, got {err:?}"
         );
     }
+
+    // -- ProcCreate branch tests ────────────────────────────────────────────
+
+    /// Build a ProcCreate payload with given (path, pid, success, piped, verbose).
+    fn demon_info_payload_proc_create(
+        path: &str,
+        pid: u32,
+        success: bool,
+        piped: bool,
+        verbose: bool,
+    ) -> Vec<u8> {
+        let mut buf = Vec::new();
+        push_u32(&mut buf, u32::from(DemonInfoClass::ProcCreate));
+        // UTF-16 LE encoded path (read_utf16 reads length-prefixed bytes)
+        let utf16: Vec<u16> = path.encode_utf16().collect();
+        let byte_len = utf16.len() * 2;
+        push_u32(&mut buf, byte_len as u32);
+        for code_unit in &utf16 {
+            buf.extend_from_slice(&code_unit.to_le_bytes());
+        }
+        push_u32(&mut buf, pid);
+        push_u32(&mut buf, u32::from(success));
+        push_u32(&mut buf, u32::from(piped));
+        push_u32(&mut buf, u32::from(verbose));
+        buf
+    }
+
+    #[tokio::test]
+    async fn demon_info_proc_create_not_verbose_returns_ok_none() {
+        let (_registry, events) = setup().await;
+        let payload =
+            demon_info_payload_proc_create("C:\\Windows\\cmd.exe", 1234, true, false, false);
+
+        let result = handle_demon_info_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert_eq!(result.expect("must succeed"), None);
+    }
+
+    #[tokio::test]
+    async fn demon_info_proc_create_verbose_success_broadcasts_started() {
+        let (_registry, events) = setup().await;
+        let mut rx = events.subscribe();
+        let payload =
+            demon_info_payload_proc_create("C:\\Windows\\cmd.exe", 5678, true, false, true);
+
+        let result = handle_demon_info_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert_eq!(result.expect("must succeed"), None);
+
+        let msg = rx.recv().await.expect("should receive broadcast");
+        let OperatorMessage::AgentResponse(resp) = &msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            message.contains("Process started"),
+            "expected 'Process started' in message, got {message:?}"
+        );
+        assert!(message.contains("cmd.exe"), "expected path in message, got {message:?}");
+        assert!(message.contains("5678"), "expected ProcessID in message, got {message:?}");
+    }
+
+    #[tokio::test]
+    async fn demon_info_proc_create_verbose_fail_not_piped_broadcasts_could_not_start() {
+        let (_registry, events) = setup().await;
+        let mut rx = events.subscribe();
+        let payload =
+            demon_info_payload_proc_create("C:\\Windows\\notepad.exe", 9999, false, false, true);
+
+        let result = handle_demon_info_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert_eq!(result.expect("must succeed"), None);
+
+        let msg = rx.recv().await.expect("should receive broadcast");
+        let OperatorMessage::AgentResponse(resp) = &msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            message.contains("could not be started"),
+            "expected 'could not be started' in message, got {message:?}"
+        );
+        assert!(message.contains("notepad.exe"), "expected path in message, got {message:?}");
+        // ProcessID should NOT be present in the failure message.
+        assert!(
+            !message.contains("ProcessID"),
+            "failure message should not contain ProcessID, got {message:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn demon_info_proc_create_verbose_fail_piped_broadcasts_without_output_pipe() {
+        let (_registry, events) = setup().await;
+        let mut rx = events.subscribe();
+        let payload =
+            demon_info_payload_proc_create("C:\\Windows\\powershell.exe", 4321, false, true, true);
+
+        let result = handle_demon_info_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert_eq!(result.expect("must succeed"), None);
+
+        let msg = rx.recv().await.expect("should receive broadcast");
+        let OperatorMessage::AgentResponse(resp) = &msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            message.contains("without output pipe"),
+            "expected 'without output pipe' in message, got {message:?}"
+        );
+        assert!(message.contains("powershell.exe"), "expected path in message, got {message:?}");
+        assert!(message.contains("4321"), "expected ProcessID in message, got {message:?}");
+    }
 }

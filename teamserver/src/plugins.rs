@@ -2514,4 +2514,81 @@ havoc.RegisterCommand(\n\
         assert!(manager.is_ok(), "expected listener manager to be available after attach");
         Ok(())
     }
+
+    /// Regression test for red-cell-c2-ss50: a Python callback that calls back
+    /// into the Rust API (e.g. `havoc.Agent(...).info`) must not deadlock on the
+    /// global `RUNTIME` mutex.  The `CallbackRuntimeGuard` thread-local bypass
+    /// makes this safe.  Without it, `invoke_callbacks` holds the mutex while
+    /// Python calls `PluginRuntime::active()`, which tries to acquire it again
+    /// on the same thread — classic re-entrant deadlock.
+    ///
+    /// We use `tokio::time::timeout` so the test fails fast rather than hanging
+    /// forever if the deadlock regresses.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn callback_reentrant_rust_api_does_not_deadlock()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let (_database, registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-reentrant-deadlock").await?;
+        let agent_id: u32 = 0x00DE_AD01;
+        registry.insert(sample_agent(agent_id)).await?;
+
+        // Build a Python callback that calls back into the Rust API via
+        // `havoc.Agent("00DEAD01").info`, which internally calls
+        // `PluginRuntime::active()`.  If the thread-local guard is not set,
+        // this will deadlock because `invoke_callbacks` already holds the
+        // global RUNTIME mutex on this thread.
+        let (tracker, callback) = tokio::task::spawn_blocking({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| -> PyResult<_> {
+                    runtime.install_api_module(py)?;
+                    let havoc = py.import("havoc")?;
+                    let locals = pyo3::types::PyDict::new(py);
+                    let tracker = PyList::empty(py);
+                    locals.set_item("_tracker", tracker.clone())?;
+                    locals.set_item("havoc", havoc)?;
+                    let cb = py.eval(
+                        pyo3::ffi::c_str!(
+                            "(lambda t, h: lambda event: t.append(h.Agent('00DEAD01').info['Hostname']))(_tracker, havoc)"
+                        ),
+                        None,
+                        Some(&locals),
+                    )?;
+                    Ok((tracker.unbind(), cb.unbind()))
+                })
+            }
+        })
+        .await??;
+
+        runtime.register_callback(PluginEvent::AgentCheckin, callback).await?;
+
+        // The callback re-enters Rust via havoc.Agent().info — if the
+        // thread-local bypass is missing, this will hang forever.  A 10-second
+        // timeout gives plenty of margin for CI while still catching a
+        // deadlock quickly.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            runtime.emit_agent_checkin(agent_id),
+        )
+        .await;
+
+        let emit_result = result.expect("timed out — likely deadlock in re-entrant callback");
+        emit_result?;
+
+        // Verify the callback actually ran and read the agent info successfully.
+        let (count, hostname) = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<(usize, String)> {
+                let list = tracker.bind(py);
+                let count = list.len();
+                let first = list.get_item(0)?.extract::<String>()?;
+                Ok((count, first))
+            })
+        })
+        .await??;
+        assert_eq!(count, 1, "callback should have been invoked exactly once");
+        assert_eq!(hostname, "wkstn-01", "callback should have read the agent hostname");
+        Ok(())
+    }
 }

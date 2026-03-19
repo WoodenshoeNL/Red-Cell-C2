@@ -1088,3 +1088,305 @@ async fn assembly_inline_execute_unknown_info_id_no_broadcast()
     listeners.stop("asm-test-unk-id").await?;
     Ok(())
 }
+
+// ── malformed / truncated payload rejection tests ────────────────────────────
+
+/// A BOF inline-execute callback whose payload is shorter than the 4-byte
+/// sub-type header must not crash the teamserver.  The HTTP response should be
+/// a fake 404 (dispatch error), and no operator message should be broadcast.
+/// A subsequent valid callback must still succeed, proving the server is alive.
+#[tokio::test]
+async fn bof_payload_shorter_than_subtype_header_does_not_crash()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("asm-trunc-hdr", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("asm-trunc-hdr").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xAB02_0001_u32;
+    let key = [0x01; AGENT_KEY_LENGTH];
+    let iv = [0x02; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // Send only 2 bytes — not enough for the 4-byte sub-type header.
+    let truncated_payload: &[u8] = &[0x00, 0x00];
+    let response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandInlineExecute),
+            0x100,
+            truncated_payload,
+        ))
+        .send()
+        .await?;
+    // Dispatch error causes a fake 404 — the server must not panic.
+    assert_eq!(
+        response.status().as_u16(),
+        404,
+        "truncated payload should produce a fake 404, not a crash"
+    );
+    let ctr_offset =
+        ctr_offset + red_cell_common::crypto::ctr_blocks_for_len(4 + truncated_payload.len());
+
+    // No operator message should have been broadcast.
+    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(250)).await;
+
+    // Prove the server is still alive: send a valid BOF_RAN_OK callback.
+    let ok_response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandInlineExecute),
+            0x101,
+            &bof_ran_ok_payload(),
+        ))
+        .send()
+        .await?;
+    assert!(
+        ok_response.status().is_success(),
+        "server should still serve valid callbacks after a truncated payload"
+    );
+
+    let event = common::read_operator_message(&mut socket).await?;
+    assert!(
+        matches!(event, OperatorMessage::AgentResponse(_)),
+        "expected AgentResponse after recovery, got {event:?}"
+    );
+
+    socket.close(None).await?;
+    listeners.stop("asm-trunc-hdr").await?;
+    Ok(())
+}
+
+/// A BOF_CALLBACK_OUTPUT (0x00) whose length prefix exceeds the remaining
+/// payload bytes (truncated string) must not crash the teamserver.
+#[tokio::test]
+async fn bof_output_truncated_string_does_not_crash() -> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("asm-trunc-str", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("asm-trunc-str").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xAB02_0002_u32;
+    let key = [0x03; AGENT_KEY_LENGTH];
+    let iv = [0x04; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // BOF_CALLBACK_OUTPUT (0x00) with a length prefix claiming 200 bytes but
+    // only 5 bytes of actual data.
+    let mut truncated_payload = Vec::new();
+    truncated_payload.extend_from_slice(&0u32.to_le_bytes()); // BOF_CALLBACK_OUTPUT
+    truncated_payload.extend_from_slice(&200u32.to_le_bytes()); // claims 200 bytes
+    truncated_payload.extend_from_slice(b"hello"); // only 5 bytes present
+
+    let response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandInlineExecute),
+            0x200,
+            &truncated_payload,
+        ))
+        .send()
+        .await?;
+    assert_eq!(
+        response.status().as_u16(),
+        404,
+        "truncated string payload should produce a fake 404"
+    );
+    let ctr_offset =
+        ctr_offset + red_cell_common::crypto::ctr_blocks_for_len(4 + truncated_payload.len());
+
+    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(250)).await;
+
+    // Verify server is still alive with a valid callback.
+    let ok_response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandInlineExecute),
+            0x201,
+            &bof_ran_ok_payload(),
+        ))
+        .send()
+        .await?;
+    assert!(
+        ok_response.status().is_success(),
+        "server should still serve valid callbacks after truncated string"
+    );
+
+    let event = common::read_operator_message(&mut socket).await?;
+    assert!(
+        matches!(event, OperatorMessage::AgentResponse(_)),
+        "expected AgentResponse after recovery, got {event:?}"
+    );
+
+    socket.close(None).await?;
+    listeners.stop("asm-trunc-str").await?;
+    Ok(())
+}
+
+/// A BOF_EXCEPTION (1) payload with fewer than 12 bytes after the sub-type
+/// header (missing the u64 address field) must not crash the teamserver.
+#[tokio::test]
+async fn bof_exception_missing_address_does_not_crash() -> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("asm-trunc-exc", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("asm-trunc-exc").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xAB02_0003_u32;
+    let key = [0x05; AGENT_KEY_LENGTH];
+    let iv = [0x06; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // BOF_EXCEPTION (1) needs: u32 sub-type + u32 exception_code + u64 address = 16 bytes.
+    // We only provide sub-type + exception_code (8 bytes), omitting the address.
+    let mut truncated_payload = Vec::new();
+    truncated_payload.extend_from_slice(&1u32.to_le_bytes()); // BOF_EXCEPTION
+    truncated_payload.extend_from_slice(&0xC000_0005u32.to_le_bytes()); // exception code
+    // Missing: u64 address
+
+    let response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandInlineExecute),
+            0x300,
+            &truncated_payload,
+        ))
+        .send()
+        .await?;
+    assert_eq!(
+        response.status().as_u16(),
+        404,
+        "BOF_EXCEPTION with missing address should produce a fake 404"
+    );
+    let ctr_offset =
+        ctr_offset + red_cell_common::crypto::ctr_blocks_for_len(4 + truncated_payload.len());
+
+    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(250)).await;
+
+    // Verify server is still alive.
+    let ok_response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandInlineExecute),
+            0x301,
+            &bof_ran_ok_payload(),
+        ))
+        .send()
+        .await?;
+    assert!(
+        ok_response.status().is_success(),
+        "server should still serve valid callbacks after truncated BOF_EXCEPTION"
+    );
+
+    let event = common::read_operator_message(&mut socket).await?;
+    assert!(
+        matches!(event, OperatorMessage::AgentResponse(_)),
+        "expected AgentResponse after recovery, got {event:?}"
+    );
+
+    socket.close(None).await?;
+    listeners.stop("asm-trunc-exc").await?;
+    Ok(())
+}
+
+/// An unknown BOF sub-type code (0xFF) must succeed at the HTTP layer and not
+/// broadcast any operator message — the server silently drops unrecognised
+/// sub-types without crashing.
+#[tokio::test]
+async fn bof_unknown_subtype_0xff_does_not_crash() -> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("asm-unk-0xff", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("asm-unk-0xff").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xAB02_0004_u32;
+    let key = [0x07; AGENT_KEY_LENGTH];
+    let iv = [0x08; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let payload = bof_unknown_subtype_payload(0xFF);
+    let response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandInlineExecute),
+            0x400,
+            &payload,
+        ))
+        .send()
+        .await?;
+    assert!(response.status().is_success(), "unknown sub-type 0xFF should succeed at HTTP layer");
+
+    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(250)).await;
+
+    socket.close(None).await?;
+    listeners.stop("asm-unk-0xff").await?;
+    Ok(())
+}

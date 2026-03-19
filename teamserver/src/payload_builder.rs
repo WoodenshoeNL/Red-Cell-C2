@@ -1284,7 +1284,7 @@ fn pack_http_listener(
             add_u32(out, 1);
             add_wstring(out, &proxy_url(proxy))?;
             add_wstring(out, proxy.username.as_deref().unwrap_or_default())?;
-            add_wstring(out, proxy.password.as_deref().unwrap_or_default())?;
+            add_wstring(out, proxy.password.as_deref().map(|s| s.as_str()).unwrap_or_default())?;
         }
         _ => add_u32(out, 0),
     }
@@ -2056,6 +2056,7 @@ mod tests {
     use red_cell_common::HttpListenerProxyConfig as DomainHttpListenerProxyConfig;
     use red_cell_common::config::HeaderConfig;
     use serde_json::json;
+    use zeroize::Zeroizing;
 
     #[test]
     fn from_profile_resolves_workspace_root_and_toolchain() -> Result<(), Box<dyn std::error::Error>>
@@ -2515,7 +2516,7 @@ mod tests {
                 host: "proxy.local".to_owned(),
                 port: 8080,
                 username: Some("neo".to_owned()),
-                password: Some("trinity".to_owned()),
+                password: Some(Zeroizing::new("trinity".to_owned())),
             }),
         }));
 

@@ -10,6 +10,7 @@ use std::path::Path;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 use utoipa::ToSchema;
+use zeroize::Zeroizing;
 
 /// A full Havoc/Red Cell YAOTL profile.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -662,6 +663,9 @@ pub struct HttpListenerResponseConfig {
 }
 
 /// Upstream proxy settings for HTTP listeners.
+///
+/// The proxy password is wrapped in [`Zeroizing`] so that heap memory is
+/// overwritten with zeros when the value is dropped.
 #[derive(Clone, PartialEq, Eq, Deserialize)]
 pub struct HttpListenerProxyConfig {
     /// Proxy hostname.
@@ -673,9 +677,13 @@ pub struct HttpListenerProxyConfig {
     /// Optional proxy username.
     #[serde(rename = "Username", default)]
     pub username: Option<String>,
-    /// Optional proxy password.
-    #[serde(rename = "Password", default)]
-    pub password: Option<String>,
+    /// Optional proxy password (zeroized on drop).
+    #[serde(
+        rename = "Password",
+        default,
+        deserialize_with = "deserialize_optional_zeroizing_string"
+    )]
+    pub password: Option<Zeroizing<String>>,
 }
 
 impl fmt::Debug for HttpListenerProxyConfig {
@@ -684,9 +692,16 @@ impl fmt::Debug for HttpListenerProxyConfig {
             .field("host", &self.host)
             .field("port", &self.port)
             .field("username", &self.username)
-            .field("password", &self.password.as_deref().map(|_| "[redacted]"))
+            .field("password", &self.password.as_ref().map(|_| "[redacted]"))
             .finish()
     }
+}
+
+fn deserialize_optional_zeroizing_string<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Zeroizing<String>>, D::Error> {
+    let opt = Option::<String>::deserialize(deserializer)?;
+    Ok(opt.map(Zeroizing::new))
 }
 
 /// Demon build-time defaults and injection settings.

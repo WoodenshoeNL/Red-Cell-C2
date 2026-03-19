@@ -43,6 +43,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, instrument, warn};
 use utoipa::ToSchema;
+use zeroize::Zeroizing;
 
 use crate::{
     AgentRegistry, AuditResultStatus, CommandDispatchError, CommandDispatcher, Database,
@@ -263,8 +264,10 @@ impl ListenerSummary {
                 info.proxy_username =
                     config.proxy.as_ref().and_then(|proxy| proxy.username.clone());
                 if !redact_proxy_password {
-                    info.proxy_password =
-                        config.proxy.as_ref().and_then(|proxy| proxy.password.clone());
+                    info.proxy_password = config
+                        .proxy
+                        .as_ref()
+                        .and_then(|proxy| proxy.password.as_deref().map(String::from));
                 }
                 info.secure = Some(config.secure.to_string());
                 info.response_headers = config.response.as_ref().and_then(|response| {
@@ -3385,7 +3388,7 @@ fn proxy_from_operator(
         host: required_field("Proxy Host", info.proxy_host.as_deref())?.to_owned(),
         port: parse_u16("Proxy Port", info.proxy_port.as_deref())?,
         username: optional_trimmed(info.proxy_username.as_deref()),
-        password: optional_trimmed(info.proxy_password.as_deref()),
+        password: optional_trimmed(info.proxy_password.as_deref()).map(Zeroizing::new),
     }))
 }
 
@@ -5425,7 +5428,7 @@ mod tests {
                 host: "127.0.0.1".to_owned(),
                 port: 8080,
                 username: Some("user".to_owned()),
-                password: Some("pass".to_owned()),
+                password: Some(Zeroizing::new("pass".to_owned())),
             }),
         });
         let summary = ListenerSummary {
@@ -5473,7 +5476,7 @@ mod tests {
                     host: "127.0.0.1".to_owned(),
                     port: 8080,
                     username: Some("user".to_owned()),
-                    password: Some("pass".to_owned()),
+                    password: Some(Zeroizing::new("pass".to_owned())),
                 }),
             }),
         };

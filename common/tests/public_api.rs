@@ -39,7 +39,7 @@ fn crate_root_exports_round_trip_listener_config() -> Result<(), Box<dyn std::er
             host: "127.0.0.1".to_string(),
             port: 8080,
             username: Some("operator".to_string()),
-            password: Some("secret".to_string()),
+            password: Some(Zeroizing::new("secret".to_string())),
         }),
     });
 

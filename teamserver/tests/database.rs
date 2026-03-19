@@ -94,7 +94,7 @@ fn sample_listener() -> ListenerConfig {
             host: "127.0.0.1".to_owned(),
             port: 8080,
             username: Some("proxy".to_owned()),
-            password: Some("secret".to_owned()),
+            password: Some(Zeroizing::new("secret".to_owned())),
         }),
     })
 }

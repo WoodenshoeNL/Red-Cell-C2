@@ -77,7 +77,11 @@ pub struct HttpListenerResponseConfig {
 }
 
 /// Upstream proxy configuration for an HTTP listener.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+///
+/// The proxy password is wrapped in [`Zeroizing`] so that heap memory is
+/// overwritten with zeros when the value is dropped, and the custom [`Debug`]
+/// implementation redacts it from log output.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct HttpListenerProxyConfig {
     /// Whether the proxy is enabled.
     #[serde(default)]
@@ -93,9 +97,28 @@ pub struct HttpListenerProxyConfig {
     /// Optional proxy username.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
-    /// Optional proxy password.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub password: Option<String>,
+    /// Optional proxy password (zeroized on drop).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_zeroizing_string",
+        deserialize_with = "deserialize_optional_zeroizing_string"
+    )]
+    #[schema(value_type = Option<String>)]
+    pub password: Option<Zeroizing<String>>,
+}
+
+impl fmt::Debug for HttpListenerProxyConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HttpListenerProxyConfig")
+            .field("enabled", &self.enabled)
+            .field("proxy_type", &self.proxy_type)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
 }
 
 /// Shared HTTP listener configuration.
@@ -321,6 +344,23 @@ fn deserialize_base64_to_zeroizing_bytes<'de, D: Deserializer<'de>>(
     let encoded = Zeroizing::new(String::deserialize(deserializer)?);
     let bytes = BASE64_STANDARD.decode(encoded.as_bytes()).map_err(de::Error::custom)?;
     Ok(Zeroizing::new(bytes))
+}
+
+fn serialize_optional_zeroizing_string<S: Serializer>(
+    value: &Option<Zeroizing<String>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match value {
+        Some(s) => serializer.serialize_some(s.as_str()),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn deserialize_optional_zeroizing_string<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Zeroizing<String>>, D::Error> {
+    let opt = Option::<String>::deserialize(deserializer)?;
+    Ok(opt.map(Zeroizing::new))
 }
 
 /// Shared persisted agent/session metadata.
@@ -619,6 +659,8 @@ enum StringOrBoolOrU64 {
 mod tests {
     use serde_json::json;
 
+    use zeroize::Zeroizing;
+
     use super::{
         AgentRecord, DnsListenerConfig, HttpListenerConfig, HttpListenerProxyConfig,
         HttpListenerResponseConfig, ListenerConfig, ListenerProtocol, ListenerTlsConfig,
@@ -706,7 +748,7 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port: 8080,
                 username: Some("user".to_string()),
-                password: Some("pass".to_string()),
+                password: Some(Zeroizing::new("pass".to_string())),
             }),
         });
 
@@ -1038,6 +1080,44 @@ mod tests {
         assert_eq!(info.port_bind, 443);
         assert_eq!(info.port_conn, Some(8443));
         assert_eq!(info.proxy.as_ref().map(|proxy| proxy.port), Some(8080));
+        Ok(())
+    }
+
+    #[test]
+    fn proxy_password_debug_is_redacted() {
+        let proxy = HttpListenerProxyConfig {
+            enabled: true,
+            proxy_type: None,
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+            username: None,
+            password: Some(Zeroizing::new("super-secret".to_string())),
+        };
+        let debug_output = format!("{proxy:?}");
+        assert!(
+            !debug_output.contains("super-secret"),
+            "proxy password must not appear in Debug output: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("[redacted]"),
+            "Debug output must contain [redacted]: {debug_output}"
+        );
+    }
+
+    #[test]
+    fn proxy_password_round_trips_through_serde() -> Result<(), Box<dyn std::error::Error>> {
+        let proxy = HttpListenerProxyConfig {
+            enabled: true,
+            proxy_type: Some("http".to_string()),
+            host: "127.0.0.1".to_string(),
+            port: 8080,
+            username: Some("user".to_string()),
+            password: Some(Zeroizing::new("secret".to_string())),
+        };
+        let json = serde_json::to_value(&proxy)?;
+        assert_eq!(json["password"], "secret");
+        let decoded: HttpListenerProxyConfig = serde_json::from_value(json)?;
+        assert_eq!(decoded.password.as_ref().map(|s| s.as_str()), Some("secret"));
         Ok(())
     }
 

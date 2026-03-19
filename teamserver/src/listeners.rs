@@ -1916,14 +1916,18 @@ struct DnsPendingUpload {
 }
 
 /// Pre-chunked C2 response ready to be polled by a DNS agent.
+///
+/// Responses are **not** bound to a specific resolver IP.  DNS recursive
+/// resolvers may rotate source addresses between an upload and the
+/// follow-up download, so pinning to `peer_ip` would strand legitimate
+/// agents.  Anti-spoofing is handled by the per-agent AES-256-CTR
+/// encryption — only the holder of the agent key can decrypt the payload.
 #[derive(Debug)]
 struct DnsPendingResponse {
     /// Base32hex-encoded response chunks.
     chunks: Vec<String>,
     /// Timestamp of when the response was queued for download.
     received_at: Instant,
-    /// Source IP that uploaded the callback this response belongs to.
-    peer_ip: IpAddr,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2049,7 +2053,7 @@ impl DnsListenerState {
                 ))
             }
             DnsC2Query::Download { agent_id, seq } => {
-                let txt = self.handle_download(agent_id, seq, peer_ip).await;
+                let txt = self.handle_download(agent_id, seq).await;
                 Some(build_dns_txt_response(
                     query.id,
                     &query.qname_raw,
@@ -2116,7 +2120,7 @@ impl DnsListenerState {
                     let chunks = chunk_response_to_b32hex(&response.payload);
                     self.responses.lock().await.insert(
                         agent_id,
-                        DnsPendingResponse { chunks, received_at: Instant::now(), peer_ip },
+                        DnsPendingResponse { chunks, received_at: Instant::now() },
                     );
                 }
                 "ack"
@@ -2144,7 +2148,7 @@ impl DnsListenerState {
             .retain(|_, pending| pending.received_at.elapsed().as_secs() < DNS_UPLOAD_TIMEOUT_SECS);
     }
 
-    async fn handle_download(&self, agent_id: u32, seq: u16, peer_ip: IpAddr) -> String {
+    async fn handle_download(&self, agent_id: u32, seq: u16) -> String {
         if self.registry.get(agent_id).await.is_none() {
             return "wait".to_owned();
         }
@@ -2153,16 +2157,6 @@ impl DnsListenerState {
         let Some(pending) = responses.get(&agent_id) else {
             return "wait".to_owned();
         };
-        if pending.peer_ip != peer_ip {
-            warn!(
-                listener = %self.config.name,
-                agent_id = format_args!("{agent_id:08X}"),
-                %peer_ip,
-                expected_peer_ip = %pending.peer_ip,
-                "dns download rejected due to source IP mismatch; possible agent_id spoofing"
-            );
-            return "wait".to_owned();
-        }
 
         let idx = usize::from(seq);
         let total = pending.chunks.len();
@@ -6485,25 +6479,15 @@ mod tests {
             DnsPendingResponse {
                 chunks: vec!["AAA".to_owned(), "BBB".to_owned()],
                 received_at: Instant::now(),
-                peer_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
             },
         );
 
-        assert_eq!(
-            state.handle_download(agent_id, 0, IpAddr::V4(Ipv4Addr::LOCALHOST)).await,
-            "2 AAA"
-        );
+        assert_eq!(state.handle_download(agent_id, 0).await, "2 AAA");
         assert!(state.responses.lock().await.contains_key(&agent_id));
 
-        assert_eq!(
-            state.handle_download(agent_id, 2, IpAddr::V4(Ipv4Addr::LOCALHOST)).await,
-            "done"
-        );
+        assert_eq!(state.handle_download(agent_id, 2).await, "done");
         assert!(!state.responses.lock().await.contains_key(&agent_id));
-        assert_eq!(
-            state.handle_download(agent_id, 0, IpAddr::V4(Ipv4Addr::LOCALHOST)).await,
-            "wait"
-        );
+        assert_eq!(state.handle_download(agent_id, 0).await, "wait");
     }
 
     #[tokio::test]
@@ -6520,57 +6504,72 @@ mod tests {
         // to simulate an attacker injecting under an unregistered agent ID.
         state.responses.lock().await.insert(
             unknown_id,
-            DnsPendingResponse {
-                chunks: vec!["SECRET".to_owned()],
-                received_at: Instant::now(),
-                peer_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
-            },
+            DnsPendingResponse { chunks: vec!["SECRET".to_owned()], received_at: Instant::now() },
         );
 
         // Unknown agent should be rejected with "wait" and the queue entry must survive.
-        assert_eq!(
-            state.handle_download(unknown_id, 0, IpAddr::V4(Ipv4Addr::LOCALHOST)).await,
-            "wait"
-        );
+        assert_eq!(state.handle_download(unknown_id, 0).await, "wait");
         assert!(
             state.responses.lock().await.contains_key(&unknown_id),
             "queued response must not be consumed for unregistered agent"
         );
     }
 
+    /// Regression test for red-cell-c2-59m7: DNS download must succeed even
+    /// when the resolver IP changes between upload and download.  Recursive
+    /// resolver pools legitimately rotate source IPs, so binding to the
+    /// upload peer_ip strands real agents.
     #[tokio::test]
-    async fn dns_download_spoof_cannot_read_or_clear_legitimate_response() {
-        let state = dns_state("dns-download-spoof").await;
+    async fn dns_download_succeeds_from_different_resolver_ip() {
+        let state = dns_state("dns-resolver-rotate").await;
         let agent_id = 0xDEAD_BEEF;
-        let legit_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-        let attacker_ip = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
         let key = [0x11u8; AGENT_KEY_LENGTH];
         let iv = [0x22u8; AGENT_IV_LENGTH];
 
         state.registry.insert(sample_agent_info(agent_id, key, iv)).await.expect("insert agent");
+
+        // Simulate response queued from upload via resolver A.
         state.responses.lock().await.insert(
             agent_id,
             DnsPendingResponse {
                 chunks: vec!["AAA".to_owned(), "BBB".to_owned()],
                 received_at: Instant::now(),
-                peer_ip: legit_ip,
             },
         );
 
-        assert_eq!(state.handle_download(agent_id, 0, attacker_ip).await, "wait");
-        assert_eq!(state.handle_download(agent_id, 2, attacker_ip).await, "wait");
-
-        {
-            let responses = state.responses.lock().await;
-            let queued = responses.get(&agent_id).expect("response must remain queued");
-            assert_eq!(queued.peer_ip, legit_ip);
-            assert_eq!(queued.chunks, vec!["AAA".to_owned(), "BBB".to_owned()]);
-        }
-
-        assert_eq!(state.handle_download(agent_id, 0, legit_ip).await, "2 AAA");
+        // Download arrives via resolver B (different IP) — must still work.
+        assert_eq!(state.handle_download(agent_id, 0).await, "2 AAA");
         assert!(state.responses.lock().await.contains_key(&agent_id));
-        assert_eq!(state.handle_download(agent_id, 2, legit_ip).await, "done");
+        assert_eq!(state.handle_download(agent_id, 1).await, "2 BBB");
+        assert!(state.responses.lock().await.contains_key(&agent_id));
+        assert_eq!(state.handle_download(agent_id, 2).await, "done");
         assert!(!state.responses.lock().await.contains_key(&agent_id));
+    }
+
+    /// An unregistered agent must not be able to download responses, even
+    /// though the IP check was removed.  The registry check is the gate.
+    #[tokio::test]
+    async fn dns_download_rejects_unregistered_agent_regardless_of_ip() {
+        let state = dns_state("dns-unregistered-dl").await;
+        let registered_id = 0xDEAD_BEEF;
+        let unregistered_id = 0xCAFE_BABE;
+        let key = [0x11u8; AGENT_KEY_LENGTH];
+        let iv = [0x22u8; AGENT_IV_LENGTH];
+
+        state.registry.insert(sample_agent_info(registered_id, key, iv)).await.expect("insert");
+
+        // Plant a response under the unregistered agent ID.
+        state.responses.lock().await.insert(
+            unregistered_id,
+            DnsPendingResponse { chunks: vec!["SECRET".to_owned()], received_at: Instant::now() },
+        );
+
+        // Must be rejected because the agent is not in the registry.
+        assert_eq!(state.handle_download(unregistered_id, 0).await, "wait");
+        assert!(
+            state.responses.lock().await.contains_key(&unregistered_id),
+            "queued response must not be consumed for unregistered agent"
+        );
     }
 
     #[tokio::test]
@@ -6749,16 +6748,11 @@ mod tests {
                 DnsPendingResponse {
                     chunks: vec!["AAA".to_owned()],
                     received_at: Instant::now() - stale_age,
-                    peer_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)),
                 },
             );
             responses.insert(
                 4,
-                DnsPendingResponse {
-                    chunks: vec!["BBB".to_owned()],
-                    received_at: Instant::now(),
-                    peer_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4)),
-                },
+                DnsPendingResponse { chunks: vec!["BBB".to_owned()], received_at: Instant::now() },
             );
         }
 

@@ -9,19 +9,19 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 394 | 212 | 31 |
-| Bugs filed against | 43 | 34 | 9 |
-| Bug rate (bugs/task) | 0.11 | 0.16 | 0.29 |
-| Quality score | 89% | 84% | 71% |
+| Tasks closed | 428 | 212 | 31 |
+| Bugs filed against | 44 | 34 | 9 |
+| Bug rate (bugs/task) | 0.10 | 0.16 | 0.29 |
+| Quality score | 90% | 84% | 71% |
 
-*Bug rates: Claude 43/394=0.11, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 44/428=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 2 | 0 | 0 |
-| Missing tests | 21 | 13 | 5 |
+| Missing tests / stale tests | 22 | 13 | 5 |
 | Clippy warnings | 2 | 0 | 1 |
 | Protocol errors | 6 | 27 | 3 |
 | Security issues | 20 | 36 | 0 |
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-19 23:30 — dd1fa62..f6b07cc
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 34 | 1 | Bulk-closed 34 test coverage issues (9+6+6+6+9+1+1+1+1 across 8 commits). Added new tests for auth, crypto, demon, shutdown, webhook, plugins, local_config. Filed xmexr: e4f55b8 changed External listener validation to warning but forgot to update main.rs test — cargo test fails. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check ✓, clippy ✓ (0 warnings), cargo test **FAILED** (1 failure: `load_profile_rejects_external_listener_configuration` in main.rs — stale after e4f55b8)
 
 ### QA Review — 2026-03-19 22:15 — 0b123b3..fd17219
 

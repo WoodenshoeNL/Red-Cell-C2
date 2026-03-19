@@ -488,30 +488,60 @@ impl PluginRuntime {
                     continue;
                 }
 
-                let module_name = path
-                    .file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .ok_or_else(|| PluginError::InvalidCStringPath {
-                        path: path.display().to_string(),
-                    })?
-                    .to_owned();
-                let code = std::fs::read_to_string(&path).map_err(|_| {
-                    PluginError::InvalidPluginDirectory { path: directory.to_path_buf() }
-                })?;
+                let module_name = match path.file_stem().and_then(|stem| stem.to_str()) {
+                    Some(name) => name.to_owned(),
+                    None => {
+                        warn!(path = %path.display(), "skipping plugin with invalid module name");
+                        continue;
+                    }
+                };
+                let code = match std::fs::read_to_string(&path) {
+                    Ok(code) => code,
+                    Err(err) => {
+                        warn!(path = %path.display(), %err, "skipping plugin that could not be read");
+                        continue;
+                    }
+                };
 
-                let code = CString::new(code).map_err(|_| PluginError::InvalidCStringPath {
-                    path: path.display().to_string(),
-                })?;
-                let filename = CString::new(path.display().to_string()).map_err(|_| {
-                    PluginError::InvalidCStringPath { path: path.display().to_string() }
-                })?;
-                let module_name_cstr = CString::new(module_name.clone()).map_err(|_| {
-                    PluginError::InvalidCStringPath { path: path.display().to_string() }
-                })?;
+                let code = match CString::new(code) {
+                    Ok(code) => code,
+                    Err(_) => {
+                        warn!(path = %path.display(), "skipping plugin with interior NUL byte in source");
+                        continue;
+                    }
+                };
+                let filename = match CString::new(path.display().to_string()) {
+                    Ok(filename) => filename,
+                    Err(_) => {
+                        warn!(path = %path.display(), "skipping plugin with interior NUL byte in path");
+                        continue;
+                    }
+                };
+                let module_name_cstr = match CString::new(module_name.clone()) {
+                    Ok(cstr) => cstr,
+                    Err(_) => {
+                        warn!(path = %path.display(), "skipping plugin with interior NUL byte in module name");
+                        continue;
+                    }
+                };
 
-                let module = PyModule::from_code(py, &code, &filename, &module_name_cstr)?;
-                py.import("sys")?.getattr("modules")?.set_item(module_name.as_str(), module)?;
-                loaded.push(module_name);
+                match PyModule::from_code(py, &code, &filename, &module_name_cstr) {
+                    Ok(module) => {
+                        if let Err(err) = py
+                            .import("sys")
+                            .and_then(|sys| sys.getattr("modules"))
+                            .and_then(|modules| modules.set_item(module_name.as_str(), module))
+                        {
+                            warn!(plugin = %module_name, %err, "failed to register plugin module in sys.modules");
+                            continue;
+                        }
+                        loaded.push(module_name);
+                    }
+                    Err(err) => {
+                        warn!(plugin = %module_name, %err, "skipping plugin that failed to load");
+                        continue;
+                    }
+                }
             }
 
             Ok(loaded)
@@ -1574,8 +1604,8 @@ havoc.RegisterCommand("demo", "demo command", run)
 
     #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "multi_thread")]
-    async fn load_plugins_returns_python_error_on_syntax_error()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn load_plugins_skips_plugin_with_syntax_error() -> Result<(), Box<dyn std::error::Error>>
+    {
         let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
         let temp_dir = TempDir::new()?;
         let plugin_path = temp_dir.path().join("bad_plugin.py");
@@ -1595,10 +1625,74 @@ havoc.RegisterCommand("demo", "demo command", run)
         )
         .await?;
 
-        let result = runtime.load_plugins().await;
+        let loaded = runtime.load_plugins().await?;
+        assert!(loaded.is_empty(), "broken plugin should be skipped, got {loaded:?}");
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn load_plugins_multiple_with_broken_plugin_isolation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let temp_dir = TempDir::new()?;
+
+        // alpha.py — registers a command
+        std::fs::write(
+            temp_dir.path().join("alpha.py"),
+            r#"
+import havoc
+def run_alpha(agent, args):
+    agent.task(0x10, "alpha-payload")
+havoc.RegisterCommand("alpha_cmd", "alpha command", run_alpha)
+"#,
+        )?;
+
+        // beta.py — has a syntax error (should be skipped)
+        std::fs::write(temp_dir.path().join("beta.py"), "def broken(\n    pass\n")?;
+
+        // gamma.py — registers a callback
+        std::fs::write(
+            temp_dir.path().join("gamma.py"),
+            r#"
+import havoc
+def on_checkin(event):
+    _ = event.agent.info["Hostname"]
+havoc.RegisterCallback("agent_checkin", on_checkin)
+"#,
+        )?;
+
+        let database = Database::connect(unique_test_dir("plugins-multi-isolation")).await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let runtime = PluginRuntime::initialize(
+            database,
+            registry,
+            events,
+            sockets,
+            Some(temp_dir.path().to_path_buf()),
+        )
+        .await?;
+
+        let loaded = runtime.load_plugins().await?;
+
+        // alpha and gamma should load; beta (syntax error) should be skipped.
+        assert_eq!(loaded, vec!["alpha".to_owned(), "gamma".to_owned()]);
+
+        // alpha's command should be registered.
+        assert_eq!(runtime.command_names().await, vec!["alpha_cmd".to_owned()]);
+        assert_eq!(
+            runtime.command_descriptions().await.get("alpha_cmd"),
+            Some(&"alpha command".to_owned()),
+        );
+
+        // gamma's callback should be registered (agent_checkin event).
+        let callbacks = runtime.inner.callbacks.read().await;
+        let checkin_callbacks = callbacks.get("agent_checkin");
         assert!(
-            matches!(result, Err(PluginError::Python(_))),
-            "expected Err(PluginError::Python), got {result:?}",
+            checkin_callbacks.is_some_and(|cbs| cbs.len() == 1),
+            "expected exactly 1 agent_checkin callback from gamma plugin",
         );
         Ok(())
     }
@@ -2245,13 +2339,13 @@ havoc.RegisterCommand(\n\
 
     #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "multi_thread")]
-    async fn load_plugins_rejects_interior_nul_in_plugin_source()
+    async fn load_plugins_skips_plugin_with_interior_nul_in_source()
     -> Result<(), Box<dyn std::error::Error>> {
         let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
         let temp_dir = TempDir::new()?;
         let plugin_path = temp_dir.path().join("nul_plugin.py");
         // Write a plugin whose source contains an interior NUL byte — this must
-        // trigger the CString conversion guard.
+        // trigger the CString conversion guard and skip the plugin.
         std::fs::write(&plugin_path, b"x = 1\0\ny = 2\n")?;
 
         let database = Database::connect(unique_test_dir("plugins-nul-source")).await?;
@@ -2267,16 +2361,8 @@ havoc.RegisterCommand(\n\
         )
         .await?;
 
-        let result = runtime.load_plugins().await;
-        match result {
-            Err(PluginError::InvalidCStringPath { path }) => {
-                assert!(
-                    path.contains("nul_plugin.py"),
-                    "error path should reference the offending file, got: {path}",
-                );
-            }
-            other => panic!("expected Err(InvalidCStringPath), got {other:?}"),
-        }
+        let loaded = runtime.load_plugins().await?;
+        assert!(loaded.is_empty(), "plugin with interior NUL should be skipped, got {loaded:?}",);
         Ok(())
     }
 

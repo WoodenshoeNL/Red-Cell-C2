@@ -2276,4 +2276,28 @@ mod tests {
         }
         Ok(())
     }
+
+    /// Extra unknown top-level JSON keys (beyond `Head` and `Body`) must be
+    /// silently ignored for forward-compatibility with newer Havoc clients.
+    #[test]
+    fn extra_top_level_keys_are_silently_ignored() -> Result<(), Box<dyn std::error::Error>> {
+        let value = json!({
+            "Head": { "Event": 1, "User": "operator", "Time": "09/03/2026 19:00:00" },
+            "Body": {
+                "SubEvent": 3,
+                "Info": { "User": "operator", "Password": "deadbeef" }
+            },
+            "Debug": true,
+            "Version": 42,
+            "Extra": { "nested": "data" }
+        });
+
+        let decoded: OperatorMessage = serde_json::from_value(value)?;
+        let expected = OperatorMessage::Login(Message {
+            head: head(EventCode::InitConnection),
+            info: LoginInfo { user: "operator".to_string(), password: "deadbeef".to_string() },
+        });
+        assert_eq!(decoded, expected);
+        Ok(())
+    }
 }

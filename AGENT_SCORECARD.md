@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 449 | 212 | 31 |
+| Tasks closed | 453 | 212 | 31 |
 | Bugs filed against | 46 | 34 | 9 |
 | Bug rate (bugs/task) | 0.10 | 0.16 | 0.29 |
 | Quality score | 90% | 84% | 71% |
 
-*Bug rates: Claude 46/449=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 46/453=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -2601,3 +2601,13 @@ Build: cargo check passed, clippy passed (0 warnings), cargo test passed (all su
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: cargo check passed, clippy pre-existing warning (unused doc comment in plugins.rs — not from this range), cargo test passed (all suites 0 failures)
+
+### QA Review — 2026-03-19 — f153a50..53de2b9
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 4 | 0 | Closed 4 issues (ss50, m93a, 7km5, et4z). Fixed plugin runtime re-entrant deadlock via thread-local CallbackRuntimeGuard RAII bypass (ss50). Added 8 SOCKS5 concurrent/load tests covering connection limits, state reclamation, u32 wraparound, and stale sweeper (m93a). Added plugin deadlock regression test with 10s timeout guard (7km5). Added 10 CTR offset u64/i64 overflow boundary tests in crypto and agent registry (et4z). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (0 warnings), cargo test passed (all suites 0 failures)

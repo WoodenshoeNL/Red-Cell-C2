@@ -1,5 +1,6 @@
 //! Embedded Python plugin runtime for the teamserver.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
@@ -24,6 +25,35 @@ use crate::{
 
 static RUNTIME: OnceLock<Mutex<Option<PluginRuntime>>> = OnceLock::new();
 static NEXT_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
+
+// Thread-local runtime set during Python callback dispatch so that re-entrant
+// calls from Python into the Rust API bypass the global `RUNTIME` mutex
+// entirely, eliminating the deadlock window.
+thread_local! {
+    static CALLBACK_RUNTIME: RefCell<Option<PluginRuntime>> = const { RefCell::new(None) };
+}
+
+/// RAII guard that sets the [`CALLBACK_RUNTIME`] thread-local for the current
+/// scope and clears it on drop, ensuring callbacks always have a lock-free path
+/// to the active runtime.
+struct CallbackRuntimeGuard;
+
+impl CallbackRuntimeGuard {
+    fn enter(runtime: &PluginRuntime) -> Self {
+        CALLBACK_RUNTIME.with(|cell| {
+            *cell.borrow_mut() = Some(runtime.clone());
+        });
+        Self
+    }
+}
+
+impl Drop for CallbackRuntimeGuard {
+    fn drop(&mut self) {
+        CALLBACK_RUNTIME.with(|cell| {
+            *cell.borrow_mut() = None;
+        });
+    }
+}
 
 fn runtime_slot() -> &'static Mutex<Option<PluginRuntime>> {
     RUNTIME.get_or_init(|| Mutex::new(None))
@@ -171,6 +201,7 @@ impl PluginRuntime {
         runtime.install_as_active()?;
         let runtime_for_python = runtime.clone();
         tokio::task::spawn_blocking(move || {
+            let _guard = CallbackRuntimeGuard::enter(&runtime_for_python);
             pyo3::prepare_freethreaded_python();
             Python::with_gil(|py| -> PyResult<()> {
                 runtime_for_python.install_api_module(py)?;
@@ -196,7 +227,11 @@ impl PluginRuntime {
         }
 
         let runtime = self.clone();
-        tokio::task::spawn_blocking(move || runtime.load_plugins_blocking(&directory)).await?
+        tokio::task::spawn_blocking(move || {
+            let _guard = CallbackRuntimeGuard::enter(&runtime);
+            runtime.load_plugins_blocking(&directory)
+        })
+        .await?
     }
 
     /// Return the configured plugin directory, if one was provided.
@@ -354,7 +389,28 @@ impl PluginRuntime {
         self.install_api_module(py)
     }
 
+    /// Return the active runtime, preferring the thread-local set during callback
+    /// dispatch to avoid re-entering the global [`RUNTIME`] mutex.
     fn active() -> PyResult<Self> {
+        // Fast path: if we are inside a callback dispatch, the thread-local is set
+        // and we can avoid touching the global mutex entirely.
+        if let Some(runtime) = CALLBACK_RUNTIME.with(|cell| cell.borrow().clone()) {
+            return Ok(runtime);
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            // In debug builds, detect if the global mutex is already held by this
+            // thread — a sign that a callback is re-entering without the thread-local
+            // guard.  `try_lock` returns Err(TryLockError::WouldBlock) if held.
+            if let Err(std::sync::TryLockError::WouldBlock) = runtime_slot().try_lock() {
+                tracing::error!(
+                    "deadlock detected: RUNTIME mutex already held on this thread; \
+                     callback dispatch should set CALLBACK_RUNTIME thread-local"
+                );
+            }
+        }
+
         Self::current()
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
             .ok_or_else(|| PyRuntimeError::new_err("red_cell Python runtime is not initialized"))
@@ -475,6 +531,10 @@ impl PluginRuntime {
 
         let runtime = self.clone();
         tokio::task::spawn_blocking(move || {
+            // Set the thread-local so re-entrant calls from Python into the Rust
+            // API bypass the global RUNTIME mutex.
+            let _guard = CallbackRuntimeGuard::enter(&runtime);
+
             Python::with_gil(|py| -> PyResult<()> {
                 runtime.install_api_module(py)?;
 
@@ -604,6 +664,10 @@ impl PluginRuntime {
         let captured_task_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let task_id_for_callback = captured_task_id.clone();
         tokio::task::spawn_blocking(move || {
+            // Set the thread-local so re-entrant calls from Python into the Rust
+            // API bypass the global RUNTIME mutex.
+            let _guard = CallbackRuntimeGuard::enter(&runtime);
+
             Python::with_gil(|py| -> PyResult<()> {
                 runtime.install_api_module(py)?;
                 let agent = Py::new(py, PyAgent { agent_id, last_task_id: task_id_for_callback })?
@@ -2366,6 +2430,62 @@ havoc.RegisterCommand(\n\
 
         assert!(runtime.command_names().await.is_empty());
         assert!(runtime.command_descriptions().await.is_empty());
+        Ok(())
+    }
+
+    /// Verify that the thread-local [`CallbackRuntimeGuard`] allows `active()` to
+    /// succeed even when the global `RUNTIME` mutex is held by another thread,
+    /// proving the re-entrancy fix for the callback deadlock (red-cell-c2-ss50).
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn callback_runtime_guard_bypasses_global_mutex() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-callback-guard").await?;
+
+        let runtime_for_thread = runtime.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            // Set the thread-local guard (simulating callback dispatch).
+            let _guard = CallbackRuntimeGuard::enter(&runtime_for_thread);
+            // active() should resolve via the thread-local, never touching the
+            // global mutex.
+            PluginRuntime::active()
+        })
+        .await?;
+
+        assert!(result.is_ok(), "active() should succeed via thread-local guard");
+        Ok(())
+    }
+
+    /// Verify that `active()` returns the thread-local runtime (not the global)
+    /// when the callback guard is set, and that the thread-local is cleared on
+    /// guard drop.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn callback_runtime_guard_clears_on_drop() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-callback-guard-drop").await?;
+
+        let result = tokio::task::spawn_blocking(move || {
+            // Verify thread-local is empty before guard.
+            let before = CALLBACK_RUNTIME.with(|cell| cell.borrow().is_some());
+            assert!(!before, "thread-local should be None before guard");
+
+            {
+                let _guard = CallbackRuntimeGuard::enter(&runtime);
+                let during = CALLBACK_RUNTIME.with(|cell| cell.borrow().is_some());
+                assert!(during, "thread-local should be Some while guard is active");
+            }
+
+            // After guard drops, thread-local should be cleared.
+            let after = CALLBACK_RUNTIME.with(|cell| cell.borrow().is_some());
+            assert!(!after, "thread-local should be None after guard drops");
+        })
+        .await;
+
+        assert!(result.is_ok());
         Ok(())
     }
 

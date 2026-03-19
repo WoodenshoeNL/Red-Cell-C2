@@ -6760,4 +6760,54 @@ mod tests {
         assert_eq!(body["agent_id"], "DEADBEEF");
         assert_eq!(body["request_id"], "42");
     }
+
+    // ---- operator management RBAC tests ----
+
+    #[tokio::test]
+    async fn analyst_key_cannot_create_operator() {
+        let app =
+            test_router(Some((60, "rest-analyst", "secret-analyst", OperatorRole::Analyst))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/operators")
+                    .header(API_KEY_HEADER, "secret-analyst")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"username":"cypher","password":"steak123","role":"Analyst"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "forbidden");
+    }
+
+    #[tokio::test]
+    async fn analyst_key_cannot_list_operators() {
+        let app =
+            test_router(Some((60, "rest-analyst", "secret-analyst", OperatorRole::Analyst))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/operators")
+                    .header(API_KEY_HEADER, "secret-analyst")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "forbidden");
+    }
 }

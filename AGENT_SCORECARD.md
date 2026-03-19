@@ -24,14 +24,14 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 22 | 13 | 5 |
 | Clippy warnings | 2 | 0 | 1 |
 | Protocol errors | 6 | 27 | 3 |
-| Security issues | 20 | 36 | 0 |
+| Security issues | 22 | 36 | 0 |
 | Architecture drift | 3 | 21 | 0 |
 | Memory / resource leaks | 2 | 10 | 1 |
 | Startup / lifecycle regressions | 1 | 8 | 0 |
 | Test infrastructure / flakiness | 1 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
-| Correctness / pagination | 12 | 6 | 1 |
+| Correctness / pagination | 13 | 7 | 1 |
 | Workflow / close-hygiene | 12 | 0 | 0 |
 | Code reuse / duplication | 6 | 0 | 0 |
 
@@ -2560,3 +2560,14 @@ Deep review covered: full structural map (96k lines across 3 crates, 66 .rs file
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (zero warnings), `cargo test -p red-cell -- api::tests` ✓ (131 tests, 0 failures). Full workspace suite (2100+ tests) times out at 120s — pre-existing issue, not a regression.
+
+### Arch Review — 2026-03-19 23:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 3 | security (2), correctness (1) | Config file permissions (9z6bx), fingerprint validation (mhmmv), mutex poisoning (rveao — shared with Codex) |
+| Codex | 2 | correctness (1), quality (1) | Mutex poisoning (rveao — shared with Claude), TOML parse errors (qweip) |
+| Cursor | 0 | — | No code touched in reviewed areas |
+
+Overall codebase health: **on track**
+Biggest blindspot: Client config file written world-readable — the only finding with real security exposure in a deployment scenario. The teamserver side is exceptionally well-hardened: no unwrap in production (clippy lint enforced), bounded allocations throughout, constant-time comparisons for auth, AES-CTR with advancing offsets, per-IP rate limiting on init. The client side has received less security scrutiny — all 4 findings are in the client crate.

@@ -61,7 +61,38 @@ pub(super) async fn handle_net_callback(
                 Some(format_net_sessions(&rows)),
             )
         }
-        DemonNetCommand::Computer | DemonNetCommand::DcList => return Ok(None),
+        DemonNetCommand::Computer => {
+            let target = parser.read_utf16("net computer target")?;
+            let mut computers = Vec::new();
+            while !parser.is_empty() {
+                computers.push(parser.read_utf16("net computer name")?);
+            }
+            let mut output = String::from(" Computer\n ---------\n");
+            for name in &computers {
+                output.push_str(&format!("  {name}\n"));
+            }
+            (
+                "Info",
+                format!("Computers for {target} [{}]: ", computers.len()),
+                Some(output.trim_end().to_owned()),
+            )
+        }
+        DemonNetCommand::DcList => {
+            let target = parser.read_utf16("net dclist target")?;
+            let mut controllers = Vec::new();
+            while !parser.is_empty() {
+                controllers.push(parser.read_utf16("net dc name")?);
+            }
+            let mut output = String::from(" Domain Controller\n -------------------\n");
+            for name in &controllers {
+                output.push_str(&format!("  {name}\n"));
+            }
+            (
+                "Info",
+                format!("Domain controllers for {target} [{}]: ", controllers.len()),
+                Some(output.trim_end().to_owned()),
+            )
+        }
         DemonNetCommand::Share => {
             let target = parser.read_utf16("net shares target")?;
             let mut rows = Vec::new();
@@ -344,33 +375,62 @@ mod tests {
         assert!(output.contains("120"));
     }
 
-    // ── handle_net_callback: Computer / DcList (no-op) ──────────────────────
+    // ── handle_net_callback: Computer ─────────────────────────────────────
 
     #[tokio::test]
-    async fn computer_returns_none_without_broadcast() {
-        let payload = net_payload(DemonNetCommand::Computer, &[]);
-        let events = EventBus::default();
-        let mut rx = events.subscribe();
-        let result = handle_net_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+    async fn computer_broadcasts_computer_list() {
+        let mut rest = encode_utf16("CORP.LOCAL");
+        rest.extend(encode_utf16("WS01"));
+        rest.extend(encode_utf16("WS02"));
+        rest.extend(encode_utf16("SRV-DB"));
+        let payload = net_payload(DemonNetCommand::Computer, &rest);
+        let (result, msg) = call_and_recv(&payload).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), None);
-        drop(events);
-        // No message should have been broadcast
-        let msg = rx.recv().await;
-        assert!(msg.is_none(), "Computer should not broadcast");
+        let msg = msg.expect("should broadcast");
+        let output = assert_agent_response(&msg, "Info", "Computers for CORP.LOCAL [3]: ");
+        assert!(output.contains("Computer"));
+        assert!(output.contains("WS01"));
+        assert!(output.contains("WS02"));
+        assert!(output.contains("SRV-DB"));
     }
 
     #[tokio::test]
-    async fn dclist_returns_none_without_broadcast() {
-        let payload = net_payload(DemonNetCommand::DcList, &[]);
-        let events = EventBus::default();
-        let mut rx = events.subscribe();
-        let result = handle_net_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+    async fn computer_empty_list_broadcasts_zero_count() {
+        let rest = encode_utf16("CORP.LOCAL");
+        let payload = net_payload(DemonNetCommand::Computer, &rest);
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        assert_agent_response(&msg, "Info", "Computers for CORP.LOCAL [0]: ");
+    }
+
+    // ── handle_net_callback: DcList ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn dclist_broadcasts_dc_list() {
+        let mut rest = encode_utf16("CORP.LOCAL");
+        rest.extend(encode_utf16("DC01.corp.local"));
+        rest.extend(encode_utf16("DC02.corp.local"));
+        let payload = net_payload(DemonNetCommand::DcList, &rest);
+        let (result, msg) = call_and_recv(&payload).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), None);
-        drop(events);
-        let msg = rx.recv().await;
-        assert!(msg.is_none(), "DcList should not broadcast");
+        let msg = msg.expect("should broadcast");
+        let output = assert_agent_response(&msg, "Info", "Domain controllers for CORP.LOCAL [2]: ");
+        assert!(output.contains("Domain Controller"));
+        assert!(output.contains("DC01.corp.local"));
+        assert!(output.contains("DC02.corp.local"));
+    }
+
+    #[tokio::test]
+    async fn dclist_empty_list_broadcasts_zero_count() {
+        let rest = encode_utf16("CORP.LOCAL");
+        let payload = net_payload(DemonNetCommand::DcList, &rest);
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        assert_agent_response(&msg, "Info", "Domain controllers for CORP.LOCAL [0]: ");
     }
 
     // ── handle_net_callback: Share ──────────────────────────────────────────

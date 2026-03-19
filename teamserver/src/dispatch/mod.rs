@@ -8803,7 +8803,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn net_computer_returns_none() -> Result<(), Box<dyn std::error::Error>> {
+    async fn net_computer_broadcasts_computer_list() -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
@@ -8823,20 +8823,38 @@ mod tests {
 
         let mut payload = Vec::new();
         add_u32(&mut payload, u32::from(DemonNetCommand::Computer));
+        add_utf16(&mut payload, "CORP.LOCAL");
+        add_utf16(&mut payload, "WS01");
+        add_utf16(&mut payload, "WS02");
 
         let result = dispatcher
             .dispatch(0x1122_3344, u32::from(DemonCommand::CommandNet), 57, &payload)
             .await?;
         assert!(result.is_none(), "Computer subcommand should return None");
 
-        // No event should have been broadcast
-        let recv = timeout(Duration::from_millis(50), receiver.recv()).await;
-        assert!(recv.is_err(), "no event should be broadcast for Computer subcommand");
+        let msg = timeout(Duration::from_millis(200), receiver.recv())
+            .await
+            .expect("should receive event")
+            .expect("should have message");
+        let OperatorMessage::AgentResponse(resp) = msg else {
+            panic!("expected AgentResponse");
+        };
+        assert!(
+            resp.info
+                .extra
+                .get("Message")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .contains("Computers for CORP.LOCAL [2]"),
+            "message should contain target and count"
+        );
+        assert!(resp.info.output.contains("WS01"));
+        assert!(resp.info.output.contains("WS02"));
         Ok(())
     }
 
     #[tokio::test]
-    async fn net_dclist_returns_none() -> Result<(), Box<dyn std::error::Error>> {
+    async fn net_dclist_broadcasts_dc_list() -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
@@ -8856,14 +8874,31 @@ mod tests {
 
         let mut payload = Vec::new();
         add_u32(&mut payload, u32::from(DemonNetCommand::DcList));
+        add_utf16(&mut payload, "CORP.LOCAL");
+        add_utf16(&mut payload, "DC01.corp.local");
 
         let result = dispatcher
             .dispatch(0x1122_3344, u32::from(DemonCommand::CommandNet), 58, &payload)
             .await?;
         assert!(result.is_none(), "DcList subcommand should return None");
 
-        let recv = timeout(Duration::from_millis(50), receiver.recv()).await;
-        assert!(recv.is_err(), "no event should be broadcast for DcList subcommand");
+        let msg = timeout(Duration::from_millis(200), receiver.recv())
+            .await
+            .expect("should receive event")
+            .expect("should have message");
+        let OperatorMessage::AgentResponse(resp) = msg else {
+            panic!("expected AgentResponse");
+        };
+        assert!(
+            resp.info
+                .extra
+                .get("Message")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .contains("Domain controllers for CORP.LOCAL [1]"),
+            "message should contain target and count"
+        );
+        assert!(resp.info.output.contains("DC01.corp.local"));
         Ok(())
     }
 

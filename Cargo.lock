@@ -3947,6 +3947,8 @@ dependencies = [
  "pyo3",
  "red-cell-common",
  "reqwest",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "sha2",

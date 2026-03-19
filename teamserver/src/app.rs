@@ -8,7 +8,7 @@ use axum::{
     extract::{ConnectInfo, FromRef, State},
     http::{Request, StatusCode},
     response::IntoResponse,
-    routing::any,
+    routing::{any, get},
 };
 use red_cell_common::config::Profile;
 
@@ -16,7 +16,7 @@ use crate::{
     AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
     ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
     ServiceBridge, ShutdownController, SocketRelayManager, api_routes, handle_external_request,
-    service_routes, websocket_routes,
+    service_routes,
 };
 
 /// Shared state injected into Axum routes and middleware.
@@ -128,8 +128,9 @@ impl FromRef<TeamserverState> for ShutdownController {
 pub fn build_router(state: TeamserverState) -> Router {
     let api = state.api.clone();
 
-    let mut router =
-        Router::new().nest("/havoc", websocket_routes()).nest("/api/v1", api_routes(api));
+    let mut router = Router::new()
+        .route("/havoc", get(crate::websocket_handler::<TeamserverState>))
+        .nest("/api/v1", api_routes(api));
 
     if let Some(ref bridge) = state.service_bridge {
         router = router.merge(service_routes(bridge));
@@ -365,6 +366,30 @@ mod tests {
             response.status(),
             StatusCode::NOT_FOUND,
             "/havoc must be routed by websocket_routes, not fall through to the 404 fallback"
+        );
+    }
+
+    /// Verify `/havoc` still routes correctly when `NormalizePathLayer` is applied,
+    /// matching the production `main.rs` setup.
+    #[tokio::test]
+    async fn havoc_prefix_routed_with_normalize_path_layer() {
+        use tower::ServiceExt as _;
+        use tower_http::normalize_path::NormalizePathLayer;
+
+        let state = build_test_state().await;
+        let svc = build_router(state).layer(NormalizePathLayer::trim_trailing_slash());
+
+        let response = svc
+            .oneshot(
+                Request::builder().uri("/havoc").body(Body::empty()).expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_ne!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "/havoc must NOT 404 when NormalizePathLayer is applied"
         );
     }
 }

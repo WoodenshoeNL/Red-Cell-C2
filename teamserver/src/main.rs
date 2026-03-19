@@ -1,5 +1,6 @@
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -15,6 +16,7 @@ use red_cell_common::config::{Profile, ProfileValidationError};
 use red_cell_common::tls::{
     TlsKeyAlgorithm, install_default_crypto_provider, resolve_or_persist_tls_identity,
 };
+use rustls_pki_types::pem::PemObject;
 use tokio::net::lookup_host;
 use tower_http::normalize_path::NormalizePathLayer;
 use tracing::{info, instrument};
@@ -190,9 +192,24 @@ async fn build_tls_config(profile: &Profile, profile_path: &Path) -> Result<Rust
     )
     .context("failed to resolve teamserver TLS identity")?;
 
-    RustlsConfig::from_pem(identity.certificate_pem().to_vec(), identity.private_key_pem().to_vec())
-        .await
-        .context("failed to build rustls configuration")
+    // Build a custom rustls ServerConfig that only advertises HTTP/1.1 via ALPN.
+    // The default `RustlsConfig::from_pem` advertises ["h2", "http/1.1"] which causes
+    // HTTP/2 to be negotiated, breaking WebSocket upgrades (which require HTTP/1.1).
+    let certs: Vec<rustls_pki_types::CertificateDer> =
+        rustls_pki_types::CertificateDer::pem_slice_iter(identity.certificate_pem())
+            .collect::<Result<Vec<_>, _>>()
+            .context("failed to parse TLS certificate PEM")?;
+    let key = rustls_pki_types::PrivateKeyDer::from_pem_slice(identity.private_key_pem())
+        .context("failed to parse TLS private key PEM")?;
+
+    let mut server_config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .context("failed to build rustls ServerConfig")?;
+
+    server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+
+    Ok(RustlsConfig::from_config(Arc::new(server_config)))
 }
 
 fn tls_subject_alt_names(host: &str) -> Vec<String> {

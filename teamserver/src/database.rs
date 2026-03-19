@@ -1673,8 +1673,12 @@ fn invalid_value(field: &'static str, message: &str) -> TeamserverError {
 
 #[cfg(test)]
 mod tests {
-    use super::{Database, LinkRecord, LootFilter, LootRecord, bool_from_i64, i64_from_u64};
-    use red_cell_common::{AgentEncryptionInfo, AgentRecord};
+    use super::{
+        AuditLogEntry, AuditLogFilter, Database, LinkRecord, ListenerStatus, LootFilter,
+        LootRecord, PersistedOperator, bool_from_i64, i64_from_u64,
+    };
+    use red_cell_common::config::OperatorRole;
+    use red_cell_common::{AgentEncryptionInfo, AgentRecord, HttpListenerConfig, ListenerConfig};
     use serde_json::json;
     use zeroize::Zeroizing;
 
@@ -2102,5 +2106,434 @@ mod tests {
         assert_eq!(links.parent_of(6).await.unwrap(), Some(5));
         assert_eq!(links.parent_of(7).await.unwrap(), Some(6));
         assert_eq!(links.parent_of(99).await.unwrap(), None, "unknown agent has no parent");
+    }
+
+    // ── AuditLogRepository tests ─────────────────────────────────────
+
+    fn audit_entry(actor: &str, action: &str, occurred_at: &str) -> AuditLogEntry {
+        AuditLogEntry {
+            id: None,
+            actor: actor.to_string(),
+            action: action.to_string(),
+            target_kind: "agent".to_string(),
+            target_id: Some("0x00000001".to_string()),
+            details: Some(json!({"agent_id": "1", "command": "whoami", "result_status": "ok"})),
+            occurred_at: occurred_at.to_string(),
+        }
+    }
+
+    async fn seed_audit_entries(db: &Database) {
+        let repo = db.audit_log();
+        repo.create(&audit_entry("alice", "task.create", "2026-03-01T10:00:00Z")).await.unwrap();
+        repo.create(&audit_entry("bob", "task.create", "2026-03-02T10:00:00Z")).await.unwrap();
+        repo.create(&audit_entry("alice", "task.complete", "2026-03-03T10:00:00Z")).await.unwrap();
+        repo.create(&audit_entry("carol", "agent.checkin", "2026-03-04T10:00:00Z")).await.unwrap();
+        repo.create(&audit_entry("bob", "task.complete", "2026-03-05T10:00:00Z")).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn audit_query_filtered_by_actor_substring() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_audit_entries(&db).await;
+        let repo = db.audit_log();
+
+        let filter =
+            AuditLogFilter { actor_contains: Some("ali".to_string()), ..Default::default() };
+        let results = repo.query_filtered(&filter, 100, 0).await.unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|e| e.actor == "alice"));
+    }
+
+    #[tokio::test]
+    async fn audit_query_filtered_by_action_substring() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_audit_entries(&db).await;
+        let repo = db.audit_log();
+
+        let filter =
+            AuditLogFilter { action_contains: Some("complete".to_string()), ..Default::default() };
+        let results = repo.query_filtered(&filter, 100, 0).await.unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|e| e.action == "task.complete"));
+    }
+
+    #[tokio::test]
+    async fn audit_query_filtered_by_date_range() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_audit_entries(&db).await;
+        let repo = db.audit_log();
+
+        let filter = AuditLogFilter {
+            since: Some("2026-03-02T00:00:00Z".to_string()),
+            until: Some("2026-03-04T00:00:00Z".to_string()),
+            ..Default::default()
+        };
+        let results = repo.query_filtered(&filter, 100, 0).await.unwrap();
+        assert_eq!(results.len(), 2, "only entries on 03-02 and 03-03 should match");
+    }
+
+    #[tokio::test]
+    async fn audit_query_filtered_combined_actor_and_action() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_audit_entries(&db).await;
+        let repo = db.audit_log();
+
+        let filter = AuditLogFilter {
+            actor_contains: Some("bob".to_string()),
+            action_contains: Some("create".to_string()),
+            ..Default::default()
+        };
+        let results = repo.query_filtered(&filter, 100, 0).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].actor, "bob");
+        assert_eq!(results[0].action, "task.create");
+    }
+
+    #[tokio::test]
+    async fn audit_query_filtered_action_in_list() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_audit_entries(&db).await;
+        let repo = db.audit_log();
+
+        let filter = AuditLogFilter {
+            action_in: Some(vec!["task.create".to_string(), "agent.checkin".to_string()]),
+            ..Default::default()
+        };
+        let results = repo.query_filtered(&filter, 100, 0).await.unwrap();
+        assert_eq!(results.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn audit_query_filtered_pagination_newest_first() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_audit_entries(&db).await;
+        let repo = db.audit_log();
+
+        let filter = AuditLogFilter::default();
+        let page1 = repo.query_filtered(&filter, 2, 0).await.unwrap();
+        let page2 = repo.query_filtered(&filter, 2, 2).await.unwrap();
+        let page3 = repo.query_filtered(&filter, 2, 4).await.unwrap();
+
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page2.len(), 2);
+        assert_eq!(page3.len(), 1);
+
+        // Newest first: page1 should have the latest occurred_at values.
+        assert!(page1[0].occurred_at >= page1[1].occurred_at);
+        assert!(page1[1].occurred_at >= page2[0].occurred_at);
+
+        // No overlapping ids.
+        let all_ids: Vec<_> =
+            page1.iter().chain(page2.iter()).chain(page3.iter()).map(|e| e.id).collect();
+        let mut deduped = all_ids.clone();
+        deduped.dedup();
+        assert_eq!(all_ids.len(), deduped.len(), "pages should not overlap");
+    }
+
+    #[tokio::test]
+    async fn audit_query_filtered_no_matches_returns_empty() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_audit_entries(&db).await;
+        let repo = db.audit_log();
+
+        let filter = AuditLogFilter {
+            actor_contains: Some("nonexistent".to_string()),
+            ..Default::default()
+        };
+        let results = repo.query_filtered(&filter, 100, 0).await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn audit_query_filtered_by_json_details_fields() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_audit_entries(&db).await;
+        let repo = db.audit_log();
+
+        // Filter by agent_id in details JSON.
+        let filter = AuditLogFilter { agent_id: Some("1".to_string()), ..Default::default() };
+        let results = repo.query_filtered(&filter, 100, 0).await.unwrap();
+        assert_eq!(results.len(), 5, "all seeded entries have agent_id=1");
+
+        // Filter by command substring in details JSON.
+        let filter =
+            AuditLogFilter { command_contains: Some("who".to_string()), ..Default::default() };
+        let results = repo.query_filtered(&filter, 100, 0).await.unwrap();
+        assert_eq!(results.len(), 5);
+
+        // Filter by result_status in details JSON.
+        let filter = AuditLogFilter { result_status: Some("ok".to_string()), ..Default::default() };
+        let results = repo.query_filtered(&filter, 100, 0).await.unwrap();
+        assert_eq!(results.len(), 5);
+
+        // Non-matching result_status.
+        let filter =
+            AuditLogFilter { result_status: Some("error".to_string()), ..Default::default() };
+        let results = repo.query_filtered(&filter, 100, 0).await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn audit_count_filtered_matches_query_length() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_audit_entries(&db).await;
+        let repo = db.audit_log();
+
+        // Unfiltered count.
+        let count = repo.count_filtered(&AuditLogFilter::default()).await.unwrap();
+        let results = repo.query_filtered(&AuditLogFilter::default(), 100, 0).await.unwrap();
+        assert_eq!(count, results.len() as i64);
+
+        // Filtered count.
+        let filter =
+            AuditLogFilter { actor_contains: Some("alice".to_string()), ..Default::default() };
+        let count = repo.count_filtered(&filter).await.unwrap();
+        let results = repo.query_filtered(&filter, 100, 0).await.unwrap();
+        assert_eq!(count, results.len() as i64);
+        assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn audit_count_filtered_with_date_range() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_audit_entries(&db).await;
+        let repo = db.audit_log();
+
+        let filter = AuditLogFilter {
+            since: Some("2026-03-03T00:00:00Z".to_string()),
+            until: Some("2026-03-05T23:59:59Z".to_string()),
+            ..Default::default()
+        };
+        let count = repo.count_filtered(&filter).await.unwrap();
+        assert_eq!(count, 3);
+    }
+
+    #[tokio::test]
+    async fn audit_latest_timestamps_no_matching_rows() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.audit_log();
+
+        // No data at all.
+        let result = repo.latest_timestamps_by_actor_for_actions(&["task.create"]).await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn audit_latest_timestamps_empty_actions_returns_empty() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_audit_entries(&db).await;
+        let repo = db.audit_log();
+
+        let result = repo.latest_timestamps_by_actor_for_actions(&[]).await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn audit_latest_timestamps_multiple_actors() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_audit_entries(&db).await;
+        let repo = db.audit_log();
+
+        let result = repo
+            .latest_timestamps_by_actor_for_actions(&["task.create", "task.complete"])
+            .await
+            .unwrap();
+        // alice: max of 2026-03-01 (create) and 2026-03-03 (complete) → 2026-03-03
+        assert_eq!(result.get("alice").map(String::as_str), Some("2026-03-03T10:00:00Z"));
+        // bob: max of 2026-03-02 (create) and 2026-03-05 (complete) → 2026-03-05
+        assert_eq!(result.get("bob").map(String::as_str), Some("2026-03-05T10:00:00Z"));
+        // carol only has agent.checkin, not in the action list.
+        assert!(result.get("carol").is_none());
+    }
+
+    #[tokio::test]
+    async fn audit_latest_timestamps_single_action() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_audit_entries(&db).await;
+        let repo = db.audit_log();
+
+        let result = repo.latest_timestamps_by_actor_for_actions(&["agent.checkin"]).await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get("carol").map(String::as_str), Some("2026-03-04T10:00:00Z"));
+    }
+
+    #[tokio::test]
+    async fn audit_latest_timestamps_nonexistent_action_returns_empty() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_audit_entries(&db).await;
+        let repo = db.audit_log();
+
+        let result =
+            repo.latest_timestamps_by_actor_for_actions(&["nonexistent.action"]).await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    // ── OperatorRepository tests ─────────────────────────────────────
+
+    fn sample_operator(username: &str) -> PersistedOperator {
+        PersistedOperator {
+            username: username.to_string(),
+            password_verifier: "argon2:initial_hash".to_string(),
+            role: OperatorRole::Operator,
+        }
+    }
+
+    #[tokio::test]
+    async fn operator_update_password_verifier_succeeds_for_existing_user() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.operators();
+
+        repo.create(&sample_operator("admin")).await.unwrap();
+        repo.update_password_verifier("admin", "argon2:new_hash").await.unwrap();
+
+        let fetched = repo.get("admin").await.unwrap().expect("operator should exist");
+        assert_eq!(fetched.password_verifier, "argon2:new_hash");
+    }
+
+    #[tokio::test]
+    async fn operator_update_password_verifier_silently_succeeds_for_nonexistent_user() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.operators();
+
+        // UPDATE WHERE username = ? affects zero rows — SQLite does not error.
+        let result = repo.update_password_verifier("ghost", "argon2:hash").await;
+        assert!(result.is_ok(), "update for non-existent user should not error");
+
+        // Confirm the user was not accidentally created.
+        let fetched = repo.get("ghost").await.unwrap();
+        assert!(fetched.is_none());
+    }
+
+    #[tokio::test]
+    async fn operator_create_and_get_round_trips() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.operators();
+        let op = sample_operator("testuser");
+
+        repo.create(&op).await.unwrap();
+        let fetched = repo.get("testuser").await.unwrap().expect("operator should exist");
+
+        assert_eq!(fetched.username, "testuser");
+        assert_eq!(fetched.password_verifier, "argon2:initial_hash");
+        assert_eq!(fetched.role, OperatorRole::Operator);
+    }
+
+    #[tokio::test]
+    async fn operator_get_returns_none_for_missing_user() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.operators();
+
+        let fetched = repo.get("nobody").await.unwrap();
+        assert!(fetched.is_none());
+    }
+
+    // ── ListenerRepository tests ─────────────────────────────────────
+
+    fn stub_http_listener(name: &str) -> ListenerConfig {
+        ListenerConfig::from(HttpListenerConfig {
+            name: name.to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["127.0.0.1".to_owned()],
+            host_bind: "0.0.0.0".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: 8080,
+            port_conn: None,
+            method: None,
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: vec!["/".to_owned()],
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: None,
+            proxy: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn listener_set_state_created_to_running() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.listeners();
+
+        repo.create(&stub_http_listener("ls-test")).await.unwrap();
+
+        // Initial state should be Created.
+        let persisted = repo.get("ls-test").await.unwrap().expect("listener should exist");
+        assert_eq!(persisted.state.status, ListenerStatus::Created);
+        assert!(persisted.state.last_error.is_none());
+
+        // Transition to Running.
+        repo.set_state("ls-test", ListenerStatus::Running, None).await.unwrap();
+        let persisted = repo.get("ls-test").await.unwrap().unwrap();
+        assert_eq!(persisted.state.status, ListenerStatus::Running);
+        assert!(persisted.state.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn listener_set_state_running_to_error_with_message() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.listeners();
+
+        repo.create(&stub_http_listener("ls-err")).await.unwrap();
+        repo.set_state("ls-err", ListenerStatus::Running, None).await.unwrap();
+
+        // Transition to Error with a reason.
+        repo.set_state("ls-err", ListenerStatus::Error, Some("bind failed: port in use"))
+            .await
+            .unwrap();
+        let persisted = repo.get("ls-err").await.unwrap().unwrap();
+        assert_eq!(persisted.state.status, ListenerStatus::Error);
+        assert_eq!(persisted.state.last_error.as_deref(), Some("bind failed: port in use"));
+    }
+
+    #[tokio::test]
+    async fn listener_set_state_error_to_stopped_clears_error() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.listeners();
+
+        repo.create(&stub_http_listener("ls-clr")).await.unwrap();
+        repo.set_state("ls-clr", ListenerStatus::Error, Some("crash")).await.unwrap();
+
+        // Transition back to Stopped with no error.
+        repo.set_state("ls-clr", ListenerStatus::Stopped, None).await.unwrap();
+        let persisted = repo.get("ls-clr").await.unwrap().unwrap();
+        assert_eq!(persisted.state.status, ListenerStatus::Stopped);
+        assert!(persisted.state.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn listener_set_state_full_lifecycle() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.listeners();
+
+        repo.create(&stub_http_listener("ls-life")).await.unwrap();
+
+        let transitions = [
+            (ListenerStatus::Running, None),
+            (ListenerStatus::Stopped, None),
+            (ListenerStatus::Running, None),
+            (ListenerStatus::Error, Some("unexpected EOF")),
+            (ListenerStatus::Stopped, None),
+        ];
+
+        for (status, error) in &transitions {
+            repo.set_state("ls-life", *status, error.as_deref()).await.unwrap();
+            let persisted = repo.get("ls-life").await.unwrap().unwrap();
+            assert_eq!(persisted.state.status, *status);
+            assert_eq!(persisted.state.last_error.as_deref(), *error);
+        }
+    }
+
+    #[tokio::test]
+    async fn listener_set_state_nonexistent_listener_silently_succeeds() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.listeners();
+
+        // UPDATE WHERE name = ? on non-existent row affects zero rows — no error.
+        let result = repo.set_state("ghost", ListenerStatus::Running, None).await;
+        assert!(result.is_ok());
     }
 }

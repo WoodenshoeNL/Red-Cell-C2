@@ -3003,4 +3003,105 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn next_ctr_offset_returns_error_on_u64_overflow() {
+        // Place the offset near u64::MAX so adding even 1 block overflows.
+        let near_max = u64::MAX;
+        let result = super::next_ctr_offset(near_max, 16);
+        assert!(result.is_err(), "adding 1 block at u64::MAX must overflow");
+    }
+
+    #[test]
+    fn next_ctr_offset_succeeds_at_maximum_non_overflowing_value() {
+        // u64::MAX - 1 + 1 block = u64::MAX, which is representable.
+        let result = super::next_ctr_offset(u64::MAX - 1, 16);
+        assert_eq!(result.unwrap(), u64::MAX);
+    }
+
+    #[test]
+    fn next_ctr_offset_zero_payload_does_not_advance() {
+        let result = super::next_ctr_offset(u64::MAX, 0);
+        assert_eq!(result.unwrap(), u64::MAX, "zero-length payload must not advance");
+    }
+
+    #[tokio::test]
+    async fn advance_ctr_for_agent_errors_on_overflow_near_i64_max() -> Result<(), TeamserverError>
+    {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database);
+        let agent = sample_agent_with_crypto(
+            0x1000_FFFE,
+            [0xCC; AGENT_KEY_LENGTH],
+            [0xDD; AGENT_IV_LENGTH],
+        );
+        registry.insert(agent.clone()).await?;
+
+        // i64::MAX as u64 is the largest offset storable in SQLite.
+        let max_storable = i64::MAX as u64;
+        registry.set_ctr_offset(agent.agent_id, max_storable).await?;
+        assert_eq!(registry.ctr_offset(agent.agent_id).await?, max_storable);
+
+        // Advancing by 16 bytes (1 block) would push past i64::MAX, which
+        // next_ctr_offset allows (it works in u64 space), but persistence will
+        // reject the resulting value.  Either way the operation must fail.
+        let result = registry.advance_ctr_for_agent(agent.agent_id, 16).await;
+        assert!(result.is_err(), "advance past i64::MAX must fail on persist");
+
+        // In-memory offset must remain unchanged after the failed advance.
+        assert_eq!(
+            registry.ctr_offset(agent.agent_id).await?,
+            max_storable,
+            "in-memory ctr_block_offset must not change on overflow"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn advance_ctr_for_agent_succeeds_at_i64_max_boundary() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database);
+        let agent = sample_agent_with_crypto(
+            0x1000_FFFD,
+            [0xCC; AGENT_KEY_LENGTH],
+            [0xDD; AGENT_IV_LENGTH],
+        );
+        registry.insert(agent.clone()).await?;
+
+        // Set to (i64::MAX - 1) as u64, then advance by 1 block → i64::MAX as u64.
+        let near_max = (i64::MAX - 1) as u64;
+        registry.set_ctr_offset(agent.agent_id, near_max).await?;
+        registry.advance_ctr_for_agent(agent.agent_id, 16).await?;
+
+        assert_eq!(
+            registry.ctr_offset(agent.agent_id).await?,
+            i64::MAX as u64,
+            "advance to exactly i64::MAX must succeed"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn advance_ctr_for_agent_zero_len_at_max_does_not_advance() -> Result<(), TeamserverError>
+    {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database);
+        let agent = sample_agent_with_crypto(
+            0x1000_FFFC,
+            [0xCC; AGENT_KEY_LENGTH],
+            [0xDD; AGENT_IV_LENGTH],
+        );
+        registry.insert(agent.clone()).await?;
+
+        let max_storable = i64::MAX as u64;
+        registry.set_ctr_offset(agent.agent_id, max_storable).await?;
+        // Zero-length payload must not overflow even at the storage limit.
+        registry.advance_ctr_for_agent(agent.agent_id, 0).await?;
+
+        assert_eq!(registry.ctr_offset(agent.agent_id).await?, max_storable);
+
+        Ok(())
+    }
 }

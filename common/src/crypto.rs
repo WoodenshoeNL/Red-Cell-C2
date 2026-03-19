@@ -569,4 +569,56 @@ mod tests {
         assert_eq!(ctr_blocks_for_len(17), 2);
         assert_eq!(ctr_blocks_for_len(32), 2);
     }
+
+    #[test]
+    fn ctr_blocks_for_len_large_payload() {
+        // 1 GiB payload = 2^30 bytes → 2^30 / 16 = 2^26 blocks.
+        assert_eq!(ctr_blocks_for_len(1 << 30), 1 << 26);
+        // Non-aligned: 2^30 + 1 byte rounds up.
+        assert_eq!(ctr_blocks_for_len((1 << 30) + 1), (1 << 26) + 1);
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn ctr_blocks_for_len_near_usize_max() {
+        // On 64-bit platforms `usize as u64` is lossless.
+        // usize::MAX bytes → ceiling(usize::MAX / 16) blocks.
+        let max_blocks = (u64::MAX).div_ceil(16);
+        assert_eq!(ctr_blocks_for_len(usize::MAX), max_blocks);
+
+        // usize::MAX - 15 is exactly aligned.
+        let aligned = usize::MAX - 15;
+        assert_eq!(ctr_blocks_for_len(aligned), aligned as u64 / 16);
+    }
+
+    #[test]
+    fn encrypt_at_max_valid_block_offset_succeeds() {
+        let key = [0x41; AGENT_KEY_LENGTH];
+        let iv = [0x24; AGENT_IV_LENGTH];
+        // Maximum block offset whose seek position (offset * 16) fits in u64.
+        let max_offset = u64::MAX / 16;
+        let plaintext = b"near-limit";
+
+        let result = encrypt_agent_data_at_offset(&key, &iv, max_offset, plaintext);
+        assert!(result.is_ok(), "max valid block offset must succeed: {result:?}");
+
+        let ciphertext = result.unwrap();
+        let decrypted = decrypt_agent_data_at_offset(&key, &iv, max_offset, &ciphertext)
+            .expect("round-trip at max valid offset");
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn encrypt_at_one_past_max_valid_block_offset_fails() {
+        let key = [0x41; AGENT_KEY_LENGTH];
+        let iv = [0x24; AGENT_IV_LENGTH];
+        // One past the maximum valid offset: (u64::MAX / 16) + 1 overflows on seek.
+        let overflow_offset = u64::MAX / 16 + 1;
+
+        let error = encrypt_agent_data_at_offset(&key, &iv, overflow_offset, b"x")
+            .expect_err("offset one past max must fail");
+        assert!(
+            matches!(error, CryptoError::InvalidCtrOffset { block_offset } if block_offset == overflow_offset),
+        );
+    }
 }

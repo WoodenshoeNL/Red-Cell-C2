@@ -1015,4 +1015,126 @@ mod tests {
         assert_eq!(body["error"]["code"], "authorization_error");
         assert_eq!(body["error"]["message"], "unsupported operator websocket command");
     }
+
+    #[tokio::test]
+    async fn session_token_rejects_lowercase_bearer_prefix() {
+        let auth = AuthService::from_profile(&profile()).expect("auth service should initialize");
+        let request = Request::builder()
+            .header(AUTHORIZATION, "bearer token123")
+            .body(())
+            .expect("request should build");
+        let (mut parts, _) = request.into_parts();
+
+        let error = AuthenticatedOperator::from_request_parts(&mut parts, &TestState { auth })
+            .await
+            .expect_err("lowercase 'bearer' prefix should be rejected");
+
+        assert_eq!(error, AuthorizationError::InvalidAuthorizationHeader);
+    }
+
+    #[tokio::test]
+    async fn session_token_rejects_uppercase_bearer_prefix() {
+        let auth = AuthService::from_profile(&profile()).expect("auth service should initialize");
+        let request = Request::builder()
+            .header(AUTHORIZATION, "BEARER token123")
+            .body(())
+            .expect("request should build");
+        let (mut parts, _) = request.into_parts();
+
+        let error = AuthenticatedOperator::from_request_parts(&mut parts, &TestState { auth })
+            .await
+            .expect_err("uppercase 'BEARER' prefix should be rejected");
+
+        assert_eq!(error, AuthorizationError::InvalidAuthorizationHeader);
+    }
+
+    #[tokio::test]
+    async fn session_token_rejects_mixed_case_bearer_prefix() {
+        let auth = AuthService::from_profile(&profile()).expect("auth service should initialize");
+        let request = Request::builder()
+            .header(AUTHORIZATION, "bEaReR token123")
+            .body(())
+            .expect("request should build");
+        let (mut parts, _) = request.into_parts();
+
+        let error = AuthenticatedOperator::from_request_parts(&mut parts, &TestState { auth })
+            .await
+            .expect_err("mixed-case 'bEaReR' prefix should be rejected");
+
+        assert_eq!(error, AuthorizationError::InvalidAuthorizationHeader);
+    }
+
+    #[tokio::test]
+    async fn session_token_double_space_after_bearer_causes_lookup_miss() {
+        let auth = AuthService::from_profile(&profile()).expect("auth service should initialize");
+
+        // Log in to get a real token.
+        let connection_id = Uuid::new_v4();
+        let result = auth
+            .authenticate_login(
+                connection_id,
+                &red_cell_common::operator::LoginInfo {
+                    user: "operator".to_owned(),
+                    password: hash_password_sha3("operatorpw"),
+                },
+            )
+            .await;
+        assert!(matches!(result, crate::auth::AuthenticationResult::Success(_)));
+
+        let stored =
+            auth.session_for_connection(connection_id).await.expect("session should exist");
+
+        // Double space: "Bearer  <token>" — strip_prefix("Bearer ") yields " <token>",
+        // which includes a leading space and won't match the real token.
+        let request = Request::builder()
+            .header(AUTHORIZATION, format!("Bearer  {}", stored.token))
+            .body(())
+            .expect("request should build");
+        let (mut parts, _) = request.into_parts();
+
+        let error = AuthenticatedOperator::from_request_parts(
+            &mut parts,
+            &TestState { auth: auth.clone() },
+        )
+        .await
+        .expect_err("double-spaced bearer should not match real token");
+
+        assert_eq!(error, AuthorizationError::UnknownSessionToken);
+    }
+
+    #[tokio::test]
+    async fn session_token_trailing_whitespace_in_token_causes_lookup_miss() {
+        let auth = AuthService::from_profile(&profile()).expect("auth service should initialize");
+
+        let connection_id = Uuid::new_v4();
+        let result = auth
+            .authenticate_login(
+                connection_id,
+                &red_cell_common::operator::LoginInfo {
+                    user: "operator".to_owned(),
+                    password: hash_password_sha3("operatorpw"),
+                },
+            )
+            .await;
+        assert!(matches!(result, crate::auth::AuthenticationResult::Success(_)));
+
+        let stored =
+            auth.session_for_connection(connection_id).await.expect("session should exist");
+
+        // Trailing space: "Bearer <token> " — token parsed includes trailing space.
+        let request = Request::builder()
+            .header(AUTHORIZATION, format!("Bearer {} ", stored.token))
+            .body(())
+            .expect("request should build");
+        let (mut parts, _) = request.into_parts();
+
+        let error = AuthenticatedOperator::from_request_parts(
+            &mut parts,
+            &TestState { auth: auth.clone() },
+        )
+        .await
+        .expect_err("trailing whitespace in token should not match real token");
+
+        assert_eq!(error, AuthorizationError::UnknownSessionToken);
+    }
 }

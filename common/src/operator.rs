@@ -1085,6 +1085,41 @@ mod tests {
         Ok(())
     }
 
+    /// Verifies that `ListenerInfo` extra fields (via `#[serde(flatten)]`) survive
+    /// a JSON round-trip and appear at the top level alongside named fields.
+    #[test]
+    fn listener_info_extra_fields_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+        let info = ListenerInfo {
+            name: Some("smb-pivot".to_string()),
+            protocol: Some("Smb".to_string()),
+            extra: BTreeMap::from([
+                ("CustomField".to_string(), json!("custom_value")),
+                ("PipeName".to_string(), json!("\\\\.\\pipe\\demon")),
+            ]),
+            ..ListenerInfo::default()
+        };
+
+        // Serialize and verify extra fields appear at the top level
+        let json_value = serde_json::to_value(&info)?;
+        let obj = json_value.as_object().expect("serialized ListenerInfo should be an object");
+        assert_eq!(obj.get("CustomField"), Some(&json!("custom_value")));
+        assert_eq!(obj.get("PipeName"), Some(&json!("\\\\.\\pipe\\demon")));
+        assert_eq!(obj.get("Name"), Some(&json!("smb-pivot")));
+        assert_eq!(obj.get("Protocol"), Some(&json!("Smb")));
+
+        // Deserialize back and verify extra fields are preserved
+        let decoded: ListenerInfo = serde_json::from_value(json_value)?;
+        assert_eq!(decoded.name, Some("smb-pivot".to_string()));
+        assert_eq!(decoded.protocol, Some("Smb".to_string()));
+        assert_eq!(decoded.extra.get("CustomField"), Some(&json!("custom_value")));
+        assert_eq!(decoded.extra.get("PipeName"), Some(&json!("\\\\.\\pipe\\demon")));
+        // Named fields must not leak into extra
+        assert!(!decoded.extra.contains_key("Name"));
+        assert!(!decoded.extra.contains_key("Protocol"));
+
+        Ok(())
+    }
+
     #[test]
     fn agent_task_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         let message = OperatorMessage::AgentTask(Message {

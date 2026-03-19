@@ -265,6 +265,69 @@ async fn bof_output_callback_broadcasts_output_to_operator()
     Ok(())
 }
 
+/// A BOF inline-execute callback with BOF_CALLBACK_OUTPUT carrying an **empty string**
+/// must still broadcast a valid `AgentResponse` with Type="Output" and Message=""
+/// without panicking on a zero-length payload read.
+#[tokio::test]
+async fn bof_output_empty_payload_broadcasts_output_without_panic()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners.create(common::http_listener_config("asm-test-bof-empty", listener_port)).await?;
+    drop(listener_guard);
+    listeners.start("asm-test-bof-empty").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xAB01_00F0_u32;
+    let key = [0xF3; AGENT_KEY_LENGTH];
+    let iv = [0xF4; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    // Consume the AgentNew broadcast.
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(
+        matches!(agent_new, OperatorMessage::AgentNew(_)),
+        "expected AgentNew, got {agent_new:?}"
+    );
+
+    // Send BOF_CALLBACK_OUTPUT with an empty string — length prefix is 0, no data bytes.
+    let payload = bof_output_payload("");
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandInlineExecute),
+            0xF0,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse, got {event:?}");
+    };
+    assert_eq!(msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::CommandInlineExecute).to_string());
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Output"));
+    // The message must be present and empty (or at least not cause a panic).
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(message.is_empty(), "expected empty message for empty BOF output, got {message:?}");
+
+    socket.close(None).await?;
+    listeners.stop("asm-test-bof-empty").await?;
+    Ok(())
+}
+
 /// A BOF inline-execute callback with an empty payload (BOF_RAN_OK) must not
 /// return an error and must broadcast a completion event to the operator.
 #[tokio::test]

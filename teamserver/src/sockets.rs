@@ -1300,6 +1300,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn negotiate_socks5_happy_path() -> io::Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (mut client, mut server) = connected_stream_pair().await?;
+
+        // Send a valid SOCKS5 greeting: version=5, 1 method, NO_AUTH (0x00).
+        let client_task = tokio::spawn(async move {
+            client.write_all(&[super::SOCKS_VERSION, 1, super::SOCKS_METHOD_NO_AUTH]).await?;
+            // Read the server's method-selection response.
+            let mut response = [0_u8; 2];
+            client.read_exact(&mut response).await?;
+            io::Result::Ok(response)
+        });
+
+        let result = super::negotiate_socks5(&mut server).await;
+
+        assert!(result.is_ok(), "negotiate_socks5 should succeed for a valid NO_AUTH greeting");
+
+        let response = client_task.await.map_err(|e| io::Error::other(e.to_string()))??;
+        assert_eq!(
+            response,
+            [super::SOCKS_VERSION, super::SOCKS_METHOD_NO_AUTH],
+            "server should reply [0x05, 0x00] selecting NO_AUTH"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn negotiate_socks5_rejects_auth_only_methods() -> io::Result<()> {
         use tokio::io::AsyncWriteExt;
 

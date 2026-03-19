@@ -5492,4 +5492,614 @@ mod tests {
         assert!(body["discord"].is_object(), "discord field should be present when configured");
         assert_eq!(body["discord"]["failures"], 0u64);
     }
+
+    // ── GET /listeners (list) ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_listeners_returns_empty_array_initially() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/listeners")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body, serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn list_listeners_returns_created_listeners() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let create_response = app
+            .clone()
+            .oneshot(create_listener_request(
+                &smb_listener_json("pivot-a", "pipe-a"),
+                "secret-admin",
+            ))
+            .await
+            .expect("response");
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+
+        let create_response = app
+            .clone()
+            .oneshot(create_listener_request(
+                &smb_listener_json("pivot-b", "pipe-b"),
+                "secret-admin",
+            ))
+            .await
+            .expect("response");
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/listeners")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        let items = body.as_array().expect("array of listeners");
+        assert_eq!(items.len(), 2);
+        let names: Vec<&str> = items.iter().filter_map(|v| v["name"].as_str()).collect();
+        assert!(names.contains(&"pivot-a"));
+        assert!(names.contains(&"pivot-b"));
+    }
+
+    // ── Listener round-trip integration test ──────────────────────────
+
+    #[tokio::test]
+    async fn listener_rest_api_round_trip_create_get_list_update_start_stop_delete() {
+        let port = free_tcp_port();
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        // 1. Create
+        let response = app
+            .clone()
+            .oneshot(create_listener_request(
+                &http_listener_json("roundtrip", port),
+                "secret-admin",
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = read_json(response).await;
+        assert_eq!(body["name"], "roundtrip");
+        assert_eq!(body["state"]["status"], "Created");
+
+        // 2. Get
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/listeners/roundtrip")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["name"], "roundtrip");
+
+        // 3. List
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/listeners")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        let items = body.as_array().expect("listener array");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["name"], "roundtrip");
+
+        // 4. Update (change port_bind to a new ephemeral port)
+        let new_port = free_tcp_port();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/listeners/roundtrip")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(http_listener_json("roundtrip", new_port)))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["name"], "roundtrip");
+
+        // 5. Start
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/listeners/roundtrip/start")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["state"]["status"], "Running");
+
+        // 6. Stop
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/listeners/roundtrip/stop")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["state"]["status"], "Stopped");
+
+        // 7. Delete
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/listeners/roundtrip")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Verify deletion
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/listeners/roundtrip")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── Validation: empty SMB pipe name ───────────────────────────────
+
+    #[tokio::test]
+    async fn create_listener_rejects_empty_smb_pipe_name() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let response = app
+            .oneshot(create_listener_request(&smb_listener_json("pivot", ""), "secret-admin"))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "listener_invalid_config");
+    }
+
+    // ── RBAC: analyst cannot delete listeners ─────────────────────────
+
+    #[tokio::test]
+    async fn analyst_key_cannot_delete_listeners() {
+        let app =
+            test_router(Some((60, "rest-analyst", "secret-analyst", OperatorRole::Analyst))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/listeners/any-listener")
+                    .header(API_KEY_HEADER, "secret-analyst")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "forbidden");
+    }
+
+    #[tokio::test]
+    async fn analyst_key_cannot_start_listeners() {
+        let app =
+            test_router(Some((60, "rest-analyst", "secret-analyst", OperatorRole::Analyst))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/listeners/any-listener/start")
+                    .header(API_KEY_HEADER, "secret-analyst")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "forbidden");
+    }
+
+    #[tokio::test]
+    async fn analyst_key_cannot_stop_listeners() {
+        let app =
+            test_router(Some((60, "rest-analyst", "secret-analyst", OperatorRole::Analyst))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/listeners/any-listener/stop")
+                    .header(API_KEY_HEADER, "secret-analyst")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "forbidden");
+    }
+
+    #[tokio::test]
+    async fn analyst_key_cannot_update_listeners() {
+        let app =
+            test_router(Some((60, "rest-analyst", "secret-analyst", OperatorRole::Analyst))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/listeners/any-listener")
+                    .header(API_KEY_HEADER, "secret-analyst")
+                    .header("content-type", "application/json")
+                    .body(Body::from(smb_listener_json("any-listener", "pipe")))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "forbidden");
+    }
+
+    #[tokio::test]
+    async fn analyst_key_cannot_mark_listeners() {
+        let app =
+            test_router(Some((60, "rest-analyst", "secret-analyst", OperatorRole::Analyst))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/listeners/any-listener/mark")
+                    .header(API_KEY_HEADER, "secret-analyst")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"mark":"start"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "forbidden");
+    }
+
+    // ── Audit: start/stop record audit entries ────────────────────────
+
+    #[tokio::test]
+    async fn start_listener_records_audit_entry_on_success() {
+        let port = free_tcp_port();
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let _ = app
+            .clone()
+            .oneshot(create_listener_request(
+                &http_listener_json("audit-start", port),
+                "secret-admin",
+            ))
+            .await
+            .expect("response");
+
+        let start_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/listeners/audit-start/start")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(start_response.status(), StatusCode::OK);
+
+        let audit_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/audit?action=listener.start")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(audit_response.status(), StatusCode::OK);
+        let body = read_json(audit_response).await;
+        let items = body["items"].as_array().expect("items array");
+        assert!(!items.is_empty(), "expected at least one listener.start audit entry");
+        let entry = &items[0];
+        assert_eq!(entry["action"], "listener.start");
+        assert_eq!(entry["target_kind"], "listener");
+        assert_eq!(entry["target_id"], "audit-start");
+        assert_eq!(entry["result_status"], "success");
+    }
+
+    #[tokio::test]
+    async fn stop_listener_records_audit_entry_on_success() {
+        let port = free_tcp_port();
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let _ = app
+            .clone()
+            .oneshot(create_listener_request(
+                &http_listener_json("audit-stop", port),
+                "secret-admin",
+            ))
+            .await
+            .expect("response");
+
+        let _ = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/listeners/audit-stop/start")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        let stop_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/listeners/audit-stop/stop")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(stop_response.status(), StatusCode::OK);
+
+        let audit_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/audit?action=listener.stop")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(audit_response.status(), StatusCode::OK);
+        let body = read_json(audit_response).await;
+        let items = body["items"].as_array().expect("items array");
+        assert!(!items.is_empty(), "expected at least one listener.stop audit entry");
+        let entry = &items[0];
+        assert_eq!(entry["action"], "listener.stop");
+        assert_eq!(entry["target_kind"], "listener");
+        assert_eq!(entry["target_id"], "audit-stop");
+        assert_eq!(entry["result_status"], "success");
+    }
+
+    #[tokio::test]
+    async fn start_listener_records_audit_entry_on_not_found() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/listeners/ghost/start")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let audit_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/audit?action=listener.start")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(audit_response.status(), StatusCode::OK);
+        let body = read_json(audit_response).await;
+        let items = body["items"].as_array().expect("items array");
+        assert!(!items.is_empty(), "expected at least one listener.start audit entry");
+        let entry = &items[0];
+        assert_eq!(entry["action"], "listener.start");
+        assert_eq!(entry["result_status"], "failure");
+    }
+
+    #[tokio::test]
+    async fn stop_listener_records_audit_entry_on_not_found() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/listeners/ghost/stop")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let audit_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/audit?action=listener.stop")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(audit_response.status(), StatusCode::OK);
+        let body = read_json(audit_response).await;
+        let items = body["items"].as_array().expect("items array");
+        assert!(!items.is_empty(), "expected at least one listener.stop audit entry");
+        let entry = &items[0];
+        assert_eq!(entry["action"], "listener.stop");
+        assert_eq!(entry["result_status"], "failure");
+    }
+
+    // ── Analyst can GET a single listener ─────────────────────────────
+
+    #[tokio::test]
+    async fn analyst_key_can_get_individual_listener() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let agent_registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(agent_registry.clone(), events.clone());
+        let listeners = ListenerManager::new(
+            database.clone(),
+            agent_registry.clone(),
+            events.clone(),
+            sockets.clone(),
+            None,
+        );
+
+        // Build a profile with both admin and analyst keys.
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "Neo" {
+                Password = "password1234"
+              }
+            }
+
+            Api {
+              RateLimitPerMinute = 60
+              key "rest-admin" {
+                Value = "secret-admin"
+                Role = "Admin"
+              }
+              key "rest-analyst" {
+                Value = "secret-analyst"
+                Role = "Analyst"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile");
+
+        let api = ApiRuntime::from_profile(&profile).expect("rng should work in tests");
+        let auth =
+            AuthService::from_profile_with_database(&profile, &database).await.expect("auth");
+        let app = api_routes(api.clone()).with_state(TeamserverState {
+            profile: profile.clone(),
+            database,
+            auth,
+            api,
+            events,
+            connections: OperatorConnectionManager::new(),
+            agent_registry,
+            listeners,
+            payload_builder: crate::PayloadBuilderService::disabled_for_tests(),
+            sockets,
+            webhooks: crate::AuditWebhookNotifier::from_profile(&profile),
+            login_rate_limiter: crate::LoginRateLimiter::new(),
+            shutdown: crate::ShutdownController::new(),
+        });
+
+        // Admin creates a listener.
+        let create_response = app
+            .clone()
+            .oneshot(create_listener_request(&smb_listener_json("pivot", "pipe-a"), "secret-admin"))
+            .await
+            .expect("response");
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+
+        // Analyst can read the individual listener.
+        let get_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/listeners/pivot")
+                    .header(API_KEY_HEADER, "secret-analyst")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let body = read_json(get_response).await;
+        assert_eq!(body["name"], "pivot");
+    }
 }

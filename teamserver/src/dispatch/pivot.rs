@@ -268,14 +268,21 @@ pub(super) fn inner_demon_agent_id(bytes: &[u8]) -> Result<u32, DemonProtocolErr
 
 #[cfg(test)]
 mod tests {
+    use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
     use red_cell_common::demon::{
         DEMON_MAGIC_VALUE, DemonCommand, DemonEnvelope, DemonProtocolError, MIN_ENVELOPE_SIZE,
     };
     use red_cell_common::operator::OperatorMessage;
     use serde_json::Value;
+    use zeroize::Zeroizing;
 
-    use super::{CallbackParser, handle_pivot_list_callback, inner_demon_agent_id};
-    use crate::EventBus;
+    use super::{
+        CallbackParser, CommandDispatchError, DemonCallbackPackage, handle_pivot_command_callback,
+        handle_pivot_list_callback, inner_demon_agent_id,
+    };
+    use crate::dispatch::pivot::dispatch_builtin_packages;
+    use crate::dispatch::{BuiltinDispatchContext, DownloadTracker};
+    use crate::{AgentRegistry, Database, EventBus, SocketRelayManager};
 
     const AGENT_ID: u32 = 0xBEEF_0001;
     const REQUEST_ID: u32 = 42;
@@ -416,5 +423,346 @@ mod tests {
         let result = handle_pivot_list_callback(&events, AGENT_ID, REQUEST_ID, &mut parser).await;
 
         assert!(result.is_err(), "truncated payload must return an error");
+    }
+
+    // -----------------------------------------------------------------------
+    // Helpers for handle_pivot_command_callback / dispatch_builtin_packages
+    // -----------------------------------------------------------------------
+
+    fn sample_agent_info(
+        agent_id: u32,
+        key: [u8; AGENT_KEY_LENGTH],
+        iv: [u8; AGENT_IV_LENGTH],
+    ) -> red_cell_common::AgentRecord {
+        red_cell_common::AgentRecord {
+            agent_id,
+            active: true,
+            reason: String::new(),
+            note: String::new(),
+            encryption: red_cell_common::AgentEncryptionInfo {
+                aes_key: Zeroizing::new(key.to_vec()),
+                aes_iv: Zeroizing::new(iv.to_vec()),
+            },
+            hostname: "wkstn-01".to_owned(),
+            username: "operator".to_owned(),
+            domain_name: "lab".to_owned(),
+            external_ip: "127.0.0.1".to_owned(),
+            internal_ip: "10.0.0.25".to_owned(),
+            process_name: "explorer.exe".to_owned(),
+            process_path: "C:\\Windows\\explorer.exe".to_owned(),
+            base_address: 0x1000,
+            process_pid: 1337,
+            process_tid: 7331,
+            process_ppid: 512,
+            process_arch: "x64".to_owned(),
+            elevated: true,
+            os_version: "Windows 11".to_owned(),
+            os_build: 0,
+            os_arch: "x64".to_owned(),
+            sleep_delay: 10,
+            sleep_jitter: 25,
+            kill_date: None,
+            working_hours: None,
+            first_call_in: "2026-03-09T20:00:00Z".to_owned(),
+            last_call_in: "2026-03-09T20:00:00Z".to_owned(),
+        }
+    }
+
+    /// Build a valid Demon callback envelope containing a single package.
+    fn valid_callback_envelope(
+        agent_id: u32,
+        key: &[u8; AGENT_KEY_LENGTH],
+        iv: &[u8; AGENT_IV_LENGTH],
+        command_id: u32,
+        request_id: u32,
+        inner_payload: &[u8],
+    ) -> Vec<u8> {
+        let mut plaintext = Vec::new();
+        plaintext.extend_from_slice(
+            &u32::try_from(inner_payload.len()).unwrap_or_default().to_be_bytes(),
+        );
+        plaintext.extend_from_slice(inner_payload);
+
+        let encrypted = red_cell_common::crypto::encrypt_agent_data(key, iv, &plaintext)
+            .expect("callback payload encryption should succeed");
+
+        let mut envelope_payload = Vec::new();
+        envelope_payload.extend_from_slice(&command_id.to_be_bytes());
+        envelope_payload.extend_from_slice(&request_id.to_be_bytes());
+        envelope_payload.extend_from_slice(&encrypted);
+
+        DemonEnvelope::new(agent_id, envelope_payload)
+            .unwrap_or_else(|error| panic!("failed to build callback envelope: {error}"))
+            .to_bytes()
+    }
+
+    /// Build a `CallbackParser` payload with a LE-length-prefixed byte blob.
+    fn length_prefixed_bytes(data: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        push_u32(&mut buf, u32::try_from(data.len()).unwrap_or_default());
+        buf.extend_from_slice(data);
+        buf
+    }
+
+    /// Build a CommandOutput inner payload (LE length-prefixed UTF-8 string).
+    fn command_output_payload(output: &str) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u32::try_from(output.len()).unwrap_or_default().to_le_bytes());
+        payload.extend_from_slice(output.as_bytes());
+        payload
+    }
+
+    async fn setup_dispatch_context()
+    -> (Database, AgentRegistry, EventBus, SocketRelayManager, DownloadTracker) {
+        let database = Database::connect_in_memory().await.expect("in-memory DB must succeed");
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let downloads = DownloadTracker::new(64 * 1024 * 1024);
+        (database, registry, events, sockets, downloads)
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests for handle_pivot_command_callback
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn pivot_command_callback_happy_path_updates_last_call_in_and_dispatches()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (database, registry, events, sockets, downloads) = setup_dispatch_context().await;
+        let mut rx = events.subscribe();
+
+        let child_id: u32 = 0x3333_4444;
+        let child_key = [0xCC; AGENT_KEY_LENGTH];
+        let child_iv = [0xDD; AGENT_IV_LENGTH];
+        registry.insert(sample_agent_info(child_id, child_key, child_iv)).await?;
+
+        // Build a valid callback envelope from the child agent containing a
+        // CommandOutput response.
+        let output_payload = command_output_payload("pivot child says hello");
+        let inner_envelope = valid_callback_envelope(
+            child_id,
+            &child_key,
+            &child_iv,
+            u32::from(DemonCommand::CommandOutput),
+            0x42,
+            &output_payload,
+        );
+
+        // Wrap the inner envelope into a CallbackParser payload (LE-length-prefixed bytes).
+        let parser_payload = length_prefixed_bytes(&inner_envelope);
+        let mut parser =
+            CallbackParser::new(&parser_payload, u32::from(DemonCommand::CommandPivot));
+
+        let context = BuiltinDispatchContext {
+            registry: &registry,
+            events: &events,
+            database: &database,
+            sockets: &sockets,
+            downloads: &downloads,
+            plugins: None,
+        };
+
+        let result = handle_pivot_command_callback(context, AGENT_ID, &mut parser).await;
+        assert!(result.is_ok(), "happy path must not return an error: {result:?}");
+
+        // First event: AgentUpdate (mark) from last_call_in update.
+        let mark_event = rx.recv().await.expect("should receive AgentUpdate event");
+        let OperatorMessage::AgentUpdate(update) = &mark_event else {
+            panic!("expected AgentUpdate, got {mark_event:?}");
+        };
+        assert_eq!(
+            update.info.agent_id,
+            format!("{child_id:08x}"),
+            "update event must be for the child agent"
+        );
+
+        // Verify last_call_in was actually updated in the registry.
+        let agent = registry.get(child_id).await.expect("child agent must exist");
+        assert_ne!(
+            agent.last_call_in, "2026-03-09T20:00:00Z",
+            "last_call_in must have been updated from its initial value"
+        );
+
+        // Second event: AgentResponse from the inner CommandOutput handler.
+        let output_event = rx.recv().await.expect("should receive AgentResponse event");
+        let OperatorMessage::AgentResponse(msg) = &output_event else {
+            panic!("expected AgentResponse, got {output_event:?}");
+        };
+        assert_eq!(
+            msg.info.demon_id,
+            format!("{child_id:08X}"),
+            "output event must reference the child agent"
+        );
+        assert!(
+            msg.info.output.contains("pivot child says hello"),
+            "output must contain the dispatched text"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pivot_command_callback_non_callback_envelope_returns_invalid_callback()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (database, registry, events, sockets, downloads) = setup_dispatch_context().await;
+
+        let child_id: u32 = 0x5555_6666;
+        let child_key = [0xEE; AGENT_KEY_LENGTH];
+        let child_iv = [0xFF; AGENT_IV_LENGTH];
+        registry.insert(sample_agent_info(child_id, child_key, child_iv)).await?;
+
+        // Build a DemonInit envelope (not a callback), which the handler must reject.
+        let init_payload = {
+            let mut metadata = Vec::new();
+            metadata.extend_from_slice(&child_id.to_be_bytes());
+            // Minimal init metadata — hostname, username, domain, etc.
+            for field in &[b"host" as &[u8], b"user", b"domain", b"10.0.0.1"] {
+                metadata.extend_from_slice(
+                    &u32::try_from(field.len()).unwrap_or_default().to_be_bytes(),
+                );
+                metadata.extend_from_slice(field);
+            }
+            // UTF-16 process path
+            let path_utf16: Vec<u8> =
+                "C:\\a.exe".encode_utf16().flat_map(u16::to_be_bytes).chain([0, 0]).collect();
+            metadata.extend_from_slice(
+                &u32::try_from(path_utf16.len()).unwrap_or_default().to_be_bytes(),
+            );
+            metadata.extend_from_slice(&path_utf16);
+            // Remaining numeric fields (pid, tid, ppid, arch, elevated, base, sleep,
+            // jitter, killdate, workhours, build, major, minor, product, timestamp, flags).
+            for _ in 0..14 {
+                metadata.extend_from_slice(&0_u32.to_be_bytes());
+            }
+            metadata.extend_from_slice(&0_u64.to_be_bytes()); // base_address
+            metadata.extend_from_slice(&0_u64.to_be_bytes()); // timestamp
+
+            let encrypted =
+                red_cell_common::crypto::encrypt_agent_data(&child_key, &child_iv, &metadata)
+                    .expect("init metadata encryption should succeed");
+
+            let mut envelope_body = Vec::new();
+            envelope_body.extend_from_slice(&u32::from(DemonCommand::DemonInit).to_be_bytes());
+            envelope_body.extend_from_slice(&7_u32.to_be_bytes()); // request_id
+            envelope_body.extend_from_slice(&child_key);
+            envelope_body.extend_from_slice(&child_iv);
+            envelope_body.extend_from_slice(&encrypted);
+
+            DemonEnvelope::new(child_id, envelope_body)
+                .expect("init envelope construction must succeed")
+                .to_bytes()
+        };
+
+        let parser_payload = length_prefixed_bytes(&init_payload);
+        let mut parser =
+            CallbackParser::new(&parser_payload, u32::from(DemonCommand::CommandPivot));
+
+        let context = BuiltinDispatchContext {
+            registry: &registry,
+            events: &events,
+            database: &database,
+            sockets: &sockets,
+            downloads: &downloads,
+            plugins: None,
+        };
+
+        let result = handle_pivot_command_callback(context, AGENT_ID, &mut parser).await;
+        assert!(result.is_err(), "non-callback envelope must return an error");
+
+        let error = result.unwrap_err();
+        assert!(
+            matches!(error, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {error:?}"
+        );
+        let error_msg = error.to_string();
+        assert!(
+            error_msg.contains("callback"),
+            "error message should mention 'callback': {error_msg}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pivot_command_callback_truncated_inner_returns_protocol_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (database, registry, events, sockets, downloads) = setup_dispatch_context().await;
+
+        // Provide a truncated inner blob (too short to be a valid DemonEnvelope).
+        let truncated_inner = vec![0xDE, 0xAD];
+        let parser_payload = length_prefixed_bytes(&truncated_inner);
+        let mut parser =
+            CallbackParser::new(&parser_payload, u32::from(DemonCommand::CommandPivot));
+
+        let context = BuiltinDispatchContext {
+            registry: &registry,
+            events: &events,
+            database: &database,
+            sockets: &sockets,
+            downloads: &downloads,
+            plugins: None,
+        };
+
+        let result = handle_pivot_command_callback(context, AGENT_ID, &mut parser).await;
+        assert!(result.is_err(), "truncated inner data must return an error");
+
+        let error = result.unwrap_err();
+        assert!(
+            matches!(error, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {error:?}"
+        );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests for dispatch_builtin_packages
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn dispatch_builtin_packages_with_command_output_emits_event()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (database, registry, events, sockets, downloads) = setup_dispatch_context().await;
+        let mut rx = events.subscribe();
+
+        let child_id: u32 = 0x7777_8888;
+        let child_key = [0x11; AGENT_KEY_LENGTH];
+        let child_iv = [0x22; AGENT_IV_LENGTH];
+        registry.insert(sample_agent_info(child_id, child_key, child_iv)).await?;
+
+        let context = BuiltinDispatchContext {
+            registry: &registry,
+            events: &events,
+            database: &database,
+            sockets: &sockets,
+            downloads: &downloads,
+            plugins: None,
+        };
+
+        let packages = vec![DemonCallbackPackage {
+            command_id: u32::from(DemonCommand::CommandOutput),
+            request_id: 0x99,
+            payload: command_output_payload("dispatched output text"),
+        }];
+
+        let result = dispatch_builtin_packages(context, child_id, &packages).await;
+        assert!(result.is_ok(), "dispatch_builtin_packages must not fail: {result:?}");
+
+        // CommandOutput handler returns None (no response bytes to forward).
+        assert_eq!(result.unwrap(), None, "CommandOutput should not produce response bytes");
+
+        // Verify an AgentResponse event was emitted by the output handler.
+        let event = rx.recv().await.expect("should receive AgentResponse event");
+        let OperatorMessage::AgentResponse(msg) = &event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+        assert_eq!(
+            msg.info.demon_id,
+            format!("{child_id:08X}"),
+            "event must reference the correct agent"
+        );
+        assert!(
+            msg.info.output.contains("dispatched output text"),
+            "event output must contain the dispatched text"
+        );
+        Ok(())
     }
 }

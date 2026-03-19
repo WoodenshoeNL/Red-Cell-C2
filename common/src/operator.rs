@@ -2335,4 +2335,34 @@ mod tests {
         assert_eq!(decoded, expected);
         Ok(())
     }
+
+    /// Verify that `AgentResponseInfo` with `command_line: None` omits the
+    /// `CommandLine` key entirely (via `skip_serializing_if`) and round-trips
+    /// correctly.
+    #[test]
+    fn agent_response_info_none_command_line_skipped() -> Result<(), Box<dyn std::error::Error>> {
+        let info = AgentResponseInfo {
+            demon_id: "DEAD0001".to_string(),
+            command_id: "10".to_string(),
+            output: "data".to_string(),
+            command_line: None,
+            extra: BTreeMap::new(),
+        };
+
+        let json = serde_json::to_value(&info)?;
+        let obj = json.as_object().expect("must be an object");
+
+        // The key must be absent, not present-as-null.
+        assert!(
+            !obj.contains_key("CommandLine"),
+            "CommandLine key must be omitted when command_line is None, got: {json}"
+        );
+
+        // Round-trip: deserializing back must yield the same value.
+        let deserialized: AgentResponseInfo = serde_json::from_value(json)?;
+        assert_eq!(deserialized.command_line, None);
+        assert_eq!(deserialized, info);
+
+        Ok(())
+    }
 }

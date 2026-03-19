@@ -147,7 +147,7 @@ pub fn decrypt_agent_data_at_offset(
 /// it can be installed as a live session key.
 #[must_use]
 pub fn is_weak_aes_key(key: &[u8]) -> bool {
-    key.iter().all(|&b| b == 0)
+    !key.is_empty() && key.iter().all(|&b| b == 0)
 }
 
 /// Returns `true` if every byte in `iv` is zero.
@@ -158,7 +158,7 @@ pub fn is_weak_aes_key(key: &[u8]) -> bool {
 /// reject this condition for the same reason as [`is_weak_aes_key`].
 #[must_use]
 pub fn is_weak_aes_iv(iv: &[u8]) -> bool {
-    iv.iter().all(|&b| b == 0)
+    !iv.is_empty() && iv.iter().all(|&b| b == 0)
 }
 
 /// Generate fresh per-agent AES-256-CTR key material.
@@ -256,10 +256,14 @@ mod tests {
     }
 
     #[test]
-    fn is_weak_aes_key_accepts_empty_slice() {
-        // An empty slice has no non-zero bytes; all() over an empty iterator returns true.
-        // Document the edge-case behaviour explicitly.
-        assert!(is_weak_aes_key(&[]));
+    fn is_weak_aes_key_rejects_empty_slice() {
+        // An empty slice is not meaningfully "all-zero" — return false.
+        assert!(!is_weak_aes_key(&[]));
+    }
+
+    #[test]
+    fn is_weak_aes_iv_rejects_empty_slice() {
+        assert!(!is_weak_aes_iv(&[]));
     }
 
     #[test]
@@ -275,8 +279,8 @@ mod tests {
     }
 
     #[test]
-    fn is_weak_aes_iv_accepts_empty_slice() {
-        assert!(is_weak_aes_iv(&[]));
+    fn is_weak_aes_iv_empty_slice_is_not_weak() {
+        assert!(!is_weak_aes_iv(&[]));
     }
 
     #[test]

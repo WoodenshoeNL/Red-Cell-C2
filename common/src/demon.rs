@@ -1229,4 +1229,29 @@ mod tests {
             "re-encoded message must match golden vector"
         );
     }
+
+    /// Verify that `DemonPackage::from_bytes` safely rejects a payload_len of
+    /// `u32::MAX` (4 GiB) without attempting the allocation. The `read_vec`
+    /// length check must fire before any `Vec::with_capacity` or `to_vec` call.
+    #[test]
+    fn demon_package_rejects_u32_max_payload_len_without_allocating() {
+        #[rustfmt::skip]
+        let bytes: [u8; 12] = [
+            0x01, 0x00, 0x00, 0x00, // command_id = 1 (LE)
+            0x02, 0x00, 0x00, 0x00, // request_id = 2 (LE)
+            0xFF, 0xFF, 0xFF, 0xFF, // payload_len = u32::MAX (LE)
+        ];
+
+        let error = DemonPackage::from_bytes(&bytes)
+            .expect_err("u32::MAX payload_len with no trailing data must fail");
+
+        assert_eq!(
+            error,
+            DemonProtocolError::BufferTooShort {
+                context: "Demon package payload",
+                expected: u32::MAX as usize,
+                actual: 0,
+            }
+        );
+    }
 }

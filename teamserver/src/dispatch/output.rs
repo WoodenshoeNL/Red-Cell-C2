@@ -618,4 +618,251 @@ mod tests {
             "expected AgentNotFound, got {err:?}"
         );
     }
+
+    // -- helpers for config callback tests --
+
+    fn push_u64(buf: &mut Vec<u8>, value: u64) {
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+
+    /// Build a config callback payload: config key (u32) + extra fields.
+    fn config_payload(key: u32, extra: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        push_u32(&mut buf, key);
+        buf.extend_from_slice(extra);
+        buf
+    }
+
+    // -- KillDate tests --
+
+    #[tokio::test]
+    async fn config_kill_date_nonzero_sets_agent_kill_date() {
+        let (registry, events) = setup().await;
+        let kill_date_raw: u64 = 1_700_000_000;
+        let mut extra = Vec::new();
+        push_u64(&mut extra, kill_date_raw);
+        let payload = config_payload(u32::from(DemonConfigKey::KillDate), &extra);
+
+        let result =
+            handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(result.is_ok());
+
+        let agent = registry.get(AGENT_ID).await.expect("agent must exist");
+        assert_eq!(agent.kill_date, Some(kill_date_raw as i64));
+    }
+
+    #[tokio::test]
+    async fn config_kill_date_zero_disables_kill_date() {
+        let (registry, events) = setup().await;
+
+        // First set a non-zero kill date.
+        let mut extra = Vec::new();
+        push_u64(&mut extra, 1_700_000_000);
+        let payload = config_payload(u32::from(DemonConfigKey::KillDate), &extra);
+        handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload)
+            .await
+            .expect("set kill date must succeed");
+
+        // Now disable it with raw=0.
+        let mut extra_zero = Vec::new();
+        push_u64(&mut extra_zero, 0);
+        let payload_zero = config_payload(u32::from(DemonConfigKey::KillDate), &extra_zero);
+        handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload_zero)
+            .await
+            .expect("disable kill date must succeed");
+
+        let agent = registry.get(AGENT_ID).await.expect("agent must exist");
+        assert_eq!(agent.kill_date, None, "kill_date should be None when raw=0");
+    }
+
+    #[tokio::test]
+    async fn config_kill_date_broadcasts_mark_and_response() {
+        let (registry, events) = setup().await;
+        let mut rx = events.subscribe();
+
+        let mut extra = Vec::new();
+        push_u64(&mut extra, 1_700_000_000);
+        let payload = config_payload(u32::from(DemonConfigKey::KillDate), &extra);
+
+        handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload)
+            .await
+            .expect("handler must succeed");
+
+        // First broadcast: AgentUpdate (mark event)
+        let msg1 = rx.recv().await.expect("should receive agent update");
+        assert!(
+            matches!(msg1, OperatorMessage::AgentUpdate(_)),
+            "expected AgentUpdate, got {msg1:?}"
+        );
+
+        // Second broadcast: AgentResponse
+        drop(events);
+        let msg2 = rx.recv().await.expect("should receive agent response");
+        let OperatorMessage::AgentResponse(resp) = &msg2 else {
+            panic!("expected AgentResponse, got {msg2:?}");
+        };
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(message.contains("KillDate"), "expected KillDate message, got {message:?}");
+    }
+
+    // -- WorkingHours tests --
+
+    #[tokio::test]
+    async fn config_working_hours_nonzero_sets_agent_working_hours() {
+        let (registry, events) = setup().await;
+        let raw: u32 = 0b101010;
+        let mut extra = Vec::new();
+        push_u32(&mut extra, raw);
+        let payload = config_payload(u32::from(DemonConfigKey::WorkingHours), &extra);
+
+        let result =
+            handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(result.is_ok());
+
+        let agent = registry.get(AGENT_ID).await.expect("agent must exist");
+        assert_eq!(agent.working_hours, Some(42i32));
+    }
+
+    #[tokio::test]
+    async fn config_working_hours_zero_disables_working_hours() {
+        let (registry, events) = setup().await;
+
+        // First set a non-zero value.
+        let mut extra = Vec::new();
+        push_u32(&mut extra, 0b101010);
+        let payload = config_payload(u32::from(DemonConfigKey::WorkingHours), &extra);
+        handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload)
+            .await
+            .expect("set working hours must succeed");
+
+        // Now disable with raw=0.
+        let mut extra_zero = Vec::new();
+        push_u32(&mut extra_zero, 0);
+        let payload_zero = config_payload(u32::from(DemonConfigKey::WorkingHours), &extra_zero);
+        handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload_zero)
+            .await
+            .expect("disable working hours must succeed");
+
+        let agent = registry.get(AGENT_ID).await.expect("agent must exist");
+        assert_eq!(agent.working_hours, None, "working_hours should be None when raw=0");
+    }
+
+    #[tokio::test]
+    async fn config_working_hours_broadcasts_mark_and_response() {
+        let (registry, events) = setup().await;
+        let mut rx = events.subscribe();
+
+        let mut extra = Vec::new();
+        push_u32(&mut extra, 0b101010);
+        let payload = config_payload(u32::from(DemonConfigKey::WorkingHours), &extra);
+
+        handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload)
+            .await
+            .expect("handler must succeed");
+
+        let msg1 = rx.recv().await.expect("should receive agent update");
+        assert!(
+            matches!(msg1, OperatorMessage::AgentUpdate(_)),
+            "expected AgentUpdate, got {msg1:?}"
+        );
+
+        drop(events);
+        let msg2 = rx.recv().await.expect("should receive agent response");
+        let OperatorMessage::AgentResponse(resp) = &msg2 else {
+            panic!("expected AgentResponse, got {msg2:?}");
+        };
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(message.contains("WorkingHours"), "expected WorkingHours message, got {message:?}");
+    }
+
+    // -- Simple key (MemoryAlloc) test --
+
+    #[tokio::test]
+    async fn config_memory_alloc_formats_message_correctly() {
+        let (registry, events) = setup().await;
+        let mut rx = events.subscribe();
+
+        let mut extra = Vec::new();
+        push_u32(&mut extra, 42);
+        let payload = config_payload(u32::from(DemonConfigKey::MemoryAlloc), &extra);
+
+        handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload)
+            .await
+            .expect("handler must succeed");
+
+        // MemoryAlloc only broadcasts a response, no AgentUpdate.
+        let msg = rx.recv().await.expect("should receive agent response");
+        let OperatorMessage::AgentResponse(resp) = &msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            message.contains("42"),
+            "expected message to contain the alloc value 42, got {message:?}"
+        );
+    }
+
+    // -- Unknown config key test --
+
+    #[tokio::test]
+    async fn config_unknown_key_returns_error() {
+        let (registry, events) = setup().await;
+        let payload = config_payload(0xFFFF, &[]);
+
+        let result =
+            handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload).await;
+        let err = result.expect_err("unknown config key must fail");
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+    }
+
+    // -- Truncated payload tests --
+
+    #[tokio::test]
+    async fn config_kill_date_truncated_payload_returns_error() {
+        let (registry, events) = setup().await;
+        // KillDate needs 8 bytes (u64) after the key, provide only 4.
+        let mut extra = Vec::new();
+        push_u32(&mut extra, 123);
+        let payload = config_payload(u32::from(DemonConfigKey::KillDate), &extra);
+
+        let result =
+            handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload).await;
+        let err = result.expect_err("truncated kill date payload must fail");
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn config_working_hours_truncated_payload_returns_error() {
+        let (registry, events) = setup().await;
+        // WorkingHours needs 4 bytes (u32) after the key, provide none.
+        let payload = config_payload(u32::from(DemonConfigKey::WorkingHours), &[]);
+
+        let result =
+            handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload).await;
+        let err = result.expect_err("truncated working hours payload must fail");
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn config_empty_payload_returns_error() {
+        let (registry, events) = setup().await;
+        let payload = Vec::new();
+
+        let result =
+            handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload).await;
+        let err = result.expect_err("empty payload must fail");
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+    }
 }

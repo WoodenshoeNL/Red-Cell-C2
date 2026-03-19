@@ -1,0 +1,156 @@
+mod common;
+
+use std::time::Duration;
+
+use red_cell::spawn_agent_liveness_monitor;
+use red_cell_common::config::Profile;
+use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
+use red_cell_common::operator::OperatorMessage;
+use tokio::time::timeout;
+use tokio_tungstenite::connect_async;
+
+/// Read operator WebSocket messages until `predicate` matches, discarding
+/// non-matching messages.  Gives up after 20 frames.
+async fn read_until<F>(
+    socket: &mut common::WsClient,
+    mut predicate: F,
+) -> Result<OperatorMessage, Box<dyn std::error::Error>>
+where
+    F: FnMut(&OperatorMessage) -> bool,
+{
+    for _ in 0..20 {
+        let msg = common::read_operator_message(socket).await?;
+        if predicate(&msg) {
+            return Ok(msg);
+        }
+    }
+    Err("did not observe expected operator message within 20 frames".into())
+}
+
+/// Build a profile with an aggressive `AgentTimeoutSecs` so the liveness
+/// monitor marks idle agents dead within a couple of seconds.
+fn short_timeout_profile() -> Profile {
+    Profile::parse(
+        r#"
+        Teamserver {
+          Host = "127.0.0.1"
+          Port = 0
+          AgentTimeoutSecs = 2
+        }
+
+        Operators {
+          user "operator" {
+            Password = "password1234"
+            Role = "Operator"
+          }
+        }
+
+        Demon {
+          Sleep = 1
+        }
+        "#,
+    )
+    .expect("short timeout profile should parse")
+}
+
+/// End-to-end test: register an agent via the HTTP listener, start the
+/// liveness monitor, wait for the timeout to expire, and verify:
+///   1. The agent is marked dead in the registry.
+///   2. An `AgentUpdate` event with `marked = "Dead"` is broadcast to the
+///      connected operator over the WebSocket.
+///   3. Any SOCKS relay state associated with the agent is cleaned up.
+#[tokio::test]
+async fn agent_marked_dead_after_liveness_timeout_expires() -> Result<(), Box<dyn std::error::Error>>
+{
+    let server = common::spawn_test_server(short_timeout_profile()).await?;
+
+    // --- Start HTTP listener ---
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let listener_name = "liveness-http";
+    server.listeners.create(common::http_listener_config(listener_name, listener_port)).await?;
+    drop(listener_guard);
+    server.listeners.start(listener_name).await?;
+    common::wait_for_listener(listener_port).await?;
+
+    // --- Connect operator WebSocket ---
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    // --- Register agent via Demon init ---
+    let agent_id: u32 = 0xCAFE_BABE;
+    let key = [0x55; AGENT_KEY_LENGTH];
+    let iv = [0xAA; AGENT_IV_LENGTH];
+    let client = reqwest::Client::new();
+    let _ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    // Consume messages until we see the AgentNew event (listener events may arrive first).
+    let agent_new =
+        read_until(&mut socket, |msg| matches!(msg, OperatorMessage::AgentNew(_))).await?;
+    let OperatorMessage::AgentNew(new_msg) = agent_new else {
+        unreachable!();
+    };
+    assert_eq!(new_msg.info.name_id, "CAFEBABE");
+
+    // Verify the agent is alive in the registry before the monitor runs.
+    let stored =
+        server.agent_registry.get(agent_id).await.ok_or("agent must exist after registration")?;
+    assert!(stored.active, "agent must be active immediately after init");
+
+    // Add a SOCKS relay to verify socket cleanup after timeout.
+    server.sockets.add_socks_server(agent_id, "0").await.map_err(|e| e.to_string())?;
+
+    // --- Start the liveness monitor ---
+    // With AgentTimeoutSecs = 2 the sweep interval is 1 s.  The agent will be
+    // marked dead on the first sweep tick that lands >= 2 s after last_call_in.
+    let _monitor = spawn_agent_liveness_monitor(
+        server.agent_registry.clone(),
+        server.sockets.clone(),
+        server.events.clone(),
+        server.database.clone(),
+        &server.profile,
+    );
+
+    // --- Wait for the AgentUpdate (dead) event on the operator WebSocket ---
+    // Allow up to 10 s to account for timing variance on loaded CI.
+    let dead_event = timeout(Duration::from_secs(10), async {
+        loop {
+            let msg = common::read_operator_message(&mut socket).await?;
+            if matches!(&msg, OperatorMessage::AgentUpdate(_)) {
+                return Ok::<_, Box<dyn std::error::Error>>(msg);
+            }
+            // Skip any other events (e.g. AgentMark from SOCKS setup).
+        }
+    })
+    .await
+    .map_err(|_| "timed out waiting for AgentUpdate (dead) event on WebSocket")??;
+
+    let OperatorMessage::AgentUpdate(update_msg) = dead_event else {
+        return Err(format!("expected AgentUpdate, got {dead_event:?}").into());
+    };
+    assert_eq!(update_msg.info.agent_id, "CAFEBABE");
+    assert_eq!(update_msg.info.marked, "Dead");
+
+    // --- Verify registry state ---
+    let stored = server
+        .agent_registry
+        .get(agent_id)
+        .await
+        .ok_or("agent must still exist after being marked dead")?;
+    assert!(!stored.active, "agent must be inactive after liveness timeout");
+    assert!(
+        stored.reason.contains("timed out"),
+        "reason must mention timeout, got: {}",
+        stored.reason
+    );
+
+    // --- Verify SOCKS relay cleanup ---
+    assert_eq!(
+        server.sockets.list_socks_servers(agent_id).await,
+        "No active SOCKS5 servers",
+        "SOCKS relay state must be pruned after agent death"
+    );
+
+    socket.close(None).await?;
+    server.listeners.stop(listener_name).await?;
+    Ok(())
+}

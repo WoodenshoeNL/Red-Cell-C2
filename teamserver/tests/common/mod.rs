@@ -33,9 +33,11 @@ pub type WsClient = WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net
 /// construction boilerplate.
 pub struct TestServer {
     pub addr: std::net::SocketAddr,
+    pub profile: Profile,
     pub listeners: ListenerManager,
     pub agent_registry: AgentRegistry,
     pub database: Database,
+    pub events: EventBus,
     pub sockets: SocketRelayManager,
     pub webhooks: AuditWebhookNotifier,
 }
@@ -60,7 +62,7 @@ pub async fn spawn_test_server(profile: Profile) -> Result<TestServer, Box<dyn s
         database: database.clone(),
         auth: AuthService::from_profile(&profile).expect("auth service should initialize"),
         api: ApiRuntime::from_profile(&profile).expect("rng should work in tests"),
-        events,
+        events: events.clone(),
         connections: OperatorConnectionManager::new(),
         agent_registry: registry.clone(),
         listeners: listeners.clone(),
@@ -79,7 +81,16 @@ pub async fn spawn_test_server(profile: Profile) -> Result<TestServer, Box<dyn s
         let _ = axum::serve(tcp, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await;
     });
-    Ok(TestServer { addr, listeners, agent_registry: registry, database, sockets, webhooks })
+    Ok(TestServer {
+        addr,
+        profile,
+        listeners,
+        agent_registry: registry,
+        database,
+        events,
+        sockets,
+        webhooks,
+    })
 }
 
 /// Authenticate over WebSocket as `"operator"` / `"password1234"` and consume the

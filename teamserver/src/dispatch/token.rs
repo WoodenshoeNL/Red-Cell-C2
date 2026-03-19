@@ -542,6 +542,73 @@ mod tests {
         assert_eq!(output, "\n");
     }
 
+    #[test]
+    fn format_token_privs_list_single_enabled() {
+        let mut buf = Vec::new();
+        push_string(&mut buf, "SeDebugPrivilege");
+        push_u32(&mut buf, 3);
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_token_privs_list(&mut parser).unwrap();
+        assert_eq!(output, "\n SeDebugPrivilege :: Enabled\n");
+    }
+
+    #[test]
+    fn format_token_privs_list_single_adjusted() {
+        let mut buf = Vec::new();
+        push_string(&mut buf, "SeBackupPrivilege");
+        push_u32(&mut buf, 2);
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_token_privs_list(&mut parser).unwrap();
+        assert_eq!(output, "\n SeBackupPrivilege :: Adjusted\n");
+    }
+
+    #[test]
+    fn format_token_privs_list_single_disabled() {
+        let mut buf = Vec::new();
+        push_string(&mut buf, "SeShutdownPrivilege");
+        push_u32(&mut buf, 0);
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_token_privs_list(&mut parser).unwrap();
+        assert_eq!(output, "\n SeShutdownPrivilege :: Disabled\n");
+    }
+
+    #[test]
+    fn format_token_privs_list_state_1_is_unknown() {
+        let mut buf = Vec::new();
+        push_string(&mut buf, "SeImpersonatePrivilege");
+        push_u32(&mut buf, 1);
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_token_privs_list(&mut parser).unwrap();
+        assert_eq!(output, "\n SeImpersonatePrivilege :: Unknown\n");
+    }
+
+    #[test]
+    fn format_token_privs_list_large_unknown_state() {
+        let mut buf = Vec::new();
+        push_string(&mut buf, "SeLoadDriverPrivilege");
+        push_u32(&mut buf, 255);
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_token_privs_list(&mut parser).unwrap();
+        assert_eq!(output, "\n SeLoadDriverPrivilege :: Unknown\n");
+    }
+
+    #[test]
+    fn format_token_privs_list_multiple_preserves_order() {
+        let mut buf = Vec::new();
+        push_string(&mut buf, "SeDebugPrivilege");
+        push_u32(&mut buf, 3);
+        push_string(&mut buf, "SeShutdownPrivilege");
+        push_u32(&mut buf, 0);
+        push_string(&mut buf, "SeBackupPrivilege");
+        push_u32(&mut buf, 2);
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_token_privs_list(&mut parser).unwrap();
+        assert_eq!(
+            output,
+            "\n SeDebugPrivilege :: Enabled\n SeShutdownPrivilege :: Disabled\n SeBackupPrivilege :: Adjusted\n"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // format_found_tokens tests — integrity level boundaries
     // -----------------------------------------------------------------------

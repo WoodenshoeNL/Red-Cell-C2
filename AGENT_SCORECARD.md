@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 550 | 212 | 31 |
+| Tasks closed | 553 | 212 | 31 |
 | Bugs filed against | 50 | 34 | 9 |
 | Bug rate (bugs/task) | 0.09 | 0.16 | 0.29 |
 | Quality score | 91% | 84% | 71% |
 
-*Bug rates: Claude 50/550=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 50/553=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-20 08:30 — 61a6921..4de6fec
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 0 | Closed fmlv (AgentRecord serialization round-trip tests — 5 tests), npdm (PythonRuntime error path tests — 3 tests), 2me0 (add_link error path for nonexistent parent/child — 2 tests). Clean run — test-only changes, no issues. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (clean), cargo test 2715 passed / 0 failed
 
 ### QA Review — 2026-03-19 23:45 — 8b00555..61a6921
 

@@ -2586,4 +2586,386 @@ mod tests {
 
         Ok(())
     }
+
+    // --- Concurrent connection tests ---
+
+    /// Many clients registering concurrently on the same agent must all succeed up to the limit,
+    /// and the state must be consistent afterward (no lost entries, no duplicates).
+    #[tokio::test]
+    async fn concurrent_client_registrations_on_same_agent_are_consistent() -> io::Result<()> {
+        let (_database, registry, manager) =
+            test_manager().await.map_err(|e| io::Error::other(e.to_string()))?;
+        registry
+            .insert(sample_agent(0xDEAD_BEEF))
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        let agent_id: u32 = 0xDEAD_BEEF;
+        let count = 100_usize;
+
+        // Spawn `count` concurrent registration tasks.
+        let mut handles = Vec::with_capacity(count);
+        for i in 0..count {
+            let m = manager.clone();
+            handles.push(tokio::spawn(async move {
+                let listener = TcpListener::bind("127.0.0.1:0").await?;
+                let addr = listener.local_addr()?;
+                let connect_task = tokio::spawn(async move { TcpStream::connect(addr).await });
+                let (server_stream, _) = listener.accept().await?;
+                let client_stream =
+                    connect_task.await.map_err(|e| io::Error::other(e.to_string()))??;
+                let (client_read, client_write) = client_stream.into_split();
+                let (_server_read, _server_write) = server_stream.into_split();
+
+                let socket_id = i as u32;
+                let result = m
+                    .register_client(
+                        agent_id,
+                        socket_id,
+                        super::PendingClient {
+                            server_port: 1080,
+                            atyp: super::SOCKS_ATYP_IPV4,
+                            address: vec![127, 0, 0, 1],
+                            port: 80,
+                            connected: false,
+                            writer: Arc::new(tokio::sync::Mutex::new(client_write)),
+                            read_half: Some(client_read),
+                        },
+                    )
+                    .await;
+                io::Result::Ok(result.is_ok())
+            }));
+        }
+
+        let mut success_count = 0_usize;
+        for handle in handles {
+            if handle.await.map_err(|e| io::Error::other(e.to_string()))?? {
+                success_count += 1;
+            }
+        }
+
+        // All 100 should succeed (well under the 256 per-agent limit).
+        assert_eq!(success_count, count, "all concurrent registrations should succeed");
+
+        let state = manager.state.read().await;
+        let agent_state = state.get(&agent_id).expect("agent state present");
+        assert_eq!(
+            agent_state.clients.len(),
+            count,
+            "all {count} clients must be present in state after concurrent registration"
+        );
+
+        Ok(())
+    }
+
+    /// When concurrent registrations push past the per-agent limit, excess clients must be
+    /// rejected with `AgentConnectionLimit` — no more than `MAX_SOCKETS_PER_AGENT` succeed.
+    #[tokio::test]
+    async fn concurrent_registrations_respect_per_agent_limit() -> io::Result<()> {
+        let (_database, registry, manager) =
+            test_manager().await.map_err(|e| io::Error::other(e.to_string()))?;
+        registry
+            .insert(sample_agent(0xDEAD_BEEF))
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        let agent_id: u32 = 0xDEAD_BEEF;
+        // Try to register more than the limit concurrently.
+        let attempt_count = super::MAX_SOCKETS_PER_AGENT + 50;
+
+        let mut handles = Vec::with_capacity(attempt_count);
+        for i in 0..attempt_count {
+            let m = manager.clone();
+            handles.push(tokio::spawn(async move {
+                let listener = TcpListener::bind("127.0.0.1:0").await?;
+                let addr = listener.local_addr()?;
+                let connect_task = tokio::spawn(async move { TcpStream::connect(addr).await });
+                let (server_stream, _) = listener.accept().await?;
+                let client_stream =
+                    connect_task.await.map_err(|e| io::Error::other(e.to_string()))??;
+                let (client_read, client_write) = client_stream.into_split();
+                let (_server_read, _server_write) = server_stream.into_split();
+
+                let socket_id = i as u32;
+                let result = m
+                    .register_client(
+                        agent_id,
+                        socket_id,
+                        super::PendingClient {
+                            server_port: 1080,
+                            atyp: super::SOCKS_ATYP_IPV4,
+                            address: vec![127, 0, 0, 1],
+                            port: 80,
+                            connected: false,
+                            writer: Arc::new(tokio::sync::Mutex::new(client_write)),
+                            read_half: Some(client_read),
+                        },
+                    )
+                    .await;
+                io::Result::Ok(result.is_ok())
+            }));
+        }
+
+        let mut success_count = 0_usize;
+        for handle in handles {
+            if handle.await.map_err(|e| io::Error::other(e.to_string()))?? {
+                success_count += 1;
+            }
+        }
+
+        assert_eq!(
+            success_count,
+            super::MAX_SOCKETS_PER_AGENT,
+            "exactly MAX_SOCKETS_PER_AGENT registrations should succeed"
+        );
+
+        let state = manager.state.read().await;
+        let agent_state = state.get(&agent_id).expect("agent state present");
+        assert_eq!(agent_state.clients.len(), super::MAX_SOCKETS_PER_AGENT);
+
+        Ok(())
+    }
+
+    // --- Memory pressure tests ---
+
+    /// After registering and removing many clients, the state map must be empty — verifying that
+    /// connection teardown actually reclaims entries and does not leak state.
+    #[tokio::test]
+    async fn state_is_reclaimed_after_mass_client_removal() -> io::Result<()> {
+        let (_database, registry, manager) =
+            test_manager().await.map_err(|e| io::Error::other(e.to_string()))?;
+        registry
+            .insert(sample_agent(0xDEAD_BEEF))
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        let agent_id: u32 = 0xDEAD_BEEF;
+        let count = 200_usize;
+
+        // Register many clients.
+        for i in 0..count {
+            let socket_id = i as u32;
+            let (_peer_read, _peer_write) =
+                register_pending_client(&manager, agent_id, socket_id).await?;
+        }
+
+        {
+            let state = manager.state.read().await;
+            assert_eq!(state.get(&agent_id).map_or(0, |s| s.clients.len()), count);
+        }
+
+        // Remove them all.
+        for i in 0..count {
+            let socket_id = i as u32;
+            manager
+                .close_client(agent_id, socket_id)
+                .await
+                .map_err(|e| io::Error::other(e.to_string()))?;
+        }
+
+        let state = manager.state.read().await;
+        let remaining = state.get(&agent_id).map_or(0, |s| s.clients.len());
+        assert_eq!(remaining, 0, "all client entries must be removed after close_client");
+
+        Ok(())
+    }
+
+    /// `remove_agent` under load — clearing an agent with many clients must remove all state
+    /// and not leave orphaned entries.
+    #[tokio::test]
+    async fn remove_agent_clears_all_clients_under_load() -> io::Result<()> {
+        let (_database, registry, manager) =
+            test_manager().await.map_err(|e| io::Error::other(e.to_string()))?;
+        registry
+            .insert(sample_agent(0xDEAD_BEEF))
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        let agent_id: u32 = 0xDEAD_BEEF;
+        let count = 200_usize;
+
+        for i in 0..count {
+            let socket_id = i as u32;
+            let (_peer_read, _peer_write) =
+                register_pending_client(&manager, agent_id, socket_id).await?;
+        }
+
+        assert!(manager.remove_agent(agent_id).await);
+        assert!(!manager.state.read().await.contains_key(&agent_id));
+
+        Ok(())
+    }
+
+    // --- Socket ID wraparound tests ---
+
+    /// `next_socket_id` starts near `u32::MAX` and wraps to 0 — the allocation must not panic.
+    #[tokio::test]
+    async fn socket_id_allocation_wraps_around_u32_max() -> io::Result<()> {
+        let (_database, registry, manager) =
+            test_manager().await.map_err(|e| io::Error::other(e.to_string()))?;
+        registry
+            .insert(sample_agent(0xDEAD_BEEF))
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        // Set the counter just below u32::MAX.
+        manager.next_socket_id.store(u32::MAX - 2, std::sync::atomic::Ordering::SeqCst);
+
+        // Allocate 5 IDs — should cross the wraparound boundary.
+        let id1 = manager.next_socket_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id2 = manager.next_socket_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id3 = manager.next_socket_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id4 = manager.next_socket_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id5 = manager.next_socket_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        assert_eq!(id1, u32::MAX - 2);
+        assert_eq!(id2, u32::MAX - 1);
+        assert_eq!(id3, u32::MAX);
+        assert_eq!(id4, 0, "AtomicU32 must wrap around to 0 after u32::MAX");
+        assert_eq!(id5, 1);
+
+        Ok(())
+    }
+
+    /// After wraparound, clients registered with wrapped IDs must be individually addressable
+    /// and not collide with pre-existing entries.
+    #[tokio::test]
+    async fn wrapped_socket_ids_do_not_collide() -> io::Result<()> {
+        let (_database, registry, manager) =
+            test_manager().await.map_err(|e| io::Error::other(e.to_string()))?;
+        registry
+            .insert(sample_agent(0xDEAD_BEEF))
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        let agent_id: u32 = 0xDEAD_BEEF;
+
+        // Register a client at socket_id = 0 (what we'd get after wraparound).
+        let (_peer_read_0, _peer_write_0) = register_pending_client(&manager, agent_id, 0).await?;
+        // Register another at u32::MAX.
+        let (_peer_read_max, _peer_write_max) =
+            register_pending_client(&manager, agent_id, u32::MAX).await?;
+
+        // Both must be independently present.
+        {
+            let state = manager.state.read().await;
+            let agent_state = state.get(&agent_id).expect("agent state present");
+            assert!(agent_state.clients.contains_key(&0));
+            assert!(agent_state.clients.contains_key(&u32::MAX));
+            assert_eq!(agent_state.clients.len(), 2);
+        }
+
+        // Closing one must not affect the other.
+        manager.close_client(agent_id, 0).await.map_err(|e| io::Error::other(e.to_string()))?;
+        {
+            let state = manager.state.read().await;
+            let agent_state = state.get(&agent_id).expect("agent state present");
+            assert!(!agent_state.clients.contains_key(&0));
+            assert!(agent_state.clients.contains_key(&u32::MAX));
+        }
+
+        Ok(())
+    }
+
+    // --- Stale agent sweeper under load tests ---
+
+    /// `prune_stale_agents` with many agents: marks half as dead and verifies the sweeper
+    /// removes exactly those agents while retaining the rest.
+    #[tokio::test]
+    async fn prune_stale_agents_under_load_removes_only_dead_agents() -> io::Result<()> {
+        let (_database, registry, manager) =
+            test_manager().await.map_err(|e| io::Error::other(e.to_string()))?;
+
+        let total_agents = 50_u32;
+        for agent_id in 1..=total_agents {
+            registry
+                .insert(sample_agent(agent_id))
+                .await
+                .map_err(|e| io::Error::other(e.to_string()))?;
+        }
+
+        // Give each agent a few clients so there is real state to sweep.
+        for agent_id in 1..=total_agents {
+            for i in 0..5_u32 {
+                let socket_id = agent_id * 1000 + i;
+                let (_peer_read, _peer_write) =
+                    register_pending_client(&manager, agent_id, socket_id).await?;
+            }
+        }
+
+        // Mark odd-numbered agents as dead.
+        let dead_count = (1..=total_agents).filter(|id| id % 2 == 1).count();
+        for agent_id in 1..=total_agents {
+            if agent_id % 2 == 1 {
+                registry
+                    .mark_dead(agent_id, "test sweep")
+                    .await
+                    .map_err(|e| io::Error::other(e.to_string()))?;
+            }
+        }
+
+        let removed = manager.prune_stale_agents().await;
+        assert_eq!(removed, dead_count, "sweeper must remove exactly the dead agents");
+
+        let state = manager.state.read().await;
+        for agent_id in 1..=total_agents {
+            if agent_id % 2 == 1 {
+                assert!(
+                    !state.contains_key(&agent_id),
+                    "dead agent {agent_id} must be removed from state"
+                );
+            } else {
+                assert!(
+                    state.contains_key(&agent_id),
+                    "live agent {agent_id} must be retained in state"
+                );
+                assert_eq!(
+                    state.get(&agent_id).map_or(0, |s| s.clients.len()),
+                    5,
+                    "live agent {agent_id} must retain all its clients"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Successive sweeper runs are idempotent — a second prune after no state changes must
+    /// remove nothing.
+    #[tokio::test]
+    async fn prune_stale_agents_is_idempotent() -> io::Result<()> {
+        let (_database, registry, manager) =
+            test_manager().await.map_err(|e| io::Error::other(e.to_string()))?;
+
+        for agent_id in 1..=10_u32 {
+            registry
+                .insert(sample_agent(agent_id))
+                .await
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            let (_peer_read, _peer_write) =
+                register_pending_client(&manager, agent_id, agent_id * 100).await?;
+        }
+
+        // Kill agents 1–5.
+        for agent_id in 1..=5_u32 {
+            registry
+                .mark_dead(agent_id, "gone")
+                .await
+                .map_err(|e| io::Error::other(e.to_string()))?;
+        }
+
+        let first_sweep = manager.prune_stale_agents().await;
+        assert_eq!(first_sweep, 5);
+
+        let second_sweep = manager.prune_stale_agents().await;
+        assert_eq!(second_sweep, 0, "second sweep with no new state changes must remove nothing");
+
+        // Remaining agents still intact.
+        let state = manager.state.read().await;
+        for agent_id in 6..=10_u32 {
+            assert!(state.contains_key(&agent_id));
+        }
+
+        Ok(())
+    }
 }

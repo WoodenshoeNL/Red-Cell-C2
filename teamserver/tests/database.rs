@@ -2218,3 +2218,82 @@ async fn agent_list_active_with_corrupt_row_returns_error() -> Result<(), Teamse
 
     Ok(())
 }
+
+#[tokio::test]
+async fn link_repository_rejects_duplicate_insert() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let agents = database.agents();
+    let links = database.links();
+    let parent = sample_agent(0x5500_0001);
+    let child = sample_agent(0x5500_0002);
+
+    agents.create(&parent).await?;
+    agents.create(&child).await?;
+
+    let link = LinkRecord { parent_agent_id: parent.agent_id, link_agent_id: child.agent_id };
+    links.create(link.clone()).await?;
+
+    let error = links.create(link).await.expect_err("duplicate link insert should fail");
+
+    assert!(matches!(error, TeamserverError::Database(_)));
+    let TeamserverError::Database(sqlx::Error::Database(database_error)) = &error else {
+        panic!("expected sqlite database error for duplicate link insert");
+    };
+    assert_eq!(database_error.code().as_deref(), Some("1555"));
+
+    // The original link must still be intact.
+    assert!(links.exists(parent.agent_id, child.agent_id).await?);
+    assert_eq!(links.list().await?.len(), 1);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn link_repository_rejects_missing_parent_agent() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let agents = database.agents();
+    let links = database.links();
+    let child = sample_agent(0x5500_0003);
+
+    agents.create(&child).await?;
+
+    let error = links
+        .create(LinkRecord { parent_agent_id: 0xDEAD_FFFF, link_agent_id: child.agent_id })
+        .await
+        .expect_err("link with missing parent agent should fail");
+
+    assert!(
+        matches!(error, TeamserverError::Database(_)),
+        "expected Database error for missing parent, got: {error:?}"
+    );
+
+    // No link should have been stored.
+    assert!(links.list().await?.is_empty());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn link_repository_rejects_missing_child_agent() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let agents = database.agents();
+    let links = database.links();
+    let parent = sample_agent(0x5500_0004);
+
+    agents.create(&parent).await?;
+
+    let error = links
+        .create(LinkRecord { parent_agent_id: parent.agent_id, link_agent_id: 0xDEAD_FFFE })
+        .await
+        .expect_err("link with missing child agent should fail");
+
+    assert!(
+        matches!(error, TeamserverError::Database(_)),
+        "expected Database error for missing child, got: {error:?}"
+    );
+
+    // No link should have been stored.
+    assert!(links.list().await?.is_empty());
+
+    Ok(())
+}

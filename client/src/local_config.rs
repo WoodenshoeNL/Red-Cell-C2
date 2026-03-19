@@ -207,19 +207,69 @@ mod tests {
     #[test]
     fn resolved_scripts_dir_falls_back_to_default_location_when_unset() {
         let config = LocalConfig::default();
+        assert_eq!(config.scripts_dir, None);
 
-        assert_eq!(config.resolved_scripts_dir(), default_scripts_dir());
+        let resolved = config.resolved_scripts_dir();
+        assert_eq!(resolved, default_scripts_dir());
+
+        // When the platform provides a config dir, verify the fallback ends
+        // with the expected "scripts" suffix.
+        if let Some(ref path) = resolved {
+            assert!(
+                path.ends_with(SCRIPTS_DIR_NAME),
+                "fallback path should end with {SCRIPTS_DIR_NAME:?}, got {path:?}",
+            );
+        }
     }
 
     #[test]
-    fn resolved_scripts_dir_returns_none_when_default_location_is_unavailable() {
+    fn resolved_scripts_dir_with_none_differs_from_explicit_custom_path() {
+        let custom = PathBuf::from("/tmp/my-custom-scripts");
+        let config_with_custom =
+            LocalConfig { scripts_dir: Some(custom.clone()), ..LocalConfig::default() };
+        let config_without = LocalConfig::default();
+
+        let resolved_custom = config_with_custom.resolved_scripts_dir();
+        let resolved_default = config_without.resolved_scripts_dir();
+
+        assert_eq!(resolved_custom, Some(custom));
+        assert_ne!(
+            resolved_custom, resolved_default,
+            "explicit scripts_dir should differ from the platform default",
+        );
+    }
+
+    #[test]
+    fn resolved_scripts_dir_returns_none_when_platform_config_dir_unavailable() {
+        // On platforms where dirs::config_dir() returns None (e.g. some CI
+        // containers), both default_scripts_dir() and the fallback in
+        // resolved_scripts_dir() must return None.
         let config = LocalConfig::default();
 
         if default_scripts_dir().is_some() {
+            // Cannot simulate dirs::config_dir() returning None without mocking,
+            // so just verify consistency: resolved should equal default.
+            assert_eq!(config.resolved_scripts_dir(), default_scripts_dir());
             return;
         }
 
         assert_eq!(config.resolved_scripts_dir(), None);
+    }
+
+    #[test]
+    fn default_scripts_dir_returns_expected_suffix() {
+        // Verify that default_scripts_dir() produces a path under the
+        // platform config dir with the correct app + scripts subdirectory.
+        let result = default_scripts_dir();
+
+        if let Some(ref path) = result {
+            let expected = dirs::config_dir()
+                .expect("config_dir should be Some when default_scripts_dir is Some")
+                .join(APP_DIR_NAME)
+                .join(SCRIPTS_DIR_NAME);
+            assert_eq!(path, &expected);
+        }
+        // If result is None, dirs::config_dir() is unavailable — nothing to assert.
     }
 
     // Mutex to serialize tests that share the platform config file.  These

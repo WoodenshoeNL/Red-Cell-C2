@@ -217,6 +217,41 @@ mod tests {
         assert!(body.is_empty());
     }
 
+    /// POST, PUT, and DELETE requests to unknown paths must also reach the
+    /// `any()` fallback and return 404 NOT_FOUND with an empty body — not 405
+    /// Method Not Allowed.  A regression replacing `any()` with `get()` would
+    /// break agent POST requests.
+    #[tokio::test]
+    async fn fallback_handles_post_put_delete_not_just_get() {
+        use axum::http::Method;
+
+        let state = build_test_state().await;
+        let router = build_router(state);
+
+        for method in [Method::POST, Method::PUT, Method::DELETE] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(&method)
+                        .uri("/missing")
+                        .body(Body::empty())
+                        .expect("request should build"),
+                )
+                .await
+                .expect("router should respond");
+
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{method} /missing should return 404, not {}",
+                response.status()
+            );
+            let body = to_bytes(response.into_body(), usize::MAX).await.expect("body should read");
+            assert!(body.is_empty(), "{method} /missing should return an empty body");
+        }
+    }
+
     /// GET /api/v1 (the info root, which has no auth middleware) must return 200 OK.
     /// If the nest("/api/v1", …) call were misconfigured the request would fall
     /// through to the 404 fallback handler instead.

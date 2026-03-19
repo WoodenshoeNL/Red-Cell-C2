@@ -546,6 +546,68 @@ async fn reconnect_then_subsequent_callback_remains_synchronised()
     Ok(())
 }
 
+/// When no operator tasks are queued, a `CommandGetJob` callback must return
+/// HTTP 200 with an empty response body.  This is the most common callback
+/// pattern in real deployments (idle polling) and a regression here — e.g.
+/// returning an error or garbage bytes — would cause agents to malfunction.
+#[tokio::test]
+async fn get_job_with_empty_task_queue_returns_empty_response()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut harness = spawn_server_with_http_listener("edge-http-empty-queue").await?;
+    let listener_port = harness.listener_port;
+
+    let agent_id = 0x1234_5678;
+    let key = [0x41; AGENT_KEY_LENGTH];
+    let iv = [0x24; AGENT_IV_LENGTH];
+    let mut ctr_offset = 0_u64;
+
+    // --- DEMON_INIT handshake ----------------------------------------------------
+    let init_response = harness
+        .client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_init_body(agent_id, key, iv))
+        .send()
+        .await?
+        .error_for_status()?;
+    let init_bytes = init_response.bytes().await?;
+    let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
+    assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
+    ctr_offset += ctr_blocks_for_len(init_bytes.len());
+
+    // Consume the AgentNew operator event so it doesn't block later reads.
+    let agent_new = common::read_operator_message(&mut harness.socket).await?;
+    assert!(
+        matches!(agent_new, OperatorMessage::AgentNew(_)),
+        "expected AgentNew event after init"
+    );
+
+    // --- Immediately poll for jobs without queuing any tasks --------------------
+    let get_job_response = harness
+        .client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandGetJob),
+            1,
+            &[],
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+    let job_bytes = get_job_response.bytes().await?;
+    assert!(
+        job_bytes.is_empty(),
+        "expected empty response body when no tasks are queued, got {} bytes",
+        job_bytes.len()
+    );
+
+    harness.shutdown().await?;
+    Ok(())
+}
+
 /// An unauthenticated WebSocket client must not be able to inject tasks for a
 /// live agent.  The server should reject the pre-auth `AgentTask` message and
 /// the agent's subsequent `COMMAND_GET_JOB` poll must return no queued jobs.

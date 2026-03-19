@@ -2062,4 +2062,249 @@ mod tests {
         // No MiscType in normal mode
         assert!(msg.info.extra.get("MiscType").is_none());
     }
+
+    // ---------------------------------------------------------------
+    // Helper: invoke handle_filesystem_callback and expect an error.
+    // ---------------------------------------------------------------
+
+    async fn call_and_expect_error(
+        payload: &[u8],
+        agent_id: u32,
+        request_id: u32,
+    ) -> CommandDispatchError {
+        let (registry, db, events, downloads) = dir_test_deps().await;
+        handle_filesystem_callback(
+            &registry, &db, &events, &downloads, None, agent_id, request_id, payload,
+        )
+        .await
+        .expect_err("handler should return error for truncated payload")
+    }
+
+    // ---------------------------------------------------------------
+    // Truncated payload tests — each subcommand with insufficient data
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn cd_truncated_payload_returns_error() {
+        // Cd needs: subcommand(u32) + utf16 string. Provide only the subcommand.
+        let mut buf = Vec::new();
+        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::Cd));
+        let err = call_and_expect_error(&buf, 0xE0, 1).await;
+        assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn remove_truncated_payload_missing_path_returns_error() {
+        // Remove needs: subcommand(u32) + bool(is_dir) + utf16(path). Only provide subcommand + bool.
+        let mut buf = Vec::new();
+        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::Remove));
+        add_bool_le(&mut buf, false);
+        let err = call_and_expect_error(&buf, 0xE1, 2).await;
+        assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn remove_truncated_payload_missing_bool_returns_error() {
+        // Remove needs at least the bool before the path.
+        let mut buf = Vec::new();
+        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::Remove));
+        let err = call_and_expect_error(&buf, 0xE2, 3).await;
+        assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn mkdir_truncated_payload_returns_error() {
+        let mut buf = Vec::new();
+        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::Mkdir));
+        let err = call_and_expect_error(&buf, 0xE3, 4).await;
+        assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn copy_truncated_payload_missing_to_returns_error() {
+        // Copy needs: subcommand + bool(success) + utf16(from) + utf16(to). Omit 'to'.
+        let mut buf = Vec::new();
+        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::Copy));
+        add_bool_le(&mut buf, true);
+        add_utf16_le(&mut buf, "C:\\from.txt");
+        let err = call_and_expect_error(&buf, 0xE4, 5).await;
+        assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn move_truncated_payload_missing_to_returns_error() {
+        let mut buf = Vec::new();
+        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::Move));
+        add_bool_le(&mut buf, true);
+        add_utf16_le(&mut buf, "C:\\from.txt");
+        let err = call_and_expect_error(&buf, 0xE5, 6).await;
+        assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn copy_truncated_payload_empty_returns_error() {
+        // Only subcommand, no bool or strings.
+        let mut buf = Vec::new();
+        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::Copy));
+        let err = call_and_expect_error(&buf, 0xE6, 7).await;
+        assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn getpwd_truncated_payload_returns_error() {
+        let mut buf = Vec::new();
+        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::GetPwd));
+        let err = call_and_expect_error(&buf, 0xE7, 8).await;
+        assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn cat_truncated_payload_missing_output_returns_error() {
+        // Cat needs: subcommand + utf16(path) + bool(success) + string(output). Omit output.
+        let mut buf = Vec::new();
+        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::Cat));
+        add_utf16_le(&mut buf, "C:\\file.txt");
+        add_bool_le(&mut buf, true);
+        let err = call_and_expect_error(&buf, 0xE8, 9).await;
+        assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn cat_truncated_payload_missing_success_returns_error() {
+        // Only subcommand + path, no success bool or output.
+        let mut buf = Vec::new();
+        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::Cat));
+        add_utf16_le(&mut buf, "C:\\file.txt");
+        let err = call_and_expect_error(&buf, 0xE9, 10).await;
+        assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn upload_truncated_payload_missing_path_returns_error() {
+        // Upload needs: subcommand + u32(size) + utf16(path). Omit path.
+        let mut buf = Vec::new();
+        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::Upload));
+        add_u32_le(&mut buf, 100);
+        let err = call_and_expect_error(&buf, 0xEA, 11).await;
+        assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn upload_truncated_payload_empty_returns_error() {
+        let mut buf = Vec::new();
+        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::Upload));
+        let err = call_and_expect_error(&buf, 0xEB, 12).await;
+        assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }), "got {err:?}");
+    }
+
+    // ---------------------------------------------------------------
+    // Edge case tests — empty strings, zero-size values
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn cd_empty_path_broadcasts_event() {
+        let event = call_and_recv(&build_cd_payload(""), 0xF0, 100).await;
+        let OperatorMessage::AgentResponse(msg) = &event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(message.contains("Changed directory"), "message: {message}");
+    }
+
+    #[tokio::test]
+    async fn mkdir_empty_path_broadcasts_event() {
+        let event = call_and_recv(&build_mkdir_payload(""), 0xF1, 101).await;
+        let OperatorMessage::AgentResponse(msg) = &event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(message.contains("Created directory"), "message: {message}");
+    }
+
+    #[tokio::test]
+    async fn remove_empty_path_broadcasts_event() {
+        let event = call_and_recv(&build_remove_payload(false, ""), 0xF2, 102).await;
+        let OperatorMessage::AgentResponse(msg) = &event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(message.contains("Removed file"), "message: {message}");
+    }
+
+    #[tokio::test]
+    async fn getpwd_empty_path_broadcasts_event() {
+        let event = call_and_recv(&build_getpwd_payload(""), 0xF3, 103).await;
+        let OperatorMessage::AgentResponse(msg) = &event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(message.contains("Current directory"), "message: {message}");
+    }
+
+    #[tokio::test]
+    async fn upload_zero_size_broadcasts_event() {
+        let event = call_and_recv(&build_upload_payload(0, "C:\\empty.bin"), 0xF4, 104).await;
+        let OperatorMessage::AgentResponse(msg) = &event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(message.contains("Uploaded file"), "message: {message}");
+        assert!(message.contains("0 bytes"), "message: {message}");
+    }
+
+    #[tokio::test]
+    async fn cat_success_empty_content_broadcasts_event() {
+        let event = call_and_recv(&build_cat_payload("C:\\empty.txt", true, ""), 0xF5, 105).await;
+        let OperatorMessage::AgentResponse(msg) = &event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(message.contains("File content of"), "message: {message}");
+        assert!(message.contains("0)"), "message should show zero length: {message}");
+        assert_eq!(msg.info.output, "", "output should be empty");
+    }
+
+    #[tokio::test]
+    async fn copy_empty_paths_success_broadcasts_event() {
+        let event = call_and_recv(&build_copy_move_payload(true, true, "", ""), 0xF6, 106).await;
+        let OperatorMessage::AgentResponse(msg) = &event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(message.contains("Successfully copied"), "message: {message}");
+        assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+    }
+
+    #[tokio::test]
+    async fn move_empty_paths_failure_broadcasts_error() {
+        let event = call_and_recv(&build_copy_move_payload(false, false, "", ""), 0xF7, 107).await;
+        let OperatorMessage::AgentResponse(msg) = &event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+        let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(message.contains("Failed to moved"), "message: {message}");
+        assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Error"));
+    }
+
+    // ---------------------------------------------------------------
+    // Invalid subcommand ID
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn invalid_subcommand_id_returns_error() {
+        let mut buf = Vec::new();
+        add_u32_le(&mut buf, 0xFFFF); // invalid subcommand
+        let err = call_and_expect_error(&buf, 0xFF, 200).await;
+        assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }), "got {err:?}");
+    }
+
+    // ---------------------------------------------------------------
+    // Completely empty payload (no subcommand at all)
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn empty_payload_returns_error() {
+        let err = call_and_expect_error(&[], 0xFF, 201).await;
+        assert!(matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }), "got {err:?}");
+    }
 }

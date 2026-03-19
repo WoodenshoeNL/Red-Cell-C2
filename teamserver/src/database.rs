@@ -1673,7 +1673,46 @@ fn invalid_value(field: &'static str, message: &str) -> TeamserverError {
 
 #[cfg(test)]
 mod tests {
-    use super::{Database, bool_from_i64, i64_from_u64};
+    use super::{Database, LootFilter, LootRecord, bool_from_i64, i64_from_u64};
+    use red_cell_common::{AgentEncryptionInfo, AgentRecord};
+    use serde_json::json;
+    use zeroize::Zeroizing;
+
+    /// Create a minimal agent record suitable for satisfying foreign-key constraints.
+    fn stub_agent(agent_id: u32) -> AgentRecord {
+        AgentRecord {
+            agent_id,
+            active: true,
+            reason: String::new(),
+            note: String::new(),
+            encryption: AgentEncryptionInfo {
+                aes_key: Zeroizing::new(b"k".to_vec()),
+                aes_iv: Zeroizing::new(b"i".to_vec()),
+            },
+            hostname: String::new(),
+            username: String::new(),
+            domain_name: String::new(),
+            external_ip: String::new(),
+            internal_ip: String::new(),
+            process_name: String::new(),
+            process_path: String::new(),
+            base_address: 0,
+            process_pid: 0,
+            process_tid: 0,
+            process_ppid: 0,
+            process_arch: String::new(),
+            elevated: false,
+            os_version: String::new(),
+            os_build: 0,
+            os_arch: String::new(),
+            sleep_delay: 0,
+            sleep_jitter: 0,
+            kill_date: None,
+            working_hours: None,
+            first_call_in: String::new(),
+            last_call_in: String::new(),
+        }
+    }
 
     #[test]
     fn bool_from_i64_accepts_sqlite_boolean_values() {
@@ -1727,5 +1766,213 @@ mod tests {
         // /proc is a read-only filesystem on Linux; SQLite cannot create files there.
         let result = Database::connect("/proc/fake_dir/test.sqlite").await;
         assert!(result.is_err(), "expected error for unwritable path");
+    }
+
+    // ── LootRepository tests ───────────────────────────────────────────
+
+    fn sample_loot(agent_id: u32, kind: &str, name: &str) -> LootRecord {
+        LootRecord {
+            id: None,
+            agent_id,
+            kind: kind.to_string(),
+            name: name.to_string(),
+            file_path: Some("/tmp/creds.txt".to_string()),
+            size_bytes: Some(256),
+            captured_at: "2026-03-19T12:00:00Z".to_string(),
+            data: Some(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+            metadata: Some(json!({"operator": "admin", "command_line": "hashdump"})),
+        }
+    }
+
+    /// Insert stub agent rows so loot FK constraints are satisfied.
+    async fn seed_agents(db: &Database, ids: &[u32]) {
+        for &id in ids {
+            db.agents().create(&stub_agent(id)).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn loot_create_and_get_round_trips_all_fields() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_agents(&db, &[100]).await;
+        let repo = db.loot();
+        let record = sample_loot(100, "hash", "NTLM hashes");
+
+        let id = repo.create(&record).await.unwrap();
+        let fetched = repo.get(id).await.unwrap().expect("record should exist");
+
+        assert_eq!(fetched.id, Some(id));
+        assert_eq!(fetched.agent_id, record.agent_id);
+        assert_eq!(fetched.kind, record.kind);
+        assert_eq!(fetched.name, record.name);
+        assert_eq!(fetched.file_path, record.file_path);
+        assert_eq!(fetched.size_bytes, record.size_bytes);
+        assert_eq!(fetched.captured_at, record.captured_at);
+        assert_eq!(fetched.data, record.data);
+        assert_eq!(fetched.metadata, record.metadata);
+    }
+
+    #[tokio::test]
+    async fn loot_get_returns_none_for_missing_id() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.loot();
+
+        let fetched = repo.get(999).await.unwrap();
+        assert!(fetched.is_none());
+    }
+
+    #[tokio::test]
+    async fn loot_list_for_agent_returns_correct_grouping() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_agents(&db, &[10, 20]).await;
+        let repo = db.loot();
+
+        repo.create(&sample_loot(10, "hash", "agent10-hash")).await.unwrap();
+        repo.create(&sample_loot(10, "ticket", "agent10-ticket")).await.unwrap();
+        repo.create(&sample_loot(20, "token", "agent20-token")).await.unwrap();
+
+        let agent10 = repo.list_for_agent(10).await.unwrap();
+        assert_eq!(agent10.len(), 2);
+        assert!(agent10.iter().all(|r| r.agent_id == 10));
+
+        let agent20 = repo.list_for_agent(20).await.unwrap();
+        assert_eq!(agent20.len(), 1);
+        assert_eq!(agent20[0].agent_id, 20);
+        assert_eq!(agent20[0].name, "agent20-token");
+
+        let agent99 = repo.list_for_agent(99).await.unwrap();
+        assert!(agent99.is_empty());
+    }
+
+    #[tokio::test]
+    async fn loot_list_returns_all_records() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_agents(&db, &[1, 2, 3]).await;
+        let repo = db.loot();
+
+        repo.create(&sample_loot(1, "hash", "a")).await.unwrap();
+        repo.create(&sample_loot(2, "ticket", "b")).await.unwrap();
+        repo.create(&sample_loot(3, "token", "c")).await.unwrap();
+
+        let all = repo.list().await.unwrap();
+        assert_eq!(all.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn loot_empty_content_and_label_round_trips() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_agents(&db, &[42]).await;
+        let repo = db.loot();
+
+        let record = LootRecord {
+            id: None,
+            agent_id: 42,
+            kind: String::new(),
+            name: String::new(),
+            file_path: None,
+            size_bytes: None,
+            captured_at: String::new(),
+            data: None,
+            metadata: None,
+        };
+
+        let id = repo.create(&record).await.unwrap();
+        let fetched = repo.get(id).await.unwrap().expect("record should exist");
+
+        assert_eq!(fetched.agent_id, 42);
+        assert_eq!(fetched.kind, "");
+        assert_eq!(fetched.name, "");
+        assert_eq!(fetched.file_path, None);
+        assert_eq!(fetched.size_bytes, None);
+        assert_eq!(fetched.captured_at, "");
+        assert_eq!(fetched.data, None);
+        assert_eq!(fetched.metadata, None);
+    }
+
+    #[tokio::test]
+    async fn loot_delete_removes_record() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_agents(&db, &[1]).await;
+        let repo = db.loot();
+
+        let id = repo.create(&sample_loot(1, "hash", "to-delete")).await.unwrap();
+        assert!(repo.get(id).await.unwrap().is_some());
+
+        repo.delete(id).await.unwrap();
+        assert!(repo.get(id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn loot_query_filtered_by_kind_exact() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_agents(&db, &[1, 2]).await;
+        let repo = db.loot();
+
+        repo.create(&sample_loot(1, "hash", "h1")).await.unwrap();
+        repo.create(&sample_loot(1, "ticket", "t1")).await.unwrap();
+        repo.create(&sample_loot(2, "hash", "h2")).await.unwrap();
+
+        let filter = LootFilter { kind_exact: Some("hash".to_string()), ..Default::default() };
+        let results = repo.query_filtered(&filter, 100, 0).await.unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|r| r.kind == "hash"));
+    }
+
+    #[tokio::test]
+    async fn loot_query_filtered_by_agent_id() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_agents(&db, &[10, 20]).await;
+        let repo = db.loot();
+
+        repo.create(&sample_loot(10, "hash", "a")).await.unwrap();
+        repo.create(&sample_loot(20, "hash", "b")).await.unwrap();
+
+        let filter = LootFilter { agent_id: Some(10), ..Default::default() };
+        let results = repo.query_filtered(&filter, 100, 0).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].agent_id, 10);
+    }
+
+    #[tokio::test]
+    async fn loot_count_filtered_matches_query_length() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_agents(&db, &[1]).await;
+        let repo = db.loot();
+
+        repo.create(&sample_loot(1, "hash", "h1")).await.unwrap();
+        repo.create(&sample_loot(1, "hash", "h2")).await.unwrap();
+        repo.create(&sample_loot(1, "ticket", "t1")).await.unwrap();
+
+        let filter = LootFilter { kind_exact: Some("hash".to_string()), ..Default::default() };
+        let count = repo.count_filtered(&filter).await.unwrap();
+        let results = repo.query_filtered(&filter, 100, 0).await.unwrap();
+        assert_eq!(count, results.len() as i64);
+    }
+
+    #[tokio::test]
+    async fn loot_query_filtered_pagination() {
+        let db = Database::connect_in_memory().await.unwrap();
+        seed_agents(&db, &[1]).await;
+        let repo = db.loot();
+
+        for i in 0..5 {
+            repo.create(&sample_loot(1, "hash", &format!("item-{i}"))).await.unwrap();
+        }
+
+        let filter = LootFilter::default();
+        let page1 = repo.query_filtered(&filter, 2, 0).await.unwrap();
+        let page2 = repo.query_filtered(&filter, 2, 2).await.unwrap();
+        let page3 = repo.query_filtered(&filter, 2, 4).await.unwrap();
+
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page2.len(), 2);
+        assert_eq!(page3.len(), 1);
+
+        // query_filtered orders by id DESC, so no overlap
+        let all_ids: Vec<_> =
+            page1.iter().chain(page2.iter()).chain(page3.iter()).map(|r| r.id).collect();
+        let mut deduped = all_ids.clone();
+        deduped.dedup();
+        assert_eq!(all_ids.len(), deduped.len(), "pages should not overlap");
     }
 }

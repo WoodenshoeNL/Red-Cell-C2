@@ -186,9 +186,18 @@ impl Profile {
         }
 
         for listener in &self.listeners.external {
-            let name =
-                if listener.name.trim().is_empty() { "<unnamed>" } else { listener.name.trim() };
-            tracing::warn!("Listeners.External \"{name}\" is not supported yet — ignoring");
+            if listener.name.trim().is_empty() {
+                errors.push("Listeners.External.Name must not be empty".to_owned());
+            }
+            if listener.endpoint.trim().is_empty() {
+                errors
+                    .push(format!("Listeners.External \"{}\" must define Endpoint", listener.name));
+            } else if !listener.endpoint.starts_with('/') {
+                errors.push(format!(
+                    "Listeners.External \"{}\" Endpoint must start with '/'",
+                    listener.name
+                ));
+            }
         }
 
         for listener in &self.listeners.dns {
@@ -1566,7 +1575,40 @@ mod tests {
     }
 
     #[test]
-    fn accepts_external_listener_with_warning() {
+    fn accepts_valid_external_listener_configuration() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Listeners {
+              External {
+                Name = "bridge"
+                Endpoint = "/svc"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        profile.validate().expect("profile with External listener should validate successfully");
+        assert_eq!(profile.listeners.external.len(), 1);
+        assert_eq!(profile.listeners.external[0].name, "bridge");
+        assert_eq!(profile.listeners.external[0].endpoint, "/svc");
+    }
+
+    #[test]
+    fn rejects_external_listener_missing_endpoint_slash() {
         let profile = Profile::parse(
             r#"
             Teamserver {
@@ -1592,9 +1634,8 @@ mod tests {
         )
         .expect("profile should parse");
 
-        profile.validate().expect("profile with External listener should validate successfully");
-        assert_eq!(profile.listeners.external.len(), 1);
-        assert_eq!(profile.listeners.external[0].name, "bridge");
+        let error = profile.validate().expect_err("endpoint without leading / should fail");
+        assert!(error.to_string().contains("must start with '/'"), "unexpected error: {error}");
     }
 
     #[test]

@@ -1,9 +1,11 @@
 //! Shared application state for the Red Cell teamserver.
 
+use std::net::SocketAddr;
+
 use axum::{
     Router,
-    body::Body,
-    extract::FromRef,
+    body::{Body, Bytes},
+    extract::{ConnectInfo, FromRef, State},
     http::{Request, StatusCode},
     response::IntoResponse,
     routing::any,
@@ -13,8 +15,8 @@ use red_cell_common::config::Profile;
 use crate::{
     AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
     ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
-    ServiceBridge, ShutdownController, SocketRelayManager, api_routes, service_routes,
-    websocket_routes,
+    ServiceBridge, ShutdownController, SocketRelayManager, api_routes, handle_external_request,
+    service_routes, websocket_routes,
 };
 
 /// Shared state injected into Axum routes and middleware.
@@ -133,17 +135,39 @@ pub fn build_router(state: TeamserverState) -> Router {
         router = router.merge(service_routes(bridge));
     }
 
-    router.fallback(any(agent_listener_placeholder)).with_state(state)
+    router.fallback(any(teamserver_fallback)).with_state(state)
 }
 
-async fn agent_listener_placeholder(request: Request<Body>) -> impl IntoResponse {
-    tracing::debug!(
-        method = %request.method(),
-        path = %request.uri().path(),
-        "teamserver operator port fallback hit"
-    );
+async fn teamserver_fallback(
+    State(state): State<TeamserverState>,
+    request: Request<Body>,
+) -> impl IntoResponse {
+    let path = request.uri().path().to_owned();
 
-    StatusCode::NOT_FOUND
+    // Check if an active External listener owns this path.
+    if let Some(ext_state) = state.listeners.external_state_for_path(&path).await {
+        let peer = request
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map_or_else(|| SocketAddr::from(([127, 0, 0, 1], 0)), |info| info.0);
+
+        let body = match axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024).await {
+            Ok(bytes) => bytes,
+            Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+        };
+
+        match handle_external_request(&ext_state, peer, &body).await {
+            Ok(payload) => (StatusCode::OK, Bytes::from(payload)).into_response(),
+            Err(status) => status.into_response(),
+        }
+    } else {
+        tracing::debug!(
+            method = %request.method(),
+            path = %path,
+            "teamserver operator port fallback hit"
+        );
+        StatusCode::NOT_FOUND.into_response()
+    }
 }
 
 #[cfg(test)]

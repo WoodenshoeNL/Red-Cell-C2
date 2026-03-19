@@ -1199,9 +1199,12 @@ fn pack_config(
     match listener {
         ListenerConfig::Http(http) => pack_http_listener(&mut out, http)?,
         ListenerConfig::Smb(smb) => pack_smb_listener(&mut out, smb)?,
-        ListenerConfig::Dns(_) => {
+        ListenerConfig::Dns(_) | ListenerConfig::External(_) => {
             return Err(PayloadBuildError::InvalidRequest {
-                message: "DNS listeners are not supported for Demon payload builds".to_owned(),
+                message: format!(
+                    "{} listeners are not supported for Demon payload builds",
+                    listener.protocol()
+                ),
             });
         }
     }
@@ -1310,9 +1313,12 @@ fn build_defines(
     let transport = match listener.protocol() {
         ListenerProtocol::Http => "TRANSPORT_HTTP",
         ListenerProtocol::Smb => "TRANSPORT_SMB",
-        ListenerProtocol::Dns => {
+        ListenerProtocol::Dns | ListenerProtocol::External => {
             return Err(PayloadBuildError::InvalidRequest {
-                message: "DNS listeners are not supported for Demon payload builds".to_owned(),
+                message: format!(
+                    "{} listeners are not supported for Demon payload builds",
+                    listener.protocol()
+                ),
             });
         }
     };
@@ -2685,7 +2691,7 @@ mod tests {
         assert!(matches!(
             error,
             PayloadBuildError::InvalidRequest { message }
-                if message == "DNS listeners are not supported for Demon payload builds"
+                if message.contains("not supported for Demon payload builds")
         ));
         Ok(())
     }

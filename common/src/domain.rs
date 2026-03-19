@@ -21,6 +21,8 @@ pub enum ListenerProtocol {
     Smb,
     /// DNS C2 transport.
     Dns,
+    /// External C2 bridge transport.
+    External,
 }
 
 impl ListenerProtocol {
@@ -32,6 +34,7 @@ impl ListenerProtocol {
             }
             value if value.eq_ignore_ascii_case("smb") => Ok(Self::Smb),
             value if value.eq_ignore_ascii_case("dns") => Ok(Self::Dns),
+            value if value.eq_ignore_ascii_case("external") => Ok(Self::External),
             _ => Err(CommonError::UnsupportedListenerProtocol { protocol: protocol.to_string() }),
         }
     }
@@ -43,6 +46,7 @@ impl ListenerProtocol {
             Self::Http => "http",
             Self::Smb => "smb",
             Self::Dns => "dns",
+            Self::External => "external",
         }
     }
 }
@@ -195,6 +199,18 @@ fn default_dns_record_types() -> Vec<String> {
     vec!["TXT".to_owned()]
 }
 
+/// External C2 bridge listener configuration.
+///
+/// External listeners register a path on the teamserver's main HTTP port.
+/// Third-party C2 transports relay agent traffic through this endpoint.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ExternalListenerConfig {
+    /// Listener display name.
+    pub name: String,
+    /// HTTP path registered on the teamserver (e.g., `"/bridge"`).
+    pub endpoint: String,
+}
+
 /// Shared listener configuration enum.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "protocol", content = "config", rename_all = "snake_case")]
@@ -205,6 +221,8 @@ pub enum ListenerConfig {
     Smb(SmbListenerConfig),
     /// DNS C2 listener settings.
     Dns(DnsListenerConfig),
+    /// External C2 bridge listener settings.
+    External(ExternalListenerConfig),
 }
 
 impl ListenerConfig {
@@ -215,6 +233,7 @@ impl ListenerConfig {
             Self::Http(config) => &config.name,
             Self::Smb(config) => &config.name,
             Self::Dns(config) => &config.name,
+            Self::External(config) => &config.name,
         }
     }
 
@@ -225,6 +244,7 @@ impl ListenerConfig {
             Self::Http(_) => ListenerProtocol::Http,
             Self::Smb(_) => ListenerProtocol::Smb,
             Self::Dns(_) => ListenerProtocol::Dns,
+            Self::External(_) => ListenerProtocol::External,
         }
     }
 }
@@ -244,6 +264,12 @@ impl From<SmbListenerConfig> for ListenerConfig {
 impl From<DnsListenerConfig> for ListenerConfig {
     fn from(config: DnsListenerConfig) -> Self {
         Self::Dns(config)
+    }
+}
+
+impl From<ExternalListenerConfig> for ListenerConfig {
+    fn from(config: ExternalListenerConfig) -> Self {
+        Self::External(config)
     }
 }
 
@@ -638,13 +664,13 @@ mod tests {
     }
 
     #[test]
-    fn listener_protocol_rejects_external_until_runtime_exists() {
-        let error =
-            ListenerProtocol::try_from_str("external").expect_err("external is not yet supported");
+    fn listener_protocol_accepts_external() {
         assert_eq!(
-            error,
-            CommonError::UnsupportedListenerProtocol { protocol: "external".to_string() }
+            ListenerProtocol::try_from_str("external").expect("external should be supported"),
+            ListenerProtocol::External,
         );
+        assert_eq!(ListenerProtocol::External.as_str(), "external");
+        assert_eq!(ListenerProtocol::External.to_string(), "external");
     }
 
     #[test]

@@ -9,8 +9,8 @@ pub mod operator;
 pub mod tls;
 
 pub use domain::{
-    AgentEncryptionInfo, AgentRecord, DnsListenerConfig, HttpListenerConfig,
-    HttpListenerProxyConfig, HttpListenerResponseConfig, ListenerConfig, ListenerProtocol,
-    ListenerTlsConfig, OperatorInfo, SmbListenerConfig,
+    AgentEncryptionInfo, AgentRecord, DnsListenerConfig, ExternalListenerConfig,
+    HttpListenerConfig, HttpListenerProxyConfig, HttpListenerResponseConfig, ListenerConfig,
+    ListenerProtocol, ListenerTlsConfig, OperatorInfo, SmbListenerConfig,
 };
 pub use error::CommonError;

@@ -329,6 +329,7 @@ mod tests {
         OperatorConnectionManager, PayloadBuilderService, ShutdownController, SocketRelayManager,
         TeamserverState,
     };
+    use red_cell_common::ListenerProtocol;
     use red_cell_common::config::{OperatorRole, Profile};
     use red_cell_common::tls::{TlsKeyAlgorithm, generate_self_signed_tls_identity};
     use tempfile::NamedTempFile;
@@ -466,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn load_profile_accepts_external_listener_configuration_with_warning() {
+    fn load_profile_accepts_external_listener_configuration() {
         let temp_file = NamedTempFile::new().expect("temporary file should be created");
         std::fs::write(
             temp_file.path(),
@@ -485,7 +486,7 @@ mod tests {
             Listeners {
               External {
                 Name = "bridge"
-                Endpoint = "svc"
+                Endpoint = "/svc"
               }
             }
 
@@ -498,6 +499,7 @@ mod tests {
             .expect("profile with External listener should load successfully");
         assert_eq!(profile.listeners.external.len(), 1);
         assert_eq!(profile.listeners.external[0].name, "bridge");
+        assert_eq!(profile.listeners.external[0].endpoint, "/svc");
     }
 
     #[tokio::test]
@@ -923,11 +925,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_profile_ignores_external_listener_configs() {
-        // External listeners are rejected by profile.validate() before sync_profile is
-        // ever reached in production.  If an unvalidated profile somehow contains External
-        // entries, sync_profile must silently skip them rather than panicking or persisting
-        // an unsupported config.
+    async fn sync_profile_persists_external_listener_configs() {
         let profile = Profile::parse(
             r#"
             Teamserver {
@@ -944,7 +942,7 @@ mod tests {
             Listeners {
               External = [{
                 Name = "external"
-                Endpoint = "svc"
+                Endpoint = "/svc"
               }]
             }
 
@@ -962,12 +960,13 @@ mod tests {
         listeners
             .sync_profile(&profile)
             .await
-            .expect("sync_profile must succeed when External entries are silently skipped");
+            .expect("sync_profile must succeed with External entries");
 
-        assert!(
-            listeners.summary("external").await.is_err(),
-            "no External listener should have been persisted"
-        );
+        let summary = listeners
+            .summary("external")
+            .await
+            .expect("External listener should have been persisted");
+        assert_eq!(summary.config.protocol(), ListenerProtocol::External);
     }
 
     #[tokio::test]

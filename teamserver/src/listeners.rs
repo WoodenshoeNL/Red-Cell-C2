@@ -32,8 +32,8 @@ use red_cell_common::tls::{
     TlsKeyAlgorithm, install_default_crypto_provider, resolve_tls_identity,
 };
 use red_cell_common::{
-    DnsListenerConfig, HttpListenerConfig, HttpListenerProxyConfig, HttpListenerResponseConfig,
-    ListenerConfig, ListenerProtocol, SmbListenerConfig,
+    DnsListenerConfig, ExternalListenerConfig, HttpListenerConfig, HttpListenerProxyConfig,
+    HttpListenerResponseConfig, ListenerConfig, ListenerProtocol, SmbListenerConfig,
 };
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -358,6 +358,23 @@ impl ListenerSummary {
                 info.host_bind = Some(config.host_bind.clone());
                 info.port_bind = Some(config.port_bind.to_string());
             }
+            ListenerConfig::External(config) => {
+                info.extra.insert("Host".to_owned(), serde_json::Value::String(String::new()));
+                info.extra.insert("Port".to_owned(), serde_json::Value::String(String::new()));
+                info.extra
+                    .insert("Info".to_owned(), serde_json::Value::String(config.endpoint.clone()));
+                info.extra.insert(
+                    "Error".to_owned(),
+                    self.state.last_error.clone().map_or_else(
+                        || serde_json::Value::String(String::new()),
+                        serde_json::Value::String,
+                    ),
+                );
+                info.extra.insert(
+                    "Endpoint".to_owned(),
+                    serde_json::Value::String(config.endpoint.clone()),
+                );
+            }
         }
 
         info
@@ -439,6 +456,8 @@ pub struct ListenerManager {
     shutdown: ShutdownController,
     active_handles: Arc<RwLock<BTreeMap<String, JoinHandle<()>>>>,
     operations: Arc<Mutex<()>>,
+    /// Active external listener endpoints keyed by path (e.g. `"/bridge"`).
+    external_endpoints: Arc<RwLock<BTreeMap<String, Arc<ExternalListenerState>>>>,
 }
 
 impl ListenerManager {
@@ -492,6 +511,7 @@ impl ListenerManager {
             shutdown: ShutdownController::new(),
             active_handles: Arc::new(RwLock::new(BTreeMap::new())),
             operations: Arc::new(Mutex::new(())),
+            external_endpoints: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 
@@ -505,6 +525,13 @@ impl ListenerManager {
     #[must_use]
     pub fn agent_registry(&self) -> AgentRegistry {
         self.agent_registry.clone()
+    }
+
+    /// Look up an active External listener by its endpoint path.
+    ///
+    /// Returns `None` if no running External listener owns `path`.
+    pub async fn external_state_for_path(&self, path: &str) -> Option<Arc<ExternalListenerState>> {
+        self.external_endpoints.read().await.get(path).cloned()
     }
 
     /// Return the shared graceful-shutdown controller used by listener runtimes.
@@ -728,6 +755,11 @@ impl ListenerManager {
 
         handle.abort();
         let _ = handle.await;
+
+        // Clean up external listener endpoint registry entries that won't get
+        // deregistered inside the aborted future.
+        self.external_endpoints.write().await.retain(|_, state| state.listener_name() != name);
+
         repository.set_state(name, ListenerStatus::Stopped, None).await?;
         info!(listener = name, "listener stopped");
         self.summary(name).await
@@ -860,6 +892,39 @@ struct SmbListenerState {
     demon_init_rate_limiter: DemonInitRateLimiter,
     unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
     shutdown: ShutdownController,
+}
+
+/// Shared state for an active External C2 bridge listener.
+///
+/// Stored in the [`ListenerManager`] external endpoint registry so that the
+/// teamserver fallback handler can dispatch matching requests.
+#[derive(Clone, Debug)]
+pub struct ExternalListenerState {
+    config: ExternalListenerConfig,
+    registry: AgentRegistry,
+    database: Database,
+    parser: DemonPacketParser,
+    events: EventBus,
+    dispatcher: CommandDispatcher,
+    /// Kept for future per-init rate limiting; currently init limiting is
+    /// performed inside [`process_demon_transport`] via the audit limiter.
+    _demon_init_rate_limiter: DemonInitRateLimiter,
+    unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
+    shutdown: ShutdownController,
+}
+
+impl ExternalListenerState {
+    /// Return the endpoint path this listener handles.
+    #[must_use]
+    pub fn endpoint(&self) -> &str {
+        &self.config.endpoint
+    }
+
+    /// Return the listener display name.
+    #[must_use]
+    pub fn listener_name(&self) -> &str {
+        &self.config.name
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1060,6 +1125,10 @@ pub fn listener_config_from_operator(
             kill_date: optional_extra_string(info, EXTRA_KILL_DATE),
             working_hours: optional_extra_string(info, EXTRA_WORKING_HOURS),
         })),
+        Ok(ListenerProtocol::External) => Ok(ListenerConfig::from(ExternalListenerConfig {
+            name: name.to_owned(),
+            endpoint: required_extra_string(info, "Endpoint")?,
+        })),
         Err(error) => Err(ListenerManagerError::InvalidConfig { message: error.to_string() }),
     }
 }
@@ -1173,6 +1242,7 @@ fn operator_protocol_name(config: &ListenerConfig) -> String {
         ListenerConfig::Http(_) => "Http".to_owned(),
         ListenerConfig::Smb(_) => "Smb".to_owned(),
         ListenerConfig::Dns(_) => "Dns".to_owned(),
+        ListenerConfig::External(_) => "External".to_owned(),
     }
 }
 
@@ -1230,6 +1300,12 @@ fn profile_listener_configs(profile: &Profile) -> Vec<ListenerConfig> {
             record_types: config.record_types,
             kill_date: config.kill_date,
             working_hours: config.working_hours,
+        })
+    }));
+    listeners.extend(profile.listeners.external.iter().cloned().map(|config| {
+        ListenerConfig::from(ExternalListenerConfig {
+            name: config.name,
+            endpoint: config.endpoint,
         })
     }));
     listeners
@@ -1804,6 +1880,99 @@ fn smb_local_socket_name(pipe_name: &str) -> io::Result<interprocess::local_sock
     normalized_smb_pipe_name(pipe_name).to_fs_name::<NamedPipe>().map(|name| name.into_owned())
 }
 
+// ── External C2 Bridge Listener ─────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_external_listener_runtime(
+    config: &ExternalListenerConfig,
+    registry: AgentRegistry,
+    events: EventBus,
+    database: Database,
+    sockets: SocketRelayManager,
+    plugins: Option<PluginRuntime>,
+    downloads: DownloadTracker,
+    demon_init_rate_limiter: DemonInitRateLimiter,
+    unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
+    shutdown: ShutdownController,
+    external_endpoints: Arc<RwLock<BTreeMap<String, Arc<ExternalListenerState>>>>,
+) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
+    let state = Arc::new(ExternalListenerState {
+        config: config.clone(),
+        registry: registry.clone(),
+        database: database.clone(),
+        parser: DemonPacketParser::new(registry.clone()),
+        events: events.clone(),
+        _demon_init_rate_limiter: demon_init_rate_limiter,
+        unknown_callback_probe_audit_limiter,
+        shutdown,
+        dispatcher: CommandDispatcher::with_builtin_handlers_and_downloads(
+            registry.clone(),
+            events.clone(),
+            database,
+            sockets,
+            plugins,
+            downloads,
+        ),
+    });
+
+    let endpoint = config.endpoint.clone();
+    let listener_name = config.name.clone();
+    let reg_state = state.clone();
+    let endpoints_ref = external_endpoints.clone();
+
+    Ok(Box::pin(async move {
+        // Register endpoint so the teamserver fallback handler can route to us.
+        endpoints_ref.write().await.insert(endpoint.clone(), reg_state);
+        info!(listener = %listener_name, endpoint = %endpoint, "external listener registered");
+
+        // Wait until shutdown is requested — actual HTTP serving is done by the
+        // teamserver's fallback handler via the endpoint registry.
+        let shutdown_signal = state.shutdown.notified();
+        shutdown_signal.await;
+
+        // Deregister endpoint on shutdown.
+        endpoints_ref.write().await.remove(&endpoint);
+        info!(listener = %listener_name, endpoint = %endpoint, "external listener deregistered");
+        Ok(())
+    }))
+}
+
+/// Process an inbound HTTP request on an External C2 bridge endpoint.
+///
+/// This is called by the teamserver fallback handler when the request path
+/// matches a registered external listener endpoint.
+pub async fn handle_external_request(
+    state: &ExternalListenerState,
+    peer: SocketAddr,
+    body: &[u8],
+) -> Result<Vec<u8>, StatusCode> {
+    let result = process_demon_transport(
+        &state.config.name,
+        &state.registry,
+        &state.database,
+        &state.parser,
+        &state.events,
+        &state.dispatcher,
+        &state.unknown_callback_probe_audit_limiter,
+        body,
+        peer.ip().to_string(),
+    )
+    .await;
+
+    match result {
+        Ok(response) => Ok(response.payload),
+        Err(error) => {
+            debug!(
+                listener = %state.config.name,
+                peer = %peer,
+                %error,
+                "external listener request failed"
+            );
+            Err(StatusCode::NOT_FOUND)
+        }
+    }
+}
+
 impl ListenerManager {
     async fn spawn_listener_runtime(
         &self,
@@ -1855,6 +2024,19 @@ impl ListenerManager {
                 )
                 .await
             }
+            ListenerConfig::External(config) => spawn_external_listener_runtime(
+                config,
+                self.agent_registry.clone(),
+                self.events.clone(),
+                self.database.clone(),
+                self.sockets.clone(),
+                self.plugins.clone(),
+                self.downloads.clone(),
+                self.demon_init_rate_limiter.clone(),
+                self.unknown_callback_probe_audit_limiter.clone(),
+                self.shutdown.clone(),
+                self.external_endpoints.clone(),
+            ),
         }?;
 
         Ok(spawn_managed_listener_task(
@@ -3269,8 +3451,9 @@ mod tests {
     use red_cell_common::demon::{DEMON_MAGIC_VALUE, DemonCommand, DemonEnvelope, DemonMessage};
     use red_cell_common::operator::{ListenerInfo, OperatorMessage};
     use red_cell_common::{
-        DnsListenerConfig, HttpListenerConfig, HttpListenerProxyConfig, HttpListenerResponseConfig,
-        ListenerConfig, ListenerProtocol, ListenerTlsConfig, SmbListenerConfig,
+        DnsListenerConfig, ExternalListenerConfig, HttpListenerConfig, HttpListenerProxyConfig,
+        HttpListenerResponseConfig, ListenerConfig, ListenerProtocol, ListenerTlsConfig,
+        SmbListenerConfig,
     };
     use reqwest::Client;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -6939,6 +7122,13 @@ mod tests {
         // DNS → "Dns"
         let dns = dns_listener_config("dns-test", 53, "c2.example");
         assert_eq!(operator_protocol_name(&dns), "Dns");
+
+        // External → "External"
+        let external = ListenerConfig::from(ExternalListenerConfig {
+            name: "ext-test".to_owned(),
+            endpoint: "/bridge".to_owned(),
+        });
+        assert_eq!(operator_protocol_name(&external), "External");
     }
 
     // ── ListenerManager constructor helpers and shutdown lifecycle ────────────
@@ -7187,5 +7377,177 @@ mod tests {
 
         manager.stop("plugin-init-wiring").await?;
         Ok(())
+    }
+
+    // ── External C2 bridge listener tests ───────────────────────────────────
+
+    fn external_listener_config(name: &str, endpoint: &str) -> ListenerConfig {
+        ListenerConfig::from(ExternalListenerConfig {
+            name: name.to_owned(),
+            endpoint: endpoint.to_owned(),
+        })
+    }
+
+    #[test]
+    fn listener_config_from_operator_parses_external() {
+        let info = ListenerInfo {
+            name: Some("bridge".to_owned()),
+            protocol: Some("External".to_owned()),
+            extra: [("Endpoint".to_owned(), serde_json::Value::String("/ext".to_owned()))]
+                .into_iter()
+                .collect(),
+            ..ListenerInfo::default()
+        };
+
+        let config = listener_config_from_operator(&info).expect("should parse external config");
+        assert_eq!(config.name(), "bridge");
+        assert_eq!(config.protocol(), ListenerProtocol::External);
+        match &config {
+            ListenerConfig::External(c) => {
+                assert_eq!(c.endpoint, "/ext");
+            }
+            other => panic!("expected External config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn listener_config_from_operator_rejects_external_without_endpoint() {
+        let info = ListenerInfo {
+            name: Some("bridge".to_owned()),
+            protocol: Some("External".to_owned()),
+            extra: std::collections::BTreeMap::new(),
+            ..ListenerInfo::default()
+        };
+
+        let error = listener_config_from_operator(&info).expect_err("missing endpoint should fail");
+        assert!(
+            matches!(error, ListenerManagerError::InvalidConfig { .. }),
+            "expected InvalidConfig, got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn external_listener_create_start_stop_lifecycle() {
+        let database = Database::connect_in_memory().await.expect("db");
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::new(database, registry, events, sockets, None);
+
+        let config = external_listener_config("ext1", "/bridge");
+
+        // Create persists the listener.
+        manager.create(config).await.expect("create should succeed");
+        let summary = manager.summary("ext1").await.expect("listener should exist");
+        assert_eq!(summary.protocol, ListenerProtocol::External);
+        assert_eq!(summary.state.status, ListenerStatus::Created);
+
+        // Start should register the endpoint.
+        manager.start("ext1").await.expect("start should succeed");
+        let summary = manager.summary("ext1").await.expect("listener should exist");
+        assert_eq!(summary.state.status, ListenerStatus::Running);
+
+        // The external endpoint should be registered.
+        let state = manager
+            .external_state_for_path("/bridge")
+            .await
+            .expect("endpoint should be registered");
+        assert_eq!(state.listener_name(), "ext1");
+        assert_eq!(state.endpoint(), "/bridge");
+
+        // Stop should deregister the endpoint.
+        manager.stop("ext1").await.expect("stop should succeed");
+
+        // Give the managed task a moment to clean up.
+        sleep(Duration::from_millis(50)).await;
+
+        let removed = manager.external_state_for_path("/bridge").await;
+        assert!(removed.is_none(), "endpoint should be deregistered after stop");
+    }
+
+    #[tokio::test]
+    async fn external_listener_to_operator_info_includes_endpoint() {
+        let database = Database::connect_in_memory().await.expect("db");
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::new(database, registry, events, sockets, None);
+
+        let config = external_listener_config("ext-info", "/c2");
+        manager.create(config).await.expect("create should succeed");
+
+        let summary = manager.summary("ext-info").await.expect("listener should exist");
+        let info = summary.to_operator_info();
+        assert_eq!(info.protocol.as_deref(), Some("External"));
+        assert_eq!(info.extra.get("Endpoint").and_then(|v| v.as_str()), Some("/c2"),);
+        assert_eq!(info.extra.get("Info").and_then(|v| v.as_str()), Some("/c2"),);
+    }
+
+    #[test]
+    fn profile_listener_configs_includes_external() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "op" { Password = "password1234" }
+            }
+
+            Listeners {
+              External {
+                Name = "bridge"
+                Endpoint = "/ext"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let configs = profile_listener_configs(&profile);
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name(), "bridge");
+        assert_eq!(configs[0].protocol(), ListenerProtocol::External);
+    }
+
+    #[tokio::test]
+    async fn external_state_for_path_returns_none_for_unknown() {
+        let database = Database::connect_in_memory().await.expect("db");
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::new(database, registry, events, sockets, None);
+
+        assert!(
+            manager.external_state_for_path("/nonexistent").await.is_none(),
+            "unknown path should return None"
+        );
+    }
+
+    #[tokio::test]
+    async fn external_listener_serializes_and_restores() {
+        let database = Database::connect_in_memory().await.expect("db");
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::new(database, registry, events, sockets, None);
+
+        let config = external_listener_config("ext-persist", "/persist");
+        manager.create(config).await.expect("create");
+
+        // Verify the config round-trips through the database.
+        let summary = manager.summary("ext-persist").await.expect("should exist");
+        assert_eq!(summary.config.protocol(), ListenerProtocol::External);
+        match &summary.config {
+            ListenerConfig::External(c) => {
+                assert_eq!(c.name, "ext-persist");
+                assert_eq!(c.endpoint, "/persist");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
     }
 }

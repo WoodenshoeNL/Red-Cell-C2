@@ -63,9 +63,10 @@ pub const MAX_AGENT_MESSAGE_LEN: usize = 0x01E0_0000; // 30 MiB
 pub use dispatch::{CommandDispatchError, CommandDispatcher};
 pub use events::{EventBus, EventReceiver};
 pub use listeners::{
-    ListenerEventAction, ListenerManager, ListenerManagerError, ListenerMarkRequest,
-    ListenerSummary, action_from_mark, listener_config_from_operator, listener_error_event,
-    listener_event_for_action, listener_removed_event, operator_requests_start,
+    ExternalListenerState, ListenerEventAction, ListenerManager, ListenerManagerError,
+    ListenerMarkRequest, ListenerSummary, action_from_mark, handle_external_request,
+    listener_config_from_operator, listener_error_event, listener_event_for_action,
+    listener_removed_event, operator_requests_start,
 };
 pub use payload_builder::{
     BuildProgress, PayloadArtifact, PayloadBuildError, PayloadBuilderService, PayloadCache,

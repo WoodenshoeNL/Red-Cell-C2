@@ -4698,4 +4698,59 @@ mod tests {
             loot_item_from_flat_info(&info, LootKind::File).expect("should produce a LootItem");
         assert_eq!(item.source, "file");
     }
+
+    #[test]
+    fn event_log_max_size_zero_caps_at_one_entry() {
+        // With max_size=0, `len() >= max_size` is always true so push()
+        // always tries to evict first. On the first push the deque is empty,
+        // so pop_front returns None and the entry is added — the log holds
+        // one entry. On subsequent pushes the existing entry is evicted and
+        // replaced. Document this behavior so changes don't silently break it.
+        let mut log = EventLog::new(0);
+        log.push(EventKind::Agent, "a", "t1", "first");
+        assert_eq!(log.len(), 1);
+        assert_eq!(log.unread_count, 1);
+
+        log.push(EventKind::Agent, "a", "t2", "second");
+        assert_eq!(log.len(), 1);
+        assert_eq!(log.entries[0].message, "second");
+        // Evicted entry was unread: -1 +1 = still 1
+        assert_eq!(log.unread_count, 1);
+
+        log.mark_all_read();
+        log.push(EventKind::System, "s", "t3", "third");
+        assert_eq!(log.len(), 1);
+        assert_eq!(log.entries[0].message, "third");
+        // Evicted entry was read: 0 +1 = 1
+        assert_eq!(log.unread_count, 1);
+    }
+
+    #[test]
+    fn event_log_eviction_unread_count_stays_consistent_over_mixed_cycle() {
+        // Push → mark_all_read → push past capacity → verify unread_count is
+        // consistent with the actual number of unread entries at each step.
+        let mut log = EventLog::new(3);
+        log.push(EventKind::Agent, "a", "t1", "m1");
+        log.push(EventKind::Operator, "b", "t2", "m2");
+        log.push(EventKind::System, "c", "t3", "m3");
+        assert_eq!(log.unread_count, 3);
+
+        log.mark_all_read();
+        assert_eq!(log.unread_count, 0);
+
+        // Push two more — evicts two read entries, adds two unread entries
+        log.push(EventKind::Agent, "a", "t4", "m4");
+        log.push(EventKind::Agent, "a", "t5", "m5");
+        assert_eq!(log.unread_count, 2);
+        assert_eq!(
+            log.entries.iter().filter(|e| !e.read).count(),
+            log.unread_count,
+            "unread_count must equal actual unread entries"
+        );
+
+        // Verify per-kind counts match too
+        assert_eq!(log.unread_by_kind(EventKind::Agent), 2);
+        assert_eq!(log.unread_by_kind(EventKind::Operator), 0);
+        assert_eq!(log.unread_by_kind(EventKind::System), 0);
+    }
 }

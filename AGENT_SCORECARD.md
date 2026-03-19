@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 477 | 212 | 31 |
+| Tasks closed | 481 | 212 | 31 |
 | Bugs filed against | 46 | 34 | 9 |
 | Bug rate (bugs/task) | 0.10 | 0.16 | 0.29 |
 | Quality score | 90% | 84% | 71% |
 
-*Bug rates: Claude 46/477=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 46/481=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -2672,3 +2672,13 @@ Build: cargo check passed, clippy passed (0 warnings), cargo test passed (all su
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: cargo check passed, clippy passed (0 warnings), cargo test passed (223 tests, 0 failures)
+
+### QA Review — 2026-03-19 — 3768dea..5230d8f
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 4 | 0 | Closed yw6v (handle_pivot_list_callback tests: empty, two-entry, truncated — 3 tests), buqf (handle_demon_info_callback MemAlloc/MemExec/MemProtect tests — 7 tests), e8eb (AuthorizationError IntoResponse status code mapping — 5 tests), 4d2m (webhook Discord embed no-nulls/empty assertions). Also filed test quality issues via test-review scan and claimed q5u8 (in progress — plugins isolation test). Closed duplicate issue 9735 (covered by yw6v). All test-only changes, clean and well-structured. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (0 warnings), cargo test passed (1460+ tests, 0 failures)

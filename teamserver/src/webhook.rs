@@ -1170,6 +1170,38 @@ mod tests {
         );
     }
 
+    /// When all optional `AuditRecord` fields (`target_id`, `agent_id`, `command`,
+    /// `parameters`) are `None`, the embed must contain exactly the four base fields
+    /// (Actor, Action, Target, Result) — no extras.
+    #[tokio::test]
+    async fn discord_embed_omits_optional_fields_when_none() {
+        let (address, mut receiver, server) = webhook_server(HttpStatusCode::OK).await;
+        let profile = discord_profile(address);
+        let notifier = AuditWebhookNotifier::from_profile(&profile);
+
+        notifier
+            .notify_audit_record(&sample_record(90))
+            .await
+            .expect("webhook delivery should succeed");
+
+        let payload = receiver.recv().await.expect("payload should arrive");
+        server.abort();
+
+        let fields =
+            payload["embeds"][0]["fields"].as_array().expect("embed fields should be an array");
+
+        let field_names: Vec<&str> = fields
+            .iter()
+            .map(|f| f["name"].as_str().expect("field name should be a string"))
+            .collect();
+
+        assert_eq!(
+            field_names,
+            vec!["Actor", "Action", "Target", "Result"],
+            "embed must contain only the four base fields when optional record fields are None; got: {field_names:?}"
+        );
+    }
+
     /// When an in-flight delivery never completes before the shutdown deadline,
     /// `shutdown()` must return `false` rather than hanging or reporting success.
     #[tokio::test]

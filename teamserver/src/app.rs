@@ -130,6 +130,7 @@ pub fn build_router(state: TeamserverState) -> Router {
 
     let mut router = Router::new()
         .route("/havoc", get(crate::websocket_handler::<TeamserverState>))
+        .route("/havoc/", get(crate::websocket_handler::<TeamserverState>))
         .nest("/api/v1", api_routes(api));
 
     if let Some(ref bridge) = state.service_bridge {

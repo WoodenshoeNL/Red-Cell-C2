@@ -113,7 +113,7 @@ async fn main() -> Result<()> {
         shutdown: shutdown.clone(),
         service_bridge: profile.service.as_ref().map(|sc| red_cell::ServiceBridge::new(sc.clone())),
     };
-    let router = build_router(state.clone()).layer(NormalizePathLayer::trim_trailing_slash());
+    let router = build_router(state.clone());
     let handle = Handle::new();
 
     if let Some(ref bridge) = state.service_bridge {

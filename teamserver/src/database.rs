@@ -1690,6 +1690,28 @@ mod tests {
     }
 
     #[test]
+    fn i64_from_u64_accepts_zero() {
+        assert_eq!(i64_from_u64("field", 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn i64_from_u64_accepts_one() {
+        assert_eq!(i64_from_u64("field", 1).unwrap(), 1);
+    }
+
+    #[test]
+    fn i64_from_u64_accepts_i64_max() {
+        let val = i64::MAX as u64;
+        assert_eq!(i64_from_u64("field", val).unwrap(), i64::MAX);
+    }
+
+    #[test]
+    fn i64_from_u64_rejects_i64_max_plus_one() {
+        let val = i64::MAX as u64 + 1;
+        assert!(i64_from_u64("field", val).is_err());
+    }
+
+    #[test]
     fn i64_from_u64_rejects_values_bigger_than_sqlite_integer() {
         assert!(i64_from_u64("base_address", u64::MAX).is_err());
     }

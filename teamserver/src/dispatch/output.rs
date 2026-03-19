@@ -463,7 +463,7 @@ mod tests {
     use zeroize::Zeroizing;
 
     use super::*;
-    use crate::{AgentRegistry, Database, EventBus};
+    use crate::{AgentRegistry, Database, EventBus, SocketRelayManager};
 
     const AGENT_ID: u32 = 0xBEEF_0001;
     const REQUEST_ID: u32 = 99;
@@ -617,6 +617,180 @@ mod tests {
             matches!(err, CommandDispatchError::Registry(TeamserverError::AgentNotFound { .. })),
             "expected AgentNotFound, got {err:?}"
         );
+    }
+
+    // -- helpers for exit / kill-date callback tests --
+
+    /// Build registry + event bus + socket relay manager with a pre-registered sample agent.
+    async fn setup_with_sockets() -> (AgentRegistry, EventBus, SocketRelayManager) {
+        let db = Database::connect_in_memory().await.expect("in-memory db must succeed");
+        let registry = AgentRegistry::new(db);
+        let events = EventBus::new(16);
+        registry.insert(sample_agent()).await.expect("insert sample agent");
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        (registry, events, sockets)
+    }
+
+    fn exit_payload(exit_method: u32) -> Vec<u8> {
+        let mut buf = Vec::new();
+        push_u32(&mut buf, exit_method);
+        buf
+    }
+
+    // -- handle_exit_callback tests --
+
+    #[tokio::test]
+    async fn exit_callback_thread_exit_marks_agent_dead() {
+        let (registry, events, sockets) = setup_with_sockets().await;
+        let payload = exit_payload(1);
+
+        let result = handle_exit_callback(
+            &registry, &sockets, &events, None, AGENT_ID, REQUEST_ID, &payload,
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+
+        let agent = registry.get(AGENT_ID).await.expect("agent must exist");
+        assert!(!agent.active, "agent should be marked dead");
+        assert!(
+            agent.reason.contains("exit thread"),
+            "reason should mention thread exit, got {:?}",
+            agent.reason
+        );
+    }
+
+    #[tokio::test]
+    async fn exit_callback_process_exit_marks_agent_dead() {
+        let (registry, events, sockets) = setup_with_sockets().await;
+        let payload = exit_payload(2);
+
+        handle_exit_callback(&registry, &sockets, &events, None, AGENT_ID, REQUEST_ID, &payload)
+            .await
+            .expect("handler must succeed");
+
+        let agent = registry.get(AGENT_ID).await.expect("agent must exist");
+        assert!(!agent.active, "agent should be marked dead");
+        assert!(
+            agent.reason.contains("exit process"),
+            "reason should mention process exit, got {:?}",
+            agent.reason
+        );
+    }
+
+    #[tokio::test]
+    async fn exit_callback_unknown_method_marks_agent_dead_generic() {
+        let (registry, events, sockets) = setup_with_sockets().await;
+        let payload = exit_payload(99);
+
+        handle_exit_callback(&registry, &sockets, &events, None, AGENT_ID, REQUEST_ID, &payload)
+            .await
+            .expect("handler must succeed");
+
+        let agent = registry.get(AGENT_ID).await.expect("agent must exist");
+        assert!(!agent.active, "agent should be marked dead");
+        assert_eq!(agent.reason, "Agent exited");
+    }
+
+    #[tokio::test]
+    async fn exit_callback_broadcasts_mark_and_response() {
+        let (registry, events, sockets) = setup_with_sockets().await;
+        let mut rx = events.subscribe();
+        let payload = exit_payload(1);
+
+        handle_exit_callback(&registry, &sockets, &events, None, AGENT_ID, REQUEST_ID, &payload)
+            .await
+            .expect("handler must succeed");
+
+        // First broadcast: AgentUpdate (mark event)
+        let msg1 = rx.recv().await.expect("should receive agent update");
+        assert!(
+            matches!(msg1, OperatorMessage::AgentUpdate(_)),
+            "expected AgentUpdate, got {msg1:?}"
+        );
+
+        // Second broadcast: AgentResponse
+        drop(events);
+        let msg2 = rx.recv().await.expect("should receive agent response");
+        let OperatorMessage::AgentResponse(resp) = &msg2 else {
+            panic!("expected AgentResponse, got {msg2:?}");
+        };
+        let kind = resp.info.extra.get("Type").and_then(Value::as_str);
+        assert_eq!(kind, Some("Good"));
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            message.contains("exit thread"),
+            "expected message about thread exit, got {message:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn exit_callback_empty_payload_returns_error() {
+        let (registry, events, sockets) = setup_with_sockets().await;
+        let payload = Vec::new();
+
+        let result = handle_exit_callback(
+            &registry, &sockets, &events, None, AGENT_ID, REQUEST_ID, &payload,
+        )
+        .await;
+        let err = result.expect_err("empty payload must fail");
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+    }
+
+    // -- handle_kill_date_callback tests --
+
+    #[tokio::test]
+    async fn kill_date_callback_marks_agent_dead() {
+        let (registry, events, sockets) = setup_with_sockets().await;
+        let payload = Vec::new(); // kill date callback ignores payload
+
+        handle_kill_date_callback(
+            &registry, &sockets, &events, None, AGENT_ID, REQUEST_ID, &payload,
+        )
+        .await
+        .expect("handler must succeed");
+
+        let agent = registry.get(AGENT_ID).await.expect("agent must exist");
+        assert!(!agent.active, "agent should be marked dead");
+        assert!(
+            agent.reason.contains("kill date"),
+            "reason should mention kill date, got {:?}",
+            agent.reason
+        );
+    }
+
+    #[tokio::test]
+    async fn kill_date_callback_broadcasts_mark_and_response() {
+        let (registry, events, sockets) = setup_with_sockets().await;
+        let mut rx = events.subscribe();
+        let payload = Vec::new();
+
+        handle_kill_date_callback(
+            &registry, &sockets, &events, None, AGENT_ID, REQUEST_ID, &payload,
+        )
+        .await
+        .expect("handler must succeed");
+
+        // First broadcast: AgentUpdate (mark event)
+        let msg1 = rx.recv().await.expect("should receive agent update");
+        assert!(
+            matches!(msg1, OperatorMessage::AgentUpdate(_)),
+            "expected AgentUpdate, got {msg1:?}"
+        );
+
+        // Second broadcast: AgentResponse
+        drop(events);
+        let msg2 = rx.recv().await.expect("should receive agent response");
+        let OperatorMessage::AgentResponse(resp) = &msg2 else {
+            panic!("expected AgentResponse, got {msg2:?}");
+        };
+        let kind = resp.info.extra.get("Type").and_then(Value::as_str);
+        assert_eq!(kind, Some("Good"));
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(message.contains("kill date"), "expected message about kill date, got {message:?}");
     }
 
     // -- helpers for config callback tests --

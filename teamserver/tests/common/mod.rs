@@ -115,7 +115,10 @@ pub async fn login_as(
 pub async fn read_operator_message(
     socket: &mut WsClient,
 ) -> Result<OperatorMessage, Box<dyn std::error::Error>> {
-    let next = timeout(Duration::from_secs(5), socket.next()).await?;
+    // Argon2id with OWASP-recommended parameters (64 MiB, t=3, p=4) makes
+    // login verification measurably slower; allow enough time for the server
+    // to complete the memory-hard hash before declaring a timeout.
+    let next = timeout(Duration::from_secs(30), socket.next()).await?;
     let frame = next.ok_or_else(|| "missing websocket frame".to_owned())??;
     match frame {
         ClientMessage::Text(payload) => Ok(serde_json::from_str(payload.as_str())?),

@@ -38,7 +38,7 @@ async fn attempt_login(
     }))?;
     socket.send(ClientMessage::Text(payload.into())).await?;
 
-    let next = timeout(Duration::from_secs(10), socket.next()).await?;
+    let next = timeout(Duration::from_secs(30), socket.next()).await?;
     let frame = next.ok_or_else(|| "missing websocket frame".to_owned())??;
     let response = match frame {
         ClientMessage::Text(text) => serde_json::from_str::<OperatorMessage>(text.as_str())?,

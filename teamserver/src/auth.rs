@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use argon2::password_hash::phc::PasswordHash;
-use argon2::{Argon2, PasswordHasher, PasswordVerifier};
+use argon2::{Algorithm, Argon2, ParamsBuilder, PasswordHasher, PasswordVerifier, Version};
 use red_cell_common::OperatorInfo;
 use red_cell_common::config::{OperatorRole, Profile};
 use red_cell_common::crypto::hash_password_sha3;
@@ -507,13 +507,27 @@ fn configured_credentials(
         .collect()
 }
 
+/// Construct an [`Argon2`] instance with OWASP-recommended parameters.
+///
+/// Uses Argon2id with m_cost=65536 (64 MiB), t_cost=3, p_cost=4 — the
+/// recommended configuration from the OWASP Password Storage Cheat Sheet.
+fn argon2_hasher() -> Argon2<'static> {
+    let params = ParamsBuilder::new()
+        .m_cost(65536)
+        .t_cost(3)
+        .p_cost(4)
+        .build()
+        .expect("hardcoded Argon2 params are valid");
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+}
+
 fn password_hashes_match(submitted: &str, expected: &str) -> bool {
     let submitted = submitted.to_ascii_lowercase();
     let Ok(parsed_hash) = PasswordHash::new(expected) else {
         return false;
     };
 
-    Argon2::default().verify_password(submitted.as_bytes(), &parsed_hash).is_ok()
+    argon2_hasher().verify_password(submitted.as_bytes(), &parsed_hash).is_ok()
 }
 
 pub(crate) fn password_verifier_for_sha3(password_hash: &str) -> Result<String, AuthError> {
@@ -524,7 +538,7 @@ pub(crate) fn password_verifier_for_sha3(password_hash: &str) -> Result<String, 
 }
 
 fn password_verifier_for_sha3_impl(password_hash: &str) -> Result<String, AuthError> {
-    Argon2::default()
+    argon2_hasher()
         .hash_password(password_hash.to_ascii_lowercase().as_bytes())
         .map(|hash| hash.to_string())
         .map_err(|error| AuthError::PasswordVerifier(error.to_string()))
@@ -606,7 +620,7 @@ fn generate_dummy_verifier() -> Result<String, AuthError> {
 
 fn generate_dummy_verifier_impl() -> Result<String, AuthError> {
     let random_bytes = Uuid::new_v4();
-    Argon2::default()
+    argon2_hasher()
         .hash_password(random_bytes.as_bytes())
         .map(|h| h.to_string())
         .map_err(|e| AuthError::PasswordVerifier(e.to_string()))

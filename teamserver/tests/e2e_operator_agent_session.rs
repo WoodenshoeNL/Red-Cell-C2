@@ -379,7 +379,7 @@ fn multi_role_profile() -> Profile {
 async fn assert_connection_closed_after_rbac_denial(
     socket: &mut common::WsClient,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let next = timeout(Duration::from_secs(5), futures_util::StreamExt::next(socket)).await?;
+    let next = timeout(Duration::from_secs(30), futures_util::StreamExt::next(socket)).await?;
     match next {
         Some(Ok(ClientMessage::Close(_))) | None => Ok(()),
         Some(Ok(frame)) => {
@@ -566,8 +566,9 @@ async fn wrong_password_receives_error_and_connection_closes()
     }))?;
     socket.send(ClientMessage::Text(bad_login.into())).await?;
 
-    // Server imposes a 2 s delay on failed logins; use a generous timeout.
-    let response = timeout(Duration::from_secs(5), futures_util::StreamExt::next(&mut socket))
+    // Server imposes a 2 s delay on failed logins; Argon2id with OWASP-recommended
+    // parameters adds additional latency for the memory-hard hash.
+    let response = timeout(Duration::from_secs(30), futures_util::StreamExt::next(&mut socket))
         .await?
         .ok_or("server closed connection without sending a rejection message")??;
     let rejection: OperatorMessage = match response {
@@ -580,7 +581,7 @@ async fn wrong_password_receives_error_and_connection_closes()
     );
 
     // After the rejection message the server must close the connection.
-    let next = timeout(Duration::from_secs(3), futures_util::StreamExt::next(&mut socket)).await?;
+    let next = timeout(Duration::from_secs(10), futures_util::StreamExt::next(&mut socket)).await?;
     match next {
         Some(Ok(ClientMessage::Close(_))) | None => {}
         Some(Ok(frame)) => {
@@ -628,8 +629,8 @@ async fn repeated_wrong_passwords_trigger_rate_limiter_lockout()
         let (mut socket, _) = connect_async(format!("ws://{addr}/")).await?;
         socket.send(ClientMessage::Text(bad_login.clone().into())).await?;
 
-        // Each failed login incurs a 2 s server-side delay.
-        let response = timeout(Duration::from_secs(5), futures_util::StreamExt::next(&mut socket))
+        // Each failed login incurs a 2 s server-side delay plus Argon2id hashing time.
+        let response = timeout(Duration::from_secs(30), futures_util::StreamExt::next(&mut socket))
             .await?
             .ok_or(format!("attempt {}: server closed without rejection", i + 1))??;
         let rejection: OperatorMessage = match response {
@@ -644,7 +645,7 @@ async fn repeated_wrong_passwords_trigger_rate_limiter_lockout()
 
         // Wait for the close frame so the server records the failure before we
         // open the next connection.
-        let _ = timeout(Duration::from_secs(3), futures_util::StreamExt::next(&mut socket)).await;
+        let _ = timeout(Duration::from_secs(10), futures_util::StreamExt::next(&mut socket)).await;
     }
 
     // --- Phase 2: the next attempt must be rejected by the rate limiter ---
@@ -654,7 +655,7 @@ async fn repeated_wrong_passwords_trigger_rate_limiter_lockout()
     // The rate-limited path rejects *before* reading a login frame, so we
     // intentionally do NOT send any login message. The server should push an
     // error and close the socket on its own.
-    let response = timeout(Duration::from_secs(5), futures_util::StreamExt::next(&mut socket))
+    let response = timeout(Duration::from_secs(10), futures_util::StreamExt::next(&mut socket))
         .await?
         .ok_or("rate-limited attempt: server closed without sending rejection")?;
 
@@ -681,7 +682,7 @@ async fn repeated_wrong_passwords_trigger_rate_limiter_lockout()
     );
 
     // The server must close the connection after the rejection.
-    let next = timeout(Duration::from_secs(3), futures_util::StreamExt::next(&mut socket)).await?;
+    let next = timeout(Duration::from_secs(10), futures_util::StreamExt::next(&mut socket)).await?;
     match next {
         Some(Ok(ClientMessage::Close(_))) | None => {}
         Some(Ok(frame)) => {

@@ -188,9 +188,7 @@ impl Profile {
         for listener in &self.listeners.external {
             let name =
                 if listener.name.trim().is_empty() { "<unnamed>" } else { listener.name.trim() };
-            errors.push(format!(
-                "Listeners.External \"{name}\" is not supported yet; remove External listeners from the profile"
-            ));
+            tracing::warn!("Listeners.External \"{name}\" is not supported yet — ignoring");
         }
 
         for listener in &self.listeners.dns {
@@ -1565,7 +1563,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_external_listener_profiles_until_transport_exists() {
+    fn accepts_external_listener_with_warning() {
         let profile = Profile::parse(
             r#"
             Teamserver {
@@ -1591,10 +1589,9 @@ mod tests {
         )
         .expect("profile should parse");
 
-        let error = profile.validate().expect_err("profile should be invalid");
-        assert!(error.errors.iter().any(|message| {
-            message.contains("Listeners.External") && message.contains("not supported yet")
-        }));
+        profile.validate().expect("profile with External listener should validate successfully");
+        assert_eq!(profile.listeners.external.len(), 1);
+        assert_eq!(profile.listeners.external[0].name, "bridge");
     }
 
     #[test]

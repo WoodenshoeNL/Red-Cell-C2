@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 474 | 212 | 31 |
+| Tasks closed | 477 | 212 | 31 |
 | Bugs filed against | 46 | 34 | 9 |
 | Bug rate (bugs/task) | 0.10 | 0.16 | 0.29 |
 | Quality score | 90% | 84% | 71% |
 
-*Bug rates: Claude 46/474=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 46/477=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -2662,3 +2662,13 @@ Build: cargo check passed, clippy passed (0 warnings), cargo test passed (2191 t
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: cargo check passed, clippy passed (0 warnings), cargo test passed (all suites 0 failures)
+
+### QA Review — 2026-03-19 — 5088711..3768dea
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 0 | Closed vbt8 (handle_config_callback unit tests, 11 tests), cdbq (handle_job_callback integration tests — single job, three jobs, unknown subcommand), yf4j (handle_exit_callback and handle_kill_date_callback unit tests, 7 tests). Also filed test quality issues via test-review scan and claimed yw6v (in progress). Clean, well-structured test code with proper error path and edge case coverage. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (0 warnings), cargo test passed (223 tests, 0 failures)

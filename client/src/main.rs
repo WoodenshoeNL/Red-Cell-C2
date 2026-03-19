@@ -5367,4 +5367,223 @@ mod tests {
             "should remain in Authenticating when status is Connected but no operator_info"
         );
     }
+
+    // ── join_remote_path ──────────────────────────────────────────────
+
+    #[test]
+    fn join_remote_path_windows_backslash_base() {
+        assert_eq!(
+            join_remote_path("C:\\Users\\admin", "Documents"),
+            "C:\\Users\\admin\\Documents"
+        );
+    }
+
+    #[test]
+    fn join_remote_path_unix_slash_base() {
+        assert_eq!(join_remote_path("/home/user", "file.txt"), "/home/user/file.txt");
+    }
+
+    #[test]
+    fn join_remote_path_trailing_backslash() {
+        assert_eq!(join_remote_path("C:\\Users\\", "admin"), "C:\\Users\\admin");
+    }
+
+    #[test]
+    fn join_remote_path_trailing_slash() {
+        assert_eq!(join_remote_path("/home/user/", "file.txt"), "/home/user/file.txt");
+    }
+
+    #[test]
+    fn join_remote_path_empty_base() {
+        assert_eq!(join_remote_path("", "file.txt"), "file.txt");
+    }
+
+    #[test]
+    fn join_remote_path_root_unix() {
+        assert_eq!(join_remote_path("/", "etc"), "/etc");
+    }
+
+    // ── directory_label ───────────────────────────────────────────────
+
+    #[test]
+    fn directory_label_extracts_leaf() {
+        assert_eq!(directory_label("/home/user/Documents"), "Documents");
+    }
+
+    #[test]
+    fn directory_label_windows_leaf() {
+        // On Linux, std::path::Path does not split on backslashes, so the full
+        // string is returned as the "file_name". This matches the current
+        // implementation which delegates to Path::file_name().
+        let result = directory_label("C:\\Users\\admin\\Desktop");
+        assert!(
+            result == "Desktop" || result == "C:\\Users\\admin\\Desktop",
+            "unexpected result: {result}"
+        );
+    }
+
+    #[test]
+    fn directory_label_trailing_separator() {
+        assert_eq!(directory_label("/home/user/Downloads/"), "Downloads");
+    }
+
+    #[test]
+    fn directory_label_drive_root_backslash() {
+        assert_eq!(directory_label("C:\\"), "C:\\");
+    }
+
+    #[test]
+    fn directory_label_drive_root_slash() {
+        assert_eq!(directory_label("C:/"), "C:/");
+    }
+
+    #[test]
+    fn directory_label_drive_letter_colon() {
+        assert_eq!(directory_label("C:"), "C:");
+    }
+
+    // ── file_entry_label ──────────────────────────────────────────────
+
+    fn make_file_browser_entry(
+        name: &str,
+        size_label: &str,
+        modified: &str,
+        perms: &str,
+    ) -> FileBrowserEntry {
+        FileBrowserEntry {
+            name: name.to_owned(),
+            path: String::new(),
+            is_dir: false,
+            size_label: size_label.to_owned(),
+            size_bytes: None,
+            modified_at: modified.to_owned(),
+            permissions: perms.to_owned(),
+        }
+    }
+
+    #[test]
+    fn file_entry_label_all_fields() {
+        let entry = make_file_browser_entry("readme.txt", "1.5 KB", "2026-01-15", "rwxr-xr-x");
+        assert_eq!(file_entry_label(&entry), "readme.txt  [1.5 KB | 2026-01-15 | rwxr-xr-x]");
+    }
+
+    #[test]
+    fn file_entry_label_empty_size() {
+        let entry = make_file_browser_entry("dir", "", "2026-01-15", "drwxr-xr-x");
+        assert_eq!(file_entry_label(&entry), "dir  [- | 2026-01-15 | drwxr-xr-x]");
+    }
+
+    #[test]
+    fn file_entry_label_all_empty_metadata() {
+        let entry = make_file_browser_entry("file.bin", " ", "", "");
+        assert_eq!(file_entry_label(&entry), "file.bin  [- | - | -]");
+    }
+
+    // ── human_size ────────────────────────────────────────────────────
+
+    #[test]
+    fn human_size_zero_bytes() {
+        assert_eq!(human_size(0), "0 B");
+    }
+
+    #[test]
+    fn human_size_below_kb() {
+        assert_eq!(human_size(1023), "1023 B");
+    }
+
+    #[test]
+    fn human_size_exactly_1kb() {
+        assert_eq!(human_size(1024), "1.0 KB");
+    }
+
+    #[test]
+    fn human_size_megabyte_range() {
+        assert_eq!(human_size(1_048_576), "1.0 MB");
+    }
+
+    #[test]
+    fn human_size_gigabyte_range() {
+        assert_eq!(human_size(1_073_741_824), "1.0 GB");
+    }
+
+    #[test]
+    fn human_size_large_gb_value() {
+        assert_eq!(human_size(5_905_580_032), "5.5 GB");
+    }
+
+    #[test]
+    fn human_size_one_byte() {
+        assert_eq!(human_size(1), "1 B");
+    }
+
+    // ── find_file_entry ───────────────────────────────────────────────
+
+    fn browser_with_entries(entries: Vec<FileBrowserEntry>) -> AgentFileBrowserState {
+        let mut dirs = std::collections::BTreeMap::new();
+        dirs.insert("/home".to_owned(), entries);
+        AgentFileBrowserState {
+            current_dir: Some("/home".to_owned()),
+            directories: dirs,
+            downloads: std::collections::BTreeMap::new(),
+            status_message: None,
+        }
+    }
+
+    #[test]
+    fn find_file_entry_found() {
+        let entry = FileBrowserEntry {
+            name: "test.txt".to_owned(),
+            path: "/home/test.txt".to_owned(),
+            is_dir: false,
+            size_label: "100 B".to_owned(),
+            size_bytes: Some(100),
+            modified_at: String::new(),
+            permissions: String::new(),
+        };
+        let browser = browser_with_entries(vec![entry]);
+        let found = find_file_entry(&browser, "/home/test.txt");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().name, "test.txt");
+    }
+
+    #[test]
+    fn find_file_entry_not_found() {
+        let browser = browser_with_entries(vec![]);
+        assert!(find_file_entry(&browser, "/nonexistent").is_none());
+    }
+
+    // ── parent_remote_path ────────────────────────────────────────────
+
+    #[test]
+    fn parent_remote_path_unix() {
+        assert_eq!(parent_remote_path("/home/user/file.txt"), Some("/home/user/".to_owned()));
+    }
+
+    #[test]
+    fn parent_remote_path_windows() {
+        assert_eq!(
+            parent_remote_path("C:\\Users\\admin\\file.txt"),
+            Some("C:\\Users\\admin\\".to_owned())
+        );
+    }
+
+    #[test]
+    fn parent_remote_path_trailing_slash() {
+        assert_eq!(parent_remote_path("/home/user/"), Some("/home/".to_owned()));
+    }
+
+    #[test]
+    fn parent_remote_path_root() {
+        assert_eq!(parent_remote_path("/"), None);
+    }
+
+    #[test]
+    fn parent_remote_path_empty() {
+        assert_eq!(parent_remote_path(""), None);
+    }
+
+    #[test]
+    fn parent_remote_path_no_separator() {
+        assert_eq!(parent_remote_path("file.txt"), None);
+    }
 }

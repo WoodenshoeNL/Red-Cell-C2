@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 527 | 212 | 31 |
-| Bugs filed against | 46 | 34 | 9 |
+| Tasks closed | 533 | 212 | 31 |
+| Bugs filed against | 49 | 34 | 9 |
 | Bug rate (bugs/task) | 0.09 | 0.16 | 0.29 |
 | Quality score | 91% | 84% | 71% |
 
-*Bug rates: Claude 46/527=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 49/533=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -22,13 +22,13 @@ Each loop run updates the running totals and appends a review entry.
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 3 | 0 | 0 |
 | Missing tests / stale tests | 27 | 13 | 5 |
-| Clippy warnings | 2 | 0 | 1 |
+| Clippy warnings | 3 | 0 | 1 |
 | Protocol errors | 7 | 27 | 3 |
 | Security issues | 22 | 36 | 0 |
-| Architecture drift | 3 | 21 | 0 |
+| Architecture drift | 4 | 21 | 0 |
 | Memory / resource leaks | 2 | 10 | 1 |
 | Startup / lifecycle regressions | 1 | 8 | 0 |
-| Test infrastructure / flakiness | 1 | 0 | 0 |
+| Test infrastructure / flakiness | 2 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
 | Correctness / pagination | 17 | 7 | 1 |
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-20 01:15 — b9f5378..7cc6dbf
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 6 | 3 | Closed 0b2j (demon init/reconnect ACK wire format tests), qufw (token formatting column expansion/boundary tests), 7d4j (ProcCreate verbose/success/piped branch tests), 23cb (format_token_privs_list state mapping tests), kuox (shutdown listener+webhook timeout warning tests), ajwt (EventBus non-TeamserverLog broadcast test). Filed: adzhf (unused NormalizePathLayer import breaks clippy -D warnings), j84p0 (trailing-slash normalization replaced with single duplicate /havoc/ route instead of app-wide middleware), 134lc (StuckDeliveryGuard test helper leaks into public API). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed (1 warning), **clippy FAILED** (unused import NormalizePathLayer), cargo test FAILED (2 pre-existing websocket test failures — not introduced in this range)
 
 ### QA Review — 2026-03-19 22:30 — 9d4099f..b9f5378
 

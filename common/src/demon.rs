@@ -532,13 +532,17 @@ impl DemonPackage {
         12 + self.payload.len()
     }
 
+    /// Validate that a payload length fits in the wire format's `u32` field.
+    fn checked_payload_len(len: usize) -> Result<u32, DemonProtocolError> {
+        u32::try_from(len).map_err(|_| DemonProtocolError::LengthOverflow {
+            context: "Demon package payload",
+            length: len,
+        })
+    }
+
     /// Serialize the package using Havoc's little-endian package format.
     pub fn to_bytes(&self) -> Result<Vec<u8>, DemonProtocolError> {
-        let payload_len =
-            u32::try_from(self.payload.len()).map_err(|_| DemonProtocolError::LengthOverflow {
-                context: "Demon package payload",
-                length: self.payload.len(),
-            })?;
+        let payload_len = Self::checked_payload_len(self.payload.len())?;
 
         let mut bytes = Vec::with_capacity(self.encoded_len());
         bytes.extend_from_slice(&self.command_id.to_le_bytes());
@@ -1056,6 +1060,31 @@ mod tests {
             result,
             Err(DemonProtocolError::UnknownEnumValue { kind: "DemonCommand", value: 0xffff_ffff })
         ));
+    }
+
+    #[test]
+    fn demon_package_to_bytes_rejects_payload_length_overflow() {
+        // We cannot allocate a >4 GiB Vec in CI, so test the extracted helper
+        // directly with a length that exceeds u32::MAX.
+        let overflow_len = u32::MAX as usize + 1;
+        let error = DemonPackage::checked_payload_len(overflow_len)
+            .expect_err("payload length exceeding u32::MAX must fail");
+
+        assert_eq!(
+            error,
+            DemonProtocolError::LengthOverflow {
+                context: "Demon package payload",
+                length: overflow_len,
+            }
+        );
+    }
+
+    #[test]
+    fn demon_package_checked_payload_len_accepts_max_u32() {
+        // u32::MAX itself must be accepted — only values above it overflow.
+        let len = u32::MAX as usize;
+        let result = DemonPackage::checked_payload_len(len);
+        assert_eq!(result.unwrap(), u32::MAX);
     }
 
     // ── Golden-vector tests ────────────────────────────────────────────────

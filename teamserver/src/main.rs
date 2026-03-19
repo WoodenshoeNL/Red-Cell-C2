@@ -461,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn load_profile_rejects_external_listener_configuration() {
+    fn load_profile_accepts_external_listener_configuration_with_warning() {
         let temp_file = NamedTempFile::new().expect("temporary file should be created");
         std::fs::write(
             temp_file.path(),
@@ -489,12 +489,10 @@ mod tests {
         )
         .expect("profile should be written");
 
-        let error = load_profile(&temp_file.path().to_path_buf()).expect_err("load should fail");
-        let message = error.to_string();
-
-        assert!(message.contains("profile validation failed"));
-        assert!(message.contains("Listeners.External"));
-        assert!(message.contains("not supported yet"));
+        let profile = load_profile(&temp_file.path().to_path_buf())
+            .expect("profile with External listener should load successfully");
+        assert_eq!(profile.listeners.external.len(), 1);
+        assert_eq!(profile.listeners.external[0].name, "bridge");
     }
 
     #[tokio::test]

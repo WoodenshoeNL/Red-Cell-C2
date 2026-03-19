@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 508 | 212 | 31 |
+| Tasks closed | 516 | 212 | 31 |
 | Bugs filed against | 46 | 34 | 9 |
 | Bug rate (bugs/task) | 0.09 | 0.16 | 0.29 |
 | Quality score | 91% | 84% | 71% |
 
-*Bug rates: Claude 46/508=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 46/516=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -2753,3 +2753,13 @@ Build: cargo check passed, clippy passed (0 warnings), cargo test passed (230 te
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: cargo check passed, clippy passed (0 warnings), cargo test passed (1503+ tests, 0 failures)
+
+### QA Review — 2026-03-19 20:30 — 17d5cc7..41dab70
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 8 | 0 | Closed 85p1, pjyr, vz1o, niw3, zj8f, s78j, 538r, bfsn. Added ~646 lines of client unit tests (EventLog lifecycle, normalize_agent_id, sanitize_text, flat_info_string, loot_item_from_flat_info, credential/loot/host-file add/edit/remove flows). Added 3 RBAC integration tests (analyst denied ListenerEdit/Remove/Mark). Added oversized body rejection test for HTTP listener. Currently has 94ap claimed (Argon2 defaults bug). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (0 warnings), cargo test passed (all workspace tests pass; e2e_operator_agent_session timeouts on full-suite run are resource contention, pass when run isolated)

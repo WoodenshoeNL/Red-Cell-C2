@@ -2649,3 +2649,234 @@ async fn job_list_malformed_incomplete_row_returns_error_no_broadcast()
     server.listeners.stop("out-job-malformed").await?;
     Ok(())
 }
+
+/// `handle_job_callback` with a `List` subcommand and exactly one job must broadcast an
+/// `AgentResponse` whose output contains the header rows and a single data row.
+#[tokio::test]
+async fn job_list_callback_single_job_broadcasts_one_row() -> Result<(), Box<dyn std::error::Error>>
+{
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    server.listeners.create(common::http_listener_config("out-job-single", listener_port)).await?;
+    drop(listener_guard);
+    server.listeners.start("out-job-single").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0077_u32;
+    let key = [0x79; AGENT_KEY_LENGTH];
+    let iv = [0x7A; AGENT_IV_LENGTH];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // Single job: id=7, type=1 (Thread), state=1 (Running)
+    let jobs = [(7u32, 1u32, 1u32)];
+    let payload = job_list_payload(&jobs);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandJob),
+            0x20,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for CommandJob/List single, got {event:?}");
+    };
+    assert_eq!(msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::CommandJob).to_string());
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Info"));
+
+    let output = &msg.info.output;
+
+    // Header/separator present.
+    assert!(output.contains("Job ID"), "output should contain header: {output:?}");
+    assert!(output.contains("------"), "output should contain separator: {output:?}");
+
+    let lines: Vec<String> =
+        output.lines().map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")).collect();
+
+    // Single row: job 7, type Thread, state Running.
+    assert!(
+        lines.iter().any(|l| l.contains("7") && l.contains("Thread") && l.contains("Running")),
+        "expected row with job 7, type Thread, state Running in output:\n{output}"
+    );
+
+    // Exactly one data row.
+    let data_rows: Vec<_> = lines
+        .iter()
+        .filter(|l| !l.is_empty() && !l.contains("Job ID") && !l.contains("------"))
+        .collect();
+    assert_eq!(
+        data_rows.len(),
+        1,
+        "expected exactly 1 data row, got {}: {data_rows:?}",
+        data_rows.len()
+    );
+
+    socket.close(None).await?;
+    server.listeners.stop("out-job-single").await?;
+    Ok(())
+}
+
+/// `handle_job_callback` with a `List` subcommand and three jobs must broadcast an
+/// `AgentResponse` whose output contains formatted rows for all three jobs.
+#[tokio::test]
+async fn job_list_callback_three_jobs_broadcasts_all_rows() -> Result<(), Box<dyn std::error::Error>>
+{
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    server.listeners.create(common::http_listener_config("out-job-three", listener_port)).await?;
+    drop(listener_guard);
+    server.listeners.start("out-job-three").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0078_u32;
+    let key = [0x7B; AGENT_KEY_LENGTH];
+    let iv = [0x7C; AGENT_IV_LENGTH];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // Three jobs covering all known type/state combos:
+    //   id=1, type=1 (Thread),        state=1 (Running)
+    //   id=2, type=2 (Process),       state=2 (Suspended)
+    //   id=3, type=3 (Track Process), state=3 (Dead)
+    let jobs = [(1u32, 1u32, 1u32), (2u32, 2u32, 2u32), (3u32, 3u32, 3u32)];
+    let payload = job_list_payload(&jobs);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandJob),
+            0x20,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for CommandJob/List three, got {event:?}");
+    };
+    assert_eq!(msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::CommandJob).to_string());
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Info"));
+
+    let output = &msg.info.output;
+
+    let lines: Vec<String> =
+        output.lines().map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")).collect();
+
+    // Row for job 1: Thread, Running
+    assert!(
+        lines.iter().any(|l| l.contains("1") && l.contains("Thread") && l.contains("Running")),
+        "expected row with job 1, type Thread, state Running in output:\n{output}"
+    );
+    // Row for job 2: Process, Suspended
+    assert!(
+        lines.iter().any(|l| l.contains("2") && l.contains("Process") && l.contains("Suspended")),
+        "expected row with job 2, type Process, state Suspended in output:\n{output}"
+    );
+    // Row for job 3: Track Process, Dead
+    assert!(
+        lines.iter().any(|l| l.contains("3") && l.contains("Track Process") && l.contains("Dead")),
+        "expected row with job 3, type Track Process, state Dead in output:\n{output}"
+    );
+
+    // Exactly three data rows.
+    let data_rows: Vec<_> = lines
+        .iter()
+        .filter(|l| !l.is_empty() && !l.contains("Job ID") && !l.contains("------"))
+        .collect();
+    assert_eq!(
+        data_rows.len(),
+        3,
+        "expected exactly 3 data rows, got {}: {data_rows:?}",
+        data_rows.len()
+    );
+
+    socket.close(None).await?;
+    server.listeners.stop("out-job-three").await?;
+    Ok(())
+}
+
+/// `handle_job_callback` with an unknown subcommand value (not 1–5) must return a
+/// non-2xx HTTP status and must NOT broadcast any `AgentResponse`.
+#[tokio::test]
+async fn job_unknown_subcommand_returns_error() -> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    server.listeners.create(common::http_listener_config("out-job-unknown", listener_port)).await?;
+    drop(listener_guard);
+    server.listeners.start("out-job-unknown").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0079_u32;
+    let key = [0x7D; AGENT_KEY_LENGTH];
+    let iv = [0x7E; AGENT_IV_LENGTH];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // Build a payload with subcommand value 99 — not a valid DemonJobCommand.
+    let payload = 99u32.to_le_bytes().to_vec();
+
+    let response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandJob),
+            0x20,
+            &payload,
+        ))
+        .send()
+        .await?;
+
+    assert!(
+        !response.status().is_success(),
+        "expected error HTTP status for unknown job subcommand, got {}",
+        response.status()
+    );
+
+    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
+
+    socket.close(None).await?;
+    server.listeners.stop("out-job-unknown").await?;
+    Ok(())
+}

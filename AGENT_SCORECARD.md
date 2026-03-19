@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 389 | 212 | 31 |
+| Tasks closed | 394 | 212 | 31 |
 | Bugs filed against | 43 | 34 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.16 | 0.29 |
 | Quality score | 89% | 84% | 71% |
 
-*Bug rates: Claude 43/389=0.11, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 43/394=0.11, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-19 22:15 — 0b123b3..fd17219
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 5 | 0 | Closed kkra (socket rportfwd/SOCKS relay tests, +439 lines), 770d (net callback tests — already existed), 1nd5, bc2z (filesystem dispatch tests — already existed), bmew (token dispatch formatting tests, +319 lines). Also claimed fc78 (util.rs tests — closed as already done). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check ✓, clippy ✓ (0 warnings), cargo test ✓ (207+ tests, 0 failures)
 
 ### QA Review — 2026-03-19 20:00 — 4d8d0e5..fc811f8
 

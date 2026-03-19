@@ -29,6 +29,15 @@ const SOCKS_ATYP_DOMAIN: u8 = 3;
 const SOCKS_ATYP_IPV6: u8 = 4;
 const STALE_AGENT_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Maximum concurrent SOCKS client connections per agent.
+const MAX_SOCKETS_PER_AGENT: usize = 256;
+
+/// Maximum concurrent SOCKS client connections across all agents.
+const MAX_GLOBAL_SOCKETS: usize = 4096;
+
+/// Maximum number of active SOCKS relay server listeners across all agents.
+const MAX_RELAY_LISTENERS: usize = 64;
+
 /// Errors returned by [`SocketRelayManager`].
 #[derive(Debug, Error)]
 pub enum SocketRelayError {
@@ -78,6 +87,26 @@ pub enum SocketRelayError {
         bind_addr: String,
         /// IO failure message.
         message: String,
+    },
+    /// Per-agent connection limit reached.
+    #[error("agent 0x{agent_id:08X} has reached the per-agent SOCKS connection limit ({limit})")]
+    AgentConnectionLimit {
+        /// Agent identifier.
+        agent_id: u32,
+        /// The enforced limit.
+        limit: usize,
+    },
+    /// Global connection limit reached.
+    #[error("global SOCKS connection limit reached ({limit})")]
+    GlobalConnectionLimit {
+        /// The enforced limit.
+        limit: usize,
+    },
+    /// Maximum number of relay server listeners reached.
+    #[error("relay listener limit reached ({limit})")]
+    ListenerLimit {
+        /// The enforced limit.
+        limit: usize,
     },
 }
 
@@ -171,6 +200,16 @@ impl SocketRelayManager {
 
         {
             let mut state = self.state.write().await;
+            let total_listeners: usize = state.values().map(|s| s.servers.len()).sum();
+            if total_listeners >= MAX_RELAY_LISTENERS {
+                warn!(
+                    agent_id = format_args!("{agent_id:08X}"),
+                    total_listeners,
+                    limit = MAX_RELAY_LISTENERS,
+                    "SOCKS5 relay listener limit reached — rejecting new server"
+                );
+                return Err(SocketRelayError::ListenerLimit { limit: MAX_RELAY_LISTENERS });
+            }
             let agent_state = state.entry(agent_id).or_default();
             if agent_state.servers.contains_key(&port) {
                 return Err(SocketRelayError::DuplicateServer { agent_id, port });
@@ -393,15 +432,47 @@ impl SocketRelayManager {
                 read_half: Some(read_half),
             },
         )
-        .await;
+        .await
+        .map_err(|e| io::Error::other(e.to_string()))?;
         self.enqueue_connect_job(agent_id, socket_id, &request).await.map_err(io_error)?;
         Ok(())
     }
 
-    async fn register_client(&self, agent_id: u32, socket_id: u32, client: PendingClient) {
+    async fn register_client(
+        &self,
+        agent_id: u32,
+        socket_id: u32,
+        client: PendingClient,
+    ) -> Result<(), SocketRelayError> {
         let mut state = self.state.write().await;
+
+        let global_count: usize = state.values().map(|s| s.clients.len()).sum();
+        if global_count >= MAX_GLOBAL_SOCKETS {
+            warn!(
+                agent_id = format_args!("{agent_id:08X}"),
+                global_count,
+                limit = MAX_GLOBAL_SOCKETS,
+                "global SOCKS connection limit reached — rejecting new client"
+            );
+            return Err(SocketRelayError::GlobalConnectionLimit { limit: MAX_GLOBAL_SOCKETS });
+        }
+
         let agent_state = state.entry(agent_id).or_default();
+        if agent_state.clients.len() >= MAX_SOCKETS_PER_AGENT {
+            warn!(
+                agent_id = format_args!("{agent_id:08X}"),
+                agent_count = agent_state.clients.len(),
+                limit = MAX_SOCKETS_PER_AGENT,
+                "per-agent SOCKS connection limit reached — rejecting new client"
+            );
+            return Err(SocketRelayError::AgentConnectionLimit {
+                agent_id,
+                limit: MAX_SOCKETS_PER_AGENT,
+            });
+        }
+
         agent_state.clients.insert(socket_id, client);
+        Ok(())
     }
 
     async fn spawn_client_reader(
@@ -2214,6 +2285,216 @@ mod tests {
         TcpStream::connect(format!("127.0.0.1:{bound_port}")).await.map_err(|e| {
             io::Error::other(format!("loopback connection to 127.0.0.1:{bound_port} failed: {e}"))
         })?;
+
+        Ok(())
+    }
+
+    // --- Connection limit tests ---
+
+    #[tokio::test]
+    async fn register_client_rejects_when_per_agent_limit_reached() -> io::Result<()> {
+        let (_database, registry, manager) =
+            test_manager().await.map_err(|e| io::Error::other(e.to_string()))?;
+        registry
+            .insert(sample_agent(0xDEAD_BEEF))
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        let agent_id: u32 = 0xDEAD_BEEF;
+
+        // Fill up to the per-agent limit by inserting fake clients directly.
+        for i in 0..super::MAX_SOCKETS_PER_AGENT {
+            let socket_id = i as u32;
+            let (_peer_read, _peer_write) =
+                register_pending_client(&manager, agent_id, socket_id).await?;
+        }
+
+        // Verify the agent has exactly MAX_SOCKETS_PER_AGENT clients.
+        {
+            let state = manager.state.read().await;
+            let agent_state = state.get(&agent_id).expect("agent state present");
+            assert_eq!(agent_state.clients.len(), super::MAX_SOCKETS_PER_AGENT);
+        }
+
+        // The next registration must be rejected.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let connect_task = tokio::spawn(async move { TcpStream::connect(addr).await });
+        let (server_stream, _) = listener.accept().await?;
+        let client_stream = connect_task.await.map_err(|e| io::Error::other(e.to_string()))??;
+        let (client_read, client_write) = client_stream.into_split();
+        let (_server_read, _server_write) = server_stream.into_split();
+
+        let result = manager
+            .register_client(
+                agent_id,
+                0xFFFF_FFFF,
+                super::PendingClient {
+                    server_port: 1080,
+                    atyp: super::SOCKS_ATYP_IPV4,
+                    address: vec![127, 0, 0, 1],
+                    port: 80,
+                    connected: false,
+                    writer: Arc::new(tokio::sync::Mutex::new(client_write)),
+                    read_half: Some(client_read),
+                },
+            )
+            .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(SocketRelayError::AgentConnectionLimit { agent_id: id, limit })
+                    if id == agent_id && limit == super::MAX_SOCKETS_PER_AGENT
+            ),
+            "expected AgentConnectionLimit, got: {result:?}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn register_client_rejects_when_global_limit_reached() -> io::Result<()> {
+        let (_database, registry, manager) =
+            test_manager().await.map_err(|e| io::Error::other(e.to_string()))?;
+
+        // Spread clients across multiple agents to hit the global limit without hitting
+        // the per-agent limit. We need MAX_GLOBAL_SOCKETS total clients.
+        let agents_needed = (super::MAX_GLOBAL_SOCKETS + super::MAX_SOCKETS_PER_AGENT - 1)
+            / super::MAX_SOCKETS_PER_AGENT;
+        let clients_per_agent = super::MAX_GLOBAL_SOCKETS / agents_needed;
+
+        for agent_idx in 0..agents_needed {
+            let agent_id = (agent_idx as u32) + 1;
+            registry
+                .insert(sample_agent(agent_id))
+                .await
+                .map_err(|e| io::Error::other(e.to_string()))?;
+        }
+
+        let mut total_inserted = 0_usize;
+        for agent_idx in 0..agents_needed {
+            let agent_id = (agent_idx as u32) + 1;
+            let to_insert = if total_inserted + clients_per_agent > super::MAX_GLOBAL_SOCKETS {
+                super::MAX_GLOBAL_SOCKETS - total_inserted
+            } else {
+                clients_per_agent
+            };
+            for i in 0..to_insert {
+                let socket_id = ((agent_idx * clients_per_agent) + i) as u32;
+                let (_peer_read, _peer_write) =
+                    register_pending_client(&manager, agent_id, socket_id).await?;
+            }
+            total_inserted += to_insert;
+            if total_inserted >= super::MAX_GLOBAL_SOCKETS {
+                break;
+            }
+        }
+
+        // Verify global count.
+        {
+            let state = manager.state.read().await;
+            let global_count: usize = state.values().map(|s| s.clients.len()).sum();
+            assert_eq!(global_count, super::MAX_GLOBAL_SOCKETS);
+        }
+
+        // The next registration on any agent must fail with GlobalConnectionLimit.
+        let target_agent = 1_u32;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let connect_task = tokio::spawn(async move { TcpStream::connect(addr).await });
+        let (server_stream, _) = listener.accept().await?;
+        let client_stream = connect_task.await.map_err(|e| io::Error::other(e.to_string()))??;
+        let (client_read, client_write) = client_stream.into_split();
+        let (_server_read, _server_write) = server_stream.into_split();
+
+        let result = manager
+            .register_client(
+                target_agent,
+                0xFFFF_FFFF,
+                super::PendingClient {
+                    server_port: 1080,
+                    atyp: super::SOCKS_ATYP_IPV4,
+                    address: vec![127, 0, 0, 1],
+                    port: 80,
+                    connected: false,
+                    writer: Arc::new(tokio::sync::Mutex::new(client_write)),
+                    read_half: Some(client_read),
+                },
+            )
+            .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(SocketRelayError::GlobalConnectionLimit { limit })
+                    if limit == super::MAX_GLOBAL_SOCKETS
+            ),
+            "expected GlobalConnectionLimit, got: {result:?}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn add_socks_server_rejects_when_listener_limit_reached() -> Result<(), SocketRelayError>
+    {
+        let (_database, registry, manager) = test_manager().await?;
+
+        // Fill up to the listener limit by inserting fake server handles.
+        let agents_needed = (super::MAX_RELAY_LISTENERS + 9) / 10; // ≤10 servers per agent
+        for agent_idx in 0..agents_needed {
+            let agent_id = (agent_idx as u32) + 1;
+            registry.insert(sample_agent(agent_id)).await?;
+        }
+
+        let mut total_inserted = 0_usize;
+        {
+            let mut state = manager.state.write().await;
+            for agent_idx in 0..agents_needed {
+                let agent_id = (agent_idx as u32) + 1;
+                let agent_state = state.entry(agent_id).or_default();
+                let to_insert = std::cmp::min(10, super::MAX_RELAY_LISTENERS - total_inserted);
+                for i in 0..to_insert {
+                    let port = ((agent_idx * 10) + i) as u16 + 10000;
+                    let (shutdown_tx, _shutdown_rx) = oneshot::channel::<()>();
+                    let task = tokio::spawn(std::future::pending::<()>());
+                    agent_state.servers.insert(
+                        port,
+                        SocksServerHandle {
+                            local_addr: format!("127.0.0.1:{port}"),
+                            shutdown: Some(shutdown_tx),
+                            task,
+                        },
+                    );
+                }
+                total_inserted += to_insert;
+                if total_inserted >= super::MAX_RELAY_LISTENERS {
+                    break;
+                }
+            }
+        }
+
+        // Verify total listener count.
+        {
+            let state = manager.state.read().await;
+            let total: usize = state.values().map(|s| s.servers.len()).sum();
+            assert_eq!(total, super::MAX_RELAY_LISTENERS);
+        }
+
+        // The next server addition must fail.
+        let new_agent_id = (agents_needed as u32) + 100;
+        registry.insert(sample_agent(new_agent_id)).await?;
+        let result = manager.add_socks_server(new_agent_id, "0").await;
+
+        assert!(
+            matches!(
+                result,
+                Err(SocketRelayError::ListenerLimit { limit })
+                    if limit == super::MAX_RELAY_LISTENERS
+            ),
+            "expected ListenerLimit, got: {result:?}"
+        );
 
         Ok(())
     }

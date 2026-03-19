@@ -3104,4 +3104,110 @@ mod tests {
 
         Ok(())
     }
+
+    /// Inserting an agent whose AES key is the wrong length (e.g. 16 bytes instead of 32)
+    /// causes `encrypt_for_agent` and `decrypt_from_agent` to return
+    /// `InvalidPersistedValue` from `decode_crypto_material` / `copy_fixed`.
+    #[tokio::test]
+    async fn encrypt_decrypt_reject_truncated_key_material() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let mut agent = sample_agent(0x1000_0D01);
+        // 16-byte key instead of the required 32 (AGENT_KEY_LENGTH).
+        agent.encryption = AgentEncryptionInfo {
+            aes_key: Zeroizing::new(vec![0xAA; 16]),
+            aes_iv: Zeroizing::new(vec![0xBB; AGENT_IV_LENGTH]),
+        };
+        registry.insert(agent.clone()).await?;
+
+        let enc_result = registry.encrypt_for_agent(agent.agent_id, b"hello").await;
+        assert!(
+            matches!(
+                &enc_result,
+                Err(TeamserverError::InvalidPersistedValue { field, .. }) if *field == "aes_key"
+            ),
+            "expected InvalidPersistedValue for aes_key, got {enc_result:?}"
+        );
+
+        let dec_result = registry.decrypt_from_agent(agent.agent_id, b"hello").await;
+        assert!(
+            matches!(
+                &dec_result,
+                Err(TeamserverError::InvalidPersistedValue { field, .. }) if *field == "aes_key"
+            ),
+            "expected InvalidPersistedValue for aes_key, got {dec_result:?}"
+        );
+
+        // CTR offset must remain untouched because we never reached encryption.
+        assert_eq!(registry.ctr_offset(agent.agent_id).await?, 0);
+
+        Ok(())
+    }
+
+    /// Same as the above test but with a truncated IV instead of the key.
+    #[tokio::test]
+    async fn encrypt_decrypt_reject_truncated_iv_material() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let mut agent = sample_agent(0x1000_0D02);
+        agent.encryption = AgentEncryptionInfo {
+            aes_key: Zeroizing::new(vec![0xAA; AGENT_KEY_LENGTH]),
+            aes_iv: Zeroizing::new(vec![0xBB; 8]), // 8 bytes instead of AGENT_IV_LENGTH (16)
+        };
+        registry.insert(agent.clone()).await?;
+
+        let enc_result = registry.encrypt_for_agent(agent.agent_id, b"hello").await;
+        assert!(
+            matches!(
+                &enc_result,
+                Err(TeamserverError::InvalidPersistedValue { field, .. }) if *field == "aes_iv"
+            ),
+            "expected InvalidPersistedValue for aes_iv, got {enc_result:?}"
+        );
+
+        Ok(())
+    }
+
+    /// `advance_ctr_for_agent` must return `AgentNotFound` for a non-existent agent.
+    #[tokio::test]
+    async fn advance_ctr_for_agent_returns_agent_not_found_for_unknown_id() {
+        let registry = AgentRegistry::new(test_database().await.expect("db"));
+        let missing = 0x1000_0D03;
+
+        assert!(matches!(
+            registry.advance_ctr_for_agent(missing, 16).await,
+            Err(TeamserverError::AgentNotFound { agent_id }) if agent_id == missing
+        ));
+    }
+
+    /// After a successful `set_encryption`, both the in-memory value and the persisted
+    /// database row must reflect the new key material.
+    #[tokio::test]
+    async fn set_encryption_updates_both_memory_and_database() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let agent = sample_agent_with_crypto(
+            0x1000_0D04,
+            [0x11; AGENT_KEY_LENGTH],
+            [0x22; AGENT_IV_LENGTH],
+        );
+        registry.insert(agent.clone()).await?;
+
+        let new_enc = AgentEncryptionInfo {
+            aes_key: Zeroizing::new(vec![0xCC; AGENT_KEY_LENGTH]),
+            aes_iv: Zeroizing::new(vec![0xDD; AGENT_IV_LENGTH]),
+        };
+        registry.set_encryption(agent.agent_id, new_enc.clone()).await?;
+
+        // In-memory value must match.
+        assert_eq!(registry.encryption(agent.agent_id).await?, new_enc);
+
+        // Database value must also match.
+        let persisted = database
+            .agents()
+            .get(agent.agent_id)
+            .await?
+            .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?;
+        assert_eq!(persisted.encryption, new_enc);
+
+        Ok(())
+    }
 }

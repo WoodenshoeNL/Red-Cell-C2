@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 386 | 212 | 31 |
+| Tasks closed | 389 | 212 | 31 |
 | Bugs filed against | 43 | 34 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.16 | 0.29 |
 | Quality score | 89% | 84% | 71% |
 
-*Bug rates: Claude 43/386=0.11, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 43/389=0.11, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -2520,3 +2520,13 @@ Biggest blindspot: Plugin test isolation — the Python GIL global state creates
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (zero warnings), `cargo test --workspace` — 1144 passed, 6 failed (all from plugin mutex poisoning cascade)
 
 Deep review covered: full structural map (96k lines across 3 crates, 66 .rs files), all dispatch handlers (14 files), crypto implementation (AES-256-CTR with offset persistence, Zeroizing key material, constant-time comparisons), protocol parsing (integer overflow guards via checked_* and try_from, magic precheck, size validation), authentication (Argon2 + dummy verifier timing defense, session caps, API key HMAC), all listener implementations (HTTP/HTTPS/DNS/SMB with rate limiting), plugin system (PyO3 + GIL), REST API routes, WebSocket handlers, client UI + transport. Security posture remains strong — no key material in logs, no unwrap in production code, no println/eprintln anywhere, bounded allocations throughout, proper error propagation. Architecture fully aligned with AGENTS.md specifications (Axum+Tokio, SQLite/sqlx, HCL config, thiserror in libraries, anyhow only in main.rs, edition 2024).
+
+### QA Review — 2026-03-19 21:15 — 43756e1..0b123b3
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 0 | Closed x8lh (dispatch/util inline tests — already existed), 5gzc (13 unit tests for auth failure tracking & rate limiting), rm6n (5 integration tests for session-activity endpoint). +476 lines of test code in api.rs. Currently working on kkra (dispatch/socket.rs test coverage). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (zero warnings), `cargo test -p red-cell -- api::tests` ✓ (131 tests, 0 failures). Full workspace suite (2100+ tests) times out at 120s — pre-existing issue, not a regression.

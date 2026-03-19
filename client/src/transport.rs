@@ -4324,4 +4324,208 @@ mod tests {
     fn sanitize_text_trims_leading_and_trailing_whitespace() {
         assert_eq!(sanitize_text("  hello  "), "hello");
     }
+
+    // ── CredentialsAdd / CredentialsEdit ──────────────────────────────
+
+    /// Helper: build a `FlatInfo` from key-value pairs.
+    fn flat_info(pairs: &[(&str, &str)]) -> FlatInfo {
+        FlatInfo {
+            fields: pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), Value::String((*v).to_owned())))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn credentials_add_inserts_loot_and_emits_event() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        let events = state.apply_operator_message(OperatorMessage::CredentialsAdd(Message {
+            head: head(EventCode::Credentials),
+            info: flat_info(&[
+                ("Name", "admin"),
+                ("DemonID", "aabb1122"),
+                ("Credential", "P@ssw0rd"),
+                ("CapturedAt", "2026-03-19 10:00:00"),
+            ]),
+        }));
+
+        assert_eq!(state.loot.len(), 1, "loot list should contain one item");
+        let item = &state.loot[0];
+        assert_eq!(item.kind, LootKind::Credential);
+        assert_eq!(item.name, "admin");
+        assert_eq!(item.agent_id, "AABB1122");
+        assert_eq!(item.preview.as_deref(), Some("P@ssw0rd"));
+
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0], AppEvent::LootCaptured(l) if l.name == "admin"),
+            "expected LootCaptured event, got {events:?}"
+        );
+    }
+
+    #[test]
+    fn credentials_edit_upserts_existing_loot() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        // Insert initial credential.
+        state.apply_operator_message(OperatorMessage::CredentialsAdd(Message {
+            head: head(EventCode::Credentials),
+            info: flat_info(&[
+                ("Name", "admin"),
+                ("DemonID", "aabb1122"),
+                ("Credential", "old"),
+                ("CapturedAt", "2026-03-19 10:00:00"),
+            ]),
+        }));
+
+        // Edit it — same name, agent, timestamp → should upsert.
+        state.apply_operator_message(OperatorMessage::CredentialsEdit(Message {
+            head: head(EventCode::Credentials),
+            info: flat_info(&[
+                ("Name", "admin"),
+                ("DemonID", "aabb1122"),
+                ("Credential", "new-password"),
+                ("CapturedAt", "2026-03-19 10:00:00"),
+            ]),
+        }));
+
+        assert_eq!(state.loot.len(), 1, "upsert should not duplicate loot");
+        assert_eq!(state.loot[0].preview.as_deref(), Some("new-password"));
+    }
+
+    #[test]
+    fn credentials_add_with_missing_name_produces_no_loot() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        // FlatInfo without Name/FileName/LootName → loot_item_from_flat_info returns None.
+        let events = state.apply_operator_message(OperatorMessage::CredentialsAdd(Message {
+            head: head(EventCode::Credentials),
+            info: flat_info(&[("DemonID", "aabb1122")]),
+        }));
+
+        assert!(state.loot.is_empty(), "no loot should be added when name is missing");
+        assert!(events.is_empty(), "no events should be emitted when name is missing");
+    }
+
+    // ── CredentialsRemove ─────────────────────────────────────────────
+
+    #[test]
+    fn credentials_remove_deletes_matching_loot() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        // Add two credentials.
+        state.apply_operator_message(OperatorMessage::CredentialsAdd(Message {
+            head: head(EventCode::Credentials),
+            info: flat_info(&[("Name", "admin"), ("DemonID", "aabb1122"), ("CapturedAt", "t1")]),
+        }));
+        state.apply_operator_message(OperatorMessage::CredentialsAdd(Message {
+            head: head(EventCode::Credentials),
+            info: flat_info(&[("Name", "guest"), ("DemonID", "aabb1122"), ("CapturedAt", "t2")]),
+        }));
+        assert_eq!(state.loot.len(), 2);
+
+        // Remove the "admin" credential.
+        state.apply_operator_message(OperatorMessage::CredentialsRemove(Message {
+            head: head(EventCode::Credentials),
+            info: flat_info(&[("Name", "admin"), ("DemonID", "aabb1122")]),
+        }));
+
+        assert_eq!(state.loot.len(), 1, "one credential should remain");
+        assert_eq!(state.loot[0].name, "guest");
+    }
+
+    #[test]
+    fn credentials_remove_with_missing_name_is_noop() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        state.apply_operator_message(OperatorMessage::CredentialsAdd(Message {
+            head: head(EventCode::Credentials),
+            info: flat_info(&[("Name", "admin"), ("DemonID", "aabb1122"), ("CapturedAt", "t1")]),
+        }));
+
+        // Remove with no Name key → loot_item_from_flat_info returns None → noop.
+        state.apply_operator_message(OperatorMessage::CredentialsRemove(Message {
+            head: head(EventCode::Credentials),
+            info: flat_info(&[("DemonID", "aabb1122")]),
+        }));
+
+        assert_eq!(state.loot.len(), 1, "remove without name should be a noop");
+    }
+
+    // ── HostFileAdd / HostFileRemove ──────────────────────────────────
+
+    #[test]
+    fn host_file_add_inserts_file_loot_and_emits_event() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        let events = state.apply_operator_message(OperatorMessage::HostFileAdd(Message {
+            head: head(EventCode::HostFile),
+            info: flat_info(&[
+                ("Name", "secrets.txt"),
+                ("DemonID", "ccdd3344"),
+                ("FilePath", "/tmp/secrets.txt"),
+                ("CapturedAt", "2026-03-19 11:00:00"),
+            ]),
+        }));
+
+        assert_eq!(state.loot.len(), 1);
+        let item = &state.loot[0];
+        assert_eq!(item.kind, LootKind::File);
+        assert_eq!(item.name, "secrets.txt");
+        assert_eq!(item.file_path.as_deref(), Some("/tmp/secrets.txt"));
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], AppEvent::LootCaptured(l) if l.kind == LootKind::File));
+    }
+
+    #[test]
+    fn host_file_remove_deletes_matching_file_loot() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        state.apply_operator_message(OperatorMessage::HostFileAdd(Message {
+            head: head(EventCode::HostFile),
+            info: flat_info(&[
+                ("Name", "secrets.txt"),
+                ("DemonID", "ccdd3344"),
+                ("CapturedAt", "t1"),
+            ]),
+        }));
+        assert_eq!(state.loot.len(), 1);
+
+        state.apply_operator_message(OperatorMessage::HostFileRemove(Message {
+            head: head(EventCode::HostFile),
+            info: flat_info(&[("Name", "secrets.txt"), ("DemonID", "ccdd3344")]),
+        }));
+
+        assert!(state.loot.is_empty(), "file loot should have been removed");
+    }
+
+    // ── AgentTask ─────────────────────────────────────────────────────
+
+    #[test]
+    fn agent_task_returns_no_events() {
+        use red_cell_common::operator::AgentTaskInfo;
+
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        let events = state.apply_operator_message(OperatorMessage::AgentTask(Message {
+            head: MessageHead {
+                event: EventCode::Session,
+                user: "bob".to_owned(),
+                timestamp: "ts".to_owned(),
+                one_time: String::new(),
+            },
+            info: AgentTaskInfo {
+                task_id: "1".to_owned(),
+                command_line: "ls".to_owned(),
+                demon_id: "11223344".to_owned(),
+                command_id: "9".to_owned(),
+                ..AgentTaskInfo::default()
+            },
+        }));
+
+        assert!(events.is_empty(), "AgentTask should not emit AppEvents");
+    }
 }

@@ -9,19 +9,19 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 441 | 212 | 31 |
-| Bugs filed against | 44 | 34 | 9 |
+| Tasks closed | 444 | 212 | 31 |
+| Bugs filed against | 46 | 34 | 9 |
 | Bug rate (bugs/task) | 0.10 | 0.16 | 0.29 |
 | Quality score | 90% | 84% | 71% |
 
-*Bug rates: Claude 44/441=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 46/444=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 2 | 0 | 0 |
-| Missing tests / stale tests | 22 | 13 | 5 |
+| Missing tests / stale tests | 23 | 13 | 5 |
 | Clippy warnings | 2 | 0 | 1 |
 | Protocol errors | 6 | 27 | 3 |
 | Security issues | 22 | 36 | 0 |
@@ -31,7 +31,7 @@ Each loop run updates the running totals and appends a review entry.
 | Test infrastructure / flakiness | 1 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
-| Correctness / pagination | 13 | 7 | 1 |
+| Correctness / pagination | 14 | 7 | 1 |
 | Workflow / close-hygiene | 12 | 0 | 0 |
 | Code reuse / duplication | 6 | 0 | 0 |
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-19 — ecbfd15..e93a83a
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 2 | Closed 3 issues (tmby, b7h3, lfbe). New service bridge WebSocket endpoint (765 lines) with SHA3-256 auth, JSON dispatch, and 12 unit tests. Also added error-path tests for Database::connect and direct test coverage for record_operator_action. Filed: wungl (AgentTask/AgentRegister stubs silently discard messages), w59il (no WS integration test for service bridge). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (0 warnings), cargo test passed (211 tests, 0 failures)
 
 ### QA Review — 2026-03-20 00:15 — f6b07cc..c7fffdc
 

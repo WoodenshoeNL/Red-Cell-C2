@@ -364,6 +364,150 @@ mod tests {
         assert_eq!(loaded, LocalConfig::default());
     }
 
+    #[test]
+    fn load_from_returns_default_for_binary_garbage() {
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("tempdir creation should succeed: {error}"));
+        let path = dir.path().join("client.toml");
+
+        fs::write(&path, b"\x00\x01\x02\xff\xfe\xfd")
+            .unwrap_or_else(|error| panic!("write should succeed: {error}"));
+
+        assert_eq!(LocalConfig::load_from(&path), LocalConfig::default());
+    }
+
+    #[test]
+    fn load_from_returns_default_for_truncated_toml() {
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("tempdir creation should succeed: {error}"));
+        let path = dir.path().join("client.toml");
+
+        // Valid key but value is truncated mid-string (no closing quote).
+        fs::write(&path, "server_url = \"wss://10.0.0.1:40056")
+            .unwrap_or_else(|error| panic!("write should succeed: {error}"));
+
+        assert_eq!(LocalConfig::load_from(&path), LocalConfig::default());
+    }
+
+    #[test]
+    fn load_from_returns_default_for_wrong_field_type() {
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("tempdir creation should succeed: {error}"));
+        let path = dir.path().join("client.toml");
+
+        // server_url should be a string, not an integer.
+        fs::write(&path, "server_url = 42")
+            .unwrap_or_else(|error| panic!("write should succeed: {error}"));
+
+        // toml::from_str fails on type mismatch → unwrap_or_default → full default.
+        assert_eq!(LocalConfig::load_from(&path), LocalConfig::default());
+    }
+
+    #[test]
+    fn load_from_returns_default_when_valid_field_mixed_with_wrong_type() {
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("tempdir creation should succeed: {error}"));
+        let path = dir.path().join("client.toml");
+
+        // username is valid, but scripts_dir is an integer instead of a string.
+        let content = "username = \"operator\"\nscripts_dir = 12345\n";
+        fs::write(&path, content).unwrap_or_else(|error| panic!("write should succeed: {error}"));
+
+        // The entire deserialization fails, so we get full default — not a partial
+        // config with username set.
+        assert_eq!(LocalConfig::load_from(&path), LocalConfig::default());
+    }
+
+    #[test]
+    fn load_from_returns_default_for_array_instead_of_table() {
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("tempdir creation should succeed: {error}"));
+        let path = dir.path().join("client.toml");
+
+        // The file is valid TOML (an array) but not a valid LocalConfig (expects a table).
+        fs::write(&path, "[[items]]\nname = \"foo\"\n")
+            .unwrap_or_else(|error| panic!("write should succeed: {error}"));
+
+        assert_eq!(LocalConfig::load_from(&path), LocalConfig::default());
+    }
+
+    #[test]
+    fn load_from_returns_default_for_duplicate_keys() {
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("tempdir creation should succeed: {error}"));
+        let path = dir.path().join("client.toml");
+
+        let content = "server_url = \"wss://a\"\nserver_url = \"wss://b\"\n";
+        fs::write(&path, content).unwrap_or_else(|error| panic!("write should succeed: {error}"));
+
+        // Duplicate keys are a TOML parse error → full default.
+        assert_eq!(LocalConfig::load_from(&path), LocalConfig::default());
+    }
+
+    #[test]
+    fn load_from_handles_crafted_server_url_with_special_chars() {
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("tempdir creation should succeed: {error}"));
+        let path = dir.path().join("client.toml");
+
+        // A server_url with path traversal and SQL-like injection attempts.
+        let crafted = "wss://evil.com/'; DROP TABLE operators;--/../../../etc/passwd";
+        let content = format!("server_url = \"{crafted}\"\n");
+        fs::write(&path, &content).unwrap_or_else(|error| panic!("write should succeed: {error}"));
+
+        let config = LocalConfig::load_from(&path);
+        // The value must be stored verbatim — no interpretation or execution.
+        assert_eq!(config.server_url.as_deref(), Some(crafted));
+        // All other fields default.
+        assert_eq!(config.username, None);
+        assert_eq!(config.scripts_dir, None);
+    }
+
+    #[test]
+    fn load_from_handles_crafted_username_with_embedded_toml() {
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("tempdir creation should succeed: {error}"));
+        let path = dir.path().join("client.toml");
+
+        // Username containing TOML-like syntax — must be treated as an opaque string.
+        let content = "username = \"admin\\nserver_url = \\\"wss://hijacked\\\"\"\n";
+        fs::write(&path, content).unwrap_or_else(|error| panic!("write should succeed: {error}"));
+
+        let config = LocalConfig::load_from(&path);
+        // The crafted value should be stored as a single string, not interpreted
+        // as a second key.
+        assert!(config.username.is_some());
+        assert_eq!(config.server_url, None, "TOML injection must not set server_url");
+    }
+
+    #[test]
+    fn load_from_handles_extremely_long_values() {
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("tempdir creation should succeed: {error}"));
+        let path = dir.path().join("client.toml");
+
+        let long_url = format!("wss://{}", "A".repeat(100_000));
+        let content = format!("server_url = \"{long_url}\"\n");
+        fs::write(&path, &content).unwrap_or_else(|error| panic!("write should succeed: {error}"));
+
+        let config = LocalConfig::load_from(&path);
+        assert_eq!(config.server_url.as_deref(), Some(long_url.as_str()));
+    }
+
+    #[test]
+    fn load_from_ignores_unknown_fields_and_preserves_known() {
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("tempdir creation should succeed: {error}"));
+        let path = dir.path().join("client.toml");
+
+        let content = "username = \"op1\"\nunknown_field = \"surprise\"\nextra = 999\n";
+        fs::write(&path, content).unwrap_or_else(|error| panic!("write should succeed: {error}"));
+
+        // serde default behaviour: unknown fields are ignored (no deny_unknown_fields).
+        let config = LocalConfig::load_from(&path);
+        assert_eq!(config.username.as_deref(), Some("op1"));
+    }
+
     /// `save()` must complete without panicking regardless of whether a config
     /// directory is available.  When `dirs::config_dir()` returns `None` the
     /// call is a documented silent no-op; when it returns `Some` it must also

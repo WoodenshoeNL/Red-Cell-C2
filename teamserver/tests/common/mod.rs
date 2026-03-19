@@ -37,6 +37,7 @@ pub struct TestServer {
     pub agent_registry: AgentRegistry,
     pub database: Database,
     pub sockets: SocketRelayManager,
+    pub webhooks: AuditWebhookNotifier,
 }
 
 /// Bind a free TCP port, start a teamserver from `profile`, and return a
@@ -53,6 +54,7 @@ pub async fn spawn_test_server(profile: Profile) -> Result<TestServer, Box<dyn s
         sockets.clone(),
         None,
     );
+    let webhooks = AuditWebhookNotifier::from_profile(&profile);
     let state = TeamserverState {
         profile: profile.clone(),
         database: database.clone(),
@@ -64,7 +66,7 @@ pub async fn spawn_test_server(profile: Profile) -> Result<TestServer, Box<dyn s
         listeners: listeners.clone(),
         payload_builder: PayloadBuilderService::disabled_for_tests(),
         sockets: sockets.clone(),
-        webhooks: AuditWebhookNotifier::from_profile(&profile),
+        webhooks: webhooks.clone(),
         login_rate_limiter: LoginRateLimiter::new(),
         shutdown: red_cell::ShutdownController::new(),
         service_bridge: None,
@@ -77,7 +79,7 @@ pub async fn spawn_test_server(profile: Profile) -> Result<TestServer, Box<dyn s
         let _ = axum::serve(tcp, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await;
     });
-    Ok(TestServer { addr, listeners, agent_registry: registry, database, sockets })
+    Ok(TestServer { addr, listeners, agent_registry: registry, database, sockets, webhooks })
 }
 
 /// Authenticate over WebSocket as `"operator"` / `"password1234"` and consume the

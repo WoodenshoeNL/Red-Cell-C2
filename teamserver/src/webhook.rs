@@ -86,7 +86,7 @@ impl AuditWebhookNotifier {
     ///
     /// Used in tests that assert on timing-sensitive shutdown behaviour so that
     /// a failing webhook does not introduce multi-second delays.
-    #[cfg(test)]
+    #[doc(hidden)]
     pub fn from_profile_no_retry(profile: &Profile) -> Self {
         Self { retry_delays: Arc::from([]), ..Self::from_profile(profile) }
     }

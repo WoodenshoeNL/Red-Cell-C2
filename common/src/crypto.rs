@@ -608,6 +608,40 @@ mod tests {
         assert_eq!(decrypted, plaintext);
     }
 
+    /// AES-256-CTR is a stream cipher **without authentication**: decrypting with the
+    /// wrong key does not produce an error — it silently yields garbage.  This is a
+    /// fundamental property of CTR mode and is security-critical for the Demon protocol:
+    /// the protocol has no MAC or AEAD tag, so a key-agreement mismatch will not be
+    /// caught at the crypto layer.  Instead, the teamserver will receive structurally
+    /// invalid (garbled) agent data whose parser must reject it gracefully rather than
+    /// treating random bytes as valid commands.
+    #[test]
+    fn ctr_mode_silently_produces_wrong_plaintext_with_wrong_key() {
+        let key_a = [0xAA; AGENT_KEY_LENGTH];
+        let key_b = [0xBB; AGENT_KEY_LENGTH];
+        let iv = [0x01; AGENT_IV_LENGTH];
+        let plaintext = b"demon-init-metadata-payload";
+
+        let ciphertext = encrypt_agent_data(&key_a, &iv, plaintext)
+            .expect("encryption with key A should succeed");
+
+        // Decrypting with the wrong key must succeed (no error) …
+        let wrong_plaintext = decrypt_agent_data(&key_b, &iv, &ciphertext)
+            .expect("decryption with wrong key must not error");
+
+        // … but the output must differ from the original plaintext.
+        assert_ne!(
+            wrong_plaintext.as_slice(),
+            plaintext.as_slice(),
+            "CTR decryption with the wrong key must produce different output, not the original plaintext"
+        );
+
+        // Sanity: the correct key still recovers the original.
+        let correct_plaintext =
+            decrypt_agent_data(&key_a, &iv, &ciphertext).expect("decryption with correct key");
+        assert_eq!(correct_plaintext, plaintext);
+    }
+
     #[test]
     fn encrypt_at_one_past_max_valid_block_offset_fails() {
         let key = [0x41; AGENT_KEY_LENGTH];

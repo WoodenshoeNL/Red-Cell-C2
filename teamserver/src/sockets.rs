@@ -349,7 +349,9 @@ impl SocketRelayManager {
 
         let reply = u8::try_from(error_code).unwrap_or(SOCKS_REPLY_GENERAL_FAILURE);
         send_socks_connect_reply(&pending.0, reply, pending.1, &pending.2, pending.3).await;
-        let _ = self.remove_client(agent_id, socket_id).await;
+        if let Err(error) = self.remove_client(agent_id, socket_id).await {
+            warn!(agent_id = format_args!("{agent_id:08X}"), socket_id = format_args!("{socket_id:08X}"), %error, "SOCKS5 connect failure: remove_client failed");
+        }
         Ok(())
     }
 
@@ -361,7 +363,9 @@ impl SocketRelayManager {
     ) -> Result<(), SocketRelayError> {
         let client = self.remove_client(agent_id, socket_id).await?;
         let mut writer = client.writer.lock().await;
-        let _ = writer.shutdown().await;
+        if let Err(error) = writer.shutdown().await {
+            warn!(agent_id = format_args!("{agent_id:08X}"), socket_id = format_args!("{socket_id:08X}"), %error, "SOCKS5 close_client: writer shutdown failed");
+        }
         Ok(())
     }
 
@@ -412,8 +416,12 @@ impl SocketRelayManager {
             loop {
                 match reader.read(&mut buf).await {
                     Ok(0) => {
-                        let _ = manager.enqueue_close_job(agent_id, socket_id).await;
-                        let _ = manager.remove_client(agent_id, socket_id).await;
+                        if let Err(e) = manager.enqueue_close_job(agent_id, socket_id).await {
+                            warn!(agent_id = format_args!("{agent_id:08X}"), socket_id = format_args!("{socket_id:08X}"), error = %e, "SOCKS5 read EOF: enqueue_close_job failed");
+                        }
+                        if let Err(e) = manager.remove_client(agent_id, socket_id).await {
+                            warn!(agent_id = format_args!("{agent_id:08X}"), socket_id = format_args!("{socket_id:08X}"), error = %e, "SOCKS5 read EOF: remove_client failed");
+                        }
                         break;
                     }
                     Ok(read) => {
@@ -422,14 +430,20 @@ impl SocketRelayManager {
                             .await
                             .is_err()
                         {
-                            let _ = manager.remove_client(agent_id, socket_id).await;
+                            if let Err(e) = manager.remove_client(agent_id, socket_id).await {
+                                warn!(agent_id = format_args!("{agent_id:08X}"), socket_id = format_args!("{socket_id:08X}"), error = %e, "SOCKS5 write failure: remove_client failed");
+                            }
                             break;
                         }
                     }
                     Err(error) => {
                         debug!(agent_id = format_args!("{agent_id:08X}"), socket_id = format_args!("{socket_id:08X}"), %error, "SOCKS5 client read loop failed");
-                        let _ = manager.enqueue_close_job(agent_id, socket_id).await;
-                        let _ = manager.remove_client(agent_id, socket_id).await;
+                        if let Err(e) = manager.enqueue_close_job(agent_id, socket_id).await {
+                            warn!(agent_id = format_args!("{agent_id:08X}"), socket_id = format_args!("{socket_id:08X}"), error = %e, "SOCKS5 read error: enqueue_close_job failed");
+                        }
+                        if let Err(e) = manager.remove_client(agent_id, socket_id).await {
+                            warn!(agent_id = format_args!("{agent_id:08X}"), socket_id = format_args!("{socket_id:08X}"), error = %e, "SOCKS5 read error: remove_client failed");
+                        }
                         break;
                     }
                 }
@@ -534,8 +548,12 @@ impl SocketRelayManager {
         };
 
         for socket_id in socket_ids {
-            let _ = self.enqueue_close_job(agent_id, socket_id).await;
-            let _ = self.close_client(agent_id, socket_id).await;
+            if let Err(e) = self.enqueue_close_job(agent_id, socket_id).await {
+                warn!(agent_id = format_args!("{agent_id:08X}"), socket_id = format_args!("{socket_id:08X}"), error = %e, "SOCKS5 prune: enqueue_close_job failed");
+            }
+            if let Err(e) = self.close_client(agent_id, socket_id).await {
+                warn!(agent_id = format_args!("{agent_id:08X}"), socket_id = format_args!("{socket_id:08X}"), error = %e, "SOCKS5 prune: close_client failed");
+            }
         }
 
         Ok(())

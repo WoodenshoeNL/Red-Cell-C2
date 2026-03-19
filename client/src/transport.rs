@@ -4528,4 +4528,172 @@ mod tests {
 
         assert!(events.is_empty(), "AgentTask should not emit AppEvents");
     }
+
+    // ── flat_info_string ─────────────────────────────────────────────
+
+    fn make_flat_info(pairs: &[(&str, serde_json::Value)]) -> FlatInfo {
+        let fields = pairs.iter().map(|(k, v)| ((*k).to_owned(), v.clone())).collect();
+        FlatInfo { fields }
+    }
+
+    #[test]
+    fn flat_info_string_returns_first_matching_key() {
+        let info = make_flat_info(&[
+            ("Name", Value::String("first".to_owned())),
+            ("FileName", Value::String("second".to_owned())),
+        ]);
+        let result = flat_info_string(&info, &["Name", "FileName"]);
+        assert_eq!(result, Some("first".to_owned()));
+    }
+
+    #[test]
+    fn flat_info_string_falls_back_to_later_key() {
+        let info = make_flat_info(&[("FileName", Value::String("fallback".to_owned()))]);
+        let result = flat_info_string(&info, &["Name", "FileName"]);
+        assert_eq!(result, Some("fallback".to_owned()));
+    }
+
+    #[test]
+    fn flat_info_string_converts_number_to_string() {
+        let info = make_flat_info(&[("ID", Value::Number(serde_json::Number::from(42)))]);
+        let result = flat_info_string(&info, &["ID"]);
+        assert_eq!(result, Some("42".to_owned()));
+    }
+
+    #[test]
+    fn flat_info_string_returns_none_for_null() {
+        let info = make_flat_info(&[("Name", Value::Null)]);
+        let result = flat_info_string(&info, &["Name"]);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn flat_info_string_returns_none_for_bool() {
+        let info = make_flat_info(&[("Name", Value::Bool(true))]);
+        let result = flat_info_string(&info, &["Name"]);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn flat_info_string_returns_none_for_array() {
+        let info = make_flat_info(&[("Name", Value::Array(vec![]))]);
+        let result = flat_info_string(&info, &["Name"]);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn flat_info_string_returns_none_for_missing_keys() {
+        let info = make_flat_info(&[("Other", Value::String("value".to_owned()))]);
+        let result = flat_info_string(&info, &["Name", "FileName"]);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn flat_info_string_returns_none_for_empty_info() {
+        let info = make_flat_info(&[]);
+        let result = flat_info_string(&info, &["Name"]);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn flat_info_string_respects_key_priority_order() {
+        // Both keys present; first key in the priority list wins even if it
+        // appears later in the BTreeMap iteration order.
+        let info = make_flat_info(&[
+            ("ZName", Value::String("z".to_owned())),
+            ("AName", Value::String("a".to_owned())),
+        ]);
+        // "ZName" is first in the key list, so it should win.
+        let result = flat_info_string(&info, &["ZName", "AName"]);
+        assert_eq!(result, Some("z".to_owned()));
+    }
+
+    // ── loot_item_from_flat_info ─────────────────────────────────────
+
+    #[test]
+    fn loot_item_from_flat_info_populates_all_fields() {
+        let info = make_flat_info(&[
+            ("Name", Value::String("creds.txt".to_owned())),
+            ("DemonID", Value::String("0xAABBCCDD".to_owned())),
+            ("FilePath", Value::String("C:\\Users\\creds.txt".to_owned())),
+            ("Operator", Value::String("admin".to_owned())),
+            ("Kind", Value::String("Credential".to_owned())),
+            ("LootID", Value::Number(serde_json::Number::from(7))),
+            ("CapturedAt", Value::String("2026-03-18T10:00:00Z".to_owned())),
+            ("SizeBytes", Value::Number(serde_json::Number::from(1024))),
+            ("ContentBase64", Value::String("dGVzdA==".to_owned())),
+            ("Credential", Value::String("user:pass".to_owned())),
+        ]);
+
+        let item =
+            loot_item_from_flat_info(&info, LootKind::Other).expect("should produce a LootItem");
+
+        assert_eq!(item.name, "creds.txt");
+        assert_eq!(item.agent_id, "AABBCCDD");
+        assert_eq!(item.file_path, Some("C:\\Users\\creds.txt".to_owned()));
+        assert_eq!(item.source, "admin");
+        assert_eq!(item.kind, LootKind::Credential);
+        assert_eq!(item.id, Some(7));
+        assert_eq!(item.collected_at, "2026-03-18T10:00:00Z");
+        assert_eq!(item.size_bytes, Some(1024));
+        assert_eq!(item.content_base64, Some("dGVzdA==".to_owned()));
+        assert_eq!(item.preview, Some("user:pass".to_owned()));
+    }
+
+    #[test]
+    fn loot_item_from_flat_info_returns_none_when_name_missing() {
+        let info = make_flat_info(&[("DemonID", Value::String("11223344".to_owned()))]);
+        assert!(loot_item_from_flat_info(&info, LootKind::File).is_none());
+    }
+
+    #[test]
+    fn loot_item_from_flat_info_uses_fallback_kind_when_kind_is_other() {
+        let info = make_flat_info(&[("Name", Value::String("data".to_owned()))]);
+        let item = loot_item_from_flat_info(&info, LootKind::Screenshot)
+            .expect("should produce a LootItem");
+        // "data" doesn't match any specific kind, so loot_kind_from_strings
+        // returns Other, and the fallback should be used.
+        assert_eq!(item.kind, LootKind::Screenshot);
+    }
+
+    #[test]
+    fn loot_item_from_flat_info_uses_fallback_keys() {
+        // Use alternate key names: FileName, AgentID, Path
+        let info = make_flat_info(&[
+            ("FileName", Value::String("report.pdf".to_owned())),
+            ("AgentID", Value::String("DEADBEEF".to_owned())),
+            ("Path", Value::String("/tmp/report.pdf".to_owned())),
+        ]);
+        let item =
+            loot_item_from_flat_info(&info, LootKind::Other).expect("should produce a LootItem");
+        assert_eq!(item.name, "report.pdf");
+        assert_eq!(item.agent_id, "DEADBEEF");
+        assert_eq!(item.file_path, Some("/tmp/report.pdf".to_owned()));
+        // Path contains '/' so loot_kind_from_strings detects File kind
+        assert_eq!(item.kind, LootKind::File);
+    }
+
+    #[test]
+    fn loot_item_from_flat_info_defaults_missing_optional_fields() {
+        let info = make_flat_info(&[("Name", Value::String("minimal".to_owned()))]);
+        let item =
+            loot_item_from_flat_info(&info, LootKind::Other).expect("should produce a LootItem");
+        assert_eq!(item.agent_id, "");
+        assert_eq!(item.collected_at, "");
+        assert_eq!(item.file_path, None);
+        assert_eq!(item.size_bytes, None);
+        assert_eq!(item.content_base64, None);
+        assert_eq!(item.preview, None);
+        assert_eq!(item.id, None);
+    }
+
+    #[test]
+    fn loot_item_from_flat_info_source_falls_back_to_kind_label() {
+        // No Operator/Pattern/Kind/Type key for source, so it should use
+        // fallback_kind.label().to_ascii_lowercase().
+        let info = make_flat_info(&[("Name", Value::String("screenshot.png".to_owned()))]);
+        let item =
+            loot_item_from_flat_info(&info, LootKind::File).expect("should produce a LootItem");
+        assert_eq!(item.source, "file");
+    }
 }

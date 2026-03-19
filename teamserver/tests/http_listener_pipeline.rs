@@ -2,6 +2,7 @@ mod common;
 
 use std::time::Duration;
 
+use futures_util::future::join_all;
 use red_cell::{
     AgentRegistry, Database, EventBus, ListenerManager, MAX_AGENT_MESSAGE_LEN, SocketRelayManager,
 };
@@ -647,6 +648,105 @@ async fn http_listener_pipeline_reconnect_probe_after_registration()
     );
 
     manager.stop("edge-http-reconnect").await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn http_listener_pipeline_concurrent_multi_agent_init()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None);
+    let mut event_receiver = events.subscribe();
+    let (port, guard) = common::available_port()?;
+
+    manager.create(http_listener("edge-http-concurrent-init", port)).await?;
+    drop(guard);
+    manager.start("edge-http-concurrent-init").await?;
+    common::wait_for_listener(port).await?;
+
+    // Five distinct agents, each with unique key/IV material.
+    let agents: Vec<(u32, [u8; AGENT_KEY_LENGTH], [u8; AGENT_IV_LENGTH])> = (0..5)
+        .map(|i| {
+            let mut key = [0x41_u8; AGENT_KEY_LENGTH];
+            key[0] = 0x10 + i;
+            let mut iv = [0x24_u8; AGENT_IV_LENGTH];
+            iv[0] = 0x30 + i;
+            let agent_id = 0xCC00_0000_u32 + u32::from(i);
+            (agent_id, key, iv)
+        })
+        .collect();
+
+    let client = Client::new();
+
+    // Spawn all five init requests concurrently.
+    let futures: Vec<_> = agents
+        .iter()
+        .map(|&(agent_id, key, iv)| {
+            let client = client.clone();
+            async move {
+                client
+                    .post(format!("http://127.0.0.1:{port}/"))
+                    .body(common::valid_demon_init_body(agent_id, key, iv))
+                    .send()
+                    .await
+            }
+        })
+        .collect();
+
+    let results = join_all(futures).await;
+    for (i, result) in results.into_iter().enumerate() {
+        let response = result?;
+        assert!(
+            response.status().is_success(),
+            "agent {i} init should succeed, got {}",
+            response.status()
+        );
+        let body = response.bytes().await?;
+        assert!(!body.is_empty(), "agent {i} init ACK should not be empty");
+
+        // Verify the ACK decrypts to the agent_id LE bytes.
+        let (agent_id, key, iv) = agents[i];
+        let decrypted = decrypt_agent_data_at_offset(&key, &iv, 0, &body)?;
+        assert_eq!(
+            decrypted.as_slice(),
+            &agent_id.to_le_bytes(),
+            "agent {i} init ACK must decrypt to its own agent_id"
+        );
+    }
+
+    // Verify each agent is independently registered with the correct key/IV.
+    for (i, &(agent_id, key, iv)) in agents.iter().enumerate() {
+        let stored = registry
+            .get(agent_id)
+            .await
+            .ok_or_else(|| format!("agent {i} ({agent_id:#x}) should be registered"))?;
+        assert_eq!(
+            stored.encryption.aes_key.as_slice(),
+            &key,
+            "agent {i} must have its own AES key"
+        );
+        assert_eq!(stored.encryption.aes_iv.as_slice(), &iv, "agent {i} must have its own AES IV");
+    }
+
+    // Verify exactly 5 active agents — no duplicates or missing entries.
+    let active = registry.list_active().await;
+    assert_eq!(active.len(), 5, "all five agents must be registered");
+
+    // Drain event bus and verify exactly 5 AgentNew events were broadcast.
+    let mut agent_new_count = 0_usize;
+    for _ in 0..5 {
+        let event = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
+        let Some(OperatorMessage::AgentNew(_)) = event else {
+            panic!("expected AgentNew event, got {event:?}");
+        };
+        agent_new_count += 1;
+    }
+    assert_eq!(agent_new_count, 5, "exactly 5 AgentNew events must be broadcast");
+
+    manager.stop("edge-http-concurrent-init").await?;
     Ok(())
 }
 

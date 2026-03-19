@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 483 | 212 | 31 |
+| Tasks closed | 486 | 212 | 31 |
 | Bugs filed against | 46 | 34 | 9 |
-| Bug rate (bugs/task) | 0.10 | 0.16 | 0.29 |
-| Quality score | 90% | 84% | 71% |
+| Bug rate (bugs/task) | 0.09 | 0.16 | 0.29 |
+| Quality score | 91% | 84% | 71% |
 
-*Bug rates: Claude 46/483=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 46/486=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -2703,3 +2703,13 @@ Biggest blindspot: `unwrap_or_default()` on protocol length fields — 67 instan
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: cargo check passed, clippy passed (0 warnings), cargo test passed (all suites, 0 failures)
+
+### QA Review — 2026-03-19 23:15 — cf4856a..903cfb4
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 0 | Closed m527 (socket dispatch stubs — 6 SOCKS/portfwd subcommands with format helpers and 13 new tests, +375 lines in socket.rs), maci (network Computer/DcList dispatch callbacks — parse UTF-16, broadcast formatted results, +4 tests), vka4 (PythonRuntime::load_script unit tests — 3 test scenarios for happy/error/idempotent paths). Currently has 1tvu claimed (ClientTransport tests). All code clean — proper `?` error handling, no unwraps in prod, consistent patterns. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (0 warnings), cargo test passed (229 tests, 0 failures)

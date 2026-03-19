@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 481 | 212 | 31 |
+| Tasks closed | 483 | 212 | 31 |
 | Bugs filed against | 46 | 34 | 9 |
 | Bug rate (bugs/task) | 0.10 | 0.16 | 0.29 |
 | Quality score | 90% | 84% | 71% |
 
-*Bug rates: Claude 46/481=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 46/483=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -2693,3 +2693,13 @@ Build: cargo check passed, clippy passed (0 warnings), cargo test passed (1460+ 
 
 Overall codebase health: **on track**
 Biggest blindspot: `unwrap_or_default()` on protocol length fields — 67 instances across 20 files. Not exploitable in practice on 64-bit (payloads would need >4 GiB), but architecturally unsound and would cause silent protocol desync on overflow.
+
+### QA Review — 2026-03-19 21:00 — 5230d8f..def9d16
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed q5u8 (plugin load resilience — changed load_plugins from fail-fast to skip-and-continue with per-plugin warnings, +64 lines of new test covering multi-plugin isolation with broken plugin in the middle), u7ob (auth rate limiter expired window reset test). Also claimed m527 (socket dispatch stubs — in progress). Clean, well-tested changes. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (0 warnings), cargo test passed (all suites, 0 failures)

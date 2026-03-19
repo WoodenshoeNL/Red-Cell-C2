@@ -1,5 +1,5 @@
 use red_cell_common::demon::{DemonCommand, DemonSocketCommand, DemonSocketType};
-use tracing::warn;
+use tracing::{trace, warn};
 
 use crate::{EventBus, SocketRelayManager};
 
@@ -182,12 +182,121 @@ pub(super) async fn handle_socket_callback(
                 );
             }
         }
-        DemonSocketCommand::SocksProxyAdd
-        | DemonSocketCommand::Open
-        | DemonSocketCommand::SocksProxyList
-        | DemonSocketCommand::SocksProxyRemove
-        | DemonSocketCommand::SocksProxyClear
-        | DemonSocketCommand::ReversePortForwardAddLocal => {}
+        DemonSocketCommand::SocksProxyAdd => {
+            let success = parser.read_u32("socks proxy add success")?;
+            let socket_id = parser.read_u32("socks proxy add socket id")?;
+            let bind_addr = int_to_ipv4(parser.read_u32("socks proxy add bind addr")?);
+            let bind_port = parser.read_u32("socks proxy add bind port")?;
+            let (kind, message) = if success != 0 {
+                (
+                    "Info",
+                    format!("Started SOCKS proxy on {bind_addr}:{bind_port} [Id: {socket_id:x}]"),
+                )
+            } else {
+                ("Error", format!("Failed to start SOCKS proxy on {bind_addr}:{bind_port}"))
+            };
+            events.broadcast(agent_response_event(
+                agent_id,
+                u32::from(DemonCommand::CommandSocket),
+                request_id,
+                kind,
+                &message,
+                None,
+            )?);
+        }
+        DemonSocketCommand::SocksProxyList => {
+            let output = format_socks_proxy_list(&mut parser)?;
+            events.broadcast(agent_response_event(
+                agent_id,
+                u32::from(DemonCommand::CommandSocket),
+                request_id,
+                "Info",
+                "socks proxies:",
+                Some(output),
+            )?);
+        }
+        DemonSocketCommand::SocksProxyRemove => {
+            let socket_id = parser.read_u32("socks proxy remove socket id")?;
+            events.broadcast(agent_response_event(
+                agent_id,
+                u32::from(DemonCommand::CommandSocket),
+                request_id,
+                "Info",
+                &format!("Removed SOCKS proxy [SocketID: {socket_id:x}]"),
+                None,
+            )?);
+        }
+        DemonSocketCommand::SocksProxyClear => {
+            let success = parser.read_u32("socks proxy clear success")?;
+            let (kind, message) = if success != 0 {
+                ("Good", "Successful closed and removed all SOCKS proxies")
+            } else {
+                ("Error", "Failed to close and remove all SOCKS proxies")
+            };
+            events.broadcast(agent_response_event(
+                agent_id,
+                u32::from(DemonCommand::CommandSocket),
+                request_id,
+                kind,
+                message,
+                None,
+            )?);
+        }
+        DemonSocketCommand::Open => {
+            let socket_id = parser.read_u32("socket open socket id")?;
+            let local_addr = int_to_ipv4(parser.read_u32("socket open local addr")?);
+            let local_port = parser.read_u32("socket open local port")?;
+            let forward_addr = int_to_ipv4(parser.read_u32("socket open forward addr")?);
+            let forward_port = parser.read_u32("socket open forward port")?;
+            trace!(
+                agent_id = format_args!("{agent_id:08X}"),
+                socket_id = format_args!("{socket_id:08X}"),
+                %local_addr, local_port,
+                %forward_addr, forward_port,
+                "socket open callback"
+            );
+            events.broadcast(agent_response_event(
+                agent_id,
+                u32::from(DemonCommand::CommandSocket),
+                request_id,
+                "Info",
+                &format!(
+                    "Opened socket {local_addr}:{local_port} -> {forward_addr}:{forward_port} [Id: {socket_id:x}]"
+                ),
+                None,
+            )?);
+        }
+        DemonSocketCommand::ReversePortForwardAddLocal => {
+            let success = parser.read_u32("rportfwd add local success")?;
+            let socket_id = parser.read_u32("rportfwd add local socket id")?;
+            let local_addr = int_to_ipv4(parser.read_u32("rportfwd add local addr")?);
+            let local_port = parser.read_u32("rportfwd add local port")?;
+            let forward_addr = int_to_ipv4(parser.read_u32("rportfwd add local forward addr")?);
+            let forward_port = parser.read_u32("rportfwd add local forward port")?;
+            let (kind, message) = if success != 0 {
+                (
+                    "Info",
+                    format!(
+                        "Started local reverse port forward on {local_addr}:{local_port} to {forward_addr}:{forward_port} [Id: {socket_id:x}]"
+                    ),
+                )
+            } else {
+                (
+                    "Error",
+                    format!(
+                        "Failed to start local reverse port forward on {local_addr}:{local_port} to {forward_addr}:{forward_port}"
+                    ),
+                )
+            };
+            events.broadcast(agent_response_event(
+                agent_id,
+                u32::from(DemonCommand::CommandSocket),
+                request_id,
+                kind,
+                &message,
+                None,
+            )?);
+        }
     }
 
     Ok(None)
@@ -205,6 +314,21 @@ fn format_rportfwd_list(parser: &mut CallbackParser<'_>) -> Result<String, Comma
         output.push_str(&format!(
             " {socket_id:<13x}{local_addr}:{local_port} -> {forward_addr}:{forward_port}\n"
         ));
+    }
+
+    Ok(output.trim_end().to_owned())
+}
+
+fn format_socks_proxy_list(
+    parser: &mut CallbackParser<'_>,
+) -> Result<String, CommandDispatchError> {
+    let mut output = String::from("\n Socket ID     Bind Address\n ---------     ------------\n");
+
+    while !parser.is_empty() {
+        let socket_id = parser.read_u32("socks proxy list socket id")?;
+        let bind_addr = int_to_ipv4(parser.read_u32("socks proxy list bind addr")?);
+        let bind_port = parser.read_u32("socks proxy list bind port")?;
+        output.push_str(&format!(" {socket_id:<13x}{bind_addr}:{bind_port}\n"));
     }
 
     Ok(output.trim_end().to_owned())
@@ -590,14 +714,245 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    // ── No-op subcommands ───────────────────────────────────────────────────
+    // ── SocksProxyAdd ──────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn socks_proxy_add_is_noop() {
-        let payload = socket_payload(DemonSocketCommand::SocksProxyAdd, &[]);
+    async fn socks_proxy_add_success_broadcasts_info() {
+        let mut rest = Vec::new();
+        add_u32(&mut rest, 1); // success
+        add_u32(&mut rest, 0x00AA_0001); // socket_id
+        add_u32(&mut rest, 0x0100_007F); // bind_addr 127.0.0.1
+        add_u32(&mut rest, 1080); // bind_port
+        let payload = socket_payload(DemonSocketCommand::SocksProxyAdd, &rest);
         let (result, msg) = call_and_recv(&payload).await;
         assert!(result.is_ok());
-        assert!(msg.is_none(), "SocksProxyAdd should be a no-op");
+        let msg = msg.expect("should broadcast");
+        assert_agent_response(&msg, "Info", "Started SOCKS proxy");
+        let message = get_extra_message(&msg);
+        assert!(message.contains("127.0.0.1:1080"));
+        assert!(message.contains("aa0001"), "should contain socket id in hex");
+    }
+
+    #[tokio::test]
+    async fn socks_proxy_add_failure_broadcasts_error() {
+        let mut rest = Vec::new();
+        add_u32(&mut rest, 0); // failure
+        add_u32(&mut rest, 0x00AA_0002); // socket_id
+        add_u32(&mut rest, 0x0100_007F); // bind_addr
+        add_u32(&mut rest, 1080); // bind_port
+        let payload = socket_payload(DemonSocketCommand::SocksProxyAdd, &rest);
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        assert_agent_response(&msg, "Error", "Failed to start SOCKS proxy");
+    }
+
+    #[tokio::test]
+    async fn socks_proxy_add_truncated_returns_error() {
+        let payload = socket_payload(DemonSocketCommand::SocksProxyAdd, &[]);
+        let (events, sockets) = test_deps().await;
+        let result =
+            handle_socket_callback(&events, &sockets, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload for truncated payload, got {result:?}"
+        );
+    }
+
+    // ── SocksProxyList ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn socks_proxy_list_zero_entries_shows_header_only() {
+        let payload = socket_payload(DemonSocketCommand::SocksProxyList, &[]);
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        assert_agent_response(&msg, "Info", "socks proxies:");
+        let output = get_output(&msg);
+        assert!(output.contains("Socket ID"), "should contain header");
+        assert!(output.contains("Bind Address"), "should contain header");
+        let data_lines: Vec<&str> = output
+            .lines()
+            .filter(|l| !l.is_empty() && !l.contains("Socket ID") && !l.contains("---------"))
+            .collect();
+        assert!(data_lines.is_empty(), "expected no data rows, got {data_lines:?}");
+    }
+
+    #[tokio::test]
+    async fn socks_proxy_list_single_entry() {
+        let mut rest = Vec::new();
+        add_u32(&mut rest, 0xBBCC_0001); // socket_id
+        add_u32(&mut rest, 0x0100_007F); // bind_addr = 127.0.0.1
+        add_u32(&mut rest, 1080); // bind_port
+        let payload = socket_payload(DemonSocketCommand::SocksProxyList, &rest);
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        let output = get_output(&msg);
+        assert!(output.contains("bbcc0001"), "should contain socket id in hex");
+        assert!(output.contains("127.0.0.1:1080"), "should contain bind addr:port");
+    }
+
+    #[tokio::test]
+    async fn socks_proxy_list_multiple_entries() {
+        let mut rest = Vec::new();
+        add_u32(&mut rest, 0x0000_0001);
+        add_u32(&mut rest, 0x0100_007F); // 127.0.0.1
+        add_u32(&mut rest, 1080);
+        add_u32(&mut rest, 0x0000_0002);
+        add_u32(&mut rest, 0x0000_0000); // 0.0.0.0
+        add_u32(&mut rest, 9050);
+        let payload = socket_payload(DemonSocketCommand::SocksProxyList, &rest);
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        let output = get_output(&msg);
+        assert!(output.contains("127.0.0.1:1080"));
+        assert!(output.contains("0.0.0.0:9050"));
+        let data_lines: Vec<&str> = output
+            .lines()
+            .filter(|l| !l.is_empty() && !l.contains("Socket ID") && !l.contains("---------"))
+            .collect();
+        assert_eq!(data_lines.len(), 2, "expected 2 data rows, got {data_lines:?}");
+    }
+
+    // ── SocksProxyRemove ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn socks_proxy_remove_broadcasts_info() {
+        let mut rest = Vec::new();
+        add_u32(&mut rest, 0x0000_00FF); // socket_id
+        let payload = socket_payload(DemonSocketCommand::SocksProxyRemove, &rest);
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        assert_agent_response(&msg, "Info", "Removed SOCKS proxy");
+        let message = get_extra_message(&msg);
+        assert!(message.contains("ff"), "should contain socket id in hex");
+    }
+
+    #[tokio::test]
+    async fn socks_proxy_remove_truncated_returns_error() {
+        let payload = socket_payload(DemonSocketCommand::SocksProxyRemove, &[]);
+        let (events, sockets) = test_deps().await;
+        let result =
+            handle_socket_callback(&events, &sockets, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload for truncated payload, got {result:?}"
+        );
+    }
+
+    // ── SocksProxyClear ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn socks_proxy_clear_success_broadcasts_good() {
+        let mut rest = Vec::new();
+        add_u32(&mut rest, 1); // success
+        let payload = socket_payload(DemonSocketCommand::SocksProxyClear, &rest);
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        assert_agent_response(&msg, "Good", "Successful closed and removed all SOCKS proxies");
+    }
+
+    #[tokio::test]
+    async fn socks_proxy_clear_failure_broadcasts_error() {
+        let mut rest = Vec::new();
+        add_u32(&mut rest, 0); // failure
+        let payload = socket_payload(DemonSocketCommand::SocksProxyClear, &rest);
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        assert_agent_response(&msg, "Error", "Failed to close and remove all SOCKS proxies");
+    }
+
+    // ── Open subcommand ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn open_broadcasts_info_with_addresses() {
+        let mut rest = Vec::new();
+        add_u32(&mut rest, 0x0000_ABCD); // socket_id
+        add_u32(&mut rest, 0x0100_007F); // local_addr 127.0.0.1
+        add_u32(&mut rest, 8080); // local_port
+        add_u32(&mut rest, 0x0101_A8C0); // forward_addr 192.168.1.1
+        add_u32(&mut rest, 4443); // forward_port
+        let payload = socket_payload(DemonSocketCommand::Open, &rest);
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        assert_agent_response(&msg, "Info", "Opened socket");
+        let message = get_extra_message(&msg);
+        assert!(message.contains("127.0.0.1:8080"));
+        assert!(message.contains("192.168.1.1:4443"));
+        assert!(message.contains("abcd"), "should contain socket id in hex");
+        assert!(message.contains("->"), "should contain arrow separator");
+    }
+
+    #[tokio::test]
+    async fn open_truncated_returns_error() {
+        let mut rest = Vec::new();
+        add_u32(&mut rest, 0x0000_ABCD); // socket_id only
+        let payload = socket_payload(DemonSocketCommand::Open, &rest);
+        let (events, sockets) = test_deps().await;
+        let result =
+            handle_socket_callback(&events, &sockets, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload for truncated payload, got {result:?}"
+        );
+    }
+
+    // ── ReversePortForwardAddLocal ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn rportfwd_add_local_success_broadcasts_info() {
+        let mut rest = Vec::new();
+        add_u32(&mut rest, 1); // success
+        add_u32(&mut rest, 0x00CC_0001); // socket_id
+        add_u32(&mut rest, 0x0100_007F); // local_addr 127.0.0.1
+        add_u32(&mut rest, 3333); // local_port
+        add_u32(&mut rest, 0x0101_A8C0); // forward_addr 192.168.1.1
+        add_u32(&mut rest, 7777); // forward_port
+        let payload = socket_payload(DemonSocketCommand::ReversePortForwardAddLocal, &rest);
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        assert_agent_response(&msg, "Info", "Started local reverse port forward");
+        let message = get_extra_message(&msg);
+        assert!(message.contains("127.0.0.1:3333"));
+        assert!(message.contains("192.168.1.1:7777"));
+        assert!(message.contains("cc0001"), "should contain socket id in hex");
+    }
+
+    #[tokio::test]
+    async fn rportfwd_add_local_failure_broadcasts_error() {
+        let mut rest = Vec::new();
+        add_u32(&mut rest, 0); // failure
+        add_u32(&mut rest, 0x00CC_0002); // socket_id
+        add_u32(&mut rest, 0x0100_007F); // local_addr
+        add_u32(&mut rest, 3333); // local_port
+        add_u32(&mut rest, 0x0101_A8C0); // forward_addr
+        add_u32(&mut rest, 7777); // forward_port
+        let payload = socket_payload(DemonSocketCommand::ReversePortForwardAddLocal, &rest);
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        assert_agent_response(&msg, "Error", "Failed to start local reverse port forward");
+    }
+
+    #[tokio::test]
+    async fn rportfwd_add_local_truncated_returns_error() {
+        let mut rest = Vec::new();
+        add_u32(&mut rest, 1); // success only
+        let payload = socket_payload(DemonSocketCommand::ReversePortForwardAddLocal, &rest);
+        let (events, sockets) = test_deps().await;
+        let result =
+            handle_socket_callback(&events, &sockets, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload for truncated payload, got {result:?}"
+        );
     }
 
     // ── Error paths ─────────────────────────────────────────────────────────

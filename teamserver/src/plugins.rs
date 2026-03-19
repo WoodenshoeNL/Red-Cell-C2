@@ -11,6 +11,7 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyModule, PyTuple};
 use red_cell_common::AgentRecord;
+use red_cell_common::config::OperatorRole;
 use red_cell_common::operator::{AgentTaskInfo, EventCode, Message, MessageHead, OperatorMessage};
 use serde_json::{Value, json};
 use time::OffsetDateTime;
@@ -50,6 +51,35 @@ impl CallbackRuntimeGuard {
 impl Drop for CallbackRuntimeGuard {
     fn drop(&mut self) {
         CALLBACK_RUNTIME.with(|cell| {
+            *cell.borrow_mut() = None;
+        });
+    }
+}
+
+// Thread-local caller role set during `invoke_registered_command` so that Python
+// API functions can enforce RBAC without needing to pass the role through Python.
+// When `None`, the caller is the system (e.g. event callbacks at startup) and
+// all permissions are granted.
+thread_local! {
+    static CALLER_ROLE: RefCell<Option<OperatorRole>> = const { RefCell::new(None) };
+}
+
+/// RAII guard that sets the [`CALLER_ROLE`] thread-local for the current scope
+/// and clears it on drop.
+struct CallerRoleGuard;
+
+impl CallerRoleGuard {
+    fn enter(role: OperatorRole) -> Self {
+        CALLER_ROLE.with(|cell| {
+            *cell.borrow_mut() = Some(role);
+        });
+        Self
+    }
+}
+
+impl Drop for CallerRoleGuard {
+    fn drop(&mut self) {
+        CALLER_ROLE.with(|cell| {
             *cell.borrow_mut() = None;
         });
     }
@@ -101,6 +131,14 @@ pub enum PluginError {
     AgentCommand {
         /// Human-readable tasking failure.
         message: String,
+    },
+    /// The caller's RBAC role does not grant the required permission.
+    #[error("plugin permission denied: role `{role:?}` lacks `{permission}` permission")]
+    PermissionDenied {
+        /// The caller's RBAC role.
+        role: OperatorRole,
+        /// The permission that was required.
+        permission: &'static str,
     },
     /// The global plugin runtime mutex was poisoned by a panic in another thread.
     #[error("plugin runtime mutex poisoned: a thread panicked while holding the lock")]
@@ -647,6 +685,7 @@ impl PluginRuntime {
         &self,
         name: &str,
         actor: &str,
+        role: OperatorRole,
         agent_id: u32,
         args: Vec<String>,
     ) -> Result<bool, PluginError> {
@@ -667,6 +706,9 @@ impl PluginRuntime {
             // Set the thread-local so re-entrant calls from Python into the Rust
             // API bypass the global RUNTIME mutex.
             let _guard = CallbackRuntimeGuard::enter(&runtime);
+            // Set the caller's RBAC role so Python API functions can enforce
+            // permission checks against the invoking operator's role.
+            let _role_guard = CallerRoleGuard::enter(role);
 
             Python::with_gil(|py| -> PyResult<()> {
                 runtime.install_api_module(py)?;
@@ -766,6 +808,25 @@ fn ensure_callable(callback: &Bound<'_, PyAny>) -> PyResult<()> {
         Ok(())
     } else {
         Err(PyValueError::new_err("callback must be callable"))
+    }
+}
+
+/// Check that the current caller (set via [`CallerRoleGuard`]) has the required
+/// permission.  When no caller role is set (system/event context), all
+/// permissions are granted.
+fn check_plugin_permission(permission: crate::rbac::Permission) -> PyResult<()> {
+    let role = CALLER_ROLE.with(|cell| *cell.borrow());
+    let Some(role) = role else {
+        // System context — no restriction.
+        return Ok(());
+    };
+    if crate::rbac::role_grants(role, permission) {
+        Ok(())
+    } else {
+        Err(pyo3::exceptions::PyPermissionError::new_err(format!(
+            "plugin permission denied: role `{role:?}` lacks `{}` permission",
+            permission.as_str(),
+        )))
     }
 }
 
@@ -873,6 +934,7 @@ impl PyAgent {
 
     #[getter]
     fn info(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        check_plugin_permission(crate::rbac::Permission::Read)?;
         let runtime = PluginRuntime::active()?;
         let agent = py.allow_threads(|| runtime.block_on(runtime.get_agent(self.agent_id)));
         match agent {
@@ -890,6 +952,7 @@ impl PyAgent {
 
     #[pyo3(signature = (command, args=None))]
     fn task(&self, py: Python<'_>, command: u32, args: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        check_plugin_permission(crate::rbac::Permission::TaskAgents)?;
         let runtime = PluginRuntime::active()?;
         let payload = match args {
             None => Vec::new(),
@@ -935,6 +998,7 @@ impl PyListener {
 
     #[getter]
     fn info(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        check_plugin_permission(crate::rbac::Permission::Read)?;
         let runtime = PluginRuntime::active()?;
         let listener = py.allow_threads(|| runtime.block_on(runtime.get_listener(&self.name)));
         match listener {
@@ -949,6 +1013,7 @@ impl PyListener {
     }
 
     fn start(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        check_plugin_permission(crate::rbac::Permission::ManageListeners)?;
         let runtime = PluginRuntime::active()?;
         let listener = py.allow_threads(|| runtime.block_on(runtime.start_listener(&self.name)));
         match listener {
@@ -962,6 +1027,7 @@ impl PyListener {
     }
 
     fn stop(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        check_plugin_permission(crate::rbac::Permission::ManageListeners)?;
         let runtime = PluginRuntime::active()?;
         let listener = py.allow_threads(|| runtime.block_on(runtime.stop_listener(&self.name)));
         match listener {
@@ -1008,6 +1074,7 @@ impl PyEvent {
 
 #[pyfunction]
 fn get_agent(py: Python<'_>, agent_id: u32) -> PyResult<Py<PyAny>> {
+    check_plugin_permission(crate::rbac::Permission::Read)?;
     let runtime = PluginRuntime::active()?;
     let agent = py.allow_threads(|| runtime.block_on(runtime.get_agent(agent_id)));
 
@@ -1024,6 +1091,7 @@ fn get_agent(py: Python<'_>, agent_id: u32) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 fn list_agents(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    check_plugin_permission(crate::rbac::Permission::Read)?;
     let runtime = PluginRuntime::active()?;
     let agents = py.allow_threads(|| runtime.block_on(runtime.list_agents()));
     json_value_to_object(
@@ -1040,6 +1108,7 @@ fn get_agents(py: Python<'_>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 fn get_listener(py: Python<'_>, name: String) -> PyResult<Py<PyAny>> {
+    check_plugin_permission(crate::rbac::Permission::Read)?;
     let runtime = PluginRuntime::active()?;
     let listener = py.allow_threads(|| runtime.block_on(runtime.get_listener(&name)));
 
@@ -1056,6 +1125,7 @@ fn get_listener(py: Python<'_>, name: String) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 fn list_listeners(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    check_plugin_permission(crate::rbac::Permission::Read)?;
     let runtime = PluginRuntime::active()?;
     let listeners = py.allow_threads(|| runtime.block_on(runtime.list_listeners()));
     let listeners = listeners.map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
@@ -1575,6 +1645,7 @@ havoc.RegisterCommand("demo", "demo command", run)
                 .invoke_registered_command(
                     "demo",
                     "operator",
+                    OperatorRole::Admin,
                     0x00AB_CDEF,
                     vec!["alpha".to_owned(), "beta".to_owned()],
                 )
@@ -1645,6 +1716,7 @@ havoc.RegisterCommand(\n\
             .invoke_registered_command(
                 "situational_awareness whoami",
                 "operator",
+                OperatorRole::Admin,
                 0x00AB_CDEF,
                 vec!["/all".to_owned()],
             )
@@ -1687,7 +1759,13 @@ havoc.RegisterCommand(\n\
         let mut receiver = events.subscribe();
 
         runtime
-            .invoke_registered_command("sync_cmd", "operator", 0x00AB_CDEF, vec!["arg1".to_owned()])
+            .invoke_registered_command(
+                "sync_cmd",
+                "operator",
+                OperatorRole::Admin,
+                0x00AB_CDEF,
+                vec!["arg1".to_owned()],
+            )
             .await?;
 
         let queued = registry.dequeue_jobs(0x00AB_CDEF).await?;
@@ -2262,7 +2340,13 @@ havoc.RegisterCommand(\n\
 
         // Invoke against a non-existent agent.
         let result = runtime
-            .invoke_registered_command("fail_cmd", "operator", 0xDEAD_BEEF, vec!["arg1".to_owned()])
+            .invoke_registered_command(
+                "fail_cmd",
+                "operator",
+                OperatorRole::Admin,
+                0xDEAD_BEEF,
+                vec!["arg1".to_owned()],
+            )
             .await;
 
         // The call must return an error (propagated from enqueue_job → AgentNotFound).
@@ -2589,6 +2673,231 @@ havoc.RegisterCommand(\n\
         .await??;
         assert_eq!(count, 1, "callback should have been invoked exactly once");
         assert_eq!(hostname, "wkstn-01", "callback should have read the agent hostname");
+        Ok(())
+    }
+
+    // ---- RBAC enforcement tests ----
+
+    #[test]
+    fn caller_role_guard_sets_and_clears_thread_local() {
+        // Initially no role is set.
+        let role = CALLER_ROLE.with(|cell| *cell.borrow());
+        assert!(role.is_none(), "caller role should be None before guard");
+
+        {
+            let _guard = CallerRoleGuard::enter(OperatorRole::Analyst);
+            let role = CALLER_ROLE.with(|cell| *cell.borrow());
+            assert_eq!(role, Some(OperatorRole::Analyst));
+        }
+
+        let role = CALLER_ROLE.with(|cell| *cell.borrow());
+        assert!(role.is_none(), "caller role should be None after guard drops");
+    }
+
+    #[test]
+    fn check_plugin_permission_allows_all_in_system_context() {
+        // Ensure no caller role is set (system context).
+        CALLER_ROLE.with(|cell| *cell.borrow_mut() = None);
+
+        for permission in [
+            crate::rbac::Permission::Read,
+            crate::rbac::Permission::TaskAgents,
+            crate::rbac::Permission::ManageListeners,
+            crate::rbac::Permission::Admin,
+        ] {
+            assert!(
+                check_plugin_permission(permission).is_ok(),
+                "system context should allow {}",
+                permission.as_str(),
+            );
+        }
+    }
+
+    #[test]
+    fn check_plugin_permission_admin_allows_everything() {
+        let _guard = CallerRoleGuard::enter(OperatorRole::Admin);
+        for permission in [
+            crate::rbac::Permission::Read,
+            crate::rbac::Permission::TaskAgents,
+            crate::rbac::Permission::ManageListeners,
+            crate::rbac::Permission::Admin,
+        ] {
+            assert!(
+                check_plugin_permission(permission).is_ok(),
+                "Admin should have {} permission",
+                permission.as_str(),
+            );
+        }
+    }
+
+    #[test]
+    fn check_plugin_permission_operator_denied_admin() {
+        let _guard = CallerRoleGuard::enter(OperatorRole::Operator);
+
+        assert!(check_plugin_permission(crate::rbac::Permission::Read).is_ok());
+        assert!(check_plugin_permission(crate::rbac::Permission::TaskAgents).is_ok());
+        assert!(check_plugin_permission(crate::rbac::Permission::ManageListeners).is_ok());
+        assert!(
+            check_plugin_permission(crate::rbac::Permission::Admin).is_err(),
+            "Operator should be denied Admin permission",
+        );
+    }
+
+    #[test]
+    fn check_plugin_permission_analyst_denied_write_operations() {
+        let _guard = CallerRoleGuard::enter(OperatorRole::Analyst);
+
+        assert!(check_plugin_permission(crate::rbac::Permission::Read).is_ok());
+        assert!(
+            check_plugin_permission(crate::rbac::Permission::TaskAgents).is_err(),
+            "Analyst should be denied TaskAgents permission",
+        );
+        assert!(
+            check_plugin_permission(crate::rbac::Permission::ManageListeners).is_err(),
+            "Analyst should be denied ManageListeners permission",
+        );
+        assert!(
+            check_plugin_permission(crate::rbac::Permission::Admin).is_err(),
+            "Analyst should be denied Admin permission",
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn invoke_registered_command_enforces_caller_role_in_python()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _reset = ActiveRuntimeReset::clear()?;
+        let (_database, registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-rbac-invoke").await?;
+
+        // Register an agent so the command can reference it.
+        let agent = sample_agent(0xBEEF_0001);
+        registry.insert(agent.clone()).await?;
+
+        // Register a Python command that tries to call list_agents() (requires Read).
+        let command_runtime = runtime.clone();
+        let handle = std::thread::spawn(move || {
+            let _cb_guard = CallbackRuntimeGuard::enter(&command_runtime);
+            Python::with_gil(|py| -> PyResult<()> {
+                command_runtime.install_api_module(py)?;
+                let module = PyModule::from_code(
+                    py,
+                    pyo3::ffi::c_str!(
+                        "import red_cell\n\
+                         \n\
+                         def my_command(agent, args):\n\
+                         \tagents = red_cell.list_agents()\n"
+                    ),
+                    pyo3::ffi::c_str!("test_rbac_read.py"),
+                    pyo3::ffi::c_str!("test_rbac_read"),
+                )?;
+                let callback = module.getattr("my_command")?.unbind();
+                command_runtime
+                    .block_on(command_runtime.register_command(
+                        "test_rbac_cmd".to_owned(),
+                        "test command for RBAC".to_owned(),
+                        callback,
+                    ))
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                Ok(())
+            })
+        });
+        handle.join().map_err(|_| "python test thread panicked")??;
+
+        // Admin should succeed.
+        let result = runtime
+            .invoke_registered_command(
+                "test_rbac_cmd",
+                "admin_user",
+                OperatorRole::Admin,
+                0xBEEF_0001,
+                vec![],
+            )
+            .await;
+        assert!(result.is_ok(), "Admin should be able to invoke the command");
+
+        // Analyst should also succeed because list_agents requires Read.
+        let result = runtime
+            .invoke_registered_command(
+                "test_rbac_cmd",
+                "analyst_user",
+                OperatorRole::Analyst,
+                0xBEEF_0001,
+                vec![],
+            )
+            .await;
+        assert!(result.is_ok(), "Analyst should be able to invoke read-only command");
+
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn invoke_registered_command_denies_analyst_task_agents()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _reset = ActiveRuntimeReset::clear()?;
+        let (_database, registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-rbac-deny-task").await?;
+
+        let agent = sample_agent(0xBEEF_0002);
+        registry.insert(agent.clone()).await?;
+
+        // Register a command that tries to task an agent (requires TaskAgents).
+        let command_runtime = runtime.clone();
+        let handle = std::thread::spawn(move || {
+            let _cb_guard = CallbackRuntimeGuard::enter(&command_runtime);
+            Python::with_gil(|py| -> PyResult<()> {
+                command_runtime.install_api_module(py)?;
+                let module = PyModule::from_code(
+                    py,
+                    pyo3::ffi::c_str!(
+                        "import red_cell\n\
+                         \n\
+                         def task_command(agent, args):\n\
+                         \tagent.task(99)\n"
+                    ),
+                    pyo3::ffi::c_str!("test_rbac_task.py"),
+                    pyo3::ffi::c_str!("test_rbac_task"),
+                )?;
+                let callback = module.getattr("task_command")?.unbind();
+                command_runtime
+                    .block_on(command_runtime.register_command(
+                        "test_task_cmd".to_owned(),
+                        "test task command".to_owned(),
+                        callback,
+                    ))
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                Ok(())
+            })
+        });
+        handle.join().map_err(|_| "python test thread panicked")??;
+
+        // Analyst should be denied because task() requires TaskAgents.
+        let result = runtime
+            .invoke_registered_command(
+                "test_task_cmd",
+                "analyst_user",
+                OperatorRole::Analyst,
+                0xBEEF_0002,
+                vec![],
+            )
+            .await;
+        assert!(result.is_err(), "Analyst should be denied agent tasking via plugin");
+
+        // Operator should succeed.
+        let result = runtime
+            .invoke_registered_command(
+                "test_task_cmd",
+                "operator_user",
+                OperatorRole::Operator,
+                0xBEEF_0002,
+                vec![],
+            )
+            .await;
+        assert!(result.is_ok(), "Operator should be able to task agents via plugin");
+
         Ok(())
     }
 }

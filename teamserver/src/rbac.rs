@@ -196,7 +196,7 @@ pub fn authorize_permission(
     session: &OperatorSession,
     permission: Permission,
 ) -> Result<(), AuthorizationError> {
-    if role_allows(session.role, permission) {
+    if role_grants(session.role, permission) {
         Ok(())
     } else {
         Err(AuthorizationError::PermissionDenied {
@@ -206,7 +206,8 @@ pub fn authorize_permission(
     }
 }
 
-const fn role_allows(role: OperatorRole, permission: Permission) -> bool {
+/// Return `true` when the given role includes the requested permission.
+pub const fn role_grants(role: OperatorRole, permission: Permission) -> bool {
     match role {
         OperatorRole::Admin => true,
         OperatorRole::Operator => {

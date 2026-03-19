@@ -1322,7 +1322,9 @@ async fn handle_agent_task(
     let agent_id = parse_agent_id(&message.info.demon_id)?;
     let command = message.info.command.clone().unwrap_or_else(|| message.info.command_line.clone());
     let parameters = serialize_for_audit(&message.info, "agent.task");
-    match execute_agent_task(registry, sockets, events, &session.username, message).await {
+    match execute_agent_task(registry, sockets, events, &session.username, session.role, message)
+        .await
+    {
         Ok(_) => {
             log_operator_action(
                 database,
@@ -1376,6 +1378,7 @@ pub(crate) async fn execute_agent_task(
     sockets: &SocketRelayManager,
     events: &EventBus,
     actor: &str,
+    caller_role: red_cell_common::config::OperatorRole,
     mut message: Message<red_cell_common::operator::AgentTaskInfo>,
 ) -> Result<usize, AgentCommandError> {
     message.head.user = actor.to_owned();
@@ -1394,7 +1397,9 @@ pub(crate) async fn execute_agent_task(
     } else {
         let handled_by_plugin = if let Some(plugins) = crate::PluginRuntime::current()? {
             if let Some((command, args)) = plugins.match_registered_command(&message.info).await {
-                plugins.invoke_registered_command(&command, actor, agent_id, args).await?
+                plugins
+                    .invoke_registered_command(&command, actor, caller_role, agent_id, args)
+                    .await?
             } else {
                 false
             }
@@ -5274,7 +5279,15 @@ mod tests {
             },
         };
 
-        let queued = execute_agent_task(&registry, &sockets, &events, "operator", message).await?;
+        let queued = execute_agent_task(
+            &registry,
+            &sockets,
+            &events,
+            "operator",
+            red_cell_common::config::OperatorRole::Admin,
+            message,
+        )
+        .await?;
         assert_eq!(queued, 1, "checkin command should queue exactly one job");
 
         // Allow the spawn_blocking inside invoke_callbacks to complete.

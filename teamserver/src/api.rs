@@ -1218,6 +1218,7 @@ async fn kill_agent(
         &state.sockets,
         &state.events,
         &identity.key_id,
+        identity.role,
         message,
     )
     .await
@@ -1313,6 +1314,7 @@ async fn queue_agent_task(
         &state.sockets,
         &state.events,
         &identity.key_id,
+        identity.role,
         Message {
             head: MessageHead {
                 event: EventCode::Session,

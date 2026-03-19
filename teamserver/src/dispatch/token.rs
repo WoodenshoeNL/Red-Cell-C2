@@ -701,6 +701,116 @@ mod tests {
     }
 
     #[test]
+    fn format_token_list_column_expansion_with_long_domain_user() {
+        // Multiple entries with varying domain\user lengths to verify column expansion.
+        let mut buf = Vec::new();
+        // Short name: "A\\B" (3 chars)
+        push_u32(&mut buf, 0);
+        push_u32(&mut buf, 0x10);
+        push_utf16(&mut buf, "A\\B");
+        push_u32(&mut buf, 100);
+        push_u32(&mut buf, 1);
+        push_u32(&mut buf, 0);
+        // Long name: "VERYLONGDOMAIN\\administratoraccount" (35 chars)
+        push_u32(&mut buf, 1);
+        push_u32(&mut buf, 0x20);
+        push_utf16(&mut buf, "VERYLONGDOMAIN\\administratoraccount");
+        push_u32(&mut buf, 200);
+        push_u32(&mut buf, 2);
+        push_u32(&mut buf, 1);
+
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_token_list(&mut parser).unwrap();
+
+        // The header "Domain\User" is 11 chars. The long name is 35 chars,
+        // so max_user should be 35 and columns should expand accordingly.
+        assert!(output.contains("VERYLONGDOMAIN\\administratoraccount"));
+        assert!(output.contains("A\\B"));
+
+        // Verify that data lines (rows with actual token data) share the same width,
+        // confirming column expansion is applied consistently.
+        let data_lines: Vec<&str> = output
+            .lines()
+            .filter(|l| !l.is_empty())
+            .skip(2) // skip header + separator
+            .collect();
+        assert_eq!(data_lines.len(), 2, "expected 2 data rows");
+        assert_eq!(
+            data_lines[0].len(),
+            data_lines[1].len(),
+            "data rows should have same width:\n  row0: '{}'\n  row1: '{}'",
+            data_lines[0],
+            data_lines[1]
+        );
+    }
+
+    #[test]
+    fn format_found_tokens_column_expansion_with_long_domain_user() {
+        let mut buf = Vec::new();
+        push_u32(&mut buf, 2); // num_tokens
+        // Short name
+        push_utf16(&mut buf, "X\\Y");
+        push_u32(&mut buf, 10);
+        push_u32(&mut buf, 0x50);
+        push_u32(&mut buf, 0x2000); // Medium
+        push_u32(&mut buf, 2); // Impersonation level
+        push_u32(&mut buf, 2); // Impersonation token
+        // Long name (wider than "Domain\User" header of 13 chars)
+        push_utf16(&mut buf, "LONGCORP\\very_long_username_here");
+        push_u32(&mut buf, 20);
+        push_u32(&mut buf, 0x60);
+        push_u32(&mut buf, 0x3000); // High
+        push_u32(&mut buf, 1); // Identification
+        push_u32(&mut buf, 2); // Impersonation token
+
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_found_tokens(&mut parser).unwrap();
+
+        assert!(output.contains("LONGCORP\\very_long_username_here"));
+        assert!(output.contains("X\\Y"));
+
+        // Verify column alignment: all table lines (header, separator, data) should have same length.
+        let table_lines: Vec<&str> =
+            output.lines().filter(|l| !l.is_empty() && !l.starts_with("To impersonate")).collect();
+        assert!(table_lines.len() >= 3);
+        let expected_len = table_lines[0].len();
+        for line in &table_lines {
+            assert_eq!(
+                line.len(),
+                expected_len,
+                "column misalignment in found_tokens:\n  expected len {expected_len}\n  got len {} for: '{line}'",
+                line.len()
+            );
+        }
+    }
+
+    #[test]
+    fn format_found_tokens_integrity_0x0fff_is_low() {
+        // 0x0FFF is <= LOW_RID (0x1000), so it's "Low"
+        let buf = build_found_token_payload(0x0FFF);
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_found_tokens(&mut parser).unwrap();
+        assert_eq!(get_integrity_from_output(&output), "Low");
+    }
+
+    #[test]
+    fn format_found_tokens_unknown_token_type() {
+        let mut buf = Vec::new();
+        push_u32(&mut buf, 1);
+        push_utf16(&mut buf, "DOM\\user");
+        push_u32(&mut buf, 42);
+        push_u32(&mut buf, 0x10);
+        push_u32(&mut buf, 0x2000); // Medium
+        push_u32(&mut buf, 0); // impersonation level
+        push_u32(&mut buf, 99); // unknown token_type_raw
+
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_found_tokens(&mut parser).unwrap();
+        assert!(output.contains("?"), "expected '?' for unknown token type: {output}");
+        assert!(output.contains("Unknown"), "expected 'Unknown' impersonation for unknown type");
+    }
+
+    #[test]
     fn format_found_tokens_delegation_has_remote_auth_yes() {
         let mut buf = Vec::new();
         push_u32(&mut buf, 1);

@@ -7286,4 +7286,25 @@ mod tests {
         // B should still be allowed.
         assert!(api.check_rate_limit(&subject_b).await.is_ok(), "B must be independent");
     }
+
+    #[tokio::test]
+    async fn disabled_api_rejects_authenticated_request() {
+        let app = test_router(None).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/listeners")
+                    .header("X-Api-Key", "arbitrary-key-value")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "api_disabled");
+    }
 }

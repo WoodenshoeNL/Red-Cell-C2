@@ -48,6 +48,14 @@ const MAX_OPERATOR_ACTIVITY: usize = 20;
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 
+/// Compute the next reconnect delay using exponential backoff.
+///
+/// Doubles `current` up to [`MAX_RECONNECT_DELAY`]. The caller is responsible
+/// for resetting to [`INITIAL_RECONNECT_DELAY`] after a successful connection.
+fn next_reconnect_delay(current: Duration) -> Duration {
+    std::cmp::min(current.saturating_mul(2), MAX_RECONNECT_DELAY)
+}
+
 /// A single command dispatched by an operator, recorded for the activity feed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OperatorActivityEntry {
@@ -1169,7 +1177,7 @@ async fn run_connection_manager(
             }
         }
 
-        reconnect_delay = std::cmp::min(reconnect_delay.saturating_mul(2), MAX_RECONNECT_DELAY);
+        reconnect_delay = next_reconnect_delay(reconnect_delay);
     }
 }
 
@@ -3450,5 +3458,62 @@ mod tests {
             matches!(err, TransportError::CustomCaRead { .. }),
             "expected CustomCaRead, got: {err}"
         );
+    }
+
+    #[test]
+    fn next_reconnect_delay_initial_value_doubles() {
+        let delay = next_reconnect_delay(INITIAL_RECONNECT_DELAY);
+        assert_eq!(delay, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn next_reconnect_delay_doubles_each_step() {
+        let mut delay = INITIAL_RECONNECT_DELAY;
+        let expected_secs = [2, 4, 8, 16];
+        for &expected in &expected_secs {
+            delay = next_reconnect_delay(delay);
+            assert_eq!(delay, Duration::from_secs(expected));
+        }
+    }
+
+    #[test]
+    fn next_reconnect_delay_saturates_at_max() {
+        let mut delay = INITIAL_RECONNECT_DELAY;
+        // Run enough iterations to well exceed MAX_RECONNECT_DELAY (30s).
+        for _ in 0..20 {
+            delay = next_reconnect_delay(delay);
+        }
+        assert_eq!(delay, MAX_RECONNECT_DELAY);
+    }
+
+    #[test]
+    fn next_reconnect_delay_at_boundary_does_not_exceed_max() {
+        // 16s -> 32s would exceed 30s cap.
+        let delay = next_reconnect_delay(Duration::from_secs(16));
+        assert_eq!(delay, MAX_RECONNECT_DELAY);
+    }
+
+    #[test]
+    fn next_reconnect_delay_already_at_max_stays_at_max() {
+        let delay = next_reconnect_delay(MAX_RECONNECT_DELAY);
+        assert_eq!(delay, MAX_RECONNECT_DELAY);
+    }
+
+    #[test]
+    fn reconnect_delay_resets_after_success() {
+        // Simulate several backoff steps then a successful connection reset.
+        let mut delay = INITIAL_RECONNECT_DELAY;
+        for _ in 0..5 {
+            delay = next_reconnect_delay(delay);
+        }
+        assert!(delay > INITIAL_RECONNECT_DELAY);
+
+        // On success the connection manager resets to INITIAL_RECONNECT_DELAY.
+        delay = INITIAL_RECONNECT_DELAY;
+        assert_eq!(delay, Duration::from_secs(1));
+
+        // Next failure should start doubling from the initial value again.
+        let after_reset = next_reconnect_delay(delay);
+        assert_eq!(after_reset, Duration::from_secs(2));
     }
 }

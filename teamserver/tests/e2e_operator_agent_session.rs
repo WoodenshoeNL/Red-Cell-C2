@@ -91,6 +91,22 @@ async fn operator_session_listener_and_mock_demon_round_trip()
     assert_eq!(message.info.listener, "edge-http");
     assert_eq!(message.info.hostname, "wkstn-01");
 
+    // Connect a second operator mid-session and verify the agent appears in the
+    // snapshot — mirrors the check already present in the SMB round-trip test.
+    let (mut snapshot_socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut snapshot_socket).await?;
+    let snapshot_agent = read_until_operator_message(&mut snapshot_socket, |msg| {
+        matches!(msg, OperatorMessage::AgentNew(_))
+    })
+    .await?;
+    let OperatorMessage::AgentNew(snapshot_msg) = snapshot_agent else {
+        panic!("expected agent snapshot event for second operator");
+    };
+    assert_eq!(snapshot_msg.info.name_id, "12345678");
+    assert_eq!(snapshot_msg.info.listener, "edge-http");
+    assert_eq!(snapshot_msg.info.hostname, "wkstn-01");
+    snapshot_socket.close(None).await?;
+
     socket.send(ClientMessage::Text(agent_task_message("2A").into())).await?;
 
     let task_echo = common::read_operator_message(&mut socket).await?;

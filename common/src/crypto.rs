@@ -436,9 +436,19 @@ mod tests {
 
     #[test]
     fn hash_password_sha3_handles_non_ascii_unicode() {
-        // Multi-byte UTF-8: CJK ideograph, emoji, accented chars.
+        // Multi-byte UTF-8: CJK ideograph, emoji, accented chars — verified against
+        // Python hashlib.sha3_256 reference digests.
         let digest_cjk = hash_password_sha3("密码");
-        assert_eq!(digest_cjk.len(), 64, "SHA3-256 hex digest must be 64 chars");
+        assert_eq!(
+            digest_cjk, "66855cb24193f8e5b6a310b6ba67509a7e0dfd71dbdda86f281d0cd0d17439bf",
+            "CJK digest must match independent Python reference"
+        );
+
+        let digest_mixed = hash_password_sha3("pässwörd☕");
+        assert_eq!(
+            digest_mixed, "70d79f7947244428870bc5e3cc0844598ea5524189996ad9b1cd27629459a2a2",
+            "mixed accented/emoji digest must match independent Python reference"
+        );
 
         let digest_emoji = hash_password_sha3("🔑secret🔒");
         assert_eq!(digest_emoji.len(), 64);
@@ -446,9 +456,9 @@ mod tests {
         let digest_accent = hash_password_sha3("contraseña");
         assert_eq!(digest_accent.len(), 64);
 
-        // All three must be distinct from each other and from ASCII.
+        // All four must be distinct from each other and from ASCII.
         let digest_ascii = hash_password_sha3("password");
-        let all = [&digest_cjk, &digest_emoji, &digest_accent, &digest_ascii];
+        let all = [&digest_cjk, &digest_mixed, &digest_emoji, &digest_accent, &digest_ascii];
         for (i, a) in all.iter().enumerate() {
             for (j, b) in all.iter().enumerate() {
                 if i != j {
@@ -456,6 +466,42 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Verifies that visually identical strings in NFC vs NFD normalization produce
+    /// different SHA3-256 digests.  This documents the expected behavior: `hash_password_sha3`
+    /// hashes raw UTF-8 bytes without normalizing, so clients and teamserver must agree on
+    /// normalization form (or skip it) to avoid locking out operators with Unicode passwords.
+    #[test]
+    fn hash_password_sha3_nfc_vs_nfd_produce_different_digests() {
+        // U+00E4 'ä' (NFC, 2 UTF-8 bytes: c3 a4) vs U+0061 U+0308 'ä' (NFD, 3 UTF-8 bytes: 61 cc 88)
+        let nfc = "\u{00E4}"; // ä precomposed
+        let nfd = "\u{0061}\u{0308}"; // a + combining diaeresis
+
+        // Sanity: both render as 'ä' but have different byte representations.
+        assert_ne!(
+            nfc.as_bytes(),
+            nfd.as_bytes(),
+            "NFC and NFD must have different byte sequences"
+        );
+
+        let hash_nfc = hash_password_sha3(nfc);
+        let hash_nfd = hash_password_sha3(nfd);
+
+        // Verified against Python hashlib.sha3_256 reference values.
+        assert_eq!(
+            hash_nfc, "eeacc3cbcb4d927171c6a503cd9ad5f5a9c094b9464d7c73a1a5b9c0e00dc089",
+            "NFC 'ä' digest must match Python reference"
+        );
+        assert_eq!(
+            hash_nfd, "5c31be24bdfa8f8e858e0f86d97b225c7de45061d2f3373e24ed87df0c54c471",
+            "NFD 'ä' digest must match Python reference"
+        );
+
+        assert_ne!(
+            hash_nfc, hash_nfd,
+            "NFC and NFD forms of the same visual character must produce different digests"
+        );
     }
 
     #[test]

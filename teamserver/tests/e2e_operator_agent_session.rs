@@ -17,7 +17,7 @@ use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_
 use red_cell_common::demon::{DemonCommand, DemonMessage};
 use red_cell_common::operator::{
     AgentResponseInfo, AgentTaskInfo, EventCode, FlatInfo, ListenerInfo, ListenerMarkInfo, Message,
-    MessageHead, OperatorMessage,
+    MessageHead, NameInfo, OperatorMessage,
 };
 use red_cell_common::{HttpListenerConfig, ListenerConfig, SmbListenerConfig};
 use serde_json::Value;
@@ -452,6 +452,70 @@ async fn analyst_cannot_create_listener() -> Result<(), Box<dyn std::error::Erro
             protocol: Some("Http".to_owned()),
             ..ListenerInfo::default()
         },
+    }))?;
+    socket.send(ClientMessage::Text(msg.into())).await?;
+
+    assert_connection_closed_after_rbac_denial(&mut socket).await
+}
+
+#[tokio::test]
+async fn analyst_cannot_edit_listener() -> Result<(), Box<dyn std::error::Error>> {
+    let addr = common::spawn_test_server(multi_role_profile()).await?.addr;
+    let (mut socket, _) = connect_async(format!("ws://{addr}/")).await?;
+    common::login_as(&mut socket, "analyst", "analystpw").await?;
+
+    let msg = serde_json::to_string(&OperatorMessage::ListenerEdit(Message {
+        head: MessageHead {
+            event: EventCode::Listener,
+            user: "analyst".to_owned(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info: ListenerInfo {
+            name: Some("edge-http".to_owned()),
+            protocol: Some("Http".to_owned()),
+            ..ListenerInfo::default()
+        },
+    }))?;
+    socket.send(ClientMessage::Text(msg.into())).await?;
+
+    assert_connection_closed_after_rbac_denial(&mut socket).await
+}
+
+#[tokio::test]
+async fn analyst_cannot_remove_listener() -> Result<(), Box<dyn std::error::Error>> {
+    let addr = common::spawn_test_server(multi_role_profile()).await?.addr;
+    let (mut socket, _) = connect_async(format!("ws://{addr}/")).await?;
+    common::login_as(&mut socket, "analyst", "analystpw").await?;
+
+    let msg = serde_json::to_string(&OperatorMessage::ListenerRemove(Message {
+        head: MessageHead {
+            event: EventCode::Listener,
+            user: "analyst".to_owned(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info: NameInfo { name: "edge-http".to_owned() },
+    }))?;
+    socket.send(ClientMessage::Text(msg.into())).await?;
+
+    assert_connection_closed_after_rbac_denial(&mut socket).await
+}
+
+#[tokio::test]
+async fn analyst_cannot_mark_listener() -> Result<(), Box<dyn std::error::Error>> {
+    let addr = common::spawn_test_server(multi_role_profile()).await?.addr;
+    let (mut socket, _) = connect_async(format!("ws://{addr}/")).await?;
+    common::login_as(&mut socket, "analyst", "analystpw").await?;
+
+    let msg = serde_json::to_string(&OperatorMessage::ListenerMark(Message {
+        head: MessageHead {
+            event: EventCode::Listener,
+            user: "analyst".to_owned(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info: ListenerMarkInfo { name: "edge-http".to_owned(), mark: "Online".to_owned() },
     }))?;
     socket.send(ClientMessage::Text(msg.into())).await?;
 

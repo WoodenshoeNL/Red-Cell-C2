@@ -3516,4 +3516,133 @@ mod tests {
         let after_reset = next_reconnect_delay(delay);
         assert_eq!(after_reset, Duration::from_secs(2));
     }
+
+    #[test]
+    fn spawn_connects_to_mock_websocket_server() {
+        // Bind a TCP listener on a random port using std (so we can get the port
+        // synchronously before spawning any async runtime).
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind to random port");
+        let port = std_listener.local_addr().expect("local addr").port();
+        std_listener.set_nonblocking(true).expect("set nonblocking");
+
+        // Run a mock WebSocket server on a background thread with its own runtime.
+        let server_handle = std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().expect("server runtime");
+            rt.block_on(async {
+                let listener =
+                    TcpListener::from_std(std_listener).expect("convert to tokio listener");
+                if let Ok((stream, _)) = listener.accept().await {
+                    let _ws = accept_async(stream).await.ok();
+                    // Keep the connection alive long enough for the client to observe
+                    // Connected status.
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            });
+        });
+
+        let app_state: SharedAppState = Arc::new(Mutex::new(AppState::new(String::new())));
+        let ctx = egui::Context::default();
+
+        let transport = ClientTransport::spawn(
+            format!("ws://127.0.0.1:{port}"),
+            app_state.clone(),
+            ctx,
+            None,
+            TlsVerification::DangerousSkipVerify,
+        )
+        .expect("spawn should succeed");
+
+        // Poll until the connection manager reaches Connected status.
+        let mut connected = false;
+        for _ in 0..50 {
+            std::thread::sleep(Duration::from_millis(100));
+            let state = lock_app_state(&app_state);
+            if matches!(state.connection_status, ConnectionStatus::Connected) {
+                connected = true;
+                break;
+            }
+        }
+
+        assert!(connected, "transport should reach Connected status");
+
+        drop(transport);
+        server_handle.join().ok();
+    }
+
+    #[test]
+    fn spawn_reports_error_for_refused_connection() {
+        // Bind then immediately drop to obtain a port with nothing listening.
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind to random port");
+            listener.local_addr().expect("local addr").port()
+        };
+
+        let app_state: SharedAppState = Arc::new(Mutex::new(AppState::new(String::new())));
+        let ctx = egui::Context::default();
+
+        // spawn() itself must not panic even when the target is unreachable.
+        let transport = ClientTransport::spawn(
+            format!("ws://127.0.0.1:{port}"),
+            app_state.clone(),
+            ctx,
+            None,
+            TlsVerification::DangerousSkipVerify,
+        )
+        .expect("spawn should not panic for unreachable target");
+
+        // The connection manager should eventually transition to Retrying or Error.
+        let mut saw_failure_status = false;
+        for _ in 0..50 {
+            std::thread::sleep(Duration::from_millis(100));
+            let state = lock_app_state(&app_state);
+            match &state.connection_status {
+                ConnectionStatus::Retrying(_) | ConnectionStatus::Error(_) => {
+                    saw_failure_status = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            saw_failure_status,
+            "transport should report Retrying or Error for a refused connection"
+        );
+
+        drop(transport);
+    }
+
+    #[test]
+    fn outgoing_sender_delivers_messages_to_channel() {
+        // Build a ClientTransport by hand so we retain a handle to the receiver.
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel();
+        let transport = ClientTransport { runtime: None, shutdown_tx, outgoing_tx };
+
+        let sender = transport.outgoing_sender();
+
+        // Send a message via the cloned sender.
+        let msg = OperatorMessage::Login(Message {
+            head: head(EventCode::InitConnection),
+            info: LoginInfo { user: "test-user".to_owned(), password: "hunter2".to_owned() },
+        });
+        sender.send(msg).expect("send via cloned sender should succeed");
+
+        // The message must arrive on the receiver.
+        assert!(
+            outgoing_rx.try_recv().is_ok(),
+            "message sent via outgoing_sender should appear on the receiver"
+        );
+
+        // The original transport sender should still work after cloning.
+        let msg2 = OperatorMessage::Login(Message {
+            head: head(EventCode::InitConnection),
+            info: LoginInfo { user: "another-user".to_owned(), password: "pass".to_owned() },
+        });
+        transport.queue_message(msg2).expect("queue_message via original sender should succeed");
+        assert!(
+            outgoing_rx.try_recv().is_ok(),
+            "message sent via queue_message should also arrive"
+        );
+    }
 }

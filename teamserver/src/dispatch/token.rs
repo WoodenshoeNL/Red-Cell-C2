@@ -404,3 +404,322 @@ fn format_found_tokens(parser: &mut CallbackParser<'_>) -> Result<String, Comman
     output.push_str("\nTo impersonate a user, run: token steal [process id] (handle)");
     Ok(output)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::CallbackParser;
+
+    /// Helper: append a little-endian u32 to a buffer.
+    fn push_u32(buf: &mut Vec<u8>, val: u32) {
+        buf.extend_from_slice(&val.to_le_bytes());
+    }
+
+    /// Helper: append a length-prefixed UTF-16LE string (as CallbackParser::read_utf16 expects).
+    fn push_utf16(buf: &mut Vec<u8>, s: &str) {
+        let words: Vec<u16> = s.encode_utf16().collect();
+        let byte_len = (words.len() * 2) as u32;
+        push_u32(buf, byte_len);
+        for w in &words {
+            buf.extend_from_slice(&w.to_le_bytes());
+        }
+    }
+
+    /// Helper: append a length-prefixed UTF-8 string (as CallbackParser::read_string expects).
+    fn push_string(buf: &mut Vec<u8>, s: &str) {
+        push_u32(buf, s.len() as u32);
+        buf.extend_from_slice(s.as_bytes());
+    }
+
+    // -----------------------------------------------------------------------
+    // format_token_list tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn format_token_list_empty() {
+        let buf = Vec::new();
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_token_list(&mut parser).unwrap();
+        assert_eq!(output, "\nThe token vault is empty");
+    }
+
+    #[test]
+    fn format_token_list_stolen_impersonating() {
+        let mut buf = Vec::new();
+        // index=0, handle=0x10, domain_user="CORP\\admin", pid=1234, type=1 (stolen), impersonating=1
+        push_u32(&mut buf, 0);
+        push_u32(&mut buf, 0x10);
+        push_utf16(&mut buf, "CORP\\admin");
+        push_u32(&mut buf, 1234);
+        push_u32(&mut buf, 1); // stolen
+        push_u32(&mut buf, 1); // impersonating
+
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_token_list(&mut parser).unwrap();
+        assert!(output.contains("stolen"), "expected 'stolen' in output: {output}");
+        assert!(output.contains("Yes"), "expected 'Yes' for impersonating");
+        assert!(output.contains("CORP\\admin"));
+    }
+
+    #[test]
+    fn format_token_list_make_local_not_impersonating() {
+        let mut buf = Vec::new();
+        push_u32(&mut buf, 1);
+        push_u32(&mut buf, 0x20);
+        push_utf16(&mut buf, "LOCAL\\user");
+        push_u32(&mut buf, 5678);
+        push_u32(&mut buf, 2); // make (local)
+        push_u32(&mut buf, 0); // not impersonating
+
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_token_list(&mut parser).unwrap();
+        assert!(output.contains("make (local)"));
+        assert!(output.contains("No"));
+    }
+
+    #[test]
+    fn format_token_list_make_network() {
+        let mut buf = Vec::new();
+        push_u32(&mut buf, 2);
+        push_u32(&mut buf, 0x30);
+        push_utf16(&mut buf, "NET\\svc");
+        push_u32(&mut buf, 9999);
+        push_u32(&mut buf, 3); // make (network)
+        push_u32(&mut buf, 0);
+
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_token_list(&mut parser).unwrap();
+        assert!(output.contains("make (network)"));
+    }
+
+    #[test]
+    fn format_token_list_unknown_type() {
+        let mut buf = Vec::new();
+        push_u32(&mut buf, 0);
+        push_u32(&mut buf, 0x40);
+        push_utf16(&mut buf, "X\\Y");
+        push_u32(&mut buf, 42);
+        push_u32(&mut buf, 99); // unknown type
+        push_u32(&mut buf, 0);
+
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_token_list(&mut parser).unwrap();
+        assert!(output.contains("unknown"));
+    }
+
+    // -----------------------------------------------------------------------
+    // format_token_privs_list tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn format_token_privs_list_all_states() {
+        let mut buf = Vec::new();
+        // state 3 = Enabled
+        push_string(&mut buf, "SeDebugPrivilege");
+        push_u32(&mut buf, 3);
+        // state 2 = Adjusted
+        push_string(&mut buf, "SeBackupPrivilege");
+        push_u32(&mut buf, 2);
+        // state 0 = Disabled
+        push_string(&mut buf, "SeShutdownPrivilege");
+        push_u32(&mut buf, 0);
+        // unknown state
+        push_string(&mut buf, "SeRestorePrivilege");
+        push_u32(&mut buf, 99);
+
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_token_privs_list(&mut parser).unwrap();
+        assert!(output.contains("SeDebugPrivilege :: Enabled"));
+        assert!(output.contains("SeBackupPrivilege :: Adjusted"));
+        assert!(output.contains("SeShutdownPrivilege :: Disabled"));
+        assert!(output.contains("SeRestorePrivilege :: Unknown"));
+    }
+
+    #[test]
+    fn format_token_privs_list_empty() {
+        let buf = Vec::new();
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_token_privs_list(&mut parser).unwrap();
+        assert_eq!(output, "\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // format_found_tokens tests — integrity level boundaries
+    // -----------------------------------------------------------------------
+
+    /// Build a found-tokens payload with a single token at the given integrity level.
+    fn build_found_token_payload(integrity_level: u32) -> Vec<u8> {
+        let mut buf = Vec::new();
+        push_u32(&mut buf, 1); // num_tokens = 1
+        push_utf16(&mut buf, "DOMAIN\\user");
+        push_u32(&mut buf, 1000); // pid
+        push_u32(&mut buf, 0x100); // handle
+        push_u32(&mut buf, integrity_level);
+        push_u32(&mut buf, 2); // impersonation level (Impersonation)
+        push_u32(&mut buf, 2); // token_type = Impersonation
+        buf
+    }
+
+    fn get_integrity_from_output(output: &str) -> String {
+        // The integrity value appears in the table body (skip the header lines).
+        // Table lines look like: " DOMAIN\user  Low       Impersonation  ..."
+        for line in output.lines().skip(3) {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 {
+                return parts[1].to_string();
+            }
+        }
+        panic!("Could not find integrity value in output:\n{output}");
+    }
+
+    #[test]
+    fn format_found_tokens_integrity_0x0000_is_low() {
+        let buf = build_found_token_payload(0x0000);
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_found_tokens(&mut parser).unwrap();
+        assert_eq!(get_integrity_from_output(&output), "Low");
+    }
+
+    #[test]
+    fn format_found_tokens_integrity_0x1000_is_low() {
+        let buf = build_found_token_payload(0x1000);
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_found_tokens(&mut parser).unwrap();
+        assert_eq!(get_integrity_from_output(&output), "Low");
+    }
+
+    #[test]
+    fn format_found_tokens_integrity_0x1001_falls_through_to_low() {
+        // This is the gap: 0x1001 is above LOW_RID but below MEDIUM_RID,
+        // and falls through all range checks to the else branch ("Low").
+        let buf = build_found_token_payload(0x1001);
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_found_tokens(&mut parser).unwrap();
+        assert_eq!(get_integrity_from_output(&output), "Low");
+    }
+
+    #[test]
+    fn format_found_tokens_integrity_0x1fff_falls_through_to_low() {
+        let buf = build_found_token_payload(0x1FFF);
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_found_tokens(&mut parser).unwrap();
+        assert_eq!(get_integrity_from_output(&output), "Low");
+    }
+
+    #[test]
+    fn format_found_tokens_integrity_0x2000_is_medium() {
+        let buf = build_found_token_payload(0x2000);
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_found_tokens(&mut parser).unwrap();
+        assert_eq!(get_integrity_from_output(&output), "Medium");
+    }
+
+    #[test]
+    fn format_found_tokens_integrity_0x2fff_is_medium() {
+        let buf = build_found_token_payload(0x2FFF);
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_found_tokens(&mut parser).unwrap();
+        assert_eq!(get_integrity_from_output(&output), "Medium");
+    }
+
+    #[test]
+    fn format_found_tokens_integrity_0x3000_is_high() {
+        let buf = build_found_token_payload(0x3000);
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_found_tokens(&mut parser).unwrap();
+        assert_eq!(get_integrity_from_output(&output), "High");
+    }
+
+    #[test]
+    fn format_found_tokens_integrity_0x3fff_is_high() {
+        let buf = build_found_token_payload(0x3FFF);
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_found_tokens(&mut parser).unwrap();
+        assert_eq!(get_integrity_from_output(&output), "High");
+    }
+
+    #[test]
+    fn format_found_tokens_integrity_0x4000_is_system() {
+        let buf = build_found_token_payload(0x4000);
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_found_tokens(&mut parser).unwrap();
+        assert_eq!(get_integrity_from_output(&output), "System");
+    }
+
+    #[test]
+    fn format_found_tokens_zero_count() {
+        let mut buf = Vec::new();
+        push_u32(&mut buf, 0); // num_tokens = 0
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_found_tokens(&mut parser).unwrap();
+        assert_eq!(output, "\nNo tokens found");
+    }
+
+    #[test]
+    fn format_found_tokens_primary_token_type() {
+        let mut buf = Vec::new();
+        push_u32(&mut buf, 1);
+        push_utf16(&mut buf, "NT AUTHORITY\\SYSTEM");
+        push_u32(&mut buf, 4); // pid
+        push_u32(&mut buf, 0x200); // handle
+        push_u32(&mut buf, 0x4000); // SYSTEM integrity
+        push_u32(&mut buf, 0); // impersonation level (unused for Primary)
+        push_u32(&mut buf, 1); // token_type = Primary
+
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_found_tokens(&mut parser).unwrap();
+        assert!(output.contains("Primary"), "expected 'Primary' in output: {output}");
+        assert!(output.contains("N/A"), "expected 'N/A' impersonation for Primary");
+    }
+
+    #[test]
+    fn format_found_tokens_impersonation_levels() {
+        // Test all impersonation levels for token_type=2
+        let levels = [
+            (0u32, "Anonymous"),
+            (1, "Identification"),
+            (2, "Impersonation"),
+            (3, "Delegation"),
+            (99, "Unknown"),
+        ];
+        for (imp_level, expected_label) in &levels {
+            let mut buf = Vec::new();
+            push_u32(&mut buf, 1);
+            push_utf16(&mut buf, "CORP\\user");
+            push_u32(&mut buf, 100);
+            push_u32(&mut buf, 0x50);
+            push_u32(&mut buf, 0x2000); // Medium integrity
+            push_u32(&mut buf, *imp_level);
+            push_u32(&mut buf, 2); // Impersonation token type
+
+            let mut parser = CallbackParser::new(&buf, 0);
+            let output = super::format_found_tokens(&mut parser).unwrap();
+            assert!(
+                output.contains(expected_label),
+                "imp_level={imp_level}: expected '{expected_label}' in output: {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_found_tokens_delegation_has_remote_auth_yes() {
+        let mut buf = Vec::new();
+        push_u32(&mut buf, 1);
+        push_utf16(&mut buf, "CORP\\admin");
+        push_u32(&mut buf, 500);
+        push_u32(&mut buf, 0x60);
+        push_u32(&mut buf, 0x3000); // High
+        push_u32(&mut buf, 3); // Delegation
+        push_u32(&mut buf, 2); // Impersonation token
+
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_found_tokens(&mut parser).unwrap();
+        // For delegation (impersonation_level=3), remote_auth should be "Yes"
+        // The table has: LocalAuth=Yes, RemoteAuth=Yes
+        // Count "Yes" occurrences — should appear for both LocalAuth and RemoteAuth
+        let yes_count = output.matches("Yes").count();
+        assert!(
+            yes_count >= 2,
+            "expected at least 2 'Yes' (Local+Remote) for delegation: {output}"
+        );
+    }
+}

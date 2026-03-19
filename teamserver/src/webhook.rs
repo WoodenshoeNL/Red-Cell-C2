@@ -309,23 +309,27 @@ struct DiscordEmbed<'a> {
 
 impl<'a> DiscordEmbed<'a> {
     fn from_record(record: &'a AuditRecord) -> Self {
+        let actor = sanitize_discord_text(&record.actor);
+        let action = sanitize_discord_text(&record.action);
+        let target_kind = sanitize_discord_text(&record.target_kind);
+
         let mut fields = vec![
-            DiscordField::new("Actor", record.actor.clone(), true),
-            DiscordField::new("Action", record.action.clone(), true),
-            DiscordField::new("Target", record.target_kind.clone(), true),
+            DiscordField::new("Actor", actor.clone(), true),
+            DiscordField::new("Action", action.clone(), true),
+            DiscordField::new("Target", target_kind.clone(), true),
             DiscordField::new("Result", record.result_status.as_str().to_owned(), true),
         ];
 
         if let Some(target_id) = &record.target_id {
-            fields.push(DiscordField::new("Target ID", target_id.clone(), true));
+            fields.push(DiscordField::new("Target ID", sanitize_discord_text(target_id), true));
         }
 
         if let Some(agent_id) = &record.agent_id {
-            fields.push(DiscordField::new("Agent ID", agent_id.clone(), true));
+            fields.push(DiscordField::new("Agent ID", sanitize_discord_text(agent_id), true));
         }
 
         if let Some(command) = &record.command {
-            fields.push(DiscordField::new("Command", command.clone(), true));
+            fields.push(DiscordField::new("Command", sanitize_discord_text(command), true));
         }
 
         if let Some(parameters) = &record.parameters {
@@ -334,10 +338,7 @@ impl<'a> DiscordEmbed<'a> {
 
         Self {
             title: "Red Cell audit event",
-            description: format!(
-                "{} recorded `{}` against `{}`.",
-                record.actor, record.action, record.target_kind
-            ),
+            description: format!("{actor} recorded `{action}` against `{target_kind}`."),
             color: if record.result_status == AuditResultStatus::Success {
                 SUCCESS_COLOR
             } else {
@@ -347,6 +348,25 @@ impl<'a> DiscordEmbed<'a> {
             timestamp: &record.occurred_at,
         }
     }
+}
+
+/// Sanitize a string for safe embedding in Discord messages.
+///
+/// Strips characters and patterns that could break embed formatting or trigger
+/// unintended Discord mentions:
+/// - Backticks are removed (would break inline-code delimiters in the description).
+/// - Newlines and carriage returns are replaced with spaces.
+/// - `@everyone` and `@here` are defused by inserting a zero-width space after `@`.
+/// - Angle-bracket mention syntax (`<@…>`, `<@&…>`, `<#…>`) is stripped of the
+///   leading `<` so Discord does not parse them as mentions.
+fn sanitize_discord_text(input: &str) -> String {
+    let mut result = input.replace('`', "").replace(['\n', '\r'], " ");
+    // Defuse broadcast mentions by inserting a zero-width space (U+200B) after @.
+    result = result.replace("@everyone", "@\u{200b}everyone");
+    result = result.replace("@here", "@\u{200b}here");
+    // Defuse user/role/channel mention syntax: <@id>, <@&id>, <#id>.
+    result = result.replace("<@", "\u{200b}<@");
+    result
 }
 
 #[derive(Debug, Serialize)]
@@ -1348,5 +1368,131 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    /// Discord embed must sanitize special characters in audit record fields:
+    /// backticks, newlines, `@everyone`/`@here` mentions, and angle-bracket
+    /// mention syntax must not appear raw in the delivered payload.
+    #[tokio::test]
+    async fn discord_embed_sanitizes_special_characters_in_audit_fields() {
+        let (address, mut receiver, server) = webhook_server(HttpStatusCode::OK).await;
+        let profile = discord_profile(address);
+        let notifier = AuditWebhookNotifier::from_profile(&profile);
+
+        let record = AuditRecord {
+            id: 200,
+            actor: "op`erator".to_owned(),
+            action: "@everyone".to_owned(),
+            target_kind: "agent\ninjected".to_owned(),
+            target_id: Some("<@123456>".to_owned()),
+            agent_id: Some("normal-id".to_owned()),
+            command: Some("@here".to_owned()),
+            parameters: None,
+            result_status: AuditResultStatus::Success,
+            occurred_at: "2026-03-18T12:00:00Z".to_owned(),
+        };
+
+        notifier.notify_audit_record(&record).await.expect("webhook delivery should succeed");
+
+        let payload = receiver.recv().await.expect("payload should arrive");
+        server.abort();
+
+        // The payload must be well-formed JSON (it parsed via serde already).
+        let embed = &payload["embeds"][0];
+        let description = embed["description"].as_str().expect("description should be a string");
+
+        // The format string uses backticks for markdown: "X recorded `Y` against `Z`."
+        // The actor value (op`erator → operator) must not introduce extra backticks
+        // that would break the inline-code delimiters.  Count: exactly 4 backticks
+        // from the format template.
+        let backtick_count = description.chars().filter(|&c| c == '`').count();
+        assert_eq!(
+            backtick_count, 4,
+            "description must contain exactly the 4 template backticks, not extras from input; got: {description}"
+        );
+
+        // @everyone must be defused (zero-width space inserted).
+        assert!(
+            !description.contains("@everyone"),
+            "description must not contain raw @everyone; got: {description}"
+        );
+
+        // Newlines must be replaced with spaces.
+        assert!(
+            !description.contains('\n'),
+            "description must not contain raw newlines; got: {description}"
+        );
+
+        // Verify field-level sanitization.
+        let fields = embed["fields"].as_array().expect("embed fields should be an array");
+
+        let actor_value = &fields[0]["value"];
+        assert_eq!(actor_value, "operator", "backtick must be stripped from actor field value");
+
+        let action_value = fields[1]["value"].as_str().expect("action value should be a string");
+        assert!(
+            !action_value.contains("@everyone") || action_value.contains("@\u{200b}everyone"),
+            "action field must defuse @everyone; got: {action_value}"
+        );
+
+        let target_value = fields[2]["value"].as_str().expect("target value should be a string");
+        assert!(
+            !target_value.contains('\n'),
+            "target field must not contain raw newlines; got: {target_value}"
+        );
+
+        // target_id with angle-bracket mention syntax must be defused.
+        let target_id_field = fields
+            .iter()
+            .find(|f| f["name"] == "Target ID")
+            .expect("Target ID field should be present");
+        let target_id_value =
+            target_id_field["value"].as_str().expect("target_id value should be a string");
+        assert!(
+            !target_id_value.starts_with("<@"),
+            "target_id must not start with raw <@ mention syntax; got: {target_id_value}"
+        );
+
+        // command field with @here must be defused.
+        let command_field = fields
+            .iter()
+            .find(|f| f["name"] == "Command")
+            .expect("Command field should be present");
+        let command_value =
+            command_field["value"].as_str().expect("command value should be a string");
+        assert!(
+            !command_value.contains("@here") || command_value.contains("@\u{200b}here"),
+            "command field must defuse @here; got: {command_value}"
+        );
+    }
+
+    /// Unit test for the `sanitize_discord_text` helper covering all sanitization rules.
+    #[test]
+    fn sanitize_discord_text_covers_all_rules() {
+        use super::sanitize_discord_text;
+
+        // Backticks are removed.
+        assert_eq!(sanitize_discord_text("a`b`c"), "abc");
+
+        // Newlines and carriage returns become spaces.
+        assert_eq!(sanitize_discord_text("line1\nline2\rline3"), "line1 line2 line3");
+
+        // @everyone and @here are defused with zero-width space.
+        let everyone = sanitize_discord_text("@everyone");
+        assert!(!everyone.contains("@everyone") || everyone.contains("@\u{200b}everyone"));
+        assert!(everyone.contains("@\u{200b}everyone"));
+
+        let here = sanitize_discord_text("@here");
+        assert!(here.contains("@\u{200b}here"));
+
+        // Angle-bracket mentions are defused.
+        let user_mention = sanitize_discord_text("<@123>");
+        assert!(!user_mention.starts_with("<@"));
+
+        let role_mention = sanitize_discord_text("<@&456>");
+        assert!(!role_mention.starts_with("<@"));
+
+        // Plain text passes through unchanged.
+        assert_eq!(sanitize_discord_text("hello world"), "hello world");
     }
 }

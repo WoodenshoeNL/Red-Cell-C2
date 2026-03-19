@@ -2690,6 +2690,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn add_link_rejects_nonexistent_parent() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database);
+        let child = sample_agent(0x1000_00E0);
+        registry.insert(child.clone()).await?;
+
+        let unknown_parent = 0xDEAD_0001u32;
+        let result = registry.add_link(unknown_parent, child.agent_id).await;
+
+        assert!(
+            matches!(
+                result,
+                Err(TeamserverError::AgentNotFound { agent_id }) if agent_id == unknown_parent
+            ),
+            "expected AgentNotFound for unknown parent, got {result:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn add_link_rejects_nonexistent_child() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database);
+        let parent = sample_agent(0x1000_00F0);
+        registry.insert(parent.clone()).await?;
+
+        let unknown_child = 0xDEAD_0002u32;
+        let result = registry.add_link(parent.agent_id, unknown_child).await;
+
+        assert!(
+            matches!(
+                result,
+                Err(TeamserverError::AgentNotFound { agent_id }) if agent_id == unknown_child
+            ),
+            "expected AgentNotFound for unknown child, got {result:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn add_link_rejects_chain_too_deep() -> Result<(), TeamserverError> {
         let database = test_database().await?;
         let registry = AgentRegistry::new(database);

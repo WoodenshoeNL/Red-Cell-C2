@@ -3683,6 +3683,7 @@ mod tests {
             webhooks: crate::AuditWebhookNotifier::from_profile(&profile),
             login_rate_limiter: crate::LoginRateLimiter::new(),
             shutdown: crate::ShutdownController::new(),
+            service_bridge: None,
         });
 
         let response = app
@@ -4379,6 +4380,7 @@ mod tests {
                 webhooks: crate::AuditWebhookNotifier::from_profile(&profile),
                 login_rate_limiter: crate::LoginRateLimiter::new(),
                 shutdown: crate::ShutdownController::new(),
+                service_bridge: None,
             }),
             agent_registry,
             auth,
@@ -5474,6 +5476,7 @@ mod tests {
             webhooks: crate::AuditWebhookNotifier::from_profile(&profile),
             login_rate_limiter: crate::LoginRateLimiter::new(),
             shutdown: crate::ShutdownController::new(),
+            service_bridge: None,
         });
 
         let response = app
@@ -6077,6 +6080,7 @@ mod tests {
             webhooks: crate::AuditWebhookNotifier::from_profile(&profile),
             login_rate_limiter: crate::LoginRateLimiter::new(),
             shutdown: crate::ShutdownController::new(),
+            service_bridge: None,
         });
 
         // Admin creates a listener.

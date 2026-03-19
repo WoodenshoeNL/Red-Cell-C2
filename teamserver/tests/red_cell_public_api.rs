@@ -62,6 +62,7 @@ async fn crate_root_reexports_support_minimal_teamserver_bootstrap() {
         webhooks: AuditWebhookNotifier::from_profile(&profile),
         login_rate_limiter: LoginRateLimiter::new(),
         shutdown: shutdown.clone(),
+        service_bridge: None,
     };
 
     let response = build_router(state)

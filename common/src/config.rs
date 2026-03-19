@@ -208,10 +208,13 @@ impl Profile {
             }
         }
 
-        if self.service.is_some() {
-            tracing::warn!(
-                "Service block present in profile but service bridge is not yet implemented — ignoring"
-            );
+        if let Some(service) = &self.service {
+            if service.endpoint.is_empty() {
+                errors.push("Service.Endpoint must not be empty".to_owned());
+            }
+            if service.password.is_empty() {
+                errors.push("Service.Password must not be empty".to_owned());
+            }
         }
 
         if let Some(api) = &self.api {

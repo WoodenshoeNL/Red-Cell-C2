@@ -168,6 +168,7 @@ async fn start_server()
         webhooks: AuditWebhookNotifier::from_profile(&profile),
         login_rate_limiter: LoginRateLimiter::new(),
         shutdown: red_cell::ShutdownController::new(),
+        service_bridge: None,
     };
 
     let tcp = TcpListener::bind("127.0.0.1:0").await?;

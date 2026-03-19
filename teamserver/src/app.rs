@@ -13,7 +13,8 @@ use red_cell_common::config::Profile;
 use crate::{
     AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
     ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
-    ShutdownController, SocketRelayManager, api_routes, websocket_routes,
+    ServiceBridge, ShutdownController, SocketRelayManager, api_routes, service_routes,
+    websocket_routes,
 };
 
 /// Shared state injected into Axum routes and middleware.
@@ -45,6 +46,8 @@ pub struct TeamserverState {
     pub login_rate_limiter: LoginRateLimiter,
     /// Coordinated graceful-shutdown controller.
     pub shutdown: ShutdownController,
+    /// Optional service bridge for external tool integration.
+    pub service_bridge: Option<ServiceBridge>,
 }
 
 impl FromRef<TeamserverState> for AuthService {
@@ -123,11 +126,14 @@ impl FromRef<TeamserverState> for ShutdownController {
 pub fn build_router(state: TeamserverState) -> Router {
     let api = state.api.clone();
 
-    Router::new()
-        .nest("/havoc", websocket_routes())
-        .nest("/api/v1", api_routes(api))
-        .fallback(any(agent_listener_placeholder))
-        .with_state(state)
+    let mut router =
+        Router::new().nest("/havoc", websocket_routes()).nest("/api/v1", api_routes(api));
+
+    if let Some(ref bridge) = state.service_bridge {
+        router = router.merge(service_routes(bridge));
+    }
+
+    router.fallback(any(agent_listener_placeholder)).with_state(state)
 }
 
 async fn agent_listener_placeholder(request: Request<Body>) -> impl IntoResponse {
@@ -195,6 +201,7 @@ mod tests {
             webhooks: AuditWebhookNotifier::from_profile(&profile),
             login_rate_limiter: LoginRateLimiter::new(),
             shutdown: ShutdownController::new(),
+            service_bridge: None,
         }
     }
 

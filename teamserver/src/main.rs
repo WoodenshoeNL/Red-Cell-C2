@@ -109,9 +109,14 @@ async fn main() -> Result<()> {
         webhooks: AuditWebhookNotifier::from_profile(&profile),
         login_rate_limiter: LoginRateLimiter::new(),
         shutdown: shutdown.clone(),
+        service_bridge: profile.service.as_ref().map(|sc| red_cell::ServiceBridge::new(sc.clone())),
     };
     let router = build_router(state.clone()).layer(NormalizePathLayer::trim_trailing_slash());
     let handle = Handle::new();
+
+    if let Some(ref bridge) = state.service_bridge {
+        info!(endpoint = %bridge.endpoint(), "service bridge enabled on /{}", bridge.endpoint());
+    }
 
     let shutdown_task =
         tokio::spawn(wait_for_shutdown_signal(handle.clone(), shutdown, state, shutdown_timeout));
@@ -539,6 +544,7 @@ mod tests {
             profile,
             login_rate_limiter: LoginRateLimiter::new(),
             shutdown: red_cell::ShutdownController::new(),
+            service_bridge: None,
         };
 
         let _ = AuthService::from_ref(&state);
@@ -1279,6 +1285,7 @@ mod tests {
             profile,
             login_rate_limiter: LoginRateLimiter::new(),
             shutdown: shutdown.clone(),
+            service_bridge: None,
         };
 
         (state, shutdown)
@@ -1398,6 +1405,7 @@ mod tests {
             profile,
             login_rate_limiter: LoginRateLimiter::new(),
             shutdown: shutdown.clone(),
+            service_bridge: None,
         };
 
         run_shutdown_sequence(handle, shutdown.clone(), state, Duration::from_secs(5))

@@ -508,6 +508,41 @@ mod tests {
         assert_eq!(config.username.as_deref(), Some("op1"));
     }
 
+    /// `save_to()` must silently ignore write failures when the target path is
+    /// inside a read-only directory.  This guards against regressions where
+    /// someone changes `let _ = fs::write(…)` to `fs::write(…)?;`.
+    #[test]
+    fn save_to_silently_ignores_unwritable_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("tempdir creation should succeed: {error}"));
+        let readonly_dir = dir.path().join("readonly");
+        fs::create_dir(&readonly_dir)
+            .unwrap_or_else(|error| panic!("mkdir should succeed: {error}"));
+
+        // Lock down the directory so writes inside it are rejected.
+        fs::set_permissions(&readonly_dir, fs::Permissions::from_mode(0o444))
+            .unwrap_or_else(|error| panic!("chmod should succeed: {error}"));
+
+        let path = readonly_dir.join("client.toml");
+        let config = LocalConfig {
+            server_url: Some("wss://10.0.0.1:40056/havoc/".to_owned()),
+            username: Some("operator".to_owned()),
+            ..LocalConfig::default()
+        };
+
+        // Must not panic — the silent failure is the documented contract.
+        config.save_to(&path);
+
+        // The file must not have been created.
+        assert!(!path.exists(), "config file should not exist under a read-only directory",);
+
+        // Restore write permission so tempdir cleanup can remove it.
+        fs::set_permissions(&readonly_dir, fs::Permissions::from_mode(0o755))
+            .unwrap_or_else(|error| panic!("restoring permissions should succeed: {error}"));
+    }
+
     /// `save()` must complete without panicking regardless of whether a config
     /// directory is available.  When `dirs::config_dir()` returns `None` the
     /// call is a documented silent no-op; when it returns `Some` it must also

@@ -816,6 +816,106 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn sweep_handles_non_utc_offset_timestamps_correctly() -> Result<(), TeamserverError> {
+        // "2026-03-10T15:30:00+05:30" is equivalent to "2026-03-10T10:00:00Z".
+        // With sleep=5 the timeout is 15 s.  Sweeping at 10:00:14Z (14 s elapsed)
+        // must keep the agent alive; sweeping at 10:00:16Z (16 s elapsed) must
+        // mark it dead.  This confirms OffsetDateTime normalizes non-UTC offsets.
+        let profile = sample_profile(None, 5); // sleep=5 → timeout=15 s
+        let config = AgentLivenessConfig::from_profile(&profile);
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+
+        let mut agent = sample_agent(0x0FF5_E700);
+        agent.last_call_in = "2026-03-10T15:30:00+05:30".to_owned();
+        registry.insert(agent.clone()).await?;
+
+        // Sweep at 10:00:14Z — 14 s elapsed, within the 15 s timeout → agent stays alive.
+        let dead = sweep_dead_agents_at(
+            &registry,
+            &sockets,
+            &events,
+            &database,
+            config,
+            time::macros::datetime!(2026-03-10 10:00:14 UTC),
+        )
+        .await?;
+        assert!(dead.is_empty(), "agent must stay alive at 14 s elapsed (timeout is 15 s)");
+
+        let stored = registry
+            .get(agent.agent_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?;
+        assert!(stored.active, "agent must still be active before timeout");
+
+        // Sweep at 10:00:16Z — 16 s elapsed, exceeds the 15 s timeout → agent marked dead.
+        let dead = sweep_dead_agents_at(
+            &registry,
+            &sockets,
+            &events,
+            &database,
+            config,
+            time::macros::datetime!(2026-03-10 10:00:16 UTC),
+        )
+        .await?;
+        assert_eq!(dead, vec![agent.agent_id], "agent must be marked dead at 16 s elapsed");
+
+        let stored = registry
+            .get(agent.agent_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?;
+        assert!(!stored.active, "agent must be inactive after timeout");
+        assert_eq!(stored.reason, "agent timed out after 15 seconds without callback");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sweep_handles_negative_utc_offset_timestamps_correctly() -> Result<(), TeamserverError>
+    {
+        // "2026-03-10T02:00:00-08:00" is equivalent to "2026-03-10T10:00:00Z".
+        // Same boundary logic as the positive-offset test above.
+        let profile = sample_profile(None, 5);
+        let config = AgentLivenessConfig::from_profile(&profile);
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+
+        let mut agent = sample_agent(0x0FF5_E701);
+        agent.last_call_in = "2026-03-10T02:00:00-08:00".to_owned();
+        registry.insert(agent.clone()).await?;
+
+        // 14 s elapsed → alive
+        let dead = sweep_dead_agents_at(
+            &registry,
+            &sockets,
+            &events,
+            &database,
+            config,
+            time::macros::datetime!(2026-03-10 10:00:14 UTC),
+        )
+        .await?;
+        assert!(dead.is_empty(), "agent must stay alive at 14 s elapsed");
+
+        // 16 s elapsed → dead
+        let dead = sweep_dead_agents_at(
+            &registry,
+            &sockets,
+            &events,
+            &database,
+            config,
+            time::macros::datetime!(2026-03-10 10:00:16 UTC),
+        )
+        .await?;
+        assert_eq!(dead, vec![agent.agent_id], "agent must be marked dead at 16 s elapsed");
+
+        Ok(())
+    }
+
     #[test]
     fn timeout_for_override_zero_returns_zero_and_sweep_uses_minimum_interval() {
         // AgentTimeoutSecs = 0 means every agent gets a 0-second timeout.

@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 461 | 212 | 31 |
+| Tasks closed | 463 | 212 | 31 |
 | Bugs filed against | 46 | 34 | 9 |
 | Bug rate (bugs/task) | 0.10 | 0.16 | 0.29 |
 | Quality score | 90% | 84% | 71% |
 
-*Bug rates: Claude 46/461=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 46/463=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -2632,3 +2632,13 @@ Build: cargo check passed, clippy passed (0 warnings), cargo test passed (2147 t
 
 Overall codebase health: on track
 Biggest blindspot: External C2 bridge listener (recently added) has zero integration test coverage — the only listener type without a pipeline test.
+
+### QA Review — 2026-03-19 — 48c717e..7506013
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed nf3r and i7q0. fix(ws): added `serialize_for_audit` helper to warn on serialization failures instead of silently dropping (5 call sites updated, 2 tests added). fix(security): wrapped proxy password in `Zeroizing<String>` across config.rs, domain.rs, listeners.rs, payload_builder.rs with Debug redaction and serde round-trip tests. Clean, well-tested changes. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (0 warnings), cargo test passed (all suites 0 failures)

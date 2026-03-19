@@ -249,8 +249,12 @@ where
     let shutdown = ShutdownController::from_ref(&state);
 
     if shutdown.is_shutting_down() {
-        let _ = send_operator_message(&mut socket, &teamserver_shutdown_event()).await;
-        let _ = socket.send(WsMessage::Close(None)).await;
+        if let Err(e) = send_operator_message(&mut socket, &teamserver_shutdown_event()).await {
+            debug!(%e, "shutdown: failed to send shutdown event to connecting operator");
+        }
+        if let Err(e) = socket.send(WsMessage::Close(None)).await {
+            debug!(%e, "shutdown: failed to send close frame to connecting operator");
+        }
         return;
     }
 
@@ -283,7 +287,9 @@ where
     }
 
     let Some(session) = auth.session_for_connection(connection_id).await else {
-        let _ = socket.send(WsMessage::Close(None)).await;
+        if let Err(e) = socket.send(WsMessage::Close(None)).await {
+            debug!(%e, "auth: failed to send close frame for missing session");
+        }
         cleanup_connection(
             &auth,
             &connections,
@@ -359,8 +365,12 @@ where
     let disconnect_kind = 'recv: loop {
         tokio::select! {
             _ = &mut shutdown_signal => {
-                let _ = send_operator_message(&mut socket, &teamserver_shutdown_event()).await;
-                let _ = socket.send(WsMessage::Close(None)).await;
+                if let Err(e) = send_operator_message(&mut socket, &teamserver_shutdown_event()).await {
+                    debug!(%e, "shutdown: failed to send shutdown event to operator");
+                }
+                if let Err(e) = socket.send(WsMessage::Close(None)).await {
+                    debug!(%e, "shutdown: failed to send close frame to operator");
+                }
                 break 'recv DisconnectKind::ServerShutdown;
             }
             incoming = socket.recv() => {
@@ -445,7 +455,9 @@ async fn handle_authentication(
                 ),
             )
             .await;
-            let _ = socket.send(WsMessage::Close(None)).await;
+            if let Err(e) = socket.send(WsMessage::Close(None)).await {
+                debug!(%e, "session timeout: failed to send close frame");
+            }
             return Err(());
         }
     };
@@ -455,12 +467,17 @@ async fn handle_authentication(
         Ok(WsMessage::Close(_)) => return Err(()),
         Ok(other) => {
             warn!(%connection_id, frame = ?other, "operator websocket requires text login frame");
-            let _ = send_operator_message(
+            if let Err(e) = send_operator_message(
                 socket,
                 &login_failure_message("", &AuthenticationFailure::InvalidCredentials),
             )
-            .await;
-            let _ = socket.send(WsMessage::Close(None)).await;
+            .await
+            {
+                debug!(%e, "auth: failed to send login failure for non-text frame");
+            }
+            if let Err(e) = socket.send(WsMessage::Close(None)).await {
+                debug!(%e, "auth: failed to send close frame for non-text frame");
+            }
             return Err(());
         }
         Err(error) => {
@@ -633,7 +650,9 @@ where
                         %error,
                         "failed to parse operator websocket message"
                     );
-                    let _ = socket.send(WsMessage::Close(None)).await;
+                    if let Err(e) = socket.send(WsMessage::Close(None)).await {
+                        debug!(%e, "failed to send close frame after parse error");
+                    }
                     return Err(());
                 }
             };
@@ -680,7 +699,9 @@ where
                         ),
                     )
                     .await;
-                    let _ = socket.send(WsMessage::Close(None)).await;
+                    if let Err(e) = socket.send(WsMessage::Close(None)).await {
+                        debug!(%e, "failed to send close frame after command error");
+                    }
                     Err(())
                 }
             }
@@ -1427,7 +1448,7 @@ async fn handle_agent_remove(
                 ),
             )
             .await;
-            let _ = sockets.remove_agent(agent_id).await;
+            sockets.remove_agent(agent_id).await;
             events.broadcast(OperatorMessage::AgentRemove(message));
         }
         Err(error) => {
@@ -2640,7 +2661,9 @@ async fn send_login_error(
         warn!(%connection_id, %error, "failed to send operator websocket authentication error");
     }
 
-    let _ = socket.send(WsMessage::Close(None)).await;
+    if let Err(e) = socket.send(WsMessage::Close(None)).await {
+        debug!(%connection_id, error = %e, "failed to send close frame after auth failure");
+    }
 }
 
 enum SocketLoopControl {

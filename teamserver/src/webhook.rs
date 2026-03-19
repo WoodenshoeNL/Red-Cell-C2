@@ -1200,6 +1200,40 @@ mod tests {
             vec!["Actor", "Action", "Target", "Result"],
             "embed must contain only the four base fields when optional record fields are None; got: {field_names:?}"
         );
+
+        // Every field value must be a non-empty string — Discord silently rejects
+        // payloads containing null or empty-string field values.
+        for field in fields {
+            let value = field["value"].as_str().expect("field value should be a string");
+            assert!(!value.is_empty(), "field {:?} must not have an empty value", field["name"]);
+        }
+
+        // The embed itself must not contain any null values at the top level.
+        let embed = &payload["embeds"][0];
+        assert!(embed["title"].is_string(), "embed title must be a non-null string");
+        assert!(embed["description"].is_string(), "embed description must be a non-null string");
+        assert!(embed["color"].is_number(), "embed color must be a non-null number");
+        assert!(embed["timestamp"].is_string(), "embed timestamp must be a non-null string");
+
+        // The payload must not contain any null-valued keys anywhere — walk the
+        // entire JSON tree to catch serialization of `None` as `null`.
+        fn assert_no_nulls(path: &str, value: &Value) {
+            match value {
+                Value::Null => panic!("unexpected null at {path}"),
+                Value::Object(map) => {
+                    for (key, val) in map {
+                        assert_no_nulls(&format!("{path}.{key}"), val);
+                    }
+                }
+                Value::Array(arr) => {
+                    for (i, val) in arr.iter().enumerate() {
+                        assert_no_nulls(&format!("{path}[{i}]"), val);
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert_no_nulls("$", &payload);
     }
 
     /// Concurrent detached deliveries where some succeed and some fail must

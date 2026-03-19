@@ -1340,7 +1340,7 @@ fn build_tls_connector(
 ) -> Result<Connector, TransportError> {
     let provider = aws_lc_rs::default_provider();
 
-    match verification {
+    let mut client_config = match verification {
         TlsVerification::CertificateAuthority => {
             let mut root_store = RootCertStore::empty();
             root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -1351,13 +1351,12 @@ fn build_tls_connector(
             .build()
             .map_err(|e| TransportError::RustlsVerifier(e.to_string()))?;
             let verifier = Arc::new(CapturingCertVerifier { inner, fingerprint_sink });
-            let client_config = ClientConfig::builder_with_provider(provider.into())
+            ClientConfig::builder_with_provider(provider.into())
                 .with_safe_default_protocol_versions()
                 .map_err(|error| TransportError::Rustls(Box::new(error)))?
                 .dangerous()
                 .with_custom_certificate_verifier(verifier)
-                .with_no_client_auth();
-            Ok(Connector::Rustls(Arc::new(client_config)))
+                .with_no_client_auth()
         }
         TlsVerification::CustomCa(path) => {
             let ca_pem = std::fs::read(path).map_err(|source| TransportError::CustomCaRead {
@@ -1384,13 +1383,12 @@ fn build_tls_connector(
             .build()
             .map_err(|e| TransportError::RustlsVerifier(e.to_string()))?;
             let verifier = Arc::new(CapturingCertVerifier { inner, fingerprint_sink });
-            let client_config = ClientConfig::builder_with_provider(provider.into())
+            ClientConfig::builder_with_provider(provider.into())
                 .with_safe_default_protocol_versions()
                 .map_err(|error| TransportError::Rustls(Box::new(error)))?
                 .dangerous()
                 .with_custom_certificate_verifier(verifier)
-                .with_no_client_auth();
-            Ok(Connector::Rustls(Arc::new(client_config)))
+                .with_no_client_auth()
         }
         TlsVerification::Fingerprint(expected) => {
             let verifier = Arc::new(FingerprintCertificateVerifier {
@@ -1398,28 +1396,32 @@ fn build_tls_connector(
                 provider: provider.clone(),
                 fingerprint_sink,
             });
-            let client_config = ClientConfig::builder_with_provider(provider.into())
+            ClientConfig::builder_with_provider(provider.into())
                 .with_safe_default_protocol_versions()
                 .map_err(|error| TransportError::Rustls(Box::new(error)))?
                 .dangerous()
                 .with_custom_certificate_verifier(verifier)
-                .with_no_client_auth();
-            Ok(Connector::Rustls(Arc::new(client_config)))
+                .with_no_client_auth()
         }
         TlsVerification::DangerousSkipVerify => {
             warn!(
                 "TLS certificate verification is DISABLED — connections are vulnerable to MITM attacks"
             );
             let verifier = Arc::new(DangerousCertificateVerifier { provider: provider.clone() });
-            let client_config = ClientConfig::builder_with_provider(provider.into())
+            ClientConfig::builder_with_provider(provider.into())
                 .with_safe_default_protocol_versions()
                 .map_err(|error| TransportError::Rustls(Box::new(error)))?
                 .dangerous()
                 .with_custom_certificate_verifier(verifier)
-                .with_no_client_auth();
-            Ok(Connector::Rustls(Arc::new(client_config)))
+                .with_no_client_auth()
         }
-    }
+    };
+
+    // Advertise HTTP/1.1 via ALPN so the server does not default to HTTP/2,
+    // which does not support the WebSocket upgrade mechanism.
+    client_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+
+    Ok(Connector::Rustls(Arc::new(client_config)))
 }
 
 /// Wraps an inner [`ServerCertVerifier`], capturing the end-entity certificate's SHA-256

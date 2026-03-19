@@ -2,7 +2,9 @@ mod common;
 
 use std::time::Duration;
 
-use red_cell::{AgentRegistry, Database, EventBus, ListenerManager, SocketRelayManager};
+use red_cell::{
+    AgentRegistry, Database, EventBus, ListenerManager, MAX_AGENT_MESSAGE_LEN, SocketRelayManager,
+};
 use red_cell_common::crypto::{
     AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len, decrypt_agent_data_at_offset,
 };
@@ -506,6 +508,72 @@ async fn http_listener_rejects_malformed_and_truncated_bodies()
     );
 
     manager.stop("edge-http-malformed").await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn http_listener_rejects_oversized_body() -> Result<(), Box<dyn std::error::Error>> {
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+    let (port, guard) = common::available_port()?;
+
+    manager.create(http_listener("edge-http-oversized", port)).await?;
+    drop(guard);
+    manager.start("edge-http-oversized").await?;
+    common::wait_for_listener(port).await?;
+
+    let client = Client::new();
+    let url = format!("http://127.0.0.1:{port}/");
+
+    // Build a body that exceeds MAX_AGENT_MESSAGE_LEN (30 MiB).
+    // Include valid Demon magic at bytes 4–7 so the rejection is due to size, not magic.
+    let oversized_len = MAX_AGENT_MESSAGE_LEN + 1;
+    let mut oversized_body = vec![0_u8; oversized_len];
+    // bytes 0–3: size field (BE) — claim the rest of the packet
+    let rest_len = u32::try_from(oversized_len - 4).unwrap_or(u32::MAX);
+    oversized_body[0..4].copy_from_slice(&rest_len.to_be_bytes());
+    // bytes 4–7: valid Demon magic (0xDEADBEEF BE)
+    oversized_body[4..8].copy_from_slice(&0xDEAD_BEEF_u32.to_be_bytes());
+    // bytes 8–11: fake agent_id
+    oversized_body[8..12].copy_from_slice(&0xBAAD_F00D_u32.to_be_bytes());
+
+    let response = client.post(&url).body(oversized_body).send().await?;
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "oversized body must be rejected with 404"
+    );
+
+    // The oversized request must not register an agent.
+    assert!(registry.get(0xBAAD_F00D).await.is_none(), "oversized body must not register an agent");
+    assert!(
+        registry.list_active().await.is_empty(),
+        "no agent should be active after oversized body"
+    );
+
+    // Verify the listener remains responsive after the oversized request.
+    let key = [0x41; AGENT_KEY_LENGTH];
+    let iv = [0x24; AGENT_IV_LENGTH];
+    let valid_agent_id = 0xBBBB_CCCC;
+    let valid_response = client
+        .post(&url)
+        .body(common::valid_demon_init_body(valid_agent_id, key, iv))
+        .send()
+        .await?
+        .error_for_status()?;
+    assert!(
+        !valid_response.bytes().await?.is_empty(),
+        "valid init must succeed after oversized body rejection"
+    );
+    assert!(
+        registry.get(valid_agent_id).await.is_some(),
+        "agent must be registered — listener survived oversized body"
+    );
+
+    manager.stop("edge-http-oversized").await?;
     Ok(())
 }
 

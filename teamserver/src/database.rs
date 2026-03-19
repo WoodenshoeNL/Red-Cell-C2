@@ -1673,7 +1673,7 @@ fn invalid_value(field: &'static str, message: &str) -> TeamserverError {
 
 #[cfg(test)]
 mod tests {
-    use super::{bool_from_i64, i64_from_u64};
+    use super::{Database, bool_from_i64, i64_from_u64};
 
     #[test]
     fn bool_from_i64_accepts_sqlite_boolean_values() {
@@ -1692,5 +1692,18 @@ mod tests {
     #[test]
     fn i64_from_u64_rejects_values_bigger_than_sqlite_integer() {
         assert!(i64_from_u64("base_address", u64::MAX).is_err());
+    }
+
+    #[tokio::test]
+    async fn connect_returns_error_for_nonexistent_parent_directory() {
+        let result = Database::connect("/nonexistent/parent/dir/test.sqlite").await;
+        assert!(result.is_err(), "expected error for path with nonexistent parent directory");
+    }
+
+    #[tokio::test]
+    async fn connect_returns_error_for_unwritable_path() {
+        // /proc is a read-only filesystem on Linux; SQLite cannot create files there.
+        let result = Database::connect("/proc/fake_dir/test.sqlite").await;
+        assert!(result.is_err(), "expected error for unwritable path");
     }
 }

@@ -455,3 +455,167 @@ pub(super) async fn handle_config_callback(
     )?);
     Ok(None)
 }
+
+#[cfg(test)]
+mod tests {
+    use red_cell_common::operator::OperatorMessage;
+    use serde_json::Value;
+    use zeroize::Zeroizing;
+
+    use super::*;
+    use crate::{AgentRegistry, Database, EventBus};
+
+    const AGENT_ID: u32 = 0xBEEF_0001;
+    const REQUEST_ID: u32 = 99;
+
+    fn push_u32(buf: &mut Vec<u8>, value: u32) {
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn sample_agent() -> red_cell_common::AgentRecord {
+        red_cell_common::AgentRecord {
+            agent_id: AGENT_ID,
+            active: true,
+            reason: String::new(),
+            note: String::new(),
+            encryption: red_cell_common::AgentEncryptionInfo {
+                aes_key: Zeroizing::new(vec![0u8; 32]),
+                aes_iv: Zeroizing::new(vec![0u8; 16]),
+            },
+            hostname: "wkstn-01".to_owned(),
+            username: "operator".to_owned(),
+            domain_name: "lab".to_owned(),
+            external_ip: "127.0.0.1".to_owned(),
+            internal_ip: "10.0.0.25".to_owned(),
+            process_name: "explorer.exe".to_owned(),
+            process_path: "C:\\Windows\\explorer.exe".to_owned(),
+            base_address: 0x1000,
+            process_pid: 1337,
+            process_tid: 7331,
+            process_ppid: 512,
+            process_arch: "x64".to_owned(),
+            elevated: true,
+            os_version: "Windows 11".to_owned(),
+            os_build: 0,
+            os_arch: "x64".to_owned(),
+            sleep_delay: 10,
+            sleep_jitter: 25,
+            kill_date: None,
+            working_hours: None,
+            first_call_in: "2026-03-09T20:00:00Z".to_owned(),
+            last_call_in: "2026-03-09T20:00:00Z".to_owned(),
+        }
+    }
+
+    /// Build registry + event bus with a pre-registered sample agent.
+    async fn setup() -> (AgentRegistry, EventBus) {
+        let db = Database::connect_in_memory().await.expect("in-memory db must succeed");
+        let registry = AgentRegistry::new(db);
+        let events = EventBus::new(16);
+        registry.insert(sample_agent()).await.expect("insert sample agent");
+        (registry, events)
+    }
+
+    fn sleep_payload(delay: u32, jitter: u32) -> Vec<u8> {
+        let mut buf = Vec::new();
+        push_u32(&mut buf, delay);
+        push_u32(&mut buf, jitter);
+        buf
+    }
+
+    #[tokio::test]
+    async fn sleep_callback_updates_agent_state() {
+        let (registry, events) = setup().await;
+        let payload = sleep_payload(60, 20);
+
+        let result =
+            handle_sleep_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+
+        let agent = registry.get(AGENT_ID).await.expect("agent must exist");
+        assert_eq!(agent.sleep_delay, 60);
+        assert_eq!(agent.sleep_jitter, 20);
+    }
+
+    #[tokio::test]
+    async fn sleep_callback_broadcasts_agent_update_and_response() {
+        let (registry, events) = setup().await;
+        let mut rx = events.subscribe();
+        let payload = sleep_payload(30, 10);
+
+        handle_sleep_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload)
+            .await
+            .expect("handler must succeed");
+
+        // First broadcast: AgentUpdate (mark event)
+        let msg1 = rx.recv().await.expect("should receive agent update");
+        assert!(
+            matches!(msg1, OperatorMessage::AgentUpdate(_)),
+            "expected AgentUpdate, got {msg1:?}"
+        );
+
+        // Second broadcast: AgentResponse
+        // Drop the event bus so recv returns None after the last queued message.
+        drop(events);
+        let msg2 = rx.recv().await.expect("should receive agent response");
+        let OperatorMessage::AgentResponse(resp) = &msg2 else {
+            panic!("expected AgentResponse, got {msg2:?}");
+        };
+        assert_eq!(resp.info.demon_id, format!("{AGENT_ID:08X}"));
+        let kind = resp.info.extra.get("Type").and_then(Value::as_str);
+        assert_eq!(kind, Some("Good"));
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            message.contains("30") && message.contains("10"),
+            "expected message to contain delay=30 and jitter=10, got {message:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sleep_callback_truncated_payload_returns_error() {
+        let (registry, events) = setup().await;
+        // Only 4 bytes — missing the jitter field.
+        let mut payload = Vec::new();
+        push_u32(&mut payload, 60);
+
+        let result =
+            handle_sleep_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload).await;
+        let err = result.expect_err("truncated payload must fail");
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sleep_callback_empty_payload_returns_error() {
+        let (registry, events) = setup().await;
+        let payload = Vec::new();
+
+        let result =
+            handle_sleep_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload).await;
+        let err = result.expect_err("empty payload must fail");
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sleep_callback_agent_not_found_returns_error() {
+        let db = Database::connect_in_memory().await.expect("in-memory db must succeed");
+        let registry = AgentRegistry::new(db);
+        let events = EventBus::new(8);
+        let payload = sleep_payload(60, 20);
+        let nonexistent_id = 0xDEAD_FFFF;
+
+        let result =
+            handle_sleep_callback(&registry, &events, nonexistent_id, REQUEST_ID, &payload).await;
+        let err = result.expect_err("nonexistent agent must fail");
+        assert!(
+            matches!(err, CommandDispatchError::Registry(TeamserverError::AgentNotFound { .. })),
+            "expected AgentNotFound, got {err:?}"
+        );
+    }
+}

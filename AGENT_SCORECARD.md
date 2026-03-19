@@ -20,10 +20,10 @@ Each loop run updates the running totals and appends a review entry.
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
-| unwrap / expect in production | 2 | 0 | 0 |
-| Missing tests / stale tests | 26 | 13 | 5 |
+| unwrap / expect in production | 3 | 0 | 0 |
+| Missing tests / stale tests | 27 | 13 | 5 |
 | Clippy warnings | 2 | 0 | 1 |
-| Protocol errors | 6 | 27 | 3 |
+| Protocol errors | 7 | 27 | 3 |
 | Security issues | 22 | 36 | 0 |
 | Architecture drift | 3 | 21 | 0 |
 | Memory / resource leaks | 2 | 10 | 1 |
@@ -31,7 +31,7 @@ Each loop run updates the running totals and appends a review entry.
 | Test infrastructure / flakiness | 1 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
-| Correctness / pagination | 15 | 7 | 1 |
+| Correctness / pagination | 17 | 7 | 1 |
 | Workflow / close-hygiene | 12 | 0 | 0 |
 | Code reuse / duplication | 6 | 0 | 0 |
 
@@ -2682,3 +2682,14 @@ Build: cargo check passed, clippy passed (0 warnings), cargo test passed (223 te
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: cargo check passed, clippy passed (0 warnings), cargo test passed (1460+ tests, 0 failures)
+
+### Arch Review — 2026-03-19 18:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 5 | protocol errors (1), unwrap/expect (1), stale tests (1), correctness (2) | Silent u32 truncation in 10+ dispatch length encoders (tywa7), ghost test from stale artifact (2n1r9), service.rs/payload_builder.rs silent serialization failures (t5gbg, v9f6z), websocket content-length overflow (hfcb0) |
+| Codex | 0 | — | No attributable findings |
+| Cursor | 0 | — | No attributable findings |
+
+Overall codebase health: **on track**
+Biggest blindspot: `unwrap_or_default()` on protocol length fields — 67 instances across 20 files. Not exploitable in practice on 64-bit (payloads would need >4 GiB), but architecturally unsound and would cause silent protocol desync on overflow.

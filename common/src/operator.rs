@@ -2148,6 +2148,51 @@ mod tests {
         Ok(())
     }
 
+    /// Deserialization must fail with a clear error when `Head` is missing.
+    #[test]
+    fn operator_message_rejects_missing_head() {
+        let value = json!({
+            "Body": { "SubEvent": 3, "Info": { "User": "operator", "Password": "secret" } }
+        });
+
+        let err = serde_json::from_value::<OperatorMessage>(value)
+            .expect_err("missing Head must fail deserialization");
+        assert!(
+            err.to_string().contains("Head"),
+            "error should mention the missing field 'Head', got: {err}"
+        );
+    }
+
+    /// Deserialization must fail with a clear error when `Body` is missing.
+    #[test]
+    fn operator_message_rejects_missing_body() {
+        let value = json!({
+            "Head": { "Event": 1, "User": "operator", "Time": "09/03/2026 19:00:00" }
+        });
+
+        let err = serde_json::from_value::<OperatorMessage>(value)
+            .expect_err("missing Body must fail deserialization");
+        assert!(
+            err.to_string().contains("Body"),
+            "error should mention the missing field 'Body', got: {err}"
+        );
+    }
+
+    /// Deserialization must fail when the JSON object is completely empty.
+    #[test]
+    fn operator_message_rejects_empty_object() {
+        let value = json!({});
+
+        let err = serde_json::from_value::<OperatorMessage>(value)
+            .expect_err("empty object must fail deserialization");
+        // serde will complain about the first missing required field.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Head") || msg.contains("Body"),
+            "error should mention a missing top-level key, got: {err}"
+        );
+    }
+
     /// A full OperatorMessage round-trip must preserve the EventCode numeric
     /// value in the Head.Event JSON field.
     #[test]

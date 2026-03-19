@@ -1777,6 +1777,75 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn create_operator_rejects_empty_string_username() {
+        let service =
+            AuthService::from_profile(&profile()).expect("auth service should initialize");
+
+        let error = service
+            .create_operator("", "zion", red_cell_common::config::OperatorRole::Operator)
+            .await
+            .expect_err("empty string username should be rejected");
+
+        assert_eq!(error, AuthError::EmptyUsername);
+    }
+
+    #[tokio::test]
+    async fn create_operator_rejects_empty_string_password() {
+        let service =
+            AuthService::from_profile(&profile()).expect("auth service should initialize");
+
+        let error = service
+            .create_operator("trinity", "", red_cell_common::config::OperatorRole::Operator)
+            .await
+            .expect_err("empty string password should be rejected");
+
+        assert_eq!(error, AuthError::EmptyPassword);
+    }
+
+    #[tokio::test]
+    async fn create_operator_rejects_duplicate_profile_configured_username() {
+        let service =
+            AuthService::from_profile(&profile()).expect("auth service should initialize");
+
+        let error = service
+            .create_operator(
+                "operator",
+                "different_password",
+                red_cell_common::config::OperatorRole::Admin,
+            )
+            .await
+            .expect_err("duplicate profile-configured username should be rejected");
+
+        assert_eq!(error, AuthError::DuplicateUser { username: "operator".to_owned() });
+    }
+
+    #[tokio::test]
+    async fn create_operator_rejects_tab_only_username() {
+        let service =
+            AuthService::from_profile(&profile()).expect("auth service should initialize");
+
+        let error = service
+            .create_operator("\t\n", "zion", red_cell_common::config::OperatorRole::Operator)
+            .await
+            .expect_err("tab/newline-only username should be rejected");
+
+        assert_eq!(error, AuthError::EmptyUsername);
+    }
+
+    #[tokio::test]
+    async fn create_operator_rejects_tab_only_password() {
+        let service =
+            AuthService::from_profile(&profile()).expect("auth service should initialize");
+
+        let error = service
+            .create_operator("trinity", "\t\n", red_cell_common::config::OperatorRole::Operator)
+            .await
+            .expect_err("tab/newline-only password should be rejected");
+
+        assert_eq!(error, AuthError::EmptyPassword);
+    }
+
     #[test]
     fn is_legacy_sha3_digest_accepts_valid_64_char_hex() {
         assert!(super::is_legacy_sha3_digest(

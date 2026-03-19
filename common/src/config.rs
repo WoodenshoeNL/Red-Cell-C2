@@ -2224,6 +2224,180 @@ mod tests {
     }
 
     #[test]
+    fn rejects_smb_listener_with_empty_pipe_name() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Listeners {
+              Smb {
+                Name = "pivot"
+                PipeName = "   "
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("profile should be invalid");
+        assert!(
+            error
+                .errors
+                .iter()
+                .any(|m| m.contains("Listeners.Smb \"pivot\"") && m.contains("PipeName")),
+            "expected PipeName error; got: {:?}",
+            error.errors
+        );
+    }
+
+    #[test]
+    fn rejects_smb_listener_with_empty_name() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Listeners {
+              Smb {
+                Name = ""
+                PipeName = "demo_pipe"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("profile should be invalid");
+        assert!(
+            error.errors.iter().any(|m| m.contains("Listeners.Smb.Name must not be empty")),
+            "expected name-empty error; got: {:?}",
+            error.errors
+        );
+    }
+
+    #[test]
+    fn rejects_service_block_with_empty_endpoint() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Service {
+              Endpoint = ""
+              Password = "service-password"
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("profile should be invalid");
+        assert!(
+            error.errors.iter().any(|m| m.contains("Service.Endpoint must not be empty")),
+            "expected endpoint error; got: {:?}",
+            error.errors
+        );
+    }
+
+    #[test]
+    fn rejects_service_block_with_empty_password() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Service {
+              Endpoint = "service-endpoint"
+              Password = ""
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("profile should be invalid");
+        assert!(
+            error.errors.iter().any(|m| m.contains("Service.Password must not be empty")),
+            "expected password error; got: {:?}",
+            error.errors
+        );
+    }
+
+    #[test]
+    fn accepts_valid_dns_listener_configuration() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Listeners {
+              Dns {
+                Name = "dns-c2"
+                Domain = "c2.example.com"
+                PortBind = 53
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        profile.validate().expect("valid DNS listener should pass validation");
+        assert_eq!(profile.listeners.dns.len(), 1);
+        assert_eq!(profile.listeners.dns[0].name, "dns-c2");
+        assert_eq!(profile.listeners.dns[0].domain, "c2.example.com");
+        assert_eq!(profile.listeners.dns[0].port_bind, 53);
+    }
+
+    #[test]
     fn parse_rejects_hcl_missing_teamserver_block() {
         // Valid HCL syntax but missing the required `Teamserver` block.
         let result = Profile::parse(

@@ -318,6 +318,18 @@ impl CommandDispatcher {
             },
         );
 
+        let ps_import_events = events.clone();
+        self.register_handler(
+            u32::from(DemonCommand::CommandPsImport),
+            move |agent_id, request_id, payload| {
+                let events = ps_import_events.clone();
+                Box::pin(async move {
+                    assembly::handle_ps_import_callback(&events, agent_id, request_id, &payload)
+                        .await
+                })
+            },
+        );
+
         let proc_ppid_registry = registry.clone();
         let proc_ppid_events = events.clone();
         self.register_handler(

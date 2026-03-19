@@ -118,6 +118,37 @@ pub(super) async fn handle_assembly_inline_execute_callback(
     Ok(None)
 }
 
+/// Handle a `CommandPsImport` (0x1011) callback from a Demon agent.
+///
+/// When the agent finishes importing a PowerShell script into memory it sends
+/// back a callback with a single UTF-8 output string describing the result.
+/// This handler reads the output and broadcasts it to connected operators.
+pub(super) async fn handle_ps_import_callback(
+    events: &EventBus,
+    agent_id: u32,
+    request_id: u32,
+    payload: &[u8],
+) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    let mut parser = CallbackParser::new(payload, u32::from(DemonCommand::CommandPsImport));
+    let output = parser.read_string("ps import output")?;
+
+    let message = if output.is_empty() {
+        "PowerShell script imported successfully".to_owned()
+    } else {
+        output
+    };
+
+    events.broadcast(agent_response_event(
+        agent_id,
+        u32::from(DemonCommand::CommandPsImport),
+        request_id,
+        "Good",
+        &message,
+        None,
+    )?);
+    Ok(None)
+}
+
 pub(super) async fn handle_assembly_list_versions_callback(
     events: &EventBus,
     agent_id: u32,
@@ -468,6 +499,71 @@ mod tests {
                 assert!(
                     message.contains("Failed"),
                     "expected 'Failed' in message, got {message:?}"
+                );
+            }
+            other => panic!("expected AgentResponse, got {other:?}"),
+        }
+    }
+
+    // --- handle_ps_import_callback ---
+
+    #[tokio::test]
+    async fn ps_import_empty_payload_returns_error() {
+        let events = EventBus::new(8);
+        let result = handle_ps_import_callback(&events, AGENT_ID, REQUEST_ID, &[]).await;
+
+        match result {
+            Err(CommandDispatchError::InvalidCallbackPayload { command_id, .. }) => {
+                assert_eq!(command_id, u32::from(DemonCommand::CommandPsImport));
+            }
+            other => panic!("expected InvalidCallbackPayload, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ps_import_with_output_broadcasts_message() {
+        let events = EventBus::new(8);
+        let mut receiver = events.subscribe();
+        let mut payload = Vec::new();
+        add_bytes(&mut payload, b"Script loaded: Invoke-Mimikatz.ps1");
+
+        let result = handle_ps_import_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(matches!(result, Ok(None)));
+
+        let msg = receiver.recv().await.expect("should receive broadcast");
+        match msg {
+            OperatorMessage::AgentResponse(resp) => {
+                let extra = &resp.info.extra;
+                assert_eq!(extra.get("Type"), Some(&serde_json::Value::String("Good".to_owned())));
+                let message = extra.get("Message").unwrap().as_str().unwrap();
+                assert!(
+                    message.contains("Invoke-Mimikatz.ps1"),
+                    "expected output text in message, got {message:?}"
+                );
+            }
+            other => panic!("expected AgentResponse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ps_import_empty_output_broadcasts_default_message() {
+        let events = EventBus::new(8);
+        let mut receiver = events.subscribe();
+        let mut payload = Vec::new();
+        add_bytes(&mut payload, b"");
+
+        let result = handle_ps_import_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(matches!(result, Ok(None)));
+
+        let msg = receiver.recv().await.expect("should receive broadcast");
+        match msg {
+            OperatorMessage::AgentResponse(resp) => {
+                let extra = &resp.info.extra;
+                assert_eq!(extra.get("Type"), Some(&serde_json::Value::String("Good".to_owned())));
+                let message = extra.get("Message").unwrap().as_str().unwrap();
+                assert!(
+                    message.contains("PowerShell"),
+                    "expected default PowerShell message, got {message:?}"
                 );
             }
             other => panic!("expected AgentResponse, got {other:?}"),

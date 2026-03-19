@@ -597,12 +597,49 @@ async fn get_job_with_empty_task_queue_returns_empty_response()
         .send()
         .await?
         .error_for_status()?;
+    let status = get_job_response.status();
     let job_bytes = get_job_response.bytes().await?;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "empty task queue must return HTTP 200, got {status}"
+    );
     assert!(
         job_bytes.is_empty(),
         "expected empty response body when no tasks are queued, got {} bytes",
         job_bytes.len()
     );
+    // The callback itself encrypted 4 bytes (length prefix), advancing the CTR offset.
+    ctr_offset += ctr_blocks_for_len(4);
+
+    // --- Verify CTR synchronisation by sending another callback -------------------
+    // Queue a task so the next GET_JOB has work to return.  If the empty-poll had
+    // desynchronised the CTR state, the server would fail to decrypt this callback.
+    let task = operator_task_message("AA", "checkin", "12345678", DemonCommand::CommandCheckin)?;
+    harness.socket.send(ClientMessage::Text(task.into())).await?;
+
+    let task_echo = common::read_operator_message(&mut harness.socket).await?;
+    assert!(matches!(task_echo, OperatorMessage::AgentTask(_)), "expected AgentTask echo");
+
+    let get_job_response_2 = harness
+        .client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandGetJob),
+            2,
+            &[],
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+    let job_bytes_2 = get_job_response_2.bytes().await?;
+    let message = DemonMessage::from_bytes(job_bytes_2.as_ref())?;
+    assert_eq!(message.packages.len(), 1, "second GET_JOB must return the queued task");
+    assert_eq!(message.packages[0].request_id, 0xAA);
 
     harness.shutdown().await?;
     Ok(())

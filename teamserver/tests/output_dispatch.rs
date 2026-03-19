@@ -351,6 +351,88 @@ async fn job_list_callback_broadcasts_formatted_table() -> Result<(), Box<dyn st
     Ok(())
 }
 
+/// `handle_job_callback` with a `List` subcommand and zero jobs must broadcast an
+/// `AgentResponse` with Type=Info whose output contains the header/separator rows
+/// but no data rows.
+#[tokio::test]
+async fn job_list_callback_empty_broadcasts_header_only() -> Result<(), Box<dyn std::error::Error>>
+{
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    server
+        .listeners
+        .create(common::http_listener_config("out-job-empty-test", listener_port))
+        .await?;
+    drop(listener_guard);
+    server.listeners.start("out-job-empty-test").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0004_u32;
+    let key = [0x07; AGENT_KEY_LENGTH];
+    let iv = [0x08; AGENT_IV_LENGTH];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // Empty job list — only the List subcommand u32, no job entries.
+    let payload = job_list_payload(&[]);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandJob),
+            0x30,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for empty CommandJob/List, got {event:?}");
+    };
+    assert_eq!(msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::CommandJob).to_string());
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Info"));
+
+    let output = &msg.info.output;
+
+    // Header and separator must still be present.
+    assert!(output.contains("Job ID"), "output should contain header row: {output:?}");
+    assert!(output.contains("Type"), "output should contain Type column header: {output:?}");
+    assert!(output.contains("State"), "output should contain State column header: {output:?}");
+    assert!(output.contains("------"), "output should contain separator row: {output:?}");
+
+    // There must be zero data rows (only header + separator lines).
+    let lines: Vec<String> =
+        output.lines().map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")).collect();
+    let data_rows: Vec<_> = lines
+        .iter()
+        .filter(|l| !l.is_empty() && !l.contains("Job ID") && !l.contains("------"))
+        .collect();
+    assert_eq!(
+        data_rows.len(),
+        0,
+        "expected zero data rows for empty job list, got {}: {data_rows:?}",
+        data_rows.len()
+    );
+
+    socket.close(None).await?;
+    server.listeners.stop("out-job-empty-test").await?;
+    Ok(())
+}
+
 /// `handle_demon_info_callback` with a truncated payload (info_class only, no class data)
 /// must return an error to the HTTP caller and must NOT broadcast any `AgentResponse`.
 #[tokio::test]

@@ -969,6 +969,159 @@ mod tests {
         server.abort();
     }
 
+    /// Build a notifier with a custom reqwest client timeout and no retries.
+    ///
+    /// Used by transport-level failure tests that need fast timeouts instead of
+    /// the production 5-second default.
+    fn notifier_with_timeout(address: SocketAddr, timeout: Duration) -> AuditWebhookNotifier {
+        use std::sync::atomic::AtomicU64;
+
+        let client = reqwest::Client::builder()
+            .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("test client should build");
+        AuditWebhookNotifier {
+            discord: Some(Arc::new(super::DiscordWebhook {
+                url: format!("http://{address}/"),
+                username: None,
+                avatar_url: None,
+                client,
+            })),
+            delivery_state: Arc::new(super::DeliveryState::default()),
+            discord_failure_count: Arc::new(AtomicU64::new(0)),
+            retry_delays: Arc::from([].as_slice()),
+        }
+    }
+
+    /// Synchronous delivery to a refused port must return `WebhookError::Request`.
+    #[tokio::test]
+    async fn notify_audit_record_returns_request_error_on_connection_refused() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("should bind");
+        let address = listener.local_addr().expect("should resolve");
+        drop(listener);
+
+        let notifier = notifier_with_timeout(address, Duration::from_secs(1));
+        let result = notifier.notify_audit_record(&sample_record(60)).await;
+
+        assert!(
+            matches!(result, Err(WebhookError::Request(_))),
+            "connection refusal should produce WebhookError::Request, got {result:?}"
+        );
+    }
+
+    /// Detached delivery to a refused port must drain on shutdown and increment
+    /// the permanent failure counter.
+    #[tokio::test]
+    async fn detached_delivery_increments_failure_count_on_connection_refused() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("should bind");
+        let address = listener.local_addr().expect("should resolve");
+        drop(listener);
+
+        let notifier = notifier_with_timeout(address, Duration::from_secs(1));
+        notifier.notify_audit_record_detached(sample_record(61));
+        assert!(notifier.shutdown(Duration::from_secs(5)).await, "shutdown should drain");
+        assert_eq!(
+            notifier.discord_failure_count(),
+            1,
+            "permanent failure should be recorded after connection refusal"
+        );
+    }
+
+    /// Synchronous delivery to a server that accepts but never responds must
+    /// return `WebhookError::Request` once the client timeout elapses.
+    #[tokio::test]
+    async fn notify_audit_record_returns_request_error_on_client_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("should bind");
+        let address = listener.local_addr().expect("should resolve");
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = listener.accept().await else { break };
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(300)).await;
+                    drop(socket);
+                });
+            }
+        });
+
+        let notifier = notifier_with_timeout(address, Duration::from_millis(100));
+        let result = notifier.notify_audit_record(&sample_record(62)).await;
+
+        assert!(
+            matches!(result, Err(WebhookError::Request(_))),
+            "client timeout should produce WebhookError::Request, got {result:?}"
+        );
+        server.abort();
+    }
+
+    /// Detached delivery to a stalling server must drain on shutdown and
+    /// increment the permanent failure counter once the client timeout fires.
+    #[tokio::test]
+    async fn detached_delivery_increments_failure_count_on_client_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("should bind");
+        let address = listener.local_addr().expect("should resolve");
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = listener.accept().await else { break };
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(300)).await;
+                    drop(socket);
+                });
+            }
+        });
+
+        let notifier = notifier_with_timeout(address, Duration::from_millis(100));
+        notifier.notify_audit_record_detached(sample_record(63));
+        assert!(notifier.shutdown(Duration::from_secs(5)).await, "shutdown should drain");
+        assert_eq!(
+            notifier.discord_failure_count(),
+            1,
+            "permanent failure should be recorded after client timeout"
+        );
+        server.abort();
+    }
+
+    /// Retries must all be attempted before the failure counter increments,
+    /// even when the underlying error is a transport-level connection refusal.
+    #[tokio::test]
+    async fn detached_retries_exhaust_on_connection_refused_before_incrementing_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("should bind");
+        let address = listener.local_addr().expect("should resolve");
+        drop(listener);
+
+        let notifier = AuditWebhookNotifier {
+            retry_delays: Arc::from([Duration::ZERO, Duration::ZERO, Duration::ZERO].as_slice()),
+            ..notifier_with_timeout(address, Duration::from_secs(1))
+        };
+
+        notifier.notify_audit_record_detached(sample_record(64));
+        assert!(notifier.shutdown(Duration::from_secs(5)).await, "shutdown should drain");
+        assert_eq!(
+            notifier.discord_failure_count(),
+            1,
+            "exactly one permanent failure after all retries exhausted"
+        );
+    }
+
+    /// Two detached deliveries both hitting connection refusal must each
+    /// increment the failure counter independently.
+    #[tokio::test]
+    async fn failure_counter_accumulates_across_multiple_transport_failures() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("should bind");
+        let address = listener.local_addr().expect("should resolve");
+        drop(listener);
+
+        let notifier = notifier_with_timeout(address, Duration::from_secs(1));
+        notifier.notify_audit_record_detached(sample_record(65));
+        notifier.notify_audit_record_detached(sample_record(66));
+        assert!(notifier.shutdown(Duration::from_secs(5)).await, "shutdown should drain");
+        assert_eq!(
+            notifier.discord_failure_count(),
+            2,
+            "each transport failure should independently increment the counter"
+        );
+    }
+
     /// When an in-flight delivery never completes before the shutdown deadline,
     /// `shutdown()` must return `false` rather than hanging or reporting success.
     #[tokio::test]

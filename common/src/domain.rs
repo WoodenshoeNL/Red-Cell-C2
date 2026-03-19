@@ -1592,6 +1592,105 @@ mod tests {
     }
 
     #[test]
+    fn agent_record_serialization_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+        let mut record = minimal_agent_record();
+        // Use non-default values for fields with custom serde logic.
+        record.agent_id = 0xDEAD_BEEF;
+        record.active = true;
+        record.elevated = true;
+        record.sleep_delay = 60;
+        record.sleep_jitter = 25;
+        record.base_address = 0x7FFE_0000_0000;
+        record.process_pid = 4096;
+        record.process_tid = 8192;
+        record.process_ppid = 2048;
+        record.os_build = 22000;
+        record.kill_date = Some(1_700_000_000);
+        record.working_hours = Some(255);
+        record.reason = "callback".to_string();
+        record.note = "test agent".to_string();
+        record.process_path = r"C:\Windows\explorer.exe".to_string();
+
+        let serialized = serde_json::to_value(&record)?;
+        let deserialized: AgentRecord = serde_json::from_value(serialized)?;
+
+        // Encryption is skip_serializing, so it defaults to empty after round-trip.
+        let mut expected = record;
+        expected.encryption = crate::AgentEncryptionInfo::default();
+
+        assert_eq!(deserialized, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn agent_record_round_trip_with_none_optional_fields() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut record = minimal_agent_record();
+        record.encryption = crate::AgentEncryptionInfo::default();
+        record.kill_date = None;
+        record.working_hours = None;
+
+        let serialized = serde_json::to_value(&record)?;
+        let deserialized: AgentRecord = serde_json::from_value(serialized)?;
+
+        assert_eq!(deserialized, record);
+        Ok(())
+    }
+
+    #[test]
+    fn agent_record_round_trip_preserves_false_booleans() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut record = minimal_agent_record();
+        record.encryption = crate::AgentEncryptionInfo::default();
+        record.active = false;
+        record.elevated = false;
+
+        let serialized = serde_json::to_value(&record)?;
+        let deserialized: AgentRecord = serde_json::from_value(serialized)?;
+
+        assert_eq!(deserialized.active, false);
+        assert_eq!(deserialized.elevated, false);
+        assert_eq!(deserialized, record);
+        Ok(())
+    }
+
+    #[test]
+    fn agent_record_round_trip_preserves_zero_numeric_fields()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut record = minimal_agent_record();
+        record.encryption = crate::AgentEncryptionInfo::default();
+        record.agent_id = 0;
+        record.base_address = 0;
+        record.process_pid = 0;
+        record.process_tid = 0;
+        record.process_ppid = 0;
+        record.os_build = 0;
+        record.sleep_delay = 0;
+        record.sleep_jitter = 0;
+
+        let serialized = serde_json::to_value(&record)?;
+        let deserialized: AgentRecord = serde_json::from_value(serialized)?;
+
+        assert_eq!(deserialized, record);
+        Ok(())
+    }
+
+    #[test]
+    fn agent_record_round_trip_preserves_max_u32_agent_id() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut record = minimal_agent_record();
+        record.encryption = crate::AgentEncryptionInfo::default();
+        record.agent_id = u32::MAX;
+
+        let serialized = serde_json::to_value(&record)?;
+        let deserialized: AgentRecord = serde_json::from_value(serialized)?;
+
+        assert_eq!(deserialized.agent_id, u32::MAX);
+        assert_eq!(deserialized, record);
+        Ok(())
+    }
+
+    #[test]
     fn agent_record_rejects_malformed_base64_aes_iv() {
         let record = minimal_agent_record();
         let serialised = serde_json::to_value(&record).expect("serialisation must succeed");

@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 523 | 212 | 31 |
+| Tasks closed | 527 | 212 | 31 |
 | Bugs filed against | 46 | 34 | 9 |
 | Bug rate (bugs/task) | 0.09 | 0.16 | 0.29 |
 | Quality score | 91% | 84% | 71% |
 
-*Bug rates: Claude 46/523=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 46/527=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-19 22:30 — 9d4099f..b9f5378
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 4 | 0 | Closed qav1 (inline DB unit tests for AuditLog/Operator/Listener repos), dm08 (encrypt/decrypt error path tests for invalid crypto material), mp17 (create_operator edge cases for empty creds and duplicates), 1rhs (audit/session pagination boundary tests). Also added ALPN http/1.1 to TLS connector in transport.rs (production fix, committed as WIP). Issue 0b2j in_progress (demon init/reconnect ACK wire format tests — stashed WIP looks solid). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (0 warnings), cargo test passed (2,674 tests, 0 failures — one flaky Python test on first run due to concurrent cargo lock contention, passed cleanly on rerun)
 
 ### QA Review — 2026-03-19 19:30 — 41dab70..73b93b1
 

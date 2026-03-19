@@ -499,6 +499,104 @@ async fn concurrent_create_and_start_for_independent_listeners_do_not_interfere(
 }
 
 // ---------------------------------------------------------------------------
+// Update tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn update_stopped_listener_replaces_config() -> Result<(), Box<dyn std::error::Error>> {
+    let manager = test_manager().await?;
+    let (port_a, _guard_a) = common::available_port()?;
+    let (port_b, guard_b) = common::available_port_excluding(port_a)?;
+
+    manager.create(http_config("lc-update-stopped", port_a)).await?;
+
+    // Update the config to use a different port while still in Created state.
+    let updated = manager.update(http_config("lc-update-stopped", port_b)).await?;
+
+    // The listener should be in Stopped state after update (update sets Stopped).
+    assert_eq!(updated.state.status, ListenerStatus::Stopped);
+
+    // Verify the persisted config has the new port.
+    let summary = manager.summary("lc-update-stopped").await?;
+    match &summary.config {
+        ListenerConfig::Http(http) => {
+            assert_eq!(http.port_bind, port_b, "port must be updated to the new value");
+        }
+        other => panic!("expected Http config, got {:?}", other.protocol()),
+    }
+
+    // Start on the new port to confirm it actually works.
+    drop(guard_b);
+    let running = manager.start("lc-update-stopped").await?;
+    assert_eq!(running.state.status, ListenerStatus::Running);
+
+    timeout(Duration::from_secs(2), common::wait_for_listener(port_b)).await??;
+
+    manager.stop("lc-update-stopped").await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn update_running_listener_restarts_with_new_config() -> Result<(), Box<dyn std::error::Error>>
+{
+    let manager = test_manager().await?;
+    let (port_a, guard_a) = common::available_port()?;
+    let (port_b, guard_b) = common::available_port_excluding(port_a)?;
+
+    manager.create(http_config("lc-update-running", port_a)).await?;
+    drop(guard_a);
+    manager.start("lc-update-running").await?;
+    common::wait_for_listener(port_a).await?;
+
+    // Update with a new port while the listener is running — should stop, update, restart.
+    drop(guard_b);
+    let updated = manager.update(http_config("lc-update-running", port_b)).await?;
+    assert_eq!(
+        updated.state.status,
+        ListenerStatus::Running,
+        "a running listener must be restarted after update"
+    );
+
+    // The new port should be reachable.
+    timeout(Duration::from_secs(2), common::wait_for_listener(port_b)).await??;
+
+    // Verify the persisted config reflects the new port.
+    let summary = manager.summary("lc-update-running").await?;
+    match &summary.config {
+        ListenerConfig::Http(http) => {
+            assert_eq!(http.port_bind, port_b, "port must be updated to the new value");
+        }
+        other => panic!("expected Http config, got {:?}", other.protocol()),
+    }
+
+    manager.stop("lc-update-running").await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn update_nonexistent_listener_returns_error() -> Result<(), Box<dyn std::error::Error>> {
+    let manager = test_manager().await?;
+    let (port, _guard) = common::available_port()?;
+
+    let result = manager.update(http_config("no-such-listener", port)).await;
+    assert!(result.is_err(), "updating a listener that does not exist must return an error");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Delete nonexistent test
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn delete_nonexistent_listener_returns_error() -> Result<(), Box<dyn std::error::Error>> {
+    let manager = test_manager().await?;
+
+    let result = manager.delete("no-such-listener").await;
+    assert!(result.is_err(), "deleting a listener that does not exist must return an error");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Same-port conflict between managed listeners
 // ---------------------------------------------------------------------------
 

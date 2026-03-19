@@ -332,6 +332,23 @@ mod tests {
     }
 
     #[test]
+    fn encrypt_and_decrypt_round_trip_multi_block() {
+        let key = [0x41; AGENT_KEY_LENGTH];
+        let iv = [0x24; AGENT_IV_LENGTH];
+        // 80 bytes = 5 AES blocks (16 bytes each), verifying multi-block CTR.
+        let plaintext: Vec<u8> = (0..80).collect();
+
+        let ciphertext =
+            encrypt_agent_data(&key, &iv, &plaintext).expect("multi-block encrypt should succeed");
+        assert_eq!(ciphertext.len(), plaintext.len());
+        assert_ne!(ciphertext, plaintext);
+
+        let decrypted =
+            decrypt_agent_data(&key, &iv, &ciphertext).expect("multi-block decrypt should succeed");
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
     fn decrypt_agent_data_rejects_invalid_iv_length() {
         let key = [0x11; AGENT_KEY_LENGTH];
         let ciphertext = [0x33; AGENT_IV_LENGTH];
@@ -411,6 +428,30 @@ mod tests {
         let first = hash_password_sha3("test-password");
         let second = hash_password_sha3("test-password");
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn hash_password_sha3_handles_non_ascii_unicode() {
+        // Multi-byte UTF-8: CJK ideograph, emoji, accented chars.
+        let digest_cjk = hash_password_sha3("密码");
+        assert_eq!(digest_cjk.len(), 64, "SHA3-256 hex digest must be 64 chars");
+
+        let digest_emoji = hash_password_sha3("🔑secret🔒");
+        assert_eq!(digest_emoji.len(), 64);
+
+        let digest_accent = hash_password_sha3("contraseña");
+        assert_eq!(digest_accent.len(), 64);
+
+        // All three must be distinct from each other and from ASCII.
+        let digest_ascii = hash_password_sha3("password");
+        let all = [&digest_cjk, &digest_emoji, &digest_accent, &digest_ascii];
+        for (i, a) in all.iter().enumerate() {
+            for (j, b) in all.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b, "distinct inputs must produce distinct digests");
+                }
+            }
+        }
     }
 
     #[test]

@@ -888,6 +888,18 @@ mod tests {
     }
 
     #[test]
+    fn demon_header_from_bytes_accepts_oversized_buffer() {
+        let header = DemonHeader::new(0x1122_3344, 5).expect("header construction should succeed");
+        let mut bytes = header.to_bytes().to_vec();
+        // Append trailing garbage — from_bytes must still parse the header.
+        bytes.extend_from_slice(&[0xFF; 32]);
+
+        let parsed =
+            DemonHeader::from_bytes(&bytes).expect("oversized buffer must still parse header");
+        assert_eq!(parsed, header);
+    }
+
+    #[test]
     fn demon_envelope_rejects_buffer_shorter_than_header() {
         let error = DemonEnvelope::from_bytes(&[0u8; 8])
             .expect_err("buffer shorter than 12 bytes must be rejected");

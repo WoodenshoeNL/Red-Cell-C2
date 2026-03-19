@@ -491,6 +491,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discord_payload_omits_username_and_avatar_url_when_none() {
+        let (address, mut receiver, server) = webhook_server(HttpStatusCode::OK).await;
+        let profile = Profile::parse(&format!(
+            r#"
+            Teamserver {{
+              Host = "127.0.0.1"
+              Port = 40056
+            }}
+
+            Operators {{
+              user "operator" {{
+                Password = "password1234"
+              }}
+            }}
+
+            WebHook {{
+              Discord {{
+                Url = "http://{address}/"
+              }}
+            }}
+
+            Demon {{}}
+            "#
+        ))
+        .expect("profile should parse");
+        let notifier = AuditWebhookNotifier::from_profile(&profile);
+
+        notifier
+            .notify_audit_record(&sample_record(80))
+            .await
+            .expect("webhook delivery should succeed");
+
+        let payload = receiver.recv().await.expect("payload should arrive");
+        server.abort();
+
+        assert!(
+            payload.get("username").is_none(),
+            "username must be omitted when None; got: {payload}"
+        );
+        assert!(
+            payload.get("avatar_url").is_none(),
+            "avatar_url must be omitted when None; got: {payload}"
+        );
+        // Embeds should still be present.
+        assert!(payload["embeds"][0]["title"].is_string());
+    }
+
+    #[tokio::test]
     async fn notifier_shutdown_waits_for_detached_delivery() {
         let (address, mut receiver, server) = webhook_server(HttpStatusCode::OK).await;
         let profile = Profile::parse(&format!(

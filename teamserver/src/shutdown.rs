@@ -315,4 +315,52 @@ mod tests {
             .await
             .expect("notified() after repeated initiate() must return immediately");
     }
+
+    /// Verify that concurrent `try_track_callback` and `initiate` calls
+    /// never leave the controller in an inconsistent state: either the
+    /// callback is tracked and must be drained, or it is rejected.
+    #[tokio::test]
+    async fn try_track_callback_race_with_concurrent_initiate() {
+        use std::sync::{Arc, Barrier};
+
+        for _ in 0..100 {
+            let controller = ShutdownController::new();
+            let barrier = Arc::new(Barrier::new(2));
+
+            let ctrl = controller.clone();
+            let bar = barrier.clone();
+            let tracker = std::thread::spawn(move || {
+                bar.wait();
+                ctrl.try_track_callback()
+            });
+
+            let ctrl2 = controller.clone();
+            let bar2 = barrier.clone();
+            let initiator = std::thread::spawn(move || {
+                bar2.wait();
+                ctrl2.initiate();
+            });
+
+            let guard = tracker.join().expect("tracker thread should not panic");
+            initiator.join().expect("initiator thread should not panic");
+
+            assert!(controller.is_shutting_down());
+
+            match guard {
+                Some(g) => {
+                    // Callback was accepted — count must be 1 until dropped.
+                    assert_eq!(controller.active_callback_count(), 1);
+                    drop(g);
+                    assert_eq!(controller.active_callback_count(), 0);
+                }
+                None => {
+                    // Callback was rejected — count must already be 0.
+                    assert_eq!(controller.active_callback_count(), 0);
+                }
+            }
+
+            // Drain must always succeed quickly after guards are dropped.
+            assert!(controller.wait_for_callback_drain(Duration::from_millis(50)).await);
+        }
+    }
 }

@@ -177,6 +177,12 @@ mod tests {
     }
 
     #[test]
+    fn load_from_returns_default_for_nonexistent_path() {
+        let path = std::path::Path::new("/tmp/red-cell-nonexistent-dir/client.toml");
+        assert_eq!(LocalConfig::load_from(path), LocalConfig::default());
+    }
+
+    #[test]
     fn load_with_missing_config_dir_returns_default() {
         assert_eq!(LocalConfig::load_with_path(None), LocalConfig::default());
     }

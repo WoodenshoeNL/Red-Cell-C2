@@ -1711,4 +1711,51 @@ mod tests {
             "persisted runtime credentials must not override profile-configured operator"
         );
     }
+
+    // ------------------------------------------------------------------
+    // is_legacy_sha3_digest boundary tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn is_legacy_sha3_digest_accepts_valid_64_char_hex() {
+        assert!(super::is_legacy_sha3_digest(
+            "2f7d3e77d0786c5d305c0afadd4c1a2a6869a3210956c963ad2420c52e797022"
+        ));
+    }
+
+    #[test]
+    fn is_legacy_sha3_digest_rejects_63_char_hex() {
+        // One char too short.
+        assert!(!super::is_legacy_sha3_digest(
+            "2f7d3e77d0786c5d305c0afadd4c1a2a6869a3210956c963ad2420c52e79702"
+        ));
+    }
+
+    #[test]
+    fn is_legacy_sha3_digest_rejects_65_char_hex() {
+        // One char too long.
+        assert!(!super::is_legacy_sha3_digest(
+            "2f7d3e77d0786c5d305c0afadd4c1a2a6869a3210956c963ad2420c52e7970220"
+        ));
+    }
+
+    #[test]
+    fn is_legacy_sha3_digest_rejects_non_hex_char_at_position_32() {
+        // 'g' at position 32 is not a hex digit.
+        let mut s = "2f7d3e77d0786c5d305c0afadd4c1a2a".to_owned();
+        s.push('g');
+        s.push_str("869a3210956c963ad2420c52e797022");
+        assert_eq!(s.len(), 64);
+        assert!(!super::is_legacy_sha3_digest(&s));
+    }
+
+    #[test]
+    fn is_legacy_sha3_digest_rejects_argon2_phc_string() {
+        assert!(!super::is_legacy_sha3_digest("$argon2id$v=19$m=19456,t=2,p=1$salt$hash"));
+    }
+
+    #[test]
+    fn is_legacy_sha3_digest_rejects_empty_string() {
+        assert!(!super::is_legacy_sha3_digest(""));
+    }
 }

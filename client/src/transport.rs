@@ -4913,4 +4913,125 @@ mod tests {
         assert_eq!(log.unread_by_kind(EventKind::Operator), 0);
         assert_eq!(log.unread_by_kind(EventKind::System), 0);
     }
+
+    /// Helper to build a full `OperatorAgentInfo` with the given `name_id` and
+    /// `hostname`, using sensible defaults for all other fields.
+    fn make_agent_info(name_id: &str, hostname: &str) -> OperatorAgentInfo {
+        OperatorAgentInfo {
+            active: "true".to_owned(),
+            background_check: false,
+            domain_name: "LAB".to_owned(),
+            elevated: false,
+            internal_ip: "10.0.0.10".to_owned(),
+            external_ip: "203.0.113.10".to_owned(),
+            first_call_in: "10/03/2026 11:59:00".to_owned(),
+            last_call_in: "10/03/2026 12:00:00".to_owned(),
+            hostname: hostname.to_owned(),
+            listener: "http".to_owned(),
+            magic_value: "deadbeef".to_owned(),
+            name_id: name_id.to_owned(),
+            os_arch: "x64".to_owned(),
+            os_build: "19045".to_owned(),
+            os_version: "Windows 11".to_owned(),
+            pivots: AgentPivotsInfo::default(),
+            port_fwds: Vec::new(),
+            process_arch: "x64".to_owned(),
+            process_name: "explorer.exe".to_owned(),
+            process_pid: "1234".to_owned(),
+            process_ppid: "1111".to_owned(),
+            process_path: "C:\\Windows\\explorer.exe".to_owned(),
+            reason: "manual".to_owned(),
+            note: String::new(),
+            sleep_delay: serde_json::Value::from(5),
+            sleep_jitter: serde_json::Value::from(10),
+            kill_date: serde_json::Value::Null,
+            working_hours: serde_json::Value::Null,
+            socks_cli: Vec::new(),
+            socks_cli_mtx: None,
+            socks_svr: Vec::new(),
+            tasked_once: false,
+            username: "operator".to_owned(),
+            pivot_parent: String::new(),
+        }
+    }
+
+    #[test]
+    fn duplicate_agent_new_updates_in_place_without_duplicating() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        // First AgentNew for "abcd1234".
+        state.apply_operator_message(OperatorMessage::AgentNew(Box::new(Message {
+            head: head(EventCode::Session),
+            info: make_agent_info("abcd1234", "wkstn-1"),
+        })));
+        assert_eq!(state.agents.len(), 1);
+        assert_eq!(state.agents[0].hostname, "wkstn-1");
+
+        // Second AgentNew with the same name_id but different hostname.
+        let events = state.apply_operator_message(OperatorMessage::AgentNew(Box::new(Message {
+            head: head(EventCode::Session),
+            info: make_agent_info("abcd1234", "wkstn-2"),
+        })));
+
+        // upsert_agent must replace in-place — still only one entry.
+        assert_eq!(state.agents.len(), 1, "duplicate AgentNew must not create a second entry");
+        assert_eq!(
+            state.agents[0].hostname, "wkstn-2",
+            "the agent fields should be updated to the latest values"
+        );
+        assert_eq!(state.agents[0].name_id, "ABCD1234", "name_id must remain normalised");
+        // An AgentCheckin event is still emitted for the duplicate.
+        assert_eq!(events, vec![AppEvent::AgentCheckin("ABCD1234".to_owned())]);
+    }
+
+    #[test]
+    fn agent_response_for_unknown_agent_does_not_panic() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+        assert!(state.agents.is_empty());
+
+        // Send a response for an agent that was never registered.
+        let events = state.apply_operator_message(OperatorMessage::AgentResponse(Message {
+            head: head(EventCode::Session),
+            info: AgentResponseInfo {
+                demon_id: "deadbeef".to_owned(),
+                command_id: "42".to_owned(),
+                output: "some output".to_owned(),
+                command_line: Some("whoami".to_owned()),
+                extra: BTreeMap::new(),
+            },
+        }));
+
+        // The response should still be recorded in the console for that agent_id,
+        // and a CommandResponse event should be emitted — no panic.
+        assert!(
+            events.iter().any(|e| matches!(e, AppEvent::CommandResponse { .. })),
+            "a CommandResponse event should be emitted even for an unknown agent"
+        );
+        let console = state.agent_consoles.get("DEADBEEF");
+        assert!(console.is_some(), "console entry should be created for unknown agent");
+        assert_eq!(console.map(|c| c.len()), Some(1));
+    }
+
+    #[test]
+    fn agent_response_empty_output_for_unknown_agent_returns_no_events() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        let events = state.apply_operator_message(OperatorMessage::AgentResponse(Message {
+            head: head(EventCode::Session),
+            info: AgentResponseInfo {
+                demon_id: "deadbeef".to_owned(),
+                command_id: "42".to_owned(),
+                output: String::new(),
+                command_line: None,
+                extra: BTreeMap::new(),
+            },
+        }));
+
+        // Empty output causes early return — no events, no console entry.
+        assert!(events.is_empty(), "empty output should produce no events");
+        assert!(
+            !state.agent_consoles.contains_key("DEADBEEF"),
+            "no console entry for empty output"
+        );
+    }
 }

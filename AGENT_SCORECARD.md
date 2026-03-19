@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 383 | 212 | 31 |
+| Tasks closed | 386 | 212 | 31 |
 | Bugs filed against | 43 | 34 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.16 | 0.29 |
 | Quality score | 89% | 84% | 71% |
 
-*Bug rates: Claude 43/383=0.11, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 43/386=0.11, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-19 20:00 — 4d8d0e5..fc811f8
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 0 | Closed zf4l (listener mgmt integration tests), qnl2 (credential/loot endpoint tests), 43uq (job queue endpoint tests). +1272 lines of test code in api.rs. Also ran arch review (6ea75c5). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check ✓, clippy ✓ (0 warnings), cargo test ✓ (207+ tests, 0 failures)
 
 ### Arch Review — 2026-03-19 18:30
 

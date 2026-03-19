@@ -21,7 +21,7 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 2 | 0 | 0 |
-| Missing tests / stale tests | 23 | 13 | 5 |
+| Missing tests / stale tests | 26 | 13 | 5 |
 | Clippy warnings | 2 | 0 | 1 |
 | Protocol errors | 6 | 27 | 3 |
 | Security issues | 22 | 36 | 0 |
@@ -31,7 +31,7 @@ Each loop run updates the running totals and appends a review entry.
 | Test infrastructure / flakiness | 1 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
-| Correctness / pagination | 14 | 7 | 1 |
+| Correctness / pagination | 15 | 7 | 1 |
 | Workflow / close-hygiene | 12 | 0 | 0 |
 | Code reuse / duplication | 6 | 0 | 0 |
 
@@ -2621,3 +2621,14 @@ Build: cargo check passed, clippy passed (0 warnings), cargo test passed (all su
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: cargo check passed, clippy passed (0 warnings), cargo test passed (2147 tests, 0 failures)
+
+### Arch Review — 2026-03-19 19:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 4 | Missing tests (3), Correctness (1) | ic7qy: External C2 bridge listener has no integration test. 984jo: listener restart path untested. hirxf: agent deletion/cleanup chain untested E2E. ahhvt: optional_u32 silently drops parse errors via .ok(). |
+| Codex | 0 | — | No new findings this review. |
+| Cursor | 0 | — | No new findings this review. |
+
+Overall codebase health: on track
+Biggest blindspot: External C2 bridge listener (recently added) has zero integration test coverage — the only listener type without a pipeline test.

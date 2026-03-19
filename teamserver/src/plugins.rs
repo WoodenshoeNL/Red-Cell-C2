@@ -2609,6 +2609,130 @@ havoc.RegisterCommand(\n\
         Ok(())
     }
 
+    /// Multiple plugins registering different commands should produce a merged
+    /// result from `command_names()` and `command_descriptions()`.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn command_names_and_descriptions_merge_across_plugins()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let temp_dir = TempDir::new()?;
+
+        // Plugin A registers "recon" command.
+        std::fs::write(
+            temp_dir.path().join("plugin_a.py"),
+            r#"
+import havoc
+
+def run_recon(agent, args):
+    agent.task(0x10, "recon")
+
+havoc.RegisterCommand("recon", "run reconnaissance", run_recon)
+"#,
+        )?;
+
+        // Plugin B registers "exfil" command.
+        std::fs::write(
+            temp_dir.path().join("plugin_b.py"),
+            r#"
+import havoc
+
+def run_exfil(agent, args):
+    agent.task(0x20, "exfil")
+
+havoc.RegisterCommand("exfil", "exfiltrate data", run_exfil)
+"#,
+        )?;
+
+        let database = Database::connect(unique_test_dir("plugins-merge-commands")).await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let runtime = PluginRuntime::initialize(
+            database,
+            registry,
+            events,
+            sockets,
+            Some(temp_dir.path().to_path_buf()),
+        )
+        .await?;
+
+        let loaded = runtime.load_plugins().await?;
+        assert_eq!(loaded.len(), 2);
+
+        // command_names returns sorted keys from BTreeMap.
+        let names = runtime.command_names().await;
+        assert_eq!(names, vec!["exfil".to_owned(), "recon".to_owned()]);
+
+        let descriptions = runtime.command_descriptions().await;
+        assert_eq!(descriptions.len(), 2);
+        assert_eq!(descriptions.get("recon"), Some(&"run reconnaissance".to_owned()),);
+        assert_eq!(descriptions.get("exfil"), Some(&"exfiltrate data".to_owned()),);
+        Ok(())
+    }
+
+    /// When two plugins register a command with the same name, the last one
+    /// loaded wins (alphabetical filename order). The description in
+    /// `command_descriptions()` should reflect the overwriting plugin.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn command_names_last_write_wins_on_duplicate_name()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let temp_dir = TempDir::new()?;
+
+        // aaa_first.py registers "scan" with description "first scan".
+        std::fs::write(
+            temp_dir.path().join("aaa_first.py"),
+            r#"
+import havoc
+
+def run_scan(agent, args):
+    agent.task(0x30, "first")
+
+havoc.RegisterCommand("scan", "first scan", run_scan)
+"#,
+        )?;
+
+        // zzz_second.py registers "scan" with description "second scan".
+        std::fs::write(
+            temp_dir.path().join("zzz_second.py"),
+            r#"
+import havoc
+
+def run_scan(agent, args):
+    agent.task(0x30, "second")
+
+havoc.RegisterCommand("scan", "second scan", run_scan)
+"#,
+        )?;
+
+        let database = Database::connect(unique_test_dir("plugins-duplicate-command")).await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let runtime = PluginRuntime::initialize(
+            database,
+            registry,
+            events,
+            sockets,
+            Some(temp_dir.path().to_path_buf()),
+        )
+        .await?;
+
+        let loaded = runtime.load_plugins().await?;
+        assert_eq!(loaded.len(), 2);
+
+        // Only one "scan" entry should exist (BTreeMap key deduplication).
+        let names = runtime.command_names().await;
+        assert_eq!(names, vec!["scan".to_owned()]);
+
+        // zzz_second.py loads after aaa_first.py, so its description wins.
+        let descriptions = runtime.command_descriptions().await;
+        assert_eq!(descriptions.get("scan"), Some(&"second scan".to_owned()),);
+        Ok(())
+    }
+
     /// Verify that the thread-local [`CallbackRuntimeGuard`] allows `active()` to
     /// succeed even when the global `RUNTIME` mutex is held by another thread,
     /// proving the re-entrancy fix for the callback deadlock (red-cell-c2-ss50).

@@ -1358,6 +1358,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_sequence_warns_when_listener_drain_times_out() {
+        let (state, shutdown) = build_shutdown_test_state().await;
+        let pool = state.database.pool().clone();
+        let handle: Handle<SocketAddr> = Handle::new();
+
+        // Hold a callback guard so the listener drain cannot complete.
+        let _stuck_callback = shutdown
+            .try_track_callback()
+            .expect("callback tracking should succeed before shutdown");
+
+        // Use a tiny timeout so the listener drain times out immediately,
+        // exercising the `!drained` warning branch.
+        run_shutdown_sequence(handle, shutdown.clone(), state, Duration::from_millis(1))
+            .await
+            .expect("shutdown sequence should succeed even when listener drain times out");
+
+        assert!(shutdown.is_shutting_down());
+        assert!(pool.is_closed(), "database should be closed even after listener timeout");
+    }
+
+    #[tokio::test]
+    async fn shutdown_sequence_warns_when_webhook_drain_times_out() {
+        let (state, shutdown) = build_shutdown_test_state().await;
+        let pool = state.database.pool().clone();
+        let handle: Handle<SocketAddr> = Handle::new();
+
+        // Simulate a pending webhook delivery that will never complete.
+        let _stuck_delivery = state.webhooks.simulate_stuck_delivery();
+
+        // Use a tiny timeout so the webhook drain times out immediately,
+        // exercising the `!state.webhooks.shutdown(timeout)` warning branch.
+        run_shutdown_sequence(handle, shutdown.clone(), state, Duration::from_millis(1))
+            .await
+            .expect("shutdown sequence should succeed even when webhook drain times out");
+
+        assert!(shutdown.is_shutting_down());
+        assert!(pool.is_closed(), "database should be closed even after webhook timeout");
+    }
+
+    #[tokio::test]
+    async fn shutdown_sequence_warns_when_both_listener_and_webhook_drain_time_out() {
+        let (state, shutdown) = build_shutdown_test_state().await;
+        let pool = state.database.pool().clone();
+        let handle: Handle<SocketAddr> = Handle::new();
+
+        // Hold both a callback guard and a stuck webhook delivery.
+        let _stuck_callback = shutdown
+            .try_track_callback()
+            .expect("callback tracking should succeed before shutdown");
+        let _stuck_delivery = state.webhooks.simulate_stuck_delivery();
+
+        run_shutdown_sequence(handle, shutdown.clone(), state, Duration::from_millis(1))
+            .await
+            .expect("shutdown sequence should succeed even when both drains time out");
+
+        assert!(shutdown.is_shutting_down());
+        assert!(pool.is_closed(), "database should be closed even after both timeouts");
+    }
+
+    #[tokio::test]
     async fn shutdown_sequence_drains_active_listener_before_closing_database() {
         let port = available_port().expect("ephemeral port should be available");
         let profile = Profile::parse(&format!(

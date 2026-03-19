@@ -91,6 +91,16 @@ impl AuditWebhookNotifier {
         Self { retry_delays: Arc::from([]), ..Self::from_profile(profile) }
     }
 
+    /// Simulate a pending webhook delivery that will never complete.
+    ///
+    /// Returns a guard that decrements the pending counter when dropped.
+    /// Used to test shutdown timeout paths without real network I/O.
+    #[doc(hidden)]
+    pub fn simulate_stuck_delivery(&self) -> StuckDeliveryGuard {
+        self.delivery_state.pending.fetch_add(1, Ordering::SeqCst);
+        StuckDeliveryGuard { delivery_state: self.delivery_state.clone() }
+    }
+
     /// Emit a notification for a persisted audit record.
     pub async fn notify_audit_record(&self, record: &AuditRecord) -> Result<(), WebhookError> {
         if let Some(discord) = &self.discord {
@@ -187,6 +197,23 @@ impl AuditWebhookNotifier {
                 return self.delivery_state.pending.load(Ordering::SeqCst) == 0;
             }
         }
+    }
+}
+
+/// RAII guard that simulates an in-flight webhook delivery for testing.
+///
+/// Dropping the guard decrements the pending counter and wakes any waiting
+/// shutdown call so the test does not leak state.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct StuckDeliveryGuard {
+    delivery_state: Arc<DeliveryState>,
+}
+
+impl Drop for StuckDeliveryGuard {
+    fn drop(&mut self) {
+        self.delivery_state.pending.fetch_sub(1, Ordering::SeqCst);
+        self.delivery_state.notify_if_drained();
     }
 }
 

@@ -321,7 +321,7 @@ async fn operator_session_smb_listener_and_mock_demon_round_trip()
         panic!("expected listener create event");
     };
     assert_eq!(message.info.name.as_deref(), Some(listener_name));
-    assert_eq!(message.info.protocol.as_deref(), Some("smb"));
+    assert_eq!(message.info.protocol.as_deref(), Some("Smb"));
     assert_eq!(message.info.status.as_deref(), Some("Offline"));
     assert_eq!(
         message.info.extra.get("PipeName").and_then(serde_json::Value::as_str),

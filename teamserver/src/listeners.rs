@@ -1170,8 +1170,9 @@ fn operator_status(status: ListenerStatus) -> &'static str {
 fn operator_protocol_name(config: &ListenerConfig) -> String {
     match config {
         ListenerConfig::Http(config) if config.secure => "Https".to_owned(),
+        ListenerConfig::Http(_) => "Http".to_owned(),
+        ListenerConfig::Smb(_) => "Smb".to_owned(),
         ListenerConfig::Dns(_) => "Dns".to_owned(),
-        _ => config.protocol().as_str().to_owned(),
     }
 }
 
@@ -3249,10 +3250,10 @@ mod tests {
         action_from_mark, base32hex_decode, base32hex_encode, build_dns_txt_response,
         chunk_response_to_b32hex, collect_body_with_magic_precheck, dns_allowed_query_types,
         extract_external_ip, listener_config_from_operator, listener_error_event,
-        listener_event_for_action, listener_removed_event, operator_requests_start,
-        parse_dns_c2_query, parse_dns_query, parse_trusted_proxy_peer, profile_listener_configs,
-        read_smb_frame, smb_local_socket_name, spawn_dns_listener_runtime,
-        spawn_managed_listener_task, spawn_smb_listener_runtime,
+        listener_event_for_action, listener_removed_event, operator_protocol_name,
+        operator_requests_start, parse_dns_c2_query, parse_dns_query, parse_trusted_proxy_peer,
+        profile_listener_configs, read_smb_frame, smb_local_socket_name,
+        spawn_dns_listener_runtime, spawn_managed_listener_task, spawn_smb_listener_runtime,
     };
     use crate::{
         AgentRegistry, AuditQuery, AuditResultStatus, Database, EventBus, Job,
@@ -6900,6 +6901,50 @@ mod tests {
             };
             assert_eq!(user, "carol", "action {action:?} did not preserve user");
         }
+    }
+
+    #[test]
+    fn operator_protocol_name_emits_havoc_compatible_title_case_labels() {
+        // HTTP (non-secure) → "Http"
+        let http = http_listener("http-test", 8080);
+        assert_eq!(operator_protocol_name(&http), "Http");
+
+        // HTTPS (secure) → "Https"
+        let https = ListenerConfig::from(HttpListenerConfig {
+            name: "https-test".to_owned(),
+            hosts: vec!["127.0.0.1".to_owned()],
+            host_bind: "127.0.0.1".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: 443,
+            port_conn: None,
+            secure: true,
+            kill_date: None,
+            working_hours: None,
+            method: None,
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: vec!["/".to_owned()],
+            host_header: None,
+            cert: None,
+            response: None,
+            proxy: None,
+        });
+        assert_eq!(operator_protocol_name(&https), "Https");
+
+        // SMB → "Smb"
+        let smb = ListenerConfig::from(SmbListenerConfig {
+            name: "smb-test".to_owned(),
+            pipe_name: "pipe-test".to_owned(),
+            kill_date: None,
+            working_hours: None,
+        });
+        assert_eq!(operator_protocol_name(&smb), "Smb");
+
+        // DNS → "Dns"
+        let dns = dns_listener_config("dns-test", 53, "c2.example");
+        assert_eq!(operator_protocol_name(&dns), "Dns");
     }
 
     // ── ListenerManager constructor helpers and shutdown lifecycle ────────────

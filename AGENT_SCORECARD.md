@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 533 | 212 | 31 |
-| Bugs filed against | 49 | 34 | 9 |
+| Tasks closed | 536 | 212 | 31 |
+| Bugs filed against | 50 | 34 | 9 |
 | Bug rate (bugs/task) | 0.09 | 0.16 | 0.29 |
 | Quality score | 91% | 84% | 71% |
 
-*Bug rates: Claude 49/533=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 50/536=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -31,7 +31,7 @@ Each loop run updates the running totals and appends a review entry.
 | Test infrastructure / flakiness | 2 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
-| Correctness / pagination | 17 | 7 | 1 |
+| Correctness / pagination | 18 | 7 | 1 |
 | Workflow / close-hygiene | 12 | 0 | 0 |
 | Code reuse / duplication | 6 | 0 | 0 |
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-20 02:00 — 7cc6dbf..97bd0af
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 1 | Closed wr7y (session_token case-sensitivity and whitespace edge-case tests in rbac.rs), adzhf (removed unused NormalizePathLayer import — fixed clippy regression from prior period), keqm (Discord embed field sanitization with sanitize_discord_text helper and special character tests). Filed: fiu4y (sanitize_discord_text docstring claims <#channel> mention defusal but code omits it). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (clean), cargo test passed (1189 tests, 0 failures)
 
 ### QA Review — 2026-03-20 01:15 — b9f5378..7cc6dbf
 

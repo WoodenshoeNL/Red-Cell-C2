@@ -2056,8 +2056,7 @@ mod tests {
         assert_eq!(offset, 3);
 
         // Now send a reconnect ACK — it should encrypt at offset 3 without advancing.
-        let reconnect_ack =
-            build_reconnect_ack(&registry, agent_id).await.expect("reconnect ack");
+        let reconnect_ack = build_reconnect_ack(&registry, agent_id).await.expect("reconnect ack");
 
         // Wire format: exactly 4 bytes of ciphertext, no framing.
         assert_eq!(
@@ -2108,8 +2107,7 @@ mod tests {
         let offset = registry.ctr_offset(agent_id).await.expect("offset");
         assert_eq!(offset, 1);
 
-        let reconnect_ack =
-            build_reconnect_ack(&registry, agent_id).await.expect("reconnect ack");
+        let reconnect_ack = build_reconnect_ack(&registry, agent_id).await.expect("reconnect ack");
 
         // Decrypting at the wrong offset (0 instead of 1) must NOT produce the agent_id.
         let wrong_plaintext = decrypt_agent_data_at_offset(&key, &iv, 0, &reconnect_ack)

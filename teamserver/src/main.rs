@@ -18,7 +18,6 @@ use red_cell_common::tls::{
 };
 use rustls_pki_types::pem::PemObject;
 use tokio::net::lookup_host;
-use tower_http::normalize_path::NormalizePathLayer;
 use tracing::{info, instrument};
 
 mod logging;

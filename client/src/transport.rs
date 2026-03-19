@@ -3645,4 +3645,100 @@ mod tests {
             "message sent via queue_message should also arrive"
         );
     }
+
+    #[test]
+    fn init_connection_success_sets_connected_and_populates_operator() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+        assert!(matches!(state.connection_status, ConnectionStatus::Disconnected));
+        assert!(state.operator_info.is_none());
+        assert!(state.online_operators.is_empty());
+
+        let events =
+            state.apply_operator_message(OperatorMessage::InitConnectionSuccess(Message {
+                head: MessageHead {
+                    event: EventCode::InitConnection,
+                    user: "alice".to_owned(),
+                    timestamp: "18/03/2026 09:30:00".to_owned(),
+                    one_time: String::new(),
+                },
+                info: MessageInfo { message: "Authentication successful".to_owned() },
+            }));
+
+        assert!(
+            matches!(state.connection_status, ConnectionStatus::Connected),
+            "connection_status should be Connected after success"
+        );
+
+        let info = state.operator_info.as_ref().expect("operator_info should be populated");
+        assert_eq!(info.username, "alice");
+        assert!(info.online);
+        assert_eq!(info.last_seen.as_deref(), Some("18/03/2026 09:30:00"));
+
+        assert!(state.online_operators.contains("alice"), "alice should be in online_operators");
+
+        // A system event should have been logged.
+        assert_eq!(state.event_log.len(), 1);
+
+        // apply_operator_message returns no AppEvent variants for this message type.
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn init_connection_success_with_empty_user_skips_operator_info() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        state.apply_operator_message(OperatorMessage::InitConnectionSuccess(Message {
+            head: MessageHead {
+                event: EventCode::InitConnection,
+                user: String::new(),
+                timestamp: "18/03/2026 09:30:00".to_owned(),
+                one_time: String::new(),
+            },
+            info: MessageInfo { message: "Connected".to_owned() },
+        }));
+
+        assert!(matches!(state.connection_status, ConnectionStatus::Connected));
+        assert!(
+            state.operator_info.is_none(),
+            "operator_info should remain None when user is empty"
+        );
+        assert!(state.online_operators.is_empty());
+        assert_eq!(state.event_log.len(), 1);
+    }
+
+    #[test]
+    fn init_connection_error_sets_error_status_and_logs_event() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        let events = state.apply_operator_message(OperatorMessage::InitConnectionError(Message {
+            head: MessageHead {
+                event: EventCode::InitConnection,
+                user: String::new(),
+                timestamp: "18/03/2026 09:31:00".to_owned(),
+                one_time: String::new(),
+            },
+            info: MessageInfo { message: "Invalid credentials".to_owned() },
+        }));
+
+        assert!(
+            matches!(&state.connection_status, ConnectionStatus::Error(msg) if msg == "Invalid credentials"),
+            "connection_status should be Error with the message"
+        );
+
+        assert_eq!(
+            state.last_auth_error.as_deref(),
+            Some("Invalid credentials"),
+            "last_auth_error should capture the error message"
+        );
+
+        // operator_info should remain None after an error.
+        assert!(state.operator_info.is_none());
+
+        // A system event should be logged.
+        assert_eq!(state.event_log.len(), 1);
+        let entry = state.event_log.entries.front().expect("should have one event entry");
+        assert_eq!(entry.message, "Invalid credentials");
+
+        assert!(events.is_empty());
+    }
 }

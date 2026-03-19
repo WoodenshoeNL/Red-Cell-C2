@@ -2213,4 +2213,185 @@ havoc.RegisterCommand(\n\
         );
         Ok(())
     }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn load_plugins_returns_empty_when_no_dir_configured()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-no-dir").await?;
+
+        let loaded = runtime.load_plugins().await?;
+        assert!(loaded.is_empty(), "expected empty vec when no plugins_dir configured");
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn load_plugins_skips_non_py_files() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let temp_dir = TempDir::new()?;
+        std::fs::write(temp_dir.path().join("readme.txt"), "not a plugin")?;
+        std::fs::write(temp_dir.path().join("data.json"), "{}")?;
+        std::fs::write(temp_dir.path().join("real_plugin.py"), "x = 42\n")?;
+
+        let database = Database::connect(unique_test_dir("plugins-skip-non-py")).await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let runtime = PluginRuntime::initialize(
+            database,
+            registry,
+            events,
+            sockets,
+            Some(temp_dir.path().to_path_buf()),
+        )
+        .await?;
+
+        let loaded = runtime.load_plugins().await?;
+        assert_eq!(loaded, vec!["real_plugin".to_owned()]);
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn emit_agent_registered_skips_unknown_agent() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("emit-registered-unknown").await?;
+
+        let (tracker, callback) = tokio::task::spawn_blocking({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| {
+                    make_tracker_and_callback(
+                        &runtime,
+                        py,
+                        pyo3::ffi::c_str!("(lambda t: lambda event: t.append(1))(_tracker)"),
+                    )
+                })
+            }
+        })
+        .await??;
+
+        runtime.register_callback(PluginEvent::AgentRegistered, callback).await?;
+        runtime.emit_agent_registered(0xDEAD).await?;
+
+        let count = tokio::task::spawn_blocking(move || tracker_len(tracker)).await?;
+        assert_eq!(count, 0, "callback must not fire when agent is unknown");
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn emit_agent_dead_skips_unknown_agent() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("emit-dead-unknown").await?;
+
+        let (tracker, callback) = tokio::task::spawn_blocking({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| {
+                    make_tracker_and_callback(
+                        &runtime,
+                        py,
+                        pyo3::ffi::c_str!("(lambda t: lambda event: t.append(1))(_tracker)"),
+                    )
+                })
+            }
+        })
+        .await??;
+
+        runtime.register_callback(PluginEvent::AgentDead, callback).await?;
+        runtime.emit_agent_dead(0xDEAD).await?;
+
+        let count = tokio::task::spawn_blocking(move || tracker_len(tracker)).await?;
+        assert_eq!(count, 0, "callback must not fire when agent is unknown");
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn emit_events_succeed_silently_with_no_callbacks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let (_database, registry, _events, _sockets, runtime) =
+            runtime_fixture("emit-no-callbacks").await?;
+        registry.insert(sample_agent(0x00AB_CDEF)).await?;
+
+        // All emit_* methods must succeed when no callbacks are registered.
+        runtime.emit_agent_checkin(0x00AB_CDEF).await?;
+        runtime.emit_agent_registered(0x00AB_CDEF).await?;
+        runtime.emit_agent_dead(0x00AB_CDEF).await?;
+        runtime.emit_command_output(0x00AB_CDEF, 1, 1, "output").await?;
+        runtime
+            .emit_loot_captured(&LootRecord {
+                id: Some(1),
+                agent_id: 0x00AB_CDEF,
+                kind: "screenshot".to_owned(),
+                name: "test.png".to_owned(),
+                file_path: None,
+                size_bytes: Some(100),
+                captured_at: "2026-03-15T00:00:00Z".to_owned(),
+                data: None,
+                metadata: None,
+            })
+            .await?;
+        runtime
+            .emit_task_created(
+                0x00AB_CDEF,
+                &Job {
+                    command: 1,
+                    request_id: 1,
+                    payload: vec![],
+                    command_line: "test".to_owned(),
+                    task_id: "001".to_owned(),
+                    created_at: "2026-03-15T00:00:00Z".to_owned(),
+                    operator: "admin".to_owned(),
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn command_names_and_descriptions_empty_by_default()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-empty-commands").await?;
+
+        assert!(runtime.command_names().await.is_empty());
+        assert!(runtime.command_descriptions().await.is_empty());
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn attach_listener_manager_makes_manager_available()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let (database, registry, events, sockets, runtime) =
+            runtime_fixture("plugins-attach-manager").await?;
+        database.listeners().create(&sample_listener()).await?;
+
+        // Before attaching, listener operations should fail.
+        let result = runtime.listener_manager().await;
+        assert!(
+            matches!(result, Err(PluginError::ListenerManagerUnavailable)),
+            "expected ListenerManagerUnavailable before attach",
+        );
+
+        let listeners =
+            ListenerManager::new(database, registry, events, sockets, Some(runtime.clone()));
+        runtime.attach_listener_manager(listeners).await;
+
+        // After attaching, listener_manager() should succeed.
+        let manager = runtime.listener_manager().await;
+        assert!(manager.is_ok(), "expected listener manager to be available after attach");
+        Ok(())
+    }
 }

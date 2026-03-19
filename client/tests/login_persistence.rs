@@ -102,3 +102,25 @@ fn optional_tls_fields_remain_unset_in_persisted_flow() {
     assert_eq!(message.head.user, "operator");
     assert_eq!(message.info.user, "operator");
 }
+
+#[test]
+fn nonexistent_config_file_falls_back_to_defaults() {
+    let tempdir = tempfile::tempdir()
+        .unwrap_or_else(|error| panic!("tempdir creation should succeed: {error}"));
+    let config_path = tempdir.path().join("never_written.toml");
+
+    let loaded = LocalConfig::load_from(&config_path);
+    let (state, message) = login_message_for(&loaded, "wss://cli.example/havoc/", "firstrun");
+
+    assert_eq!(loaded, LocalConfig::default());
+    assert_eq!(state.server_url, "wss://cli.example/havoc/");
+    assert!(state.username.is_empty());
+
+    let OperatorMessage::Login(message) = message else {
+        panic!("expected login message");
+    };
+    assert_eq!(message.head.event, EventCode::InitConnection);
+    assert_eq!(message.head.user, "");
+    assert_eq!(message.info.user, "");
+    assert_eq!(message.info.password, hash_password_sha3("firstrun"));
+}

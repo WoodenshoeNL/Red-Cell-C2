@@ -4422,4 +4422,96 @@ havocui.RegisterCommand('recon scan', 'Run a recon scan', [{{'name': 'target', '
             "last history entry should be the most recent invocation before the final call",
         );
     }
+
+    #[test]
+    fn load_script_registers_command_and_descriptor() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+
+        // Initialize runtime with an empty directory — no scripts loaded yet.
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+        assert!(runtime.command_names().is_empty(), "no commands before load");
+        assert!(runtime.script_descriptors().is_empty(), "no descriptors before load");
+
+        // Write a script and load it via load_script.
+        let script_path = temp_dir.path().join("plugin.py");
+        write_script(
+            &script_path,
+            "import red_cell\nred_cell.register_command('greet', lambda: None)\n",
+        );
+        runtime
+            .load_script(script_path.clone())
+            .unwrap_or_else(|error| panic!("load_script should succeed: {error}"));
+
+        assert_eq!(runtime.command_names(), vec!["greet".to_owned()]);
+        assert_eq!(
+            runtime.script_descriptors(),
+            vec![ScriptDescriptor {
+                name: "plugin".to_owned(),
+                path: script_path,
+                status: ScriptLoadStatus::Loaded,
+                error: None,
+                registered_commands: vec!["greet".to_owned()],
+                registered_command_count: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn load_script_nonexistent_path_returns_error() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        let result = runtime.load_script(temp_dir.path().join("nonexistent.py"));
+        assert!(result.is_err(), "load_script with a nonexistent path should return an error");
+        let error_message = result.unwrap_err().to_string();
+        assert!(
+            error_message.contains("nonexistent"),
+            "error should reference the missing file, got: {error_message}"
+        );
+    }
+
+    #[test]
+    fn load_script_twice_is_idempotent() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        let script_path = temp_dir.path().join("twice.py");
+        write_script(
+            &script_path,
+            "import red_cell\nred_cell.register_command('cmd', lambda: None)\n",
+        );
+
+        runtime
+            .load_script(script_path.clone())
+            .unwrap_or_else(|error| panic!("first load should succeed: {error}"));
+        runtime
+            .load_script(script_path.clone())
+            .unwrap_or_else(|error| panic!("second load should succeed: {error}"));
+
+        // Command should appear exactly once — not duplicated.
+        assert_eq!(runtime.command_names(), vec!["cmd".to_owned()]);
+        assert_eq!(
+            runtime.script_descriptors().len(),
+            1,
+            "only one script descriptor should exist after loading twice"
+        );
+        assert_eq!(runtime.script_descriptors()[0].registered_command_count, 1);
+    }
 }

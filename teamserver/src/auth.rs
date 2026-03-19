@@ -1720,6 +1720,49 @@ mod tests {
     // is_legacy_sha3_digest boundary tests
     // ------------------------------------------------------------------
 
+    #[tokio::test]
+    async fn operator_inventory_returns_none_last_seen_with_empty_audit_log() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        let service = AuthService::from_profile_with_database(&profile(), &database)
+            .await
+            .expect("auth service should initialize");
+
+        // No audit rows inserted — every operator should have last_seen: None.
+        let inventory = service.operator_inventory().await;
+        assert!(!inventory.is_empty(), "inventory should contain configured operators");
+        for entry in &inventory {
+            assert_eq!(
+                entry.last_seen, None,
+                "operator `{}` should have last_seen None when audit log is empty",
+                entry.username
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn operator_inventory_returns_results_after_database_closed() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        let service = AuthService::from_profile_with_database(&profile(), &database)
+            .await
+            .expect("auth service should initialize");
+
+        // Close the database — the audit log query should fail gracefully.
+        database.close().await;
+
+        let inventory = service.operator_inventory().await;
+        assert!(
+            !inventory.is_empty(),
+            "inventory should still return configured operators after database close"
+        );
+        for entry in &inventory {
+            assert_eq!(
+                entry.last_seen, None,
+                "operator `{}` should have last_seen None when audit log query fails",
+                entry.username
+            );
+        }
+    }
+
     #[test]
     fn is_legacy_sha3_digest_accepts_valid_64_char_hex() {
         assert!(super::is_legacy_sha3_digest(

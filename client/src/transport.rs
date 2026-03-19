@@ -2027,11 +2027,12 @@ mod tests {
     use super::*;
     use red_cell_common::operator::{
         AgentInfo as OperatorAgentInfo, AgentPivotsInfo, AgentResponseInfo, AgentUpdateInfo,
-        BuildPayloadMessageInfo, ChatCode, EventCode, InitConnectionCode, ListenerCode,
-        ListenerErrorInfo, LoginInfo, Message, MessageHead, MessageInfo, NameInfo, SessionCode,
-        TeamserverLogInfo,
+        BuildPayloadMessageInfo, BuildPayloadResponseInfo, ChatCode, EventCode, InitConnectionCode,
+        ListenerCode, ListenerErrorInfo, LoginInfo, Message, MessageHead, MessageInfo, NameInfo,
+        SessionCode, TeamserverLogInfo,
     };
     use red_cell_common::tls::{TlsKeyAlgorithm, generate_self_signed_tls_identity};
+    use serde_json::Value;
     use tokio::net::TcpListener;
     use tokio_tungstenite::{accept_async, tungstenite::Message as TungsteniteMessage};
 
@@ -3903,5 +3904,154 @@ mod tests {
         assert_eq!(state.listeners[0].name, "unknown-listener");
         assert_eq!(state.listeners[0].status, "Offline");
         assert_eq!(state.listeners[0].protocol, "unknown");
+    }
+
+    #[test]
+    fn chat_message_pushes_operator_event_with_user_and_message() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        let mut fields = BTreeMap::new();
+        fields.insert("User".to_owned(), Value::String("alice".to_owned()));
+        fields.insert("Message".to_owned(), Value::String("hello team".to_owned()));
+
+        state.apply_operator_message(OperatorMessage::ChatMessage(Message {
+            head: head(EventCode::Chat),
+            info: FlatInfo { fields },
+        }));
+
+        assert_eq!(state.event_log.len(), 1);
+        let entry = state.event_log.entries.back().unwrap();
+        assert_eq!(entry.kind, EventKind::Operator);
+        assert_eq!(entry.author, "alice");
+        assert_eq!(entry.message, "hello team");
+    }
+
+    #[test]
+    fn chat_message_uses_fallback_when_fields_missing() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        state.apply_operator_message(OperatorMessage::ChatMessage(Message {
+            head: head(EventCode::Chat),
+            info: FlatInfo { fields: BTreeMap::new() },
+        }));
+
+        assert_eq!(state.event_log.len(), 1);
+        let entry = state.event_log.entries.back().unwrap();
+        assert_eq!(entry.kind, EventKind::Operator);
+        assert_eq!(entry.author, "system");
+        assert_eq!(entry.message, "Received event");
+    }
+
+    #[test]
+    fn chat_message_extracts_alternate_keys_name_and_text() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        let mut fields = BTreeMap::new();
+        fields.insert("Name".to_owned(), Value::String("bob".to_owned()));
+        fields.insert("Text".to_owned(), Value::String("hi there".to_owned()));
+
+        state.apply_operator_message(OperatorMessage::ChatMessage(Message {
+            head: head(EventCode::Chat),
+            info: FlatInfo { fields },
+        }));
+
+        let entry = state.event_log.entries.back().unwrap();
+        assert_eq!(entry.author, "bob");
+        assert_eq!(entry.message, "hi there");
+    }
+
+    #[test]
+    fn chat_listener_pushes_agent_event() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        let mut fields = BTreeMap::new();
+        fields.insert("User".to_owned(), Value::String("listener1".to_owned()));
+        fields.insert("Message".to_owned(), Value::String("listener event".to_owned()));
+
+        state.apply_operator_message(OperatorMessage::ChatListener(Message {
+            head: head(EventCode::Chat),
+            info: FlatInfo { fields },
+        }));
+
+        assert_eq!(state.event_log.len(), 1);
+        let entry = state.event_log.entries.back().unwrap();
+        assert_eq!(entry.kind, EventKind::Agent);
+        assert_eq!(entry.author, "listener1");
+        assert_eq!(entry.message, "listener event");
+    }
+
+    #[test]
+    fn chat_agent_pushes_agent_event() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        let mut fields = BTreeMap::new();
+        fields.insert("DemonID".to_owned(), Value::String("deadbeef".to_owned()));
+        fields.insert("Output".to_owned(), Value::String("agent output".to_owned()));
+
+        state.apply_operator_message(OperatorMessage::ChatAgent(Message {
+            head: head(EventCode::Chat),
+            info: FlatInfo { fields },
+        }));
+
+        assert_eq!(state.event_log.len(), 1);
+        let entry = state.event_log.entries.back().unwrap();
+        assert_eq!(entry.kind, EventKind::Agent);
+        assert_eq!(entry.author, "deadbeef");
+        assert_eq!(entry.message, "agent output");
+    }
+
+    #[test]
+    fn teamserver_log_pushes_system_event() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        state.apply_operator_message(OperatorMessage::TeamserverLog(Message {
+            head: head(EventCode::Teamserver),
+            info: TeamserverLogInfo { text: "server started".to_owned() },
+        }));
+
+        assert_eq!(state.event_log.len(), 1);
+        let entry = state.event_log.entries.back().unwrap();
+        assert_eq!(entry.kind, EventKind::System);
+        assert_eq!(entry.author, "teamserver");
+        assert_eq!(entry.message, "server started");
+    }
+
+    #[test]
+    fn build_payload_message_pushes_formatted_system_event() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        state.apply_operator_message(OperatorMessage::BuildPayloadMessage(Message {
+            head: head(EventCode::Teamserver),
+            info: BuildPayloadMessageInfo {
+                message_type: "Info".to_owned(),
+                message: "compiling agent".to_owned(),
+            },
+        }));
+
+        assert_eq!(state.event_log.len(), 1);
+        let entry = state.event_log.entries.back().unwrap();
+        assert_eq!(entry.kind, EventKind::System);
+        assert_eq!(entry.author, "builder");
+        assert_eq!(entry.message, "Info: compiling agent");
+    }
+
+    #[test]
+    fn build_payload_response_pushes_built_filename_event() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        state.apply_operator_message(OperatorMessage::BuildPayloadResponse(Message {
+            head: head(EventCode::Teamserver),
+            info: BuildPayloadResponseInfo {
+                payload_array: String::new(),
+                format: "exe".to_owned(),
+                file_name: "demon.exe".to_owned(),
+            },
+        }));
+
+        assert_eq!(state.event_log.len(), 1);
+        let entry = state.event_log.entries.back().unwrap();
+        assert_eq!(entry.kind, EventKind::System);
+        assert_eq!(entry.author, "builder");
+        assert_eq!(entry.message, "Built demon.exe");
     }
 }

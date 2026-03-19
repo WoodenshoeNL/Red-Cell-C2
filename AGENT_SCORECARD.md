@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 368 | 212 | 31 |
+| Tasks closed | 375 | 212 | 31 |
 | Bugs filed against | 43 | 34 | 9 |
-| Bug rate (bugs/task) | 0.12 | 0.16 | 0.29 |
-| Quality score | 88% | 84% | 71% |
+| Bug rate (bugs/task) | 0.11 | 0.16 | 0.29 |
+| Quality score | 89% | 84% | 71% |
 
-*Bug rates: Claude 43/368=0.12, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 43/375=0.11, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-19 14:30 — 16cafed..c9245fd
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 7 | 0 | Closed 2nqo (malformed transfer/mem-file/package-dropped callback tests), 3hff (payload cache key binary_patch sub-field tests), yoa8 (plugin dir/listener-manager error tests — already existed), 2g6s (basename/process_arch_label helper tests), n8q5 (duplicate/dangling link insert tests), 32g6 (loot FK constraint tests), 3atn (agent response FK constraint tests). Also ran test-review scan (ec3354f). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check ✓, clippy ✓ (0 warnings), cargo test ✓ (1,936 tests, 0 failures)
 
 ### QA Review — 2026-03-19 02:30 — 0d70085..b02bae9
 

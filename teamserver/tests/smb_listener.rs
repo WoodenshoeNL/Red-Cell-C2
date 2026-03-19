@@ -21,6 +21,7 @@ use red_cell::{
 };
 use red_cell_common::crypto::{
     AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len, decrypt_agent_data,
+    decrypt_agent_data_at_offset,
 };
 use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::OperatorMessage;
@@ -597,6 +598,119 @@ async fn smb_listener_rejects_truncated_header_and_partial_payload()
     );
 
     manager.stop("smb-test-truncated").await?;
+    Ok(())
+}
+
+/// Verify that a reconnect probe over SMB is non-counter-consuming and that a
+/// subsequent callback at the same CTR offset succeeds.
+///
+/// Sequence:
+/// 1. Agent does a full init; server responds with init ACK.  Both advance their
+///    CTR counters by `ctr_blocks_for_len(ack.len())`.
+/// 2. Agent sends a reconnect probe (empty `DEMON_INIT` body, no encrypted payload).
+/// 3. Server returns a reconnect ACK encrypted at the current offset without
+///    advancing.  Agent receives the ACK and also does **not** advance its counter.
+/// 4. Agent sends a `COMMAND_GET_JOB` callback encrypted at the same offset.
+///    The server decrypts it successfully, proving both sides remain synchronised.
+///
+/// If the reconnect ACK were counter-consuming, step 4 would fail because the
+/// agent would encrypt at the pre-reconnect offset while the server would try to
+/// decrypt at offset + 1.
+#[cfg(unix)]
+#[tokio::test]
+async fn reconnect_then_subsequent_callback_remains_synchronised()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_, registry, events, manager) = test_manager().await?;
+    let mut event_receiver = events.subscribe();
+    let pipe_name = unique_pipe_name("reconnect");
+
+    manager.create(smb_config("smb-test-reconnect", &pipe_name)).await?;
+    manager.start("smb-test-reconnect").await?;
+    wait_for_smb_listener(&pipe_name).await?;
+
+    let agent_id = 0xFACE_CAFE_u32;
+    let key = [0x9A_u8; AGENT_KEY_LENGTH];
+    let iv = [0x5B_u8; AGENT_IV_LENGTH];
+
+    // --- Step 1: full DEMON_INIT ---------------------------------------------------
+    let mut agent_ctr_offset = 0_u64;
+
+    let mut init_stream = connect_smb(&pipe_name).await?;
+    write_smb_frame(&mut init_stream, agent_id, &common::valid_demon_init_body(agent_id, key, iv))
+        .await?;
+
+    let (ack_agent_id, ack_payload) =
+        timeout(Duration::from_secs(5), read_smb_frame(&mut init_stream)).await??;
+    assert_eq!(ack_agent_id, agent_id, "init ack agent_id must match");
+
+    // Verify the init ACK decrypts at offset 0.
+    let init_ack = decrypt_agent_data_at_offset(&key, &iv, agent_ctr_offset, &ack_payload)?;
+    assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes(), "init ACK must echo agent_id");
+
+    // Agent advances its counter after consuming the init ACK (counter-consuming).
+    agent_ctr_offset += ctr_blocks_for_len(ack_payload.len());
+
+    // Drain the AgentNew event.
+    let event = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
+    assert!(
+        matches!(event, Some(OperatorMessage::AgentNew(_))),
+        "expected AgentNew event after init"
+    );
+
+    drop(init_stream);
+
+    // --- Step 2: reconnect probe ---------------------------------------------------
+    // The reconnect probe carries no encrypted payload — agent counter does NOT change.
+    let mut reconnect_stream = connect_smb(&pipe_name).await?;
+    write_smb_frame(&mut reconnect_stream, agent_id, &common::valid_demon_reconnect_body(agent_id))
+        .await?;
+
+    // --- Step 3: verify reconnect ACK at the current (non-advanced) offset ---------
+    let (reconnect_ack_agent_id, reconnect_ack_payload) =
+        timeout(Duration::from_secs(5), read_smb_frame(&mut reconnect_stream)).await??;
+    assert_eq!(reconnect_ack_agent_id, agent_id, "reconnect ack agent_id must match");
+
+    let reconnect_ack =
+        decrypt_agent_data_at_offset(&key, &iv, agent_ctr_offset, &reconnect_ack_payload)?;
+    assert_eq!(
+        reconnect_ack.as_slice(),
+        &agent_id.to_le_bytes(),
+        "reconnect ACK must echo agent_id encrypted at the pre-reconnect CTR offset"
+    );
+    // NOT advancing agent_ctr_offset — the reconnect ACK is not counter-consuming.
+
+    // Confirm the server's stored offset also did not advance.
+    assert_eq!(
+        registry.ctr_offset(agent_id).await?,
+        agent_ctr_offset,
+        "server CTR offset must not advance after sending a reconnect ACK"
+    );
+
+    drop(reconnect_stream);
+
+    // --- Step 4: subsequent callback at the same (unchanged) offset ----------------
+    // If the reconnect ACK were counter-consuming, this would fail because the server
+    // would try to decrypt at offset `agent_ctr_offset + 1` while the agent encrypted
+    // at `agent_ctr_offset`.
+    let mut callback_stream = connect_smb(&pipe_name).await?;
+    let callback_body = common::valid_demon_callback_body(
+        agent_id,
+        key,
+        iv,
+        agent_ctr_offset,
+        u32::from(DemonCommand::CommandGetJob),
+        1,
+        &[],
+    );
+    write_smb_frame(&mut callback_stream, agent_id, &callback_body).await?;
+
+    // A successful response (even empty) proves the server decrypted at the correct
+    // CTR offset.  A desync would cause a decrypt/parse error and no response frame.
+    let (resp_agent_id, _resp_payload) =
+        timeout(Duration::from_secs(5), read_smb_frame(&mut callback_stream)).await??;
+    assert_eq!(resp_agent_id, agent_id, "callback response must echo the agent_id");
+
+    manager.stop("smb-test-reconnect").await?;
     Ok(())
 }
 

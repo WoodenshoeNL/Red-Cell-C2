@@ -296,13 +296,17 @@ fn session_token(headers: &HeaderMap) -> Result<String, AuthorizationError> {
 mod tests {
     use axum::extract::{FromRef, FromRequestParts};
     use axum::http::header::AUTHORIZATION;
-    use axum::http::{HeaderValue, Request};
+    use axum::http::{HeaderValue, Request, StatusCode};
     use red_cell_common::config::{OperatorRole, Profile};
     use red_cell_common::operator::{
         AgentTaskInfo, FlatInfo, ListenerInfo, Message, MessageHead, OperatorMessage,
         TeamserverProfileInfo,
     };
     use uuid::Uuid;
+
+    use axum::body::to_bytes;
+    use axum::response::IntoResponse;
+    use serde_json::Value;
 
     use super::{
         AdminAccess, AuthenticatedOperator, AuthorizationError, ListenerManagementAccess,
@@ -958,5 +962,57 @@ mod tests {
             .expect_err("unknown x-session-token should be rejected");
 
         assert_eq!(error, AuthorizationError::UnknownSessionToken);
+    }
+
+    async fn read_json(response: axum::response::Response) -> Value {
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.expect("response body bytes");
+        serde_json::from_slice(&bytes).expect("json body")
+    }
+
+    #[tokio::test]
+    async fn into_response_missing_session_token_returns_401() {
+        let response = AuthorizationError::MissingSessionToken.into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "authorization_error");
+        assert_eq!(body["error"]["message"], "missing session token");
+    }
+
+    #[tokio::test]
+    async fn into_response_invalid_authorization_header_returns_401() {
+        let response = AuthorizationError::InvalidAuthorizationHeader.into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "authorization_error");
+        assert_eq!(body["error"]["message"], "invalid authorization header");
+    }
+
+    #[tokio::test]
+    async fn into_response_unknown_session_token_returns_401() {
+        let response = AuthorizationError::UnknownSessionToken.into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "authorization_error");
+        assert_eq!(body["error"]["message"], "unknown session token");
+    }
+
+    #[tokio::test]
+    async fn into_response_permission_denied_returns_403() {
+        let response =
+            AuthorizationError::PermissionDenied { role: OperatorRole::Analyst, required: "admin" }
+                .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "authorization_error");
+        assert_eq!(body["error"]["message"], "operator role `Analyst` lacks `admin` permission");
+    }
+
+    #[tokio::test]
+    async fn into_response_unsupported_websocket_command_returns_400() {
+        let response = AuthorizationError::UnsupportedWebSocketCommand.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "authorization_error");
+        assert_eq!(body["error"]["message"], "unsupported operator websocket command");
     }
 }

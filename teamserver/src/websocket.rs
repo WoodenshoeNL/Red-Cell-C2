@@ -5252,7 +5252,7 @@ mod tests {
 
         let _guard = crate::plugins::PLUGIN_RUNTIME_TEST_MUTEX
             .lock()
-            .map_err(|_| "plugin test mutex poisoned")?;
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         // Build a PluginRuntime and install it as the active runtime.
         let database = Database::connect_in_memory().await?;

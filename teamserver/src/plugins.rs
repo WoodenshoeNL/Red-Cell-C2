@@ -1326,9 +1326,15 @@ mod tests {
     use super::*;
 
     // Tests that install a `PluginRuntime` as the active global must hold
-    // `super::PLUGIN_RUNTIME_TEST_MUTEX` (aliased below) so that wiring tests in
-    // other modules that call `PluginRuntime::swap_active` are serialised with us.
-    use super::PLUGIN_RUNTIME_TEST_MUTEX as TEST_GUARD;
+    // `super::PLUGIN_RUNTIME_TEST_MUTEX` so that wiring tests in other modules that
+    // call `PluginRuntime::swap_active` are serialised with us.
+    //
+    // We use `unwrap_or_else(|e| e.into_inner())` to tolerate a poisoned mutex — if a
+    // prior test panicked while holding the lock, the data inside is still valid (it is
+    // just `()`), so we recover and continue rather than cascading failures.
+    fn lock_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        super::PLUGIN_RUNTIME_TEST_MUTEX.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
     const POISON_CURRENT_ENV: &str = "RED_CELL_POISON_PLUGIN_RUNTIME_CURRENT";
 
     fn unique_test_dir(label: &str) -> PathBuf {
@@ -1444,7 +1450,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn current_is_none_before_initialization_and_plugins_dir_is_optional()
     -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let _reset = ActiveRuntimeReset::clear()?;
 
         assert!(PluginRuntime::current()?.is_none());
@@ -1461,7 +1467,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn initialize_sets_current_runtime_and_exposes_plugins_dir()
     -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let _reset = ActiveRuntimeReset::clear()?;
         let temp_dir = TempDir::new()?;
         let plugins_dir = temp_dir.path().to_path_buf();
@@ -1518,7 +1524,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn initialize_exposes_agent_and_listener_accessors()
     -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let (database, registry, events, sockets, runtime) =
             runtime_fixture("plugins-access").await?;
         database.listeners().create(&sample_listener()).await?;
@@ -1555,7 +1561,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn load_plugins_registers_callbacks_and_commands()
     -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let temp_dir = TempDir::new()?;
         let plugin_path = temp_dir.path().join("sample_plugin.py");
         std::fs::write(
@@ -1606,7 +1612,7 @@ havoc.RegisterCommand("demo", "demo command", run)
     #[tokio::test(flavor = "multi_thread")]
     async fn load_plugins_skips_plugin_with_syntax_error() -> Result<(), Box<dyn std::error::Error>>
     {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let temp_dir = TempDir::new()?;
         let plugin_path = temp_dir.path().join("bad_plugin.py");
         // Deliberate Python syntax error: unmatched parenthesis.
@@ -1634,7 +1640,7 @@ havoc.RegisterCommand("demo", "demo command", run)
     #[tokio::test(flavor = "multi_thread")]
     async fn load_plugins_multiple_with_broken_plugin_isolation()
     -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let temp_dir = TempDir::new()?;
 
         // alpha.py — registers a command
@@ -1701,7 +1707,7 @@ havoc.RegisterCallback("agent_checkin", on_checkin)
     #[tokio::test(flavor = "multi_thread")]
     async fn registered_command_callbacks_can_queue_agent_jobs()
     -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let (_database, registry, _events, _sockets, runtime) =
             runtime_fixture("plugins-command-exec").await?;
         registry.insert(sample_agent(0x00AB_CDEF)).await?;
@@ -1757,7 +1763,7 @@ havoc.RegisterCallback("agent_checkin", on_checkin)
     #[tokio::test(flavor = "multi_thread")]
     async fn register_command_accepts_havoc_keyword_signature()
     -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let (_database, registry, _events, _sockets, runtime) =
             runtime_fixture("plugins-havoc-register-command").await?;
         registry.insert(sample_agent(0x00AB_CDEF)).await?;
@@ -1827,7 +1833,7 @@ havoc.RegisterCommand(\n\
     #[tokio::test(flavor = "multi_thread")]
     async fn invoke_registered_command_broadcast_task_id_matches_queued_job()
     -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let (_database, registry, events, _sockets, runtime) =
             runtime_fixture("plugins-task-id-match").await?;
         registry.insert(sample_agent(0x00AB_CDEF)).await?;
@@ -1904,7 +1910,7 @@ havoc.RegisterCommand(\n\
     #[tokio::test(flavor = "multi_thread")]
     async fn emit_agent_checkin_invokes_registered_callbacks()
     -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let (_database, registry, _events, _sockets, runtime) =
             runtime_fixture("emit-checkin").await?;
         registry.insert(sample_agent(0x00AB_CDEF)).await?;
@@ -1946,7 +1952,7 @@ havoc.RegisterCommand(\n\
     #[tokio::test(flavor = "multi_thread")]
     async fn emit_command_output_invokes_registered_callbacks()
     -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let (_database, _registry, _events, _sockets, runtime) =
             runtime_fixture("emit-output").await?;
 
@@ -1986,7 +1992,7 @@ havoc.RegisterCommand(\n\
     #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "multi_thread")]
     async fn emit_agent_checkin_skips_unknown_agent() -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let (_database, _registry, _events, _sockets, runtime) =
             runtime_fixture("emit-checkin-unknown").await?;
 
@@ -2016,7 +2022,7 @@ havoc.RegisterCommand(\n\
     #[tokio::test(flavor = "multi_thread")]
     async fn emit_callback_exception_does_not_propagate() -> Result<(), Box<dyn std::error::Error>>
     {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let (_database, registry, _events, _sockets, runtime) =
             runtime_fixture("emit-exception").await?;
         registry.insert(sample_agent(0x00AB_CDEF)).await?;
@@ -2064,7 +2070,7 @@ havoc.RegisterCommand(\n\
     #[tokio::test(flavor = "multi_thread")]
     async fn emit_agent_registered_invokes_registered_callbacks()
     -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let (_database, registry, _events, _sockets, runtime) =
             runtime_fixture("emit-registered").await?;
         registry.insert(sample_agent(0x00AB_CDEF)).await?;
@@ -2106,7 +2112,7 @@ havoc.RegisterCommand(\n\
     #[tokio::test(flavor = "multi_thread")]
     async fn emit_agent_dead_invokes_registered_callbacks() -> Result<(), Box<dyn std::error::Error>>
     {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let (_database, registry, _events, _sockets, runtime) =
             runtime_fixture("emit-dead").await?;
         registry.insert(sample_agent(0x00AB_CDEF)).await?;
@@ -2148,7 +2154,7 @@ havoc.RegisterCommand(\n\
     #[tokio::test(flavor = "multi_thread")]
     async fn emit_loot_captured_invokes_registered_callbacks()
     -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let (_database, _registry, _events, _sockets, runtime) =
             runtime_fixture("emit-loot").await?;
 
@@ -2200,7 +2206,7 @@ havoc.RegisterCommand(\n\
     #[tokio::test(flavor = "multi_thread")]
     async fn emit_task_created_invokes_registered_callbacks()
     -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let (_database, _registry, _events, _sockets, runtime) =
             runtime_fixture("emit-task").await?;
 
@@ -2250,7 +2256,7 @@ havoc.RegisterCommand(\n\
     #[tokio::test(flavor = "multi_thread")]
     async fn listener_start_fails_before_manager_attached() -> Result<(), Box<dyn std::error::Error>>
     {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let (_database, _registry, _events, _sockets, runtime) =
             runtime_fixture("plugins-listener-unavailable-start").await?;
 
@@ -2281,7 +2287,7 @@ havoc.RegisterCommand(\n\
     #[tokio::test(flavor = "multi_thread")]
     async fn listener_stop_fails_before_manager_attached() -> Result<(), Box<dyn std::error::Error>>
     {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let (_database, _registry, _events, _sockets, runtime) =
             runtime_fixture("plugins-listener-unavailable-stop").await?;
 
@@ -2341,7 +2347,7 @@ havoc.RegisterCommand(\n\
     #[tokio::test(flavor = "multi_thread")]
     async fn load_plugins_skips_plugin_with_interior_nul_in_source()
     -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let temp_dir = TempDir::new()?;
         let plugin_path = temp_dir.path().join("nul_plugin.py");
         // Write a plugin whose source contains an interior NUL byte — this must
@@ -2395,7 +2401,7 @@ havoc.RegisterCommand(\n\
     #[tokio::test(flavor = "multi_thread")]
     async fn invoke_command_against_unknown_agent_returns_error_and_no_broadcast()
     -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         // Do NOT insert any agent into the registry — the agent ID will be unknown.
         let (_database, _registry, events, _sockets, runtime) =
             runtime_fixture("plugins-unknown-agent-task").await?;
@@ -2452,7 +2458,7 @@ havoc.RegisterCommand(\n\
     #[tokio::test(flavor = "multi_thread")]
     async fn load_plugins_returns_empty_when_no_dir_configured()
     -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let (_database, _registry, _events, _sockets, runtime) =
             runtime_fixture("plugins-no-dir").await?;
 
@@ -2464,7 +2470,7 @@ havoc.RegisterCommand(\n\
     #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "multi_thread")]
     async fn load_plugins_skips_non_py_files() -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let temp_dir = TempDir::new()?;
         std::fs::write(temp_dir.path().join("readme.txt"), "not a plugin")?;
         std::fs::write(temp_dir.path().join("data.json"), "{}")?;
@@ -2491,7 +2497,7 @@ havoc.RegisterCommand(\n\
     #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "multi_thread")]
     async fn emit_agent_registered_skips_unknown_agent() -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let (_database, _registry, _events, _sockets, runtime) =
             runtime_fixture("emit-registered-unknown").await?;
 
@@ -2520,7 +2526,7 @@ havoc.RegisterCommand(\n\
     #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "multi_thread")]
     async fn emit_agent_dead_skips_unknown_agent() -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let (_database, _registry, _events, _sockets, runtime) =
             runtime_fixture("emit-dead-unknown").await?;
 
@@ -2550,7 +2556,7 @@ havoc.RegisterCommand(\n\
     #[tokio::test(flavor = "multi_thread")]
     async fn emit_events_succeed_silently_with_no_callbacks()
     -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let (_database, registry, _events, _sockets, runtime) =
             runtime_fixture("emit-no-callbacks").await?;
         registry.insert(sample_agent(0x00AB_CDEF)).await?;
@@ -2594,7 +2600,7 @@ havoc.RegisterCommand(\n\
     #[tokio::test(flavor = "multi_thread")]
     async fn command_names_and_descriptions_empty_by_default()
     -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let (_database, _registry, _events, _sockets, runtime) =
             runtime_fixture("plugins-empty-commands").await?;
 
@@ -2610,7 +2616,7 @@ havoc.RegisterCommand(\n\
     #[tokio::test(flavor = "multi_thread")]
     async fn callback_runtime_guard_bypasses_global_mutex() -> Result<(), Box<dyn std::error::Error>>
     {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let (_database, _registry, _events, _sockets, runtime) =
             runtime_fixture("plugins-callback-guard").await?;
 
@@ -2634,7 +2640,7 @@ havoc.RegisterCommand(\n\
     #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "multi_thread")]
     async fn callback_runtime_guard_clears_on_drop() -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let (_database, _registry, _events, _sockets, runtime) =
             runtime_fixture("plugins-callback-guard-drop").await?;
 
@@ -2663,7 +2669,7 @@ havoc.RegisterCommand(\n\
     #[tokio::test(flavor = "multi_thread")]
     async fn attach_listener_manager_makes_manager_available()
     -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let (database, registry, events, sockets, runtime) =
             runtime_fixture("plugins-attach-manager").await?;
         database.listeners().create(&sample_listener()).await?;
@@ -2698,7 +2704,7 @@ havoc.RegisterCommand(\n\
     #[tokio::test(flavor = "multi_thread")]
     async fn callback_reentrant_rust_api_does_not_deadlock()
     -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let (_database, registry, _events, _sockets, runtime) =
             runtime_fixture("plugins-reentrant-deadlock").await?;
         let agent_id: u32 = 0x00DE_AD01;
@@ -2852,7 +2858,7 @@ havoc.RegisterCommand(\n\
     #[tokio::test(flavor = "multi_thread")]
     async fn invoke_registered_command_enforces_caller_role_in_python()
     -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let _reset = ActiveRuntimeReset::clear()?;
         let (_database, registry, _events, _sockets, runtime) =
             runtime_fixture("plugins-rbac-invoke").await?;
@@ -2922,7 +2928,7 @@ havoc.RegisterCommand(\n\
     #[tokio::test(flavor = "multi_thread")]
     async fn invoke_registered_command_denies_analyst_task_agents()
     -> Result<(), Box<dyn std::error::Error>> {
-        let _guard = TEST_GUARD.lock().map_err(|_| "plugin test mutex poisoned")?;
+        let _guard = lock_test_guard();
         let _reset = ActiveRuntimeReset::clear()?;
         let (_database, registry, _events, _sockets, runtime) =
             runtime_fixture("plugins-rbac-deny-task").await?;

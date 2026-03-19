@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 495 | 212 | 31 |
+| Tasks closed | 500 | 212 | 31 |
 | Bugs filed against | 46 | 34 | 9 |
 | Bug rate (bugs/task) | 0.09 | 0.16 | 0.29 |
 | Quality score | 91% | 84% | 71% |
 
-*Bug rates: Claude 46/495=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 46/500=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -2733,3 +2733,13 @@ Build: cargo check passed, clippy passed (0 warnings), cargo test passed (1477+ 
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: cargo check passed, clippy passed (0 warnings), cargo test passed (230 tests, 0 failures)
+
+### QA Review — 2026-03-19 — 9eaf6e9..0c7bd86
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 5 | 0 | Closed 08ds (poisoned test mutex fix — replaced all TEST_GUARD.lock().map_err() with lock_test_guard() helper tolerating poisoned mutex in plugins.rs and websocket.rs), 2oj4 (verified emit_* event hooks already have comprehensive coverage — closed as already-covered), b20u (verified initialize/current() already tested — closed as already-covered), 84ob (4 new integration tests for malformed/truncated BOF payloads: short header, truncated string, missing exception address, unknown sub-type 0xFF), mzd5 (2 new plugin tests: command merge across plugins, duplicate command last-write-wins). Also closed duplicate pua6 (same scope as 84ob). Currently has w680 claimed. Zero issues found — clean period. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (0 warnings), cargo test passed (1503+ tests, 0 failures)

@@ -108,8 +108,11 @@ impl EventReceiver {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use red_cell_common::operator::{
-        EventCode, Message, MessageHead, OperatorMessage, TeamserverLogInfo,
+        ChatUserInfo, EventCode, FlatInfo, ListenerErrorInfo, Message, MessageHead,
+        OperatorMessage, TeamserverLogInfo,
     };
 
     use super::EventBus;
@@ -209,6 +212,58 @@ mod tests {
         assert_eq!(bus.broadcast(third.clone()), 0);
 
         assert_eq!(bus.recent_teamserver_logs(), vec![second, third]);
+    }
+
+    #[tokio::test]
+    async fn non_log_variants_are_delivered_but_not_retained() {
+        let bus = EventBus::new(8);
+        let mut receiver = bus.subscribe();
+
+        let head = |event| MessageHead {
+            event,
+            user: "operator".to_owned(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        };
+
+        let non_log_events: Vec<OperatorMessage> = vec![
+            OperatorMessage::ChatMessage(Message {
+                head: head(EventCode::Chat),
+                info: FlatInfo { fields: BTreeMap::new() },
+            }),
+            OperatorMessage::ListenerError(Message {
+                head: head(EventCode::Listener),
+                info: ListenerErrorInfo {
+                    error: "bind failed".to_owned(),
+                    name: "http".to_owned(),
+                },
+            }),
+            OperatorMessage::ChatUserConnected(Message {
+                head: head(EventCode::Chat),
+                info: ChatUserInfo { user: "alice".to_owned() },
+            }),
+            OperatorMessage::AgentRemove(Message {
+                head: head(EventCode::Session),
+                info: FlatInfo { fields: BTreeMap::new() },
+            }),
+        ];
+
+        for event in &non_log_events {
+            let count = bus.broadcast(event.clone());
+            assert_eq!(count, 1, "each broadcast should reach the single subscriber");
+        }
+
+        // Verify all events were delivered to the subscriber.
+        for expected in &non_log_events {
+            let received = receiver.recv().await;
+            assert_eq!(received.as_ref(), Some(expected));
+        }
+
+        // History must remain empty — none of these are TeamserverLog.
+        assert!(
+            bus.recent_teamserver_logs().is_empty(),
+            "non-log variants must not appear in teamserver log history"
+        );
     }
 
     #[tokio::test]

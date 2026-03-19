@@ -1069,6 +1069,54 @@ mod tests {
         buf
     }
 
+    // -- handle_command_error_callback truncated payload tests --
+
+    #[tokio::test]
+    async fn command_error_win32_truncated_second_field_returns_error() {
+        let (_registry, events) = setup().await;
+        // Win32 error class present, but no subsequent error_code u32.
+        let mut payload = Vec::new();
+        push_u32(&mut payload, u32::from(DemonCallbackError::Win32));
+
+        let result = handle_command_error_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        let err = result.expect_err("truncated Win32 payload must fail");
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn command_error_token_truncated_second_field_returns_error() {
+        let (_registry, events) = setup().await;
+        // Token error class present, but no subsequent status u32.
+        let mut payload = Vec::new();
+        push_u32(&mut payload, u32::from(DemonCallbackError::Token));
+
+        let result = handle_command_error_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        let err = result.expect_err("truncated Token payload must fail");
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn command_error_truncated_before_error_class_returns_error() {
+        let (_registry, events) = setup().await;
+        // Only 2 bytes — not enough to read the error class u32.
+        let payload = vec![0x01, 0x00];
+
+        let result = handle_command_error_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        let err = result.expect_err("payload too short for error class must fail");
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+    }
+
+    // -- handle_demon_info_callback tests ────────────────────────────────────
+
     #[tokio::test]
     async fn demon_info_mem_alloc_formats_message() {
         let (_registry, events) = setup().await;

@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 444 | 212 | 31 |
+| Tasks closed | 449 | 212 | 31 |
 | Bugs filed against | 46 | 34 | 9 |
 | Bug rate (bugs/task) | 0.10 | 0.16 | 0.29 |
 | Quality score | 90% | 84% | 71% |
 
-*Bug rates: Claude 46/444=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 46/449=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -2591,3 +2591,13 @@ Biggest blindspot: Client config file written world-readable — the only findin
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: cargo check passed, clippy passed (0 warnings), cargo test passed (all suites 0 failures)
+
+### QA Review — 2026-03-19 — f586860..f153a50
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 5 | 0 | Closed 5 issues (hiil, vhn9, 4be2, a0ac, 0sgh). Implemented External C2 bridge listener runtime with endpoint registry, fallback handler integration, and 7 unit tests. Added CommandPsImport (0x1011) dispatch handler with 3 tests. Added SOCKS5 negotiate happy-path test. Added comprehensive DNS listener E2E integration test (498 lines, 4 test cases). Enforced per-agent/global/listener SOCKS5 connection limits with 3 limit tests. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy pre-existing warning (unused doc comment in plugins.rs — not from this range), cargo test passed (all suites 0 failures)

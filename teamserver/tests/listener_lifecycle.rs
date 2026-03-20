@@ -574,6 +574,90 @@ async fn update_running_listener_restarts_with_new_config() -> Result<(), Box<dy
 }
 
 #[tokio::test]
+async fn update_running_listener_persists_non_port_config_changes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let manager = test_manager().await?;
+    let (port, guard) = common::available_port()?;
+
+    // Create and start a listener with default host_rotation and no user_agent.
+    manager.create(http_config("lc-update-cfg", port)).await?;
+    drop(guard);
+    manager.start("lc-update-cfg").await?;
+    common::wait_for_listener(port).await?;
+
+    // Build an updated config that keeps the same port but changes host_rotation
+    // and sets a user_agent — these are non-port fields that should be persisted
+    // without affecting the bind address.
+    let updated_cfg = HttpListenerConfig {
+        name: "lc-update-cfg".to_owned(),
+        kill_date: None,
+        working_hours: None,
+        hosts: vec!["127.0.0.1".to_owned()],
+        host_bind: "127.0.0.1".to_owned(),
+        host_rotation: "random".to_owned(),
+        port_bind: port,
+        port_conn: Some(port),
+        method: Some("POST".to_owned()),
+        behind_redirector: false,
+        trusted_proxy_peers: Vec::new(),
+        user_agent: Some("RedCell/1.0".to_owned()),
+        headers: Vec::new(),
+        uris: vec!["/".to_owned()],
+        host_header: None,
+        secure: false,
+        cert: None,
+        response: None,
+        proxy: None,
+    };
+
+    let updated = manager.update(ListenerConfig::from(updated_cfg.clone())).await?;
+
+    // (1) The listener must still be Running after the update.
+    assert_eq!(
+        updated.state.status,
+        ListenerStatus::Running,
+        "listener must remain Running after config update"
+    );
+
+    // (2) summary() must reflect the new config values.
+    let summary = manager.summary("lc-update-cfg").await?;
+    assert_eq!(summary.state.status, ListenerStatus::Running, "persisted state must be Running");
+    match &summary.config {
+        ListenerConfig::Http(http) => {
+            assert_eq!(http.host_rotation, "random", "host_rotation must be updated");
+            assert_eq!(
+                http.user_agent.as_deref(),
+                Some("RedCell/1.0"),
+                "user_agent must be updated"
+            );
+            assert_eq!(http.port_bind, port, "port must remain unchanged");
+        }
+        other => panic!("expected Http config, got {:?}", other.protocol()),
+    }
+
+    // (3) Verify the DB persisted the update by reading a fresh summary (which
+    //     always reads from the database).
+    let db_summary = manager.summary("lc-update-cfg").await?;
+    match &db_summary.config {
+        ListenerConfig::Http(http) => {
+            assert_eq!(http.host_rotation, "random", "DB must persist host_rotation");
+            assert_eq!(
+                http.user_agent.as_deref(),
+                Some("RedCell/1.0"),
+                "DB must persist user_agent"
+            );
+        }
+        other => panic!("expected Http config, got {:?}", other.protocol()),
+    }
+
+    // The listener should still be accepting connections on the same port.
+    timeout(Duration::from_secs(2), common::wait_for_listener(port)).await??;
+
+    manager.stop("lc-update-cfg").await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn update_nonexistent_listener_returns_error() -> Result<(), Box<dyn std::error::Error>> {
     let manager = test_manager().await?;
     let (port, _guard) = common::available_port()?;

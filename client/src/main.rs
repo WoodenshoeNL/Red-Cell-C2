@@ -301,6 +301,8 @@ enum DockTab {
     Loot,
     /// Per-agent interactive console.
     AgentConsole(String),
+    /// Per-agent file explorer (standalone dual-pane browser).
+    FileBrowser(String),
 }
 
 impl DockTab {
@@ -313,6 +315,7 @@ impl DockTab {
             Self::Scripts => "Scripts".to_owned(),
             Self::Loot => "Loot".to_owned(),
             Self::AgentConsole(id) => format!("[{id}]"),
+            Self::FileBrowser(id) => format!("[{id}] File Explorer"),
         }
     }
 
@@ -325,6 +328,7 @@ impl DockTab {
             Self::Scripts => Color32::from_rgb(232, 182, 83),        // yellow
             Self::Loot => Color32::from_rgb(220, 130, 60),           // orange
             Self::AgentConsole(_) => Color32::from_rgb(140, 120, 220), // purple
+            Self::FileBrowser(_) => Color32::from_rgb(80, 180, 140), // teal
         }
     }
 
@@ -442,6 +446,10 @@ impl SessionPanelState {
         }
         self.selected_console = Some(agent_id.to_owned());
         self.dock.open_tab(DockTab::AgentConsole(agent_id.to_owned()));
+    }
+
+    fn ensure_file_browser_open(&mut self, agent_id: &str) {
+        self.dock.open_tab(DockTab::FileBrowser(agent_id.to_owned()));
     }
 
     #[allow(dead_code)]
@@ -861,6 +869,7 @@ impl PayloadDialogState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SessionAction {
     OpenConsole(String),
+    OpenFileBrowser(String),
     RequestKill(String),
     EditNote { agent_id: String, current_note: String },
 }
@@ -2231,6 +2240,13 @@ impl ClientApp {
                         );
                         ui.close();
                     }
+                    if ui.button("File Explorer").clicked() {
+                        self.handle_session_action(
+                            SessionAction::OpenFileBrowser(agent.name_id.clone()),
+                            state.operator_info.as_ref().map(|operator| operator.username.as_str()),
+                        );
+                        ui.close();
+                    }
                     if ui.button("Kill").clicked() {
                         self.handle_session_action(
                             SessionAction::RequestKill(agent.name_id.clone()),
@@ -2382,6 +2398,10 @@ impl ClientApp {
                 self.session_panel.selected_console = Some(agent_id.clone());
                 self.render_single_console(ui, state, &agent_id);
             }
+            Some(DockTab::FileBrowser(ref agent_id)) => {
+                let agent_id = agent_id.clone();
+                self.render_file_browser_tab(ui, state, &agent_id);
+            }
             None => {
                 ui.centered_and_justified(|ui| {
                     ui.label(
@@ -2455,6 +2475,9 @@ impl ClientApp {
         match action {
             SessionAction::OpenConsole(agent_id) => {
                 self.session_panel.ensure_console_open(&agent_id);
+            }
+            SessionAction::OpenFileBrowser(agent_id) => {
+                self.session_panel.ensure_file_browser_open(&agent_id);
             }
             SessionAction::RequestKill(agent_id) => {
                 self.session_panel
@@ -3155,6 +3178,346 @@ impl ClientApp {
                 ui.add_space(8.0);
                 self.render_process_panel(ui, agent, agent_id, process_list);
             });
+    }
+
+    /// Standalone file browser tab — dual-pane explorer with directory tree (left)
+    /// and file list (right), breadcrumb bar, and action toolbar.
+    fn render_file_browser_tab(&mut self, ui: &mut egui::Ui, state: &AppState, agent_id: &str) {
+        let agent = state.agents.iter().find(|a| a.name_id == agent_id);
+        let browser = state.file_browsers.get(agent_id);
+
+        egui::Frame::default().inner_margin(egui::Margin::symmetric(10, 10)).show(ui, |ui| {
+            // ── Agent header ──────────────────────────────────────
+            if let Some(agent) = agent {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(format!("{} File Explorer", agent.name_id))
+                            .strong()
+                            .monospace(),
+                    );
+                    ui.separator();
+                    ui.label(RichText::new(&agent.hostname).strong());
+                    ui.separator();
+                    ui.label(format!("{}\\{}", agent.domain_name, agent.username));
+                });
+            } else {
+                ui.label(RichText::new(format!("Agent {agent_id} is no longer present")).weak());
+            }
+
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(4.0);
+
+            // ── Breadcrumb / path bar ─────────────────────────────
+            let current_dir = browser
+                .and_then(|s| s.current_dir.clone())
+                .or_else(|| browser.and_then(|s| s.directories.keys().next().cloned()));
+
+            self.render_file_browser_breadcrumb(ui, agent_id, browser, current_dir.as_deref());
+
+            ui.add_space(4.0);
+
+            // ── Action toolbar ────────────────────────────────────
+            self.render_file_browser_toolbar(ui, agent_id, browser);
+
+            // ── Status messages ───────────────────────────────────
+            let browser_status = browser.and_then(|s| s.status_message.as_deref());
+            let ui_status = self
+                .session_panel
+                .file_browser_state
+                .get(agent_id)
+                .and_then(|s| s.status_message.as_deref());
+            if let Some(message) = ui_status.or(browser_status) {
+                ui.add_space(4.0);
+                ui.label(RichText::new(message).weak());
+            }
+
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(4.0);
+
+            // ── Dual-pane: directory tree (left) + file list (right) ─
+            let available = ui.available_size();
+            let left_width = (available.x * 0.35).max(180.0);
+            ui.horizontal(|ui| {
+                // Left pane — directory tree
+                ui.allocate_ui(egui::vec2(left_width, available.y - 20.0), |ui| {
+                    ui.label(RichText::new("Directories").strong());
+                    ui.separator();
+                    egui::ScrollArea::both().id_salt(("fb-tree", agent_id)).show(ui, |ui| {
+                        if let Some(browser) = browser {
+                            if let Some(root) = current_dir.as_deref() {
+                                self.render_directory_tree(ui, agent_id, browser, root, 0);
+                            } else {
+                                ui.label("Resolve cwd to initialize.");
+                            }
+                        } else {
+                            ui.label("No filesystem state yet.");
+                        }
+                    });
+                });
+
+                ui.separator();
+
+                // Right pane — file list table
+                ui.vertical(|ui| {
+                    ui.label(RichText::new("Files").strong());
+                    ui.separator();
+                    self.render_file_list_table(ui, agent_id, browser, current_dir.as_deref());
+                });
+            });
+
+            // ── Downloads progress ────────────────────────────────
+            if let Some(browser) = browser {
+                if !browser.downloads.is_empty() {
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.label(RichText::new("Downloads").strong());
+                    for progress in browser.downloads.values() {
+                        let denominator = progress.expected_size.max(1) as f32;
+                        let fraction = (progress.current_size as f32 / denominator).clamp(0.0, 1.0);
+                        ui.add(egui::ProgressBar::new(fraction).text(format!(
+                            "{} [{} / {}]",
+                            progress.remote_path,
+                            human_size(progress.current_size),
+                            human_size(progress.expected_size)
+                        )));
+                    }
+                }
+            }
+        });
+    }
+
+    /// Breadcrumb path bar for the file browser tab.
+    fn render_file_browser_breadcrumb(
+        &mut self,
+        ui: &mut egui::Ui,
+        agent_id: &str,
+        browser: Option<&AgentFileBrowserState>,
+        current_dir: Option<&str>,
+    ) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Path:").strong());
+
+            if let Some(path) = current_dir {
+                // Split path into breadcrumb segments
+                let segments = breadcrumb_segments(path);
+                for (i, (label, full_path)) in segments.iter().enumerate() {
+                    if i > 0 {
+                        ui.label(RichText::new(path_separator(path)).weak());
+                    }
+                    if ui.link(RichText::new(label.as_str()).monospace()).clicked() {
+                        self.queue_file_browser_cd(agent_id, full_path);
+                        self.queue_file_browser_list(agent_id, full_path);
+                    }
+                }
+            } else {
+                ui.monospace("unknown");
+            }
+
+            ui.separator();
+
+            if ui.button("Resolve cwd").clicked() {
+                self.queue_file_browser_pwd(agent_id);
+            }
+            if ui.button("Refresh").clicked() {
+                if let Some(path) = current_dir {
+                    self.queue_file_browser_list(agent_id, path);
+                }
+            }
+            if ui.button("Up").clicked() {
+                if let Some(path) = current_dir.and_then(parent_remote_path) {
+                    self.queue_file_browser_cd(agent_id, &path);
+                    self.queue_file_browser_list(agent_id, &path);
+                }
+            }
+
+            // Auto-request listing if the current directory is not yet loaded
+            let loaded_paths = browser.map(|s| &s.directories);
+            let operator = self.current_operator_username();
+            {
+                let ui_state = self.session_panel.file_browser_state_mut(agent_id);
+                if let Some(browser) = browser {
+                    ui_state.pending_dirs.retain(|p| !browser.directories.contains_key(p));
+                }
+                if let Some(root) = current_dir {
+                    if loaded_paths.is_none_or(|paths| !paths.contains_key(root))
+                        && !ui_state.pending_dirs.contains(root)
+                    {
+                        let message = build_file_browser_list_task(agent_id, root, &operator);
+                        ui_state.pending_dirs.insert(root.to_owned());
+                        ui_state.status_message = Some(format!("Queued listing for {root}."));
+                        self.session_panel.pending_messages.push(message);
+                    }
+                }
+            }
+        });
+    }
+
+    /// Action toolbar for the file browser tab (Download, Upload, Delete, Set Working Dir).
+    fn render_file_browser_toolbar(
+        &mut self,
+        ui: &mut egui::Ui,
+        agent_id: &str,
+        browser: Option<&AgentFileBrowserState>,
+    ) {
+        ui.horizontal_wrapped(|ui| {
+            let selected_path = self
+                .session_panel
+                .file_browser_state
+                .get(agent_id)
+                .and_then(|s| s.selected_path.clone());
+            let selected_entry = browser.and_then(|state| {
+                selected_path.as_deref().and_then(|path| find_file_entry(state, path))
+            });
+            let selected_directory = selected_remote_directory(browser, selected_path.as_deref());
+
+            if ui
+                .add_enabled(selected_directory.is_some(), egui::Button::new("Set Working Dir"))
+                .clicked()
+                && let Some(path) = selected_directory.as_deref()
+            {
+                self.queue_file_browser_cd(agent_id, path);
+                self.queue_file_browser_list(agent_id, path);
+            }
+
+            if ui
+                .add_enabled(
+                    selected_entry.is_some_and(|entry| !entry.is_dir),
+                    egui::Button::new("Download"),
+                )
+                .clicked()
+            {
+                if let Some(path) = selected_path.as_deref() {
+                    self.queue_file_browser_download(agent_id, path);
+                }
+            }
+
+            if ui.button("Upload").clicked() {
+                self.queue_file_browser_upload(
+                    agent_id,
+                    upload_destination(browser, selected_path.as_deref()),
+                );
+            }
+
+            if ui.add_enabled(selected_path.is_some(), egui::Button::new("Delete")).clicked() {
+                if let Some(path) = selected_path.as_deref() {
+                    self.queue_file_browser_delete(agent_id, path);
+                }
+            }
+
+            if let Some(path) = &selected_path {
+                ui.separator();
+                ui.label(RichText::new(format!("Selected: {path}")).weak().monospace());
+            }
+        });
+    }
+
+    /// Right-pane file list table for the standalone file browser tab.
+    fn render_file_list_table(
+        &mut self,
+        ui: &mut egui::Ui,
+        agent_id: &str,
+        browser: Option<&AgentFileBrowserState>,
+        current_dir: Option<&str>,
+    ) {
+        // Determine the directory to show in the file list — use the selected
+        // path if it's a directory, otherwise fall back to the current working
+        // directory.
+        let selected_path = self
+            .session_panel
+            .file_browser_state
+            .get(agent_id)
+            .and_then(|s| s.selected_path.clone());
+        let display_dir = selected_remote_directory(browser, selected_path.as_deref())
+            .or_else(|| current_dir.map(String::from));
+
+        let entries =
+            display_dir.as_deref().and_then(|dir| browser.and_then(|b| b.directories.get(dir)));
+
+        egui::ScrollArea::both().id_salt(("fb-files", agent_id)).show(ui, |ui| {
+            if let Some(entries) = entries {
+                if entries.is_empty() {
+                    ui.label("Directory is empty.");
+                    return;
+                }
+
+                // Header row
+                egui::Grid::new(("fb-file-grid", agent_id))
+                    .num_columns(4)
+                    .spacing([12.0, 4.0])
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("Name").strong());
+                        ui.label(RichText::new("Size").strong());
+                        ui.label(RichText::new("Modified").strong());
+                        ui.label(RichText::new("Permissions").strong());
+                        ui.end_row();
+
+                        // Directories first, then files
+                        let mut sorted: Vec<_> = entries.iter().collect();
+                        sorted.sort_by(|a, b| {
+                            b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name))
+                        });
+
+                        for entry in sorted {
+                            let is_selected = self
+                                .session_panel
+                                .file_browser_state
+                                .get(agent_id)
+                                .and_then(|s| s.selected_path.as_deref())
+                                == Some(entry.path.as_str());
+
+                            let icon = if entry.is_dir { "\u{1F4C1}" } else { "\u{1F4C4}" };
+                            let name_text = format!("{icon} {}", entry.name);
+                            let label_text = if entry.is_dir {
+                                RichText::new(&name_text)
+                                    .monospace()
+                                    .color(Color32::from_rgb(80, 180, 220))
+                            } else {
+                                RichText::new(&name_text).monospace()
+                            };
+
+                            let response = ui.selectable_label(is_selected, label_text);
+                            if response.clicked() {
+                                self.session_panel.file_browser_state_mut(agent_id).selected_path =
+                                    Some(entry.path.clone());
+                            }
+                            if response.double_clicked() && entry.is_dir {
+                                self.queue_file_browser_cd(agent_id, &entry.path);
+                                self.queue_file_browser_list(agent_id, &entry.path);
+                            }
+
+                            // Context menu on each entry
+                            response.context_menu(|ui| {
+                                if entry.is_dir {
+                                    if ui.button("Open").clicked() {
+                                        self.queue_file_browser_cd(agent_id, &entry.path);
+                                        self.queue_file_browser_list(agent_id, &entry.path);
+                                        ui.close();
+                                    }
+                                } else {
+                                    if ui.button("Download").clicked() {
+                                        self.queue_file_browser_download(agent_id, &entry.path);
+                                        ui.close();
+                                    }
+                                }
+                                if ui.button("Delete").clicked() {
+                                    self.queue_file_browser_delete(agent_id, &entry.path);
+                                    ui.close();
+                                }
+                            });
+
+                            ui.label(RichText::new(&entry.size_label).monospace().weak());
+                            ui.label(RichText::new(&entry.modified_at).monospace().weak());
+                            ui.label(RichText::new(&entry.permissions).monospace().weak());
+                            ui.end_row();
+                        }
+                    });
+            } else {
+                ui.label("Select a directory to view its contents.");
+            }
+        });
     }
 
     fn render_console_output_panel(
@@ -6091,6 +6454,72 @@ fn join_remote_path(base: &str, name: &str) -> String {
     }
 }
 
+/// Return the dominant path separator for a remote path (`\` for Windows, `/` otherwise).
+fn path_separator(path: &str) -> &'static str {
+    if path.contains('\\') { "\\" } else { "/" }
+}
+
+/// Split a remote path into `(label, cumulative_path)` pairs for breadcrumb rendering.
+fn breadcrumb_segments(path: &str) -> Vec<(String, String)> {
+    let sep = if path.contains('\\') { '\\' } else { '/' };
+    let mut segments = Vec::new();
+
+    // Handle Windows drive root: "C:\\" → segment ("C:\\", "C:\\")
+    let trimmed_for_check = path.trim_end_matches(sep);
+    if trimmed_for_check.len() >= 2 && trimmed_for_check.as_bytes()[1] == b':' {
+        let drive_root = format!("{}:{sep}", &trimmed_for_check[..1]);
+        segments.push((drive_root.clone(), drive_root.clone()));
+
+        let rest_start = drive_root.len().min(path.len());
+        let rest = path[rest_start..].trim_matches(sep);
+        if !rest.is_empty() {
+            let mut cumulative = drive_root;
+            for part in rest.split(sep) {
+                if part.is_empty() {
+                    continue;
+                }
+                cumulative = format!("{cumulative}{part}{sep}");
+                segments.push((part.to_owned(), cumulative.clone()));
+            }
+        }
+        return segments;
+    }
+
+    // Unix-style: starts with "/"
+    if path.starts_with(sep) {
+        let root = sep.to_string();
+        segments.push((root.clone(), root.clone()));
+
+        let rest = path[1..].trim_end_matches(sep);
+        if !rest.is_empty() {
+            let mut cumulative = String::from(sep);
+            for part in rest.split(sep) {
+                if part.is_empty() {
+                    continue;
+                }
+                cumulative = format!("{cumulative}{part}{sep}");
+                segments.push((part.to_owned(), cumulative.clone()));
+            }
+        }
+        return segments;
+    }
+
+    // Relative path — just split on separator
+    let mut cumulative = String::new();
+    for part in path.trim_end_matches(sep).split(sep) {
+        if part.is_empty() {
+            continue;
+        }
+        if cumulative.is_empty() {
+            cumulative = format!("{part}{sep}");
+        } else {
+            cumulative = format!("{cumulative}{part}{sep}");
+        }
+        segments.push((part.to_owned(), cumulative.clone()));
+    }
+    segments
+}
+
 fn directory_label(path: &str) -> String {
     if path.ends_with(':') || path.ends_with(":\\") || path.ends_with(":/") {
         return path.to_owned();
@@ -7551,6 +7980,113 @@ mod tests {
     #[test]
     fn join_remote_path_root_unix() {
         assert_eq!(join_remote_path("/", "etc"), "/etc");
+    }
+
+    // ── DockTab::FileBrowser ────────────────────────────────────────
+
+    #[test]
+    fn dock_tab_file_browser_label() {
+        let tab = DockTab::FileBrowser("DEADBEEF".to_owned());
+        assert_eq!(tab.label(), "[DEADBEEF] File Explorer");
+    }
+
+    #[test]
+    fn dock_tab_file_browser_is_closeable() {
+        let tab = DockTab::FileBrowser("DEADBEEF".to_owned());
+        assert!(tab.closeable());
+    }
+
+    #[test]
+    fn dock_tab_file_browser_accent_is_teal() {
+        let tab = DockTab::FileBrowser("DEADBEEF".to_owned());
+        assert_eq!(tab.accent_color(), Color32::from_rgb(80, 180, 140));
+    }
+
+    #[test]
+    fn dock_state_open_file_browser_tab() {
+        let mut dock = DockState::default();
+        dock.open_tab(DockTab::FileBrowser("AGENT1".to_owned()));
+        assert!(dock.open_tabs.contains(&DockTab::FileBrowser("AGENT1".to_owned())));
+        assert_eq!(dock.selected, Some(DockTab::FileBrowser("AGENT1".to_owned())));
+    }
+
+    #[test]
+    fn dock_state_close_file_browser_tab() {
+        let mut dock = DockState::default();
+        dock.open_tab(DockTab::FileBrowser("AGENT1".to_owned()));
+        dock.close_tab(&DockTab::FileBrowser("AGENT1".to_owned()));
+        assert!(!dock.open_tabs.contains(&DockTab::FileBrowser("AGENT1".to_owned())));
+    }
+
+    // ── path_separator ────────────────────────────────────────────────
+
+    #[test]
+    fn path_separator_windows() {
+        assert_eq!(path_separator("C:\\Users\\admin"), "\\");
+    }
+
+    #[test]
+    fn path_separator_unix() {
+        assert_eq!(path_separator("/home/user"), "/");
+    }
+
+    #[test]
+    fn path_separator_no_separator() {
+        assert_eq!(path_separator("file.txt"), "/");
+    }
+
+    // ── breadcrumb_segments ──────────────────────────────────────────
+
+    #[test]
+    fn breadcrumb_segments_windows_path() {
+        let segments = breadcrumb_segments("C:\\Users\\admin\\Documents");
+        assert_eq!(
+            segments,
+            vec![
+                ("C:\\".to_owned(), "C:\\".to_owned()),
+                ("Users".to_owned(), "C:\\Users\\".to_owned()),
+                ("admin".to_owned(), "C:\\Users\\admin\\".to_owned()),
+                ("Documents".to_owned(), "C:\\Users\\admin\\Documents\\".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn breadcrumb_segments_unix_path() {
+        let segments = breadcrumb_segments("/home/user/docs");
+        assert_eq!(
+            segments,
+            vec![
+                ("/".to_owned(), "/".to_owned()),
+                ("home".to_owned(), "/home/".to_owned()),
+                ("user".to_owned(), "/home/user/".to_owned()),
+                ("docs".to_owned(), "/home/user/docs/".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn breadcrumb_segments_root_only() {
+        let segments = breadcrumb_segments("/");
+        assert_eq!(segments, vec![("/".to_owned(), "/".to_owned())]);
+    }
+
+    #[test]
+    fn breadcrumb_segments_windows_drive_root() {
+        let segments = breadcrumb_segments("C:\\");
+        assert_eq!(segments, vec![("C:\\".to_owned(), "C:\\".to_owned())]);
+    }
+
+    #[test]
+    fn breadcrumb_segments_relative_path() {
+        let segments = breadcrumb_segments("Documents/Stuff");
+        assert_eq!(
+            segments,
+            vec![
+                ("Documents".to_owned(), "Documents/".to_owned()),
+                ("Stuff".to_owned(), "Documents/Stuff/".to_owned()),
+            ]
+        );
     }
 
     // ── directory_label ───────────────────────────────────────────────

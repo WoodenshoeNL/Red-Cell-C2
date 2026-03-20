@@ -303,6 +303,8 @@ enum DockTab {
     AgentConsole(String),
     /// Per-agent file explorer (standalone dual-pane browser).
     FileBrowser(String),
+    /// Per-agent process list viewer (standalone tab).
+    ProcessList(String),
 }
 
 impl DockTab {
@@ -316,6 +318,7 @@ impl DockTab {
             Self::Loot => "Loot".to_owned(),
             Self::AgentConsole(id) => format!("[{id}]"),
             Self::FileBrowser(id) => format!("[{id}] File Explorer"),
+            Self::ProcessList(id) => format!("Process: [{id}]"),
         }
     }
 
@@ -329,6 +332,7 @@ impl DockTab {
             Self::Loot => Color32::from_rgb(220, 130, 60),           // orange
             Self::AgentConsole(_) => Color32::from_rgb(140, 120, 220), // purple
             Self::FileBrowser(_) => Color32::from_rgb(80, 180, 140), // teal
+            Self::ProcessList(_) => Color32::from_rgb(255, 85, 85),  // red/salmon
         }
     }
 
@@ -450,6 +454,10 @@ impl SessionPanelState {
 
     fn ensure_file_browser_open(&mut self, agent_id: &str) {
         self.dock.open_tab(DockTab::FileBrowser(agent_id.to_owned()));
+    }
+
+    fn ensure_process_list_open(&mut self, agent_id: &str) {
+        self.dock.open_tab(DockTab::ProcessList(agent_id.to_owned()));
     }
 
     #[allow(dead_code)]
@@ -870,6 +878,7 @@ impl PayloadDialogState {
 enum SessionAction {
     OpenConsole(String),
     OpenFileBrowser(String),
+    OpenProcessList(String),
     RequestKill(String),
     EditNote { agent_id: String, current_note: String },
 }
@@ -2247,6 +2256,13 @@ impl ClientApp {
                         );
                         ui.close();
                     }
+                    if ui.button("Process List").clicked() {
+                        self.handle_session_action(
+                            SessionAction::OpenProcessList(agent.name_id.clone()),
+                            state.operator_info.as_ref().map(|operator| operator.username.as_str()),
+                        );
+                        ui.close();
+                    }
                     if ui.button("Kill").clicked() {
                         self.handle_session_action(
                             SessionAction::RequestKill(agent.name_id.clone()),
@@ -2402,6 +2418,10 @@ impl ClientApp {
                 let agent_id = agent_id.clone();
                 self.render_file_browser_tab(ui, state, &agent_id);
             }
+            Some(DockTab::ProcessList(ref agent_id)) => {
+                let agent_id = agent_id.clone();
+                self.render_process_list_tab(ui, state, &agent_id);
+            }
             None => {
                 ui.centered_and_justified(|ui| {
                     ui.label(
@@ -2478,6 +2498,10 @@ impl ClientApp {
             }
             SessionAction::OpenFileBrowser(agent_id) => {
                 self.session_panel.ensure_file_browser_open(&agent_id);
+            }
+            SessionAction::OpenProcessList(agent_id) => {
+                self.session_panel.ensure_process_list_open(&agent_id);
+                self.queue_process_refresh(&agent_id);
             }
             SessionAction::RequestKill(agent_id) => {
                 self.session_panel
@@ -3950,6 +3974,216 @@ impl ClientApp {
                 }
             },
         );
+    }
+
+    /// Standalone process list tab — full-height table with search, color-coded rows,
+    /// and right-click context menu (kill, inject, migrate).
+    fn render_process_list_tab(&mut self, ui: &mut egui::Ui, state: &AppState, agent_id: &str) {
+        let agent = state.agents.iter().find(|a| a.name_id == agent_id);
+        let process_list = state.process_lists.get(agent_id);
+
+        let current_pid = agent.and_then(|a| a.process_pid.trim().parse::<u32>().ok());
+
+        egui::Frame::default().inner_margin(egui::Margin::symmetric(10, 10)).show(ui, |ui| {
+            // ── Agent header ──────────────────────────────────────
+            if let Some(agent) = agent {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(format!("Process: {}", agent.hostname))
+                            .strong()
+                            .monospace(),
+                    );
+                    ui.separator();
+                    ui.label(RichText::new(&agent.name_id).strong().monospace());
+                    ui.separator();
+                    ui.label(format!("{}\\{}", agent.domain_name, agent.username));
+                    if let Some(pid) = current_pid {
+                        ui.separator();
+                        ui.label(
+                            RichText::new(format!("Agent PID {pid}"))
+                                .color(Color32::from_rgb(255, 85, 85)),
+                        );
+                    }
+                });
+            } else {
+                ui.label(RichText::new(format!("Agent {agent_id} is no longer present")).weak());
+            }
+
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(4.0);
+
+            // ── Toolbar: search + refresh + status ───────────────
+            let process_status = self
+                .session_panel
+                .process_state
+                .get(agent_id)
+                .and_then(|s| s.status_message.clone())
+                .or_else(|| process_list.and_then(|s| s.status_message.clone()));
+
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Filter");
+                let filter = &mut self.session_panel.process_state_mut(agent_id).filter;
+                ui.add(
+                    egui::TextEdit::singleline(filter)
+                        .desired_width(220.0)
+                        .hint_text("Search name, PID, or user"),
+                );
+
+                if ui.button("Refresh").clicked() {
+                    self.queue_process_refresh(agent_id);
+                }
+
+                if let Some(updated_at) =
+                    process_list.and_then(|s| s.updated_at.as_deref())
+                {
+                    ui.separator();
+                    ui.label(RichText::new(format!("Updated {updated_at}")).weak());
+                }
+            });
+
+            if let Some(message) = process_status {
+                ui.add_space(4.0);
+                ui.label(RichText::new(message).weak());
+            }
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(4.0);
+
+            // ── Process table ────────────────────────────────────
+            let Some(process_list) = process_list else {
+                ui.label("No process list has been received for this agent yet. Click Refresh to request one.");
+                return;
+            };
+
+            let filter = self
+                .session_panel
+                .process_state
+                .get(agent_id)
+                .map(|s| s.filter.as_str())
+                .unwrap_or_default();
+            let rows = filtered_process_rows(&process_list.rows, filter);
+            if rows.is_empty() {
+                ui.label("No processes match the current filter.");
+                return;
+            }
+
+            ui.label(
+                RichText::new(format!("{} processes", rows.len()))
+                    .weak()
+                    .small(),
+            );
+            ui.add_space(4.0);
+
+            // Table header
+            egui::Grid::new(("process-tab-header", agent_id))
+                .num_columns(7)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
+                    ui.strong("Name");
+                    ui.strong("PID");
+                    ui.strong("PPID");
+                    ui.strong("Session");
+                    ui.strong("Arch");
+                    ui.strong("User");
+                    ui.strong("Actions");
+                    ui.end_row();
+                });
+            ui.separator();
+
+            // Table body (scrollable)
+            egui::ScrollArea::vertical()
+                .id_salt(("process-tab-body", agent_id))
+                .show(ui, |ui| {
+                    for row in &rows {
+                        let is_agent = current_pid == Some(row.pid);
+                        let is_system = row.user.to_ascii_lowercase().contains("system")
+                            || row.user.to_ascii_lowercase().contains("local service")
+                            || row.user.to_ascii_lowercase().contains("network service");
+
+                        let bg = if is_agent {
+                            Color32::from_rgba_unmultiplied(255, 85, 85, 35)
+                        } else if is_system {
+                            Color32::from_rgba_unmultiplied(80, 180, 220, 18)
+                        } else {
+                            Color32::TRANSPARENT
+                        };
+
+                        let row_response = egui::Frame::default()
+                            .fill(bg)
+                            .inner_margin(egui::Margin::symmetric(6, 3))
+                            .show(ui, |ui| {
+                                egui::Grid::new(("process-tab-row", agent_id, row.pid))
+                                    .num_columns(7)
+                                    .spacing([12.0, 3.0])
+                                    .show(ui, |ui| {
+                                        let name_color = if is_agent {
+                                            Color32::from_rgb(255, 85, 85)
+                                        } else {
+                                            Color32::from_rgb(220, 220, 220)
+                                        };
+                                        ui.label(RichText::new(&row.name).color(name_color));
+                                        ui.monospace(row.pid.to_string());
+                                        ui.monospace(row.ppid.to_string());
+                                        ui.label(row.session.to_string());
+                                        ui.label(&row.arch);
+                                        ui.label(blank_if_empty(&row.user, "unknown"));
+                                        ui.horizontal_wrapped(|ui| {
+                                            if ui.small_button("Kill").clicked() {
+                                                self.queue_process_kill(agent_id, row.pid);
+                                            }
+                                            if ui.small_button("Inject").clicked() {
+                                                self.open_process_injection_dialog(
+                                                    agent_id,
+                                                    row,
+                                                    InjectionTargetAction::Inject,
+                                                );
+                                            }
+                                            if ui.small_button("Migrate").clicked() {
+                                                self.open_process_injection_dialog(
+                                                    agent_id,
+                                                    row,
+                                                    InjectionTargetAction::Migrate,
+                                                );
+                                            }
+                                        });
+                                        ui.end_row();
+                                    });
+                            });
+
+                        // Right-click context menu on each row
+                        row_response.response.context_menu(|ui| {
+                            ui.label(
+                                RichText::new(format!("{} (PID {})", row.name, row.pid))
+                                    .strong(),
+                            );
+                            ui.separator();
+                            if ui.button("Kill Process").clicked() {
+                                self.queue_process_kill(agent_id, row.pid);
+                                ui.close();
+                            }
+                            if ui.button("Inject Shellcode").clicked() {
+                                self.open_process_injection_dialog(
+                                    agent_id,
+                                    row,
+                                    InjectionTargetAction::Inject,
+                                );
+                                ui.close();
+                            }
+                            if ui.button("Migrate").clicked() {
+                                self.open_process_injection_dialog(
+                                    agent_id,
+                                    row,
+                                    InjectionTargetAction::Migrate,
+                                );
+                                ui.close();
+                            }
+                        });
+
+                        ui.add_space(1.0);
+                    }
+                });
+        });
     }
 
     fn open_process_injection_dialog(
@@ -8016,6 +8250,64 @@ mod tests {
         dock.open_tab(DockTab::FileBrowser("AGENT1".to_owned()));
         dock.close_tab(&DockTab::FileBrowser("AGENT1".to_owned()));
         assert!(!dock.open_tabs.contains(&DockTab::FileBrowser("AGENT1".to_owned())));
+    }
+
+    // ── DockTab::ProcessList ──────────────────────────────────────────
+
+    #[test]
+    fn dock_tab_process_list_label() {
+        let tab = DockTab::ProcessList("DEADBEEF".to_owned());
+        assert_eq!(tab.label(), "Process: [DEADBEEF]");
+    }
+
+    #[test]
+    fn dock_tab_process_list_is_closeable() {
+        let tab = DockTab::ProcessList("DEADBEEF".to_owned());
+        assert!(tab.closeable());
+    }
+
+    #[test]
+    fn dock_tab_process_list_accent_is_red() {
+        let tab = DockTab::ProcessList("DEADBEEF".to_owned());
+        assert_eq!(tab.accent_color(), Color32::from_rgb(255, 85, 85));
+    }
+
+    #[test]
+    fn dock_state_open_process_list_tab() {
+        let mut dock = DockState::default();
+        dock.open_tab(DockTab::ProcessList("AGENT1".to_owned()));
+        assert!(dock.open_tabs.contains(&DockTab::ProcessList("AGENT1".to_owned())));
+        assert_eq!(dock.selected, Some(DockTab::ProcessList("AGENT1".to_owned())));
+    }
+
+    #[test]
+    fn dock_state_close_process_list_tab() {
+        let mut dock = DockState::default();
+        dock.open_tab(DockTab::ProcessList("AGENT1".to_owned()));
+        dock.close_tab(&DockTab::ProcessList("AGENT1".to_owned()));
+        assert!(!dock.open_tabs.contains(&DockTab::ProcessList("AGENT1".to_owned())));
+    }
+
+    #[test]
+    fn ensure_process_list_open_creates_tab() {
+        let mut panel = SessionPanelState::default();
+        panel.ensure_process_list_open("ABCD1234");
+        assert!(panel.dock.open_tabs.contains(&DockTab::ProcessList("ABCD1234".to_owned())));
+        assert_eq!(panel.dock.selected, Some(DockTab::ProcessList("ABCD1234".to_owned())));
+    }
+
+    #[test]
+    fn ensure_process_list_open_idempotent() {
+        let mut panel = SessionPanelState::default();
+        panel.ensure_process_list_open("ABCD1234");
+        panel.ensure_process_list_open("ABCD1234");
+        let count = panel
+            .dock
+            .open_tabs
+            .iter()
+            .filter(|t| **t == DockTab::ProcessList("ABCD1234".to_owned()))
+            .count();
+        assert_eq!(count, 1);
     }
 
     // ── path_separator ────────────────────────────────────────────────

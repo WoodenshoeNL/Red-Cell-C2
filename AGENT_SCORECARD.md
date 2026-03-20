@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 583 | 212 | 31 |
+| Tasks closed | 585 | 212 | 31 |
 | Bugs filed against | 51 | 34 | 9 |
 | Bug rate (bugs/task) | 0.09 | 0.16 | 0.29 |
 | Quality score | 91% | 84% | 71% |
 
-*Bug rates: Claude 51/583=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 51/585=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-20 03:15 — e09c92a8..14619c3b
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed f7ajo (credential extraction E2E tests — 3 integration tests for persist_credentials_from_output), t2rcj (error path tests for non-existent agent in exit/kill-date callbacks — 2 unit tests). Currently working on abu8j (filesystem dispatch DownloadTracker memory limit). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (clean), cargo test 1638 passed / 1 failed (websocket_listener_commands_broadcast_and_persist_state — known flaky, tracked in red-cell-c2-he5j7)
 
 ### Arch Review — 2026-03-21 01:30
 

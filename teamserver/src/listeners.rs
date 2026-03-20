@@ -1272,18 +1272,8 @@ fn profile_listener_configs(profile: &Profile) -> Vec<ListenerConfig> {
             cert: config
                 .cert
                 .map(|cert| red_cell_common::ListenerTlsConfig { cert: cert.cert, key: cert.key }),
-            response: config.response.map(|response| HttpListenerResponseConfig {
-                headers: response.headers,
-                body: response.body,
-            }),
-            proxy: config.proxy.map(|proxy| HttpListenerProxyConfig {
-                enabled: true,
-                proxy_type: Some("http".to_owned()),
-                host: proxy.host,
-                port: proxy.port,
-                username: proxy.username,
-                password: proxy.password,
-            }),
+            response: config.response.map(Into::into),
+            proxy: config.proxy.map(Into::into),
         })
     }));
     listeners.extend(profile.listeners.smb.iter().cloned().map(|config| {

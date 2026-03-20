@@ -576,10 +576,10 @@ pub struct ProfileHttpListenerConfig {
     pub cert: Option<HttpListenerCertConfig>,
     /// Optional response header customization.
     #[serde(rename = "Response", default)]
-    pub response: Option<HttpListenerResponseConfig>,
+    pub response: Option<HclHttpListenerResponseConfig>,
     /// Optional upstream proxy settings.
     #[serde(rename = "Proxy", default)]
-    pub proxy: Option<HttpListenerProxyConfig>,
+    pub proxy: Option<HclHttpListenerProxyConfig>,
 }
 
 /// SMB pivot listener configuration.
@@ -651,9 +651,13 @@ pub struct HttpListenerCertConfig {
     pub key: String,
 }
 
-/// Static headers applied to HTTP listener responses.
+/// Static headers applied to HTTP listener responses (HCL profile shape).
+///
+/// This type deserializes the PascalCase HCL profile format. Use
+/// [`Into<crate::HttpListenerResponseConfig>`] to convert to the canonical
+/// domain type.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct HttpListenerResponseConfig {
+pub struct HclHttpListenerResponseConfig {
     /// HTTP response headers.
     #[serde(rename = "Headers", default)]
     pub headers: Vec<String>,
@@ -662,12 +666,23 @@ pub struct HttpListenerResponseConfig {
     pub body: Option<String>,
 }
 
-/// Upstream proxy settings for HTTP listeners.
+impl From<HclHttpListenerResponseConfig> for crate::HttpListenerResponseConfig {
+    fn from(hcl: HclHttpListenerResponseConfig) -> Self {
+        Self { headers: hcl.headers, body: hcl.body }
+    }
+}
+
+/// Upstream proxy settings for HTTP listeners (HCL profile shape).
+///
+/// This type deserializes the PascalCase HCL profile format. Use
+/// [`Into<crate::HttpListenerProxyConfig>`] to convert to the canonical domain
+/// type. The conversion sets `enabled` to `true` and `proxy_type` to `"http"`
+/// since presence in the HCL profile implies an enabled HTTP proxy.
 ///
 /// The proxy password is wrapped in [`Zeroizing`] so that heap memory is
 /// overwritten with zeros when the value is dropped.
 #[derive(Clone, PartialEq, Eq, Deserialize)]
-pub struct HttpListenerProxyConfig {
+pub struct HclHttpListenerProxyConfig {
     /// Proxy hostname.
     #[serde(rename = "Host")]
     pub host: String,
@@ -686,9 +701,22 @@ pub struct HttpListenerProxyConfig {
     pub password: Option<Zeroizing<String>>,
 }
 
-impl fmt::Debug for HttpListenerProxyConfig {
+impl From<HclHttpListenerProxyConfig> for crate::HttpListenerProxyConfig {
+    fn from(hcl: HclHttpListenerProxyConfig) -> Self {
+        Self {
+            enabled: true,
+            proxy_type: Some("http".to_owned()),
+            host: hcl.host,
+            port: hcl.port,
+            username: hcl.username,
+            password: hcl.password,
+        }
+    }
+}
+
+impl fmt::Debug for HclHttpListenerProxyConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("HttpListenerProxyConfig")
+        f.debug_struct("HclHttpListenerProxyConfig")
             .field("host", &self.host)
             .field("port", &self.port)
             .field("username", &self.username)

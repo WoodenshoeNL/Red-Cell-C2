@@ -478,6 +478,27 @@ mod tests {
         assert_eq!(data_lines.len(), 2, "expected 2 data rows, got {data_lines:?}");
     }
 
+    #[tokio::test]
+    async fn rportfwd_list_truncated_second_entry_returns_error() {
+        let mut rest = Vec::new();
+        // complete first entry (5 × u32 = 20 bytes)
+        add_u32(&mut rest, 0xABCD_0001); // socket_id
+        add_u32(&mut rest, 0x0100_007F); // local_addr = 127.0.0.1
+        add_u32(&mut rest, 8080); // local_port
+        add_u32(&mut rest, 0x0101_A8C0); // forward_addr = 192.168.1.1
+        add_u32(&mut rest, 4443); // forward_port
+        // truncated second entry: only socket_id, missing the other 4 fields
+        add_u32(&mut rest, 0xABCD_0002); // socket_id only
+        let payload = socket_payload(DemonSocketCommand::ReversePortForwardList, &rest);
+        let (events, sockets) = test_deps().await;
+        let result =
+            handle_socket_callback(&events, &sockets, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload for truncated list entry, got {result:?}"
+        );
+    }
+
     // ── ReversePortForwardAdd ───────────────────────────────────────────────
 
     #[tokio::test]

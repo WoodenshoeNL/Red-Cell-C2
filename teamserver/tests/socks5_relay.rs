@@ -382,6 +382,45 @@ async fn socks5_connect_ipv6_handshake_enqueues_connect_job()
 }
 
 // ---------------------------------------------------------------------------
+// SOCKS5 unsupported auth method rejection
+// ---------------------------------------------------------------------------
+
+/// When a SOCKS5 client offers only unsupported authentication methods (e.g.,
+/// username/password `0x02` with no no-auth `0x00`), the server must respond
+/// with `VER=5, METHOD=0xFF` (no acceptable method) and close the connection.
+#[tokio::test]
+async fn socks5_rejects_unsupported_auth_method() -> Result<(), Box<dyn std::error::Error>> {
+    let (_database, registry, manager) = test_manager().await?;
+    let agent_id = 0xAABB_000F_u32;
+    registry.insert(sample_agent(agent_id)).await?;
+
+    let (port, guard) = common::available_port()?;
+    drop(guard);
+    manager.add_socks_server(agent_id, &port.to_string()).await?;
+
+    let mut client =
+        timeout(Duration::from_secs(2), TcpStream::connect(format!("127.0.0.1:{port}"))).await??;
+
+    // Send greeting with only username/password auth (METHOD=0x02), no no-auth.
+    client.write_all(&[SOCKS_VERSION, 1, 0x02]).await?;
+    client.flush().await?;
+
+    // Server must respond with VER=5, METHOD=0xFF (no acceptable method).
+    let mut response = [0u8; 2];
+    timeout(Duration::from_secs(2), client.read_exact(&mut response)).await??;
+    assert_eq!(response[0], SOCKS_VERSION, "server must respond with SOCKS5 version");
+    assert_eq!(response[1], 0xFF, "server must reject with METHOD=0xFF (no acceptable method)");
+
+    // The server should close the connection — subsequent reads must return EOF.
+    let mut buf = [0u8; 1];
+    let n = timeout(Duration::from_secs(2), client.read(&mut buf)).await??;
+    assert_eq!(n, 0, "server must close the connection after rejecting auth methods");
+
+    manager.clear_socks_servers(agent_id).await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Data relay tests
 // ---------------------------------------------------------------------------
 

@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 
 use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256, PKCS_RSA_SHA256};
 use thiserror::Error;
+use time::OffsetDateTime;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -118,6 +119,8 @@ pub fn generate_self_signed_tls_identity(
     let mut params = CertificateParams::new(subject_alt_names.to_vec())?;
     params.distinguished_name = rcgen::DistinguishedName::new();
     params.distinguished_name.push(rcgen::DnType::CommonName, common_name.as_str());
+    params.not_before = OffsetDateTime::now_utc();
+    params.not_after = OffsetDateTime::now_utc() + time::Duration::days(365);
 
     let signing_key = match algorithm {
         TlsKeyAlgorithm::EcdsaP256 => KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?,
@@ -556,6 +559,55 @@ mod tests {
                 other => other.to_string(),
             })
             .collect()
+    }
+
+    #[test]
+    fn generate_self_signed_tls_identity_has_reasonable_validity_period() {
+        let identity = generate_self_signed_tls_identity(
+            &["validity-test.local".to_owned()],
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("identity generation should succeed");
+
+        let mut reader = BufReader::new(identity.certificate_pem());
+        let certificates = rustls_pemfile::certs(&mut reader)
+            .collect::<Result<Vec<_>, std::io::Error>>()
+            .expect("certificate PEM should parse");
+        let cert_der =
+            certificates.first().expect("certificate PEM should contain at least one certificate");
+        let (_, parsed) = x509_parser::certificate::X509Certificate::from_der(cert_der.as_ref())
+            .expect("certificate DER should parse");
+
+        let validity = &parsed.tbs_certificate.validity;
+        let now = x509_parser::time::ASN1Time::now();
+
+        assert!(
+            validity.not_before <= now,
+            "certificate not_before ({:?}) should be in the past or present",
+            validity.not_before,
+        );
+        assert!(
+            now <= validity.not_after,
+            "certificate not_after ({:?}) should be in the future",
+            validity.not_after,
+        );
+
+        // Validity span must be between 1 day and 10 years (reasonable for self-signed certs).
+        let not_before_secs = validity.not_before.timestamp();
+        let not_after_secs = validity.not_after.timestamp();
+        let span_secs = not_after_secs - not_before_secs;
+
+        let one_day_secs: i64 = 24 * 60 * 60;
+        let ten_years_secs: i64 = 10 * 365 * 24 * 60 * 60;
+
+        assert!(
+            span_secs >= one_day_secs,
+            "certificate validity span ({span_secs}s) should be at least 1 day ({one_day_secs}s)",
+        );
+        assert!(
+            span_secs <= ten_years_secs,
+            "certificate validity span ({span_secs}s) should be at most 10 years ({ten_years_secs}s)",
+        );
     }
 
     #[test]

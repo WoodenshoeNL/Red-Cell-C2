@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 629 | 212 | 31 |
+| Tasks closed | 631 | 212 | 31 |
 | Bugs filed against | 51 | 34 | 9 |
 | Bug rate (bugs/task) | 0.08 | 0.16 | 0.29 |
 | Quality score | 92% | 84% | 71% |
 
-*Bug rates: Claude 51/629=0.08, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 51/631=0.08, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -3052,3 +3052,13 @@ Build: cargo check passed, clippy passed (0 warnings), cargo test passed (254 te
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: passed (cargo check, clippy -D warnings clean, all 592 client + 261 common + teamserver tests pass, 0 failures)
+
+### QA Review — 2026-03-21 03:00 — d66ae25c..1c5f7181
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed sn6yf (Unicode/non-ASCII process name formatting tests — 159 LOC in process.rs covering CJK, Cyrillic, accented Latin, mixed scripts, Unicode user fields, empty name edge case), z889u (invalid DemonCallback type error path test — 41 LOC in transfer.rs). Currently has jmo0u claimed (pivot SmbConnect reconnect dead code bug) with unstaged fix in progress. All test-only changes, clean code, no issues. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: passed (cargo check clean, clippy -D warnings clean, 1752 unit tests pass, 1 pre-existing integration test failure in pivot_dispatch — tracked by jmo0u)

@@ -662,9 +662,10 @@ mod tests {
     use zeroize::Zeroizing;
 
     use super::{
-        AgentEncryptionInfo, AgentRecord, BASE64_STANDARD, DnsListenerConfig, HttpListenerConfig,
-        HttpListenerProxyConfig, HttpListenerResponseConfig, ListenerConfig, ListenerProtocol,
-        ListenerTlsConfig, OperatorInfo, SmbListenerConfig,
+        AgentEncryptionInfo, AgentRecord, BASE64_STANDARD, DnsListenerConfig,
+        ExternalListenerConfig, HttpListenerConfig, HttpListenerProxyConfig,
+        HttpListenerResponseConfig, ListenerConfig, ListenerProtocol, ListenerTlsConfig,
+        OperatorInfo, SmbListenerConfig,
     };
     use crate::error::CommonError;
 
@@ -1225,6 +1226,19 @@ mod tests {
             record_types: vec!["TXT".to_string(), "A".to_string()],
             kill_date: Some("2026-12-31 23:59:59".to_string()),
             working_hours: Some("08:00-18:00".to_string()),
+        });
+
+        let encoded = serde_json::to_value(&original)?;
+        let decoded: ListenerConfig = serde_json::from_value(encoded)?;
+        assert_eq!(decoded, original);
+        Ok(())
+    }
+
+    #[test]
+    fn external_listener_config_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+        let original = ListenerConfig::from(ExternalListenerConfig {
+            name: "bridge".to_string(),
+            endpoint: "/svc".to_string(),
         });
 
         let encoded = serde_json::to_value(&original)?;

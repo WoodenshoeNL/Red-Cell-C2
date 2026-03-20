@@ -510,6 +510,41 @@ mod tests {
         );
     }
 
+    /// When `service_bridge` is `Some`, `build_router` must merge the service
+    /// routes so that the service endpoint path is routable (not 404).  This
+    /// exercises the `if let Some(ref bridge) = state.service_bridge` branch
+    /// that is otherwise never hit by tests using `service_bridge: None`.
+    #[tokio::test]
+    async fn build_router_with_service_bridge_routes_service_endpoint() {
+        use red_cell_common::config::ServiceConfig;
+
+        let mut state = build_test_state().await;
+        let bridge = crate::ServiceBridge::new(ServiceConfig {
+            endpoint: "service-ws".to_owned(),
+            password: "test-password".to_owned(),
+        });
+        state.service_bridge = Some(bridge);
+
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/service-ws")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        // The service endpoint expects a WebSocket upgrade, so a plain GET
+        // without upgrade headers will be rejected — but critically it must
+        // NOT return 404, which would indicate the route was never merged.
+        assert_ne!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "/service-ws must be routed by service_routes when service_bridge is Some, not fall through to 404"
+        );
+    }
+
     /// The 10 MiB body size limit in `teamserver_fallback` must return 400
     /// BAD_REQUEST when a request body exceeds the limit.  Without this guard
     /// an attacker could exhaust server memory via the external listener path.

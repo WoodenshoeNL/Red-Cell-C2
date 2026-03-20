@@ -1804,4 +1804,45 @@ mod tests {
         );
         Ok(())
     }
+
+    // ------------------------------------------------------------------
+    // handle_beacon_output_callback — invalid DemonCallback type returns error
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn beacon_output_callback_invalid_callback_type_returns_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let downloads = DownloadTracker::new(1024 * 1024);
+        let agent_id: u32 = 0xBAAD_F00D;
+        let request_id: u32 = 7;
+
+        // Build a payload whose callback type (0xFF) is not a valid DemonCallback variant.
+        let invalid_callback: u32 = 0xFF;
+        let payload = le32(invalid_callback).to_vec();
+
+        let result = handle_beacon_output_callback(
+            &registry, &database, &events, &downloads, None, agent_id, request_id, &payload,
+        )
+        .await;
+
+        let err = result.expect_err("invalid callback type must return an error");
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+
+        // Verify the error carries the correct command_id.
+        if let CommandDispatchError::InvalidCallbackPayload { command_id, .. } = &err {
+            assert_eq!(
+                *command_id,
+                u32::from(red_cell_common::demon::DemonCommand::BeaconOutput),
+                "command_id in error must match BeaconOutput"
+            );
+        }
+
+        Ok(())
+    }
 }

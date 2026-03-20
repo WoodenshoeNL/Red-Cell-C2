@@ -278,7 +278,7 @@ mod tests {
 
     use super::{
         CallbackParser, CommandDispatchError, DemonCallbackPackage, handle_pivot_command_callback,
-        handle_pivot_list_callback, inner_demon_agent_id,
+        handle_pivot_disconnect_callback, handle_pivot_list_callback, inner_demon_agent_id,
     };
     use crate::dispatch::pivot::dispatch_builtin_packages;
     use crate::dispatch::{BuiltinDispatchContext, DownloadTracker};
@@ -763,6 +763,220 @@ mod tests {
             msg.info.output.contains("dispatched output text"),
             "event output must contain the dispatched text"
         );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests for handle_pivot_disconnect_callback
+    // -----------------------------------------------------------------------
+
+    /// Build a disconnect callback payload: success (u32 LE) + child_agent_id (u32 LE).
+    fn disconnect_payload(success: u32, child_agent_id: u32) -> Vec<u8> {
+        let mut buf = Vec::new();
+        push_u32(&mut buf, success);
+        push_u32(&mut buf, child_agent_id);
+        buf
+    }
+
+    #[tokio::test]
+    async fn pivot_disconnect_success_marks_child_dead_and_broadcasts_events()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_database, registry, events, _sockets, _downloads) = setup_dispatch_context().await;
+        let mut rx = events.subscribe();
+
+        let parent_id: u32 = 0xAAAA_0001;
+        let child_id: u32 = 0xAAAA_0002;
+        let parent_key = [0x10; AGENT_KEY_LENGTH];
+        let parent_iv = [0x11; AGENT_IV_LENGTH];
+        let child_key = [0x20; AGENT_KEY_LENGTH];
+        let child_iv = [0x21; AGENT_IV_LENGTH];
+
+        registry.insert(sample_agent_info(parent_id, parent_key, parent_iv)).await?;
+        registry.insert(sample_agent_info(child_id, child_key, child_iv)).await?;
+        registry.add_link(parent_id, child_id).await?;
+
+        // Verify child is initially active.
+        let child_before = registry.get(child_id).await.expect("child must exist");
+        assert!(child_before.active, "child must be active before disconnect");
+
+        let payload = disconnect_payload(1, child_id);
+        let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandPivot));
+
+        let result = handle_pivot_disconnect_callback(
+            &registry,
+            &events,
+            parent_id,
+            REQUEST_ID,
+            &mut parser,
+        )
+        .await;
+        assert!(result.is_ok(), "success path must not error: {result:?}");
+        assert!(matches!(result, Ok(None)), "handler should return Ok(None)");
+
+        // First event(s): AgentUpdate (mark) for each affected agent.
+        let mark_event = rx.recv().await.expect("should receive AgentUpdate mark event");
+        let OperatorMessage::AgentUpdate(update) = &mark_event else {
+            panic!("expected AgentUpdate, got {mark_event:?}");
+        };
+        assert_eq!(
+            update.info.agent_id,
+            format!("{child_id:08X}"),
+            "mark event must be for the child agent"
+        );
+        assert_eq!(update.info.marked, "Dead", "child agent must be marked Dead");
+
+        // Next event: AgentResponse with the disconnect info message.
+        let resp_event = rx.recv().await.expect("should receive AgentResponse event");
+        let OperatorMessage::AgentResponse(resp) = &resp_event else {
+            panic!("expected AgentResponse, got {resp_event:?}");
+        };
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            message.contains(&format!("{child_id:08X}")),
+            "response must contain child agent ID hex, got: {message}"
+        );
+        assert!(
+            message.contains("disconnected"),
+            "response should mention disconnection, got: {message}"
+        );
+
+        // Verify child agent is now inactive in the registry.
+        let child_after = registry.get(child_id).await.expect("child must still exist");
+        assert!(!child_after.active, "child must be inactive after disconnect");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pivot_disconnect_success_cascades_to_grandchild()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_database, registry, events, _sockets, _downloads) = setup_dispatch_context().await;
+        let mut rx = events.subscribe();
+
+        let parent_id: u32 = 0xBBBB_0001;
+        let child_id: u32 = 0xBBBB_0002;
+        let grandchild_id: u32 = 0xBBBB_0003;
+
+        registry
+            .insert(sample_agent_info(parent_id, [0x30; AGENT_KEY_LENGTH], [0x31; AGENT_IV_LENGTH]))
+            .await?;
+        registry
+            .insert(sample_agent_info(child_id, [0x40; AGENT_KEY_LENGTH], [0x41; AGENT_IV_LENGTH]))
+            .await?;
+        registry
+            .insert(sample_agent_info(
+                grandchild_id,
+                [0x50; AGENT_KEY_LENGTH],
+                [0x51; AGENT_IV_LENGTH],
+            ))
+            .await?;
+
+        // parent -> child -> grandchild
+        registry.add_link(parent_id, child_id).await?;
+        registry.add_link(child_id, grandchild_id).await?;
+
+        let payload = disconnect_payload(1, child_id);
+        let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandPivot));
+
+        let result = handle_pivot_disconnect_callback(
+            &registry,
+            &events,
+            parent_id,
+            REQUEST_ID,
+            &mut parser,
+        )
+        .await;
+        assert!(result.is_ok(), "cascading disconnect must succeed: {result:?}");
+
+        // Collect mark events — should get one for child and one for grandchild.
+        let mut marked_agents = Vec::new();
+        for _ in 0..2 {
+            let event = rx.recv().await.expect("should receive mark event");
+            let OperatorMessage::AgentUpdate(update) = &event else {
+                panic!("expected AgentUpdate, got {event:?}");
+            };
+            assert_eq!(update.info.marked, "Dead");
+            marked_agents.push(update.info.agent_id.clone());
+        }
+        assert!(
+            marked_agents.contains(&format!("{child_id:08X}")),
+            "child must be in marked agents: {marked_agents:?}"
+        );
+        assert!(
+            marked_agents.contains(&format!("{grandchild_id:08X}")),
+            "grandchild must be in marked agents: {marked_agents:?}"
+        );
+
+        // Both child and grandchild must be dead.
+        let child = registry.get(child_id).await.expect("child must exist");
+        assert!(!child.active, "child must be dead after cascading disconnect");
+        let grandchild = registry.get(grandchild_id).await.expect("grandchild must exist");
+        assert!(!grandchild.active, "grandchild must be dead after cascading disconnect");
+
+        // Parent must still be alive.
+        let parent = registry.get(parent_id).await.expect("parent must exist");
+        assert!(parent.active, "parent must remain alive after disconnecting a child");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pivot_disconnect_failure_broadcasts_error_and_leaves_child_alive()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_database, registry, events, _sockets, _downloads) = setup_dispatch_context().await;
+        let mut rx = events.subscribe();
+
+        let parent_id: u32 = 0xCCCC_0001;
+        let child_id: u32 = 0xCCCC_0002;
+
+        registry
+            .insert(sample_agent_info(parent_id, [0x60; AGENT_KEY_LENGTH], [0x61; AGENT_IV_LENGTH]))
+            .await?;
+        registry
+            .insert(sample_agent_info(child_id, [0x70; AGENT_KEY_LENGTH], [0x71; AGENT_IV_LENGTH]))
+            .await?;
+        registry.add_link(parent_id, child_id).await?;
+
+        // success == 0 means failure
+        let payload = disconnect_payload(0, child_id);
+        let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandPivot));
+
+        let result = handle_pivot_disconnect_callback(
+            &registry,
+            &events,
+            parent_id,
+            REQUEST_ID,
+            &mut parser,
+        )
+        .await;
+        assert!(result.is_ok(), "failure path must not error: {result:?}");
+        assert!(matches!(result, Ok(None)), "handler should return Ok(None)");
+
+        // Should get an error response event.
+        let resp_event = rx.recv().await.expect("should receive AgentResponse event");
+        let OperatorMessage::AgentResponse(resp) = &resp_event else {
+            panic!("expected AgentResponse, got {resp_event:?}");
+        };
+        let kind = resp.info.extra.get("Type").and_then(Value::as_str).unwrap_or("");
+        assert_eq!(kind, "Error", "failure path must produce an Error response");
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            message.contains("Failed to disconnect"),
+            "error message must mention failure, got: {message}"
+        );
+        assert!(
+            message.contains(&format!("{child_id:08X}")),
+            "error message must contain child agent ID, got: {message}"
+        );
+
+        // Child agent must remain active — disconnect_link should NOT have been called.
+        let child = registry.get(child_id).await.expect("child must exist");
+        assert!(child.active, "child must remain active when disconnect fails");
+
+        // No mark events should have been broadcast — only the one error response above.
+        let no_extra = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
+        assert!(no_extra.is_err(), "no additional events should be broadcast on failure path");
+
         Ok(())
     }
 }

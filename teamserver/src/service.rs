@@ -40,7 +40,9 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
-use crate::{AgentRegistry, EventBus};
+use crate::agent_events::agent_new_event;
+use crate::database::TeamserverError;
+use crate::{AgentRegistry, EventBus, PivotInfo};
 
 // ── Constants ────────────────────────────────────────────────────────
 
@@ -84,6 +86,14 @@ pub enum ServiceBridgeError {
     /// Duplicate agent name.
     #[error("service agent already registered: {name}")]
     DuplicateAgent { name: String },
+
+    /// Agent registry operation failed.
+    #[error("agent registry error: {0}")]
+    AgentRegistry(#[from] TeamserverError),
+
+    /// Base64 decoding failure.
+    #[error("base64 decode error: {0}")]
+    Base64Decode(String),
 }
 
 // ── Service bridge state ─────────────────────────────────────────────
@@ -395,27 +405,16 @@ async fn handle_agent_message(
     message: &Value,
     _bridge: &ServiceBridge,
     events: &EventBus,
-    _agent_registry: &AgentRegistry,
-    _socket: &mut WebSocket,
+    agent_registry: &AgentRegistry,
+    socket: &mut WebSocket,
 ) -> Result<(), ServiceBridgeError> {
     let body_type =
         message.get("Body").and_then(|b| b.get("Type")).and_then(Value::as_str).unwrap_or_default();
 
     match body_type {
-        BODY_AGENT_TASK => {
-            debug!("service agent task message received");
-            // Agent task queueing — external services can push commands to agents.
-            // The full implementation depends on the agent queue infrastructure being
-            // wired up for service-originated tasks. For now, log and acknowledge.
-            debug!("service agent task dispatch not yet fully wired");
-            Ok(())
-        }
+        BODY_AGENT_TASK => handle_agent_task(message, events, agent_registry, socket).await,
         BODY_AGENT_REGISTER => {
-            debug!("service agent registration callback received");
-            // An agent instance registering through the service bridge. This would
-            // call into agent_registry to register the agent.
-            debug!("service agent instance registration not yet fully wired");
-            Ok(())
+            handle_agent_instance_register(message, events, agent_registry).await
         }
         BODY_AGENT_RESPONSE => {
             debug!("service agent response received");
@@ -427,6 +426,215 @@ async fn handle_agent_message(
             Ok(())
         }
     }
+}
+
+/// Handle an `AgentTask` message — queue or retrieve tasks for a registered agent.
+///
+/// Supports two task modes matching the original Havoc protocol:
+/// - `"Add"`: decode the base64-encoded command and enqueue a job for the agent
+/// - `"Get"`: drain the agent's job queue and return combined payloads as base64
+async fn handle_agent_task(
+    message: &Value,
+    events: &EventBus,
+    agent_registry: &AgentRegistry,
+    socket: &mut WebSocket,
+) -> Result<(), ServiceBridgeError> {
+    let body =
+        message.get("Body").ok_or_else(|| ServiceBridgeError::MissingField("Body".to_owned()))?;
+
+    let agent_info = body
+        .get("Agent")
+        .ok_or_else(|| ServiceBridgeError::MissingField("Body.Agent".to_owned()))?;
+
+    let agent_id_str = agent_info
+        .get("NameID")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ServiceBridgeError::MissingField("Body.Agent.NameID".to_owned()))?;
+
+    let agent_id = u32::from_str_radix(agent_id_str, 16).map_err(|_| {
+        ServiceBridgeError::MissingField(format!("Body.Agent.NameID: invalid hex '{agent_id_str}'"))
+    })?;
+
+    let task = body
+        .get("Task")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ServiceBridgeError::MissingField("Body.Task".to_owned()))?;
+
+    match task {
+        "Add" => {
+            let command_b64 = body
+                .get("Command")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ServiceBridgeError::MissingField("Body.Command".to_owned()))?;
+
+            use base64::Engine as _;
+            let payload = base64::engine::general_purpose::STANDARD
+                .decode(command_b64)
+                .map_err(|e| ServiceBridgeError::Base64Decode(e.to_string()))?;
+
+            let job = crate::agents::Job {
+                command: 0,
+                request_id: 0,
+                payload,
+                command_line: String::new(),
+                task_id: Uuid::new_v4().to_string(),
+                created_at: OffsetDateTime::now_utc().unix_timestamp().to_string(),
+                operator: "service".to_owned(),
+            };
+
+            agent_registry.enqueue_job(agent_id, job).await?;
+            info!(agent_id = %agent_id_str, "service agent task enqueued");
+
+            let log_event =
+                service_log_event(&format!("task enqueued for agent {agent_id_str} via service"));
+            events.broadcast(log_event);
+            Ok(())
+        }
+        "Get" => {
+            let jobs = agent_registry.dequeue_jobs(agent_id).await?;
+
+            let mut combined_payload = Vec::new();
+            for job in &jobs {
+                combined_payload.extend_from_slice(&job.payload);
+            }
+
+            use base64::Engine as _;
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&combined_payload);
+
+            let mut response = message.clone();
+            if let Some(resp_body) = response.get_mut("Body") {
+                resp_body["TasksQueue"] = Value::String(encoded);
+            }
+
+            let response_text = serde_json::to_string(&response)?;
+            socket
+                .send(WsMessage::Text(response_text.into()))
+                .await
+                .map_err(ServiceBridgeError::WebSocket)?;
+
+            debug!(agent_id = %agent_id_str, count = jobs.len(), "service agent tasks returned");
+            Ok(())
+        }
+        other => {
+            debug!(task = %other, "unknown service agent task mode");
+            Ok(())
+        }
+    }
+}
+
+/// Handle an `AgentRegister` message — register a new agent instance through the
+/// service bridge.
+///
+/// Parses the registration info from the message body, constructs an `AgentRecord`,
+/// inserts it into the agent registry, and broadcasts an `AgentNew` event to operators.
+async fn handle_agent_instance_register(
+    message: &Value,
+    events: &EventBus,
+    agent_registry: &AgentRegistry,
+) -> Result<(), ServiceBridgeError> {
+    let body =
+        message.get("Body").ok_or_else(|| ServiceBridgeError::MissingField("Body".to_owned()))?;
+
+    let register_info = body
+        .get("RegisterInfo")
+        .ok_or_else(|| ServiceBridgeError::MissingField("Body.RegisterInfo".to_owned()))?;
+
+    let agent_header = body
+        .get("AgentHeader")
+        .ok_or_else(|| ServiceBridgeError::MissingField("Body.AgentHeader".to_owned()))?;
+
+    let agent_id_str = agent_header
+        .get("AgentID")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ServiceBridgeError::MissingField("Body.AgentHeader.AgentID".to_owned()))?;
+
+    let agent_id = u32::from_str_radix(agent_id_str, 16).map_err(|_| {
+        ServiceBridgeError::MissingField(format!(
+            "Body.AgentHeader.AgentID: invalid hex '{agent_id_str}'"
+        ))
+    })?;
+
+    let magic_value_str = agent_header.get("MagicValue").and_then(Value::as_str).unwrap_or("0");
+
+    let magic_value = u32::from_str_radix(magic_value_str, 16).unwrap_or(0);
+
+    let now = OffsetDateTime::now_utc().unix_timestamp().to_string();
+
+    let agent = red_cell_common::AgentRecord {
+        agent_id,
+        active: true,
+        reason: String::new(),
+        note: String::new(),
+        encryption: red_cell_common::AgentEncryptionInfo::default(),
+        hostname: register_info
+            .get("Hostname")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        username: register_info
+            .get("Username")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        domain_name: register_info
+            .get("DomainName")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        external_ip: register_info
+            .get("ExternalIP")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        internal_ip: register_info
+            .get("InternalIP")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        process_name: register_info
+            .get("ProcessName")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        process_path: register_info
+            .get("ProcessPath")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        base_address: 0,
+        process_pid: register_info.get("ProcessPID").and_then(Value::as_u64).unwrap_or(0) as u32,
+        process_tid: 0,
+        process_ppid: 0,
+        process_arch: register_info
+            .get("ProcessArch")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        elevated: register_info.get("Elevated").and_then(Value::as_bool).unwrap_or(false),
+        os_version: register_info
+            .get("OSVersion")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        os_build: 0,
+        os_arch: register_info.get("OSArch").and_then(Value::as_str).unwrap_or_default().to_owned(),
+        sleep_delay: register_info.get("SleepDelay").and_then(Value::as_u64).unwrap_or(0) as u32,
+        sleep_jitter: register_info.get("SleepJitter").and_then(Value::as_u64).unwrap_or(0) as u32,
+        kill_date: None,
+        working_hours: None,
+        first_call_in: now.clone(),
+        last_call_in: now,
+    };
+
+    let pivots = PivotInfo::default();
+    let event = agent_new_event("service", magic_value, &agent, &pivots);
+
+    agent_registry.insert(agent).await?;
+    info!(agent_id = %agent_id_str, "service agent instance registered");
+
+    events.broadcast(event);
+
+    Ok(())
 }
 
 /// Handle agent output messages — broadcast console output to operators.
@@ -761,5 +969,368 @@ mod tests {
         let agent_data = message.get("Body").and_then(|b| b.get("Agent")).unwrap();
         let name = agent_data.get("Name").and_then(Value::as_str);
         assert!(name.is_none());
+    }
+
+    // ── AgentTask handler tests ─────────────────────────────────────
+
+    async fn test_registry() -> AgentRegistry {
+        let database = crate::database::Database::connect_in_memory().await.expect("in-memory db");
+        AgentRegistry::new(database)
+    }
+
+    fn test_agent_record(agent_id: u32) -> red_cell_common::AgentRecord {
+        red_cell_common::AgentRecord {
+            agent_id,
+            active: true,
+            reason: String::new(),
+            note: String::new(),
+            encryption: red_cell_common::AgentEncryptionInfo::default(),
+            hostname: "WORKSTATION".to_owned(),
+            username: "admin".to_owned(),
+            domain_name: "DOMAIN".to_owned(),
+            external_ip: "10.0.0.1".to_owned(),
+            internal_ip: "192.168.1.100".to_owned(),
+            process_name: "svc.exe".to_owned(),
+            process_path: "C:\\svc.exe".to_owned(),
+            base_address: 0,
+            process_pid: 1234,
+            process_tid: 0,
+            process_ppid: 0,
+            process_arch: "x64".to_owned(),
+            elevated: false,
+            os_version: "Windows 10".to_owned(),
+            os_build: 0,
+            os_arch: "x64".to_owned(),
+            sleep_delay: 5,
+            sleep_jitter: 0,
+            kill_date: None,
+            working_hours: None,
+            first_call_in: "0".to_owned(),
+            last_call_in: "0".to_owned(),
+        }
+    }
+
+    /// Create a WebSocket pair using a real TCP connection and axum upgrade.
+    async fn ws_pair() -> (
+        WebSocket,
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) {
+        use tokio::net::TcpListener;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<WebSocket>(1);
+
+        let app = axum::Router::new().route(
+            "/ws",
+            axum::routing::get(move |ws: WebSocketUpgrade| {
+                let tx = tx.clone();
+                async move {
+                    ws.on_upgrade(move |socket| async move {
+                        let _ = tx.send(socket).await;
+                    })
+                }
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let server_handle =
+            tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+
+        let url = format!("ws://127.0.0.1:{}/ws", addr.port());
+        let (client, _) = tokio_tungstenite::connect_async(&url).await.expect("ws connect");
+
+        let mut rx = rx;
+        let server_socket = rx.recv().await.expect("server socket");
+
+        server_handle.abort();
+        (server_socket, client)
+    }
+
+    #[tokio::test]
+    async fn handle_agent_task_add_enqueues_job() {
+        use base64::Engine as _;
+
+        let registry = test_registry().await;
+        let agent_id: u32 = 0xAABB_CCDD;
+        registry.insert(test_agent_record(agent_id)).await.expect("insert agent");
+
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+
+        let payload = vec![0x41, 0x42, 0x43];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&payload);
+
+        let message = serde_json::json!({
+            "Head": { "Type": HEAD_AGENT },
+            "Body": {
+                "Type": BODY_AGENT_TASK,
+                "Agent": { "NameID": "AABBCCDD" },
+                "Task": "Add",
+                "Command": encoded,
+            },
+        });
+
+        let (mut server_ws, _client_ws) = ws_pair().await;
+
+        handle_agent_task(&message, &events, &registry, &mut server_ws)
+            .await
+            .expect("task add should succeed");
+
+        let jobs = registry.queued_jobs(agent_id).await.expect("queued jobs");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].payload, payload);
+        assert_eq!(jobs[0].operator, "service");
+
+        let event = rx.recv().await.expect("event should be broadcast");
+        assert!(
+            matches!(event, OperatorMessage::TeamserverLog(_)),
+            "expected teamserver log event"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_agent_task_get_returns_queued_payloads() {
+        use base64::Engine as _;
+        use futures_util::StreamExt as _;
+
+        let registry = test_registry().await;
+        let agent_id: u32 = 0x1122_3344;
+        registry.insert(test_agent_record(agent_id)).await.expect("insert agent");
+
+        let job1 = crate::agents::Job {
+            payload: vec![0x01, 0x02],
+            task_id: "t1".to_owned(),
+            created_at: "0".to_owned(),
+            operator: "op".to_owned(),
+            ..Default::default()
+        };
+        let job2 = crate::agents::Job {
+            payload: vec![0x03, 0x04],
+            task_id: "t2".to_owned(),
+            created_at: "0".to_owned(),
+            operator: "op".to_owned(),
+            ..Default::default()
+        };
+        registry.enqueue_job(agent_id, job1).await.expect("enqueue job1");
+        registry.enqueue_job(agent_id, job2).await.expect("enqueue job2");
+
+        let events = EventBus::default();
+
+        let message = serde_json::json!({
+            "Head": { "Type": HEAD_AGENT },
+            "Body": {
+                "Type": BODY_AGENT_TASK,
+                "Agent": { "NameID": "11223344" },
+                "Task": "Get",
+            },
+        });
+
+        let (mut server_ws, mut client_ws) = ws_pair().await;
+
+        handle_agent_task(&message, &events, &registry, &mut server_ws)
+            .await
+            .expect("task get should succeed");
+
+        // Read the response from the client side
+        let resp = client_ws.next().await.expect("should receive").expect("not error");
+        let text = resp.into_text().expect("text message");
+        let parsed: Value = serde_json::from_str(&text).expect("valid json");
+        let tasks_queue = parsed["Body"]["TasksQueue"].as_str().expect("TasksQueue");
+        let decoded =
+            base64::engine::general_purpose::STANDARD.decode(tasks_queue).expect("valid base64");
+        assert_eq!(decoded, vec![0x01, 0x02, 0x03, 0x04]);
+
+        // Queue should be drained
+        let remaining = registry.queued_jobs(agent_id).await.expect("queued");
+        assert!(remaining.is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_agent_task_missing_body_returns_error() {
+        let registry = test_registry().await;
+        let events = EventBus::default();
+
+        let message = serde_json::json!({
+            "Head": { "Type": HEAD_AGENT },
+        });
+
+        let (mut server_ws, _client_ws) = ws_pair().await;
+
+        let err = handle_agent_task(&message, &events, &registry, &mut server_ws)
+            .await
+            .expect_err("should fail");
+        assert!(matches!(err, ServiceBridgeError::MissingField(_)));
+    }
+
+    #[tokio::test]
+    async fn handle_agent_task_add_invalid_base64_returns_error() {
+        let registry = test_registry().await;
+        let agent_id: u32 = 0xDEAD_BEEF;
+        registry.insert(test_agent_record(agent_id)).await.expect("insert agent");
+        let events = EventBus::default();
+
+        let message = serde_json::json!({
+            "Head": { "Type": HEAD_AGENT },
+            "Body": {
+                "Type": BODY_AGENT_TASK,
+                "Agent": { "NameID": "DEADBEEF" },
+                "Task": "Add",
+                "Command": "!!!not-base64!!!",
+            },
+        });
+
+        let (mut server_ws, _client_ws) = ws_pair().await;
+
+        let err = handle_agent_task(&message, &events, &registry, &mut server_ws)
+            .await
+            .expect_err("should fail");
+        assert!(matches!(err, ServiceBridgeError::Base64Decode(_)));
+    }
+
+    #[tokio::test]
+    async fn handle_agent_task_add_unknown_agent_returns_error() {
+        let registry = test_registry().await;
+        let events = EventBus::default();
+
+        let message = serde_json::json!({
+            "Head": { "Type": HEAD_AGENT },
+            "Body": {
+                "Type": BODY_AGENT_TASK,
+                "Agent": { "NameID": "99999999" },
+                "Task": "Add",
+                "Command": "AAAA",
+            },
+        });
+
+        let (mut server_ws, _client_ws) = ws_pair().await;
+
+        let err = handle_agent_task(&message, &events, &registry, &mut server_ws)
+            .await
+            .expect_err("should fail for unknown agent");
+        assert!(matches!(err, ServiceBridgeError::AgentRegistry(_)));
+    }
+
+    // ── AgentRegister handler tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn handle_agent_instance_register_inserts_and_broadcasts() {
+        let registry = test_registry().await;
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+
+        let message = serde_json::json!({
+            "Head": { "Type": HEAD_AGENT },
+            "Body": {
+                "Type": BODY_AGENT_REGISTER,
+                "AgentHeader": {
+                    "Size": "256",
+                    "MagicValue": "deadbeef",
+                    "AgentID": "AABB0011",
+                },
+                "RegisterInfo": {
+                    "Hostname": "SRV01",
+                    "Username": "admin",
+                    "DomainName": "CORP",
+                    "ExternalIP": "10.0.0.5",
+                    "InternalIP": "192.168.1.5",
+                    "ProcessName": "agent.exe",
+                    "ProcessArch": "x64",
+                    "OSVersion": "Windows 11",
+                    "OSArch": "x64",
+                    "SleepDelay": 10,
+                    "SleepJitter": 20,
+                },
+            },
+        });
+
+        handle_agent_instance_register(&message, &events, &registry)
+            .await
+            .expect("registration should succeed");
+
+        let agent = registry.get(0xAABB_0011).await.expect("agent should exist");
+        assert_eq!(agent.hostname, "SRV01");
+        assert_eq!(agent.username, "admin");
+        assert_eq!(agent.domain_name, "CORP");
+        assert_eq!(agent.sleep_delay, 10);
+        assert!(agent.active);
+
+        let event = rx.recv().await.expect("event should be broadcast");
+        assert!(matches!(event, OperatorMessage::AgentNew(_)), "expected AgentNew event");
+    }
+
+    #[tokio::test]
+    async fn handle_agent_instance_register_duplicate_returns_error() {
+        let registry = test_registry().await;
+        let events = EventBus::default();
+
+        let message = serde_json::json!({
+            "Head": { "Type": HEAD_AGENT },
+            "Body": {
+                "Type": BODY_AGENT_REGISTER,
+                "AgentHeader": {
+                    "Size": "0",
+                    "MagicValue": "0",
+                    "AgentID": "11223344",
+                },
+                "RegisterInfo": {
+                    "Hostname": "H1",
+                    "Username": "u1",
+                },
+            },
+        });
+
+        handle_agent_instance_register(&message, &events, &registry)
+            .await
+            .expect("first registration should succeed");
+
+        let err = handle_agent_instance_register(&message, &events, &registry)
+            .await
+            .expect_err("duplicate should fail");
+        assert!(matches!(err, ServiceBridgeError::AgentRegistry(_)));
+    }
+
+    #[tokio::test]
+    async fn handle_agent_instance_register_missing_header_returns_error() {
+        let registry = test_registry().await;
+        let events = EventBus::default();
+
+        let message = serde_json::json!({
+            "Head": { "Type": HEAD_AGENT },
+            "Body": {
+                "Type": BODY_AGENT_REGISTER,
+                "RegisterInfo": { "Hostname": "H1" },
+            },
+        });
+
+        let err = handle_agent_instance_register(&message, &events, &registry)
+            .await
+            .expect_err("should fail without AgentHeader");
+        assert!(matches!(err, ServiceBridgeError::MissingField(_)));
+    }
+
+    #[tokio::test]
+    async fn handle_agent_instance_register_invalid_hex_id_returns_error() {
+        let registry = test_registry().await;
+        let events = EventBus::default();
+
+        let message = serde_json::json!({
+            "Head": { "Type": HEAD_AGENT },
+            "Body": {
+                "Type": BODY_AGENT_REGISTER,
+                "AgentHeader": {
+                    "AgentID": "ZZZZZZ",
+                    "MagicValue": "0",
+                },
+                "RegisterInfo": { "Hostname": "H1" },
+            },
+        });
+
+        let err = handle_agent_instance_register(&message, &events, &registry)
+            .await
+            .expect_err("should fail with invalid hex");
+        assert!(matches!(err, ServiceBridgeError::MissingField(_)));
     }
 }

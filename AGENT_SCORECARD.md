@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 564 | 212 | 31 |
+| Tasks closed | 566 | 212 | 31 |
 | Bugs filed against | 51 | 34 | 9 |
 | Bug rate (bugs/task) | 0.09 | 0.16 | 0.29 |
 | Quality score | 91% | 84% | 71% |
 
-*Bug rates: Claude 51/564=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 51/566=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -2893,3 +2893,13 @@ Build: cargo check passed, clippy passed (0 warnings), cargo test passed (2283 t
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: cargo check passed, clippy passed (0 warnings), cargo test 1602 passed / 3 failed (3 pre-existing websocket flaky tests — filed as red-cell-c2-he5j7)
+
+### QA Review — 2026-03-20 19:30 — 8e34044..9dd5359
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed gx4s (7 comprehensive plugin emit_* hook tests covering all payload fields for agent_checkin, command_output, agent_dead, loot_captured, task_created + exception resilience), 5qug (E2E reconnect probe test — full flow: init → reconnect → no duplicate AgentNew → resumed callback at unchanged CTR offset). Clean, well-structured test code. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (0 warnings), cargo test 2762 passed / 0 failed

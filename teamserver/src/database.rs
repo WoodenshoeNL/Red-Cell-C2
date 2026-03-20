@@ -1675,7 +1675,8 @@ fn invalid_value(field: &'static str, message: &str) -> TeamserverError {
 mod tests {
     use super::{
         AuditLogEntry, AuditLogFilter, Database, LinkRecord, ListenerStatus, LootFilter,
-        LootRecord, PersistedOperator, bool_from_i64, i64_from_u64,
+        LootRecord, PersistedOperator, bool_from_i64, i64_from_u64, parse_operator_role,
+        u32_from_i64, u64_from_i64,
     };
     use red_cell_common::config::OperatorRole;
     use red_cell_common::{AgentEncryptionInfo, AgentRecord, HttpListenerConfig, ListenerConfig};
@@ -2535,5 +2536,113 @@ mod tests {
         // UPDATE WHERE name = ? on non-existent row affects zero rows — no error.
         let result = repo.set_state("ghost", ListenerStatus::Running, None).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn listener_create_duplicate_name_returns_error() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.listeners();
+
+        repo.create(&stub_http_listener("dup")).await.unwrap();
+        let result = repo.create(&stub_http_listener("dup")).await;
+        assert!(result.is_err(), "inserting a listener with a duplicate name should fail");
+    }
+
+    // ── ListenerStatus::try_from_str tests ──────────────────────────────
+
+    #[test]
+    fn listener_status_try_from_str_valid_values() {
+        assert_eq!(ListenerStatus::try_from_str("created").unwrap(), ListenerStatus::Created);
+        assert_eq!(ListenerStatus::try_from_str("running").unwrap(), ListenerStatus::Running);
+        assert_eq!(ListenerStatus::try_from_str("stopped").unwrap(), ListenerStatus::Stopped);
+        assert_eq!(ListenerStatus::try_from_str("error").unwrap(), ListenerStatus::Error);
+    }
+
+    #[test]
+    fn listener_status_try_from_str_rejects_invalid_string() {
+        assert!(ListenerStatus::try_from_str("").is_err());
+        assert!(ListenerStatus::try_from_str("RUNNING").is_err());
+        assert!(ListenerStatus::try_from_str("Created").is_err());
+        assert!(ListenerStatus::try_from_str("unknown").is_err());
+        assert!(ListenerStatus::try_from_str(" running").is_err());
+    }
+
+    // ── u32_from_i64 tests ──────────────────────────────────────────────
+
+    #[test]
+    fn u32_from_i64_accepts_zero() {
+        assert_eq!(u32_from_i64("field", 0).unwrap(), 0u32);
+    }
+
+    #[test]
+    fn u32_from_i64_accepts_u32_max() {
+        assert_eq!(u32_from_i64("field", i64::from(u32::MAX)).unwrap(), u32::MAX);
+    }
+
+    #[test]
+    fn u32_from_i64_rejects_negative() {
+        assert!(u32_from_i64("field", -1).is_err());
+        assert!(u32_from_i64("field", i64::MIN).is_err());
+    }
+
+    #[test]
+    fn u32_from_i64_rejects_above_u32_max() {
+        assert!(u32_from_i64("field", i64::from(u32::MAX) + 1).is_err());
+        assert!(u32_from_i64("field", i64::MAX).is_err());
+    }
+
+    // ── u64_from_i64 tests ──────────────────────────────────────────────
+
+    #[test]
+    fn u64_from_i64_accepts_zero() {
+        assert_eq!(u64_from_i64("field", 0).unwrap(), 0u64);
+    }
+
+    #[test]
+    fn u64_from_i64_accepts_i64_max() {
+        assert_eq!(u64_from_i64("field", i64::MAX).unwrap(), i64::MAX as u64);
+    }
+
+    #[test]
+    fn u64_from_i64_rejects_negative() {
+        assert!(u64_from_i64("field", -1).is_err());
+        assert!(u64_from_i64("field", i64::MIN).is_err());
+    }
+
+    // ── parse_operator_role tests ───────────────────────────────────────
+
+    #[test]
+    fn parse_operator_role_accepts_titlecase() {
+        assert_eq!(parse_operator_role("Admin").unwrap(), OperatorRole::Admin);
+        assert_eq!(parse_operator_role("Operator").unwrap(), OperatorRole::Operator);
+        assert_eq!(parse_operator_role("Analyst").unwrap(), OperatorRole::Analyst);
+    }
+
+    #[test]
+    fn parse_operator_role_accepts_lowercase() {
+        assert_eq!(parse_operator_role("admin").unwrap(), OperatorRole::Admin);
+        assert_eq!(parse_operator_role("operator").unwrap(), OperatorRole::Operator);
+        assert_eq!(parse_operator_role("analyst").unwrap(), OperatorRole::Analyst);
+    }
+
+    #[test]
+    fn parse_operator_role_rejects_uppercase() {
+        assert!(parse_operator_role("ADMIN").is_err());
+        assert!(parse_operator_role("OPERATOR").is_err());
+        assert!(parse_operator_role("ANALYST").is_err());
+    }
+
+    #[test]
+    fn parse_operator_role_rejects_mixed_case() {
+        assert!(parse_operator_role("aDmIn").is_err());
+        assert!(parse_operator_role("oPeRaToR").is_err());
+    }
+
+    #[test]
+    fn parse_operator_role_rejects_empty_and_unknown() {
+        assert!(parse_operator_role("").is_err());
+        assert!(parse_operator_role("root").is_err());
+        assert!(parse_operator_role("viewer").is_err());
+        assert!(parse_operator_role(" admin").is_err());
     }
 }

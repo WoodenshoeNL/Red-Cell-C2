@@ -118,3 +118,226 @@ pub(super) async fn handle_screenshot_callback(
     )?);
     Ok(None)
 }
+
+#[cfg(test)]
+mod tests {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use red_cell_common::operator::OperatorMessage;
+    use serde_json::Value;
+    use zeroize::Zeroizing;
+
+    use super::*;
+    use crate::{AgentRegistry, Database, EventBus};
+
+    const AGENT_ID: u32 = 0xABCD_0001;
+    const REQUEST_ID: u32 = 0x42;
+
+    fn push_u32(buf: &mut Vec<u8>, value: u32) {
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn sample_agent() -> red_cell_common::AgentRecord {
+        red_cell_common::AgentRecord {
+            agent_id: AGENT_ID,
+            active: true,
+            reason: String::new(),
+            note: String::new(),
+            encryption: red_cell_common::AgentEncryptionInfo {
+                aes_key: Zeroizing::new(vec![0u8; 32]),
+                aes_iv: Zeroizing::new(vec![0u8; 16]),
+            },
+            hostname: "wkstn-01".to_owned(),
+            username: "operator".to_owned(),
+            domain_name: "lab".to_owned(),
+            external_ip: "127.0.0.1".to_owned(),
+            internal_ip: "10.0.0.25".to_owned(),
+            process_name: "explorer.exe".to_owned(),
+            process_path: "C:\\Windows\\explorer.exe".to_owned(),
+            base_address: 0x1000,
+            process_pid: 1337,
+            process_tid: 7331,
+            process_ppid: 512,
+            process_arch: "x64".to_owned(),
+            elevated: true,
+            os_version: "Windows 11".to_owned(),
+            os_build: 0,
+            os_arch: "x64".to_owned(),
+            sleep_delay: 10,
+            sleep_jitter: 25,
+            kill_date: None,
+            working_hours: None,
+            first_call_in: "2026-03-09T20:00:00Z".to_owned(),
+            last_call_in: "2026-03-09T20:00:00Z".to_owned(),
+        }
+    }
+
+    /// Build registry, database, and event bus with a pre-registered sample agent.
+    async fn setup() -> (AgentRegistry, Database, EventBus) {
+        let db = Database::connect_in_memory().await.expect("in-memory db must succeed");
+        let registry = AgentRegistry::new(db.clone());
+        let events = EventBus::new(16);
+        registry.insert(sample_agent()).await.expect("insert sample agent");
+        (registry, db, events)
+    }
+
+    /// Build a payload with `success=1` and the given image bytes.
+    fn success_payload(image_bytes: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        push_u32(&mut buf, 1); // success = 1
+        push_u32(&mut buf, image_bytes.len() as u32);
+        buf.extend_from_slice(image_bytes);
+        buf
+    }
+
+    /// Build a payload with `success=0`.
+    fn failure_payload() -> Vec<u8> {
+        0_u32.to_le_bytes().to_vec()
+    }
+
+    /// Build a payload with `success=1` but zero-length bytes.
+    fn empty_bytes_payload() -> Vec<u8> {
+        let mut buf = Vec::new();
+        push_u32(&mut buf, 1); // success = 1
+        push_u32(&mut buf, 0); // length = 0
+        buf
+    }
+
+    /// Success path: stores loot and broadcasts loot-new + screenshot events.
+    #[tokio::test]
+    async fn success_stores_loot_and_broadcasts_two_events() {
+        let (registry, db, events) = setup().await;
+        let mut rx = events.subscribe();
+
+        let png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let payload = success_payload(&png);
+
+        let result = handle_screenshot_callback(
+            &registry, &db, &events, None, AGENT_ID, REQUEST_ID, &payload,
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+
+        // First broadcast: loot-new event.
+        let msg1 = rx.recv().await.expect("should receive loot-new event");
+        let OperatorMessage::AgentResponse(loot_resp) = &msg1 else {
+            panic!("expected AgentResponse (loot-new), got {msg1:?}");
+        };
+        assert_eq!(loot_resp.info.extra.get("MiscType").and_then(Value::as_str), Some("loot-new"),);
+        assert_eq!(loot_resp.info.demon_id, format!("{AGENT_ID:08X}"));
+
+        // Second broadcast: screenshot download-complete response.
+        let msg2 = rx.recv().await.expect("should receive screenshot response");
+        let OperatorMessage::AgentResponse(resp) = &msg2 else {
+            panic!("expected AgentResponse (screenshot), got {msg2:?}");
+        };
+        assert_eq!(resp.info.extra.get("Type").and_then(Value::as_str), Some("Good"),);
+        assert_eq!(resp.info.extra.get("MiscType").and_then(Value::as_str), Some("screenshot"),);
+
+        // Verify base64-encoded MiscData round-trips to original bytes.
+        let misc_data = resp.info.extra.get("MiscData").and_then(Value::as_str).unwrap();
+        let decoded = BASE64_STANDARD.decode(misc_data).expect("valid base64");
+        assert_eq!(decoded, png);
+
+        // Verify MiscData2 is a Desktop_*.png filename.
+        let misc_data2 = resp.info.extra.get("MiscData2").and_then(Value::as_str).unwrap();
+        assert!(
+            misc_data2.starts_with("Desktop_") && misc_data2.ends_with(".png"),
+            "expected Desktop_*.png filename, got {misc_data2}"
+        );
+
+        // Verify loot record persisted in the database.
+        let loot_records = db.loot().list_for_agent(AGENT_ID).await.expect("loot query");
+        assert_eq!(loot_records.len(), 1);
+        assert_eq!(loot_records[0].kind, "screenshot");
+        assert_eq!(loot_records[0].agent_id, AGENT_ID);
+        assert_eq!(loot_records[0].data.as_deref(), Some(png.as_slice()));
+        assert_eq!(loot_records[0].name, misc_data2);
+    }
+
+    /// Failure path (success=0): broadcasts error, stores no loot.
+    #[tokio::test]
+    async fn failure_broadcasts_error_and_stores_no_loot() {
+        let (registry, db, events) = setup().await;
+        let mut rx = events.subscribe();
+
+        let payload = failure_payload();
+
+        let result = handle_screenshot_callback(
+            &registry, &db, &events, None, AGENT_ID, REQUEST_ID, &payload,
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+
+        // Should receive exactly one error broadcast.
+        let msg = rx.recv().await.expect("should receive error event");
+        let OperatorMessage::AgentResponse(resp) = &msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        assert_eq!(resp.info.extra.get("Type").and_then(Value::as_str), Some("Error"),);
+
+        // No loot record should be stored.
+        let loot_records = db.loot().list_for_agent(AGENT_ID).await.expect("loot query");
+        assert!(loot_records.is_empty());
+    }
+
+    /// Empty bytes path (success=1, length=0): broadcasts error, stores no loot.
+    #[tokio::test]
+    async fn empty_bytes_broadcasts_error_and_stores_no_loot() {
+        let (registry, db, events) = setup().await;
+        let mut rx = events.subscribe();
+
+        let payload = empty_bytes_payload();
+
+        let result = handle_screenshot_callback(
+            &registry, &db, &events, None, AGENT_ID, REQUEST_ID, &payload,
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+
+        // Should receive exactly one error broadcast.
+        let msg = rx.recv().await.expect("should receive error event");
+        let OperatorMessage::AgentResponse(resp) = &msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        assert_eq!(resp.info.extra.get("Type").and_then(Value::as_str), Some("Error"),);
+
+        // No loot record should be stored.
+        let loot_records = db.loot().list_for_agent(AGENT_ID).await.expect("loot query");
+        assert!(loot_records.is_empty());
+    }
+
+    /// Truncated payload (no success field) returns a parse error.
+    #[tokio::test]
+    async fn truncated_payload_returns_error() {
+        let (registry, db, events) = setup().await;
+
+        // Empty payload — cannot even read the success u32.
+        let result =
+            handle_screenshot_callback(&registry, &db, &events, None, AGENT_ID, REQUEST_ID, &[])
+                .await;
+        assert!(result.is_err());
+    }
+
+    /// Truncated payload after success=1 (no bytes field) returns a parse error.
+    #[tokio::test]
+    async fn truncated_after_success_flag_returns_error() {
+        let (registry, db, events) = setup().await;
+
+        // success=1 but no subsequent length-prefixed bytes.
+        let payload = 1_u32.to_le_bytes().to_vec();
+
+        let result = handle_screenshot_callback(
+            &registry, &db, &events, None, AGENT_ID, REQUEST_ID, &payload,
+        )
+        .await;
+        assert!(result.is_err());
+
+        // No loot should be stored.
+        let loot_records = db.loot().list_for_agent(AGENT_ID).await.expect("loot query");
+        assert!(loot_records.is_empty());
+    }
+}

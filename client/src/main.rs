@@ -22,14 +22,15 @@ use python::{
 };
 use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::{
-    AgentTaskInfo, EventCode, FlatInfo, ListenerInfo, Message, MessageHead, NameInfo,
-    OperatorMessage,
+    AgentTaskInfo, BuildPayloadRequestInfo, EventCode, FlatInfo, ListenerInfo, Message,
+    MessageHead, NameInfo, OperatorMessage,
 };
 use rfd::FileDialog;
 use transport::{
     AgentConsoleEntry, AgentConsoleEntryKind, AgentFileBrowserState, AgentProcessListState,
-    AppState, ClientTransport, ConnectedOperatorState, ConnectionStatus, EventKind,
-    FileBrowserEntry, LootItem, LootKind, ProcessEntry, SharedAppState, TlsVerification,
+    AppState, BuildConsoleEntry, ClientTransport, ConnectedOperatorState, ConnectionStatus,
+    EventKind, FileBrowserEntry, LootItem, LootKind, PayloadBuildResult, ProcessEntry,
+    SharedAppState, TlsVerification,
 };
 
 const WINDOW_TITLE: &str = "Red Cell Client";
@@ -417,6 +418,8 @@ struct SessionPanelState {
     selected_listener: Option<String>,
     /// Open Create/Edit Listener dialog state (None = dialog closed).
     listener_dialog: Option<ListenerDialogState>,
+    /// Open Payload generation dialog state (None = dialog closed).
+    payload_dialog: Option<PayloadDialogState>,
     /// Set to true when the "Mark all read" button is pressed; consumed in `render_main_ui`.
     pending_mark_all_read: bool,
     /// Bottom dock panel state.
@@ -687,6 +690,171 @@ impl ListenerDialogState {
                 }
             }
         }
+    }
+}
+
+// ── Payload dialog types ────────────────────────────────────────────
+/// Architecture selection for payload generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PayloadArch {
+    X64,
+    X86,
+}
+
+impl PayloadArch {
+    const ALL: [Self; 2] = [Self::X64, Self::X86];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::X64 => "x64",
+            Self::X86 => "x86",
+        }
+    }
+}
+
+/// Output format for payload generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
+enum PayloadFormat {
+    WindowsExe,
+    WindowsServiceExe,
+    WindowsDll,
+    WindowsReflectiveDll,
+    WindowsShellcode,
+}
+
+impl PayloadFormat {
+    const ALL: [Self; 5] = [
+        Self::WindowsExe,
+        Self::WindowsServiceExe,
+        Self::WindowsDll,
+        Self::WindowsReflectiveDll,
+        Self::WindowsShellcode,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::WindowsExe => "Windows Exe",
+            Self::WindowsServiceExe => "Windows Service Exe",
+            Self::WindowsDll => "Windows Dll",
+            Self::WindowsReflectiveDll => "Windows Reflective Dll",
+            Self::WindowsShellcode => "Windows Shellcode",
+        }
+    }
+}
+
+/// Sleep obfuscation technique.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SleepTechnique {
+    WaitForSingleObjectEx,
+    Ekko,
+    Zilean,
+    None,
+}
+
+impl SleepTechnique {
+    const ALL: [Self; 4] = [Self::WaitForSingleObjectEx, Self::Ekko, Self::Zilean, Self::None];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::WaitForSingleObjectEx => "WaitForSingleObjectEx",
+            Self::Ekko => "Ekko",
+            Self::Zilean => "Zilean",
+            Self::None => "None",
+        }
+    }
+}
+
+/// Allocation method for injection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AllocMethod {
+    NativeSyscall,
+    Win32,
+}
+
+impl AllocMethod {
+    const ALL: [Self; 2] = [Self::NativeSyscall, Self::Win32];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::NativeSyscall => "Native/Syscall",
+            Self::Win32 => "Win32",
+        }
+    }
+}
+
+/// Execute method for injection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecuteMethod {
+    NativeSyscall,
+    Win32,
+}
+
+impl ExecuteMethod {
+    const ALL: [Self; 2] = [Self::NativeSyscall, Self::Win32];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::NativeSyscall => "Native/Syscall",
+            Self::Win32 => "Win32",
+        }
+    }
+}
+
+/// State for the Payload generation dialog (Attack > Payload).
+#[derive(Debug, Clone)]
+struct PayloadDialogState {
+    agent_type: String,
+    listener: String,
+    arch: PayloadArch,
+    format: PayloadFormat,
+    // Config
+    sleep: String,
+    jitter: String,
+    indirect_syscall: bool,
+    sleep_technique: SleepTechnique,
+    // Injection
+    alloc: AllocMethod,
+    execute: ExecuteMethod,
+    spawn64: String,
+    spawn32: String,
+    /// Whether a build request is currently in flight.
+    building: bool,
+}
+
+impl PayloadDialogState {
+    fn new() -> Self {
+        Self {
+            agent_type: "Demon".to_owned(),
+            listener: String::new(),
+            arch: PayloadArch::X64,
+            format: PayloadFormat::WindowsExe,
+            sleep: "2".to_owned(),
+            jitter: "20".to_owned(),
+            indirect_syscall: true,
+            sleep_technique: SleepTechnique::WaitForSingleObjectEx,
+            alloc: AllocMethod::NativeSyscall,
+            execute: ExecuteMethod::NativeSyscall,
+            spawn64: r"C:\Windows\System32\notepad.exe".to_owned(),
+            spawn32: r"C:\Windows\SysWOW64\notepad.exe".to_owned(),
+            building: false,
+        }
+    }
+
+    /// Serialize the config fields into the JSON document expected by the
+    /// teamserver's `BuildPayloadRequest.Config` field.
+    fn config_json(&self) -> String {
+        let config = serde_json::json!({
+            "Sleep": self.sleep,
+            "Jitter": self.jitter,
+            "IndirectSyscall": self.indirect_syscall,
+            "SleepTechnique": self.sleep_technique.label(),
+            "Alloc": self.alloc.label(),
+            "Execute": self.execute.label(),
+            "Spawn64": self.spawn64,
+            "Spawn32": self.spawn32,
+        });
+        config.to_string()
     }
 }
 
@@ -1211,6 +1379,308 @@ impl ClientApp {
         }
     }
 
+    /// Render the Payload generation dialog (Attack > Payload).
+    fn render_payload_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        state: &AppState,
+        app_state: &SharedAppState,
+    ) {
+        let Some(dialog) = &mut self.session_panel.payload_dialog else {
+            return;
+        };
+
+        let mut close_requested = false;
+        let mut generate_clicked = false;
+        let mut save_result: Option<PayloadBuildResult> = None;
+
+        // Snapshot build console + payload response from shared state.
+        let build_messages: Vec<BuildConsoleEntry> = state.build_console_messages.clone();
+        let payload_result: Option<PayloadBuildResult> = state.last_payload_response.clone();
+
+        egui::Window::new("Payload")
+            .collapsible(false)
+            .resizable(true)
+            .default_width(520.0)
+            .default_height(640.0)
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                // ── Agent type ──────────────────────────────────────
+                egui::Grid::new("payload_agent_grid").num_columns(2).spacing([8.0, 6.0]).show(
+                    ui,
+                    |ui| {
+                        ui.label("Agent:");
+                        egui::ComboBox::from_id_salt("payload_agent_type")
+                            .selected_text(&dialog.agent_type)
+                            .width(360.0)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut dialog.agent_type,
+                                    "Demon".to_owned(),
+                                    "Demon",
+                                );
+                            });
+                        ui.end_row();
+                    },
+                );
+
+                // ── Options section ─────────────────────────────────
+                ui.add_space(4.0);
+                ui.label(RichText::new("Options").strong());
+                ui.separator();
+
+                egui::Grid::new("payload_options_grid").num_columns(2).spacing([8.0, 6.0]).show(
+                    ui,
+                    |ui| {
+                        ui.label("Listener:");
+                        let listener_names: Vec<String> =
+                            state.listeners.iter().map(|l| l.name.clone()).collect();
+                        let selected = if dialog.listener.is_empty() {
+                            listener_names.first().cloned().unwrap_or_default()
+                        } else {
+                            dialog.listener.clone()
+                        };
+                        egui::ComboBox::from_id_salt("payload_listener")
+                            .selected_text(&selected)
+                            .width(360.0)
+                            .show_ui(ui, |ui| {
+                                for name in &listener_names {
+                                    if ui.selectable_label(dialog.listener == *name, name).clicked()
+                                    {
+                                        dialog.listener = name.clone();
+                                    }
+                                }
+                            });
+                        ui.end_row();
+
+                        ui.label("Arch:");
+                        egui::ComboBox::from_id_salt("payload_arch")
+                            .selected_text(dialog.arch.label())
+                            .width(360.0)
+                            .show_ui(ui, |ui| {
+                                for arch in PayloadArch::ALL {
+                                    ui.selectable_value(&mut dialog.arch, arch, arch.label());
+                                }
+                            });
+                        ui.end_row();
+
+                        ui.label("Format:");
+                        egui::ComboBox::from_id_salt("payload_format")
+                            .selected_text(dialog.format.label())
+                            .width(360.0)
+                            .show_ui(ui, |ui| {
+                                for fmt in PayloadFormat::ALL {
+                                    ui.selectable_value(&mut dialog.format, fmt, fmt.label());
+                                }
+                            });
+                        ui.end_row();
+                    },
+                );
+
+                // ── Config table ────────────────────────────────────
+                ui.add_space(4.0);
+                egui::Grid::new("payload_config_header").num_columns(2).spacing([8.0, 0.0]).show(
+                    ui,
+                    |ui| {
+                        ui.strong("Config");
+                        ui.strong("Value");
+                        ui.end_row();
+                    },
+                );
+                ui.separator();
+
+                egui::Grid::new("payload_config_grid").num_columns(2).spacing([8.0, 4.0]).show(
+                    ui,
+                    |ui| {
+                        ui.label("    Sleep");
+                        ui.add(egui::TextEdit::singleline(&mut dialog.sleep).desired_width(200.0));
+                        ui.end_row();
+
+                        ui.label("    Jitter");
+                        ui.add(egui::TextEdit::singleline(&mut dialog.jitter).desired_width(200.0));
+                        ui.end_row();
+
+                        ui.label("    Indirect Syscall");
+                        ui.checkbox(&mut dialog.indirect_syscall, "");
+                        ui.end_row();
+
+                        ui.label("    Sleep Technique");
+                        egui::ComboBox::from_id_salt("payload_sleep_tech")
+                            .selected_text(dialog.sleep_technique.label())
+                            .width(200.0)
+                            .show_ui(ui, |ui| {
+                                for tech in SleepTechnique::ALL {
+                                    ui.selectable_value(
+                                        &mut dialog.sleep_technique,
+                                        tech,
+                                        tech.label(),
+                                    );
+                                }
+                            });
+                        ui.end_row();
+                    },
+                );
+
+                // ── Injection section ───────────────────────────────
+                ui.add_space(4.0);
+                ui.collapsing("Injection", |ui| {
+                    egui::Grid::new("payload_injection_grid")
+                        .num_columns(2)
+                        .spacing([8.0, 4.0])
+                        .show(ui, |ui| {
+                            ui.label("Alloc");
+                            egui::ComboBox::from_id_salt("payload_alloc")
+                                .selected_text(dialog.alloc.label())
+                                .width(200.0)
+                                .show_ui(ui, |ui| {
+                                    for m in AllocMethod::ALL {
+                                        ui.selectable_value(&mut dialog.alloc, m, m.label());
+                                    }
+                                });
+                            ui.end_row();
+
+                            ui.label("Execute");
+                            egui::ComboBox::from_id_salt("payload_execute")
+                                .selected_text(dialog.execute.label())
+                                .width(200.0)
+                                .show_ui(ui, |ui| {
+                                    for m in ExecuteMethod::ALL {
+                                        ui.selectable_value(&mut dialog.execute, m, m.label());
+                                    }
+                                });
+                            ui.end_row();
+
+                            ui.label("Spawn64");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut dialog.spawn64)
+                                    .desired_width(280.0)
+                                    .text_color(Color32::from_rgb(85, 255, 85)),
+                            );
+                            ui.end_row();
+
+                            ui.label("Spawn32");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut dialog.spawn32)
+                                    .desired_width(280.0)
+                                    .text_color(Color32::from_rgb(85, 255, 85)),
+                            );
+                            ui.end_row();
+                        });
+                });
+
+                // ── Building Console ────────────────────────────────
+                ui.add_space(8.0);
+                ui.strong("Building Console");
+
+                let console_height = 140.0;
+                egui::Frame::NONE
+                    .fill(Color32::from_rgb(20, 20, 30))
+                    .inner_margin(6.0)
+                    .corner_radius(4.0)
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .max_height(console_height)
+                            .auto_shrink([false, false])
+                            .stick_to_bottom(true)
+                            .show(ui, |ui| {
+                                if build_messages.is_empty() {
+                                    ui.colored_label(
+                                        Color32::from_rgb(100, 100, 100),
+                                        "No build output yet.",
+                                    );
+                                } else {
+                                    for entry in &build_messages {
+                                        let color =
+                                            build_console_message_color(&entry.message_type);
+                                        let prefix =
+                                            build_console_message_prefix(&entry.message_type);
+                                        ui.colored_label(
+                                            color,
+                                            format!("{prefix} {}", entry.message),
+                                        );
+                                    }
+                                }
+                            });
+                    });
+
+                // ── Generate / Save / Close buttons ─────────────────
+                ui.add_space(8.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let can_generate = !dialog.building;
+                    if ui.add_enabled(can_generate, egui::Button::new("Generate")).clicked() {
+                        generate_clicked = true;
+                    }
+                    if let Some(result) = &payload_result {
+                        if ui.button(format!("Save ({})", result.file_name)).clicked() {
+                            save_result = Some(result.clone());
+                        }
+                    }
+                    if ui.button("Close").clicked() {
+                        close_requested = true;
+                    }
+                });
+            });
+
+        // ── Post-frame actions ──────────────────────────────────────
+        if generate_clicked {
+            if let Some(dialog) = &mut self.session_panel.payload_dialog {
+                dialog.building = true;
+                // Clear previous build state.
+                match app_state.lock() {
+                    Ok(mut s) => {
+                        s.build_console_messages.clear();
+                        s.last_payload_response = None;
+                    }
+                    Err(poisoned) => {
+                        let mut s = poisoned.into_inner();
+                        s.build_console_messages.clear();
+                        s.last_payload_response = None;
+                    }
+                }
+                let operator =
+                    state.operator_info.as_ref().map(|op| op.username.as_str()).unwrap_or_default();
+                let message = build_payload_request(dialog, operator);
+                self.session_panel.pending_messages.push(message);
+            }
+        }
+
+        if let Some(result) = save_result {
+            if let Some(path) = FileDialog::new().set_file_name(&result.file_name).save_file() {
+                if let Err(e) = std::fs::write(&path, &result.payload_bytes) {
+                    self.session_panel.status_message =
+                        Some(format!("Failed to save payload: {e}"));
+                } else {
+                    self.session_panel.status_message =
+                        Some(format!("Payload saved to {}", path.display()));
+                }
+            }
+        }
+
+        if close_requested {
+            self.session_panel.payload_dialog = None;
+            // Clear build state when closing the dialog.
+            match app_state.lock() {
+                Ok(mut s) => {
+                    s.build_console_messages.clear();
+                    s.last_payload_response = None;
+                }
+                Err(poisoned) => {
+                    let mut s = poisoned.into_inner();
+                    s.build_console_messages.clear();
+                    s.last_payload_response = None;
+                }
+            }
+        }
+
+        // Mark building as done when we have a response or build is done.
+        if payload_result.is_some() {
+            if let Some(dialog) = &mut self.session_panel.payload_dialog {
+                dialog.building = false;
+            }
+        }
+    }
+
     fn render_loot_panel(&mut self, ui: &mut egui::Ui, state: &AppState) {
         ui.heading("Loot");
         ui.separator();
@@ -1579,6 +2049,7 @@ impl ClientApp {
         self.render_note_editor(ctx, app_state);
         self.render_process_injection_dialog(ctx);
         self.render_listener_dialog(ctx, &snapshot);
+        self.render_payload_dialog(ctx, &snapshot, app_state);
 
         if self.session_panel.pending_mark_all_read {
             self.session_panel.pending_mark_all_read = false;
@@ -1639,7 +2110,12 @@ impl ClientApp {
             });
 
             ui.menu_button("Attack", |ui| {
-                ui.label("(payload generation — coming soon)");
+                if ui.button("Payload").clicked() {
+                    if self.session_panel.payload_dialog.is_none() {
+                        self.session_panel.payload_dialog = Some(PayloadDialogState::new());
+                    }
+                    ui.close();
+                }
             });
 
             ui.menu_button("Scripts", |ui| {
@@ -3913,6 +4389,44 @@ fn build_listener_remove(name: &str, operator: &str) -> OperatorMessage {
         },
         info: NameInfo { name: name.to_owned() },
     })
+}
+
+fn build_payload_request(dialog: &PayloadDialogState, operator: &str) -> OperatorMessage {
+    OperatorMessage::BuildPayloadRequest(Message {
+        head: MessageHead {
+            event: EventCode::Gate,
+            user: operator.to_owned(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info: BuildPayloadRequestInfo {
+            agent_type: dialog.agent_type.clone(),
+            listener: dialog.listener.clone(),
+            arch: dialog.arch.label().to_owned(),
+            format: dialog.format.label().to_owned(),
+            config: dialog.config_json(),
+        },
+    })
+}
+
+/// Map a build console message type to a display color.
+fn build_console_message_color(message_type: &str) -> Color32 {
+    match message_type {
+        "Good" => Color32::from_rgb(85, 255, 85),
+        "Error" => Color32::from_rgb(255, 85, 85),
+        "Warning" => Color32::from_rgb(255, 200, 50),
+        _ => Color32::from_rgb(180, 180, 220), // Info / default
+    }
+}
+
+/// Map a build console message type to a prefix tag (like Havoc's [*] / [+] / [-]).
+fn build_console_message_prefix(message_type: &str) -> &'static str {
+    match message_type {
+        "Good" => "[+]",
+        "Error" => "[-]",
+        "Warning" => "[!]",
+        _ => "[*]",
+    }
 }
 
 fn next_task_id() -> u32 {
@@ -7982,5 +8496,135 @@ mod tests {
         assert!(info.headers.is_none());
         assert!(info.uris.is_none());
         assert!(!info.extra.contains_key("HostHeader"));
+    }
+
+    // ── Payload dialog tests ────────────────────────────────────────
+
+    #[test]
+    fn payload_dialog_new_defaults() {
+        let dialog = PayloadDialogState::new();
+        assert_eq!(dialog.agent_type, "Demon");
+        assert!(dialog.listener.is_empty());
+        assert_eq!(dialog.arch, PayloadArch::X64);
+        assert_eq!(dialog.format, PayloadFormat::WindowsExe);
+        assert_eq!(dialog.sleep, "2");
+        assert_eq!(dialog.jitter, "20");
+        assert!(dialog.indirect_syscall);
+        assert_eq!(dialog.sleep_technique, SleepTechnique::WaitForSingleObjectEx);
+        assert_eq!(dialog.alloc, AllocMethod::NativeSyscall);
+        assert_eq!(dialog.execute, ExecuteMethod::NativeSyscall);
+        assert_eq!(dialog.spawn64, r"C:\Windows\System32\notepad.exe");
+        assert_eq!(dialog.spawn32, r"C:\Windows\SysWOW64\notepad.exe");
+        assert!(!dialog.building);
+    }
+
+    #[test]
+    fn payload_dialog_config_json_contains_all_fields() {
+        let dialog = PayloadDialogState::new();
+        let json_str = dialog.config_json();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(parsed["Sleep"], "2");
+        assert_eq!(parsed["Jitter"], "20");
+        assert_eq!(parsed["IndirectSyscall"], true);
+        assert_eq!(parsed["SleepTechnique"], "WaitForSingleObjectEx");
+        assert_eq!(parsed["Alloc"], "Native/Syscall");
+        assert_eq!(parsed["Execute"], "Native/Syscall");
+        assert_eq!(parsed["Spawn64"], r"C:\Windows\System32\notepad.exe");
+        assert_eq!(parsed["Spawn32"], r"C:\Windows\SysWOW64\notepad.exe");
+    }
+
+    #[test]
+    fn payload_dialog_config_json_reflects_changes() {
+        let mut dialog = PayloadDialogState::new();
+        dialog.sleep = "10".to_owned();
+        dialog.jitter = "50".to_owned();
+        dialog.indirect_syscall = false;
+        dialog.sleep_technique = SleepTechnique::Ekko;
+        dialog.alloc = AllocMethod::Win32;
+        dialog.execute = ExecuteMethod::Win32;
+
+        let json_str = dialog.config_json();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(parsed["Sleep"], "10");
+        assert_eq!(parsed["Jitter"], "50");
+        assert_eq!(parsed["IndirectSyscall"], false);
+        assert_eq!(parsed["SleepTechnique"], "Ekko");
+        assert_eq!(parsed["Alloc"], "Win32");
+        assert_eq!(parsed["Execute"], "Win32");
+    }
+
+    #[test]
+    fn build_payload_request_creates_correct_message() {
+        let mut dialog = PayloadDialogState::new();
+        dialog.listener = "http-listener".to_owned();
+        dialog.arch = PayloadArch::X86;
+        dialog.format = PayloadFormat::WindowsShellcode;
+
+        let msg = build_payload_request(&dialog, "operator1");
+        match msg {
+            OperatorMessage::BuildPayloadRequest(m) => {
+                assert_eq!(m.head.event, EventCode::Gate);
+                assert_eq!(m.head.user, "operator1");
+                assert_eq!(m.info.agent_type, "Demon");
+                assert_eq!(m.info.listener, "http-listener");
+                assert_eq!(m.info.arch, "x86");
+                assert_eq!(m.info.format, "Windows Shellcode");
+                // Config should be valid JSON
+                let config: serde_json::Value = serde_json::from_str(&m.info.config).unwrap();
+                assert_eq!(config["Sleep"], "2");
+            }
+            _ => panic!("expected BuildPayloadRequest"),
+        }
+    }
+
+    #[test]
+    fn payload_arch_labels() {
+        assert_eq!(PayloadArch::X64.label(), "x64");
+        assert_eq!(PayloadArch::X86.label(), "x86");
+    }
+
+    #[test]
+    fn payload_format_labels() {
+        assert_eq!(PayloadFormat::WindowsExe.label(), "Windows Exe");
+        assert_eq!(PayloadFormat::WindowsServiceExe.label(), "Windows Service Exe");
+        assert_eq!(PayloadFormat::WindowsDll.label(), "Windows Dll");
+        assert_eq!(PayloadFormat::WindowsReflectiveDll.label(), "Windows Reflective Dll");
+        assert_eq!(PayloadFormat::WindowsShellcode.label(), "Windows Shellcode");
+    }
+
+    #[test]
+    fn sleep_technique_labels() {
+        assert_eq!(SleepTechnique::WaitForSingleObjectEx.label(), "WaitForSingleObjectEx");
+        assert_eq!(SleepTechnique::Ekko.label(), "Ekko");
+        assert_eq!(SleepTechnique::Zilean.label(), "Zilean");
+        assert_eq!(SleepTechnique::None.label(), "None");
+    }
+
+    #[test]
+    fn alloc_execute_method_labels() {
+        assert_eq!(AllocMethod::NativeSyscall.label(), "Native/Syscall");
+        assert_eq!(AllocMethod::Win32.label(), "Win32");
+        assert_eq!(ExecuteMethod::NativeSyscall.label(), "Native/Syscall");
+        assert_eq!(ExecuteMethod::Win32.label(), "Win32");
+    }
+
+    #[test]
+    fn build_console_message_color_mapping() {
+        assert_eq!(build_console_message_color("Good"), Color32::from_rgb(85, 255, 85));
+        assert_eq!(build_console_message_color("Error"), Color32::from_rgb(255, 85, 85));
+        assert_eq!(build_console_message_color("Warning"), Color32::from_rgb(255, 200, 50));
+        assert_eq!(build_console_message_color("Info"), Color32::from_rgb(180, 180, 220));
+        assert_eq!(build_console_message_color("unknown"), Color32::from_rgb(180, 180, 220));
+    }
+
+    #[test]
+    fn build_console_message_prefix_mapping() {
+        assert_eq!(build_console_message_prefix("Good"), "[+]");
+        assert_eq!(build_console_message_prefix("Error"), "[-]");
+        assert_eq!(build_console_message_prefix("Warning"), "[!]");
+        assert_eq!(build_console_message_prefix("Info"), "[*]");
+        assert_eq!(build_console_message_prefix("other"), "[*]");
     }
 }

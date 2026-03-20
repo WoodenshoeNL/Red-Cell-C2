@@ -465,6 +465,27 @@ pub(crate) struct AgentSummary {
     pub(crate) pivot_links: Vec<String>,
 }
 
+/// A single line of build-console output received from the teamserver during
+/// payload generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BuildConsoleEntry {
+    /// Severity tag sent by the builder (e.g. "Info", "Good", "Error").
+    pub(crate) message_type: String,
+    /// Human-readable message text.
+    pub(crate) message: String,
+}
+
+/// Holds the result of a successful payload build so the operator can save it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PayloadBuildResult {
+    /// Raw payload bytes (decoded from base64).
+    pub(crate) payload_bytes: Vec<u8>,
+    /// Output format string (e.g. "Windows Exe").
+    pub(crate) format: String,
+    /// Suggested filename (e.g. "demon.exe").
+    pub(crate) file_name: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ListenerSummary {
     pub(crate) name: String,
@@ -497,6 +518,12 @@ pub(crate) struct AppState {
     /// Stores the most recent authentication error message so it remains accessible
     /// even after the connection status transitions from `Error` to `Retrying`.
     pub(crate) last_auth_error: Option<String>,
+    /// Build console messages received during payload generation (displayed in the
+    /// Payload dialog's "Building Console" area).
+    pub(crate) build_console_messages: Vec<BuildConsoleEntry>,
+    /// The most recent payload build response, if any.  The dialog reads this to
+    /// offer the operator a file-save action.
+    pub(crate) last_payload_response: Option<PayloadBuildResult>,
 }
 
 impl AppState {
@@ -516,6 +543,8 @@ impl AppState {
             connected_operators: BTreeMap::new(),
             tls_failure: None,
             last_auth_error: None,
+            build_console_messages: Vec::new(),
+            last_payload_response: None,
         }
     }
 
@@ -699,14 +728,27 @@ impl AppState {
                     message.head.timestamp,
                     format!("{}: {}", message.info.message_type, message.info.message),
                 );
+                self.build_console_messages.push(BuildConsoleEntry {
+                    message_type: message.info.message_type,
+                    message: message.info.message,
+                });
             }
             OperatorMessage::BuildPayloadResponse(message) => {
                 self.push_event(
                     EventKind::System,
                     "builder",
-                    message.head.timestamp,
+                    message.head.timestamp.clone(),
                     format!("Built {}", message.info.file_name),
                 );
+                if let Ok(bytes) =
+                    base64::engine::general_purpose::STANDARD.decode(&message.info.payload_array)
+                {
+                    self.last_payload_response = Some(PayloadBuildResult {
+                        payload_bytes: bytes,
+                        format: message.info.format,
+                        file_name: message.info.file_name,
+                    });
+                }
             }
             OperatorMessage::AgentTask(message) => {
                 self.record_operator_activity(
@@ -4238,6 +4280,81 @@ mod tests {
         assert_eq!(entry.kind, EventKind::System);
         assert_eq!(entry.author, "builder");
         assert_eq!(entry.message, "Built demon.exe");
+    }
+
+    #[test]
+    fn build_payload_message_stores_console_entry() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        state.apply_operator_message(OperatorMessage::BuildPayloadMessage(Message {
+            head: head(EventCode::Teamserver),
+            info: BuildPayloadMessageInfo {
+                message_type: "Info".to_owned(),
+                message: "compiling core dll".to_owned(),
+            },
+        }));
+
+        assert_eq!(state.build_console_messages.len(), 1);
+        assert_eq!(state.build_console_messages[0].message_type, "Info");
+        assert_eq!(state.build_console_messages[0].message, "compiling core dll");
+    }
+
+    #[test]
+    fn build_payload_response_stores_decoded_payload() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+        let payload_bytes = b"binary payload data";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(payload_bytes);
+
+        state.apply_operator_message(OperatorMessage::BuildPayloadResponse(Message {
+            head: head(EventCode::Teamserver),
+            info: BuildPayloadResponseInfo {
+                payload_array: encoded,
+                format: "Windows Exe".to_owned(),
+                file_name: "demon.exe".to_owned(),
+            },
+        }));
+
+        let result = state.last_payload_response.as_ref().unwrap();
+        assert_eq!(result.payload_bytes, payload_bytes);
+        assert_eq!(result.format, "Windows Exe");
+        assert_eq!(result.file_name, "demon.exe");
+    }
+
+    #[test]
+    fn build_payload_response_invalid_base64_does_not_store() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        state.apply_operator_message(OperatorMessage::BuildPayloadResponse(Message {
+            head: head(EventCode::Teamserver),
+            info: BuildPayloadResponseInfo {
+                payload_array: "!!!not-valid-base64!!!".to_owned(),
+                format: "exe".to_owned(),
+                file_name: "demon.exe".to_owned(),
+            },
+        }));
+
+        // Invalid base64 should not produce a stored result.
+        assert!(state.last_payload_response.is_none());
+        // But the event log entry should still be pushed.
+        assert_eq!(state.event_log.len(), 1);
+    }
+
+    #[test]
+    fn build_console_messages_accumulate() {
+        let mut state = AppState::new("wss://127.0.0.1:40056/havoc/".to_owned());
+
+        for msg in &["Starting build", "Compiling source", "Finished compiling"] {
+            state.apply_operator_message(OperatorMessage::BuildPayloadMessage(Message {
+                head: head(EventCode::Teamserver),
+                info: BuildPayloadMessageInfo {
+                    message_type: "Info".to_owned(),
+                    message: (*msg).to_owned(),
+                },
+            }));
+        }
+
+        assert_eq!(state.build_console_messages.len(), 3);
+        assert_eq!(state.build_console_messages[2].message, "Finished compiling");
     }
 
     // ── EventLog tests ──────────────────────────────────────────────

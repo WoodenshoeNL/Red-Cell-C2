@@ -130,6 +130,7 @@ enum LootTypeFilter {
 }
 
 impl LootTypeFilter {
+    #[allow(dead_code)]
     const ALL: [(Self, &'static str); 4] = [
         (Self::All, "All"),
         (Self::Credentials, "Credentials"),
@@ -174,6 +175,39 @@ impl FileSubFilter {
         (Self::Archive, "Archive"),
         (Self::Binary, "Binary"),
     ];
+}
+
+/// Active sub-tab inside the Loot dock panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum LootTab {
+    #[default]
+    Credentials,
+    Screenshots,
+    Files,
+}
+
+/// Persistent UI state for the Loot panel.
+#[derive(Debug, Default)]
+struct LootPanelState {
+    /// Currently active sub-tab.
+    active_tab: LootTab,
+    /// Selected screenshot index (into the filtered screenshot list) for detail view.
+    selected_screenshot: Option<usize>,
+    /// Column used for sorting the credential table.
+    cred_sort_column: CredentialSortColumn,
+    /// Whether the credential sort is descending.
+    cred_sort_desc: bool,
+}
+
+/// Columns available for sorting in the credential table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum CredentialSortColumn {
+    #[default]
+    Name,
+    Agent,
+    Category,
+    Source,
+    Time,
 }
 
 #[derive(Debug, Default)]
@@ -393,6 +427,19 @@ impl DockState {
     }
 }
 
+/// Cache for decoded screenshot textures.  `TextureHandle` does not implement `Debug`,
+/// so we provide a manual impl to keep `SessionPanelState` debuggable.
+#[derive(Default)]
+struct ScreenshotTextureCache {
+    inner: std::collections::HashMap<i64, egui::TextureHandle>,
+}
+
+impl std::fmt::Debug for ScreenshotTextureCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScreenshotTextureCache").field("count", &self.inner.len()).finish()
+    }
+}
+
 #[derive(Debug, Default)]
 struct SessionPanelState {
     filter: String,
@@ -411,6 +458,7 @@ struct SessionPanelState {
     graph_state: SessionGraphState,
     pending_messages: Vec<OperatorMessage>,
     status_message: Option<String>,
+    #[allow(dead_code)]
     loot_type_filter: LootTypeFilter,
     loot_cred_filter: CredentialSubFilter,
     loot_file_filter: FileSubFilter,
@@ -419,6 +467,9 @@ struct SessionPanelState {
     loot_until_filter: String,
     loot_text_filter: String,
     loot_status_message: Option<String>,
+    loot_panel: LootPanelState,
+    /// Cache of decoded screenshot textures keyed by loot item id.
+    screenshot_textures: ScreenshotTextureCache,
     chat_input: String,
     /// Which event kinds are shown in the notification panel (None = all).
     event_kind_filter: Option<EventKind>,
@@ -1700,26 +1751,43 @@ impl ClientApp {
     }
 
     fn render_loot_panel(&mut self, ui: &mut egui::Ui, state: &AppState) {
-        ui.heading("Loot");
+        // ── Header with sub-tabs ───────────────────────────────────────
+        ui.horizontal(|ui| {
+            ui.heading("Loot");
+            ui.add_space(16.0);
+            for (tab, label) in [
+                (LootTab::Credentials, "Credentials"),
+                (LootTab::Screenshots, "Screenshots"),
+                (LootTab::Files, "Files"),
+            ] {
+                let active = self.session_panel.loot_panel.active_tab == tab;
+                let text = if active {
+                    RichText::new(label).strong().color(Color32::WHITE)
+                } else {
+                    RichText::new(label).color(Color32::from_rgb(160, 160, 170))
+                };
+                let frame = if active {
+                    egui::Frame::default()
+                        .fill(Color32::from_rgb(40, 42, 54))
+                        .stroke(Stroke::new(1.0, Color32::from_rgb(220, 130, 60)))
+                        .inner_margin(egui::Margin::symmetric(8, 3))
+                } else {
+                    egui::Frame::default()
+                        .fill(Color32::from_rgb(30, 30, 46))
+                        .inner_margin(egui::Margin::symmetric(8, 3))
+                };
+                if frame.show(ui, |ui| ui.label(text)).response.clicked() {
+                    self.session_panel.loot_panel.active_tab = tab;
+                }
+            }
+        });
         ui.separator();
 
+        // ── Common filter bar ──────────────────────────────────────────
         ui.horizontal_wrapped(|ui| {
-            ui.label("Type");
-            egui::ComboBox::from_id_salt("loot-type-filter")
-                .selected_text(match self.session_panel.loot_type_filter {
-                    LootTypeFilter::All => "All",
-                    LootTypeFilter::Credentials => "Credentials",
-                    LootTypeFilter::Files => "Files",
-                    LootTypeFilter::Screenshots => "Screenshots",
-                })
-                .show_ui(ui, |ui| {
-                    for (value, label) in LootTypeFilter::ALL {
-                        ui.selectable_value(&mut self.session_panel.loot_type_filter, value, label);
-                    }
-                });
-
-            match self.session_panel.loot_type_filter {
-                LootTypeFilter::Credentials => {
+            // Show sub-filter only when relevant to the active tab.
+            match self.session_panel.loot_panel.active_tab {
+                LootTab::Credentials => {
                     ui.label("Category");
                     egui::ComboBox::from_id_salt("loot-cred-filter")
                         .selected_text(match self.session_panel.loot_cred_filter {
@@ -1739,7 +1807,7 @@ impl ClientApp {
                             }
                         });
                 }
-                LootTypeFilter::Files => {
+                LootTab::Files => {
                     ui.label("Category");
                     egui::ComboBox::from_id_salt("loot-file-filter")
                         .selected_text(match self.session_panel.loot_file_filter {
@@ -1758,7 +1826,7 @@ impl ClientApp {
                             }
                         });
                 }
-                LootTypeFilter::All | LootTypeFilter::Screenshots => {}
+                LootTab::Screenshots => {}
             }
 
             ui.label("Agent");
@@ -1786,10 +1854,17 @@ impl ClientApp {
         );
 
         if let Some(message) = &self.session_panel.loot_status_message {
-            ui.add_space(6.0);
+            ui.add_space(4.0);
             ui.label(RichText::new(message).weak());
         }
-        ui.add_space(6.0);
+        ui.add_space(4.0);
+
+        // ── Build the type filter matching the active tab ──────────────
+        let type_filter = match self.session_panel.loot_panel.active_tab {
+            LootTab::Credentials => LootTypeFilter::Credentials,
+            LootTab::Screenshots => LootTypeFilter::Screenshots,
+            LootTab::Files => LootTypeFilter::Files,
+        };
 
         let filtered_loot: Vec<_> = state
             .loot
@@ -1797,7 +1872,7 @@ impl ClientApp {
             .filter(|item| {
                 loot_matches_filters(
                     item,
-                    self.session_panel.loot_type_filter,
+                    type_filter,
                     self.session_panel.loot_cred_filter,
                     self.session_panel.loot_file_filter,
                     &self.session_panel.loot_agent_filter,
@@ -1808,27 +1883,7 @@ impl ClientApp {
             })
             .collect();
 
-        if filtered_loot.is_empty() {
-            ui.label(if state.loot.is_empty() {
-                "No loot has been collected yet."
-            } else {
-                "No loot matches the current filters."
-            });
-
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("Export CSV").clicked() {
-                    self.session_panel.loot_status_message =
-                        Some(export_loot_csv(&[]).unwrap_or_else(|e| e));
-                }
-                if ui.button("Export JSON").clicked() {
-                    self.session_panel.loot_status_message =
-                        Some(export_loot_json(&[]).unwrap_or_else(|e| e));
-                }
-            });
-            return;
-        }
-
+        // ── Export bar ─────────────────────────────────────────────────
         ui.horizontal(|ui| {
             ui.label(format!("{} item(s)", filtered_loot.len()));
             if ui.button("Export CSV").clicked() {
@@ -1842,52 +1897,297 @@ impl ClientApp {
         });
         ui.add_space(4.0);
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for item in filtered_loot {
-                ui.group(|ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new(item.kind.label()).strong());
-                        let sub_label = loot_sub_category_label(item);
-                        if !sub_label.is_empty() {
+        // ── Tab content ────────────────────────────────────────────────
+        match self.session_panel.loot_panel.active_tab {
+            LootTab::Credentials => self.render_loot_credentials(ui, &filtered_loot),
+            LootTab::Screenshots => self.render_loot_screenshots(ui, &filtered_loot),
+            LootTab::Files => self.render_loot_files(ui, &filtered_loot),
+        }
+    }
+
+    /// Render the credential table inside the Loot panel.
+    fn render_loot_credentials(&mut self, ui: &mut egui::Ui, items: &[&LootItem]) {
+        if items.is_empty() {
+            ui.label("No credentials collected yet.");
+            return;
+        }
+
+        // Sort items according to selected column.
+        let mut sorted: Vec<&LootItem> = items.to_vec();
+        let desc = self.session_panel.loot_panel.cred_sort_desc;
+        sorted.sort_by(|a, b| {
+            let ordering = match self.session_panel.loot_panel.cred_sort_column {
+                CredentialSortColumn::Name => a.name.cmp(&b.name),
+                CredentialSortColumn::Agent => a.agent_id.cmp(&b.agent_id),
+                CredentialSortColumn::Category => {
+                    loot_sub_category_label(a).cmp(loot_sub_category_label(b))
+                }
+                CredentialSortColumn::Source => a.source.cmp(&b.source),
+                CredentialSortColumn::Time => a.collected_at.cmp(&b.collected_at),
+            };
+            if desc { ordering.reverse() } else { ordering }
+        });
+
+        let header_color = Color32::from_rgb(180, 180, 190);
+        let row_bg_a = Color32::from_rgb(30, 30, 46);
+        let row_bg_b = Color32::from_rgb(36, 36, 52);
+
+        egui::ScrollArea::both().show(ui, |ui| {
+            egui::Grid::new("loot-cred-table")
+                .num_columns(6)
+                .striped(false)
+                .min_col_width(60.0)
+                .spacing([8.0, 2.0])
+                .show(ui, |ui| {
+                    // Header row.
+                    let columns = [
+                        (CredentialSortColumn::Name, "Name"),
+                        (CredentialSortColumn::Category, "Type"),
+                        (CredentialSortColumn::Agent, "Agent"),
+                        (CredentialSortColumn::Source, "Source"),
+                        (CredentialSortColumn::Time, "Collected"),
+                    ];
+                    for (col, label) in columns {
+                        let active = self.session_panel.loot_panel.cred_sort_column == col;
+                        let arrow = if active {
+                            if self.session_panel.loot_panel.cred_sort_desc { " v" } else { " ^" }
+                        } else {
+                            ""
+                        };
+                        let text =
+                            RichText::new(format!("{label}{arrow}")).strong().color(header_color);
+                        if ui.label(text).clicked() {
+                            if self.session_panel.loot_panel.cred_sort_column == col {
+                                self.session_panel.loot_panel.cred_sort_desc =
+                                    !self.session_panel.loot_panel.cred_sort_desc;
+                            } else {
+                                self.session_panel.loot_panel.cred_sort_column = col;
+                                self.session_panel.loot_panel.cred_sort_desc = false;
+                            }
+                        }
+                    }
+                    // Value column is not sortable.
+                    ui.label(RichText::new("Value / Preview").strong().color(header_color));
+                    ui.end_row();
+
+                    // Data rows.
+                    for (index, item) in sorted.iter().enumerate() {
+                        let bg = if index % 2 == 0 { row_bg_a } else { row_bg_b };
+                        let _ = bg; // Row striping via frame below.
+                        ui.label(&item.name);
+                        ui.label(
+                            RichText::new(loot_sub_category_label(item))
+                                .small()
+                                .color(credential_category_color(item)),
+                        );
+                        ui.monospace(&item.agent_id);
+                        ui.label(&item.source);
+                        ui.label(blank_if_empty(&item.collected_at, "-"));
+                        // Preview / value (monospace, truncated).
+                        if let Some(preview) = &item.preview {
+                            let display = if preview.len() > 80 {
+                                format!("{}...", &preview[..77])
+                            } else {
+                                preview.clone()
+                            };
                             ui.label(
-                                RichText::new(format!("({sub_label})"))
-                                    .small()
-                                    .color(Color32::GRAY),
+                                RichText::new(display)
+                                    .monospace()
+                                    .color(Color32::from_rgb(110, 199, 141)),
                             );
+                        } else {
+                            ui.label("-");
                         }
-                        ui.separator();
-                        ui.label(RichText::new(&item.name).strong());
-                        if !item.agent_id.is_empty() {
-                            ui.separator();
-                            ui.monospace(&item.agent_id);
-                        }
-                    });
-                    ui.label(format!("Source: {}", item.source));
-                    ui.label(format!(
-                        "Collected: {}",
-                        blank_if_empty(&item.collected_at, "unknown")
-                    ));
-                    if let Some(path) = &item.file_path {
-                        ui.label(format!("Path: {path}"));
-                    }
-                    if let Some(size) = item.size_bytes {
-                        ui.label(format!("Size: {}", human_size(size)));
-                    }
-                    if let Some(preview) = &item.preview {
-                        ui.add_space(4.0);
-                        ui.label(RichText::new(preview).monospace());
-                    }
-                    if loot_is_downloadable(item) {
-                        ui.add_space(6.0);
-                        if ui.button("Download").clicked() {
-                            self.session_panel.loot_status_message =
-                                Some(download_loot_item(item).unwrap_or_else(|error| error));
-                        }
+                        ui.end_row();
                     }
                 });
-                ui.add_space(6.0);
-            }
         });
+    }
+
+    /// Render the screenshot gallery inside the Loot panel.
+    fn render_loot_screenshots(&mut self, ui: &mut egui::Ui, items: &[&LootItem]) {
+        if items.is_empty() {
+            ui.label("No screenshots captured yet.");
+            return;
+        }
+
+        // Clamp selected index.
+        if let Some(sel) = self.session_panel.loot_panel.selected_screenshot {
+            if sel >= items.len() {
+                self.session_panel.loot_panel.selected_screenshot = None;
+            }
+        }
+
+        // If a screenshot is selected, show detail view.
+        if let Some(selected_idx) = self.session_panel.loot_panel.selected_screenshot {
+            let item = items[selected_idx];
+            ui.horizontal(|ui| {
+                if ui.button("<< Back to gallery").clicked() {
+                    self.session_panel.loot_panel.selected_screenshot = None;
+                }
+                ui.add_space(8.0);
+                ui.label(RichText::new(&item.name).strong());
+                if !item.agent_id.is_empty() {
+                    ui.monospace(format!("[{}]", item.agent_id));
+                }
+                ui.label(format!("  {}", blank_if_empty(&item.collected_at, "unknown")));
+                if loot_is_downloadable(item) && ui.button("Save").clicked() {
+                    self.session_panel.loot_status_message =
+                        Some(download_loot_item(item).unwrap_or_else(|e| e));
+                }
+            });
+            ui.separator();
+
+            // Render the screenshot image.
+            egui::ScrollArea::both().show(ui, |ui| {
+                if let Some(texture) = self.ensure_screenshot_texture(ui.ctx(), item) {
+                    let size = texture.size_vec2();
+                    let available = ui.available_size();
+                    let scale = (available.x / size.x).min(available.y / size.y).min(1.0);
+                    let scaled = size * scale;
+                    ui.add(egui::Image::from_texture(&texture).fit_to_exact_size(scaled));
+                } else {
+                    ui.label(
+                        RichText::new("Unable to decode screenshot image.")
+                            .color(Color32::from_rgb(220, 80, 80)),
+                    );
+                }
+            });
+            return;
+        }
+
+        // Thumbnail grid view.
+        let thumb_size = 200.0_f32;
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            let available_width = ui.available_width();
+            let cols = ((available_width / (thumb_size + 12.0)) as usize).max(1);
+            egui::Grid::new("loot-screenshot-grid").num_columns(cols).spacing([8.0, 8.0]).show(
+                ui,
+                |ui| {
+                    for (index, item) in items.iter().enumerate() {
+                        let frame = egui::Frame::default()
+                            .fill(Color32::from_rgb(30, 30, 46))
+                            .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 80)))
+                            .inner_margin(egui::Margin::same(4));
+                        let response = frame
+                            .show(ui, |ui| {
+                                ui.set_width(thumb_size);
+                                if let Some(texture) =
+                                    self.ensure_screenshot_texture(ui.ctx(), item)
+                                {
+                                    let img_size = texture.size_vec2();
+                                    let scale =
+                                        (thumb_size / img_size.x).min(thumb_size / img_size.y);
+                                    let scaled = img_size * scale;
+                                    ui.add(
+                                        egui::Image::from_texture(&texture)
+                                            .fit_to_exact_size(scaled),
+                                    );
+                                } else {
+                                    ui.allocate_space(egui::vec2(thumb_size, thumb_size * 0.6));
+                                    ui.label(
+                                        RichText::new("[decode error]")
+                                            .small()
+                                            .color(Color32::from_rgb(180, 80, 80)),
+                                    );
+                                }
+                                ui.label(RichText::new(&item.name).small().strong());
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} | {}",
+                                        blank_if_empty(&item.agent_id, "?"),
+                                        blank_if_empty(&item.collected_at, "?"),
+                                    ))
+                                    .small()
+                                    .color(Color32::GRAY),
+                                );
+                            })
+                            .response;
+                        if response.clicked() {
+                            self.session_panel.loot_panel.selected_screenshot = Some(index);
+                        }
+                        if (index + 1) % cols == 0 {
+                            ui.end_row();
+                        }
+                    }
+                },
+            );
+        });
+    }
+
+    /// Render the file downloads table inside the Loot panel.
+    fn render_loot_files(&mut self, ui: &mut egui::Ui, items: &[&LootItem]) {
+        if items.is_empty() {
+            ui.label("No files downloaded yet.");
+            return;
+        }
+
+        let header_color = Color32::from_rgb(180, 180, 190);
+
+        egui::ScrollArea::both().show(ui, |ui| {
+            egui::Grid::new("loot-files-table")
+                .num_columns(7)
+                .striped(false)
+                .min_col_width(50.0)
+                .spacing([8.0, 2.0])
+                .show(ui, |ui| {
+                    // Header.
+                    for label in ["Name", "Category", "Agent", "Path", "Size", "Collected", ""] {
+                        ui.label(RichText::new(label).strong().color(header_color));
+                    }
+                    ui.end_row();
+
+                    // Rows.
+                    for item in items {
+                        ui.label(&item.name);
+                        ui.label(
+                            RichText::new(loot_sub_category_label(item))
+                                .small()
+                                .color(Color32::GRAY),
+                        );
+                        ui.monospace(&item.agent_id);
+                        ui.label(item.file_path.as_deref().unwrap_or("-"));
+                        ui.label(item.size_bytes.map(human_size).unwrap_or_else(|| "-".to_owned()));
+                        ui.label(blank_if_empty(&item.collected_at, "-"));
+                        if loot_is_downloadable(item) {
+                            if ui.button("Save").clicked() {
+                                self.session_panel.loot_status_message =
+                                    Some(download_loot_item(item).unwrap_or_else(|e| e));
+                            }
+                        } else {
+                            ui.label("");
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
+    }
+
+    /// Decode and cache a screenshot texture for the given loot item.
+    ///
+    /// Returns `None` if the item has no image content or decoding fails.
+    fn ensure_screenshot_texture(
+        &mut self,
+        ctx: &egui::Context,
+        item: &LootItem,
+    ) -> Option<egui::TextureHandle> {
+        let id = item.id.unwrap_or(-1);
+        if let Some(handle) = self.session_panel.screenshot_textures.inner.get(&id) {
+            return Some(handle.clone());
+        }
+        let encoded = item.content_base64.as_deref()?;
+        let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
+        let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
+        let (w, h) = img.dimensions();
+        let color_image =
+            egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], img.as_raw());
+        let texture = ctx.load_texture(
+            format!("loot-screenshot-{id}"),
+            color_image,
+            egui::TextureOptions::LINEAR,
+        );
+        self.session_panel.screenshot_textures.inner.insert(id, texture.clone());
+        Some(texture)
     }
 
     fn render_chat_panel(&mut self, ui: &mut egui::Ui, state: &AppState) {
@@ -6454,6 +6754,17 @@ fn loot_sub_category_label(item: &LootItem) -> &'static str {
     }
 }
 
+/// Returns a color hint for the credential sub-category (for the table "Type" column).
+fn credential_category_color(item: &LootItem) -> Color32 {
+    match detect_credential_category(item) {
+        CredentialSubFilter::NtlmHash => Color32::from_rgb(220, 160, 60), // amber
+        CredentialSubFilter::Plaintext => Color32::from_rgb(110, 199, 141), // green
+        CredentialSubFilter::KerberosTicket => Color32::from_rgb(140, 120, 220), // purple
+        CredentialSubFilter::Certificate => Color32::from_rgb(80, 180, 220), // cyan
+        CredentialSubFilter::All => Color32::GRAY,
+    }
+}
+
 /// Export loot items to CSV and save to the downloads directory.
 fn export_loot_csv(items: &[&LootItem]) -> std::result::Result<String, String> {
     let mut out = String::from(
@@ -10330,5 +10641,115 @@ mod tests {
     fn completion_pivot_matches_p_prefix() {
         let matches = console_completion_candidates("pi");
         assert!(matches.contains(&"pivot"));
+    }
+
+    // ── Loot panel types ─────────────────────────────────────────────────
+
+    #[test]
+    fn loot_tab_default_is_credentials() {
+        assert_eq!(LootTab::default(), LootTab::Credentials);
+    }
+
+    #[test]
+    fn credential_sort_column_default_is_name() {
+        assert_eq!(CredentialSortColumn::default(), CredentialSortColumn::Name);
+    }
+
+    #[test]
+    fn loot_panel_state_default_values() {
+        let state = LootPanelState::default();
+        assert_eq!(state.active_tab, LootTab::Credentials);
+        assert!(state.selected_screenshot.is_none());
+        assert!(!state.cred_sort_desc);
+    }
+
+    #[test]
+    fn credential_category_color_returns_distinct_colors() {
+        let ntlm_item = LootItem {
+            id: Some(1),
+            kind: LootKind::Credential,
+            name: "NTLM hash".to_owned(),
+            agent_id: String::new(),
+            source: String::new(),
+            collected_at: String::new(),
+            file_path: None,
+            size_bytes: None,
+            content_base64: None,
+            preview: None,
+        };
+        let plain_item = LootItem {
+            id: Some(2),
+            kind: LootKind::Credential,
+            name: "plaintext password".to_owned(),
+            agent_id: String::new(),
+            source: String::new(),
+            collected_at: String::new(),
+            file_path: None,
+            size_bytes: None,
+            content_base64: None,
+            preview: None,
+        };
+        let ntlm_color = credential_category_color(&ntlm_item);
+        let plain_color = credential_category_color(&plain_item);
+        assert_ne!(ntlm_color, plain_color);
+    }
+
+    #[test]
+    fn credential_category_color_kerberos_and_certificate() {
+        let kerb = LootItem {
+            id: Some(3),
+            kind: LootKind::Credential,
+            name: "kerberos ticket".to_owned(),
+            agent_id: String::new(),
+            source: String::new(),
+            collected_at: String::new(),
+            file_path: None,
+            size_bytes: None,
+            content_base64: None,
+            preview: None,
+        };
+        let cert = LootItem {
+            id: Some(4),
+            kind: LootKind::Credential,
+            name: "certificate".to_owned(),
+            agent_id: String::new(),
+            source: String::new(),
+            collected_at: String::new(),
+            file_path: None,
+            size_bytes: None,
+            content_base64: None,
+            preview: None,
+        };
+        let kerb_color = credential_category_color(&kerb);
+        let cert_color = credential_category_color(&cert);
+        assert_ne!(kerb_color, cert_color);
+        // Kerberos = purple, Certificate = cyan
+        assert_eq!(kerb_color, Color32::from_rgb(140, 120, 220));
+        assert_eq!(cert_color, Color32::from_rgb(80, 180, 220));
+    }
+
+    #[test]
+    fn credential_category_color_unknown_returns_gray() {
+        let unknown = LootItem {
+            id: Some(5),
+            kind: LootKind::Credential,
+            name: "some random cred".to_owned(),
+            agent_id: String::new(),
+            source: String::new(),
+            collected_at: String::new(),
+            file_path: None,
+            size_bytes: None,
+            content_base64: None,
+            preview: None,
+        };
+        assert_eq!(credential_category_color(&unknown), Color32::GRAY);
+    }
+
+    #[test]
+    fn screenshot_texture_cache_debug_shows_count() {
+        let cache = ScreenshotTextureCache::default();
+        let debug = format!("{cache:?}");
+        assert!(debug.contains("count"));
+        assert!(debug.contains('0'));
     }
 }

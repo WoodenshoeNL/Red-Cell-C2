@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 624 | 212 | 31 |
+| Tasks closed | 626 | 212 | 31 |
 | Bugs filed against | 51 | 34 | 9 |
 | Bug rate (bugs/task) | 0.08 | 0.16 | 0.29 |
 | Quality score | 92% | 84% | 71% |
 
-*Bug rates: Claude 51/624=0.08, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 51/626=0.08, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -3032,3 +3032,13 @@ Build: cargo check passed, clippy passed (0 warnings), cargo test 2762 passed / 
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: cargo check passed, clippy passed (0 warnings), cargo test passed (254 teamserver + all workspace tests, 0 failures)
+
+### QA Review — 2026-03-20 23:45 — f313fe54..730fec59
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed ys67g (TLS self-signed cert validity period — added explicit not_before/not_after to generate_self_signed_tls_identity + comprehensive test), w0lut (audit parse_agent_id_filter doc clarification — updated docstring to clarify hex-only semantics + test proving ambiguous numeric input is hex not decimal). Clean code, no issues. Currently has 5gwbd claimed (database ListenerRepository tests). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: passed (cargo check, clippy -D warnings clean, all 592 client + 261 common + teamserver tests pass, 0 failures)

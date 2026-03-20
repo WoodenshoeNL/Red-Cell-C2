@@ -4017,3 +4017,271 @@ async fn sleep_callback_truncated_missing_jitter_returns_error_no_broadcast()
     server.listeners.stop("out-sleep-trunc").await?;
     Ok(())
 }
+
+// ── persist_credentials_from_output — credential extraction tests ───────────
+
+/// Sending command output containing a credential pattern (keyword-block style)
+/// must create a loot record with kind="credential" in the database and broadcast
+/// both a loot-new event and a CredentialsAdd event to the operator WebSocket.
+#[tokio::test]
+async fn command_output_credential_pattern_creates_loot_record()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    server
+        .listeners
+        .create(common::http_listener_config("out-cred-extract", listener_port))
+        .await?;
+    drop(listener_guard);
+    server.listeners.start("out-cred-extract").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_00D0_u32;
+    let key = [0xD0; AGENT_KEY_LENGTH];
+    let iv = [0xD1; AGENT_IV_LENGTH];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // Mimikatz-style credential output with keyword-block lines.
+    let output_text = "Username : admin\nPassword : P@ssw0rd!";
+    let payload = common::command_output_payload(output_text);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandOutput),
+            0xD0,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // First event: AgentResponse with the output text.
+    let event1 = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(resp_msg) = event1 else {
+        panic!("expected AgentResponse for CommandOutput, got {event1:?}");
+    };
+    assert_eq!(resp_msg.info.demon_id, format!("{agent_id:08X}"));
+    assert!(resp_msg.info.output.contains(output_text));
+
+    // Second event: loot-new for the credential record.
+    let event2 = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(loot_msg) = event2 else {
+        panic!("expected AgentResponse (loot-new), got {event2:?}");
+    };
+    assert_eq!(
+        loot_msg.info.extra.get("MiscType").and_then(|v| v.as_str()),
+        Some("loot-new"),
+        "loot event must have MiscType=loot-new"
+    );
+
+    // Third event: CredentialsAdd with the extracted credential details.
+    let event3 = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::CredentialsAdd(cred_msg) = event3 else {
+        panic!("expected CredentialsAdd event, got {event3:?}");
+    };
+    assert_eq!(
+        cred_msg.info.fields.get("DemonID").and_then(|v| v.as_str()),
+        Some(&format!("{agent_id:08X}") as &str),
+    );
+    let credential_content = cred_msg
+        .info
+        .fields
+        .get("Credential")
+        .and_then(|v| v.as_str())
+        .expect("CredentialsAdd must contain a Credential field");
+    assert!(
+        credential_content.contains("Username") && credential_content.contains("Password"),
+        "credential content should contain the keyword block: {credential_content:?}"
+    );
+
+    // Database must contain a loot record with kind="credential".
+    let loot_records = server.database.loot().list_for_agent(agent_id).await?;
+    assert!(!loot_records.is_empty(), "at least one loot record must be persisted");
+    assert!(
+        loot_records.iter().any(|r| r.kind == "credential"),
+        "expected a 'credential' loot record; got kinds: {:?}",
+        loot_records.iter().map(|r| &r.kind).collect::<Vec<_>>()
+    );
+    let cred_record = loot_records.iter().find(|r| r.kind == "credential").unwrap();
+    assert_eq!(cred_record.agent_id, agent_id);
+    let data_str = std::str::from_utf8(cred_record.data.as_deref().unwrap_or_default())
+        .unwrap_or("<invalid utf8>");
+    assert!(
+        data_str.contains("Username") && data_str.contains("Password"),
+        "loot data should contain the credential block: {data_str:?}"
+    );
+
+    socket.close(None).await?;
+    server.listeners.stop("out-cred-extract").await?;
+    Ok(())
+}
+
+/// Sending command output containing a pwdump-format hash must create a loot
+/// record with pattern="pwdump-hash".
+#[tokio::test]
+async fn command_output_pwdump_hash_creates_loot_record() -> Result<(), Box<dyn std::error::Error>>
+{
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    server.listeners.create(common::http_listener_config("out-cred-pwdump", listener_port)).await?;
+    drop(listener_guard);
+    server.listeners.start("out-cred-pwdump").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_00D1_u32;
+    let key = [0xD2; AGENT_KEY_LENGTH];
+    let iv = [0xD3; AGENT_IV_LENGTH];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // pwdump-format NTLM hash line.
+    let hash_line =
+        "Administrator:500:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::";
+    let payload = common::command_output_payload(hash_line);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandOutput),
+            0xD1,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // First event: AgentResponse with the output.
+    let event1 = common::read_operator_message(&mut socket).await?;
+    assert!(
+        matches!(event1, OperatorMessage::AgentResponse(_)),
+        "expected AgentResponse, got {event1:?}"
+    );
+
+    // Second event: loot-new.
+    let event2 = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(loot_msg) = event2 else {
+        panic!("expected AgentResponse (loot-new), got {event2:?}");
+    };
+    assert_eq!(loot_msg.info.extra.get("MiscType").and_then(|v| v.as_str()), Some("loot-new"),);
+
+    // Third event: CredentialsAdd.
+    let event3 = common::read_operator_message(&mut socket).await?;
+    assert!(
+        matches!(event3, OperatorMessage::CredentialsAdd(_)),
+        "expected CredentialsAdd, got {event3:?}"
+    );
+
+    // Database loot record must exist with the hash data.
+    let loot_records = server.database.loot().list_for_agent(agent_id).await?;
+    assert!(
+        loot_records.iter().any(|r| r.kind == "credential"),
+        "expected a 'credential' loot record; got: {loot_records:?}"
+    );
+    let cred_record = loot_records.iter().find(|r| r.kind == "credential").unwrap();
+    let data_str = std::str::from_utf8(cred_record.data.as_deref().unwrap_or_default())
+        .unwrap_or("<invalid utf8>");
+    assert!(
+        data_str.contains("Administrator") && data_str.contains("aad3b435b51404ee"),
+        "loot data should contain the pwdump hash: {data_str:?}"
+    );
+    // Verify metadata contains pattern=pwdump-hash.
+    let metadata = cred_record.metadata.as_ref().expect("loot metadata must be present");
+    assert_eq!(
+        metadata.get("pattern").and_then(|v| v.as_str()),
+        Some("pwdump-hash"),
+        "loot metadata pattern should be 'pwdump-hash'"
+    );
+
+    socket.close(None).await?;
+    server.listeners.stop("out-cred-pwdump").await?;
+    Ok(())
+}
+
+/// Non-credential command output (plain text with no credential patterns) must
+/// NOT create any loot records — verifies no false-positive extraction.
+#[tokio::test]
+async fn command_output_no_credentials_creates_no_loot() -> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    server.listeners.create(common::http_listener_config("out-cred-none", listener_port)).await?;
+    drop(listener_guard);
+    server.listeners.start("out-cred-none").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_00D2_u32;
+    let key = [0xD4; AGENT_KEY_LENGTH];
+    let iv = [0xD5; AGENT_IV_LENGTH];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // Plain text output with no credential patterns.
+    let output_text = "Directory of C:\\Users\\operator\\Desktop\n\n2026-03-19  10:30    <DIR>          .\n2026-03-19  10:30    <DIR>          ..\n               0 File(s)              0 bytes";
+    let payload = common::command_output_payload(output_text);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandOutput),
+            0xD2,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // Must receive the AgentResponse for the output text.
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(resp_msg) = event else {
+        panic!("expected AgentResponse, got {event:?}");
+    };
+    assert!(resp_msg.info.output.contains("Directory of"));
+
+    // No further events should arrive (no loot-new, no CredentialsAdd).
+    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(300)).await;
+
+    // Database must have zero loot records for this agent.
+    let loot_records = server.database.loot().list_for_agent(agent_id).await?;
+    assert!(
+        loot_records.is_empty(),
+        "non-credential output must not create loot records; got: {loot_records:?}"
+    );
+
+    socket.close(None).await?;
+    server.listeners.stop("out-cred-none").await?;
+    Ok(())
+}

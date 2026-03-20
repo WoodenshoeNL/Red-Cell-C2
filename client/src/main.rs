@@ -280,7 +280,107 @@ enum ConsoleLayoutMode {
 }
 
 impl ConsoleLayoutMode {
+    #[allow(dead_code)]
     const ALL: [(Self, &'static str); 2] = [(Self::Tabs, "Tabs"), (Self::Split, "Split")];
+}
+
+/// Identifies a tab in the bottom dock panel.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum DockTab {
+    /// Teamserver chat / event log.
+    TeamserverChat,
+    /// Listener management panel.
+    Listeners,
+    /// Session graph visualization.
+    SessionGraph,
+    /// Python script manager.
+    Scripts,
+    /// Loot browser.
+    Loot,
+    /// Per-agent interactive console.
+    AgentConsole(String),
+}
+
+impl DockTab {
+    /// Display label for the tab.
+    fn label(&self) -> String {
+        match self {
+            Self::TeamserverChat => "Teamserver Chat".to_owned(),
+            Self::Listeners => "Listeners".to_owned(),
+            Self::SessionGraph => "Session Graph".to_owned(),
+            Self::Scripts => "Scripts".to_owned(),
+            Self::Loot => "Loot".to_owned(),
+            Self::AgentConsole(id) => format!("[{id}]"),
+        }
+    }
+
+    /// Accent color for the tab's left border (Havoc-style).
+    fn accent_color(&self) -> Color32 {
+        match self {
+            Self::TeamserverChat => Color32::from_rgb(200, 80, 200), // magenta
+            Self::Listeners => Color32::from_rgb(80, 180, 220),      // cyan
+            Self::SessionGraph => Color32::from_rgb(110, 199, 141),  // green
+            Self::Scripts => Color32::from_rgb(232, 182, 83),        // yellow
+            Self::Loot => Color32::from_rgb(220, 130, 60),           // orange
+            Self::AgentConsole(_) => Color32::from_rgb(140, 120, 220), // purple
+        }
+    }
+
+    /// Whether this tab can be closed by the user.
+    fn closeable(&self) -> bool {
+        !matches!(self, Self::TeamserverChat)
+    }
+}
+
+/// Dock panel state — tracks which tabs are open, which is selected, and the top/bottom split.
+#[derive(Debug)]
+struct DockState {
+    /// Ordered list of open dock tabs.
+    open_tabs: Vec<DockTab>,
+    /// Currently selected/visible dock tab.
+    selected: Option<DockTab>,
+    /// Fractional height of the top zone (0.0–1.0, default 0.35).
+    #[allow(dead_code)]
+    top_fraction: f32,
+    /// Whether the event viewer panel (top-right) is visible.
+    event_viewer_open: bool,
+    /// Fractional width of the session table vs event viewer (0.0–1.0, default 0.6).
+    top_split_fraction: f32,
+}
+
+impl Default for DockState {
+    fn default() -> Self {
+        Self {
+            open_tabs: vec![DockTab::TeamserverChat],
+            selected: Some(DockTab::TeamserverChat),
+            top_fraction: 0.35,
+            event_viewer_open: true,
+            top_split_fraction: 0.6,
+        }
+    }
+}
+
+impl DockState {
+    fn open_tab(&mut self, tab: DockTab) {
+        if !self.open_tabs.contains(&tab) {
+            self.open_tabs.push(tab.clone());
+        }
+        self.selected = Some(tab);
+    }
+
+    fn close_tab(&mut self, tab: &DockTab) {
+        self.open_tabs.retain(|t| t != tab);
+        if self.selected.as_ref() == Some(tab) {
+            self.selected = self.open_tabs.first().cloned();
+        }
+    }
+
+    fn ensure_selected(&mut self) {
+        if self.selected.as_ref().is_some_and(|s| self.open_tabs.contains(s)) {
+            return;
+        }
+        self.selected = self.open_tabs.first().cloned();
+    }
 }
 
 #[derive(Debug, Default)]
@@ -290,6 +390,7 @@ struct SessionPanelState {
     descending: bool,
     open_consoles: Vec<String>,
     selected_console: Option<String>,
+    #[allow(dead_code)]
     console_layout: ConsoleLayoutMode,
     console_state: BTreeMap<String, AgentConsoleState>,
     file_browser_state: BTreeMap<String, AgentFileBrowserUiState>,
@@ -313,6 +414,8 @@ struct SessionPanelState {
     event_kind_filter: Option<EventKind>,
     /// Set to true when the "Mark all read" button is pressed; consumed in `render_main_ui`.
     pending_mark_all_read: bool,
+    /// Bottom dock panel state.
+    dock: DockState,
 }
 
 impl SessionPanelState {
@@ -330,8 +433,10 @@ impl SessionPanelState {
             self.open_consoles.push(agent_id.to_owned());
         }
         self.selected_console = Some(agent_id.to_owned());
+        self.dock.open_tab(DockTab::AgentConsole(agent_id.to_owned()));
     }
 
+    #[allow(dead_code)]
     fn ensure_selected_console(&mut self) {
         if self
             .selected_console
@@ -348,6 +453,7 @@ impl SessionPanelState {
         self.open_consoles.retain(|open_id| open_id != agent_id);
         self.console_state.remove(agent_id);
         self.file_browser_state.remove(agent_id);
+        self.dock.close_tab(&DockTab::AgentConsole(agent_id.to_owned()));
         if self.selected_console.as_deref() == Some(agent_id) {
             self.selected_console = self.open_consoles.first().cloned();
         }
@@ -557,175 +663,6 @@ impl ClientApp {
                 self.phase = AppPhase::Login(login_state);
             }
         }
-    }
-
-    fn render_connection_bar(&self, ui: &mut egui::Ui, state: &AppState) {
-        ui.horizontal_wrapped(|ui| {
-            ui.heading(WINDOW_TITLE);
-            ui.separator();
-            ui.label("Teamserver");
-            ui.monospace(&state.server_url);
-            ui.separator();
-            ui.colored_label(state.connection_status.color(), state.connection_status.label());
-
-            if let Some(message) = state.connection_status.detail() {
-                ui.separator();
-                ui.colored_label(state.connection_status.color(), message);
-            }
-        });
-    }
-
-    fn render_operator_panel(&self, ui: &mut egui::Ui, state: &AppState) {
-        ui.heading("Operator");
-        ui.separator();
-
-        // --- My session ---
-        if let Some(operator) = &state.operator_info {
-            ui.horizontal(|ui| {
-                ui.strong(&operator.username);
-                role_badge(ui, operator.role.as_deref());
-            });
-            ui.label(format!(
-                "Last seen: {}",
-                operator.last_seen.as_deref().unwrap_or("not available")
-            ));
-        } else {
-            ui.label("No operator session is active.");
-        }
-
-        // --- Connected operators ---
-        ui.add_space(6.0);
-        ui.separator();
-        ui.strong("Connected operators");
-
-        let has_peers = state
-            .connected_operators
-            .values()
-            .any(|op| op.online || !op.recent_commands.is_empty());
-
-        if !has_peers {
-            ui.label("None");
-        } else {
-            egui::ScrollArea::vertical().id_salt("operator_panel_scroll").max_height(300.0).show(
-                ui,
-                |ui| {
-                    for (username, op) in &state.connected_operators {
-                        if !op.online && op.recent_commands.is_empty() {
-                            continue;
-                        }
-                        render_operator_entry(ui, username, op);
-                    }
-                },
-            );
-        }
-    }
-
-    fn render_agents_panel(&mut self, ui: &mut egui::Ui, state: &AppState) {
-        ui.heading("Sessions");
-        ui.separator();
-
-        ui.horizontal(|ui| {
-            ui.label("Filter");
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut self.session_panel.filter)
-                    .hint_text("Search ID, host, user, process, note"),
-            );
-            if response.changed() {
-                ui.ctx().request_repaint();
-            }
-        });
-        ui.add_space(6.0);
-
-        if state.agents.is_empty() {
-            ui.label("No agents are registered yet.");
-            return;
-        }
-
-        let agents = self.filtered_and_sorted_agents(&state.agents);
-        if agents.is_empty() {
-            ui.label("No agents match the current filter.");
-            return;
-        }
-
-        if let Some(message) = &self.session_panel.status_message {
-            ui.label(RichText::new(message).weak());
-            ui.add_space(6.0);
-        }
-
-        self.render_session_table_header(ui);
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for agent in &agents {
-                let fill = if agent.elevated {
-                    Color32::from_rgba_unmultiplied(120, 28, 28, 110)
-                } else {
-                    Color32::from_rgba_unmultiplied(255, 255, 255, 8)
-                };
-                let frame = egui::Frame::default()
-                    .fill(fill)
-                    .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 18)))
-                    .inner_margin(egui::Margin::symmetric(8, 6));
-                let inner = frame.show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        self.render_session_row_cell(ui, 86.0, &agent.name_id, true);
-                        self.render_session_row_cell(ui, 116.0, &agent.hostname, false);
-                        self.render_session_row_cell(ui, 108.0, &agent.username, false);
-                        self.render_session_row_cell(ui, 86.0, &agent.domain_name, false);
-                        self.render_session_row_cell(ui, 108.0, &agent_ip(agent), false);
-                        self.render_session_row_cell(ui, 72.0, &agent.process_pid, false);
-                        self.render_session_row_cell(ui, 132.0, &agent.process_name, false);
-                        self.render_session_row_cell(ui, 72.0, &agent_arch(agent), false);
-                        self.render_session_row_cell(
-                            ui,
-                            82.0,
-                            if agent.elevated { "Yes" } else { "No" },
-                            false,
-                        );
-                        self.render_session_row_cell(ui, 170.0, &agent_os(agent), false);
-                        self.render_session_row_cell(ui, 110.0, &agent_sleep_jitter(agent), false);
-                        self.render_session_row_cell(ui, 136.0, &agent.last_call_in, false);
-                    });
-                });
-
-                let row_response = ui.interact(
-                    inner.response.rect,
-                    ui.make_persistent_id(("agent-row", &agent.name_id)),
-                    Sense::click(),
-                );
-
-                if row_response.double_clicked() {
-                    self.session_panel.ensure_console_open(&agent.name_id);
-                }
-
-                row_response.context_menu(|ui| {
-                    if ui.button("Interact").clicked() {
-                        self.handle_session_action(
-                            SessionAction::OpenConsole(agent.name_id.clone()),
-                            state.operator_info.as_ref().map(|operator| operator.username.as_str()),
-                        );
-                        ui.close();
-                    }
-                    if ui.button("Kill").clicked() {
-                        self.handle_session_action(
-                            SessionAction::RequestKill(agent.name_id.clone()),
-                            state.operator_info.as_ref().map(|operator| operator.username.as_str()),
-                        );
-                        ui.close();
-                    }
-                    if ui.button("Add note").clicked() {
-                        self.handle_session_action(
-                            SessionAction::EditNote {
-                                agent_id: agent.name_id.clone(),
-                                current_note: agent.note.clone(),
-                            },
-                            state.operator_info.as_ref().map(|operator| operator.username.as_str()),
-                        );
-                        ui.close();
-                    }
-                });
-
-                ui.add_space(4.0);
-            }
-        });
     }
 
     fn render_listeners_panel(&self, ui: &mut egui::Ui, state: &AppState) {
@@ -1045,49 +982,6 @@ impl ClientApp {
         }
     }
 
-    fn render_overview_panel(&self, ui: &mut egui::Ui, state: &AppState) {
-        ui.heading("Overview");
-        ui.separator();
-        ui.label("Connected to teamserver. Live WebSocket transport is active.");
-        ui.add_space(8.0);
-
-        egui::Grid::new("overview-stats").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
-            ui.label("Connection");
-            ui.colored_label(state.connection_status.color(), state.connection_status.label());
-            ui.end_row();
-
-            ui.label("Operator");
-            ui.label(
-                state.operator_info.as_ref().map_or("Not authenticated", |op| op.username.as_str()),
-            );
-            ui.end_row();
-
-            ui.label("Agents");
-            ui.label(state.agents.len().to_string());
-            ui.end_row();
-
-            ui.label("Listeners");
-            ui.label(state.listeners.len().to_string());
-            ui.end_row();
-
-            ui.label("Loot items");
-            ui.label(state.loot.len().to_string());
-            ui.end_row();
-
-            ui.label("Events logged");
-            ui.label(state.event_log.len().to_string());
-            ui.end_row();
-        });
-
-        ui.add_space(12.0);
-        ui.label(RichText::new("Connection states").strong());
-        ui.horizontal_wrapped(|ui| {
-            for status in ConnectionStatus::placeholders() {
-                ui.colored_label(status.color(), status.label());
-            }
-        });
-    }
-
     fn render_current_phase(
         &mut self,
         ctx: &egui::Context,
@@ -1131,41 +1025,31 @@ impl ClientApp {
     fn render_main_ui(&mut self, ctx: &egui::Context, app_state: &SharedAppState) {
         let snapshot = Self::snapshot(app_state);
 
-        egui::TopBottomPanel::top("connection_bar").show(ctx, |ui| {
-            self.render_connection_bar(ui, &snapshot);
+        // ── Menu bar (top) ──────────────────────────────────────────
+        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            self.render_menu_bar(ui, &snapshot);
         });
 
-        egui::SidePanel::left("navigation_left").resizable(true).default_width(320.0).show(
-            ctx,
-            |ui| {
-                self.render_operator_panel(ui, &snapshot);
-                ui.add_space(12.0);
-                self.render_agents_panel(ui, &snapshot);
-            },
-        );
+        // ── Status bar (bottom) ─────────────────────────────────────
+        egui::TopBottomPanel::bottom("status_bar").exact_height(22.0).show(ctx, |ui| {
+            self.render_status_bar(ui, &snapshot);
+        });
 
-        egui::SidePanel::right("navigation_right").resizable(true).default_width(320.0).show(
-            ctx,
-            |ui| {
-                self.render_listeners_panel(ui, &snapshot);
-                ui.add_space(12.0);
-                self.render_loot_panel(ui, &snapshot);
-            },
-        );
-
-        egui::TopBottomPanel::bottom("chat_panel").resizable(true).default_height(220.0).show(
-            ctx,
-            |ui| {
-                self.render_chat_panel(ui, &snapshot);
-            },
-        );
-
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                self.render_console_workspace(ui, &snapshot);
+        // ── Bottom dock panel (tabbed) ──────────────────────────────
+        egui::TopBottomPanel::bottom("dock_panel")
+            .resizable(true)
+            .default_height(350.0)
+            .min_height(120.0)
+            .show(ctx, |ui| {
+                self.render_dock_panel(ui, &snapshot);
             });
+
+        // ── Central panel: top half with session table + event viewer
+        egui::CentralPanel::default().show(ctx, |ui| {
+            self.render_top_zone(ui, &snapshot);
         });
 
+        // ── Modal dialogs ───────────────────────────────────────────
         self.render_note_editor(ctx, app_state);
         self.render_process_injection_dialog(ctx);
 
@@ -1178,6 +1062,332 @@ impl ClientApp {
         }
 
         self.flush_pending_messages();
+    }
+
+    /// Havoc-style menu bar: Havoc, View, Attack, Scripts, Help.
+    fn render_menu_bar(&mut self, ui: &mut egui::Ui, state: &AppState) {
+        egui::MenuBar::new().ui(ui, |ui| {
+            ui.menu_button("Red Cell", |ui| {
+                ui.label(format!(
+                    "Operator: {}",
+                    state.operator_info.as_ref().map_or("—", |op| op.username.as_str())
+                ));
+                ui.label(format!("Server: {}", state.server_url));
+                ui.separator();
+                let status_color = state.connection_status.color();
+                ui.colored_label(status_color, state.connection_status.label());
+                ui.separator();
+                if ui.button("Disconnect").clicked() {
+                    ui.close();
+                }
+            });
+
+            ui.menu_button("View", |ui| {
+                if ui.button("Event Viewer").clicked() {
+                    self.session_panel.dock.event_viewer_open =
+                        !self.session_panel.dock.event_viewer_open;
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Teamserver Chat").clicked() {
+                    self.session_panel.dock.open_tab(DockTab::TeamserverChat);
+                    ui.close();
+                }
+                if ui.button("Listeners").clicked() {
+                    self.session_panel.dock.open_tab(DockTab::Listeners);
+                    ui.close();
+                }
+                if ui.button("Session Graph").clicked() {
+                    self.session_panel.dock.open_tab(DockTab::SessionGraph);
+                    ui.close();
+                }
+                if ui.button("Scripts").clicked() {
+                    self.session_panel.dock.open_tab(DockTab::Scripts);
+                    ui.close();
+                }
+                if ui.button("Loot").clicked() {
+                    self.session_panel.dock.open_tab(DockTab::Loot);
+                    ui.close();
+                }
+            });
+
+            ui.menu_button("Attack", |ui| {
+                ui.label("(payload generation — coming soon)");
+            });
+
+            ui.menu_button("Scripts", |ui| {
+                if ui.button("Script Manager").clicked() {
+                    self.session_panel.dock.open_tab(DockTab::Scripts);
+                    ui.close();
+                }
+            });
+
+            ui.menu_button("Help", |ui| {
+                ui.label("Red Cell C2 — Havoc rewrite in Rust");
+                ui.label("https://github.com/…");
+            });
+        });
+    }
+
+    /// Bottom status bar showing operator name (like Havoc).
+    fn render_status_bar(&self, ui: &mut egui::Ui, state: &AppState) {
+        ui.horizontal_centered(|ui| {
+            let operator = state.operator_info.as_ref().map_or("—", |op| op.username.as_str());
+            ui.label(RichText::new(operator).monospace().small());
+        });
+    }
+
+    /// Top zone: session table (left) + event viewer (right).
+    fn render_top_zone(&mut self, ui: &mut egui::Ui, state: &AppState) {
+        let avail = ui.available_size();
+
+        if self.session_panel.dock.event_viewer_open {
+            let split = self.session_panel.dock.top_split_fraction;
+            let left_width = (avail.x * split - 4.0).max(100.0);
+            let right_width = (avail.x * (1.0 - split) - 4.0).max(100.0);
+
+            ui.horizontal(|ui| {
+                // Session table (left)
+                ui.allocate_ui(egui::vec2(left_width, avail.y), |ui| {
+                    self.render_session_table_zone(ui, state);
+                });
+
+                // Thin vertical separator
+                ui.separator();
+
+                // Event viewer (right)
+                ui.allocate_ui(egui::vec2(right_width, avail.y), |ui| {
+                    self.render_event_viewer(ui, state);
+                });
+            });
+        } else {
+            self.render_session_table_zone(ui, state);
+        }
+    }
+
+    /// Session table rendered in the top-left zone (Havoc-style full-width table).
+    fn render_session_table_zone(&mut self, ui: &mut egui::Ui, state: &AppState) {
+        // Header row with green-tinted column headers (Havoc style)
+        self.render_session_table_header(ui);
+
+        if state.agents.is_empty() {
+            return;
+        }
+
+        let agents = self.filtered_and_sorted_agents(&state.agents);
+        if agents.is_empty() {
+            return;
+        }
+
+        egui::ScrollArea::vertical().id_salt("session_table_scroll").show(ui, |ui| {
+            for agent in &agents {
+                let fill = if agent.elevated {
+                    Color32::from_rgba_unmultiplied(120, 28, 28, 110)
+                } else {
+                    Color32::TRANSPARENT
+                };
+                let frame =
+                    egui::Frame::default().fill(fill).inner_margin(egui::Margin::symmetric(4, 2));
+                let inner = frame.show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        self.render_session_row_cell(ui, 86.0, &agent.name_id, true);
+                        self.render_session_row_cell(ui, 116.0, &agent.hostname, false);
+                        self.render_session_row_cell(ui, 108.0, &agent.username, false);
+                        self.render_session_row_cell(ui, 86.0, &agent.domain_name, false);
+                        self.render_session_row_cell(ui, 108.0, &agent_ip(agent), false);
+                        self.render_session_row_cell(ui, 72.0, &agent.process_pid, false);
+                        self.render_session_row_cell(ui, 132.0, &agent.process_name, false);
+                        self.render_session_row_cell(ui, 72.0, &agent_arch(agent), false);
+                        self.render_session_row_cell(
+                            ui,
+                            82.0,
+                            if agent.elevated { "Yes" } else { "No" },
+                            false,
+                        );
+                        self.render_session_row_cell(ui, 170.0, &agent_os(agent), false);
+                        self.render_session_row_cell(ui, 110.0, &agent_sleep_jitter(agent), false);
+                        self.render_session_row_cell(ui, 136.0, &agent.last_call_in, false);
+                    });
+                });
+
+                let row_response = ui.interact(
+                    inner.response.rect,
+                    ui.make_persistent_id(("agent-row", &agent.name_id)),
+                    Sense::click(),
+                );
+
+                if row_response.double_clicked() {
+                    self.session_panel.ensure_console_open(&agent.name_id);
+                }
+
+                row_response.context_menu(|ui| {
+                    if ui.button("Interact").clicked() {
+                        self.handle_session_action(
+                            SessionAction::OpenConsole(agent.name_id.clone()),
+                            state.operator_info.as_ref().map(|operator| operator.username.as_str()),
+                        );
+                        ui.close();
+                    }
+                    if ui.button("Kill").clicked() {
+                        self.handle_session_action(
+                            SessionAction::RequestKill(agent.name_id.clone()),
+                            state.operator_info.as_ref().map(|operator| operator.username.as_str()),
+                        );
+                        ui.close();
+                    }
+                    if ui.button("Add note").clicked() {
+                        self.handle_session_action(
+                            SessionAction::EditNote {
+                                agent_id: agent.name_id.clone(),
+                                current_note: agent.note.clone(),
+                            },
+                            state.operator_info.as_ref().map(|operator| operator.username.as_str()),
+                        );
+                        ui.close();
+                    }
+                });
+            }
+        });
+    }
+
+    /// Event Viewer panel (top-right) — Havoc-style with yellow border accent.
+    fn render_event_viewer(&mut self, ui: &mut egui::Ui, state: &AppState) {
+        // Tab header with close button
+        ui.horizontal(|ui| {
+            let tab_text = RichText::new("Event Viewer").strong();
+            ui.label(tab_text);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui
+                    .button(RichText::new("X").strong().color(Color32::from_rgb(200, 60, 60)))
+                    .clicked()
+                {
+                    self.session_panel.dock.event_viewer_open = false;
+                }
+            });
+        });
+
+        // Event list — green monospace text like Havoc
+        let active_filter = self.session_panel.event_kind_filter;
+        let visible: Vec<_> = state
+            .event_log
+            .entries
+            .iter()
+            .filter(|e| active_filter.is_none_or(|k| e.kind == k))
+            .collect();
+
+        egui::ScrollArea::vertical().id_salt("event_viewer_scroll").stick_to_bottom(true).show(
+            ui,
+            |ui| {
+                for entry in &visible {
+                    let event_color = match entry.kind {
+                        EventKind::Agent => Color32::from_rgb(110, 199, 141),
+                        EventKind::Operator => Color32::from_rgb(100, 180, 240),
+                        EventKind::System => Color32::from_rgb(180, 180, 180),
+                    };
+                    let text = format!("{} [*] {}", entry.sent_at, entry.message);
+                    ui.label(RichText::new(text).color(event_color).monospace().small());
+                }
+            },
+        );
+    }
+
+    /// Bottom dock panel — tabbed like Havoc with closeable tabs.
+    fn render_dock_panel(&mut self, ui: &mut egui::Ui, state: &AppState) {
+        self.session_panel.dock.ensure_selected();
+
+        // ── Tab bar ─────────────────────────────────────────────────
+        let mut tab_to_close: Option<DockTab> = None;
+        let mut tab_to_select: Option<DockTab> = None;
+
+        ui.horizontal(|ui| {
+            for tab in &self.session_panel.dock.open_tabs.clone() {
+                let selected = self.session_panel.dock.selected.as_ref() == Some(tab);
+                let accent = tab.accent_color();
+
+                let frame = if selected {
+                    egui::Frame::default()
+                        .fill(Color32::from_rgb(40, 42, 54))
+                        .stroke(Stroke::new(2.0, accent))
+                        .inner_margin(egui::Margin::symmetric(8, 4))
+                } else {
+                    egui::Frame::default()
+                        .fill(Color32::from_rgb(30, 30, 46))
+                        .inner_margin(egui::Margin::symmetric(8, 4))
+                };
+
+                let response = frame
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let label_text = if selected {
+                                RichText::new(tab.label()).strong().color(Color32::WHITE)
+                            } else {
+                                RichText::new(tab.label()).color(Color32::from_rgb(160, 160, 170))
+                            };
+                            if ui.label(label_text).clicked() {
+                                tab_to_select = Some(tab.clone());
+                            }
+                            if tab.closeable()
+                                && ui
+                                    .button(
+                                        RichText::new("X")
+                                            .small()
+                                            .color(Color32::from_rgb(160, 160, 170)),
+                                    )
+                                    .clicked()
+                            {
+                                tab_to_close = Some(tab.clone());
+                            }
+                        });
+                    })
+                    .response;
+
+                if response.clicked() {
+                    tab_to_select = Some(tab.clone());
+                }
+            }
+        });
+
+        if let Some(tab) = tab_to_close {
+            self.session_panel.dock.close_tab(&tab);
+        }
+        if let Some(tab) = tab_to_select {
+            self.session_panel.dock.selected = Some(tab);
+        }
+
+        ui.separator();
+
+        // ── Tab content ─────────────────────────────────────────────
+        let selected = self.session_panel.dock.selected.clone();
+        match selected {
+            Some(DockTab::TeamserverChat) => {
+                self.render_chat_panel(ui, state);
+            }
+            Some(DockTab::Listeners) => {
+                self.render_listeners_panel(ui, state);
+            }
+            Some(DockTab::SessionGraph) => {
+                self.render_session_graph_panel(ui, state);
+            }
+            Some(DockTab::Scripts) => {
+                self.render_script_manager_panel(ui);
+            }
+            Some(DockTab::Loot) => {
+                self.render_loot_panel(ui, state);
+            }
+            Some(DockTab::AgentConsole(ref agent_id)) => {
+                let agent_id = agent_id.clone();
+                self.session_panel.selected_console = Some(agent_id.clone());
+                self.render_single_console(ui, state, &agent_id);
+            }
+            None => {
+                ui.centered_and_justified(|ui| {
+                    ui.label(
+                        RichText::new("Open a tab from the View menu or interact with an agent")
+                            .weak(),
+                    );
+                });
+            }
+        }
     }
 
     fn render_session_table_header(&mut self, ui: &mut egui::Ui) {
@@ -1253,66 +1463,6 @@ impl ClientApp {
             SessionAction::EditNote { agent_id, current_note } => {
                 self.session_panel.note_editor =
                     Some(NoteEditorState { agent_id, note: current_note });
-            }
-        }
-    }
-
-    fn render_console_workspace(&mut self, ui: &mut egui::Ui, state: &AppState) {
-        self.session_panel.ensure_selected_console();
-        self.render_session_graph_panel(ui, state);
-        ui.add_space(12.0);
-        self.render_script_manager_panel(ui);
-        ui.add_space(12.0);
-
-        if self.session_panel.open_consoles.is_empty() {
-            self.render_overview_panel(ui, state);
-            return;
-        }
-
-        ui.heading("Command Console");
-        ui.separator();
-
-        ui.horizontal_wrapped(|ui| {
-            ui.label("View");
-            egui::ComboBox::from_id_salt("console-layout-mode")
-                .selected_text(match self.session_panel.console_layout {
-                    ConsoleLayoutMode::Tabs => "Tabs",
-                    ConsoleLayoutMode::Split => "Split",
-                })
-                .show_ui(ui, |ui| {
-                    for (value, label) in ConsoleLayoutMode::ALL {
-                        ui.selectable_value(&mut self.session_panel.console_layout, value, label);
-                    }
-                });
-        });
-        ui.add_space(8.0);
-
-        self.render_console_tabs(ui);
-        ui.add_space(8.0);
-
-        match self.session_panel.console_layout {
-            ConsoleLayoutMode::Tabs => {
-                if let Some(agent_id) = self.session_panel.selected_console.clone() {
-                    self.render_single_console(ui, state, &agent_id);
-                }
-            }
-            ConsoleLayoutMode::Split => {
-                let visible = split_console_selection(
-                    &self.session_panel.open_consoles,
-                    self.session_panel.selected_console.as_deref(),
-                )
-                .into_iter()
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>();
-                if visible.len() == 1 {
-                    self.render_single_console(ui, state, &visible[0]);
-                } else {
-                    ui.columns(2, |columns| {
-                        for (column, agent_id) in columns.iter_mut().zip(visible.into_iter()) {
-                            self.render_single_console(column, state, &agent_id);
-                        }
-                    });
-                }
             }
         }
     }
@@ -1905,6 +2055,7 @@ impl ClientApp {
         }
     }
 
+    #[allow(dead_code)]
     fn render_console_tabs(&mut self, ui: &mut egui::Ui) {
         let mut close_agent = None;
 
@@ -2890,6 +3041,55 @@ fn resolve_tls_verification(cli: &Cli, config: &LocalConfig) -> Result<TlsVerifi
     Ok(TlsVerification::CertificateAuthority)
 }
 
+/// Build an egui `Visuals` matching Havoc C2's dark navy theme.
+fn havoc_dark_theme() -> egui::Visuals {
+    let mut visuals = egui::Visuals::dark();
+
+    // Havoc background: dark navy (~#1a1a2e / #16162a)
+    let bg_dark = Color32::from_rgb(22, 22, 42);
+    let bg_panel = Color32::from_rgb(26, 26, 46);
+    let bg_widget = Color32::from_rgb(36, 36, 60);
+    let bg_widget_hover = Color32::from_rgb(46, 46, 76);
+    let bg_widget_active = Color32::from_rgb(56, 56, 90);
+    let accent = Color32::from_rgb(140, 80, 200); // purple accent
+    let text_primary = Color32::from_rgb(220, 220, 230);
+    let text_secondary = Color32::from_rgb(160, 160, 180);
+
+    visuals.panel_fill = bg_panel;
+    visuals.window_fill = bg_dark;
+    visuals.extreme_bg_color = bg_dark;
+    visuals.faint_bg_color = Color32::from_rgb(30, 30, 50);
+
+    // Widget styles
+    visuals.widgets.noninteractive.bg_fill = bg_panel;
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, text_secondary);
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(50, 50, 70));
+
+    visuals.widgets.inactive.bg_fill = bg_widget;
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, text_primary);
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(60, 60, 80));
+
+    visuals.widgets.hovered.bg_fill = bg_widget_hover;
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.5, Color32::WHITE);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, accent);
+
+    visuals.widgets.active.bg_fill = bg_widget_active;
+    visuals.widgets.active.fg_stroke = Stroke::new(2.0, Color32::WHITE);
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0, accent);
+
+    visuals.selection.bg_fill = Color32::from_rgba_unmultiplied(140, 80, 200, 80);
+    visuals.selection.stroke = Stroke::new(1.0, accent);
+
+    // Window shadow + separator
+    visuals.window_shadow =
+        egui::Shadow { offset: [0, 2], blur: 8, spread: 0, color: Color32::from_black_alpha(120) };
+    visuals.popup_shadow = visuals.window_shadow;
+
+    visuals.override_text_color = Some(text_primary);
+
+    visuals
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     launch_client(cli)
@@ -2907,7 +3107,7 @@ fn launch_client(cli: Cli) -> Result<()> {
         WINDOW_TITLE,
         options,
         Box::new(move |creation_context| {
-            creation_context.egui_ctx.set_visuals(egui::Visuals::dark());
+            creation_context.egui_ctx.set_visuals(havoc_dark_theme());
             let app = ClientApp::new(cli)
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
             Ok(Box::new(app) as Box<dyn eframe::App>)
@@ -2927,6 +3127,7 @@ fn role_badge_color(role: Option<&str>) -> Color32 {
 }
 
 /// Renders a small coloured role badge inline.
+#[allow(dead_code)]
 fn role_badge(ui: &mut egui::Ui, role: Option<&str>) {
     let label = role.unwrap_or("unassigned");
     let color = role_badge_color(role);
@@ -2941,6 +3142,7 @@ fn role_badge(ui: &mut egui::Ui, role: Option<&str>) {
 }
 
 /// Renders a single operator entry in the connected-operators list.
+#[allow(dead_code)]
 fn render_operator_entry(ui: &mut egui::Ui, username: &str, op: &ConnectedOperatorState) {
     egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 2)).show(ui, |ui| {
         ui.horizontal(|ui| {
@@ -3480,6 +3682,7 @@ fn closest_command_usage(command: &str) -> Option<&'static str> {
     })
 }
 
+#[allow(dead_code)]
 fn split_console_selection<'a>(
     open_consoles: &'a [String],
     selected_console: Option<&'a str>,

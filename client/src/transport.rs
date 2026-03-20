@@ -206,6 +206,7 @@ pub(crate) enum ConnectionStatus {
 }
 
 impl ConnectionStatus {
+    #[allow(dead_code)]
     pub(crate) fn placeholders() -> [Self; 5] {
         [
             Self::Disconnected,
@@ -235,6 +236,7 @@ impl ConnectionStatus {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn detail(&self) -> Option<&str> {
         match self {
             Self::Retrying(message) | Self::Error(message) => Some(message.as_str()),
@@ -364,6 +366,7 @@ impl EventLog {
     }
 
     /// Total number of entries (read and unread).
+    #[allow(dead_code)]
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }

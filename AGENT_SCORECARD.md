@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 588 | 212 | 31 |
+| Tasks closed | 589 | 212 | 31 |
 | Bugs filed against | 51 | 34 | 9 |
 | Bug rate (bugs/task) | 0.09 | 0.16 | 0.29 |
 | Quality score | 91% | 84% | 71% |
 
-*Bug rates: Claude 51/588=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 51/589=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -41,15 +41,15 @@ Each loop run updates the running totals and appends a review entry.
 
 <!-- QA and arch loops append entries below this line -->
 
-### QA Review — 2026-03-20 15:30 — fd716ba2..0fed7bbd
+### QA Review — 2026-03-20 15:30 — fd716ba2..4f3a3b5c
 
 | Agent | Tasks closed | Bugs filed | Notes |
 |-------|-------------|------------|-------|
-| Claude | 3 | 0 | Closed red-cell-c2-wungl (P2, AgentTask/AgentRegister dispatch wiring — 210 LOC production + 367 LOC tests), red-cell-c2-8y8pc (P3, screenshot handler inline tests — 223 LOC), red-cell-c2-19nvq (P4, token truncation edge case — 55 LOC + warning). All clean: no clippy warnings, no unwrap in production, proper error handling. |
+| Claude | 4 | 0 | Closed red-cell-c2-wungl (P2, AgentTask/AgentRegister dispatch wiring — 210 LOC production + 367 LOC tests), red-cell-c2-8y8pc (P3, screenshot handler inline tests — 223 LOC), red-cell-c2-19nvq (P4, token truncation edge case — 55 LOC + warning), red-cell-c2-t7a0g (P4, rportfwd_list truncated entry test — 21 LOC). WIP on red-cell-c2-ncuir (interrupted). All clean: no clippy warnings, no unwrap in production, proper error handling. |
 | Codex | 0 | 0 | No activity this period. |
 | Cursor | 0 | 0 | No activity this period. |
 
-Build: passed (cargo check, clippy -D warnings, 1660/1660 tests pass)
+Build: passed (cargo check, clippy -D warnings, 1661/1661 tests pass)
 
 ### QA Review — 2026-03-20 23:45 — 3385e1f6..fd716ba2
 

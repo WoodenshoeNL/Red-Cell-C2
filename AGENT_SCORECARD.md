@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 581 | 212 | 31 |
+| Tasks closed | 583 | 212 | 31 |
 | Bugs filed against | 51 | 34 | 9 |
 | Bug rate (bugs/task) | 0.09 | 0.16 | 0.29 |
 | Quality score | 91% | 84% | 71% |
 
-*Bug rates: Claude 51/581=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 51/583=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -2962,3 +2962,13 @@ Build: cargo check passed, clippy passed (0 warnings), cargo test 1602 passed / 
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: cargo check passed, clippy passed (0 warnings), cargo test 2762 passed / 0 failed
+
+### QA Review — 2026-03-20 — beffc218..1cc01f80
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed rveao (mutex poisoning fix — added warn! logging before into_inner() across 5 files: agents.rs, auth.rs, events.rs, python.rs, transport.rs), qweip (TOML parse error fix — log parse errors in local_config.rs instead of silently falling back to defaults). Also filed arch review findings (fb3920a5). Currently has 3w6d5 claimed (output dispatch truncated payload tests). Clean code — no issues found. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (0 warnings), cargo test passed (254 teamserver + all workspace tests, 0 failures)

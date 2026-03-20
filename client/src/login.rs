@@ -390,6 +390,18 @@ mod tests {
         assert_eq!(state.error_message.as_deref(), Some("invalid credentials"));
     }
 
+    /// After an authentication error the cursor should land on the password field so the
+    /// user can retype immediately without reaching for the mouse.
+    #[test]
+    fn set_error_requests_password_focus() {
+        let mut state = default_login_state();
+        // Start from a neutral focus state.
+        state.focus_request = FocusRequest::None;
+
+        state.set_error("wrong password".to_owned());
+        assert_eq!(state.focus_request, FocusRequest::Password);
+    }
+
     #[test]
     fn set_connecting_clears_error() {
         let mut state = default_login_state();

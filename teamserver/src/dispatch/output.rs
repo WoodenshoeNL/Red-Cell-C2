@@ -793,6 +793,72 @@ mod tests {
         assert!(message.contains("kill date"), "expected message about kill date, got {message:?}");
     }
 
+    // -- error path tests for non-existent agent --
+
+    #[tokio::test]
+    async fn exit_callback_nonexistent_agent_returns_error() {
+        let db = Database::connect_in_memory().await.expect("in-memory db must succeed");
+        let registry = AgentRegistry::new(db);
+        let events = EventBus::new(8);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let mut rx = events.subscribe();
+        let nonexistent_id = 0xDEAD_FFFF;
+        let payload = exit_payload(1);
+
+        let result = handle_exit_callback(
+            &registry,
+            &sockets,
+            &events,
+            None,
+            nonexistent_id,
+            REQUEST_ID,
+            &payload,
+        )
+        .await;
+        let err = result.expect_err("nonexistent agent must fail");
+        assert!(
+            matches!(err, CommandDispatchError::Registry(TeamserverError::AgentNotFound { .. })),
+            "expected AgentNotFound, got {err:?}"
+        );
+
+        // Drop all senders so the receiver closes, then verify no events were queued.
+        drop(sockets);
+        drop(events);
+        assert!(rx.recv().await.is_none(), "no events should be broadcast for a nonexistent agent");
+    }
+
+    #[tokio::test]
+    async fn kill_date_callback_nonexistent_agent_returns_error() {
+        let db = Database::connect_in_memory().await.expect("in-memory db must succeed");
+        let registry = AgentRegistry::new(db);
+        let events = EventBus::new(8);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let mut rx = events.subscribe();
+        let nonexistent_id = 0xDEAD_FFFF;
+        let payload = Vec::new();
+
+        let result = handle_kill_date_callback(
+            &registry,
+            &sockets,
+            &events,
+            None,
+            nonexistent_id,
+            REQUEST_ID,
+            &payload,
+        )
+        .await;
+        let err = result.expect_err("nonexistent agent must fail");
+        assert!(
+            matches!(err, CommandDispatchError::Registry(TeamserverError::AgentNotFound { .. })),
+            "expected AgentNotFound, got {err:?}"
+        );
+
+        // Drop all senders so the receiver closes, then verify no events were queued.
+        drop(sockets);
+        drop(events);
+        assert!(rx.recv().await.is_none(), "no events should be broadcast for a nonexistent agent");
+    }
+
     // -- helpers for config callback tests --
 
     fn push_u64(buf: &mut Vec<u8>, value: u64) {

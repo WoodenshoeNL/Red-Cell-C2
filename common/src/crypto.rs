@@ -639,6 +639,22 @@ mod tests {
     }
 
     #[test]
+    fn decrypt_agent_data_at_offset_rejects_overflowing_block_offset() {
+        let key = [0x41; AGENT_KEY_LENGTH];
+        let iv = [0x24; AGENT_IV_LENGTH];
+        // block_offset * 16 overflows u64
+        let overflow_offset = u64::MAX / 16 + 1;
+
+        let error = decrypt_agent_data_at_offset(&key, &iv, overflow_offset, b"data")
+            .expect_err("overflowing block offset must return an error");
+
+        assert!(
+            matches!(error, CryptoError::InvalidCtrOffset { block_offset } if block_offset == overflow_offset),
+            "expected InvalidCtrOffset, got {error:?}"
+        );
+    }
+
+    #[test]
     fn ctr_blocks_for_len_rounds_up_to_full_blocks() {
         assert_eq!(ctr_blocks_for_len(0), 0);
         assert_eq!(ctr_blocks_for_len(1), 1);

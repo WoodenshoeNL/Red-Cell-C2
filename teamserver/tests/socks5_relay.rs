@@ -421,6 +421,96 @@ async fn socks5_rejects_unsupported_auth_method() -> Result<(), Box<dyn std::err
 }
 
 // ---------------------------------------------------------------------------
+// SOCKS5 unsupported command rejection (BIND, UDP ASSOCIATE)
+// ---------------------------------------------------------------------------
+
+/// Helper: send a SOCKS5 request with an arbitrary command byte (IPv4 target).
+async fn socks5_send_command(
+    stream: &mut TcpStream,
+    command: u8,
+    addr: [u8; 4],
+    port: u16,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut request = vec![SOCKS_VERSION, command, 0, SOCKS_ATYP_IPV4];
+    request.extend_from_slice(&addr);
+    request.extend_from_slice(&port.to_be_bytes());
+    stream.write_all(&request).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+/// SOCKS5 BIND command (0x02) must be rejected with REP=0x07
+/// (command not supported). No job should be enqueued for the agent.
+#[tokio::test]
+async fn socks5_rejects_bind_command() -> Result<(), Box<dyn std::error::Error>> {
+    let (_database, registry, manager) = test_manager().await?;
+    let agent_id = 0xAABB_00A0_u32;
+    registry.insert(sample_agent(agent_id)).await?;
+
+    let (port, guard) = common::available_port()?;
+    drop(guard);
+    manager.add_socks_server(agent_id, &port.to_string()).await?;
+
+    let mut client =
+        timeout(Duration::from_secs(2), TcpStream::connect(format!("127.0.0.1:{port}"))).await??;
+    socks5_handshake(&mut client).await?;
+
+    // Send BIND command (0x02) instead of CONNECT.
+    socks5_send_command(&mut client, 0x02, [93, 184, 216, 34], 80).await?;
+
+    // Read the SOCKS5 reply — expect REP=0x07 (command not supported).
+    // The server sends an IPv4 reply with zeroed bind address (10 bytes total)
+    // and then drops the connection. Use a bulk read to capture whatever the
+    // server sends before the RST/FIN arrives.
+    let mut buf = [0u8; 64];
+    let n = timeout(Duration::from_secs(2), client.read(&mut buf)).await??;
+    assert!(n >= 10, "server must send at least 10-byte SOCKS5 reply; got {n} bytes");
+    assert_eq!(buf[0], SOCKS_VERSION, "reply must be SOCKS5");
+    assert_eq!(buf[1], 0x07, "REP must be 0x07 (command not supported) for BIND");
+
+    // Verify no job was enqueued for the agent.
+    let jobs = registry.queued_jobs(agent_id).await?;
+    assert!(jobs.is_empty(), "no job should be enqueued for a rejected BIND command");
+
+    manager.clear_socks_servers(agent_id).await?;
+    Ok(())
+}
+
+/// SOCKS5 UDP ASSOCIATE command (0x03) must be rejected with REP=0x07
+/// (command not supported). No job should be enqueued for the agent.
+#[tokio::test]
+async fn socks5_rejects_udp_associate_command() -> Result<(), Box<dyn std::error::Error>> {
+    let (_database, registry, manager) = test_manager().await?;
+    let agent_id = 0xAABB_00A1_u32;
+    registry.insert(sample_agent(agent_id)).await?;
+
+    let (port, guard) = common::available_port()?;
+    drop(guard);
+    manager.add_socks_server(agent_id, &port.to_string()).await?;
+
+    let mut client =
+        timeout(Duration::from_secs(2), TcpStream::connect(format!("127.0.0.1:{port}"))).await??;
+    socks5_handshake(&mut client).await?;
+
+    // Send UDP ASSOCIATE command (0x03) instead of CONNECT.
+    socks5_send_command(&mut client, 0x03, [0, 0, 0, 0], 0).await?;
+
+    // Read the SOCKS5 reply — expect REP=0x07 (command not supported).
+    let mut buf = [0u8; 64];
+    let n = timeout(Duration::from_secs(2), client.read(&mut buf)).await??;
+    assert!(n >= 10, "server must send at least 10-byte SOCKS5 reply; got {n} bytes");
+    assert_eq!(buf[0], SOCKS_VERSION, "reply must be SOCKS5");
+    assert_eq!(buf[1], 0x07, "REP must be 0x07 (command not supported) for UDP ASSOCIATE");
+
+    // Verify no job was enqueued for the agent.
+    let jobs = registry.queued_jobs(agent_id).await?;
+    assert!(jobs.is_empty(), "no job should be enqueued for a rejected UDP ASSOCIATE command");
+
+    manager.clear_socks_servers(agent_id).await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Data relay tests
 // ---------------------------------------------------------------------------
 

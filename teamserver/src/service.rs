@@ -839,19 +839,28 @@ mod tests {
         assert!(response["Body"]["Success"].as_bool().unwrap());
     }
 
-    #[test]
-    fn dispatch_returns_ok_for_unknown_head_type() {
-        // This tests that unknown message types are silently ignored.
-        let message = serde_json::json!({
-            "Head": { "Type": "UnknownType" },
-            "Body": {},
+    #[tokio::test]
+    async fn dispatch_returns_ok_for_unknown_listener_subtype() {
+        // `dispatch_message` requires a `WebSocket` (not constructable in unit
+        // tests), so we test the equivalent "unknown type → Ok" path via
+        // `handle_listener_message`, which `dispatch_message` delegates to for
+        // HEAD_LISTENER messages and which has the same unknown-type branch.
+        let bridge = ServiceBridge::new(ServiceConfig {
+            endpoint: "test".to_owned(),
+            password: "pw".to_owned(),
         });
-        let head_type = message
-            .get("Head")
-            .and_then(|h| h.get("Type"))
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        assert_eq!(head_type, "UnknownType");
+        let events = EventBus::default();
+        let mut client_listeners = Vec::new();
+
+        let message = serde_json::json!({
+            "Head": { "Type": HEAD_LISTENER },
+            "Body": { "Type": "CompletelyUnknownBodyType" },
+        });
+
+        let result =
+            handle_listener_message(&message, &bridge, &events, &mut client_listeners).await;
+        assert!(result.is_ok(), "unknown listener sub-type should be silently ignored");
+        assert!(client_listeners.is_empty(), "no listener should be registered");
     }
 
     #[tokio::test]
@@ -958,17 +967,30 @@ mod tests {
         );
     }
 
-    #[test]
-    fn missing_agent_name_returns_error() {
+    #[tokio::test]
+    async fn missing_agent_name_returns_error() {
+        let bridge = ServiceBridge::new(ServiceConfig {
+            endpoint: "test".to_owned(),
+            password: "pw".to_owned(),
+        });
+        let events = EventBus::default();
+        let mut client_agents = Vec::new();
+
         let message = serde_json::json!({
             "Head": { "Type": HEAD_REGISTER_AGENT },
             "Body": {
                 "Agent": {}
             },
         });
-        let agent_data = message.get("Body").and_then(|b| b.get("Agent")).unwrap();
-        let name = agent_data.get("Name").and_then(Value::as_str);
-        assert!(name.is_none());
+
+        let err = handle_register_agent(&message, &bridge, &events, &mut client_agents)
+            .await
+            .expect_err("missing Name should fail");
+
+        assert!(
+            matches!(err, ServiceBridgeError::MissingField(ref f) if f.contains("Name")),
+            "expected MissingField error mentioning Name, got: {err:?}"
+        );
     }
 
     // ── AgentTask handler tests ─────────────────────────────────────

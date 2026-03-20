@@ -115,6 +115,7 @@ impl EventReceiver {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::Arc;
 
     use red_cell_common::operator::{
         ChatUserInfo, EventCode, FlatInfo, ListenerErrorInfo, Message, MessageHead,
@@ -291,6 +292,65 @@ mod tests {
 
         let logs = bus.recent_teamserver_logs();
         assert_eq!(logs, vec![second]);
+    }
+
+    /// Poison the inner history mutex by panicking a thread while it holds the lock.
+    fn poison_history(bus: &EventBus) {
+        let mutex = Arc::clone(&bus.recent_teamserver_logs);
+        let handle = std::thread::spawn(move || {
+            let _guard = mutex.lock().unwrap();
+            panic!("intentional panic to poison mutex");
+        });
+        // The thread panicked — join returns Err but the mutex is now poisoned.
+        let _ = handle.join();
+    }
+
+    #[tokio::test]
+    async fn broadcast_recovers_from_poisoned_history_mutex() {
+        let bus = EventBus::new(4);
+
+        // Broadcast one event before poisoning so the history is non-empty.
+        bus.broadcast(log_message("before-poison"));
+
+        poison_history(&bus);
+
+        // broadcast() should recover via poisoned.into_inner() rather than panicking.
+        let count = bus.broadcast(log_message("after-poison"));
+        // No subscribers, so count is 0 — the important thing is we didn't panic.
+        assert_eq!(count, 0);
+
+        // The history should contain both messages, proving the poisoned guard was recovered.
+        let logs = bus.recent_teamserver_logs();
+        assert_eq!(logs, vec![log_message("before-poison"), log_message("after-poison")]);
+    }
+
+    #[tokio::test]
+    async fn recent_teamserver_logs_recovers_from_poisoned_mutex() {
+        let bus = EventBus::new(4);
+
+        bus.broadcast(log_message("surviving"));
+
+        poison_history(&bus);
+
+        // recent_teamserver_logs() should recover rather than panicking.
+        let logs = bus.recent_teamserver_logs();
+        assert_eq!(logs, vec![log_message("surviving")]);
+    }
+
+    #[tokio::test]
+    async fn broadcast_and_logs_work_after_repeated_poisoning() {
+        let bus = EventBus::new(4);
+
+        bus.broadcast(log_message("first"));
+        poison_history(&bus);
+
+        bus.broadcast(log_message("second"));
+        poison_history(&bus);
+
+        bus.broadcast(log_message("third"));
+
+        let logs = bus.recent_teamserver_logs();
+        assert_eq!(logs, vec![log_message("first"), log_message("second"), log_message("third")]);
     }
 
     #[tokio::test]

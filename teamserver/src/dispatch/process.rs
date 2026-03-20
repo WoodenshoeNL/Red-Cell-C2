@@ -1693,6 +1693,49 @@ mod tests {
         assert_eq!(arr[1]["Arch"], "x86"); // arch == 86 → x86
     }
 
+    #[tokio::test]
+    async fn process_grep_user_bytes_null_terminator_edge_cases() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let payload = build_process_grep_payload(&[
+            // No null terminator — raw string should be preserved as-is
+            ("notepad.exe", 100, 4, b"admin", 64),
+            // Multiple trailing null bytes — all should be stripped
+            ("svchost.exe", 200, 4, b"user\0\0\0", 64),
+            // Entirely null bytes — should produce an empty string
+            ("idle.exe", 300, 4, b"\0", 86),
+        ]);
+
+        handle_process_command_callback(&events, 0xC2, 31, &payload)
+            .await
+            .expect("handler should succeed");
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("event");
+
+        let OperatorMessage::AgentResponse(ref msg) = event else {
+            panic!("expected AgentResponse, got {event:?}");
+        };
+
+        let rows_json = msg.info.extra.get("GrepRows").expect("missing GrepRows");
+        let arr = rows_json.as_array().expect("GrepRows should be array");
+        assert_eq!(arr.len(), 3);
+
+        // No null terminator — user string preserved
+        assert_eq!(arr[0]["Name"], "notepad.exe");
+        assert_eq!(arr[0]["User"], "admin");
+
+        // Multiple trailing nulls — all stripped
+        assert_eq!(arr[1]["Name"], "svchost.exe");
+        assert_eq!(arr[1]["User"], "user");
+
+        // Entirely null — empty string
+        assert_eq!(arr[2]["Name"], "idle.exe");
+        assert_eq!(arr[2]["User"], "");
+    }
+
     // ── handle_process_command_callback — Memory branch ─────────────────────
 
     fn build_process_memory_payload(

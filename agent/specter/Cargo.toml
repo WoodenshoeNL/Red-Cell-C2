@@ -1,0 +1,13 @@
+[package]
+name = "specter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Rust rewrite of the Demon agent — full protocol and feature parity with the original"
+
+[lints]
+workspace = true
+
+[dependencies]

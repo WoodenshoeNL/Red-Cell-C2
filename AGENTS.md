@@ -17,7 +17,7 @@ Rewrite of the [Havoc C2 framework](./src/Havoc) in Rust — teamserver and oper
 
 | Concern | Decision |
 |---|---|
-| **Repo structure** | Cargo workspace: `./teamserver`, `./client`, `./common` at repo root |
+| **Repo structure** | Cargo workspace: `./teamserver`, `./client`, `./common` at repo root. Agent source in `./agent/`. Profiles in `./profiles/`. |
 | **Binaries** | `red-cell` (teamserver), `red-cell-client` (operator GUI) |
 | **Rust edition** | 2024, latest stable |
 | **Teamserver framework** | Axum + Tokio |
@@ -31,6 +31,18 @@ Rewrite of the [Havoc C2 framework](./src/Havoc) in Rust — teamserver and oper
 | **Testing** | Full suite: unit + integration (mock Demon agent) + E2E |
 
 The original Havoc source lives in `./src/Havoc` as reference only — **do not modify it, do not stage it, do not delete it**. It is committed to git for cross-machine sync, but it is **read-only**. Agents must never edit, create, or delete any file under `./src/`. It is there purely so the code can be read as a reference implementation.
+
+### Profiles
+
+Teamserver profiles live in `./profiles/` (`.yaotl` config files + TLS certs). This is the canonical location — use `--profile profiles/havoc.yaotl` when running the teamserver.
+
+### Agent Variants (`./agent/`)
+
+| Directory | Name | Language | Policy |
+|-----------|------|----------|--------|
+| `agent/demon/` | **Demon** | C/ASM | **Frozen** — pristine copy of the Havoc Demon. Do not modify. Replace with upstream to update. |
+| `agent/archon/` | **Archon** | C/ASM | **Mutable** — enhanced fork of Demon. Changes and improvements welcome. |
+| `agent/specter/` | **Specter** | Rust | **New** — ground-up Rust rewrite targeting full Demon protocol/feature parity. |
 
 ## Stopping a Dev Loop
 

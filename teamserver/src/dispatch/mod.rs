@@ -4948,7 +4948,7 @@ mod tests {
         assert_eq!(
             msg.info.extra.get("Message"),
             Some(&Value::String(
-                "Failed to copied file C:\\nope\\a.txt to C:\\nope\\b.txt".to_owned()
+                "Failed to copy file C:\\nope\\a.txt to C:\\nope\\b.txt".to_owned()
             ))
         );
         assert_eq!(msg.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));
@@ -5030,7 +5030,7 @@ mod tests {
         assert_eq!(
             msg.info.extra.get("Message"),
             Some(&Value::String(
-                "Failed to moved file C:\\locked\\x.dll to C:\\dest\\x.dll".to_owned()
+                "Failed to move file C:\\locked\\x.dll to C:\\dest\\x.dll".to_owned()
             ))
         );
         assert_eq!(msg.info.extra.get("Type"), Some(&Value::String("Error".to_owned())));

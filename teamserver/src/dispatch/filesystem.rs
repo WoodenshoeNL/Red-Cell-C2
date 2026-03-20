@@ -305,12 +305,13 @@ pub(super) async fn handle_filesystem_callback(
             let success = parser.read_bool("filesystem copy/move success")?;
             let from = parser.read_utf16("filesystem copy/move from")?;
             let to = parser.read_utf16("filesystem copy/move to")?;
-            let verb =
-                if matches!(subcommand, DemonFilesystemCommand::Copy) { "copied" } else { "moved" };
+            let is_copy = matches!(subcommand, DemonFilesystemCommand::Copy);
             let kind = if success { "Good" } else { "Error" };
             let message = if success {
+                let verb = if is_copy { "copied" } else { "moved" };
                 format!("Successfully {verb} file {from} to {to}")
             } else {
+                let verb = if is_copy { "copy" } else { "move" };
                 format!("Failed to {verb} file {from} to {to}")
             };
             events.broadcast(agent_response_event(
@@ -1888,7 +1889,7 @@ mod tests {
             panic!("expected AgentResponse, got {event:?}");
         };
         let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
-        assert!(message.contains("Failed to copied"), "message: {message}");
+        assert!(message.contains("Failed to copy"), "message: {message}");
         assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Error"));
     }
 
@@ -1926,7 +1927,7 @@ mod tests {
             panic!("expected AgentResponse, got {event:?}");
         };
         let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
-        assert!(message.contains("Failed to moved"), "message: {message}");
+        assert!(message.contains("Failed to move"), "message: {message}");
         assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Error"));
     }
 
@@ -2282,7 +2283,7 @@ mod tests {
             panic!("expected AgentResponse, got {event:?}");
         };
         let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
-        assert!(message.contains("Failed to moved"), "message: {message}");
+        assert!(message.contains("Failed to move"), "message: {message}");
         assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Error"));
     }
 

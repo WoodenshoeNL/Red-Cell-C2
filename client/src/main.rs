@@ -7155,6 +7155,14 @@ mod tests {
     }
 
     #[test]
+    fn cli_optional_fields_default_to_none() {
+        let cli = Cli::parse_from(["red-cell-client"]);
+        assert!(cli.scripts_dir.is_none());
+        assert!(cli.ca_cert.is_none());
+        assert!(cli.cert_fingerprint.is_none());
+    }
+
+    #[test]
     fn cli_accept_invalid_certs_defaults_to_false() {
         let cli = Cli::parse_from(["red-cell-client"]);
         assert!(!cli.accept_invalid_certs);
@@ -7164,6 +7172,18 @@ mod tests {
     fn cli_accept_invalid_certs_flag_sets_true() {
         let cli = Cli::parse_from(["red-cell-client", "--accept-invalid-certs"]);
         assert!(cli.accept_invalid_certs);
+    }
+
+    #[test]
+    fn cli_rejects_unknown_args() {
+        let result = Cli::try_parse_from(["red-cell-client", "--nonexistent-flag"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cli_rejects_unknown_positional_args() {
+        let result = Cli::try_parse_from(["red-cell-client", "unexpected-positional"]);
+        assert!(result.is_err());
     }
 
     #[test]

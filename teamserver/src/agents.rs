@@ -3288,6 +3288,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mark_dead_on_already_dead_agent_is_idempotent() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let agent = sample_agent(0x1000_00DD);
+        let cleaned = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cleanup_observer = cleaned.clone();
+        registry.register_cleanup_hook(move |agent_id| {
+            let cleaned = cleanup_observer.clone();
+            async move {
+                let mut cleaned = cleaned.lock().expect("cleanup tracker lock should succeed");
+                cleaned.push(agent_id);
+            }
+        });
+        registry.insert(agent.clone()).await?;
+
+        // First call: mark the agent dead.
+        registry.mark_dead(agent.agent_id, "lost contact").await?;
+        let after_first = registry
+            .get(agent.agent_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?;
+        assert!(!after_first.active);
+        assert_eq!(after_first.reason, "lost contact");
+
+        // Second call: mark the already-dead agent dead again with a different reason.
+        registry.mark_dead(agent.agent_id, "operator kill").await?;
+        let after_second = registry
+            .get(agent.agent_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?;
+        assert!(!after_second.active);
+        assert_eq!(after_second.reason, "operator kill");
+
+        // Verify the database also reflects the updated reason.
+        let persisted = database
+            .agents()
+            .get(agent.agent_id)
+            .await?
+            .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?;
+        assert!(!persisted.active);
+        assert_eq!(persisted.reason, "operator kill");
+
+        // Cleanup hooks fire on every mark_dead call (current behavior).
+        assert_eq!(
+            cleaned.lock().expect("cleanup tracker lock should succeed").as_slice(),
+            &[agent.agent_id, agent.agent_id]
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn set_note_returns_agent_not_found_for_unknown_id() -> Result<(), TeamserverError> {
         let database = test_database().await?;
         let registry = AgentRegistry::new(database);

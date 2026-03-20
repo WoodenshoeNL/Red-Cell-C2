@@ -3161,4 +3161,64 @@ havoc.RegisterCommand("scan", "second scan", run_scan)
         assert_eq!(PluginEvent::parse("\tagent_dead\n"), Some(PluginEvent::AgentDead));
         assert_eq!(PluginEvent::parse("   "), None);
     }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn match_registered_command_resolves_ambiguous_prefix_to_longest()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-ambiguous-prefix").await?;
+
+        let handle = std::thread::spawn({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| -> PyResult<()> {
+                    runtime.install_api_module(py)?;
+                    let module = py.import("red_cell")?;
+                    let noop =
+                        py.eval(pyo3::ffi::c_str!("lambda agent, args: None"), None, None)?;
+                    module.call_method1("register_command", ("scan", "short scan", &noop))?;
+                    module.call_method1("register_command", ("scan_deep", "deep scan", &noop))?;
+                    Ok(())
+                })
+            }
+        });
+        handle.join().map_err(|_| "python test thread panicked")??;
+
+        // "scan_deep target" must match "scan_deep", not "scan"
+        assert_eq!(
+            runtime
+                .match_registered_command(&AgentTaskInfo {
+                    command_line: "scan_deep target".to_owned(),
+                    ..AgentTaskInfo::default()
+                })
+                .await,
+            Some(("scan_deep".to_owned(), vec!["target".to_owned()]))
+        );
+
+        // "scan host1" must still match "scan"
+        assert_eq!(
+            runtime
+                .match_registered_command(&AgentTaskInfo {
+                    command_line: "scan host1".to_owned(),
+                    ..AgentTaskInfo::default()
+                })
+                .await,
+            Some(("scan".to_owned(), vec!["host1".to_owned()]))
+        );
+
+        // exact "scan_deep" with no args must match "scan_deep"
+        assert_eq!(
+            runtime
+                .match_registered_command(&AgentTaskInfo {
+                    command_line: "scan_deep".to_owned(),
+                    ..AgentTaskInfo::default()
+                })
+                .await,
+            Some(("scan_deep".to_owned(), vec![]))
+        );
+
+        Ok(())
+    }
 }

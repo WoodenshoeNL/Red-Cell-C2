@@ -662,9 +662,9 @@ mod tests {
     use zeroize::Zeroizing;
 
     use super::{
-        AgentRecord, DnsListenerConfig, HttpListenerConfig, HttpListenerProxyConfig,
-        HttpListenerResponseConfig, ListenerConfig, ListenerProtocol, ListenerTlsConfig,
-        OperatorInfo, SmbListenerConfig,
+        AgentEncryptionInfo, AgentRecord, BASE64_STANDARD, DnsListenerConfig, HttpListenerConfig,
+        HttpListenerProxyConfig, HttpListenerResponseConfig, ListenerConfig, ListenerProtocol,
+        ListenerTlsConfig, OperatorInfo, SmbListenerConfig,
     };
     use crate::error::CommonError;
 
@@ -1115,6 +1115,44 @@ mod tests {
         assert!(
             debug_output.contains("[redacted]"),
             "Debug output must contain [redacted]: {debug_output}"
+        );
+    }
+
+    #[test]
+    fn agent_encryption_info_debug_redacts_key_material() {
+        use base64::Engine as _;
+
+        let key_bytes = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04];
+        let iv_bytes = vec![0xCA, 0xFE, 0xBA, 0xBE, 0x05, 0x06, 0x07, 0x08];
+        let key_b64 = BASE64_STANDARD.encode(&key_bytes);
+        let iv_b64 = BASE64_STANDARD.encode(&iv_bytes);
+
+        let info = AgentEncryptionInfo {
+            aes_key: Zeroizing::new(key_bytes),
+            aes_iv: Zeroizing::new(iv_bytes),
+        };
+        let debug_output = format!("{info:?}");
+
+        assert!(
+            debug_output.contains("[redacted]"),
+            "Debug output must contain [redacted]: {debug_output}"
+        );
+        assert!(
+            !debug_output.contains(&key_b64),
+            "Debug output must not contain base64 key: {debug_output}"
+        );
+        assert!(
+            !debug_output.contains(&iv_b64),
+            "Debug output must not contain base64 IV: {debug_output}"
+        );
+        // Verify raw byte sequences don't leak either (e.g. as [222, 173, ...])
+        assert!(
+            !debug_output.contains("222"),
+            "Debug output must not contain raw key bytes: {debug_output}"
+        );
+        assert!(
+            !debug_output.contains("202"),
+            "Debug output must not contain raw IV bytes: {debug_output}"
         );
     }
 

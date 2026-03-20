@@ -197,16 +197,15 @@ async fn pivot_connect_new_child_agent_registered_and_announced()
     Ok(())
 }
 
-/// When the child agent already exists in the registry, `DemonPacketParser::parse_for_listener`
-/// rejects the duplicate full DEMON_INIT with `InvalidInit("agent is already registered")`.
-/// This causes `handle_pivot_connect_callback` to return `InvalidCallbackPayload`, so no
-/// `agent_mark_event` or `agent_new_event` is broadcast and no pivot link is established.
-///
-/// NOTE: The `if existed { agent_mark_event }` branch in `handle_pivot_connect_callback` is
-/// unreachable because `parse_for_listener` always rejects duplicate inits before the branch
-/// is reached.  See issue red-cell-c2-jmo0u for tracking.
+/// When the child agent already exists in the registry, the pivot connect handler
+/// treats this as a reconnect: it reuses the existing agent record, updates
+/// `last_call_in`, reactivates the agent if dead, establishes the pivot link, and
+/// broadcasts an `AgentUpdate` (mark) followed by an `AgentResponse` confirming
+/// the connection.  This matches the original Havoc behaviour where pivot
+/// reconnects are handled by retrieving the existing instance rather than
+/// re-parsing the DEMON_INIT.
 #[tokio::test]
-async fn pivot_connect_existing_child_rejected_as_duplicate()
+async fn pivot_connect_existing_child_reconnects_successfully()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut h = setup_pivot_test("pivot-reconnect").await?;
 
@@ -227,13 +226,11 @@ async fn pivot_connect_existing_child_rejected_as_duplicate()
         "expected AgentNew for pre-registered child, got {child_new:?}"
     );
 
-    // Now send the pivot connect callback — child already exists, parse_for_listener
-    // rejects the duplicate full DEMON_INIT.
+    // Now send the pivot connect callback — child already exists, handler
+    // should treat this as a reconnect.
     let payload = pivot_connect_success_payload(child_agent_id, child_key, child_iv);
 
-    // The dispatch error surfaces as a non-200 response from the listener.
-    let _resp = h
-        .client
+    h.client
         .post(format!("http://127.0.0.1:{}/", h.listener_port))
         .body(common::valid_demon_callback_body(
             h.parent_agent_id,
@@ -245,17 +242,35 @@ async fn pivot_connect_existing_child_rejected_as_duplicate()
             &payload,
         ))
         .send()
-        .await?;
+        .await?
+        .error_for_status()?;
 
-    // No AgentUpdate (mark) or AgentResponse should be broadcast — the duplicate
-    // init rejection causes the handler to return an error before reaching the
-    // event broadcast code.
-    common::assert_no_operator_message(&mut h.socket, std::time::Duration::from_millis(500)).await;
+    // First broadcast: AgentUpdate (mark) for the reconnected child.
+    let mark_event = common::read_operator_message(&mut h.socket).await?;
+    let OperatorMessage::AgentUpdate(update) = &mark_event else {
+        panic!("expected AgentUpdate for reconnected child, got {mark_event:?}");
+    };
+    assert_eq!(
+        update.info.agent_id,
+        format!("{child_agent_id:08X}"),
+        "mark event must reference the child agent"
+    );
+    assert_eq!(update.info.marked, "Alive", "reconnected child must be marked Alive");
 
-    // The child should still exist from the original registration, but no new
-    // pivot link should have been added by this failed callback.
+    // Second broadcast: AgentResponse confirming the pivot connection.
+    let resp_event = common::read_operator_message(&mut h.socket).await?;
+    let OperatorMessage::AgentResponse(resp) = &resp_event else {
+        panic!("expected AgentResponse, got {resp_event:?}");
+    };
+    let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+    assert!(
+        message.contains("[SMB] Connected to pivot agent"),
+        "response must confirm pivot connection, got: {message}"
+    );
+
+    // The child should still exist and now have a pivot link to the parent.
     let child_record = h.server.agent_registry.get(child_agent_id).await;
-    assert!(child_record.is_some(), "child should still exist from original registration");
+    assert!(child_record.is_some(), "child must exist after reconnect");
 
     Ok(())
 }

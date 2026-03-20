@@ -121,42 +121,72 @@ async fn handle_pivot_connect_callback(
             message: error.to_string(),
         }
     })?;
-    let existed = registry.get(child_agent_id).await.is_some();
-    let external_ip =
-        registry.get(parent_agent_id).await.map(|agent| agent.external_ip).unwrap_or_default();
     let listener_name =
         registry.listener_name(parent_agent_id).await.unwrap_or_else(|| "smb".to_owned());
-    let parsed = DemonPacketParser::new(registry.clone())
-        .parse_for_listener(&inner, external_ip, &listener_name)
-        .await;
-    let child_agent = match parsed {
-        Ok(crate::ParsedDemonPacket::Init(init)) => init.agent,
-        Ok(_) => {
-            return Err(CommandDispatchError::InvalidCallbackPayload {
-                command_id: u32::from(DemonCommand::CommandPivot),
-                message: "pivot connect payload did not contain a demon init envelope".to_owned(),
-            });
-        }
-        Err(error) => {
-            return Err(CommandDispatchError::InvalidCallbackPayload {
-                command_id: u32::from(DemonCommand::CommandPivot),
-                message: error.to_string(),
-            });
-        }
-    };
 
-    registry.add_link(parent_agent_id, child_agent.agent_id).await?;
-    let pivots = registry.pivots(child_agent.agent_id).await;
-    if existed {
-        events.broadcast(agent_mark_event(&child_agent));
+    // Verify the inner envelope contains a DEMON_INIT command; any other
+    // command type is invalid in a pivot connect payload regardless of
+    // whether the agent is already registered or not.
+    let inner_command = inner_demon_command_id(&inner).map_err(|error| {
+        CommandDispatchError::InvalidCallbackPayload {
+            command_id: u32::from(DemonCommand::CommandPivot),
+            message: error.to_string(),
+        }
+    })?;
+    if inner_command != u32::from(DemonCommand::DemonInit) {
+        return Err(CommandDispatchError::InvalidCallbackPayload {
+            command_id: u32::from(DemonCommand::CommandPivot),
+            message: "pivot connect payload did not contain a demon init envelope".to_owned(),
+        });
+    }
+
+    // If the child agent is already registered this is a pivot reconnect.
+    // Re-use the existing record (matching Havoc behaviour) instead of
+    // calling parse_for_listener, which would reject the duplicate init.
+    let child_agent = if registry.get(child_agent_id).await.is_some() {
+        let timestamp = OffsetDateTime::now_utc().format(&Rfc3339).map_err(|e| {
+            CommandDispatchError::InvalidCallbackPayload {
+                command_id: u32::from(DemonCommand::CommandPivot),
+                message: format!("failed to format reconnect timestamp: {e}"),
+            }
+        })?;
+        // Reactivates the agent if it was marked dead and updates last_call_in.
+        let updated = registry.set_last_call_in(child_agent_id, timestamp).await?;
+        registry.add_link(parent_agent_id, child_agent_id).await?;
+        events.broadcast(agent_mark_event(&updated));
+        updated
     } else {
+        let external_ip =
+            registry.get(parent_agent_id).await.map(|agent| agent.external_ip).unwrap_or_default();
+        let parsed = DemonPacketParser::new(registry.clone())
+            .parse_for_listener(&inner, external_ip, &listener_name)
+            .await;
+        let agent = match parsed {
+            Ok(crate::ParsedDemonPacket::Init(init)) => init.agent,
+            Ok(_) => {
+                return Err(CommandDispatchError::InvalidCallbackPayload {
+                    command_id: u32::from(DemonCommand::CommandPivot),
+                    message: "pivot connect payload did not contain a demon init envelope"
+                        .to_owned(),
+                });
+            }
+            Err(error) => {
+                return Err(CommandDispatchError::InvalidCallbackPayload {
+                    command_id: u32::from(DemonCommand::CommandPivot),
+                    message: error.to_string(),
+                });
+            }
+        };
+        registry.add_link(parent_agent_id, agent.agent_id).await?;
+        let pivots = registry.pivots(agent.agent_id).await;
         events.broadcast(agent_new_event(
             &listener_name,
             red_cell_common::demon::DEMON_MAGIC_VALUE,
-            &child_agent,
+            &agent,
             &pivots,
         ));
-    }
+        agent
+    };
     events.broadcast(agent_response_event(
         parent_agent_id,
         u32::from(DemonCommand::CommandPivot),
@@ -266,6 +296,24 @@ pub(super) fn inner_demon_agent_id(bytes: &[u8]) -> Result<u32, DemonProtocolErr
     Ok(red_cell_common::demon::DemonEnvelope::from_bytes(bytes)?.header.agent_id)
 }
 
+/// Extract the top-level command ID from a raw Demon envelope payload.
+fn inner_demon_command_id(bytes: &[u8]) -> Result<u32, DemonProtocolError> {
+    let envelope = red_cell_common::demon::DemonEnvelope::from_bytes(bytes)?;
+    if envelope.payload.len() < 4 {
+        return Err(DemonProtocolError::BufferTooShort {
+            context: "inner command id",
+            expected: 4,
+            actual: envelope.payload.len(),
+        });
+    }
+    Ok(u32::from_be_bytes([
+        envelope.payload[0],
+        envelope.payload[1],
+        envelope.payload[2],
+        envelope.payload[3],
+    ]))
+}
+
 #[cfg(test)]
 mod tests {
     use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
@@ -278,7 +326,8 @@ mod tests {
 
     use super::{
         CallbackParser, CommandDispatchError, DemonCallbackPackage, handle_pivot_command_callback,
-        handle_pivot_disconnect_callback, handle_pivot_list_callback, inner_demon_agent_id,
+        handle_pivot_connect_callback, handle_pivot_disconnect_callback,
+        handle_pivot_list_callback, inner_demon_agent_id,
     };
     use crate::dispatch::pivot::dispatch_builtin_packages;
     use crate::dispatch::{BuiltinDispatchContext, DownloadTracker};
@@ -291,6 +340,18 @@ mod tests {
     fn valid_envelope_bytes(agent_id: u32) -> Vec<u8> {
         DemonEnvelope::new(agent_id, Vec::new())
             .expect("envelope construction must succeed")
+            .to_bytes()
+    }
+
+    /// Build a Demon envelope whose payload starts with the DEMON_INIT command ID,
+    /// followed by a dummy request_id. Used for pivot connect tests where the
+    /// inner envelope must look like an init packet.
+    fn valid_init_envelope_bytes(agent_id: u32) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u32::from(DemonCommand::DemonInit).to_be_bytes());
+        payload.extend_from_slice(&0_u32.to_be_bytes()); // request_id
+        DemonEnvelope::new(agent_id, payload)
+            .expect("init envelope construction must succeed")
             .to_bytes()
     }
 
@@ -1010,6 +1071,159 @@ mod tests {
         // No mark events should have been broadcast — only the one error response above.
         let no_extra = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
         assert!(no_extra.is_err(), "no additional events should be broadcast on failure path");
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests for handle_pivot_connect_callback
+    // -----------------------------------------------------------------------
+
+    /// Build a connect callback payload: success (u32 LE) + LE-length-prefixed inner bytes.
+    fn connect_payload(success: u32, inner_envelope: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        push_u32(&mut buf, success);
+        push_u32(&mut buf, u32::try_from(inner_envelope.len()).unwrap_or_default());
+        buf.extend_from_slice(inner_envelope);
+        buf
+    }
+
+    #[tokio::test]
+    async fn pivot_connect_reconnect_reuses_existing_agent_and_emits_mark_event()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_database, registry, events, _sockets, _downloads) = setup_dispatch_context().await;
+        let mut rx = events.subscribe();
+
+        let parent_id: u32 = 0xDD00_0001;
+        let child_id: u32 = 0xDD00_0002;
+
+        // Register both agents and establish a link so disconnect_link can work.
+        registry
+            .insert(sample_agent_info(parent_id, [0xA0; AGENT_KEY_LENGTH], [0xA1; AGENT_IV_LENGTH]))
+            .await?;
+        registry
+            .insert(sample_agent_info(child_id, [0xB0; AGENT_KEY_LENGTH], [0xB1; AGENT_IV_LENGTH]))
+            .await?;
+        registry.add_link(parent_id, child_id).await?;
+
+        // Mark child as dead so we can verify reconnect reactivates it.
+        registry.disconnect_link(parent_id, child_id, "test-disconnect").await?;
+        let child_before = registry.get(child_id).await.expect("child must exist");
+        assert!(!child_before.active, "child must be dead before reconnect");
+
+        // Drain the disconnect mark event(s).
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
+
+        // Build a connect payload with a valid init envelope for the child agent ID.
+        let inner_envelope = valid_init_envelope_bytes(child_id);
+        let payload = connect_payload(1, &inner_envelope);
+        let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandPivot));
+
+        let result =
+            handle_pivot_connect_callback(&registry, &events, parent_id, REQUEST_ID, &mut parser)
+                .await;
+        assert!(result.is_ok(), "reconnect must succeed: {result:?}");
+
+        // First event: AgentUpdate (mark) for the reconnected child.
+        let mark_event = rx.recv().await.expect("should receive AgentUpdate mark event");
+        let OperatorMessage::AgentUpdate(update) = &mark_event else {
+            panic!("expected AgentUpdate, got {mark_event:?}");
+        };
+        assert_eq!(update.info.agent_id, format!("{child_id:08X}"));
+        assert_eq!(update.info.marked, "Alive", "reconnected child must be marked Alive");
+
+        // Second event: AgentResponse confirming the pivot connection.
+        let resp_event = rx.recv().await.expect("should receive AgentResponse event");
+        let OperatorMessage::AgentResponse(resp) = &resp_event else {
+            panic!("expected AgentResponse, got {resp_event:?}");
+        };
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            message.contains("[SMB] Connected to pivot agent"),
+            "response must confirm pivot connection, got: {message}"
+        );
+
+        // Child must now be active in the registry.
+        let child_after = registry.get(child_id).await.expect("child must exist");
+        assert!(child_after.active, "child must be active after reconnect");
+
+        // last_call_in must have been updated.
+        assert_ne!(
+            child_after.last_call_in, child_before.last_call_in,
+            "last_call_in must be updated on reconnect"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pivot_connect_reconnect_active_agent_emits_mark_event()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_database, registry, events, _sockets, _downloads) = setup_dispatch_context().await;
+        let mut rx = events.subscribe();
+
+        let parent_id: u32 = 0xEE00_0001;
+        let child_id: u32 = 0xEE00_0002;
+
+        registry
+            .insert(sample_agent_info(parent_id, [0xC0; AGENT_KEY_LENGTH], [0xC1; AGENT_IV_LENGTH]))
+            .await?;
+        registry
+            .insert(sample_agent_info(child_id, [0xD0; AGENT_KEY_LENGTH], [0xD1; AGENT_IV_LENGTH]))
+            .await?;
+
+        // Child is already active — reconnect should still succeed.
+        let inner_envelope = valid_init_envelope_bytes(child_id);
+        let payload = connect_payload(1, &inner_envelope);
+        let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandPivot));
+
+        let result =
+            handle_pivot_connect_callback(&registry, &events, parent_id, REQUEST_ID, &mut parser)
+                .await;
+        assert!(result.is_ok(), "reconnect of active agent must succeed: {result:?}");
+
+        // Should get AgentUpdate (mark) — not AgentNew.
+        let event = rx.recv().await.expect("should receive event");
+        assert!(
+            matches!(&event, OperatorMessage::AgentUpdate(_)),
+            "reconnect must emit AgentUpdate, not AgentNew; got {event:?}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pivot_connect_failure_broadcasts_error() -> Result<(), Box<dyn std::error::Error>> {
+        let (_database, registry, events, _sockets, _downloads) = setup_dispatch_context().await;
+        let mut rx = events.subscribe();
+
+        let parent_id: u32 = 0xFF00_0001;
+        registry
+            .insert(sample_agent_info(parent_id, [0xE0; AGENT_KEY_LENGTH], [0xE1; AGENT_IV_LENGTH]))
+            .await?;
+
+        // success == 0, error_code == 5 (ERROR_ACCESS_DENIED)
+        let mut payload = Vec::new();
+        push_u32(&mut payload, 0); // success = false
+        push_u32(&mut payload, 5); // error code
+        let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandPivot));
+
+        let result =
+            handle_pivot_connect_callback(&registry, &events, parent_id, REQUEST_ID, &mut parser)
+                .await;
+        assert!(result.is_ok(), "failure path must return Ok(None): {result:?}");
+
+        let resp_event = rx.recv().await.expect("should receive AgentResponse event");
+        let OperatorMessage::AgentResponse(resp) = &resp_event else {
+            panic!("expected AgentResponse, got {resp_event:?}");
+        };
+        let kind = resp.info.extra.get("Type").and_then(Value::as_str).unwrap_or("");
+        assert_eq!(kind, "Error", "failure path must produce an Error response");
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            message.contains("Failed to connect"),
+            "error message must mention failure, got: {message}"
+        );
 
         Ok(())
     }

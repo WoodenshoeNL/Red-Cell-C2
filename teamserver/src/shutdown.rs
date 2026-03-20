@@ -60,6 +60,17 @@ impl ShutdownController {
         }
 
         self.inner.active_callbacks.fetch_add(1, Ordering::SeqCst);
+
+        // Test-only: pause here so a test can call initiate() in the gap.
+        #[cfg(test)]
+        if self.inner.hook_enabled.load(Ordering::SeqCst) {
+            self.inner.post_increment_hook.notify_one();
+            // Spin-wait until shutdown is initiated by the test harness.
+            while !self.inner.shutting_down.load(Ordering::SeqCst) {
+                std::hint::spin_loop();
+            }
+        }
+
         if self.is_shutting_down() {
             self.inner.active_callbacks.fetch_sub(1, Ordering::SeqCst);
             self.inner.notify_drain_if_complete();
@@ -106,6 +117,15 @@ struct ShutdownState {
     active_callbacks: AtomicUsize,
     notify: Notify,
     drain_notify: Notify,
+    /// Test-only hook: when set, `try_track_callback` waits on this notify
+    /// after incrementing the counter but before re-checking the shutdown flag.
+    /// This allows a test to force the exact interleaving where `initiate()`
+    /// runs between the increment and the re-check.
+    #[cfg(test)]
+    post_increment_hook: Notify,
+    /// Test-only flag: enables the `post_increment_hook` pause point.
+    #[cfg(test)]
+    hook_enabled: AtomicBool,
 }
 
 impl ShutdownState {
@@ -126,6 +146,21 @@ impl Drop for ActiveCallbackGuard {
     fn drop(&mut self) {
         self.inner.active_callbacks.fetch_sub(1, Ordering::SeqCst);
         self.inner.notify_drain_if_complete();
+    }
+}
+
+#[cfg(test)]
+impl ShutdownController {
+    /// Enable the test hook that pauses `try_track_callback` after
+    /// incrementing the counter, before re-checking the shutdown flag.
+    fn enable_post_increment_hook(&self) {
+        self.inner.hook_enabled.store(true, Ordering::SeqCst);
+    }
+
+    /// Wait until a `try_track_callback` caller has incremented the counter
+    /// and is paused at the hook point.
+    async fn wait_for_hook_pause(&self) {
+        self.inner.post_increment_hook.notified().await;
     }
 }
 
@@ -362,5 +397,39 @@ mod tests {
             // Drain must always succeed quickly after guards are dropped.
             assert!(controller.wait_for_callback_drain(Duration::from_millis(50)).await);
         }
+    }
+
+    /// Deterministic test for the rollback path in `try_track_callback` (lines 63-67).
+    ///
+    /// Forces the exact interleaving: `try_track_callback` increments the counter,
+    /// then `initiate()` runs, then the re-check sees shutdown and rolls back.
+    /// Verifies that the counter returns to zero and drain completes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn try_track_callback_rollback_when_shutdown_races_after_increment() {
+        let controller = ShutdownController::new();
+        controller.enable_post_increment_hook();
+
+        // spawn_blocking so the sync spin-wait doesn't block the async runtime.
+        let ctrl = controller.clone();
+        let tracker = tokio::task::spawn_blocking(move || ctrl.try_track_callback());
+
+        // Wait until the tracker has incremented the counter and paused.
+        controller.wait_for_hook_pause().await;
+
+        // The counter is incremented but the tracker hasn't re-checked the flag yet.
+        assert_eq!(controller.active_callback_count(), 1);
+
+        // Initiate shutdown in the gap — this is the race we want to exercise.
+        controller.initiate();
+
+        // The tracker should now see shutdown on re-check and roll back.
+        let guard = tracker.await.expect("tracker task should not panic");
+
+        // The rollback path must have returned None and decremented the counter.
+        assert!(guard.is_none(), "callback must be rejected when shutdown raced after increment");
+        assert_eq!(controller.active_callback_count(), 0, "counter must be zero after rollback");
+
+        // Drain must succeed immediately since no callbacks are tracked.
+        assert!(controller.wait_for_callback_drain(Duration::from_millis(50)).await);
     }
 }

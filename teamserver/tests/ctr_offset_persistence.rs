@@ -10,6 +10,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use red_cell::database::TeamserverError;
 use red_cell::{AgentRegistry, database::Database};
 use red_cell_common::{
     AgentEncryptionInfo, AgentRecord,
@@ -143,6 +144,206 @@ async fn ctr_offset_survives_registry_reload() -> Result<(), Box<dyn std::error:
         decrypted, post_restart_plaintext,
         "post-restart ciphertext should decrypt back to the original plaintext"
     );
+
+    Ok(())
+}
+
+/// Setting the CTR offset to a value above `i64::MAX` must fail because SQLite stores
+/// the offset as a signed 64-bit integer. This tests the sign-conversion rejection
+/// at the `set_ctr_offset` → `i64_from_u64` boundary.
+#[tokio::test]
+async fn set_ctr_offset_rejects_values_above_i64_max() -> Result<(), Box<dyn std::error::Error>> {
+    let key = [0xE1_u8; AGENT_KEY_LENGTH];
+    let iv = [0xE2_u8; AGENT_IV_LENGTH];
+    let agent_id: u32 = 0xBBBB_0001;
+
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database);
+    let agent = sample_agent_with_crypto(agent_id, key, iv);
+    registry.insert(agent).await?;
+
+    // i64::MAX + 1 is the first u64 value that cannot be stored in SQLite's INTEGER.
+    let above_i64_max = i64::MAX as u64 + 1;
+    let result = registry.set_ctr_offset(agent_id, above_i64_max).await;
+    assert!(result.is_err(), "set_ctr_offset must reject values > i64::MAX");
+    assert!(
+        matches!(
+            &result,
+            Err(TeamserverError::InvalidPersistedValue { field, .. }) if *field == "ctr_block_offset"
+        ),
+        "expected InvalidPersistedValue for ctr_block_offset, got {result:?}"
+    );
+
+    // u64::MAX must also be rejected.
+    let result = registry.set_ctr_offset(agent_id, u64::MAX).await;
+    assert!(result.is_err(), "set_ctr_offset must reject u64::MAX");
+
+    // The in-memory offset must remain at 0 (the initial value).
+    let offset = registry.ctr_offset(agent_id).await?;
+    assert_eq!(offset, 0, "offset must not change after rejected set_ctr_offset");
+
+    Ok(())
+}
+
+/// The AES-CTR seek position is `block_offset * 16`. The maximum block offset where
+/// this multiplication does not overflow u64 is `u64::MAX / 16`. This is the tightest
+/// boundary — it is smaller than `i64::MAX` (the SQLite storage limit), so the crypto
+/// layer rejects the offset before persistence is even attempted.
+///
+/// This test exercises the full `encrypt_for_agent` path at this boundary:
+/// 1. Encryption at `u64::MAX / 16` succeeds (seek = `(u64::MAX / 16) * 16`, valid).
+/// 2. The offset advances to `u64::MAX / 16 + 1`, which is persisted (< `i64::MAX`).
+/// 3. The next encryption at `u64::MAX / 16 + 1` fails because the seek overflows u64.
+/// 4. The in-memory offset is not modified on failure.
+#[tokio::test]
+async fn encrypt_for_agent_errors_at_crypto_seek_overflow_boundary()
+-> Result<(), Box<dyn std::error::Error>> {
+    let key = [0xF1_u8; AGENT_KEY_LENGTH];
+    let iv = [0xF2_u8; AGENT_IV_LENGTH];
+    let agent_id: u32 = 0xBBBB_0002;
+
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database);
+    let agent = sample_agent_with_crypto(agent_id, key, iv);
+    registry.insert(agent).await?;
+
+    // u64::MAX / 16 is the largest block offset where block_offset * 16 fits in u64.
+    let max_safe_offset = u64::MAX / 16;
+    registry.set_ctr_offset(agent_id, max_safe_offset).await?;
+    assert_eq!(registry.ctr_offset(agent_id).await?, max_safe_offset);
+
+    // Encryption at max_safe_offset succeeds — the seek is valid.
+    let one_block = b"exactly-16-bytes";
+    assert_eq!(one_block.len(), 16);
+    let ciphertext = registry.encrypt_for_agent(agent_id, one_block).await?;
+    assert!(!ciphertext.is_empty(), "encryption at max safe offset must succeed");
+
+    // Offset is now max_safe_offset + 1, where (offset * 16) would overflow u64.
+    let offset_after = registry.ctr_offset(agent_id).await?;
+    assert_eq!(offset_after, max_safe_offset + 1);
+
+    // Next encryption must fail because the seek position overflows.
+    let result = registry.encrypt_for_agent(agent_id, one_block).await;
+    assert!(
+        result.is_err(),
+        "encrypt_for_agent must fail when the CTR seek position would overflow u64"
+    );
+
+    // The in-memory offset must not have been modified.
+    let offset_final = registry.ctr_offset(agent_id).await?;
+    assert_eq!(
+        offset_final,
+        max_safe_offset + 1,
+        "in-memory CTR offset must not change after a failed encrypt_for_agent"
+    );
+
+    Ok(())
+}
+
+/// When the CTR offset is at `i64::MAX` (the largest value storable in SQLite), the seek
+/// position `i64::MAX * 16` overflows u64, so `encrypt_for_agent` must fail at the crypto
+/// layer. This verifies the interaction between the two overflow boundaries: SQLite
+/// persistence accepts `i64::MAX`, but the crypto seek rejects it.
+#[tokio::test]
+async fn encrypt_for_agent_errors_at_i64_max_offset() -> Result<(), Box<dyn std::error::Error>> {
+    let key = [0xD1_u8; AGENT_KEY_LENGTH];
+    let iv = [0xD2_u8; AGENT_IV_LENGTH];
+    let agent_id: u32 = 0xBBBB_0003;
+
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database);
+    let agent = sample_agent_with_crypto(agent_id, key, iv);
+    registry.insert(agent).await?;
+
+    // i64::MAX is storable in SQLite, but (i64::MAX * 16) overflows u64,
+    // so the crypto seek will fail.
+    let max_storable = i64::MAX as u64;
+    registry.set_ctr_offset(agent_id, max_storable).await?;
+
+    let result = registry.encrypt_for_agent(agent_id, b"payload").await;
+    assert!(
+        result.is_err(),
+        "encrypt_for_agent at i64::MAX must fail because the seek position overflows u64"
+    );
+
+    // The in-memory offset must remain unchanged.
+    let offset_after = registry.ctr_offset(agent_id).await?;
+    assert_eq!(
+        offset_after, max_storable,
+        "in-memory CTR offset must not change after a failed encrypt_for_agent"
+    );
+
+    Ok(())
+}
+
+/// `decrypt_from_agent` must also fail at the crypto seek boundary, mirroring
+/// `encrypt_for_agent` behavior. The decryption path advances the CTR offset
+/// by the same block count, so it must hit the same overflow guard.
+#[tokio::test]
+async fn decrypt_from_agent_errors_at_crypto_seek_overflow_boundary()
+-> Result<(), Box<dyn std::error::Error>> {
+    let key = [0xC1_u8; AGENT_KEY_LENGTH];
+    let iv = [0xC2_u8; AGENT_IV_LENGTH];
+    let agent_id: u32 = 0xBBBB_0004;
+
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database);
+    let agent = sample_agent_with_crypto(agent_id, key, iv);
+    registry.insert(agent).await?;
+
+    // Set offset one past the max safe value so the seek overflows.
+    let past_safe = u64::MAX / 16 + 1;
+    registry.set_ctr_offset(agent_id, past_safe).await?;
+
+    // decrypt_from_agent must fail because the seek position overflows.
+    let fake_ciphertext = vec![0xAA_u8; 32]; // 2 AES blocks
+    let result = registry.decrypt_from_agent(agent_id, &fake_ciphertext).await;
+    assert!(
+        result.is_err(),
+        "decrypt_from_agent must fail when the CTR seek position would overflow u64"
+    );
+
+    // The in-memory offset must remain unchanged.
+    let offset_after = registry.ctr_offset(agent_id).await?;
+    assert_eq!(
+        offset_after, past_safe,
+        "in-memory CTR offset must not change after a failed decrypt_from_agent"
+    );
+
+    Ok(())
+}
+
+/// `set_ctr_offset` accepts the largest offset that both the crypto layer and SQLite
+/// can handle (`u64::MAX / 16`), and encryption at that offset succeeds. This confirms
+/// there is no off-by-one in the boundary check.
+#[tokio::test]
+async fn encrypt_at_max_safe_offset_succeeds_and_roundtrips()
+-> Result<(), Box<dyn std::error::Error>> {
+    let key = [0xA1_u8; AGENT_KEY_LENGTH];
+    let iv = [0xA2_u8; AGENT_IV_LENGTH];
+    let agent_id: u32 = 0xBBBB_0005;
+
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database);
+    let agent = sample_agent_with_crypto(agent_id, key, iv);
+    registry.insert(agent).await?;
+
+    let max_safe_offset = u64::MAX / 16;
+    registry.set_ctr_offset(agent_id, max_safe_offset).await?;
+
+    let plaintext = b"boundary test payload";
+    let ciphertext = registry.encrypt_for_agent(agent_id, plaintext).await?;
+
+    // Verify the ciphertext matches a direct encryption at the same offset.
+    let reference = encrypt_agent_data_at_offset(&key, &iv, max_safe_offset, plaintext)?;
+    assert_eq!(
+        ciphertext, reference,
+        "encryption at max safe offset must produce correct ciphertext"
+    );
+
+    // Verify the ciphertext decrypts back to the original plaintext.
+    let decrypted = decrypt_agent_data_at_offset(&key, &iv, max_safe_offset, &ciphertext)?;
+    assert_eq!(decrypted, plaintext, "round-trip at max safe offset must recover plaintext");
 
     Ok(())
 }

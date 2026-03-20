@@ -1,4 +1,6 @@
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -55,13 +57,14 @@ impl LocalConfig {
     /// Persist the local config to a specific path.
     ///
     /// Creates parent directories as needed. Silently ignores write failures.
+    /// On Unix the file is created with mode 0600 (owner-only read/write).
     pub fn save_to(&self, path: &std::path::Path) {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
 
         if let Ok(contents) = toml::to_string_pretty(self) {
-            let _ = fs::write(path, contents);
+            let _ = write_config_file(path, contents.as_bytes());
         }
     }
 
@@ -83,6 +86,29 @@ impl LocalConfig {
         };
         self.save_to(&path);
     }
+}
+
+/// Write `data` to `path` with mode 0600 on Unix (owner-only read/write).
+///
+/// On non-Unix platforms this uses default permissions.
+fn write_config_file(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    #[cfg(unix)]
+    let mut file =
+        fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+
+    #[cfg(not(unix))]
+    let mut file = fs::OpenOptions::new().write(true).create(true).truncate(true).open(path)?;
+
+    file.write_all(data)?;
+
+    // On Unix, .mode() only applies at creation time. If the file already
+    // existed with looser permissions, explicitly tighten them.
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+
+    Ok(())
 }
 
 fn config_file_path() -> Option<PathBuf> {
@@ -506,6 +532,63 @@ mod tests {
         // serde default behaviour: unknown fields are ignored (no deny_unknown_fields).
         let config = LocalConfig::load_from(&path);
         assert_eq!(config.username.as_deref(), Some("op1"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_to_creates_file_with_restrictive_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("tempdir creation should succeed: {error}"));
+        let path = dir.path().join("client.toml");
+
+        let config = LocalConfig {
+            server_url: Some("wss://10.0.0.1:40056/havoc/".to_owned()),
+            username: Some("operator".to_owned()),
+            ..LocalConfig::default()
+        };
+
+        config.save_to(&path);
+
+        let metadata =
+            fs::metadata(&path).unwrap_or_else(|error| panic!("metadata should succeed: {error}"));
+        let mode = metadata.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "config file should be owner-only (0600), got {mode:#o}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_to_tightens_permissions_on_existing_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("tempdir creation should succeed: {error}"));
+        let path = dir.path().join("client.toml");
+
+        // Create an initial file with permissive (0o644) permissions.
+        fs::write(&path, "old content")
+            .unwrap_or_else(|error| panic!("initial write should succeed: {error}"));
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
+            .unwrap_or_else(|error| panic!("chmod should succeed: {error}"));
+
+        let config = LocalConfig {
+            server_url: Some("wss://new-server/havoc/".to_owned()),
+            ..LocalConfig::default()
+        };
+        config.save_to(&path);
+
+        // Verify permissions were tightened.
+        let mode = fs::metadata(&path)
+            .unwrap_or_else(|error| panic!("metadata should succeed: {error}"))
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "permissions should be tightened to 0600, got {mode:#o}");
+
+        // Verify content was updated.
+        let loaded = LocalConfig::load_from(&path);
+        assert_eq!(loaded.server_url.as_deref(), Some("wss://new-server/havoc/"));
     }
 
     /// `save_to()` must silently ignore write failures when the target path is

@@ -955,6 +955,13 @@ mod tests {
         assert_eq!(record.name_id(), "FFFFFFFF");
     }
 
+    #[test]
+    fn name_id_returns_zero_padded_string_for_agent_id_one() {
+        let mut record = minimal_agent_record();
+        record.agent_id = 1;
+        assert_eq!(record.name_id(), "00000001");
+    }
+
     /// Helper: builds a valid `AgentRecord` JSON value, then applies overrides.
     fn agent_record_json(overrides: serde_json::Value) -> serde_json::Value {
         let mut base = json!({

@@ -250,18 +250,18 @@ mod tests {
         assert!(body.is_empty());
     }
 
-    /// POST, PUT, and DELETE requests to unknown paths must also reach the
-    /// `any()` fallback and return 404 NOT_FOUND with an empty body — not 405
-    /// Method Not Allowed.  A regression replacing `any()` with `get()` would
-    /// break agent POST requests.
+    /// POST, PUT, DELETE, and HEAD requests to unknown paths must also reach
+    /// the `any()` fallback and return 404 NOT_FOUND with an empty body — not
+    /// 405 Method Not Allowed.  A regression replacing `any()` with `get()`
+    /// would break agent POST requests.
     #[tokio::test]
-    async fn fallback_handles_post_put_delete_not_just_get() {
+    async fn fallback_handles_all_methods_not_just_get() {
         use axum::http::Method;
 
         let state = build_test_state().await;
         let router = build_router(state);
 
-        for method in [Method::POST, Method::PUT, Method::DELETE] {
+        for method in [Method::POST, Method::PUT, Method::DELETE, Method::HEAD] {
             let response = router
                 .clone()
                 .oneshot(

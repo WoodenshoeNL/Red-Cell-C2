@@ -3221,4 +3221,356 @@ havoc.RegisterCommand("scan", "second scan", run_scan)
 
         Ok(())
     }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn emit_agent_checkin_passes_full_agent_data() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let (_database, registry, _events, _sockets, runtime) =
+            runtime_fixture("emit-checkin-full").await?;
+        registry.insert(sample_agent(0x00AB_CDEF)).await?;
+
+        // Capture event.data fields and event.agent.id (hex string) via Python.
+        let (tracker, callback) = tokio::task::spawn_blocking({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| {
+                    make_tracker_and_callback(
+                        &runtime,
+                        py,
+                        pyo3::ffi::c_str!(
+                            "(lambda t: lambda event: t.append((event.event_type, event.agent.id if event.agent else None, event.data.get('Hostname'), event.data.get('Username'), event.data.get('ExternalIP'), event.data.get('ProcessName'), event.data.get('Elevated'))))(_tracker)"
+                        ),
+                    )
+                })
+            }
+        })
+        .await??;
+
+        runtime.register_callback(PluginEvent::AgentCheckin, callback).await?;
+        runtime.emit_agent_checkin(0x00AB_CDEF).await?;
+
+        let result = tokio::task::spawn_blocking(move || {
+            Python::with_gil(
+                |py| -> PyResult<(String, String, String, String, String, String, bool)> {
+                    let list = tracker.bind(py);
+                    let tuple = list.get_item(0)?;
+                    Ok((
+                        tuple.get_item(0)?.extract()?,
+                        tuple.get_item(1)?.extract()?,
+                        tuple.get_item(2)?.extract()?,
+                        tuple.get_item(3)?.extract()?,
+                        tuple.get_item(4)?.extract()?,
+                        tuple.get_item(5)?.extract()?,
+                        tuple.get_item(6)?.extract()?,
+                    ))
+                },
+            )
+        })
+        .await??;
+        assert_eq!(result.0, "agent_checkin");
+        assert_eq!(result.1, "00ABCDEF");
+        assert_eq!(result.2, "wkstn-01");
+        assert_eq!(result.3, "operator");
+        assert_eq!(result.4, "203.0.113.10");
+        assert_eq!(result.5, "explorer.exe");
+        assert!(result.6, "Elevated must be true");
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn emit_command_output_passes_all_fields() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("emit-output-full").await?;
+
+        let (tracker, callback) = tokio::task::spawn_blocking({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| {
+                    make_tracker_and_callback(
+                        &runtime,
+                        py,
+                        pyo3::ffi::c_str!(
+                            "(lambda t: lambda event: t.append((event.event_type, event.data['agent_id'], event.data['command_id'], event.data['request_id'], event.data['output'])))(_tracker)"
+                        ),
+                    )
+                })
+            }
+        })
+        .await??;
+
+        runtime.register_callback(PluginEvent::CommandOutput, callback).await?;
+        runtime.emit_command_output(0x00AB_CDEF, 42, 7, "test output").await?;
+
+        let result = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<(String, u32, u32, u32, String)> {
+                let list = tracker.bind(py);
+                let tuple = list.get_item(0)?;
+                Ok((
+                    tuple.get_item(0)?.extract()?,
+                    tuple.get_item(1)?.extract()?,
+                    tuple.get_item(2)?.extract()?,
+                    tuple.get_item(3)?.extract()?,
+                    tuple.get_item(4)?.extract()?,
+                ))
+            })
+        })
+        .await??;
+        assert_eq!(result.0, "command_output");
+        assert_eq!(result.1, 0x00AB_CDEF, "agent_id");
+        assert_eq!(result.2, 42, "command_id");
+        assert_eq!(result.3, 7, "request_id");
+        assert_eq!(result.4, "test output");
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn emit_agent_dead_passes_full_agent_data() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let (_database, registry, _events, _sockets, runtime) =
+            runtime_fixture("emit-dead-full").await?;
+        registry.insert(sample_agent(0x00AB_CDEF)).await?;
+
+        let (tracker, callback) = tokio::task::spawn_blocking({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| {
+                    make_tracker_and_callback(
+                        &runtime,
+                        py,
+                        pyo3::ffi::c_str!(
+                            "(lambda t: lambda event: t.append((event.event_type, event.agent.id if event.agent else None, event.data.get('Hostname'), event.data.get('DomainName'))))(_tracker)"
+                        ),
+                    )
+                })
+            }
+        })
+        .await??;
+
+        runtime.register_callback(PluginEvent::AgentDead, callback).await?;
+        runtime.emit_agent_dead(0x00AB_CDEF).await?;
+
+        let result = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<(String, String, String, String)> {
+                let list = tracker.bind(py);
+                let tuple = list.get_item(0)?;
+                Ok((
+                    tuple.get_item(0)?.extract()?,
+                    tuple.get_item(1)?.extract()?,
+                    tuple.get_item(2)?.extract()?,
+                    tuple.get_item(3)?.extract()?,
+                ))
+            })
+        })
+        .await??;
+        assert_eq!(result.0, "agent_dead");
+        assert_eq!(result.1, "00ABCDEF");
+        assert_eq!(result.2, "wkstn-01");
+        assert_eq!(result.3, "REDCELL");
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn emit_loot_captured_passes_all_fields() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("emit-loot-full").await?;
+
+        let (tracker, callback) = tokio::task::spawn_blocking({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| {
+                    make_tracker_and_callback(
+                        &runtime,
+                        py,
+                        pyo3::ffi::c_str!(
+                            "(lambda t: lambda event: t.append((event.event_type, event.data['agent_id'], event.data['id'], event.data['kind'], event.data['name'], event.data['size_bytes'], event.data['captured_at'], event.data.get('file_path'))))(_tracker)"
+                        ),
+                    )
+                })
+            }
+        })
+        .await??;
+
+        runtime.register_callback(PluginEvent::LootCaptured, callback).await?;
+        let loot = LootRecord {
+            id: Some(99),
+            agent_id: 0x00AB_CDEF,
+            kind: "credential".to_owned(),
+            name: "admin_creds.txt".to_owned(),
+            file_path: Some("/loot/admin_creds.txt".to_owned()),
+            size_bytes: Some(256),
+            captured_at: "2026-03-15T12:00:00Z".to_owned(),
+            data: None,
+            metadata: None,
+        };
+        runtime.emit_loot_captured(&loot).await?;
+
+        let result = tokio::task::spawn_blocking(move || {
+            Python::with_gil(
+                |py| -> PyResult<(String, u32, u64, String, String, u64, String, String)> {
+                    let list = tracker.bind(py);
+                    let tuple = list.get_item(0)?;
+                    Ok((
+                        tuple.get_item(0)?.extract()?,
+                        tuple.get_item(1)?.extract()?,
+                        tuple.get_item(2)?.extract()?,
+                        tuple.get_item(3)?.extract()?,
+                        tuple.get_item(4)?.extract()?,
+                        tuple.get_item(5)?.extract()?,
+                        tuple.get_item(6)?.extract()?,
+                        tuple.get_item(7)?.extract()?,
+                    ))
+                },
+            )
+        })
+        .await??;
+        assert_eq!(result.0, "loot_captured");
+        assert_eq!(result.1, 0x00AB_CDEF, "agent_id");
+        assert_eq!(result.2, 99, "loot id");
+        assert_eq!(result.3, "credential", "kind");
+        assert_eq!(result.4, "admin_creds.txt", "name");
+        assert_eq!(result.5, 256, "size_bytes");
+        assert_eq!(result.6, "2026-03-15T12:00:00Z", "captured_at");
+        assert_eq!(result.7, "/loot/admin_creds.txt", "file_path");
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn emit_task_created_passes_all_fields() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("emit-task-full").await?;
+
+        let (tracker, callback) = tokio::task::spawn_blocking({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| {
+                    make_tracker_and_callback(
+                        &runtime,
+                        py,
+                        pyo3::ffi::c_str!(
+                            "(lambda t: lambda event: t.append((event.event_type, event.data['agent_id'], event.data['request_id'], event.data['command'], event.data['command_line'], event.data['task_id'], event.data['created_at'], event.data['operator'])))(_tracker)"
+                        ),
+                    )
+                })
+            }
+        })
+        .await??;
+
+        runtime.register_callback(PluginEvent::TaskCreated, callback).await?;
+        let job = Job {
+            command: 15,
+            request_id: 99,
+            payload: vec![],
+            command_line: "upload /tmp/payload.bin".to_owned(),
+            task_id: "task-042".to_owned(),
+            created_at: "2026-03-15T08:30:00Z".to_owned(),
+            operator: "admin".to_owned(),
+        };
+        runtime.emit_task_created(0x00AB_CDEF, &job).await?;
+
+        let result = tokio::task::spawn_blocking(move || {
+            Python::with_gil(
+                |py| -> PyResult<(String, u32, u32, u32, String, String, String, String)> {
+                    let list = tracker.bind(py);
+                    let tuple = list.get_item(0)?;
+                    Ok((
+                        tuple.get_item(0)?.extract()?,
+                        tuple.get_item(1)?.extract()?,
+                        tuple.get_item(2)?.extract()?,
+                        tuple.get_item(3)?.extract()?,
+                        tuple.get_item(4)?.extract()?,
+                        tuple.get_item(5)?.extract()?,
+                        tuple.get_item(6)?.extract()?,
+                        tuple.get_item(7)?.extract()?,
+                    ))
+                },
+            )
+        })
+        .await??;
+        assert_eq!(result.0, "task_created");
+        assert_eq!(result.1, 0x00AB_CDEF, "agent_id");
+        assert_eq!(result.2, 99, "request_id");
+        assert_eq!(result.3, 15, "command");
+        assert_eq!(result.4, "upload /tmp/payload.bin", "command_line");
+        assert_eq!(result.5, "task-042", "task_id");
+        assert_eq!(result.6, "2026-03-15T08:30:00Z", "created_at");
+        assert_eq!(result.7, "admin", "operator");
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn emit_loot_captured_exception_does_not_block_subsequent_callbacks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("emit-loot-exception").await?;
+
+        let (tracker, bad_cb, good_cb) = tokio::task::spawn_blocking({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| -> PyResult<(Py<PyList>, Py<PyAny>, Py<PyAny>)> {
+                    runtime.install_api_module(py)?;
+                    let helper = PyModule::from_code(
+                        py,
+                        pyo3::ffi::c_str!(
+                            "def raise_error(event):\n    raise ValueError('loot boom')"
+                        ),
+                        pyo3::ffi::c_str!("test_loot_raiser.py"),
+                        pyo3::ffi::c_str!("test_loot_raiser"),
+                    )?;
+                    let bad_cb = helper.getattr("raise_error")?.unbind();
+
+                    let tracker = PyList::empty(py);
+                    let locals = PyDict::new(py);
+                    locals.set_item("_tracker", tracker.clone())?;
+                    let good_cb = py.eval(
+                        pyo3::ffi::c_str!(
+                            "(lambda t: lambda event: t.append(event.data['kind']))(_tracker)"
+                        ),
+                        None,
+                        Some(&locals),
+                    )?;
+                    Ok((tracker.unbind(), bad_cb, good_cb.unbind()))
+                })
+            }
+        })
+        .await??;
+
+        runtime.register_callback(PluginEvent::LootCaptured, bad_cb).await?;
+        runtime.register_callback(PluginEvent::LootCaptured, good_cb).await?;
+
+        let loot = LootRecord {
+            id: Some(1),
+            agent_id: 0x00AB_CDEF,
+            kind: "download".to_owned(),
+            name: "flag.txt".to_owned(),
+            file_path: None,
+            size_bytes: Some(42),
+            captured_at: "2026-03-15T00:00:00Z".to_owned(),
+            data: None,
+            metadata: None,
+        };
+        runtime.emit_loot_captured(&loot).await?;
+
+        let (count, kind) = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<(usize, String)> {
+                let list = tracker.bind(py);
+                let count = list.len();
+                let first = list.get_item(0)?.extract::<String>()?;
+                Ok((count, first))
+            })
+        })
+        .await??;
+        assert_eq!(count, 1, "good callback must fire after bad callback raises");
+        assert_eq!(kind, "download");
+        Ok(())
+    }
 }

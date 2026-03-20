@@ -2257,7 +2257,21 @@ fn required_u32(
 }
 
 fn optional_u32(info: &red_cell_common::operator::AgentTaskInfo, keys: &[&str]) -> Option<u32> {
-    string_field(info, keys).and_then(|value| value.trim().parse::<u32>().ok())
+    string_field(info, keys).and_then(|value| {
+        let trimmed = value.trim();
+        match trimmed.parse::<u32>() {
+            Ok(n) => Some(n),
+            Err(err) => {
+                debug!(
+                    field = ?keys,
+                    value = trimmed,
+                    %err,
+                    "optional_u32: ignoring unparseable value"
+                );
+                None
+            }
+        }
+    })
 }
 
 fn optional_base64(

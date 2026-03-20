@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 621 | 212 | 31 |
+| Tasks closed | 624 | 212 | 31 |
 | Bugs filed against | 51 | 34 | 9 |
 | Bug rate (bugs/task) | 0.08 | 0.16 | 0.29 |
 | Quality score | 92% | 84% | 71% |
 
-*Bug rates: Claude 51/621=0.08, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 51/624=0.08, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-21 00:00 — 2c141ec4..9eb0881e
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 0 | Closed og4l5 (P4, AgentRecord::name_id() boundary value tests — agent_id=0/1/MAX), ckqdu (P3, external listener fallback path + body size limit tests — 162 LOC in app.rs), ww3hk (P3, AgentUpdateInfo wire-key assertion test — in stash, beads closed). All test-only changes, no production code modified. Clean code, no issues found. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: passed (cargo check, clippy -D warnings clean, all tests pass across workspace)
 
 ### QA Review — 2026-03-20 22:30 — 2ebd20fc..a75457d4
 

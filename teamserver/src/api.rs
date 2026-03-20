@@ -3232,6 +3232,202 @@ mod tests {
         assert_eq!(body["error"]["code"], "agent_not_found");
     }
 
+    /// Sends a GET request to `/agents/{id}` with the given malformed ID and asserts
+    /// a 400 Bad Request with error code `"invalid_agent_task"`.
+    async fn assert_get_agent_bad_request(malformed_id: &str) {
+        let (app, _, _) = test_router_with_registry(Some((
+            60,
+            "rest-admin",
+            "secret-admin",
+            OperatorRole::Admin,
+        )))
+        .await;
+
+        let uri = format!("/agents/{malformed_id}");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(&uri)
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "GET {uri} should return 400, not {}",
+            response.status()
+        );
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_agent_task");
+    }
+
+    #[tokio::test]
+    async fn get_agent_rejects_non_hex_id() {
+        assert_get_agent_bad_request("ZZZZZZZZ").await;
+    }
+
+    #[tokio::test]
+    async fn get_agent_returns_not_found_for_short_hex_id() {
+        // "DEAD" is valid hex (parses as 0x0000DEAD) but no agent has that ID.
+        let (app, _, _) = test_router_with_registry(Some((
+            60,
+            "rest-admin",
+            "secret-admin",
+            OperatorRole::Admin,
+        )))
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/agents/DEAD")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "agent_not_found");
+    }
+
+    #[tokio::test]
+    async fn get_agent_rejects_too_long_id() {
+        assert_get_agent_bad_request("DEADBEEF00").await;
+    }
+
+    /// Sends a DELETE request to `/agents/{id}` with a malformed ID and asserts 400.
+    async fn assert_delete_agent_bad_request(malformed_id: &str) {
+        let (app, _, _) = test_router_with_registry(Some((
+            60,
+            "rest-admin",
+            "secret-admin",
+            OperatorRole::Admin,
+        )))
+        .await;
+
+        let uri = format!("/agents/{malformed_id}");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(&uri)
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "DELETE {uri} should return 400, not {}",
+            response.status()
+        );
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_agent_task");
+    }
+
+    #[tokio::test]
+    async fn delete_agent_rejects_non_hex_id() {
+        assert_delete_agent_bad_request("ZZZZZZZZ").await;
+    }
+
+    #[tokio::test]
+    async fn delete_agent_rejects_too_long_id() {
+        assert_delete_agent_bad_request("DEADBEEF00").await;
+    }
+
+    /// Sends a POST request to `/agents/{id}/task` with a malformed ID and asserts 400.
+    async fn assert_queue_task_bad_request(malformed_id: &str) {
+        let (app, _, _) = test_router_with_registry(Some((
+            60,
+            "rest-admin",
+            "secret-admin",
+            OperatorRole::Admin,
+        )))
+        .await;
+
+        let uri = format!("/agents/{malformed_id}/task");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&uri)
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"TaskID":"01","CommandLine":"checkin","DemonID":"DEADBEEF","CommandID":"100"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "POST {uri} should return 400, not {}",
+            response.status()
+        );
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_agent_task");
+    }
+
+    #[tokio::test]
+    async fn queue_task_rejects_non_hex_id() {
+        assert_queue_task_bad_request("ZZZZZZZZ").await;
+    }
+
+    #[tokio::test]
+    async fn queue_task_returns_error_for_short_hex_id() {
+        // "DEAD" is valid hex (parses as 0x0000DEAD) but the canonical 8-char form
+        // "0000DEAD" differs from the body DemonID "DEAD", triggering a 400
+        // mismatch error. Either 400 or 404 is acceptable — not 500.
+        let (app, _, _) = test_router_with_registry(Some((
+            60,
+            "rest-admin",
+            "secret-admin",
+            OperatorRole::Admin,
+        )))
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/agents/DEAD/task")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"TaskID":"01","CommandLine":"checkin","DemonID":"DEAD","CommandID":"100"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        let status = response.status();
+        assert!(
+            status == StatusCode::BAD_REQUEST || status == StatusCode::NOT_FOUND,
+            "POST /agents/DEAD/task should return 400 or 404, not {status}"
+        );
+        let body = read_json(response).await;
+        assert!(body["error"]["code"].is_string(), "error response should include an error code");
+    }
+
+    #[tokio::test]
+    async fn queue_task_rejects_too_long_id() {
+        assert_queue_task_bad_request("DEADBEEF00").await;
+    }
+
     #[tokio::test]
     async fn analyst_key_cannot_task_agents() {
         let (app, registry, _) = test_router_with_registry(Some((

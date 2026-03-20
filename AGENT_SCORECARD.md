@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 631 | 212 | 31 |
+| Tasks closed | 632 | 212 | 31 |
 | Bugs filed against | 51 | 34 | 9 |
 | Bug rate (bugs/task) | 0.08 | 0.16 | 0.29 |
 | Quality score | 92% | 84% | 71% |
 
-*Bug rates: Claude 51/631=0.08, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 51/632=0.08, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-20 — 1c5f7181..382e9e20
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed jmo0u: fixed pivot SmbConnect reconnect path — the `if existed { agent_mark_event }` branch was unreachable because `parse_for_listener` rejected duplicate inits. Refactored to detect existing agent before parsing, reuse existing record on reconnect, update `last_call_in`, and reactivate dead agents. Added `inner_demon_command_id()` validation helper. Comprehensive unit tests (reconnect dead agent, reconnect active agent, failure path) and updated integration test. Clean code, proper error handling, no issues found. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: passed (cargo check, clippy -D warnings clean, 261 tests pass across workspace)
 
 ### QA Review — 2026-03-21 01:30 — 5e4b6bdd..c6bdd1fa
 

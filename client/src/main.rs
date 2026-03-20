@@ -22,7 +22,8 @@ use python::{
 };
 use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::{
-    AgentTaskInfo, EventCode, FlatInfo, Message, MessageHead, OperatorMessage,
+    AgentTaskInfo, EventCode, FlatInfo, ListenerInfo, Message, MessageHead, NameInfo,
+    OperatorMessage,
 };
 use rfd::FileDialog;
 use transport::{
@@ -412,6 +413,10 @@ struct SessionPanelState {
     chat_input: String,
     /// Which event kinds are shown in the notification panel (None = all).
     event_kind_filter: Option<EventKind>,
+    /// Selected listener name in the listeners table.
+    selected_listener: Option<String>,
+    /// Open Create/Edit Listener dialog state (None = dialog closed).
+    listener_dialog: Option<ListenerDialogState>,
     /// Set to true when the "Mark all read" button is pressed; consumed in `render_main_ui`.
     pending_mark_all_read: bool,
     /// Bottom dock panel state.
@@ -469,6 +474,219 @@ impl SessionPanelState {
 
     fn process_state_mut(&mut self, agent_id: &str) -> &mut AgentProcessPanelState {
         self.process_state.entry(agent_id.to_owned()).or_default()
+    }
+}
+
+// ── Listener dialog types ───────────────────────────────────────────
+/// Listener protocol selection in the Create/Edit dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListenerProtocol {
+    Http,
+    Https,
+    Smb,
+    External,
+}
+
+impl ListenerProtocol {
+    const ALL: [Self; 4] = [Self::Http, Self::Https, Self::Smb, Self::External];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Http => "Http",
+            Self::Https => "Https",
+            Self::Smb => "Smb",
+            Self::External => "External",
+        }
+    }
+}
+
+/// Whether we are creating a new listener or editing an existing one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListenerDialogMode {
+    Create,
+    Edit,
+}
+
+/// State for the Create/Edit Listener dialog window.
+#[derive(Debug, Clone)]
+struct ListenerDialogState {
+    mode: ListenerDialogMode,
+    name: String,
+    protocol: ListenerProtocol,
+    // HTTP/HTTPS fields
+    host: String,
+    port: String,
+    user_agent: String,
+    headers: String,
+    uris: String,
+    host_header: String,
+    proxy_enabled: bool,
+    proxy_type: String,
+    proxy_host: String,
+    proxy_port: String,
+    proxy_username: String,
+    proxy_password: String,
+    // SMB fields
+    pipe_name: String,
+    // External fields
+    endpoint: String,
+}
+
+impl ListenerDialogState {
+    fn new_create() -> Self {
+        Self {
+            mode: ListenerDialogMode::Create,
+            name: String::new(),
+            protocol: ListenerProtocol::Http,
+            host: String::new(),
+            port: String::new(),
+            user_agent: String::new(),
+            headers: String::new(),
+            uris: String::new(),
+            host_header: String::new(),
+            proxy_enabled: false,
+            proxy_type: "http".to_owned(),
+            proxy_host: String::new(),
+            proxy_port: String::new(),
+            proxy_username: String::new(),
+            proxy_password: String::new(),
+            pipe_name: String::new(),
+            endpoint: String::new(),
+        }
+    }
+
+    fn new_edit(name: &str, protocol: &str, info: &ListenerInfo) -> Self {
+        let protocol_enum = match protocol {
+            "Https" => ListenerProtocol::Https,
+            "Smb" => ListenerProtocol::Smb,
+            "External" => ListenerProtocol::External,
+            _ => ListenerProtocol::Http,
+        };
+        Self {
+            mode: ListenerDialogMode::Edit,
+            name: name.to_owned(),
+            protocol: protocol_enum,
+            host: info.host_bind.clone().unwrap_or_default(),
+            port: info.port_bind.clone().unwrap_or_default(),
+            user_agent: info.user_agent.clone().unwrap_or_default(),
+            headers: info.headers.clone().unwrap_or_default(),
+            uris: info.uris.clone().unwrap_or_default(),
+            host_header: info
+                .extra
+                .get("HostHeader")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_owned(),
+            proxy_enabled: info.proxy_enabled.as_deref() == Some("true"),
+            proxy_type: info.proxy_type.clone().unwrap_or_else(|| "http".to_owned()),
+            proxy_host: info.proxy_host.clone().unwrap_or_default(),
+            proxy_port: info.proxy_port.clone().unwrap_or_default(),
+            proxy_username: info.proxy_username.clone().unwrap_or_default(),
+            proxy_password: info.proxy_password.clone().unwrap_or_default(),
+            pipe_name: info
+                .extra
+                .get("PipeName")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_owned(),
+            endpoint: info
+                .extra
+                .get("Endpoint")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_owned(),
+        }
+    }
+
+    /// Build the `ListenerInfo` payload for the WebSocket message.
+    fn to_listener_info(&self) -> ListenerInfo {
+        let protocol_str = self.protocol.label().to_owned();
+        let secure = matches!(self.protocol, ListenerProtocol::Https);
+        let mut extra = BTreeMap::new();
+
+        match self.protocol {
+            ListenerProtocol::Http | ListenerProtocol::Https => {
+                if !self.host_header.is_empty() {
+                    extra.insert(
+                        "HostHeader".to_owned(),
+                        serde_json::Value::String(self.host_header.clone()),
+                    );
+                }
+                ListenerInfo {
+                    name: Some(self.name.clone()),
+                    protocol: Some(protocol_str),
+                    status: Some("Online".to_owned()),
+                    host_bind: Some(self.host.clone()),
+                    port_bind: Some(self.port.clone()),
+                    user_agent: if self.user_agent.is_empty() {
+                        None
+                    } else {
+                        Some(self.user_agent.clone())
+                    },
+                    headers: if self.headers.is_empty() {
+                        None
+                    } else {
+                        Some(self.headers.clone())
+                    },
+                    uris: if self.uris.is_empty() { None } else { Some(self.uris.clone()) },
+                    secure: Some(secure.to_string()),
+                    proxy_enabled: Some(self.proxy_enabled.to_string()),
+                    proxy_type: if self.proxy_enabled {
+                        Some(self.proxy_type.clone())
+                    } else {
+                        None
+                    },
+                    proxy_host: if self.proxy_enabled {
+                        Some(self.proxy_host.clone())
+                    } else {
+                        None
+                    },
+                    proxy_port: if self.proxy_enabled {
+                        Some(self.proxy_port.clone())
+                    } else {
+                        None
+                    },
+                    proxy_username: if self.proxy_enabled {
+                        Some(self.proxy_username.clone())
+                    } else {
+                        None
+                    },
+                    proxy_password: if self.proxy_enabled {
+                        Some(self.proxy_password.clone())
+                    } else {
+                        None
+                    },
+                    extra,
+                    ..ListenerInfo::default()
+                }
+            }
+            ListenerProtocol::Smb => {
+                extra.insert(
+                    "PipeName".to_owned(),
+                    serde_json::Value::String(self.pipe_name.clone()),
+                );
+                ListenerInfo {
+                    name: Some(self.name.clone()),
+                    protocol: Some(protocol_str),
+                    status: Some("Online".to_owned()),
+                    extra,
+                    ..ListenerInfo::default()
+                }
+            }
+            ListenerProtocol::External => {
+                extra.insert(
+                    "Endpoint".to_owned(),
+                    serde_json::Value::String(self.endpoint.clone()),
+                );
+                ListenerInfo {
+                    name: Some(self.name.clone()),
+                    protocol: Some(protocol_str),
+                    status: Some("Online".to_owned()),
+                    extra,
+                    ..ListenerInfo::default()
+                }
+            }
+        }
     }
 }
 
@@ -665,24 +883,332 @@ impl ClientApp {
         }
     }
 
-    fn render_listeners_panel(&self, ui: &mut egui::Ui, state: &AppState) {
-        ui.heading("Listeners");
-        ui.separator();
+    fn render_listeners_panel(&mut self, ui: &mut egui::Ui, state: &AppState) {
+        // ── Table ───────────────────────────────────────────────────
+        let col_widths = [120.0_f32, 80.0, 120.0, 70.0, 70.0, 80.0];
+        let headers = ["Name", "Protocol", "Host", "PortBind", "PortConn", "Status"];
 
-        if state.listeners.is_empty() {
-            ui.label("No listeners are configured yet.");
-            return;
-        }
-
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for listener in &state.listeners {
-                ui.group(|ui| {
-                    ui.label(RichText::new(&listener.name).strong());
-                    ui.label(format!("Protocol: {}", listener.protocol));
-                    ui.label(format!("Status: {}", listener.status));
-                });
+        // Header row
+        ui.horizontal(|ui| {
+            for (header, &width) in headers.iter().zip(&col_widths) {
+                ui.add_sized(
+                    [width, 18.0],
+                    egui::Label::new(
+                        RichText::new(*header).strong().color(Color32::from_rgb(180, 180, 200)),
+                    ),
+                );
             }
         });
+        ui.separator();
+
+        // Body
+        egui::ScrollArea::vertical().id_salt("listeners_table_scroll").show(ui, |ui| {
+            if state.listeners.is_empty() {
+                ui.label(RichText::new("No listeners configured.").weak());
+            } else {
+                for listener in &state.listeners {
+                    let is_selected =
+                        self.session_panel.selected_listener.as_deref() == Some(&listener.name);
+
+                    let row_bg = if is_selected {
+                        Color32::from_rgb(50, 50, 80)
+                    } else {
+                        Color32::TRANSPARENT
+                    };
+
+                    let response = egui::Frame::default()
+                        .fill(row_bg)
+                        .inner_margin(egui::Margin::symmetric(0, 1))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.add_sized(
+                                    [col_widths[0], 16.0],
+                                    egui::Label::new(RichText::new(&listener.name)),
+                                );
+                                ui.add_sized(
+                                    [col_widths[1], 16.0],
+                                    egui::Label::new(RichText::new(&listener.protocol)),
+                                );
+                                ui.add_sized(
+                                    [col_widths[2], 16.0],
+                                    egui::Label::new(RichText::new(&listener.host)),
+                                );
+                                ui.add_sized(
+                                    [col_widths[3], 16.0],
+                                    egui::Label::new(RichText::new(&listener.port_bind)),
+                                );
+                                ui.add_sized(
+                                    [col_widths[4], 16.0],
+                                    egui::Label::new(RichText::new(&listener.port_conn)),
+                                );
+                                let status_color = if listener.status.contains("Online") {
+                                    Color32::from_rgb(110, 199, 141) // green
+                                } else {
+                                    Color32::from_rgb(230, 80, 80) // red (offline/error)
+                                };
+                                ui.add_sized(
+                                    [col_widths[5], 16.0],
+                                    egui::Label::new(
+                                        RichText::new(&listener.status).color(status_color),
+                                    ),
+                                );
+                            });
+                        })
+                        .response;
+
+                    if response.interact(Sense::click()).clicked() {
+                        self.session_panel.selected_listener = Some(listener.name.clone());
+                    }
+                }
+            }
+        });
+
+        ui.add_space(4.0);
+        ui.separator();
+
+        // ── Action buttons ──────────────────────────────────────────
+        ui.horizontal(|ui| {
+            if ui.button("Add").clicked() {
+                self.session_panel.listener_dialog = Some(ListenerDialogState::new_create());
+            }
+            let has_selection = self.session_panel.selected_listener.is_some();
+            if ui.add_enabled(has_selection, egui::Button::new("Remove")).clicked() {
+                if let Some(name) = self.session_panel.selected_listener.take() {
+                    let operator = state
+                        .operator_info
+                        .as_ref()
+                        .map(|op| op.username.as_str())
+                        .unwrap_or_default();
+                    self.session_panel
+                        .pending_messages
+                        .push(build_listener_remove(&name, operator));
+                }
+            }
+            if ui.add_enabled(has_selection, egui::Button::new("Edit")).clicked() {
+                // For Edit we re-open the dialog pre-filled; since we only store
+                // summary data locally, we populate from the summary and let the
+                // operator change what the server allows.
+                if let Some(name) = &self.session_panel.selected_listener {
+                    if let Some(listener) = state.listeners.iter().find(|l| &l.name == name) {
+                        let info = ListenerInfo {
+                            host_bind: Some(listener.host.clone()),
+                            port_bind: Some(listener.port_bind.clone()),
+                            ..ListenerInfo::default()
+                        };
+                        self.session_panel.listener_dialog = Some(ListenerDialogState::new_edit(
+                            &listener.name,
+                            &listener.protocol,
+                            &info,
+                        ));
+                    }
+                }
+            }
+        });
+    }
+
+    /// Render the Create/Edit Listener dialog as an egui window overlay.
+    fn render_listener_dialog(&mut self, ctx: &egui::Context, state: &AppState) {
+        let Some(dialog) = &mut self.session_panel.listener_dialog else {
+            return;
+        };
+
+        let title = match dialog.mode {
+            ListenerDialogMode::Create => "Create Listener",
+            ListenerDialogMode::Edit => "Edit Listener",
+        };
+
+        let mut close_requested = false;
+        let mut save_clicked = false;
+
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(480.0)
+            .default_height(520.0)
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                egui::Grid::new("listener_dialog_grid").num_columns(2).spacing([8.0, 6.0]).show(
+                    ui,
+                    |ui| {
+                        ui.label("Name:");
+                        let name_editable = dialog.mode == ListenerDialogMode::Create;
+                        ui.add_enabled(
+                            name_editable,
+                            egui::TextEdit::singleline(&mut dialog.name).desired_width(300.0),
+                        );
+                        ui.end_row();
+
+                        ui.label("Payload:");
+                        egui::ComboBox::from_id_salt("listener_protocol_combo")
+                            .selected_text(dialog.protocol.label())
+                            .width(300.0)
+                            .show_ui(ui, |ui| {
+                                for proto in ListenerProtocol::ALL {
+                                    ui.selectable_value(&mut dialog.protocol, proto, proto.label());
+                                }
+                            });
+                        ui.end_row();
+                    },
+                );
+
+                ui.add_space(8.0);
+                ui.heading("Config Options");
+                ui.separator();
+
+                match dialog.protocol {
+                    ListenerProtocol::Http | ListenerProtocol::Https => {
+                        Self::render_http_listener_fields(ui, dialog);
+                    }
+                    ListenerProtocol::Smb => {
+                        egui::Grid::new("smb_fields").num_columns(2).spacing([8.0, 6.0]).show(
+                            ui,
+                            |ui| {
+                                ui.label("Pipe Name:");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut dialog.pipe_name)
+                                        .desired_width(300.0),
+                                );
+                                ui.end_row();
+                            },
+                        );
+                    }
+                    ListenerProtocol::External => {
+                        egui::Grid::new("external_fields").num_columns(2).spacing([8.0, 6.0]).show(
+                            ui,
+                            |ui| {
+                                ui.label("Endpoint:");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut dialog.endpoint)
+                                        .desired_width(300.0),
+                                );
+                                ui.end_row();
+                            },
+                        );
+                    }
+                }
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        save_clicked = true;
+                    }
+                    if ui.button("Close").clicked() {
+                        close_requested = true;
+                    }
+                });
+            });
+
+        if save_clicked {
+            if let Some(dialog) = &self.session_panel.listener_dialog {
+                let operator =
+                    state.operator_info.as_ref().map(|op| op.username.as_str()).unwrap_or_default();
+                let info = dialog.to_listener_info();
+                let message = match dialog.mode {
+                    ListenerDialogMode::Create => build_listener_new(info, operator),
+                    ListenerDialogMode::Edit => build_listener_edit(info, operator),
+                };
+                self.session_panel.pending_messages.push(message);
+            }
+            self.session_panel.listener_dialog = None;
+        } else if close_requested {
+            self.session_panel.listener_dialog = None;
+        }
+    }
+
+    /// Render the HTTP/HTTPS-specific config fields inside the listener dialog.
+    fn render_http_listener_fields(ui: &mut egui::Ui, dialog: &mut ListenerDialogState) {
+        egui::Grid::new("http_fields").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+            ui.label("Host:");
+            ui.add(egui::TextEdit::singleline(&mut dialog.host).desired_width(300.0));
+            ui.end_row();
+
+            ui.label("Port:");
+            ui.add(egui::TextEdit::singleline(&mut dialog.port).desired_width(300.0));
+            ui.end_row();
+
+            ui.label("User Agent:");
+            ui.add(egui::TextEdit::singleline(&mut dialog.user_agent).desired_width(300.0));
+            ui.end_row();
+
+            ui.label("Headers:");
+            ui.add(
+                egui::TextEdit::multiline(&mut dialog.headers).desired_width(300.0).desired_rows(3),
+            );
+            ui.end_row();
+
+            ui.label("Uris:");
+            ui.add(
+                egui::TextEdit::multiline(&mut dialog.uris).desired_width(300.0).desired_rows(3),
+            );
+            ui.end_row();
+
+            ui.label("Host Header:");
+            ui.add(egui::TextEdit::singleline(&mut dialog.host_header).desired_width(300.0));
+            ui.end_row();
+        });
+
+        ui.checkbox(&mut dialog.proxy_enabled, "Enable Proxy Connection");
+
+        if dialog.proxy_enabled {
+            egui::Frame::default()
+                .fill(Color32::from_rgb(30, 30, 50))
+                .inner_margin(egui::Margin::same(8))
+                .corner_radius(4.0)
+                .show(ui, |ui| {
+                    egui::Grid::new("proxy_fields").num_columns(2).spacing([8.0, 6.0]).show(
+                        ui,
+                        |ui| {
+                            ui.label("Proxy Type:");
+                            egui::ComboBox::from_id_salt("proxy_type_combo")
+                                .selected_text(&dialog.proxy_type)
+                                .width(300.0)
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut dialog.proxy_type,
+                                        "http".to_owned(),
+                                        "http",
+                                    );
+                                    ui.selectable_value(
+                                        &mut dialog.proxy_type,
+                                        "https".to_owned(),
+                                        "https",
+                                    );
+                                });
+                            ui.end_row();
+
+                            ui.label("Proxy Host:");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut dialog.proxy_host)
+                                    .desired_width(300.0),
+                            );
+                            ui.end_row();
+
+                            ui.label("Proxy Port:");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut dialog.proxy_port)
+                                    .desired_width(300.0),
+                            );
+                            ui.end_row();
+
+                            ui.label("UserName:");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut dialog.proxy_username)
+                                    .desired_width(300.0),
+                            );
+                            ui.end_row();
+
+                            ui.label("Password:");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut dialog.proxy_password)
+                                    .desired_width(300.0)
+                                    .password(true),
+                            );
+                            ui.end_row();
+                        },
+                    );
+                });
+        }
     }
 
     fn render_loot_panel(&mut self, ui: &mut egui::Ui, state: &AppState) {
@@ -1052,6 +1578,7 @@ impl ClientApp {
         // ── Modal dialogs ───────────────────────────────────────────
         self.render_note_editor(ctx, app_state);
         self.render_process_injection_dialog(ctx);
+        self.render_listener_dialog(ctx, &snapshot);
 
         if self.session_panel.pending_mark_all_read {
             self.session_panel.pending_mark_all_read = false;
@@ -3349,6 +3876,42 @@ fn build_agent_task(operator: &str, info: AgentTaskInfo) -> OperatorMessage {
             one_time: String::new(),
         },
         info,
+    })
+}
+
+fn build_listener_new(info: ListenerInfo, operator: &str) -> OperatorMessage {
+    OperatorMessage::ListenerNew(Message {
+        head: MessageHead {
+            event: EventCode::Listener,
+            user: operator.to_owned(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info,
+    })
+}
+
+fn build_listener_edit(info: ListenerInfo, operator: &str) -> OperatorMessage {
+    OperatorMessage::ListenerEdit(Message {
+        head: MessageHead {
+            event: EventCode::Listener,
+            user: operator.to_owned(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info,
+    })
+}
+
+fn build_listener_remove(name: &str, operator: &str) -> OperatorMessage {
+    OperatorMessage::ListenerRemove(Message {
+        head: MessageHead {
+            event: EventCode::Listener,
+            user: operator.to_owned(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info: NameInfo { name: name.to_owned() },
     })
 }
 
@@ -7227,5 +7790,197 @@ mod tests {
     #[test]
     fn session_graph_status_color_unknown() {
         assert_eq!(session_graph_status_color("something_else"), Color32::from_rgb(174, 68, 68));
+    }
+
+    // ── Listener dialog & message builder tests ─────────────────────
+
+    #[test]
+    fn listener_protocol_label_round_trips() {
+        for proto in ListenerProtocol::ALL {
+            let label = proto.label();
+            assert!(!label.is_empty());
+        }
+        assert_eq!(ListenerProtocol::Http.label(), "Http");
+        assert_eq!(ListenerProtocol::Https.label(), "Https");
+        assert_eq!(ListenerProtocol::Smb.label(), "Smb");
+        assert_eq!(ListenerProtocol::External.label(), "External");
+    }
+
+    #[test]
+    fn listener_dialog_new_create_defaults() {
+        let dialog = ListenerDialogState::new_create();
+        assert_eq!(dialog.mode, ListenerDialogMode::Create);
+        assert_eq!(dialog.protocol, ListenerProtocol::Http);
+        assert!(dialog.name.is_empty());
+        assert!(dialog.host.is_empty());
+        assert!(dialog.port.is_empty());
+        assert!(!dialog.proxy_enabled);
+    }
+
+    #[test]
+    fn listener_dialog_to_info_http() {
+        let mut dialog = ListenerDialogState::new_create();
+        dialog.name = "test-http".to_owned();
+        dialog.protocol = ListenerProtocol::Http;
+        dialog.host = "0.0.0.0".to_owned();
+        dialog.port = "8080".to_owned();
+        dialog.user_agent = "TestAgent/1.0".to_owned();
+        dialog.headers = "X-Custom: val".to_owned();
+        dialog.uris = "/api/v1".to_owned();
+        dialog.host_header = "example.com".to_owned();
+
+        let info = dialog.to_listener_info();
+        assert_eq!(info.name.as_deref(), Some("test-http"));
+        assert_eq!(info.protocol.as_deref(), Some("Http"));
+        assert_eq!(info.host_bind.as_deref(), Some("0.0.0.0"));
+        assert_eq!(info.port_bind.as_deref(), Some("8080"));
+        assert_eq!(info.user_agent.as_deref(), Some("TestAgent/1.0"));
+        assert_eq!(info.headers.as_deref(), Some("X-Custom: val"));
+        assert_eq!(info.uris.as_deref(), Some("/api/v1"));
+        assert_eq!(info.secure.as_deref(), Some("false"));
+        assert_eq!(info.proxy_enabled.as_deref(), Some("false"));
+        // Proxy fields should be None when not enabled
+        assert!(info.proxy_type.is_none());
+        assert!(info.proxy_host.is_none());
+        // HostHeader is in extra
+        assert_eq!(info.extra.get("HostHeader").and_then(|v| v.as_str()), Some("example.com"));
+    }
+
+    #[test]
+    fn listener_dialog_to_info_https_with_proxy() {
+        let mut dialog = ListenerDialogState::new_create();
+        dialog.name = "test-https".to_owned();
+        dialog.protocol = ListenerProtocol::Https;
+        dialog.host = "0.0.0.0".to_owned();
+        dialog.port = "443".to_owned();
+        dialog.proxy_enabled = true;
+        dialog.proxy_type = "http".to_owned();
+        dialog.proxy_host = "proxy.local".to_owned();
+        dialog.proxy_port = "3128".to_owned();
+        dialog.proxy_username = "user".to_owned();
+        dialog.proxy_password = "pass".to_owned();
+
+        let info = dialog.to_listener_info();
+        assert_eq!(info.protocol.as_deref(), Some("Https"));
+        assert_eq!(info.secure.as_deref(), Some("true"));
+        assert_eq!(info.proxy_enabled.as_deref(), Some("true"));
+        assert_eq!(info.proxy_type.as_deref(), Some("http"));
+        assert_eq!(info.proxy_host.as_deref(), Some("proxy.local"));
+        assert_eq!(info.proxy_port.as_deref(), Some("3128"));
+        assert_eq!(info.proxy_username.as_deref(), Some("user"));
+        assert_eq!(info.proxy_password.as_deref(), Some("pass"));
+    }
+
+    #[test]
+    fn listener_dialog_to_info_smb() {
+        let mut dialog = ListenerDialogState::new_create();
+        dialog.name = "smb-pipe".to_owned();
+        dialog.protocol = ListenerProtocol::Smb;
+        dialog.pipe_name = r"\\.\pipe\mypipe".to_owned();
+
+        let info = dialog.to_listener_info();
+        assert_eq!(info.name.as_deref(), Some("smb-pipe"));
+        assert_eq!(info.protocol.as_deref(), Some("Smb"));
+        assert_eq!(info.extra.get("PipeName").and_then(|v| v.as_str()), Some(r"\\.\pipe\mypipe"));
+        // HTTP-specific fields should be default
+        assert!(info.host_bind.is_none());
+        assert!(info.port_bind.is_none());
+    }
+
+    #[test]
+    fn listener_dialog_to_info_external() {
+        let mut dialog = ListenerDialogState::new_create();
+        dialog.name = "ext-listener".to_owned();
+        dialog.protocol = ListenerProtocol::External;
+        dialog.endpoint = "/callback".to_owned();
+
+        let info = dialog.to_listener_info();
+        assert_eq!(info.name.as_deref(), Some("ext-listener"));
+        assert_eq!(info.protocol.as_deref(), Some("External"));
+        assert_eq!(info.extra.get("Endpoint").and_then(|v| v.as_str()), Some("/callback"));
+    }
+
+    #[test]
+    fn listener_dialog_new_edit_preserves_fields() {
+        let mut source = ListenerInfo::default();
+        source.host_bind = Some("10.0.0.1".to_owned());
+        source.port_bind = Some("8443".to_owned());
+        source.user_agent = Some("MyAgent".to_owned());
+        source.proxy_enabled = Some("true".to_owned());
+        source.proxy_type = Some("https".to_owned());
+        source.proxy_host = Some("px.local".to_owned());
+        source.extra.insert("PipeName".to_owned(), serde_json::Value::String("pipe1".to_owned()));
+
+        let dialog = ListenerDialogState::new_edit("mylistener", "Https", &source);
+        assert_eq!(dialog.mode, ListenerDialogMode::Edit);
+        assert_eq!(dialog.name, "mylistener");
+        assert_eq!(dialog.protocol, ListenerProtocol::Https);
+        assert_eq!(dialog.host, "10.0.0.1");
+        assert_eq!(dialog.port, "8443");
+        assert_eq!(dialog.user_agent, "MyAgent");
+        assert!(dialog.proxy_enabled);
+        assert_eq!(dialog.proxy_type, "https");
+        assert_eq!(dialog.proxy_host, "px.local");
+        assert_eq!(dialog.pipe_name, "pipe1");
+    }
+
+    #[test]
+    fn build_listener_new_creates_correct_message() {
+        let info = ListenerInfo {
+            name: Some("http-1".to_owned()),
+            protocol: Some("Http".to_owned()),
+            ..ListenerInfo::default()
+        };
+        let msg = build_listener_new(info, "operator1");
+        match msg {
+            OperatorMessage::ListenerNew(m) => {
+                assert_eq!(m.head.event, EventCode::Listener);
+                assert_eq!(m.head.user, "operator1");
+                assert_eq!(m.info.name.as_deref(), Some("http-1"));
+            }
+            _ => panic!("expected ListenerNew"),
+        }
+    }
+
+    #[test]
+    fn build_listener_edit_creates_correct_message() {
+        let info = ListenerInfo { name: Some("http-1".to_owned()), ..ListenerInfo::default() };
+        let msg = build_listener_edit(info, "op2");
+        match msg {
+            OperatorMessage::ListenerEdit(m) => {
+                assert_eq!(m.head.event, EventCode::Listener);
+                assert_eq!(m.head.user, "op2");
+            }
+            _ => panic!("expected ListenerEdit"),
+        }
+    }
+
+    #[test]
+    fn build_listener_remove_creates_correct_message() {
+        let msg = build_listener_remove("http-1", "op3");
+        match msg {
+            OperatorMessage::ListenerRemove(m) => {
+                assert_eq!(m.head.event, EventCode::Listener);
+                assert_eq!(m.head.user, "op3");
+                assert_eq!(m.info.name, "http-1");
+            }
+            _ => panic!("expected ListenerRemove"),
+        }
+    }
+
+    #[test]
+    fn listener_dialog_http_empty_optional_fields_produce_none() {
+        let mut dialog = ListenerDialogState::new_create();
+        dialog.name = "minimal".to_owned();
+        dialog.protocol = ListenerProtocol::Http;
+        dialog.host = "0.0.0.0".to_owned();
+        dialog.port = "80".to_owned();
+        // Leave user_agent, headers, uris, host_header all empty
+
+        let info = dialog.to_listener_info();
+        assert!(info.user_agent.is_none());
+        assert!(info.headers.is_none());
+        assert!(info.uris.is_none());
+        assert!(!info.extra.contains_key("HostHeader"));
     }
 }

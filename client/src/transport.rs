@@ -469,6 +469,9 @@ pub(crate) struct AgentSummary {
 pub(crate) struct ListenerSummary {
     pub(crate) name: String,
     pub(crate) protocol: String,
+    pub(crate) host: String,
+    pub(crate) port_bind: String,
+    pub(crate) port_conn: String,
     pub(crate) status: String,
 }
 
@@ -573,6 +576,9 @@ impl AppState {
                 self.upsert_listener(ListenerSummary {
                     name: message.info.name.clone(),
                     protocol: "unknown".to_owned(),
+                    host: String::new(),
+                    port_bind: String::new(),
+                    port_conn: String::new(),
                     status: format!("Error: {}", message.info.error),
                 });
                 self.push_event(
@@ -759,6 +765,9 @@ impl AppState {
             None => self.listeners.push(ListenerSummary {
                 name: mark.name.clone(),
                 protocol: "unknown".to_owned(),
+                host: String::new(),
+                port_bind: String::new(),
+                port_conn: String::new(),
                 status,
             }),
         }
@@ -1550,6 +1559,9 @@ fn listener_summary_from_info(info: &ListenerInfo) -> ListenerSummary {
     ListenerSummary {
         name: info.name.clone().unwrap_or_else(|| "unnamed".to_owned()),
         protocol: info.protocol.clone().unwrap_or_else(|| "unknown".to_owned()),
+        host: info.host_bind.clone().unwrap_or_default(),
+        port_bind: info.port_bind.clone().unwrap_or_default(),
+        port_conn: info.port_conn.clone().unwrap_or_default(),
         status: info.status.clone().unwrap_or_else(|| "Unknown".to_owned()),
     }
 }
@@ -3069,6 +3081,9 @@ mod tests {
         state.listeners.push(ListenerSummary {
             name: "http".to_owned(),
             protocol: "Https".to_owned(),
+            host: "0.0.0.0".to_owned(),
+            port_bind: "443".to_owned(),
+            port_conn: "443".to_owned(),
             status: "Online".to_owned(),
         });
         let log_before = state.event_log.len();

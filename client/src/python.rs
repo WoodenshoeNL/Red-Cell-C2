@@ -1384,6 +1384,9 @@ fn listener_summary_to_json(listener: &ListenerSummary) -> Value {
     json!({
         "name": listener.name,
         "protocol": listener.protocol,
+        "host": listener.host,
+        "port_bind": listener.port_bind,
+        "port_conn": listener.port_conn,
         "status": listener.status,
     })
 }
@@ -2609,6 +2612,9 @@ mod tests {
         ListenerSummary {
             name: name.to_owned(),
             protocol: "https".to_owned(),
+            host: "0.0.0.0".to_owned(),
+            port_bind: "443".to_owned(),
+            port_conn: "443".to_owned(),
             status: "Online".to_owned(),
         }
     }

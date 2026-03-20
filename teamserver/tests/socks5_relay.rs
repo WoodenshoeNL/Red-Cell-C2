@@ -582,6 +582,99 @@ async fn finish_connect_failure_closes_client_socket() -> Result<(), Box<dyn std
     Ok(())
 }
 
+/// When a SOCKS5 client sends data (e.g. an HTTP request) after the CONNECT
+/// request but *before* the agent calls `finish_connect`, the relay must not
+/// panic or corrupt state.  The data sits in the kernel TCP buffer until the
+/// reader task is spawned by `finish_connect(success=true)`, at which point it
+/// should be forwarded to the agent as a normal `CommandSocket/Write` job.
+#[tokio::test]
+async fn client_data_before_finish_connect_is_buffered_and_relayed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_database, registry, manager) = test_manager().await?;
+    let agent_id = 0xAABB_0025_u32;
+    registry.insert(sample_agent(agent_id)).await?;
+
+    let (port, guard) = common::available_port()?;
+    drop(guard);
+    manager.add_socks_server(agent_id, &port.to_string()).await?;
+
+    let mut client =
+        timeout(Duration::from_secs(2), TcpStream::connect(format!("127.0.0.1:{port}"))).await??;
+    socks5_handshake(&mut client).await?;
+    socks5_connect_ipv4(&mut client, [93, 184, 216, 34], 80).await?;
+
+    // Wait for the relay to register the client and enqueue the connect job.
+    let socket_id = dequeue_socket_id(&registry, agent_id).await?;
+
+    // Drain the connect job so we can cleanly detect subsequent write jobs.
+    let _ = registry.dequeue_jobs(agent_id).await?;
+
+    // --- KEY: send data BEFORE finish_connect is called. ---
+    // In a real scenario this is an eager HTTP client writing its request
+    // immediately after the SOCKS5 CONNECT, not waiting for the reply.
+    let premature_data = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+    client.write_all(premature_data).await?;
+    client.flush().await?;
+
+    // Give the data a moment to arrive at the relay's TCP buffer.
+    sleep(Duration::from_millis(50)).await;
+
+    // Now simulate the agent completing the connection successfully.
+    // This spawns the reader task which should pick up the buffered data.
+    manager.finish_connect(agent_id, socket_id, true, 0).await?;
+
+    // The client should receive a SOCKS5 success reply.
+    let (reply, _addr, _port) =
+        timeout(Duration::from_secs(2), read_socks5_reply(&mut client, SOCKS_ATYP_IPV4)).await??;
+    assert_eq!(reply, SOCKS_REPLY_SUCCEEDED, "client must receive a success reply");
+
+    // The premature data should now be forwarded as a CommandSocket/Write job.
+    let write_cmd = u32::from(DemonSocketCommand::Write).to_le_bytes();
+    let mut write_job_payload = None;
+    for _ in 0..50 {
+        let jobs = registry.queued_jobs(agent_id).await?;
+        if let Some(job) = jobs.iter().find(|j| {
+            j.command == u32::from(DemonCommand::CommandSocket)
+                && j.payload.len() >= 4
+                && j.payload[..4] == write_cmd
+        }) {
+            write_job_payload = Some(job.payload.clone());
+            break;
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+
+    let payload = write_job_payload.expect("premature client data must be relayed as a Write job");
+
+    // Verify the payload contains the exact bytes the client sent.
+    // Layout: [subcmd:4][socket_id:4][data_len:4][data:N]
+    assert!(payload.len() >= 12, "payload must contain at least header fields");
+    let job_socket_id = u32::from_le_bytes(payload[4..8].try_into()?);
+    assert_eq!(job_socket_id, socket_id, "write job must reference the correct socket_id");
+    let data_len = u32::from_le_bytes(payload[8..12].try_into()?) as usize;
+    assert_eq!(data_len, premature_data.len(), "data length must match sent bytes");
+    assert_eq!(
+        &payload[12..12 + data_len],
+        premature_data.as_slice(),
+        "write job must contain the exact premature bytes"
+    );
+
+    // Verify the relay is still fully functional — write_client_data should work.
+    let relay_data = b"response after early send";
+    manager.write_client_data(agent_id, socket_id, relay_data).await?;
+
+    let mut received = vec![0u8; relay_data.len()];
+    timeout(Duration::from_secs(2), client.read_exact(&mut received)).await??;
+    assert_eq!(
+        received,
+        relay_data.as_slice(),
+        "relay must still deliver agent data to the client after premature send"
+    );
+
+    manager.clear_socks_servers(agent_id).await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn client_write_enqueues_socket_write_job_for_agent() -> Result<(), Box<dyn std::error::Error>>
 {

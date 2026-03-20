@@ -111,6 +111,17 @@ impl Profile {
             }
         }
 
+        if let Some(cert) = &self.teamserver.cert {
+            if cert.cert.trim().is_empty() {
+                errors
+                    .push("Teamserver.Cert.Cert path must not be empty when specified".to_owned());
+            }
+
+            if cert.key.trim().is_empty() {
+                errors.push("Teamserver.Cert.Key path must not be empty when specified".to_owned());
+            }
+        }
+
         if self.operators.users.is_empty() {
             errors.push("Operators must define at least one user".to_owned());
         }
@@ -2479,6 +2490,148 @@ mod tests {
         assert!(
             msg.contains("error one; error two; error three"),
             "errors must be joined with \"; \"; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parses_teamserver_tls_certificate_paths() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "0.0.0.0"
+              Port = 40056
+
+              Cert {
+                Cert = "/tmp/server.crt"
+                Key = "/tmp/server.key"
+              }
+            }
+
+            Operators {
+              user "Neo" {
+                Password = "password1234"
+              }
+            }
+
+            Listeners {}
+
+            Demon {}
+            "#,
+        )
+        .expect("profile with teamserver cert block should parse");
+
+        let cert =
+            profile.teamserver.cert.as_ref().expect("teamserver cert block should be present");
+
+        assert_eq!(cert.cert, "/tmp/server.crt");
+        assert_eq!(cert.key, "/tmp/server.key");
+
+        profile.validate().expect("profile with valid cert paths should pass validation");
+    }
+
+    #[test]
+    fn rejects_teamserver_with_blank_certificate_path() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "0.0.0.0"
+              Port = 40056
+
+              Cert {
+                Cert = "   "
+                Key = "/tmp/server.key"
+              }
+            }
+
+            Operators {
+              user "Neo" {
+                Password = "password1234"
+              }
+            }
+
+            Listeners {}
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("profile should be invalid");
+        assert!(
+            error.errors.iter().any(|message| message.contains("Teamserver.Cert.Cert")),
+            "expected error about blank Teamserver.Cert.Cert path, got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_teamserver_with_blank_certificate_key_path() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "0.0.0.0"
+              Port = 40056
+
+              Cert {
+                Cert = "/tmp/server.crt"
+                Key = "   "
+              }
+            }
+
+            Operators {
+              user "Neo" {
+                Password = "password1234"
+              }
+            }
+
+            Listeners {}
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("profile should be invalid");
+        assert!(
+            error.errors.iter().any(|message| message.contains("Teamserver.Cert.Key")),
+            "expected error about blank Teamserver.Cert.Key path, got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_teamserver_with_both_blank_certificate_paths() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "0.0.0.0"
+              Port = 40056
+
+              Cert {
+                Cert = ""
+                Key = ""
+              }
+            }
+
+            Operators {
+              user "Neo" {
+                Password = "password1234"
+              }
+            }
+
+            Listeners {}
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("profile should be invalid");
+        assert!(
+            error.errors.iter().any(|message| message.contains("Teamserver.Cert.Cert")),
+            "expected Cert path error, got: {error:?}"
+        );
+        assert!(
+            error.errors.iter().any(|message| message.contains("Teamserver.Cert.Key")),
+            "expected Key path error, got: {error:?}"
         );
     }
 }

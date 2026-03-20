@@ -450,6 +450,72 @@ async fn assembly_list_versions_broadcasts_formatted_list() -> Result<(), Box<dy
     Ok(())
 }
 
+/// `handle_assembly_list_versions_callback` with an empty payload (zero versions)
+/// must broadcast a valid `AgentResponse` without panicking.
+#[tokio::test]
+async fn assembly_list_versions_empty_payload_broadcasts_gracefully()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (server_addr, listeners) = start_server().await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    common::login(&mut socket).await?;
+
+    listeners
+        .create(common::http_listener_config("asm-test-list-ver-empty", listener_port))
+        .await?;
+    drop(listener_guard);
+    listeners.start("asm-test-list-ver-empty").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xAB01_0004_u32;
+    let key = [0x55; AGENT_KEY_LENGTH];
+    let iv = [0x66; AGENT_IV_LENGTH];
+    let ctr_offset = register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // Send a CommandAssemblyListVersions callback with an empty payload (zero versions).
+    let payload = assembly_list_versions_payload(&[]);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandAssemblyListVersions),
+            0x30,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse, got {event:?}");
+    };
+    assert_eq!(msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(
+        msg.info.command_id,
+        u32::from(DemonCommand::CommandAssemblyListVersions).to_string()
+    );
+    // With zero versions the output section should be empty (no version lines).
+    assert!(
+        msg.info.output.is_empty(),
+        "expected empty output for zero versions, got {:?}",
+        msg.info.output
+    );
+
+    socket.close(None).await?;
+    listeners.stop("asm-test-list-ver-empty").await?;
+    Ok(())
+}
+
 /// `handle_assembly_inline_execute_callback` with DOTNET_INFO_NET_VERSION must
 /// broadcast the parsed CLR version string to the operator.
 #[tokio::test]

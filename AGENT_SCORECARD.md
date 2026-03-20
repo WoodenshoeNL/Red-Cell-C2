@@ -20,7 +20,7 @@ Each loop run updates the running totals and appends a review entry.
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
-| unwrap / expect in production | 3 | 0 | 0 |
+| unwrap / expect in production | 4 | 0 | 0 |
 | Missing tests / stale tests | 31 | 13 | 5 |
 | Clippy warnings | 3 | 0 | 1 |
 | Protocol errors | 7 | 27 | 3 |
@@ -31,7 +31,7 @@ Each loop run updates the running totals and appends a review entry.
 | Test infrastructure / flakiness | 4 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
-| Correctness / pagination | 18 | 7 | 1 |
+| Correctness / pagination | 20 | 7 | 1 |
 | Workflow / close-hygiene | 12 | 0 | 0 |
 | Code reuse / duplication | 6 | 0 | 0 |
 
@@ -3062,3 +3062,23 @@ Build: passed (cargo check, clippy -D warnings clean, all 592 client + 261 commo
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: passed (cargo check clean, clippy -D warnings clean, 1752 unit tests pass, 1 pre-existing integration test failure in pivot_dispatch — tracked by jmo0u)
+
+### Arch Review — 2026-03-20 16:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude (Opus) | 2 | correctness (stub impls) | service.rs:419-422 BODY_AGENT_RESPONSE handler is no-op, service.rs:672-674 BODY_LISTENER_START handler is no-op. Both silently drop messages from service bridge clients. Filed arygx, 3zhoq. |
+| Claude (Sonnet) | 1 | unwrap/expect | crypto.rs:91 unreachable!() in From&lt;InvalidLength&gt; — will panic instead of returning error if cipher length validation invariant is ever broken. Filed jlc2p. |
+| Codex | 0 | — | No findings attributed. |
+| Cursor | 0 | — | No findings attributed. |
+
+Overall codebase health: **on track**
+- Zero clippy warnings, zero test failures (267 tests), zero todo!/unimplemented!
+- Zero bare println/eprintln in production code
+- Proper constant-time comparisons (subtle crate) for all secret comparisons
+- Key material consistently redacted in Debug impls and logs
+- Resource limits well-defined for all listener types (HTTP 30MiB, SMB 16MiB, DNS 256 chunks/1000 sessions)
+- Authentication enforced on all endpoints; rate limiting on init handshakes and API auth
+
+Biggest blindspot: Service bridge dispatch completeness — two message types silently dropped
+Security posture: Strong — no exploitable issues found in current state

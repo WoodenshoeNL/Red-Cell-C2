@@ -173,7 +173,9 @@ mod tests {
     use red_cell_common::config::{LogFormat, LogRotation, Profile};
     use tempfile::TempDir;
 
-    use super::{LoggingInitError, init_tracing, resolve_logging_config_with_override};
+    use super::{
+        LoggingInitError, init_tracing, map_rotation, resolve_logging_config_with_override,
+    };
 
     const SUBPROCESS_TEST_ENV: &str = "RED_CELL_LOGGING_TEST_CASE";
     const SUBPROCESS_LOG_DIR_ENV: &str = "RED_CELL_LOGGING_TEST_LOG_DIR";
@@ -629,6 +631,29 @@ mod tests {
             "subprocess should succeed, stdout: {}, stderr: {}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn map_rotation_maps_never_to_appender_never() {
+        assert_eq!(map_rotation(LogRotation::Never), tracing_appender::rolling::Rotation::NEVER);
+    }
+
+    #[test]
+    fn map_rotation_maps_hourly_to_appender_hourly() {
+        assert_eq!(map_rotation(LogRotation::Hourly), tracing_appender::rolling::Rotation::HOURLY);
+    }
+
+    #[test]
+    fn map_rotation_maps_daily_to_appender_daily() {
+        assert_eq!(map_rotation(LogRotation::Daily), tracing_appender::rolling::Rotation::DAILY);
+    }
+
+    #[test]
+    fn map_rotation_maps_minutely_to_appender_minutely() {
+        assert_eq!(
+            map_rotation(LogRotation::Minutely),
+            tracing_appender::rolling::Rotation::MINUTELY
         );
     }
 

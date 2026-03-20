@@ -1620,4 +1620,167 @@ mod tests {
     fn transfer_state_name_unknown() {
         assert_eq!(transfer_state_name(99), "Unknown");
     }
+
+    // ------------------------------------------------------------------
+    // handle_beacon_output_callback — empty output no-op paths
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn beacon_output_empty_string_skips_broadcast_and_persist()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let downloads = DownloadTracker::new(1024 * 1024);
+        let agent_id: u32 = 0xE000_0001;
+        let request_id: u32 = 500;
+
+        register_test_agent(&registry, agent_id).await?;
+
+        // Build payload: Output callback with a length-prefixed empty string (len=0).
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&le32(u32::from(DemonCallback::Output)));
+        payload.extend_from_slice(&length_prefixed(b""));
+
+        let result = handle_beacon_output_callback(
+            &registry, &database, &events, &downloads, None, agent_id, request_id, &payload,
+        )
+        .await?;
+
+        assert_eq!(result, None, "empty Output must not produce a reply packet");
+
+        // No event should have been broadcast.
+        let no_event =
+            tokio::time::timeout(std::time::Duration::from_millis(50), receiver.recv()).await;
+        assert!(no_event.is_err(), "empty Output must not broadcast an event; got: {no_event:?}");
+
+        // No agent_response should have been persisted.
+        let responses = database.agent_responses().list_for_agent(agent_id).await?;
+        assert!(
+            responses.is_empty(),
+            "empty Output must not persist an agent_response record; got: {responses:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn beacon_output_utf8_empty_skips_broadcast_and_persist()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let downloads = DownloadTracker::new(1024 * 1024);
+        let agent_id: u32 = 0xE000_0002;
+        let request_id: u32 = 501;
+
+        register_test_agent(&registry, agent_id).await?;
+
+        // Build payload: OutputUtf8 callback with a length-prefixed empty UTF-16 buffer.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&le32(u32::from(DemonCallback::OutputUtf8)));
+        payload.extend_from_slice(&length_prefixed(b""));
+
+        let result = handle_beacon_output_callback(
+            &registry, &database, &events, &downloads, None, agent_id, request_id, &payload,
+        )
+        .await?;
+
+        assert_eq!(result, None, "empty OutputUtf8 must not produce a reply packet");
+
+        let no_event =
+            tokio::time::timeout(std::time::Duration::from_millis(50), receiver.recv()).await;
+        assert!(
+            no_event.is_err(),
+            "empty OutputUtf8 must not broadcast an event; got: {no_event:?}"
+        );
+
+        let responses = database.agent_responses().list_for_agent(agent_id).await?;
+        assert!(
+            responses.is_empty(),
+            "empty OutputUtf8 must not persist an agent_response record; got: {responses:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn beacon_output_oem_empty_skips_broadcast_and_persist()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let downloads = DownloadTracker::new(1024 * 1024);
+        let agent_id: u32 = 0xE000_0003;
+        let request_id: u32 = 502;
+
+        register_test_agent(&registry, agent_id).await?;
+
+        // Build payload: OutputOem callback with a length-prefixed empty UTF-16 buffer.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&le32(u32::from(DemonCallback::OutputOem)));
+        payload.extend_from_slice(&length_prefixed(b""));
+
+        let result = handle_beacon_output_callback(
+            &registry, &database, &events, &downloads, None, agent_id, request_id, &payload,
+        )
+        .await?;
+
+        assert_eq!(result, None, "empty OutputOem must not produce a reply packet");
+
+        let no_event =
+            tokio::time::timeout(std::time::Duration::from_millis(50), receiver.recv()).await;
+        assert!(
+            no_event.is_err(),
+            "empty OutputOem must not broadcast an event; got: {no_event:?}"
+        );
+
+        let responses = database.agent_responses().list_for_agent(agent_id).await?;
+        assert!(
+            responses.is_empty(),
+            "empty OutputOem must not persist an agent_response record; got: {responses:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn beacon_error_message_empty_skips_broadcast_and_persist()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let downloads = DownloadTracker::new(1024 * 1024);
+        let agent_id: u32 = 0xE000_0004;
+        let request_id: u32 = 503;
+
+        register_test_agent(&registry, agent_id).await?;
+
+        // Build payload: ErrorMessage callback with a length-prefixed empty string.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&le32(u32::from(DemonCallback::ErrorMessage)));
+        payload.extend_from_slice(&length_prefixed(b""));
+
+        let result = handle_beacon_output_callback(
+            &registry, &database, &events, &downloads, None, agent_id, request_id, &payload,
+        )
+        .await?;
+
+        assert_eq!(result, None, "empty ErrorMessage must not produce a reply packet");
+
+        let no_event =
+            tokio::time::timeout(std::time::Duration::from_millis(50), receiver.recv()).await;
+        assert!(
+            no_event.is_err(),
+            "empty ErrorMessage must not broadcast an event; got: {no_event:?}"
+        );
+
+        let responses = database.agent_responses().list_for_agent(agent_id).await?;
+        assert!(
+            responses.is_empty(),
+            "empty ErrorMessage must not persist an agent_response record; got: {responses:?}"
+        );
+        Ok(())
+    }
 }

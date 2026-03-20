@@ -5056,4 +5056,153 @@ mod tests {
         assert_eq!(removed, 1);
         assert!(svc.cache().get(&key).await.is_none(), "cache should be empty after flush");
     }
+
+    // ── PayloadCache edge-case & concurrency tests ─────────────────────
+
+    #[tokio::test]
+    async fn get_returns_truncated_bytes_from_corrupted_cache_entry() {
+        let temp = TempDir::new().unwrap();
+        let cache = PayloadCache::new(temp.path().to_path_buf());
+        let key = test_cache_key("corrupt01", ".exe");
+
+        // Simulate a full artifact write followed by on-disk truncation
+        // (e.g. disk full during a previous `put`).
+        let original = b"MZ\x90\x00FULL-PAYLOAD-CONTENT-HERE";
+        cache.put(&key, original).await;
+
+        // Manually truncate the cached file to simulate corruption.
+        let path = cache.artifact_path(&key);
+        let truncated = &original[..4]; // only the MZ header stub
+        tokio::fs::write(&path, truncated).await.unwrap();
+
+        // `get` performs no integrity validation — it returns whatever bytes
+        // are on disk, even if they are shorter than the original artifact.
+        let got = cache.get(&key).await.expect("file exists, so get returns Some");
+        assert_eq!(got, truncated, "get should return the truncated bytes verbatim");
+        assert_ne!(got.len(), original.len(), "truncated content differs from original");
+    }
+
+    #[tokio::test]
+    async fn get_returns_empty_bytes_for_zero_length_cache_file() {
+        let temp = TempDir::new().unwrap();
+        let cache = PayloadCache::new(temp.path().to_path_buf());
+        let key = test_cache_key("empty01", ".bin");
+
+        // Create a zero-length file (worst-case truncation).
+        tokio::fs::create_dir_all(temp.path()).await.unwrap();
+        tokio::fs::write(cache.artifact_path(&key), b"").await.unwrap();
+
+        let got = cache.get(&key).await.expect("file exists, so get returns Some");
+        assert!(got.is_empty(), "zero-length cached file should return empty bytes");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn put_succeeds_gracefully_when_cache_dir_is_read_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let cache_dir = temp.path().join("readonly-cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+
+        // Pre-populate one entry so we can verify reads still work.
+        let pre_key = test_cache_key("preexist", ".exe");
+        let cache = PayloadCache::new(cache_dir.clone());
+        cache.put(&pre_key, b"existing-data").await;
+
+        // Make the directory read-only.
+        std::fs::set_permissions(&cache_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        // Writing to a read-only directory should fail gracefully (no panic).
+        let key = test_cache_key("readonly01", ".bin");
+        cache.put(&key, b"should-not-persist").await; // must not panic
+
+        // The failed write should not have created the file.
+        assert!(
+            cache.get(&key).await.is_none(),
+            "put to read-only dir should not create a cache entry"
+        );
+
+        // Pre-existing entries should still be readable.
+        let got = cache.get(&pre_key).await.expect("pre-existing entry should still be readable");
+        assert_eq!(got, b"existing-data");
+
+        // Restore permissions so TempDir cleanup succeeds.
+        std::fs::set_permissions(&cache_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_puts_with_same_key_both_succeed() {
+        let temp = TempDir::new().unwrap();
+        let cache = PayloadCache::new(temp.path().to_path_buf());
+        let key_hex = "racekey01";
+        let ext = ".dll";
+
+        let payload_a = vec![0xAAu8; 1024];
+        let payload_b = vec![0xBBu8; 1024];
+
+        // Spawn two concurrent puts with the same cache key.
+        let cache_a = cache.clone();
+        let cache_b = cache.clone();
+        let pa = payload_a.clone();
+        let pb = payload_b.clone();
+
+        let ((), ()) = tokio::join!(
+            async move {
+                let k = test_cache_key(key_hex, ext);
+                cache_a.put(&k, &pa).await;
+            },
+            async move {
+                let k = test_cache_key(key_hex, ext);
+                cache_b.put(&k, &pb).await;
+            },
+        );
+
+        // Neither put should panic or error.
+        // The file should contain one of the two payloads (last-writer-wins).
+        let key = test_cache_key(key_hex, ext);
+        let got = cache.get(&key).await.expect("cache entry should exist after concurrent puts");
+        assert!(
+            got == payload_a || got == payload_b,
+            "cached bytes must be one of the two payloads, not a mix"
+        );
+        assert_eq!(got.len(), 1024, "cached artifact must not be partially written");
+    }
+
+    #[tokio::test]
+    async fn concurrent_put_and_get_does_not_panic() {
+        let temp = TempDir::new().unwrap();
+        let cache = PayloadCache::new(temp.path().to_path_buf());
+        let key_hex = "racerw01";
+        let ext = ".exe";
+        let payload = vec![0xCCu8; 2048];
+
+        // Pre-populate so the reader has something to find.
+        let pre_key = test_cache_key(key_hex, ext);
+        cache.put(&pre_key, &payload).await;
+
+        let cache_w = cache.clone();
+        let cache_r = cache.clone();
+        let pw = payload.clone();
+
+        // Run a put and a get concurrently against the same key.
+        let ((), read_result) = tokio::join!(
+            async move {
+                let k = test_cache_key(key_hex, ext);
+                cache_w.put(&k, &pw).await;
+            },
+            async move {
+                let k = test_cache_key(key_hex, ext);
+                cache_r.get(&k).await
+            },
+        );
+
+        // The get may return the old or new data — either is acceptable.
+        // The critical property is that neither operation panics and the
+        // file is not left in an invalid intermediate state.
+        if let Some(bytes) = read_result {
+            assert_eq!(bytes.len(), 2048, "read bytes must be complete, not partially written");
+        }
+        // If read_result is None, the file was briefly absent during the write — also acceptable.
+    }
 }

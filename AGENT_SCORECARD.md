@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 571 | 212 | 31 |
+| Tasks closed | 576 | 212 | 31 |
 | Bugs filed against | 51 | 34 | 9 |
 | Bug rate (bugs/task) | 0.09 | 0.16 | 0.29 |
 | Quality score | 91% | 84% | 71% |
 
-*Bug rates: Claude 51/571=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 51/576=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-20 22:15 — a249b408..ee7f38da
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 5 | 0 | Closed vyx2 (decrypt_agent_data_at_offset overflow test), v05n (SMB empty name+pipe_name validation test), fffl (CryptoError Display format tests), 33k8 (name_id boundary tests for 0 and u32::MAX), 855gp (AgentNotFound error path tests for remove/mark_dead/set_note). All test-only changes, clean code. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (clean), cargo test 893 passed / 0 failed
+
+Note: red-cell-c2-620mb (encrypt_for_agent empty plaintext test) is in_progress, claimed ~16h ago — not yet stale but worth monitoring.
 
 ### QA Review — 2026-03-20 21:00 — a355962..9c5bc94
 

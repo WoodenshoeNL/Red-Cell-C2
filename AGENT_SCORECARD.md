@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 579 | 212 | 31 |
+| Tasks closed | 581 | 212 | 31 |
 | Bugs filed against | 51 | 34 | 9 |
 | Bug rate (bugs/task) | 0.09 | 0.16 | 0.29 |
 | Quality score | 91% | 84% | 71% |
 
-*Bug rates: Claude 51/579=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 51/581=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-21 00:15 — 5a40dabe..beffc218
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed mhmmv (TLS fingerprint validation at parse time — rejects malformed SHA-256 hex, surfaces clear error identifying CLI vs config source), 9z6bx (config file 0600 permissions on Unix — OpenOptions .mode() + explicit set_permissions for pre-existing files). Both changes include thorough tests. Currently working on rveao (mutex poisoning). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (clean), cargo test 1634 passed / 3 failed (known flaky websocket tests — tracked in red-cell-c2-he5j7)
 
 ### QA Review — 2026-03-20 23:30 — ba337578..5a40dabe
 

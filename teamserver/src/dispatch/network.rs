@@ -355,6 +355,23 @@ mod tests {
         assert!(output.contains("Usernames"));
     }
 
+    #[tokio::test]
+    async fn logons_empty_list_broadcasts_zero_count() {
+        let rest = encode_utf16("SERVER01");
+        let payload = net_payload(DemonNetCommand::Logons, &rest);
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+        let msg = msg.expect("should broadcast");
+        let output = assert_agent_response(&msg, "Info", "Logged on users at SERVER01 [0]: ");
+        // Output should contain the header but no user entries
+        assert!(output.contains("Usernames"));
+        assert!(output.contains("---------"));
+        // No actual user lines after the header
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 2, "only header + separator, no user rows");
+    }
+
     // ── handle_net_callback: Sessions ───────────────────────────────────────
 
     #[tokio::test]
@@ -373,6 +390,19 @@ mod tests {
         assert!(output.contains("10.0.0.5"));
         assert!(output.contains("admin"));
         assert!(output.contains("120"));
+    }
+
+    #[tokio::test]
+    async fn sessions_empty_list_broadcasts_zero_count() {
+        let rest = encode_utf16("DC01");
+        let payload = net_payload(DemonNetCommand::Sessions, &rest);
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+        let msg = msg.expect("should broadcast");
+        let output = assert_agent_response(&msg, "Info", "Sessions for DC01 [0]: ");
+        // format_net_sessions returns empty string for empty slice
+        assert!(output.is_empty());
     }
 
     // ── handle_net_callback: Computer ─────────────────────────────────────
@@ -452,6 +482,19 @@ mod tests {
         assert!(output.contains("Remote Admin"));
     }
 
+    #[tokio::test]
+    async fn share_empty_list_broadcasts_zero_count() {
+        let rest = encode_utf16("FILESERV");
+        let payload = net_payload(DemonNetCommand::Share, &rest);
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+        let msg = msg.expect("should broadcast");
+        let output = assert_agent_response(&msg, "Info", "Shares for FILESERV [0]: ");
+        // format_net_shares returns empty string for empty slice
+        assert!(output.is_empty());
+    }
+
     // ── handle_net_callback: LocalGroup ─────────────────────────────────────
 
     #[tokio::test]
@@ -472,6 +515,19 @@ mod tests {
         assert!(output.contains("Ordinary users"));
     }
 
+    #[tokio::test]
+    async fn localgroup_empty_list_broadcasts_empty_output() {
+        let rest = encode_utf16("WORKSTATION");
+        let payload = net_payload(DemonNetCommand::LocalGroup, &rest);
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+        let msg = msg.expect("should broadcast");
+        let output = assert_agent_response(&msg, "Info", "Local Groups for WORKSTATION: ");
+        // format_net_group_descriptions returns empty string for empty slice
+        assert!(output.is_empty());
+    }
+
     // ── handle_net_callback: Group ──────────────────────────────────────────
 
     #[tokio::test]
@@ -486,6 +542,19 @@ mod tests {
         let output = assert_agent_response(&msg, "Info", "List groups on DC01: ");
         assert!(output.contains("Domain Admins"));
         assert!(output.contains("DA group"));
+    }
+
+    #[tokio::test]
+    async fn group_empty_list_broadcasts_empty_output() {
+        let rest = encode_utf16("DC01");
+        let payload = net_payload(DemonNetCommand::Group, &rest);
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+        let msg = msg.expect("should broadcast");
+        let output = assert_agent_response(&msg, "Info", "List groups on DC01: ");
+        // format_net_group_descriptions returns empty string for empty slice
+        assert!(output.is_empty());
     }
 
     // ── handle_net_callback: Users ──────────────────────────────────────────
@@ -511,6 +580,18 @@ mod tests {
                 assert!(!line.contains("(Admin)"), "guest should not be admin: {line}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn users_empty_list_broadcasts_empty_output() {
+        let rest = encode_utf16("HOST01");
+        let payload = net_payload(DemonNetCommand::Users, &rest);
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+        let msg = msg.expect("should broadcast");
+        let output = assert_agent_response(&msg, "Info", "Users on HOST01: ");
+        assert!(output.is_empty());
     }
 
     // ── handle_net_callback: error paths ──────────────────────────────────────

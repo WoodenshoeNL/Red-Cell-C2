@@ -483,6 +483,42 @@ mod tests {
         assert_eq!(obj["SocksCliMtx"], "mutex-1", "SocksCliMtx must appear when Some");
     }
 
+    /// Verify that `AgentUpdateInfo` serialized JSON keys match the Havoc wire protocol.
+    ///
+    /// Mirrors `operator_agent_info_serialized_json_keys_match_havoc_wire_protocol` but
+    /// for the `agent_mark_event` path.  A `#[serde(rename = "...")]` change on
+    /// `AgentUpdateInfo` would break the Havoc operator client silently.
+    #[test]
+    fn agent_update_info_serialized_json_keys_match_havoc_wire_protocol() {
+        let agent = sample_agent(0x1112_1314);
+
+        let event = agent_mark_event(&agent);
+
+        let OperatorMessage::AgentUpdate(message) = event else {
+            panic!("expected AgentUpdate event");
+        };
+
+        let json =
+            serde_json::to_value(&message.info).expect("AgentUpdateInfo must serialize to JSON");
+        let obj = json.as_object().expect("serialized AgentUpdateInfo must be a JSON object");
+
+        // Assert every Havoc-expected key is present with the correct wire name and value.
+        assert_eq!(obj["AgentID"], "11121314", "wire key must be 'AgentID', not 'agent_id'");
+        assert_eq!(obj["Marked"], "Alive", "wire key must be 'Marked', not 'marked'");
+
+        // Verify no unexpected keys are present — the full set of required keys.
+        let expected_keys: std::collections::BTreeSet<&str> =
+            ["AgentID", "Marked"].iter().copied().collect();
+
+        let actual_keys: std::collections::BTreeSet<&str> =
+            obj.keys().map(String::as_str).collect();
+
+        assert_eq!(
+            expected_keys, actual_keys,
+            "serialized AgentUpdateInfo keys must exactly match the Havoc wire protocol"
+        );
+    }
+
     #[test]
     fn operator_agent_info_none_kill_date_and_working_hours_emit_null() {
         let mut agent = sample_agent(0x1112_1314);

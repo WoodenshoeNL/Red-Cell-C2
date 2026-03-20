@@ -796,3 +796,436 @@ async fn failed_login_operator_cannot_inject_agent_task() -> Result<(), Box<dyn 
     harness.shutdown().await?;
     Ok(())
 }
+
+/// A callback encrypted with the wrong AES key must be rejected with HTTP 404
+/// (the server's fake-404 response), and the server's CTR offset must not
+/// advance.  A subsequent callback with the *correct* key must still succeed,
+/// proving the server did not desync.
+#[tokio::test]
+async fn wrong_key_callback_returns_404_and_preserves_ctr_offset()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut harness = spawn_server_with_http_listener("edge-http-wrong-key").await?;
+    let listener_port = harness.listener_port;
+
+    let agent_id = 0x1234_5678;
+    let key = [0x41; AGENT_KEY_LENGTH];
+    let iv = [0x24; AGENT_IV_LENGTH];
+    let mut ctr_offset = 0_u64;
+
+    // --- Register the agent normally ------------------------------------------------
+    let init_response = harness
+        .client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_init_body(agent_id, key, iv))
+        .send()
+        .await?
+        .error_for_status()?;
+    let init_bytes = init_response.bytes().await?;
+    let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
+    assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
+    ctr_offset += ctr_blocks_for_len(init_bytes.len());
+
+    let agent_new = common::read_operator_message(&mut harness.socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // --- Send a callback encrypted with a WRONG key ---------------------------------
+    let wrong_key = [0xBB; AGENT_KEY_LENGTH];
+    let wrong_key_response = harness
+        .client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            wrong_key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandGetJob),
+            1,
+            &[],
+        ))
+        .send()
+        .await?;
+    assert_eq!(
+        wrong_key_response.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "wrong-key callback must be rejected with fake 404"
+    );
+
+    // --- Verify the server's CTR offset was NOT advanced ----------------------------
+    assert_eq!(
+        harness.server.agent_registry.ctr_offset(agent_id).await?,
+        ctr_offset,
+        "CTR offset must not advance after a wrong-key callback"
+    );
+
+    // --- A subsequent valid callback must still succeed ------------------------------
+    let task = operator_task_message("CC", "checkin", "12345678", DemonCommand::CommandCheckin)?;
+    harness.socket.send(ClientMessage::Text(task.into())).await?;
+    let _task_echo = common::read_operator_message(&mut harness.socket).await?;
+
+    let valid_response = harness
+        .client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandGetJob),
+            2,
+            &[],
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+    let job_bytes = valid_response.bytes().await?;
+    let message = DemonMessage::from_bytes(job_bytes.as_ref())?;
+    assert_eq!(
+        message.packages.len(),
+        1,
+        "valid callback after wrong-key must still retrieve queued tasks"
+    );
+    assert_eq!(message.packages[0].request_id, 0xCC);
+
+    harness.shutdown().await?;
+    Ok(())
+}
+
+/// A duplicate full `DEMON_INIT` for an already-registered agent must be
+/// rejected with HTTP 404.  The original agent's crypto state must be
+/// preserved — a subsequent callback with the original key must still work.
+#[tokio::test]
+async fn duplicate_demon_init_rejected_preserves_original_agent()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut harness = spawn_server_with_http_listener("edge-http-dup-init").await?;
+    let listener_port = harness.listener_port;
+
+    let agent_id = 0x1234_5678;
+    let key = [0x41; AGENT_KEY_LENGTH];
+    let iv = [0x24; AGENT_IV_LENGTH];
+    let mut ctr_offset = 0_u64;
+
+    // --- First (legitimate) init ----------------------------------------------------
+    let init_response = harness
+        .client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_init_body(agent_id, key, iv))
+        .send()
+        .await?
+        .error_for_status()?;
+    let init_bytes = init_response.bytes().await?;
+    let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
+    assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
+    ctr_offset += ctr_blocks_for_len(init_bytes.len());
+
+    let agent_new = common::read_operator_message(&mut harness.socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let ctr_before_dup = harness.server.agent_registry.ctr_offset(agent_id).await?;
+
+    // --- Second (duplicate) init with different key material ------------------------
+    let dup_key = [0xDD; AGENT_KEY_LENGTH];
+    let dup_iv = [0xEE; AGENT_IV_LENGTH];
+    let dup_response = harness
+        .client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_init_body(agent_id, dup_key, dup_iv))
+        .send()
+        .await?;
+    assert_eq!(
+        dup_response.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "duplicate DEMON_INIT must be rejected with fake 404"
+    );
+
+    // --- Verify CTR offset unchanged ------------------------------------------------
+    assert_eq!(
+        harness.server.agent_registry.ctr_offset(agent_id).await?,
+        ctr_before_dup,
+        "CTR offset must not change after duplicate init rejection"
+    );
+
+    // --- Verify original key still works --------------------------------------------
+    let task = operator_task_message("DD", "checkin", "12345678", DemonCommand::CommandCheckin)?;
+    harness.socket.send(ClientMessage::Text(task.into())).await?;
+    let _task_echo = common::read_operator_message(&mut harness.socket).await?;
+
+    let valid_response = harness
+        .client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandGetJob),
+            1,
+            &[],
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+    let job_bytes = valid_response.bytes().await?;
+    let message = DemonMessage::from_bytes(job_bytes.as_ref())?;
+    assert_eq!(message.packages.len(), 1);
+    assert_eq!(message.packages[0].request_id, 0xDD);
+
+    harness.shutdown().await?;
+    Ok(())
+}
+
+/// Multiple agents registering and communicating concurrently on the same
+/// listener must not interfere with each other.  Each agent has independent
+/// key material and CTR state.
+#[tokio::test]
+async fn multiple_concurrent_agents_on_same_listener() -> Result<(), Box<dyn std::error::Error>> {
+    let mut harness = spawn_server_with_http_listener("edge-http-concurrent").await?;
+    let listener_port = harness.listener_port;
+
+    struct AgentState {
+        agent_id: u32,
+        key: [u8; AGENT_KEY_LENGTH],
+        iv: [u8; AGENT_IV_LENGTH],
+        ctr_offset: u64,
+    }
+
+    let mut agents = vec![
+        AgentState {
+            agent_id: 0xAAAA_0001,
+            key: [0x11; AGENT_KEY_LENGTH],
+            iv: [0x21; AGENT_IV_LENGTH],
+            ctr_offset: 0,
+        },
+        AgentState {
+            agent_id: 0xAAAA_0002,
+            key: [0x22; AGENT_KEY_LENGTH],
+            iv: [0x32; AGENT_IV_LENGTH],
+            ctr_offset: 0,
+        },
+        AgentState {
+            agent_id: 0xAAAA_0003,
+            key: [0x33; AGENT_KEY_LENGTH],
+            iv: [0x43; AGENT_IV_LENGTH],
+            ctr_offset: 0,
+        },
+    ];
+
+    // --- Register all three agents --------------------------------------------------
+    for agent in &mut agents {
+        let init_response = harness
+            .client
+            .post(format!("http://127.0.0.1:{listener_port}/"))
+            .body(common::valid_demon_init_body(agent.agent_id, agent.key, agent.iv))
+            .send()
+            .await?
+            .error_for_status()?;
+        let init_bytes = init_response.bytes().await?;
+        let init_ack =
+            decrypt_agent_data_at_offset(&agent.key, &agent.iv, agent.ctr_offset, &init_bytes)?;
+        assert_eq!(init_ack.as_slice(), &agent.agent_id.to_le_bytes());
+        agent.ctr_offset += ctr_blocks_for_len(init_bytes.len());
+
+        // Consume the AgentNew event.
+        let agent_new = common::read_operator_message(&mut harness.socket).await?;
+        assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+    }
+
+    // --- Queue a task for each agent ------------------------------------------------
+    for agent in &agents {
+        let demon_id = format!("{:X}", agent.agent_id);
+        let task_id = format!("{:X}", agent.agent_id & 0xFF);
+        let task =
+            operator_task_message(&task_id, "checkin", &demon_id, DemonCommand::CommandCheckin)?;
+        harness.socket.send(ClientMessage::Text(task.into())).await?;
+        let _echo = common::read_operator_message(&mut harness.socket).await?;
+    }
+
+    // --- Each agent polls for its job -----------------------------------------------
+    for agent in &mut agents {
+        let get_job_response = harness
+            .client
+            .post(format!("http://127.0.0.1:{listener_port}/"))
+            .body(common::valid_demon_callback_body(
+                agent.agent_id,
+                agent.key,
+                agent.iv,
+                agent.ctr_offset,
+                u32::from(DemonCommand::CommandGetJob),
+                1,
+                &[],
+            ))
+            .send()
+            .await?
+            .error_for_status()?;
+        let job_bytes = get_job_response.bytes().await?;
+        let message = DemonMessage::from_bytes(job_bytes.as_ref())?;
+        assert_eq!(
+            message.packages.len(),
+            1,
+            "agent 0x{:08X} must receive exactly one task",
+            agent.agent_id
+        );
+        let expected_request_id = agent.agent_id & 0xFF;
+        assert_eq!(
+            message.packages[0].request_id, expected_request_id,
+            "agent 0x{:08X} received wrong task",
+            agent.agent_id
+        );
+        agent.ctr_offset += ctr_blocks_for_len(4);
+    }
+
+    // --- Each agent sends output — verify no cross-contamination --------------------
+    for agent in &agents {
+        let output_text = format!("output from {:08X}", agent.agent_id);
+        let request_id = agent.agent_id & 0xFF;
+        let payload = common::command_output_payload(&output_text);
+        harness
+            .client
+            .post(format!("http://127.0.0.1:{listener_port}/"))
+            .body(common::valid_demon_callback_body(
+                agent.agent_id,
+                agent.key,
+                agent.iv,
+                agent.ctr_offset,
+                u32::from(DemonCommand::CommandOutput),
+                request_id,
+                &payload,
+            ))
+            .send()
+            .await?
+            .error_for_status()?;
+    }
+
+    for agent in &agents {
+        let event = common::read_operator_message(&mut harness.socket).await?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected AgentResponse event");
+        };
+        let expected_demon_id = format!("{:X}", agent.agent_id);
+        let expected_output = format!("output from {:08X}", agent.agent_id);
+        assert_eq!(message.info.demon_id, expected_demon_id);
+        assert_eq!(message.info.output, expected_output);
+    }
+
+    harness.shutdown().await?;
+    Ok(())
+}
+
+/// A callback sent with a stale (already-consumed) CTR offset must be
+/// rejected with HTTP 404, the server's CTR offset must not change, and
+/// a subsequent callback at the correct offset must still succeed.
+#[tokio::test]
+async fn stale_ctr_offset_callback_returns_404_and_preserves_state()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut harness = spawn_server_with_http_listener("edge-http-stale-ctr").await?;
+    let listener_port = harness.listener_port;
+
+    let agent_id = 0x1234_5678;
+    let key = [0x41; AGENT_KEY_LENGTH];
+    let iv = [0x24; AGENT_IV_LENGTH];
+    let mut ctr_offset = 0_u64;
+
+    // --- Register the agent ---------------------------------------------------------
+    let init_response = harness
+        .client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_init_body(agent_id, key, iv))
+        .send()
+        .await?
+        .error_for_status()?;
+    let init_bytes = init_response.bytes().await?;
+    let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
+    assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
+    ctr_offset += ctr_blocks_for_len(init_bytes.len());
+
+    let agent_new = common::read_operator_message(&mut harness.socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // --- First valid callback to advance the server's CTR ---------------------------
+    let task = operator_task_message("AA", "checkin", "12345678", DemonCommand::CommandCheckin)?;
+    harness.socket.send(ClientMessage::Text(task.into())).await?;
+    let _task_echo = common::read_operator_message(&mut harness.socket).await?;
+
+    let valid_response = harness
+        .client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandGetJob),
+            1,
+            &[],
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+    let job_bytes = valid_response.bytes().await?;
+    let message = DemonMessage::from_bytes(job_bytes.as_ref())?;
+    assert_eq!(message.packages.len(), 1);
+    assert_eq!(message.packages[0].request_id, 0xAA);
+
+    let stale_offset = ctr_offset;
+    ctr_offset += ctr_blocks_for_len(4);
+    let ctr_after_valid = harness.server.agent_registry.ctr_offset(agent_id).await?;
+
+    // --- Send a replay with the STALE (pre-advance) CTR offset ----------------------
+    let stale_response = harness
+        .client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            stale_offset,
+            u32::from(DemonCommand::CommandGetJob),
+            2,
+            &[],
+        ))
+        .send()
+        .await?;
+    assert_eq!(
+        stale_response.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "stale-CTR callback must be rejected with fake 404"
+    );
+
+    // --- Verify server CTR offset was NOT changed -----------------------------------
+    assert_eq!(
+        harness.server.agent_registry.ctr_offset(agent_id).await?,
+        ctr_after_valid,
+        "CTR offset must not change after stale-offset callback rejection"
+    );
+
+    // --- A subsequent callback at the CORRECT offset must succeed --------------------
+    let task2 = operator_task_message("BB", "checkin", "12345678", DemonCommand::CommandCheckin)?;
+    harness.socket.send(ClientMessage::Text(task2.into())).await?;
+    let _task2_echo = common::read_operator_message(&mut harness.socket).await?;
+
+    let recovery_response = harness
+        .client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandGetJob),
+            3,
+            &[],
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+    let recovery_bytes = recovery_response.bytes().await?;
+    let recovery_message = DemonMessage::from_bytes(recovery_bytes.as_ref())?;
+    assert_eq!(
+        recovery_message.packages.len(),
+        1,
+        "valid callback after stale-CTR must still retrieve queued tasks"
+    );
+    assert_eq!(recovery_message.packages[0].request_id, 0xBB);
+
+    harness.shutdown().await?;
+    Ok(())
+}

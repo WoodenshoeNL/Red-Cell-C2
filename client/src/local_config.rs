@@ -42,7 +42,17 @@ impl LocalConfig {
     /// Returns the default config if the file does not exist or cannot be parsed.
     pub fn load_from(path: &std::path::Path) -> Self {
         match fs::read_to_string(path) {
-            Ok(contents) => toml::from_str(&contents).unwrap_or_default(),
+            Ok(contents) => match toml::from_str(&contents) {
+                Ok(config) => config,
+                Err(error) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        %error,
+                        "failed to parse client config; falling back to defaults",
+                    );
+                    Self::default()
+                }
+            },
             Err(_) => Self::default(),
         }
     }

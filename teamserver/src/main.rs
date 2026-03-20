@@ -379,6 +379,16 @@ mod tests {
     }
 
     #[test]
+    fn database_path_uses_explicit_override() {
+        let path = resolve_database_path(
+            Path::new("/tmp/teamserver.yaotl"),
+            Some(&PathBuf::from("/data/custom.db")),
+        );
+
+        assert_eq!(path, PathBuf::from("/data/custom.db"));
+    }
+
+    #[test]
     fn tls_subject_alt_names_expand_ipv4_unspecified() {
         assert_eq!(
             tls_subject_alt_names("0.0.0.0"),

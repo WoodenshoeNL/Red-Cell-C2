@@ -1279,6 +1279,106 @@ mod tests {
     }
 
     #[test]
+    fn parses_http_listener_with_proxy_block() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "Neo" {
+                Password = "password1234"
+              }
+            }
+
+            Listeners {
+              Http {
+                Name = "proxied listener"
+                Hosts = ["proxy.local"]
+                HostBind = "0.0.0.0"
+                HostRotation = "round-robin"
+                PortBind = 8443
+
+                Proxy {
+                  Host = "squid.internal"
+                  Port = 3128
+                  Username = "proxyuser"
+                  Password = "proxysecret"
+                }
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile with proxy block should parse");
+
+        assert_eq!(profile.listeners.http.len(), 1);
+        let listener = &profile.listeners.http[0];
+        assert_eq!(listener.name, "proxied listener");
+
+        let proxy = listener.proxy.as_ref().expect("proxy block should be present");
+        assert_eq!(proxy.host, "squid.internal");
+        assert_eq!(proxy.port, 3128);
+        assert_eq!(proxy.username.as_deref(), Some("proxyuser"));
+        assert_eq!(proxy.password.as_deref().map(String::as_str), Some("proxysecret"));
+
+        // Verify the From conversion to the domain type sets expected defaults.
+        let domain_proxy: crate::HttpListenerProxyConfig = proxy.clone().into();
+        assert!(domain_proxy.enabled);
+        assert_eq!(domain_proxy.proxy_type.as_deref(), Some("http"));
+        assert_eq!(domain_proxy.host, "squid.internal");
+        assert_eq!(domain_proxy.port, 3128);
+        assert_eq!(domain_proxy.username.as_deref(), Some("proxyuser"));
+        assert_eq!(domain_proxy.password.as_deref().map(String::as_str), Some("proxysecret"));
+    }
+
+    #[test]
+    fn parses_http_listener_with_proxy_block_no_credentials() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "Neo" {
+                Password = "password1234"
+              }
+            }
+
+            Listeners {
+              Http {
+                Name = "anon proxy listener"
+                Hosts = ["proxy.local"]
+                HostBind = "0.0.0.0"
+                HostRotation = "round-robin"
+                PortBind = 9090
+
+                Proxy {
+                  Host = "transparent.internal"
+                  Port = 8080
+                }
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile with credential-less proxy block should parse");
+
+        let proxy =
+            profile.listeners.http[0].proxy.as_ref().expect("proxy block should be present");
+        assert_eq!(proxy.host, "transparent.internal");
+        assert_eq!(proxy.port, 8080);
+        assert_eq!(proxy.username, None);
+        assert_eq!(proxy.password, None);
+    }
+
+    #[test]
     fn parses_operator_roles_and_defaults_missing_roles_to_admin() {
         let profile = Profile::parse(
             r#"

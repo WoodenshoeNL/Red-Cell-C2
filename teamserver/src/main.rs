@@ -159,7 +159,7 @@ fn invalid_profile(error: ProfileValidationError) -> anyhow::Error {
 }
 
 async fn resolve_bind_addr(profile: &Profile) -> Result<SocketAddr> {
-    let mut addrs = lookup_host((profile.teamserver.host.as_str(), profile.teamserver.port))
+    let addrs = lookup_host((profile.teamserver.host.as_str(), profile.teamserver.port))
         .await
         .with_context(|| {
             format!(
@@ -168,13 +168,17 @@ async fn resolve_bind_addr(profile: &Profile) -> Result<SocketAddr> {
             )
         })?;
 
-    addrs.next().ok_or_else(|| {
-        anyhow!(
-            "no socket addresses resolved for {}:{}",
-            profile.teamserver.host,
-            profile.teamserver.port
-        )
-    })
+    first_resolved_addr(addrs, &profile.teamserver.host, profile.teamserver.port)
+}
+
+/// Picks the first socket address from an iterator of resolved addresses, returning a
+/// descriptive error when the iterator is empty.
+fn first_resolved_addr(
+    mut addrs: impl Iterator<Item = SocketAddr>,
+    host: &str,
+    port: u16,
+) -> Result<SocketAddr> {
+    addrs.next().ok_or_else(|| anyhow!("no socket addresses resolved for {}:{}", host, port))
 }
 
 #[instrument(skip(profile, profile_path), fields(bind_host = %profile.teamserver.host))]
@@ -332,9 +336,9 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        Cli, build_tls_config, load_profile, profile_listener_names, resolve_bind_addr,
-        resolve_database_path, run_shutdown_sequence, start_new_profile_listeners,
-        tls_subject_alt_names,
+        Cli, build_tls_config, first_resolved_addr, load_profile, profile_listener_names,
+        resolve_bind_addr, resolve_database_path, run_shutdown_sequence,
+        start_new_profile_listeners, tls_subject_alt_names,
     };
     use axum::extract::FromRef;
     use axum_server::Handle;
@@ -424,6 +428,37 @@ mod tests {
 
         assert_eq!(addr.ip().to_string(), "127.0.0.1");
         assert_eq!(addr.port(), 40056);
+    }
+
+    #[test]
+    fn first_resolved_addr_returns_error_when_iterator_is_empty() {
+        let empty = std::iter::empty::<SocketAddr>();
+
+        let error = first_resolved_addr(empty, "ghost.example.com", 443)
+            .expect_err("should fail for empty iterator");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("no socket addresses resolved"),
+            "error should mention 'no socket addresses resolved', got: {message}"
+        );
+        assert!(
+            message.contains("ghost.example.com"),
+            "error should mention the host, got: {message}"
+        );
+        assert!(message.contains("443"), "error should mention the port, got: {message}");
+    }
+
+    #[test]
+    fn first_resolved_addr_returns_first_address_from_iterator() {
+        let addr1: SocketAddr = "127.0.0.1:8080".parse().expect("valid socket addr");
+        let addr2: SocketAddr = "[::1]:8080".parse().expect("valid socket addr");
+        let addrs = vec![addr1, addr2];
+
+        let result =
+            first_resolved_addr(addrs.into_iter(), "localhost", 8080).expect("should succeed");
+
+        assert_eq!(result, addr1);
     }
 
     #[test]

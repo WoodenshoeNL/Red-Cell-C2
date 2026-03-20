@@ -1933,6 +1933,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn encrypt_for_agent_empty_plaintext_returns_empty_and_preserves_ctr()
+    -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let key = [0xA1; AGENT_KEY_LENGTH];
+        let iv = [0xB1; AGENT_IV_LENGTH];
+        let agent = sample_agent_with_crypto(0x1000_0E01, key, iv);
+
+        registry.insert(agent.clone()).await?;
+        assert_eq!(registry.ctr_offset(agent.agent_id).await?, 0);
+
+        let ciphertext = registry.encrypt_for_agent(agent.agent_id, &[]).await?;
+
+        assert!(ciphertext.is_empty(), "encrypting empty plaintext must produce empty ciphertext");
+        assert_eq!(
+            registry.ctr_offset(agent.agent_id).await?,
+            0,
+            "CTR offset must not advance for empty plaintext"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn decrypt_from_agent_empty_ciphertext_returns_empty_and_preserves_ctr()
+    -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let key = [0xA2; AGENT_KEY_LENGTH];
+        let iv = [0xB2; AGENT_IV_LENGTH];
+        let agent = sample_agent_with_crypto(0x1000_0E02, key, iv);
+
+        registry.insert(agent.clone()).await?;
+        assert_eq!(registry.ctr_offset(agent.agent_id).await?, 0);
+
+        let plaintext = registry.decrypt_from_agent(agent.agent_id, &[]).await?;
+
+        assert!(plaintext.is_empty(), "decrypting empty ciphertext must produce empty plaintext");
+        assert_eq!(
+            registry.ctr_offset(agent.agent_id).await?,
+            0,
+            "CTR offset must not advance for empty ciphertext"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn encrypt_empty_then_non_empty_preserves_keystream_continuity()
+    -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let key = [0xA3; AGENT_KEY_LENGTH];
+        let iv = [0xB3; AGENT_IV_LENGTH];
+        let agent = sample_agent_with_crypto(0x1000_0E03, key, iv);
+        let payload = b"payload after empty";
+
+        registry.insert(agent.clone()).await?;
+
+        // Encrypt empty — offset must stay at 0.
+        let _ = registry.encrypt_for_agent(agent.agent_id, &[]).await?;
+        assert_eq!(registry.ctr_offset(agent.agent_id).await?, 0);
+
+        // Encrypt a real payload — must use offset 0 keystream.
+        let ciphertext = registry.encrypt_for_agent(agent.agent_id, payload).await?;
+        let expected = encrypt_agent_data_at_offset(&key, &iv, 0, payload)?;
+        assert_eq!(
+            ciphertext, expected,
+            "empty encrypt must not shift the keystream for subsequent messages"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn set_ctr_offset_changes_agent_transport_keystream() -> Result<(), TeamserverError> {
         let registry = AgentRegistry::new(test_database().await?);
         let key = [0x73; AGENT_KEY_LENGTH];

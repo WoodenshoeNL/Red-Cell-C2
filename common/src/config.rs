@@ -2211,6 +2211,29 @@ mod tests {
     }
 
     #[test]
+    fn accepts_discord_webhook_url_with_port() {
+        let profile = profile_with_discord_url("https://discord.com:443/api/webhooks/123/token");
+        assert!(
+            profile.validate().is_ok(),
+            "discord.com with explicit port 443 should be accepted: {:?}",
+            profile.validate().unwrap_err()
+        );
+    }
+
+    #[test]
+    fn rejects_discord_webhook_url_with_host_in_port() {
+        // An attacker might try `evil.com:discord.com` hoping the validator
+        // sees "discord.com" as the host. The colon-split must yield "evil.com".
+        let profile = profile_with_discord_url("https://evil.com:discord.com/hook");
+        let err =
+            profile.validate().expect_err("evil.com disguised via port field must be rejected");
+        assert!(
+            err.errors.iter().any(|m| m.contains("permitted Discord hostname")),
+            "error should mention hostname restriction: {err}"
+        );
+    }
+
+    #[test]
     fn rejects_http_discord_webhook_url() {
         let profile = profile_with_discord_url("http://discord.com/api/webhooks/123/token");
         let err = profile.validate().expect_err("http webhook URL must be rejected");

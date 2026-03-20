@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use red_cell_common::operator::OperatorMessage;
 use tokio::sync::broadcast;
-use tracing::warn;
+use tracing::{trace, warn};
 
 const DEFAULT_EVENT_BUS_CAPACITY: usize = 256;
 
@@ -57,7 +57,13 @@ impl EventBus {
                 }
             };
             if self.history_capacity == 0 {
-                return self.sender.send(event).unwrap_or_default();
+                return match self.sender.send(event) {
+                    Ok(n) => n,
+                    Err(_) => {
+                        trace!("event broadcast dropped — no active subscribers");
+                        0
+                    }
+                };
             }
             if history.len() == self.history_capacity {
                 history.pop_front();
@@ -65,7 +71,13 @@ impl EventBus {
             history.push_back(event.clone());
         }
 
-        self.sender.send(event).unwrap_or_default()
+        match self.sender.send(event) {
+            Ok(n) => n,
+            Err(_) => {
+                trace!("event broadcast dropped — no active subscribers");
+                0
+            }
+        }
     }
 
     /// Return the retained recent teamserver log messages in original order.

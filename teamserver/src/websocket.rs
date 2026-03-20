@@ -1626,7 +1626,7 @@ fn build_upload_jobs(
     for chunk in content.chunks(MAX_AGENT_MESSAGE_LEN) {
         let mut payload = Vec::new();
         write_u32(&mut payload, memfile_id);
-        write_u64(&mut payload, u64::try_from(content.len()).unwrap_or_default());
+        write_u64(&mut payload, content.len() as u64);
         write_len_prefixed_bytes(&mut payload, chunk)?;
         jobs.push(Job {
             command: u32::from(DemonCommand::CommandMemFile),

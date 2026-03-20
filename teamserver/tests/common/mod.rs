@@ -275,7 +275,9 @@ pub fn valid_demon_callback_body(
     payload: &[u8],
 ) -> Vec<u8> {
     let mut decrypted = Vec::new();
-    decrypted.extend_from_slice(&u32::try_from(payload.len()).unwrap_or_default().to_be_bytes());
+    decrypted.extend_from_slice(
+        &u32::try_from(payload.len()).expect("test data fits in u32").to_be_bytes(),
+    );
     decrypted.extend_from_slice(payload);
 
     let encrypted = encrypt_agent_data_at_offset(&key, &iv, ctr_offset, &decrypted)
@@ -312,7 +314,9 @@ pub fn valid_demon_reconnect_body(agent_id: u32) -> Vec<u8> {
 /// Serialize a `CommandOutput` payload (LE length-prefixed UTF-8 string).
 pub fn command_output_payload(output: &str) -> Vec<u8> {
     let mut payload = Vec::new();
-    payload.extend_from_slice(&u32::try_from(output.len()).unwrap_or_default().to_le_bytes());
+    payload.extend_from_slice(
+        &u32::try_from(output.len()).expect("test data fits in u32").to_le_bytes(),
+    );
     payload.extend_from_slice(output.as_bytes());
     payload
 }
@@ -388,7 +392,9 @@ pub fn default_test_profile() -> Profile {
 
 /// Append `value` to `buffer` as a BE-length-prefixed byte slice.
 pub fn add_length_prefixed_bytes_be(buffer: &mut Vec<u8>, value: &[u8]) {
-    buffer.extend_from_slice(&u32::try_from(value.len()).unwrap_or_default().to_be_bytes());
+    buffer.extend_from_slice(
+        &u32::try_from(value.len()).expect("test data fits in u32").to_be_bytes(),
+    );
     buffer.extend_from_slice(value);
 }
 

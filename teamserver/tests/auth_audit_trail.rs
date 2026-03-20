@@ -57,7 +57,7 @@ async fn poll_audit_entries(
 ) -> Vec<red_cell::AuditLogEntry> {
     let start = tokio::time::Instant::now();
     loop {
-        let entries = database.audit_log().list().await.unwrap_or_default();
+        let entries = database.audit_log().list().await.expect("audit log query failed");
         if entries.len() >= expected_count || start.elapsed() > max_wait {
             return entries;
         }
@@ -276,7 +276,7 @@ async fn rate_limited_login_does_not_produce_audit_entry() -> Result<(), Box<dyn
 
     // Give a small window for any (unexpected) audit entry to be flushed.
     tokio::time::sleep(Duration::from_millis(250)).await;
-    let final_entries = server.database.audit_log().list().await.unwrap_or_default();
+    let final_entries = server.database.audit_log().list().await.expect("audit log query failed");
     let final_login_count = login_audit_entries(&final_entries).len();
 
     assert_eq!(

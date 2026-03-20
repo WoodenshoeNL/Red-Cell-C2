@@ -383,7 +383,7 @@ async fn handle_register_agent(
     info!(name = %agent_name, "service agent registered");
 
     // Broadcast to operators.
-    let agent_json = serde_json::to_string(agent_data).unwrap_or_default();
+    let agent_json = serde_json::to_string(agent_data)?;
     let event = OperatorMessage::ServiceAgentRegister(Message {
         head: MessageHead {
             event: EventCode::Service,
@@ -703,7 +703,7 @@ async fn handle_listener_add(
 
     info!(name = %name, "service listener registered");
 
-    let listener_json = serde_json::to_string(listener).unwrap_or_default();
+    let listener_json = serde_json::to_string(listener)?;
     let event = OperatorMessage::ServiceListenerRegister(Message {
         head: MessageHead {
             event: EventCode::Service,

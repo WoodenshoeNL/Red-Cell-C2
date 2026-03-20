@@ -522,7 +522,7 @@ mod tests {
     }
 
     fn add_bytes(buf: &mut Vec<u8>, bytes: &[u8]) {
-        buf.extend_from_slice(&u32_be(u32::try_from(bytes.len()).unwrap_or_default()));
+        buf.extend_from_slice(&u32_be(u32::try_from(bytes.len()).expect("test data fits in u32")));
         buf.extend_from_slice(bytes);
     }
 

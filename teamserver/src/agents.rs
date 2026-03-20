@@ -1219,7 +1219,7 @@ mod tests {
         Job {
             command: 0x1000 + index,
             request_id: index,
-            payload: vec![u8::try_from(index & 0xff).unwrap_or_default()],
+            payload: vec![u8::try_from(index & 0xff).expect("test data fits in u8")],
             command_line: format!("job-{index}"),
             task_id: format!("task-{index}"),
             created_at: format!("2026-03-09T19:{index:02}:00Z"),

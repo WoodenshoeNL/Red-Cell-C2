@@ -255,7 +255,7 @@ mod tests {
     }
 
     fn push_bytes(buf: &mut Vec<u8>, value: &[u8]) {
-        push_u32(buf, u32::try_from(value.len()).unwrap_or_default());
+        push_u32(buf, u32::try_from(value.len()).expect("test data fits in u32"));
         buf.extend_from_slice(value);
     }
 

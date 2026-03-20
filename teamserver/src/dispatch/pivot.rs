@@ -574,7 +574,7 @@ mod tests {
     ) -> Vec<u8> {
         let mut plaintext = Vec::new();
         plaintext.extend_from_slice(
-            &u32::try_from(inner_payload.len()).unwrap_or_default().to_be_bytes(),
+            &u32::try_from(inner_payload.len()).expect("test data fits in u32").to_be_bytes(),
         );
         plaintext.extend_from_slice(inner_payload);
 
@@ -594,7 +594,7 @@ mod tests {
     /// Build a `CallbackParser` payload with a LE-length-prefixed byte blob.
     fn length_prefixed_bytes(data: &[u8]) -> Vec<u8> {
         let mut buf = Vec::new();
-        push_u32(&mut buf, u32::try_from(data.len()).unwrap_or_default());
+        push_u32(&mut buf, u32::try_from(data.len()).expect("test data fits in u32"));
         buf.extend_from_slice(data);
         buf
     }
@@ -602,7 +602,9 @@ mod tests {
     /// Build a CommandOutput inner payload (LE length-prefixed UTF-8 string).
     fn command_output_payload(output: &str) -> Vec<u8> {
         let mut payload = Vec::new();
-        payload.extend_from_slice(&u32::try_from(output.len()).unwrap_or_default().to_le_bytes());
+        payload.extend_from_slice(
+            &u32::try_from(output.len()).expect("test data fits in u32").to_le_bytes(),
+        );
         payload.extend_from_slice(output.as_bytes());
         payload
     }
@@ -713,7 +715,7 @@ mod tests {
             // Minimal init metadata — hostname, username, domain, etc.
             for field in &[b"host" as &[u8], b"user", b"domain", b"10.0.0.1"] {
                 metadata.extend_from_slice(
-                    &u32::try_from(field.len()).unwrap_or_default().to_be_bytes(),
+                    &u32::try_from(field.len()).expect("test data fits in u32").to_be_bytes(),
                 );
                 metadata.extend_from_slice(field);
             }
@@ -721,7 +723,7 @@ mod tests {
             let path_utf16: Vec<u8> =
                 "C:\\a.exe".encode_utf16().flat_map(u16::to_be_bytes).chain([0, 0]).collect();
             metadata.extend_from_slice(
-                &u32::try_from(path_utf16.len()).unwrap_or_default().to_be_bytes(),
+                &u32::try_from(path_utf16.len()).expect("test data fits in u32").to_be_bytes(),
             );
             metadata.extend_from_slice(&path_utf16);
             // Remaining numeric fields (pid, tid, ppid, arch, elevated, base, sleep,
@@ -1083,7 +1085,7 @@ mod tests {
     fn connect_payload(success: u32, inner_envelope: &[u8]) -> Vec<u8> {
         let mut buf = Vec::new();
         push_u32(&mut buf, success);
-        push_u32(&mut buf, u32::try_from(inner_envelope.len()).unwrap_or_default());
+        push_u32(&mut buf, u32::try_from(inner_envelope.len()).expect("test data fits in u32"));
         buf.extend_from_slice(inner_envelope);
         buf
     }

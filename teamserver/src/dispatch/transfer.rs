@@ -427,7 +427,8 @@ mod tests {
     }
 
     fn length_prefixed(data: &[u8]) -> Vec<u8> {
-        let mut out = u32::try_from(data.len()).unwrap_or_default().to_le_bytes().to_vec();
+        let mut out =
+            u32::try_from(data.len()).expect("test data fits in u32").to_le_bytes().to_vec();
         out.extend_from_slice(data);
         out
     }

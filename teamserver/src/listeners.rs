@@ -5898,15 +5898,17 @@ mod tests {
         additional: &[(u32, u32, Vec<u8>)],
     ) -> Vec<u8> {
         let mut decrypted = Vec::new();
-        decrypted
-            .extend_from_slice(&u32::try_from(first.2.len()).unwrap_or_default().to_be_bytes());
+        decrypted.extend_from_slice(
+            &u32::try_from(first.2.len()).expect("test data fits in u32").to_be_bytes(),
+        );
         decrypted.extend_from_slice(&first.2);
 
         for (command_id, request_id, payload) in additional {
             decrypted.extend_from_slice(&command_id.to_be_bytes());
             decrypted.extend_from_slice(&request_id.to_be_bytes());
-            decrypted
-                .extend_from_slice(&u32::try_from(payload.len()).unwrap_or_default().to_be_bytes());
+            decrypted.extend_from_slice(
+                &u32::try_from(payload.len()).expect("test data fits in u32").to_be_bytes(),
+            );
             decrypted.extend_from_slice(payload);
         }
 
@@ -5925,7 +5927,9 @@ mod tests {
     }
 
     fn add_length_prefixed_bytes(buf: &mut Vec<u8>, bytes: &[u8]) {
-        buf.extend_from_slice(&u32::try_from(bytes.len()).unwrap_or_default().to_be_bytes());
+        buf.extend_from_slice(
+            &u32::try_from(bytes.len()).expect("test data fits in u32").to_be_bytes(),
+        );
         buf.extend_from_slice(bytes);
     }
 
@@ -5943,7 +5947,7 @@ mod tests {
     }
 
     fn add_checkin_bytes(buf: &mut Vec<u8>, bytes: &[u8]) {
-        add_checkin_u32(buf, u32::try_from(bytes.len()).unwrap_or_default());
+        add_checkin_u32(buf, u32::try_from(bytes.len()).expect("test data fits in u32"));
         buf.extend_from_slice(bytes);
     }
 

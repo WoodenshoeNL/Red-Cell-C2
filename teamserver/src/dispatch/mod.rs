@@ -1762,7 +1762,9 @@ mod tests {
     }
 
     fn add_length_prefixed_bytes(buf: &mut Vec<u8>, bytes: &[u8]) {
-        buf.extend_from_slice(&u32::try_from(bytes.len()).unwrap_or_default().to_be_bytes());
+        buf.extend_from_slice(
+            &u32::try_from(bytes.len()).expect("test data fits in u32").to_be_bytes(),
+        );
         buf.extend_from_slice(bytes);
     }
 
@@ -1895,7 +1897,9 @@ mod tests {
         let mut payload = Vec::new();
         payload.extend_from_slice(&u32::from(DemonPivotCommand::SmbConnect).to_le_bytes());
         payload.extend_from_slice(&1_u32.to_le_bytes());
-        payload.extend_from_slice(&u32::try_from(inner.len()).unwrap_or_default().to_le_bytes());
+        payload.extend_from_slice(
+            &u32::try_from(inner.len()).expect("test data fits in u32").to_le_bytes(),
+        );
         payload.extend_from_slice(inner);
         payload
     }
@@ -2348,7 +2352,7 @@ mod tests {
             payload.extend_from_slice(&demon_id.to_le_bytes());
             let utf16: Vec<u16> = pipe_name.encode_utf16().collect();
             let utf16_bytes: Vec<u8> = utf16.iter().flat_map(|c| c.to_le_bytes()).collect();
-            let len = u32::try_from(utf16_bytes.len()).unwrap_or_default();
+            let len = u32::try_from(utf16_bytes.len()).expect("test data fits in u32");
             payload.extend_from_slice(&len.to_le_bytes());
             payload.extend_from_slice(&utf16_bytes);
         }
@@ -9419,7 +9423,7 @@ mod tests {
     }
 
     fn add_bytes(buf: &mut Vec<u8>, value: &[u8]) {
-        add_u32(buf, u32::try_from(value.len()).unwrap_or_default());
+        add_u32(buf, u32::try_from(value.len()).expect("test data fits in u32"));
         buf.extend_from_slice(value);
     }
 
@@ -9634,7 +9638,7 @@ mod tests {
         // The callback plaintext is: length-prefixed payload (BE) for the first package.
         let mut plaintext = Vec::new();
         plaintext.extend_from_slice(
-            &u32::try_from(inner_payload.len()).unwrap_or_default().to_be_bytes(),
+            &u32::try_from(inner_payload.len()).expect("test data fits in u32").to_be_bytes(),
         );
         plaintext.extend_from_slice(inner_payload);
 

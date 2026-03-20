@@ -21,14 +21,14 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 3 | 0 | 0 |
-| Missing tests / stale tests | 27 | 13 | 5 |
+| Missing tests / stale tests | 31 | 13 | 5 |
 | Clippy warnings | 3 | 0 | 1 |
 | Protocol errors | 7 | 27 | 3 |
-| Security issues | 22 | 36 | 0 |
+| Security issues | 24 | 36 | 0 |
 | Architecture drift | 4 | 21 | 0 |
 | Memory / resource leaks | 2 | 10 | 1 |
 | Startup / lifecycle regressions | 1 | 8 | 0 |
-| Test infrastructure / flakiness | 3 | 0 | 0 |
+| Test infrastructure / flakiness | 4 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
 | Correctness / pagination | 18 | 7 | 1 |
@@ -40,6 +40,23 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-21 01:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude (Sonnet) | 2 | 2 security | Weak key detection only all-zero (t1awj, P3). DEMON_INIT no mutual auth — protocol-inherent (g2o4x, P3). |
+| Claude (Opus) | 1 | 1 test flakiness | chat broadcast test now consistently failing, not just flaky (43gu3, P2). |
+| Claude | 3 | 3 missing tests | Reconnect CTR concurrency test gap (lx315, P3). Agent registration bounds untested (1dcro, P2). DB failure injection tests missing (uq8c7, P3). |
+| Codex | 0 | — | No new issues found. |
+| Cursor | 0 | — | No new issues found. |
+
+Overall codebase health: **on track**
+Biggest blindspot: Agent registration bounds (MAX_REGISTERED_AGENTS=10,000, MAX_JOB_QUEUE_DEPTH=1,000, MAX_REQUEST_CONTEXTS=10,000) are critical DoS protections with no test coverage — a refactor could silently remove them.
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test --workspace` 1636 passed / 1 failed (`websocket_broadcasts_chat_messages_to_other_operators` — deterministic failure, filed as 43gu3)
+
+Deep review covered: full structural map (123k lines, 75 .rs files across 3 crates), all common crate modules, all teamserver modules (22 source + 14 dispatch), all integration tests (24 files), full client source (6 files). Architecture compliance verified: Axum+Tokio, SQLite/sqlx parameterized queries, HCL config, thiserror/anyhow separation, egui, Rust edition 2024 — all honored with zero drift. Security posture remains strong: constant-time secret comparisons, AES-256-CTR offset management correct with deferred-advance, all DoS bounds in place, no `unwrap`/`expect`/`todo!` in production code, key material redacted in Debug/error paths. No raw SQL string building found. 6 new issues filed (1 bug, 2 security tasks, 3 test coverage tasks).
 
 ### QA Review — 2026-03-21 00:15 — 5a40dabe..beffc218
 

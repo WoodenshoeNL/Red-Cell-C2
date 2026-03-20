@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 589 | 212 | 31 |
+| Tasks closed | 617 | 212 | 31 |
 | Bugs filed against | 51 | 34 | 9 |
-| Bug rate (bugs/task) | 0.09 | 0.16 | 0.29 |
-| Quality score | 91% | 84% | 71% |
+| Bug rate (bugs/task) | 0.08 | 0.16 | 0.29 |
+| Quality score | 92% | 84% | 71% |
 
-*Bug rates: Claude 51/589=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 51/617=0.08, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-20 18:00 — 4f3a3b5c..2ebd20fc
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 28 | 0 | Major client UI sprint: Havoc-style 3-zone split panel layout, listeners tab with CRUD dialog, payload generation dialog, agent console/file browser/process list tabs, loot panel with sub-tabs. 12 test additions across teamserver (agent deletion, DNS, external listeners, SOCKS5, crypto CTR offsets, service stubs) and client (CLI args). 1 fix (optional_u32 debug logging). 1 valid close-without-code (e92d1 — test already existed). 5 `#[allow(dead_code)]` annotations for superseded UI code — minor cleanup opportunity. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: passed (cargo check, clippy -D warnings clean, 1850/1850 tests pass — up from 1661)
 
 ### QA Review — 2026-03-20 15:30 — fd716ba2..4f3a3b5c
 

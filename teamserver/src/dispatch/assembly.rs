@@ -187,6 +187,10 @@ mod tests {
         buf.extend_from_slice(&value.to_le_bytes());
     }
 
+    fn add_u64(buf: &mut Vec<u8>, value: u64) {
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+
     fn add_bytes(buf: &mut Vec<u8>, value: &[u8]) {
         add_u32(buf, u32::try_from(value.len()).unwrap_or_default());
         buf.extend_from_slice(value);
@@ -301,6 +305,135 @@ mod tests {
         match msg {
             OperatorMessage::AgentResponse(resp) => {
                 assert!(resp.info.output.is_empty() || resp.info.output.contains("BOF"));
+            }
+            other => panic!("expected AgentResponse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn inline_execute_bof_exception_broadcasts_hex_codes() {
+        let events = EventBus::new(8);
+        let mut receiver = events.subscribe();
+        let mut payload = Vec::new();
+        add_u32(&mut payload, BOF_EXCEPTION);
+        add_u32(&mut payload, 0xC000_0005); // exception code
+        add_u64(&mut payload, 0x00007FFA_DEADBEEF); // exception address
+
+        let result = handle_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(matches!(result, Ok(None)));
+
+        let msg = receiver.recv().await.expect("should receive broadcast");
+        match msg {
+            OperatorMessage::AgentResponse(resp) => {
+                let extra = &resp.info.extra;
+                assert_eq!(
+                    extra.get("Type"),
+                    Some(&serde_json::Value::String("Error".to_owned())),
+                    "BOF_EXCEPTION should produce Type=Error"
+                );
+                let message = extra.get("Message").unwrap().as_str().unwrap();
+                assert!(
+                    message.contains("C0000005"),
+                    "expected exception code 0xC0000005 in message, got {message:?}"
+                );
+                assert!(
+                    message.contains("00007FFADEADBEEF"),
+                    "expected exception address in message, got {message:?}"
+                );
+            }
+            other => panic!("expected AgentResponse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn inline_execute_bof_exception_truncated_returns_error() {
+        let events = EventBus::new(8);
+        // BOF_EXCEPTION needs u32 + u64; give only the type + exception code (no address).
+        let mut payload = Vec::new();
+        add_u32(&mut payload, BOF_EXCEPTION);
+        add_u32(&mut payload, 0xC000_0005);
+
+        let result = handle_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+
+        match result {
+            Err(CommandDispatchError::InvalidCallbackPayload { command_id, .. }) => {
+                assert_eq!(command_id, u32::from(DemonCommand::CommandInlineExecute));
+            }
+            other => panic!("expected InvalidCallbackPayload, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn inline_execute_bof_symbol_not_found_broadcasts_symbol_name() {
+        let events = EventBus::new(8);
+        let mut receiver = events.subscribe();
+        let mut payload = Vec::new();
+        add_u32(&mut payload, BOF_SYMBOL_NOT_FOUND);
+        add_bytes(&mut payload, b"kernel32.dll!SomeExport");
+
+        let result = handle_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(matches!(result, Ok(None)));
+
+        let msg = receiver.recv().await.expect("should receive broadcast");
+        match msg {
+            OperatorMessage::AgentResponse(resp) => {
+                let extra = &resp.info.extra;
+                assert_eq!(
+                    extra.get("Type"),
+                    Some(&serde_json::Value::String("Error".to_owned())),
+                    "BOF_SYMBOL_NOT_FOUND should produce Type=Error"
+                );
+                let message = extra.get("Message").unwrap().as_str().unwrap();
+                assert!(
+                    message.contains("kernel32.dll!SomeExport"),
+                    "expected symbol name in message, got {message:?}"
+                );
+            }
+            other => panic!("expected AgentResponse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn inline_execute_bof_symbol_not_found_truncated_returns_error() {
+        let events = EventBus::new(8);
+        // BOF_SYMBOL_NOT_FOUND needs a string; give only the type.
+        let mut payload = Vec::new();
+        add_u32(&mut payload, BOF_SYMBOL_NOT_FOUND);
+
+        let result = handle_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+
+        match result {
+            Err(CommandDispatchError::InvalidCallbackPayload { command_id, .. }) => {
+                assert_eq!(command_id, u32::from(DemonCommand::CommandInlineExecute));
+            }
+            other => panic!("expected InvalidCallbackPayload, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn inline_execute_bof_could_not_run_broadcasts_error() {
+        let events = EventBus::new(8);
+        let mut receiver = events.subscribe();
+        let mut payload = Vec::new();
+        add_u32(&mut payload, BOF_COULD_NOT_RUN);
+
+        let result = handle_inline_execute_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(matches!(result, Ok(None)));
+
+        let msg = receiver.recv().await.expect("should receive broadcast");
+        match msg {
+            OperatorMessage::AgentResponse(resp) => {
+                let extra = &resp.info.extra;
+                assert_eq!(
+                    extra.get("Type"),
+                    Some(&serde_json::Value::String("Error".to_owned())),
+                    "BOF_COULD_NOT_RUN should produce Type=Error"
+                );
+                let message = extra.get("Message").unwrap().as_str().unwrap();
+                assert!(
+                    message.contains("Failed"),
+                    "expected 'Failed' in message, got {message:?}"
+                );
             }
             other => panic!("expected AgentResponse, got {other:?}"),
         }

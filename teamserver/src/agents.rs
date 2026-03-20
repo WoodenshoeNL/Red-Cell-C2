@@ -3250,4 +3250,58 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn remove_returns_agent_not_found_for_unknown_id() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database);
+        let unknown_id = 0xFFFF_FFFF_u32;
+
+        let error = registry
+            .remove(unknown_id)
+            .await
+            .expect_err("remove must fail for an unknown agent_id");
+
+        assert!(
+            matches!(error, TeamserverError::AgentNotFound { agent_id } if agent_id == unknown_id)
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mark_dead_returns_agent_not_found_for_unknown_id() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database);
+        let unknown_id = 0xFFFF_FFFF_u32;
+
+        let error = registry
+            .mark_dead(unknown_id, "reason")
+            .await
+            .expect_err("mark_dead must fail for an unknown agent_id");
+
+        assert!(
+            matches!(error, TeamserverError::AgentNotFound { agent_id } if agent_id == unknown_id)
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn set_note_returns_agent_not_found_for_unknown_id() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database);
+        let unknown_id = 0xFFFF_FFFF_u32;
+
+        let error = registry
+            .set_note(unknown_id, "note")
+            .await
+            .expect_err("set_note must fail for an unknown agent_id");
+
+        assert!(
+            matches!(error, TeamserverError::AgentNotFound { agent_id } if agent_id == unknown_id)
+        );
+
+        Ok(())
+    }
 }

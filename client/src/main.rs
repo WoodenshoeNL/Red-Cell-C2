@@ -421,12 +421,12 @@ struct ClientApp {
 }
 
 impl ClientApp {
-    fn new(cli: Cli) -> Self {
+    fn new(cli: Cli) -> Result<Self> {
         let local_config = LocalConfig::load();
         let login_state = LoginState::new(&cli.server, &local_config);
-        let tls_verification = resolve_tls_verification(&cli, &local_config);
+        let tls_verification = resolve_tls_verification(&cli, &local_config)?;
 
-        Self {
+        Ok(Self {
             phase: AppPhase::Login(login_state),
             local_config,
             cli_server_url: cli.server,
@@ -439,7 +439,7 @@ impl ClientApp {
             },
             outgoing_tx: None,
             python_runtime: None,
-        }
+        })
     }
 
     fn snapshot(app_state: &SharedAppState) -> AppState {
@@ -2844,27 +2844,50 @@ impl eframe::App for ClientApp {
     }
 }
 
+/// Validate that a certificate fingerprint is a well-formed SHA-256 hex digest.
+///
+/// Returns the fingerprint unchanged if valid, or an error describing why it is malformed.
+fn validate_fingerprint(fingerprint: &str, source: &str) -> Result<String> {
+    if fingerprint.len() != 64 {
+        return Err(anyhow!(
+            "invalid certificate fingerprint from {source}: expected 64 hex characters \
+             (SHA-256 digest), got {} characters",
+            fingerprint.len()
+        ));
+    }
+    if !fingerprint.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(anyhow!(
+            "invalid certificate fingerprint from {source}: contains non-hex characters"
+        ));
+    }
+    Ok(fingerprint.to_owned())
+}
+
 /// Determine the TLS verification mode from CLI flags, falling back to local config.
 ///
 /// Precedence: CLI `--accept-invalid-certs` > CLI `--cert-fingerprint` > CLI `--ca-cert`
 ///           > config `cert_fingerprint` > config `ca_cert` > system root CAs.
-fn resolve_tls_verification(cli: &Cli, config: &LocalConfig) -> TlsVerification {
+///
+/// Returns an error if a provided fingerprint is not a valid SHA-256 hex digest.
+fn resolve_tls_verification(cli: &Cli, config: &LocalConfig) -> Result<TlsVerification> {
     if cli.accept_invalid_certs {
-        return TlsVerification::DangerousSkipVerify;
+        return Ok(TlsVerification::DangerousSkipVerify);
     }
     if let Some(fingerprint) = &cli.cert_fingerprint {
-        return TlsVerification::Fingerprint(fingerprint.clone());
+        let validated = validate_fingerprint(fingerprint, "--cert-fingerprint")?;
+        return Ok(TlsVerification::Fingerprint(validated));
     }
     if let Some(ca_path) = &cli.ca_cert {
-        return TlsVerification::CustomCa(ca_path.clone());
+        return Ok(TlsVerification::CustomCa(ca_path.clone()));
     }
     if let Some(fingerprint) = &config.cert_fingerprint {
-        return TlsVerification::Fingerprint(fingerprint.clone());
+        let validated = validate_fingerprint(fingerprint, "config file")?;
+        return Ok(TlsVerification::Fingerprint(validated));
     }
     if let Some(ca_path) = &config.ca_cert {
-        return TlsVerification::CustomCa(ca_path.clone());
+        return Ok(TlsVerification::CustomCa(ca_path.clone()));
     }
-    TlsVerification::CertificateAuthority
+    Ok(TlsVerification::CertificateAuthority)
 }
 
 fn main() -> Result<()> {
@@ -2885,7 +2908,9 @@ fn launch_client(cli: Cli) -> Result<()> {
         options,
         Box::new(move |creation_context| {
             creation_context.egui_ctx.set_visuals(egui::Visuals::dark());
-            Ok(Box::new(ClientApp::new(cli)) as Box<dyn eframe::App>)
+            let app = ClientApp::new(cli)
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+            Ok(Box::new(app) as Box<dyn eframe::App>)
         }),
     )
     .map_err(|error| anyhow!("failed to start egui application: {error}"))
@@ -4283,29 +4308,31 @@ mod tests {
         };
         let config = LocalConfig::default();
         assert!(matches!(
-            resolve_tls_verification(&cli, &config),
+            resolve_tls_verification(&cli, &config).unwrap(),
             TlsVerification::DangerousSkipVerify
         ));
     }
 
     #[test]
     fn resolve_tls_prefers_cli_fingerprint_over_ca() {
+        let valid_fp = "a".repeat(64);
         let cli = Cli {
             server: DEFAULT_SERVER_URL.to_owned(),
             scripts_dir: None,
             ca_cert: Some(PathBuf::from("/tmp/ca.pem")),
-            cert_fingerprint: Some("abcd".to_owned()),
+            cert_fingerprint: Some(valid_fp.clone()),
             accept_invalid_certs: false,
         };
         let config = LocalConfig::default();
         assert!(matches!(
-            resolve_tls_verification(&cli, &config),
-            TlsVerification::Fingerprint(ref fp) if fp == "abcd"
+            resolve_tls_verification(&cli, &config).unwrap(),
+            TlsVerification::Fingerprint(ref fp) if fp == &valid_fp
         ));
     }
 
     #[test]
     fn resolve_tls_falls_back_to_config_fingerprint() {
+        let valid_fp = "b".repeat(64);
         let cli = Cli {
             server: DEFAULT_SERVER_URL.to_owned(),
             scripts_dir: None,
@@ -4314,10 +4341,10 @@ mod tests {
             accept_invalid_certs: false,
         };
         let config =
-            LocalConfig { cert_fingerprint: Some("configfp".to_owned()), ..LocalConfig::default() };
+            LocalConfig { cert_fingerprint: Some(valid_fp.clone()), ..LocalConfig::default() };
         assert!(matches!(
-            resolve_tls_verification(&cli, &config),
-            TlsVerification::Fingerprint(ref fp) if fp == "configfp"
+            resolve_tls_verification(&cli, &config).unwrap(),
+            TlsVerification::Fingerprint(ref fp) if fp == &valid_fp
         ));
     }
 
@@ -4332,7 +4359,7 @@ mod tests {
         };
         let config = LocalConfig::default();
         assert!(matches!(
-            resolve_tls_verification(&cli, &config),
+            resolve_tls_verification(&cli, &config).unwrap(),
             TlsVerification::CustomCa(ref path) if path == &PathBuf::from("/tmp/cli-ca.pem")
         ));
     }
@@ -4351,7 +4378,7 @@ mod tests {
             ..LocalConfig::default()
         };
         assert!(matches!(
-            resolve_tls_verification(&cli, &config),
+            resolve_tls_verification(&cli, &config).unwrap(),
             TlsVerification::CustomCa(ref path) if path == &PathBuf::from("/tmp/cli-ca.pem")
         ));
     }
@@ -4370,7 +4397,7 @@ mod tests {
             ..LocalConfig::default()
         };
         assert!(matches!(
-            resolve_tls_verification(&cli, &config),
+            resolve_tls_verification(&cli, &config).unwrap(),
             TlsVerification::CustomCa(ref path) if path == &PathBuf::from("/tmp/config-ca.pem")
         ));
     }
@@ -4386,8 +4413,95 @@ mod tests {
         };
         let config = LocalConfig::default();
         assert!(matches!(
-            resolve_tls_verification(&cli, &config),
+            resolve_tls_verification(&cli, &config).unwrap(),
             TlsVerification::CertificateAuthority
+        ));
+    }
+
+    #[test]
+    fn validate_fingerprint_accepts_valid_sha256_hex() {
+        let valid_lower = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        assert!(validate_fingerprint(valid_lower, "test").is_ok());
+
+        let valid_upper = "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789";
+        assert!(validate_fingerprint(valid_upper, "test").is_ok());
+
+        let valid_mixed = "AbCdEf0123456789abcDEF0123456789ABCDEF0123456789abcdef0123456789";
+        assert!(validate_fingerprint(valid_mixed, "test").is_ok());
+    }
+
+    #[test]
+    fn validate_fingerprint_rejects_wrong_length() {
+        let too_short = "abcdef";
+        let err = validate_fingerprint(too_short, "test").unwrap_err();
+        assert!(err.to_string().contains("6 characters"), "error: {err}");
+
+        let too_long = "a".repeat(65);
+        let err = validate_fingerprint(&too_long, "test").unwrap_err();
+        assert!(err.to_string().contains("65 characters"), "error: {err}");
+
+        let empty = "";
+        let err = validate_fingerprint(empty, "test").unwrap_err();
+        assert!(err.to_string().contains("0 characters"), "error: {err}");
+    }
+
+    #[test]
+    fn validate_fingerprint_rejects_non_hex_chars() {
+        // 64 chars but contains spaces (non-hex)
+        let with_spaces = format!("{}    ", "a".repeat(60));
+        assert_eq!(with_spaces.len(), 64);
+        let err = validate_fingerprint(&with_spaces, "test").unwrap_err();
+        assert!(err.to_string().contains("non-hex"), "error: {err}");
+
+        // 64 chars but contains 'g'
+        let with_invalid = "g".repeat(64);
+        let err = validate_fingerprint(&with_invalid, "test").unwrap_err();
+        assert!(err.to_string().contains("non-hex"), "error: {err}");
+    }
+
+    #[test]
+    fn resolve_tls_rejects_malformed_cli_fingerprint() {
+        let cli = Cli {
+            server: DEFAULT_SERVER_URL.to_owned(),
+            scripts_dir: None,
+            ca_cert: None,
+            cert_fingerprint: Some("not-a-valid-fingerprint".to_owned()),
+            accept_invalid_certs: false,
+        };
+        let config = LocalConfig::default();
+        let err = resolve_tls_verification(&cli, &config).unwrap_err();
+        assert!(err.to_string().contains("--cert-fingerprint"), "error: {err}");
+    }
+
+    #[test]
+    fn resolve_tls_rejects_malformed_config_fingerprint() {
+        let cli = Cli {
+            server: DEFAULT_SERVER_URL.to_owned(),
+            scripts_dir: None,
+            ca_cert: None,
+            cert_fingerprint: None,
+            accept_invalid_certs: false,
+        };
+        let config =
+            LocalConfig { cert_fingerprint: Some("zzzz".to_owned()), ..LocalConfig::default() };
+        let err = resolve_tls_verification(&cli, &config).unwrap_err();
+        assert!(err.to_string().contains("config file"), "error: {err}");
+    }
+
+    #[test]
+    fn resolve_tls_accept_invalid_certs_skips_fingerprint_validation() {
+        // Even with an invalid fingerprint, --accept-invalid-certs takes precedence
+        let cli = Cli {
+            server: DEFAULT_SERVER_URL.to_owned(),
+            scripts_dir: None,
+            ca_cert: None,
+            cert_fingerprint: Some("bad".to_owned()),
+            accept_invalid_certs: true,
+        };
+        let config = LocalConfig::default();
+        assert!(matches!(
+            resolve_tls_verification(&cli, &config).unwrap(),
+            TlsVerification::DangerousSkipVerify
         ));
     }
 
@@ -4416,7 +4530,7 @@ mod tests {
             cert_fingerprint: None,
             accept_invalid_certs: false,
         };
-        let app = ClientApp::new(cli);
+        let app = ClientApp::new(cli).unwrap();
         assert!(matches!(app.phase, AppPhase::Login(_)));
     }
 
@@ -4429,7 +4543,7 @@ mod tests {
             cert_fingerprint: None,
             accept_invalid_certs: false,
         };
-        let app = ClientApp::new(cli);
+        let app = ClientApp::new(cli).unwrap();
         match &app.phase {
             AppPhase::Login(state) => {
                 if app.local_config.server_url.is_none() {

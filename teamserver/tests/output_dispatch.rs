@@ -2880,3 +2880,738 @@ async fn job_unknown_subcommand_returns_error() -> Result<(), Box<dyn std::error
     server.listeners.stop("out-job-unknown").await?;
     Ok(())
 }
+
+// ── handle_config_callback — remaining branches ─────────────────────────────
+
+/// Build a `CommandConfig/MemoryExecute` payload: key(u32=102) + value(u32).
+fn config_memory_execute_payload(value: u32) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&u32::from(DemonConfigKey::MemoryExecute).to_le_bytes());
+    p.extend_from_slice(&value.to_le_bytes());
+    p
+}
+
+/// Encode a UTF-16LE length-prefixed field (u32 byte-length + UTF-16LE data).
+fn encode_utf16_field(s: &str) -> Vec<u8> {
+    let utf16: Vec<u16> = s.encode_utf16().collect();
+    let byte_len = (utf16.len() * 2) as u32;
+    let mut p = Vec::new();
+    p.extend_from_slice(&byte_len.to_le_bytes());
+    for word in &utf16 {
+        p.extend_from_slice(&word.to_le_bytes());
+    }
+    p
+}
+
+/// Encode a UTF-8 length-prefixed field (u32 byte-length + UTF-8 data).
+fn encode_string_field(s: &str) -> Vec<u8> {
+    let bytes = s.as_bytes();
+    let mut p = Vec::new();
+    p.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    p.extend_from_slice(bytes);
+    p
+}
+
+/// Build a `CommandConfig/InjectSpawn64` payload: key(u32=152) + utf16 path.
+fn config_inject_spawn64_payload(path: &str) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&u32::from(DemonConfigKey::InjectSpawn64).to_le_bytes());
+    p.extend(encode_utf16_field(path));
+    p
+}
+
+/// Build a `CommandConfig/InjectSpawn32` payload: key(u32=153) + utf16 path.
+fn config_inject_spawn32_payload(path: &str) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&u32::from(DemonConfigKey::InjectSpawn32).to_le_bytes());
+    p.extend(encode_utf16_field(path));
+    p
+}
+
+/// Build a `CommandConfig/ImplantSpfThreadStart` payload: key(u32=3) + string module + string symbol.
+fn config_spf_thread_start_payload(module: &str, symbol: &str) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&u32::from(DemonConfigKey::ImplantSpfThreadStart).to_le_bytes());
+    p.extend(encode_string_field(module));
+    p.extend(encode_string_field(symbol));
+    p
+}
+
+/// Build a `CommandConfig/ImplantSleepTechnique` payload: key(u32=5) + value(u32).
+fn config_sleep_technique_payload(value: u32) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&u32::from(DemonConfigKey::ImplantSleepTechnique).to_le_bytes());
+    p.extend_from_slice(&value.to_le_bytes());
+    p
+}
+
+/// Build a `CommandConfig/ImplantCoffeeVeh` payload: key(u32=7) + bool(u32).
+fn config_coffee_veh_payload(enabled: bool) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&u32::from(DemonConfigKey::ImplantCoffeeVeh).to_le_bytes());
+    p.extend_from_slice(&u32::from(enabled).to_le_bytes());
+    p
+}
+
+/// Build a `CommandConfig/ImplantCoffeeThreaded` payload: key(u32=6) + bool(u32).
+fn config_coffee_threaded_payload(enabled: bool) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&u32::from(DemonConfigKey::ImplantCoffeeThreaded).to_le_bytes());
+    p.extend_from_slice(&u32::from(enabled).to_le_bytes());
+    p
+}
+
+/// Build a `CommandConfig/InjectTechnique` payload: key(u32=150) + value(u32).
+fn config_inject_technique_payload(value: u32) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&u32::from(DemonConfigKey::InjectTechnique).to_le_bytes());
+    p.extend_from_slice(&value.to_le_bytes());
+    p
+}
+
+/// Build a `CommandConfig/InjectSpoofAddr` payload: key(u32=151) + string module + string symbol.
+fn config_inject_spoof_addr_payload(module: &str, symbol: &str) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&u32::from(DemonConfigKey::InjectSpoofAddr).to_le_bytes());
+    p.extend(encode_string_field(module));
+    p.extend(encode_string_field(symbol));
+    p
+}
+
+/// Build a `CommandConfig/ImplantVerbose` payload: key(u32=4) + bool(u32).
+fn config_implant_verbose_payload(enabled: bool) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(&u32::from(DemonConfigKey::ImplantVerbose).to_le_bytes());
+    p.extend_from_slice(&u32::from(enabled).to_le_bytes());
+    p
+}
+
+/// `handle_config_callback` with `MemoryExecute` broadcasts a message containing
+/// the execute protection value.
+#[tokio::test]
+async fn config_memory_execute_broadcasts_value() -> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    server.listeners.create(common::http_listener_config("out-cfg-memexec", listener_port)).await?;
+    drop(listener_guard);
+    server.listeners.start("out-cfg-memexec").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0080_u32;
+    let key = [0x80; AGENT_KEY_LENGTH];
+    let iv = [0x81; AGENT_IV_LENGTH];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let exec_value = 32_u32;
+    let payload = config_memory_execute_payload(exec_value);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandConfig),
+            0xC0,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for config MemoryExecute, got {event:?}");
+    };
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::CommandConfig).to_string());
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.contains("memory executing") || message.contains("Memory Execute"),
+        "message should mention memory executing: {message:?}"
+    );
+    assert!(
+        message.contains(&exec_value.to_string()),
+        "message should contain execute value {exec_value}: {message:?}"
+    );
+
+    socket.close(None).await?;
+    server.listeners.stop("out-cfg-memexec").await?;
+    Ok(())
+}
+
+/// `handle_config_callback` with `InjectSpawn64` broadcasts the x64 target process path.
+#[tokio::test]
+async fn config_inject_spawn64_broadcasts_path() -> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    server.listeners.create(common::http_listener_config("out-cfg-spawn64", listener_port)).await?;
+    drop(listener_guard);
+    server.listeners.start("out-cfg-spawn64").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0081_u32;
+    let key = [0x82; AGENT_KEY_LENGTH];
+    let iv = [0x83; AGENT_IV_LENGTH];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let target_path = r"C:\Windows\System32\notepad.exe";
+    let payload = config_inject_spawn64_payload(target_path);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandConfig),
+            0xC1,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for config InjectSpawn64, got {event:?}");
+    };
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::CommandConfig).to_string());
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.contains("x64") || message.contains("64"),
+        "message should mention x64: {message:?}"
+    );
+    assert!(
+        message.contains("notepad.exe"),
+        "message should contain the target process path: {message:?}"
+    );
+
+    socket.close(None).await?;
+    server.listeners.stop("out-cfg-spawn64").await?;
+    Ok(())
+}
+
+/// `handle_config_callback` with `InjectSpawn32` broadcasts the x86 target process path.
+#[tokio::test]
+async fn config_inject_spawn32_broadcasts_path() -> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    server.listeners.create(common::http_listener_config("out-cfg-spawn32", listener_port)).await?;
+    drop(listener_guard);
+    server.listeners.start("out-cfg-spawn32").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0082_u32;
+    let key = [0x84; AGENT_KEY_LENGTH];
+    let iv = [0x85; AGENT_IV_LENGTH];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let target_path = r"C:\Windows\SysWOW64\cmd.exe";
+    let payload = config_inject_spawn32_payload(target_path);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandConfig),
+            0xC2,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for config InjectSpawn32, got {event:?}");
+    };
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::CommandConfig).to_string());
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.contains("x86") || message.contains("32"),
+        "message should mention x86: {message:?}"
+    );
+    assert!(
+        message.contains("cmd.exe"),
+        "message should contain the target process path: {message:?}"
+    );
+
+    socket.close(None).await?;
+    server.listeners.stop("out-cfg-spawn32").await?;
+    Ok(())
+}
+
+/// `handle_config_callback` with `ImplantSpfThreadStart` broadcasts module!symbol.
+#[tokio::test]
+async fn config_spf_thread_start_broadcasts_module_symbol() -> Result<(), Box<dyn std::error::Error>>
+{
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    server
+        .listeners
+        .create(common::http_listener_config("out-cfg-spfthread", listener_port))
+        .await?;
+    drop(listener_guard);
+    server.listeners.start("out-cfg-spfthread").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0083_u32;
+    let key = [0x86; AGENT_KEY_LENGTH];
+    let iv = [0x87; AGENT_IV_LENGTH];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let payload = config_spf_thread_start_payload("ntdll.dll", "RtlUserThreadStart");
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandConfig),
+            0xC3,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for config ImplantSpfThreadStart, got {event:?}");
+    };
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::CommandConfig).to_string());
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.contains("ntdll.dll") && message.contains("RtlUserThreadStart"),
+        "message should contain module!symbol: {message:?}"
+    );
+
+    socket.close(None).await?;
+    server.listeners.stop("out-cfg-spfthread").await?;
+    Ok(())
+}
+
+/// `handle_config_callback` with `ImplantSleepTechnique` broadcasts the technique value.
+#[tokio::test]
+async fn config_sleep_technique_broadcasts_value() -> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    server
+        .listeners
+        .create(common::http_listener_config("out-cfg-sleeptech", listener_port))
+        .await?;
+    drop(listener_guard);
+    server.listeners.start("out-cfg-sleeptech").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0084_u32;
+    let key = [0x88; AGENT_KEY_LENGTH];
+    let iv = [0x89; AGENT_IV_LENGTH];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let technique = 2_u32;
+    let payload = config_sleep_technique_payload(technique);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandConfig),
+            0xC4,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for config ImplantSleepTechnique, got {event:?}");
+    };
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::CommandConfig).to_string());
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.contains("obfuscation") || message.contains("Sleep"),
+        "message should mention sleep obfuscation: {message:?}"
+    );
+    assert!(
+        message.contains(&technique.to_string()),
+        "message should contain technique value {technique}: {message:?}"
+    );
+
+    socket.close(None).await?;
+    server.listeners.stop("out-cfg-sleeptech").await?;
+    Ok(())
+}
+
+/// `handle_config_callback` with `ImplantCoffeeVeh` (true) broadcasts enabled status.
+#[tokio::test]
+async fn config_coffee_veh_true_broadcasts_enabled() -> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    server
+        .listeners
+        .create(common::http_listener_config("out-cfg-coffeeveh", listener_port))
+        .await?;
+    drop(listener_guard);
+    server.listeners.start("out-cfg-coffeeveh").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0085_u32;
+    let key = [0x8A; AGENT_KEY_LENGTH];
+    let iv = [0x8B; AGENT_IV_LENGTH];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let payload = config_coffee_veh_payload(true);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandConfig),
+            0xC5,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for config ImplantCoffeeVeh, got {event:?}");
+    };
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::CommandConfig).to_string());
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.contains("VEH") || message.contains("veh"),
+        "message should mention Coffee VEH: {message:?}"
+    );
+    assert!(message.contains("true"), "message should contain 'true': {message:?}");
+
+    socket.close(None).await?;
+    server.listeners.stop("out-cfg-coffeeveh").await?;
+    Ok(())
+}
+
+/// `handle_config_callback` with `ImplantCoffeeThreaded` (false) broadcasts disabled status.
+#[tokio::test]
+async fn config_coffee_threaded_false_broadcasts_disabled() -> Result<(), Box<dyn std::error::Error>>
+{
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    server
+        .listeners
+        .create(common::http_listener_config("out-cfg-coffeethread", listener_port))
+        .await?;
+    drop(listener_guard);
+    server.listeners.start("out-cfg-coffeethread").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0086_u32;
+    let key = [0x8C; AGENT_KEY_LENGTH];
+    let iv = [0x8D; AGENT_IV_LENGTH];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let payload = config_coffee_threaded_payload(false);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandConfig),
+            0xC6,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for config ImplantCoffeeThreaded, got {event:?}");
+    };
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::CommandConfig).to_string());
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.contains("threading") || message.contains("Coffee"),
+        "message should mention coffee threading: {message:?}"
+    );
+    assert!(message.contains("false"), "message should contain 'false': {message:?}");
+
+    socket.close(None).await?;
+    server.listeners.stop("out-cfg-coffeethread").await?;
+    Ok(())
+}
+
+/// `handle_config_callback` with `InjectTechnique` broadcasts the injection technique value.
+#[tokio::test]
+async fn config_inject_technique_broadcasts_value() -> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    server
+        .listeners
+        .create(common::http_listener_config("out-cfg-injecttech", listener_port))
+        .await?;
+    drop(listener_guard);
+    server.listeners.start("out-cfg-injecttech").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0087_u32;
+    let key = [0x8E; AGENT_KEY_LENGTH];
+    let iv = [0x8F; AGENT_IV_LENGTH];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let technique = 3_u32;
+    let payload = config_inject_technique_payload(technique);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandConfig),
+            0xC7,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for config InjectTechnique, got {event:?}");
+    };
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::CommandConfig).to_string());
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.contains("injection technique") || message.contains("inject"),
+        "message should mention injection technique: {message:?}"
+    );
+    assert!(
+        message.contains(&technique.to_string()),
+        "message should contain technique value {technique}: {message:?}"
+    );
+
+    socket.close(None).await?;
+    server.listeners.stop("out-cfg-injecttech").await?;
+    Ok(())
+}
+
+/// `handle_config_callback` with `InjectSpoofAddr` broadcasts module!symbol for spoofing.
+#[tokio::test]
+async fn config_inject_spoof_addr_broadcasts_module_symbol()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    server
+        .listeners
+        .create(common::http_listener_config("out-cfg-injectspoof", listener_port))
+        .await?;
+    drop(listener_guard);
+    server.listeners.start("out-cfg-injectspoof").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0088_u32;
+    let key = [0x90; AGENT_KEY_LENGTH];
+    let iv = [0x91; AGENT_IV_LENGTH];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let payload = config_inject_spoof_addr_payload("kernel32.dll", "CreateThread");
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandConfig),
+            0xC8,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for config InjectSpoofAddr, got {event:?}");
+    };
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::CommandConfig).to_string());
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.contains("kernel32.dll") && message.contains("CreateThread"),
+        "message should contain module!symbol: {message:?}"
+    );
+
+    socket.close(None).await?;
+    server.listeners.stop("out-cfg-injectspoof").await?;
+    Ok(())
+}
+
+/// `handle_config_callback` with `ImplantVerbose` (true) broadcasts verbose enabled.
+#[tokio::test]
+async fn config_implant_verbose_broadcasts_value() -> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    server.listeners.create(common::http_listener_config("out-cfg-verbose", listener_port)).await?;
+    drop(listener_guard);
+    server.listeners.start("out-cfg-verbose").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0089_u32;
+    let key = [0x92; AGENT_KEY_LENGTH];
+    let iv = [0x93; AGENT_IV_LENGTH];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    let payload = config_implant_verbose_payload(true);
+
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandConfig),
+            0xC9,
+            &payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(msg) = event else {
+        panic!("expected AgentResponse for config ImplantVerbose, got {event:?}");
+    };
+    assert_eq!(msg.info.command_id, u32::from(DemonCommand::CommandConfig).to_string());
+    assert_eq!(msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+
+    let message = msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.contains("verbose") || message.contains("Verbose"),
+        "message should mention verbose: {message:?}"
+    );
+    assert!(message.contains("true"), "message should contain 'true': {message:?}");
+
+    socket.close(None).await?;
+    server.listeners.stop("out-cfg-verbose").await?;
+    Ok(())
+}

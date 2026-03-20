@@ -198,6 +198,135 @@ async fn operator_session_listener_and_mock_demon_round_trip()
     Ok(())
 }
 
+/// E2E test: reconnect probe through operator WebSocket.
+///
+/// Sequence:
+/// 1. Agent registers via `DEMON_INIT` — operator sees `AgentNew`.
+/// 2. Agent sends a reconnect probe (empty `DEMON_INIT` body, same agent_id).
+/// 3. Operator must NOT see a duplicate `AgentNew`.
+/// 4. Agent sends a `CommandOutput` callback at the persisted (unchanged) CTR offset.
+/// 5. Operator receives the output correctly — proving the session resumed without
+///    desync or duplicate registration.
+#[tokio::test]
+async fn reconnect_probe_does_not_duplicate_agent_new_and_resumes_callbacks()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+
+    common::login(&mut socket).await?;
+    common::assert_no_operator_message(&mut socket, Duration::from_millis(200)).await;
+
+    // Create and start an HTTP listener.
+    drop(listener_guard);
+    socket
+        .send(ClientMessage::Text(listener_new_message("operator", listener_port).into()))
+        .await?;
+
+    let _listener_created = common::read_operator_message(&mut socket).await?;
+    let _listener_started = common::read_operator_message(&mut socket).await?;
+
+    server.listeners.update(http_listener_config(listener_port)).await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xABCD_EF01_u32;
+    let key = [0x73; AGENT_KEY_LENGTH];
+    let iv = [0x84; AGENT_IV_LENGTH];
+    let mut ctr_offset = 0_u64;
+
+    // --- Step 1: full DEMON_INIT registration ---
+    let init_response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_init_body(agent_id, key, iv))
+        .send()
+        .await?
+        .error_for_status()?;
+    let init_bytes = init_response.bytes().await?;
+    let init_ack =
+        red_cell_common::crypto::decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
+    assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
+    ctr_offset += ctr_blocks_for_len(init_bytes.len());
+
+    // Operator must see AgentNew.
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentNew(new_msg) = agent_new else {
+        panic!("expected AgentNew after init");
+    };
+    assert_eq!(new_msg.info.name_id, "ABCDEF01");
+
+    // --- Step 2: reconnect probe (empty DEMON_INIT body, same agent_id) ---
+    let reconnect_response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_reconnect_body(agent_id))
+        .send()
+        .await?
+        .error_for_status()?;
+    let reconnect_bytes = reconnect_response.bytes().await?;
+
+    // Verify the reconnect ACK decrypts correctly at the current (unchanged) CTR offset.
+    let reconnect_ack = red_cell_common::crypto::decrypt_agent_data_at_offset(
+        &key,
+        &iv,
+        ctr_offset,
+        &reconnect_bytes,
+    )?;
+    assert_eq!(
+        reconnect_ack.as_slice(),
+        &agent_id.to_le_bytes(),
+        "reconnect ACK must echo agent_id at the pre-reconnect CTR offset"
+    );
+
+    // --- Step 3: operator must NOT see a duplicate AgentNew ---
+    // The reconnect probe should not broadcast any operator event.
+    common::assert_no_operator_message(&mut socket, Duration::from_millis(500)).await;
+
+    // CTR offset must not have advanced (reconnect ACK is not counter-consuming).
+    // We do NOT advance ctr_offset here.
+
+    // --- Step 4: queue a task so we can verify output delivery ---
+    socket.send(ClientMessage::Text(agent_task_message_for("3B", "ABCDEF01").into())).await?;
+
+    let task_echo = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentTask(task_msg) = task_echo else {
+        panic!("expected AgentTask echo");
+    };
+    assert_eq!(task_msg.info.demon_id, "ABCDEF01");
+    assert_eq!(task_msg.info.task_id, "3B");
+
+    // --- Step 5: agent sends CommandOutput at the unchanged CTR offset ---
+    let output_text = "reconnect callback output";
+    let callback_response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandOutput),
+            0x3B,
+            &common::command_output_payload(output_text),
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+    assert!(callback_response.bytes().await?.is_empty());
+
+    // Operator must see the resumed callback output.
+    let output_event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(resp_msg) = output_event else {
+        panic!("expected AgentResponse after resumed callback");
+    };
+    assert_eq!(resp_msg.info.demon_id, "ABCDEF01");
+    assert_eq!(resp_msg.info.command_id, u32::from(DemonCommand::CommandOutput).to_string());
+    assert_eq!(resp_msg.info.output, output_text);
+
+    socket.close(None).await?;
+    server.listeners.stop("edge-http").await?;
+    Ok(())
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn operator_session_smb_listener_and_mock_demon_round_trip()
@@ -825,6 +954,10 @@ fn listener_new_smb_message(user: &str, name: &str, pipe_name: &str) -> String {
 }
 
 fn agent_task_message(task_id: &str) -> String {
+    agent_task_message_for(task_id, "12345678")
+}
+
+fn agent_task_message_for(task_id: &str, demon_id: &str) -> String {
     serde_json::to_string(&OperatorMessage::AgentTask(Message {
         head: MessageHead {
             event: EventCode::Session,
@@ -835,7 +968,7 @@ fn agent_task_message(task_id: &str) -> String {
         info: AgentTaskInfo {
             task_id: task_id.to_owned(),
             command_line: "checkin".to_owned(),
-            demon_id: "12345678".to_owned(),
+            demon_id: demon_id.to_owned(),
             command_id: u32::from(DemonCommand::CommandCheckin).to_string(),
             ..AgentTaskInfo::default()
         },

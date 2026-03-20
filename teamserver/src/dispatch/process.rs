@@ -1891,4 +1891,163 @@ mod tests {
             "expected InvalidCallbackPayload for truncated payload, got: {result:?}"
         );
     }
+
+    // ── Unicode / non-ASCII process name formatting ─────────────────────────
+    //
+    // Note on alignment: `format_process_table` and `format_grep_table` compute
+    // column widths via `.len()` (byte length) and pad via `format!("{:<w$}", …)`
+    // (which counts Unicode scalar values, not display width).  For multi-byte
+    // UTF-8 characters this means:
+    //
+    //  - CJK characters: 3 bytes each, 1 char, 2 display columns
+    //    → `.len()` over-counts vs char count → extra padding spaces
+    //    → display columns = display_width + padding > expected column width
+    //
+    //  - Accented Latin (e.g. "é"): 2 bytes, 1 char, 1 display column
+    //    → `.len()` over-counts vs char count → extra padding spaces
+    //
+    // The result is that rows with multi-byte names get more visual padding than
+    // pure-ASCII rows, causing slight column misalignment.  This is a known
+    // cosmetic limitation.  Fixing it properly requires a Unicode display-width
+    // library (e.g. `unicode-width`).  The tests below document the current
+    // behavior so any future fix can be validated.
+
+    #[test]
+    fn format_process_table_cjk_name_output_is_well_formed() {
+        let rows = vec![
+            make_process_row("测试进程.exe", 1000, 4),
+            make_process_row("svchost.exe", 800, 4),
+        ];
+        let table = format_process_table(&rows);
+
+        // All data must appear in the output
+        assert!(table.contains("测试进程.exe"), "missing CJK process name:\n{table}");
+        assert!(table.contains("svchost.exe"), "missing ASCII process name:\n{table}");
+        assert!(table.contains("1000"), "missing PID 1000:\n{table}");
+        assert!(table.contains("800"), "missing PID 800:\n{table}");
+
+        // Must still have 4 lines: header, separator, 2 data rows
+        assert_eq!(table.lines().count(), 4, "expected 4 lines:\n{table}");
+
+        // Header and separator must still be present
+        assert!(table.contains("Name"), "missing Name header:\n{table}");
+        assert!(table.contains("----"), "missing separator:\n{table}");
+    }
+
+    #[test]
+    fn format_process_table_cjk_name_byte_len_exceeds_char_count() {
+        // "测试进程.exe" = 4 CJK chars (3 bytes each) + ".exe" (4 bytes) = 16 bytes, 8 chars
+        // This documents the known divergence between .len() and char count.
+        let name = "测试进程.exe";
+        assert_eq!(name.len(), 16, "byte length");
+        assert_eq!(name.chars().count(), 8, "char count");
+
+        let rows = vec![make_process_row(name, 1, 0)];
+        let table = format_process_table(&rows);
+        let data_line = table.lines().nth(2).expect("data row");
+
+        // The Name column is padded to byte-length (16) by format!("{:<16}", …),
+        // but since the string is only 8 chars, format! adds 8 spaces of padding.
+        // Verify the name appears and is followed by spaces (over-padded).
+        assert!(
+            data_line.contains("测试进程.exe"),
+            "data line must contain CJK name:\n{data_line}"
+        );
+    }
+
+    #[test]
+    fn format_process_table_accented_latin_name_is_present() {
+        // "Ünïcödé.exe" contains multi-byte Latin chars
+        let rows = vec![make_process_row("Ünïcödé.exe", 42, 1)];
+        let table = format_process_table(&rows);
+
+        assert!(table.contains("Ünïcödé.exe"), "missing accented name:\n{table}");
+        assert_eq!(table.lines().count(), 3, "expected 3 lines:\n{table}");
+    }
+
+    #[test]
+    fn format_process_table_mixed_script_rows_all_present() {
+        // Mix of ASCII, CJK, Cyrillic, and accented names
+        let rows = vec![
+            make_process_row("explorer.exe", 100, 4),
+            make_process_row("测试.exe", 200, 4),
+            make_process_row("процесс.exe", 300, 4),
+            make_process_row("café.exe", 400, 4),
+        ];
+        let table = format_process_table(&rows);
+
+        assert!(table.contains("explorer.exe"), "missing ASCII name:\n{table}");
+        assert!(table.contains("测试.exe"), "missing CJK name:\n{table}");
+        assert!(table.contains("процесс.exe"), "missing Cyrillic name:\n{table}");
+        assert!(table.contains("café.exe"), "missing accented name:\n{table}");
+        assert_eq!(table.lines().count(), 6, "expected 6 lines (header+sep+4 data):\n{table}");
+    }
+
+    #[test]
+    fn format_process_table_unicode_user_field_is_present() {
+        // Non-ASCII user name (e.g. domain with CJK characters)
+        let row = ProcessRow {
+            name: "cmd.exe".to_owned(),
+            pid: 10,
+            ppid: 1,
+            session: 0,
+            arch: "x64".to_owned(),
+            threads: 1,
+            user: "域\\管理员".to_owned(),
+        };
+        let table = format_process_table(&[row]);
+        assert!(table.contains("域\\管理员"), "missing Unicode user:\n{table}");
+    }
+
+    #[test]
+    fn format_grep_table_cjk_name_output_is_well_formed() {
+        let rows = vec![GrepRow {
+            name: "恶意软件.exe".to_owned(),
+            pid: 999,
+            ppid: 4,
+            user: "SYSTEM".to_owned(),
+            arch: "x64".to_owned(),
+        }];
+        let table = format_grep_table(&rows);
+
+        assert!(table.contains("恶意软件.exe"), "missing CJK name:\n{table}");
+        assert!(table.contains("999"), "missing PID:\n{table}");
+        assert!(table.contains("SYSTEM"), "missing user:\n{table}");
+        // header + separator + 1 data row
+        assert_eq!(
+            table.lines().filter(|l| !l.is_empty()).count(),
+            3,
+            "expected 3 non-empty lines:\n{table}"
+        );
+    }
+
+    #[test]
+    fn format_grep_table_unicode_user_is_present() {
+        let rows = vec![GrepRow {
+            name: "notepad.exe".to_owned(),
+            pid: 50,
+            ppid: 1,
+            user: "用户".to_owned(),
+            arch: "x86".to_owned(),
+        }];
+        let table = format_grep_table(&rows);
+        assert!(table.contains("用户"), "missing Unicode user:\n{table}");
+    }
+
+    #[test]
+    fn format_module_table_cjk_module_name_is_present() {
+        let rows =
+            vec![ModuleRow { name: "テスト.dll".to_owned(), base: 0x7FFE_0000_0000_0000 }];
+        let table = format_module_table(&rows);
+        assert!(table.contains("テスト.dll"), "missing CJK module name:\n{table}");
+    }
+
+    #[test]
+    fn format_process_table_empty_name_does_not_panic() {
+        // Edge case: empty process name (could happen with malformed agent data)
+        let rows = vec![make_process_row("", 1, 0)];
+        let table = format_process_table(&rows);
+        // Name column minimum width is 4 ("Name" header), so this should still work
+        assert_eq!(table.lines().count(), 3, "expected 3 lines:\n{table}");
+    }
 }

@@ -3116,4 +3116,49 @@ havoc.RegisterCommand("scan", "second scan", run_scan)
 
         Ok(())
     }
+
+    #[test]
+    fn plugin_event_round_trip_all_variants() {
+        let variants = [
+            PluginEvent::AgentCheckin,
+            PluginEvent::AgentRegistered,
+            PluginEvent::AgentDead,
+            PluginEvent::CommandOutput,
+            PluginEvent::LootCaptured,
+            PluginEvent::TaskCreated,
+        ];
+        for event in variants {
+            let s = event.as_str();
+            let parsed = PluginEvent::parse(s);
+            assert_eq!(parsed, Some(event), "round-trip failed for {s:?}");
+        }
+    }
+
+    #[test]
+    fn plugin_event_parse_unknown_returns_none() {
+        for input in ["nonexistent_event", "foo", "", "agent_checkin_extra", "UNKNOWN"] {
+            assert_eq!(
+                PluginEvent::parse(input),
+                None,
+                "expected None for unknown input {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn plugin_event_parse_case_insensitive() {
+        assert_eq!(PluginEvent::parse("AGENT_CHECKIN"), Some(PluginEvent::AgentCheckin));
+        assert_eq!(PluginEvent::parse("Agent_Registered"), Some(PluginEvent::AgentRegistered));
+        assert_eq!(PluginEvent::parse("COMMAND_OUTPUT"), Some(PluginEvent::CommandOutput));
+        assert_eq!(PluginEvent::parse("Loot_Captured"), Some(PluginEvent::LootCaptured));
+        assert_eq!(PluginEvent::parse("TASK_CREATED"), Some(PluginEvent::TaskCreated));
+        assert_eq!(PluginEvent::parse("AGENT_DEAD"), Some(PluginEvent::AgentDead));
+    }
+
+    #[test]
+    fn plugin_event_parse_trims_whitespace() {
+        assert_eq!(PluginEvent::parse("  agent_checkin  "), Some(PluginEvent::AgentCheckin));
+        assert_eq!(PluginEvent::parse("\tagent_dead\n"), Some(PluginEvent::AgentDead));
+        assert_eq!(PluginEvent::parse("   "), None);
+    }
 }

@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 557 | 212 | 31 |
+| Tasks closed | 561 | 212 | 31 |
 | Bugs filed against | 51 | 34 | 9 |
 | Bug rate (bugs/task) | 0.09 | 0.16 | 0.29 |
 | Quality score | 91% | 84% | 71% |
 
-*Bug rates: Claude 51/557=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 51/561=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-20 14:30 — 0060b51..10ae0f7
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 4 | 0 | Closed 3jal (resolve_bind_addr empty DNS error path — extracted helper + 2 tests), xsi8 (PluginEvent::parse round-trip + edge cases — 4 tests), ef81 (ambiguous prefix resolution in match_registered_command — 1 async test), vd2m (ShutdownController try_track_callback race rollback — deterministic test with cfg(test) hook). 3ybg (PayloadCache) now in progress. Clean run. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (clean), cargo test 745 passed / 0 failed
 
 ### QA Review — 2026-03-20 11:15 — 198a6e7..cddce02
 

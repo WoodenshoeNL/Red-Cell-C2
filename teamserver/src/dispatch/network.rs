@@ -405,6 +405,48 @@ mod tests {
         assert!(output.is_empty());
     }
 
+    #[tokio::test]
+    async fn sessions_empty_string_row_data_aligns_correctly() {
+        // One row with all-empty strings: client="", user="", active=0, idle=0
+        let mut rest = encode_utf16("DC01");
+        rest.extend(encode_utf16(""));
+        rest.extend(encode_utf16(""));
+        rest.extend(encode_u32(0));
+        rest.extend(encode_u32(0));
+        let payload = net_payload(DemonNetCommand::Sessions, &rest);
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        let output = assert_agent_response(&msg, "Info", "Sessions for DC01 [1]: ");
+        // Output should still contain the header
+        assert!(output.contains("Computer"));
+        assert!(output.contains("Username"));
+        // Should have 3 lines: header, separator, data
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 3, "header + separator + one data row");
+    }
+
+    #[tokio::test]
+    async fn share_empty_string_row_data_aligns_correctly() {
+        // One row with all-empty strings: name="", path="", remark="", access=0
+        let mut rest = encode_utf16("FILESERV");
+        rest.extend(encode_utf16(""));
+        rest.extend(encode_utf16(""));
+        rest.extend(encode_utf16(""));
+        rest.extend(encode_u32(0));
+        let payload = net_payload(DemonNetCommand::Share, &rest);
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        let output = assert_agent_response(&msg, "Info", "Shares for FILESERV [1]: ");
+        // Output should still contain the header
+        assert!(output.contains("Share name"));
+        assert!(output.contains("Path"));
+        // Should have 3 lines: header, separator, data
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 3, "header + separator + one data row");
+    }
+
     // ── handle_net_callback: Computer ─────────────────────────────────────
 
     #[tokio::test]
@@ -702,6 +744,21 @@ mod tests {
         assert!(result.contains("user2"));
     }
 
+    #[test]
+    fn format_net_sessions_empty_string_values_align_to_min_widths() {
+        // All-empty-string row: computer="", username="", active=0, idle=0
+        let rows = vec![("".to_owned(), "".to_owned(), 0u32, 0u32)];
+        let result = format_net_sessions(&rows);
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 3, "header + separator + one data row");
+        // Min widths (8 each) must still hold even though data lengths are 0
+        assert_eq!(lines[0], " Computer   Username   Active   Idle");
+        assert_eq!(lines[1], " --------   --------   ------   ----");
+        // Empty strings padded to width 8; verify data row matches expected format
+        let expected_data = format!(" {:<8}   {:<8}   {:<6}   {}", "", "", 0, 0);
+        assert_eq!(lines[2], expected_data);
+    }
+
     // ── format_net_shares ────────────────────────────────────────────────────
 
     #[test]
@@ -750,11 +807,52 @@ mod tests {
         assert!(result.contains("Remote IPC"));
     }
 
+    #[test]
+    fn format_net_shares_empty_string_values_align_to_min_widths() {
+        // All-empty-string row: name="", path="", remark="", access=0
+        let rows = vec![("".to_owned(), "".to_owned(), "".to_owned(), 0u32)];
+        let result = format_net_shares(&rows);
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 3, "header + separator + one data row");
+        // Min widths: name=10, path=4, remark=6
+        assert_eq!(lines[0], " Share name   Path   Remark   Access");
+        assert_eq!(lines[1], " ----------   ----   ------   ------");
+        let expected_data = format!(" {:<10}   {:<4}   {:<6}   {}", "", "", "", 0);
+        assert_eq!(lines[2], expected_data);
+    }
+
     // ── format_net_group_descriptions ────────────────────────────────────────
 
     #[test]
     fn format_net_group_descriptions_empty_returns_empty_string() {
         assert_eq!(format_net_group_descriptions(&[]), "");
+    }
+
+    #[test]
+    fn format_net_group_descriptions_empty_string_values_trims_whitespace_only_row() {
+        // All-empty-string row: group="", description=""
+        // The data row is all whitespace (" {:<5}  {}"), so trim_end() strips it,
+        // leaving only header + separator. This is the actual behavior — an edge
+        // case where the trailing data row is invisible.
+        let rows = vec![("".to_owned(), "".to_owned())];
+        let result = format_net_group_descriptions(&rows);
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 2, "data row is all-whitespace and gets trimmed");
+        assert_eq!(lines[0], " Group  Description");
+        assert_eq!(lines[1], " -----  -----------");
+    }
+
+    #[test]
+    fn format_net_group_descriptions_empty_group_nonempty_description_preserves_row() {
+        // Empty group name but non-empty description — row is preserved by trim_end
+        let rows = vec![("".to_owned(), "Some description".to_owned())];
+        let result = format_net_group_descriptions(&rows);
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 3, "header + separator + one data row");
+        assert_eq!(lines[0], " Group  Description");
+        assert_eq!(lines[1], " -----  -----------");
+        let expected_data = format!(" {:<5}  {}", "", "Some description");
+        assert_eq!(lines[2], expected_data);
     }
 
     #[test]

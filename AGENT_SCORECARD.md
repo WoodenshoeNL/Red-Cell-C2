@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 617 | 212 | 31 |
+| Tasks closed | 621 | 212 | 31 |
 | Bugs filed against | 51 | 34 | 9 |
 | Bug rate (bugs/task) | 0.08 | 0.16 | 0.29 |
 | Quality score | 92% | 84% | 71% |
 
-*Bug rates: Claude 51/617=0.08, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 51/621=0.08, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-20 22:30 — 2ebd20fc..a75457d4
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 4 | 0 | Closed ckgtn (SOCKS5 relay test for client data before finish_connect — 93 LOC), xhale (AgentEncryptionInfo Debug redaction test — 38 LOC), ymibn (HTTP listener Proxy block parsing tests — 100 LOC), tbw2o (Profile::from_reader malformed HCL error path test — 10 LOC). WIP on 5zpgq (ExternalListenerConfig serde round-trip). All test-only changes, no production code modified. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: passed (cargo check, clippy -D warnings clean, 2530/2530 tests pass)
 
 ### QA Review — 2026-03-20 18:00 — 4f3a3b5c..2ebd20fc
 

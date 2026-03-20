@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 566 | 212 | 31 |
+| Tasks closed | 571 | 212 | 31 |
 | Bugs filed against | 51 | 34 | 9 |
 | Bug rate (bugs/task) | 0.09 | 0.16 | 0.29 |
 | Quality score | 91% | 84% | 71% |
 
-*Bug rates: Claude 51/566=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 51/571=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-20 21:00 — a355962..9c5bc94
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 5 | 0 | Closed 6cvz (SOCKS5 unsupported auth rejection test), 1o5f (screenshot 2MB large payload test), 15gi (login set_error password focus test), ebzo (unknown DemonSocketCommand dispatch test), 4tvm (Teamserver.Cert TLS parsing + validation — 4 tests + production validation logic). Also added cert blank-path validation to config.rs. Clean run. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (clean), cargo test all passed / 0 failed
 
 ### QA Review — 2026-03-20 17:45 — 39dbaf8..09531ad
 

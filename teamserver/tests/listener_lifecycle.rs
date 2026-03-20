@@ -129,6 +129,152 @@ async fn restart_after_stop_succeeds() -> Result<(), Box<dyn std::error::Error>>
 }
 
 // ---------------------------------------------------------------------------
+// Restart coverage tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn restart_after_stop_rebinds_port_and_accepts_connections()
+-> Result<(), Box<dyn std::error::Error>> {
+    let manager = test_manager().await?;
+    let (port, guard) = common::available_port()?;
+
+    manager.create(http_config("lc-restart-port", port)).await?;
+    drop(guard);
+    manager.start("lc-restart-port").await?;
+
+    // Verify the listener is actually accepting connections before stopping.
+    timeout(Duration::from_secs(2), common::wait_for_listener(port)).await??;
+
+    manager.stop("lc-restart-port").await?;
+
+    // Restart — the port should be re-bound.
+    let summary = manager.start("lc-restart-port").await?;
+    assert_eq!(summary.state.status, ListenerStatus::Running);
+
+    // Verify port rebinding by actually connecting.
+    timeout(Duration::from_secs(2), common::wait_for_listener(port)).await??;
+
+    // DB state must be consistent.
+    let db_summary = manager.summary("lc-restart-port").await?;
+    assert_eq!(db_summary.state.status, ListenerStatus::Running);
+    assert!(db_summary.state.last_error.is_none(), "no error after successful restart");
+
+    manager.stop("lc-restart-port").await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn multiple_restart_cycles_succeed() -> Result<(), Box<dyn std::error::Error>> {
+    let manager = test_manager().await?;
+    let (port, guard) = common::available_port()?;
+
+    manager.create(http_config("lc-multi-restart", port)).await?;
+    drop(guard);
+
+    // Perform three stop-then-restart cycles.
+    for cycle in 0..3 {
+        let started = manager.start("lc-multi-restart").await?;
+        assert_eq!(
+            started.state.status,
+            ListenerStatus::Running,
+            "cycle {cycle}: listener must be Running after start"
+        );
+
+        timeout(Duration::from_secs(2), common::wait_for_listener(port)).await??;
+
+        let stopped = manager.stop("lc-multi-restart").await?;
+        assert_eq!(
+            stopped.state.status,
+            ListenerStatus::Stopped,
+            "cycle {cycle}: listener must be Stopped after stop"
+        );
+    }
+
+    // Final DB consistency check.
+    let db_summary = manager.summary("lc-multi-restart").await?;
+    assert_eq!(db_summary.state.status, ListenerStatus::Stopped);
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_reconnects_after_listener_restart() -> Result<(), Box<dyn std::error::Error>> {
+    use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
+
+    let manager = test_manager().await?;
+    let (port, guard) = common::available_port()?;
+
+    manager.create(http_config("lc-agent-reconnect", port)).await?;
+    drop(guard);
+    manager.start("lc-agent-reconnect").await?;
+    timeout(Duration::from_secs(2), common::wait_for_listener(port)).await??;
+
+    // Register an agent via DEMON_INIT.
+    let client = reqwest::Client::new();
+    let agent_id: u32 = 0xDEAD_0001;
+    let key = [0x42_u8; AGENT_KEY_LENGTH];
+    let iv = [0x13_u8; AGENT_IV_LENGTH];
+
+    let _ctr_offset = common::register_agent(&client, port, agent_id, key, iv).await?;
+
+    // Stop and restart the listener.
+    manager.stop("lc-agent-reconnect").await?;
+    manager.start("lc-agent-reconnect").await?;
+    timeout(Duration::from_secs(2), common::wait_for_listener(port)).await??;
+
+    // The agent should be able to reconnect after the listener restarts.
+    let reconnect_body = common::valid_demon_reconnect_body(agent_id);
+    let resp = client.post(format!("http://127.0.0.1:{port}/")).body(reconnect_body).send().await?;
+
+    // The server should accept the reconnect probe (200 OK with a body).
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "reconnect probe after restart must succeed"
+    );
+    let body = resp.bytes().await?;
+    assert!(!body.is_empty(), "reconnect ACK must have a non-empty body");
+
+    manager.stop("lc-agent-reconnect").await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn restart_preserves_config_unchanged() -> Result<(), Box<dyn std::error::Error>> {
+    let manager = test_manager().await?;
+    let (port, guard) = common::available_port()?;
+
+    let config = http_config("lc-restart-cfg", port);
+    manager.create(config).await?;
+    drop(guard);
+
+    // Capture config before restart cycle.
+    let before = manager.summary("lc-restart-cfg").await?;
+
+    manager.start("lc-restart-cfg").await?;
+    manager.stop("lc-restart-cfg").await?;
+    manager.start("lc-restart-cfg").await?;
+
+    // Config must be identical after the stop-start cycle.
+    let after = manager.summary("lc-restart-cfg").await?;
+    match (&before.config, &after.config) {
+        (ListenerConfig::Http(before_http), ListenerConfig::Http(after_http)) => {
+            assert_eq!(before_http.port_bind, after_http.port_bind, "port must be preserved");
+            assert_eq!(before_http.host_bind, after_http.host_bind, "host must be preserved");
+            assert_eq!(
+                before_http.host_rotation, after_http.host_rotation,
+                "host_rotation must be preserved"
+            );
+            assert_eq!(before_http.uris, after_http.uris, "URIs must be preserved");
+            assert_eq!(before_http.method, after_http.method, "method must be preserved");
+        }
+        _ => panic!("expected Http config on both sides"),
+    }
+
+    manager.stop("lc-restart-cfg").await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Error condition tests
 // ---------------------------------------------------------------------------
 

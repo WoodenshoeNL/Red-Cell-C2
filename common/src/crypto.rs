@@ -736,6 +736,46 @@ mod tests {
     }
 
     #[test]
+    fn crypto_error_invalid_key_length_display() {
+        let error = CryptoError::InvalidKeyLength { expected: 32, actual: 31 };
+        let message = error.to_string();
+        assert!(
+            message.contains("expected 32 bytes") && message.contains("got 31"),
+            "InvalidKeyLength display must contain key tokens, got: {message}"
+        );
+    }
+
+    #[test]
+    fn crypto_error_invalid_iv_length_display() {
+        let error = CryptoError::InvalidIvLength { expected: 16, actual: 8 };
+        let message = error.to_string();
+        assert!(
+            message.contains("expected 16 bytes") && message.contains("got 8"),
+            "InvalidIvLength display must contain key tokens, got: {message}"
+        );
+    }
+
+    #[test]
+    fn crypto_error_invalid_ctr_offset_display() {
+        let error = CryptoError::InvalidCtrOffset { block_offset: 999 };
+        let message = error.to_string();
+        assert!(
+            message.contains("999") && message.contains("overflowed"),
+            "InvalidCtrOffset display must contain the offset and 'overflowed', got: {message}"
+        );
+    }
+
+    #[test]
+    fn crypto_error_random_generation_display() {
+        let error = CryptoError::RandomGeneration("entropy source unavailable".to_string());
+        let message = error.to_string();
+        assert!(
+            message.contains("entropy source unavailable"),
+            "RandomGeneration display must contain the inner message, got: {message}"
+        );
+    }
+
+    #[test]
     fn encrypt_at_one_past_max_valid_block_offset_fails() {
         let key = [0x41; AGENT_KEY_LENGTH];
         let iv = [0x24; AGENT_IV_LENGTH];

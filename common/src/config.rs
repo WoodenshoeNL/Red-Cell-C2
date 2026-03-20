@@ -2657,4 +2657,42 @@ mod tests {
             "expected Key path error, got: {error:?}"
         );
     }
+
+    #[test]
+    fn rejects_smb_listener_with_empty_name_and_pipe_name() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Listeners {
+              Smb {
+                Name = ""
+                PipeName = ""
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("profile should be invalid");
+        assert!(
+            error.errors.iter().any(|message| message.contains("Smb.Name")),
+            "expected Smb.Name error, got: {error:?}"
+        );
+        assert!(
+            error.errors.iter().any(|message| message.contains("PipeName")),
+            "expected PipeName error, got: {error:?}"
+        );
+    }
 }

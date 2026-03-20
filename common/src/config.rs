@@ -1424,6 +1424,16 @@ mod tests {
     }
 
     #[test]
+    fn from_reader_rejects_malformed_hcl() {
+        let result = Profile::from_reader("{{invalid hcl".as_bytes());
+        assert!(result.is_err(), "malformed HCL must return an error");
+        assert!(
+            matches!(result.unwrap_err(), ProfileError::Parse(_)),
+            "error must be the Parse variant"
+        );
+    }
+
+    #[test]
     fn loads_profile_from_file() {
         let temp_dir = tempfile::TempDir::new().expect("temporary directory should be created");
         let profile_path = temp_dir.path().join("profile.yaotl");

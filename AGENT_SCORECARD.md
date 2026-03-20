@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 633 | 212 | 31 |
+| Tasks closed | 635 | 212 | 31 |
 | Bugs filed against | 51 | 34 | 9 |
 | Bug rate (bugs/task) | 0.08 | 0.16 | 0.29 |
 | Quality score | 92% | 84% | 71% |
 
-*Bug rates: Claude 51/633=0.08, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 51/635=0.08, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -3102,3 +3102,13 @@ Security posture: Strong — no exploitable issues found in current state
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: passed (cargo check, clippy -D warnings clean, 3044 tests pass across workspace)
+
+### QA Review — 2026-03-21 06:00 — 6428288d..635d6de0
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed 0pgqt (P3, 14 new tests for database.rs helpers: ListenerRepository duplicate name, ListenerStatus::try_from_str, u32_from_i64/u64_from_i64 boundaries, parse_operator_role case-sensitivity). Closed uyg2x (P2, systematic unwrap_or_default removal: service.rs/payload_builder.rs use `?`, events.rs logs dropped broadcasts at trace, infallible casts use `as`, test code uses `.expect()`). 20 files touched, 267 lines added, 83 removed. Clean code, no issues found. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: passed (cargo check, clippy -D warnings clean, 869 tests pass across workspace)

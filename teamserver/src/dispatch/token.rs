@@ -1,4 +1,5 @@
 use red_cell_common::demon::{DemonCommand, DemonTokenCommand};
+use tracing::warn;
 
 use crate::EventBus;
 
@@ -299,8 +300,13 @@ fn format_found_tokens(parser: &mut CallbackParser<'_>) -> Result<String, Comman
     }
 
     let mut tokens = Vec::new();
-    for _ in 0..num_tokens {
+    for i in 0..num_tokens {
         if parser.is_empty() {
+            warn!(
+                declared = num_tokens,
+                parsed = i,
+                "format_found_tokens: payload declared {num_tokens} tokens but only {i} were present"
+            );
             break;
         }
         let domain_user = parser.read_utf16("found token user")?;
@@ -875,6 +881,53 @@ mod tests {
         let output = super::format_found_tokens(&mut parser).unwrap();
         assert!(output.contains("?"), "expected '?' for unknown token type: {output}");
         assert!(output.contains("Unknown"), "expected 'Unknown' impersonation for unknown type");
+    }
+
+    #[test]
+    fn format_found_tokens_truncates_when_num_tokens_exceeds_payload() {
+        // Declare num_tokens=3 but only encode 1 token entry.
+        // The function should return a table with exactly 1 data row
+        // (silently truncating) and emit a warning.
+        let mut buf = Vec::new();
+        push_u32(&mut buf, 3); // num_tokens = 3 (overstated)
+        // Only one token entry follows:
+        push_utf16(&mut buf, "CORP\\admin");
+        push_u32(&mut buf, 1234); // pid
+        push_u32(&mut buf, 0x10); // handle
+        push_u32(&mut buf, 0x2000); // Medium integrity
+        push_u32(&mut buf, 2); // Impersonation level
+        push_u32(&mut buf, 2); // Impersonation token type
+
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_found_tokens(&mut parser).unwrap();
+
+        // Should still produce a valid table with the 1 token we did provide.
+        assert!(output.contains("CORP\\admin"), "expected the single token in output: {output}");
+
+        // Count data rows (skip header line, separator line, and the trailing
+        // "To impersonate" hint). Data rows contain the domain\user string.
+        let data_rows: Vec<&str> = output.lines().filter(|l| l.contains("CORP\\admin")).collect();
+        assert_eq!(
+            data_rows.len(),
+            1,
+            "expected exactly 1 data row, got {}: {output}",
+            data_rows.len()
+        );
+
+        // Should NOT say "No tokens found" since we did parse one.
+        assert!(!output.contains("No tokens found"));
+    }
+
+    #[test]
+    fn format_found_tokens_num_tokens_exceeds_payload_completely_empty() {
+        // Declare num_tokens=5 but include zero token entries after the count.
+        // The loop should immediately break on parser.is_empty() and return "No tokens found".
+        let mut buf = Vec::new();
+        push_u32(&mut buf, 5); // num_tokens = 5 (but no entries follow)
+
+        let mut parser = CallbackParser::new(&buf, 0);
+        let output = super::format_found_tokens(&mut parser).unwrap();
+        assert_eq!(output, "\nNo tokens found");
     }
 
     #[test]

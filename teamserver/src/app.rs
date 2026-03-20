@@ -393,4 +393,166 @@ mod tests {
             "/havoc must NOT 404 when NormalizePathLayer is applied"
         );
     }
+
+    /// Build a valid Demon init packet for use in external listener tests.
+    ///
+    /// Returns the raw bytes of a `DemonEnvelope` containing an init payload
+    /// with the given agent id, AES key, and AES IV.
+    fn build_demon_init_packet(agent_id: u32, key: [u8; 32], iv: [u8; 16]) -> Vec<u8> {
+        use red_cell_common::crypto::encrypt_agent_data;
+        use red_cell_common::demon::{DemonCommand, DemonEnvelope};
+
+        fn add_len_prefixed(buf: &mut Vec<u8>, data: &[u8]) {
+            buf.extend_from_slice(&u32::try_from(data.len()).unwrap().to_be_bytes());
+            buf.extend_from_slice(data);
+        }
+
+        fn add_len_prefixed_utf16(buf: &mut Vec<u8>, s: &str) {
+            let utf16: Vec<u16> = s.encode_utf16().collect();
+            let byte_len = utf16.len() * 2;
+            buf.extend_from_slice(&u32::try_from(byte_len).unwrap().to_be_bytes());
+            for code_unit in &utf16 {
+                buf.extend_from_slice(&code_unit.to_le_bytes());
+            }
+        }
+
+        let mut metadata = Vec::new();
+        metadata.extend_from_slice(&agent_id.to_be_bytes());
+        add_len_prefixed(&mut metadata, b"wkstn-01");
+        add_len_prefixed(&mut metadata, b"operator");
+        add_len_prefixed(&mut metadata, b"REDCELL");
+        add_len_prefixed(&mut metadata, b"10.0.0.25");
+        add_len_prefixed_utf16(&mut metadata, "C:\\Windows\\explorer.exe");
+        metadata.extend_from_slice(&1337_u32.to_be_bytes()); // pid
+        metadata.extend_from_slice(&1338_u32.to_be_bytes()); // tid
+        metadata.extend_from_slice(&512_u32.to_be_bytes()); // ppid
+        metadata.extend_from_slice(&2_u32.to_be_bytes()); // arch
+        metadata.extend_from_slice(&1_u32.to_be_bytes()); // elevated
+        metadata.extend_from_slice(&0x401000_u64.to_be_bytes()); // base_address
+        metadata.extend_from_slice(&10_u32.to_be_bytes()); // os_major
+        metadata.extend_from_slice(&0_u32.to_be_bytes()); // os_minor
+        metadata.extend_from_slice(&1_u32.to_be_bytes()); // os_product_type
+        metadata.extend_from_slice(&0_u32.to_be_bytes()); // os_service_pack
+        metadata.extend_from_slice(&22000_u32.to_be_bytes()); // os_build
+        metadata.extend_from_slice(&9_u32.to_be_bytes()); // os_arch
+        metadata.extend_from_slice(&15_u32.to_be_bytes()); // sleep_delay
+        metadata.extend_from_slice(&20_u32.to_be_bytes()); // sleep_jitter
+        metadata.extend_from_slice(&1_893_456_000_u64.to_be_bytes()); // kill_date
+        metadata.extend_from_slice(&0b101010_u32.to_be_bytes()); // working_hours
+
+        let encrypted =
+            encrypt_agent_data(&key, &iv, &metadata).expect("metadata encryption should succeed");
+        let payload = [
+            u32::from(DemonCommand::DemonInit).to_be_bytes().as_slice(),
+            7_u32.to_be_bytes().as_slice(),
+            key.as_slice(),
+            iv.as_slice(),
+            encrypted.as_slice(),
+        ]
+        .concat();
+
+        DemonEnvelope::new(agent_id, payload)
+            .expect("failed to build demon init envelope")
+            .to_bytes()
+    }
+
+    /// When an External listener is registered and running, requests to its
+    /// endpoint path must be routed through `handle_external_request` — not
+    /// fall through to the 404 branch.  A valid Demon init packet should
+    /// produce a 200 OK with a non-empty response payload (the init ACK).
+    #[tokio::test]
+    async fn fallback_routes_to_external_listener_path() {
+        use red_cell_common::ExternalListenerConfig;
+
+        let state = build_test_state().await;
+
+        // Register and start an external listener on "/bridge".
+        let config = red_cell_common::ListenerConfig::from(ExternalListenerConfig {
+            name: "ext-test".to_owned(),
+            endpoint: "/bridge".to_owned(),
+        });
+        state.listeners.create(config).await.expect("create should succeed");
+        state.listeners.start("ext-test").await.expect("start should succeed");
+
+        // Confirm endpoint is registered before sending the request.
+        let ext = state
+            .listeners
+            .external_state_for_path("/bridge")
+            .await
+            .expect("external endpoint should be registered");
+        assert_eq!(ext.listener_name(), "ext-test");
+
+        // Build a valid Demon init packet.
+        let key = [0xAA_u8; 32];
+        let iv = [0xBB_u8; 16];
+        let init_body = build_demon_init_packet(0xCAFE_0001, key, iv);
+
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/bridge")
+                    .body(Body::from(init_body))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "valid Demon init to external listener path should return 200 OK"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("body should read");
+        assert!(
+            !body.is_empty(),
+            "200 OK response from external listener init should contain an ACK payload"
+        );
+    }
+
+    /// The 10 MiB body size limit in `teamserver_fallback` must return 400
+    /// BAD_REQUEST when a request body exceeds the limit.  Without this guard
+    /// an attacker could exhaust server memory via the external listener path.
+    #[tokio::test]
+    async fn fallback_rejects_oversized_body_for_external_listener() {
+        use red_cell_common::ExternalListenerConfig;
+
+        let state = build_test_state().await;
+
+        // Register and start an external listener so the body-size branch is
+        // reachable (without an external listener the request would 404 before
+        // the body is ever read).
+        let config = red_cell_common::ListenerConfig::from(ExternalListenerConfig {
+            name: "ext-big".to_owned(),
+            endpoint: "/bigbody".to_owned(),
+        });
+        state.listeners.create(config).await.expect("create should succeed");
+        state.listeners.start("ext-big").await.expect("start should succeed");
+
+        // Confirm endpoint is registered.
+        assert!(
+            state.listeners.external_state_for_path("/bigbody").await.is_some(),
+            "external endpoint should be registered"
+        );
+
+        // Send a body that exceeds 10 MiB.
+        let oversized = vec![0x41_u8; 10 * 1024 * 1024 + 1];
+
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/bigbody")
+                    .body(Body::from(oversized))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "body exceeding 10 MiB should be rejected with 400 BAD_REQUEST"
+        );
+    }
 }

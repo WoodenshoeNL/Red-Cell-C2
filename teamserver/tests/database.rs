@@ -539,6 +539,80 @@ async fn listener_repository_exists_tracks_creation_and_deletion() -> Result<(),
 }
 
 #[tokio::test]
+async fn listener_repository_names_returns_sorted_names() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let repository = database.listeners();
+
+    // Empty table — names() should return an empty vec.
+    assert!(repository.names().await?.is_empty(), "names should be empty initially");
+
+    // Insert two listeners with names that sort alphabetically: "alpha" < "http-main".
+    let listener_a = {
+        let mut l = sample_listener();
+        if let ListenerConfig::Http(config) = &mut l {
+            config.name = "alpha".to_owned();
+        }
+        l
+    };
+    let listener_b = sample_listener(); // name = "http-main"
+
+    // Insert in reverse alphabetical order to verify ORDER BY, not insertion order.
+    repository.create(&listener_b).await?;
+    repository.create(&listener_a).await?;
+
+    assert_eq!(
+        repository.names().await?,
+        vec!["alpha".to_owned(), "http-main".to_owned()],
+        "names must be returned in alphabetical order"
+    );
+
+    // Delete one listener and verify the list shrinks.
+    repository.delete("alpha").await?;
+    assert_eq!(
+        repository.names().await?,
+        vec!["http-main".to_owned()],
+        "names must reflect deletion"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn listener_repository_count_tracks_insertions_and_deletions() -> Result<(), TeamserverError>
+{
+    let database = test_database().await?;
+    let repository = database.listeners();
+
+    // Empty table.
+    assert_eq!(repository.count().await?, 0, "count should be 0 initially");
+
+    let listener_a = {
+        let mut l = sample_listener();
+        if let ListenerConfig::Http(config) = &mut l {
+            config.name = "alpha".to_owned();
+        }
+        l
+    };
+    let listener_b = sample_listener(); // name = "http-main"
+
+    repository.create(&listener_a).await?;
+    assert_eq!(repository.count().await?, 1, "count should be 1 after first insert");
+
+    repository.create(&listener_b).await?;
+    assert_eq!(repository.count().await?, 2, "count should be 2 after second insert");
+
+    // Delete one — count should decrement.
+    repository.delete("alpha").await?;
+    assert_eq!(repository.count().await?, 1, "count should be 1 after deletion");
+
+    // Delete the other — back to zero.
+    repository.delete("http-main").await?;
+    assert_eq!(repository.count().await?, 0, "count should be 0 after all deletions");
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn listener_repository_set_state_is_a_noop_for_missing_listener()
 -> Result<(), TeamserverError> {
     let database = test_database().await?;

@@ -3615,3 +3615,405 @@ async fn config_implant_verbose_broadcasts_value() -> Result<(), Box<dyn std::er
     server.listeners.stop("out-cfg-verbose").await?;
     Ok(())
 }
+
+// ── handle_command_output_callback truncated payload tests ──────────────────
+
+/// `handle_command_output_callback` with an empty payload (zero bytes) must fail
+/// because `read_string` needs at least a u32 length prefix. No event must be broadcast.
+#[tokio::test]
+async fn command_output_empty_payload_returns_error_no_broadcast()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    server
+        .listeners
+        .create(common::http_listener_config("out-cmdout-empty", listener_port))
+        .await?;
+    drop(listener_guard);
+    server.listeners.start("out-cmdout-empty").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_00A0_u32;
+    let key = [0xA0; AGENT_KEY_LENGTH];
+    let iv = [0xA1; AGENT_IV_LENGTH];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // Send CommandOutput with zero bytes — no length prefix at all.
+    let response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandOutput),
+            0xD0,
+            &[], // empty payload
+        ))
+        .send()
+        .await?;
+
+    assert!(
+        !response.status().is_success(),
+        "empty CommandOutput payload must not return 2xx, got {}",
+        response.status()
+    );
+
+    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
+
+    socket.close(None).await?;
+    server.listeners.stop("out-cmdout-empty").await?;
+    Ok(())
+}
+
+/// `handle_command_output_callback` with a truncated payload (only 2 bytes, less than
+/// the 4-byte u32 length prefix) must return a non-2xx HTTP status and no event.
+#[tokio::test]
+async fn command_output_truncated_length_prefix_returns_error_no_broadcast()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    server
+        .listeners
+        .create(common::http_listener_config("out-cmdout-short", listener_port))
+        .await?;
+    drop(listener_guard);
+    server.listeners.start("out-cmdout-short").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_00A1_u32;
+    let key = [0xA2; AGENT_KEY_LENGTH];
+    let iv = [0xA3; AGENT_IV_LENGTH];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // Send CommandOutput with only 2 bytes — too short for a u32 length prefix.
+    let response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandOutput),
+            0xD1,
+            &[0x05, 0x00], // only 2 bytes, need at least 4 for length prefix
+        ))
+        .send()
+        .await?;
+
+    assert!(
+        !response.status().is_success(),
+        "truncated CommandOutput payload must not return 2xx, got {}",
+        response.status()
+    );
+
+    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
+
+    socket.close(None).await?;
+    server.listeners.stop("out-cmdout-short").await?;
+    Ok(())
+}
+
+/// `handle_command_output_callback` with a length prefix that exceeds the actual payload
+/// must return a non-2xx HTTP status. The length says 100 bytes but only 3 bytes follow.
+#[tokio::test]
+async fn command_output_length_exceeds_payload_returns_error_no_broadcast()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    server
+        .listeners
+        .create(common::http_listener_config("out-cmdout-overlen", listener_port))
+        .await?;
+    drop(listener_guard);
+    server.listeners.start("out-cmdout-overlen").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_00A2_u32;
+    let key = [0xA4; AGENT_KEY_LENGTH];
+    let iv = [0xA5; AGENT_IV_LENGTH];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // Length prefix says 100 bytes, but only 3 bytes of data follow.
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&100_u32.to_le_bytes()); // length = 100
+    payload.extend_from_slice(&[0x41, 0x42, 0x43]); // only 3 bytes of data
+
+    let response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandOutput),
+            0xD2,
+            &payload,
+        ))
+        .send()
+        .await?;
+
+    assert!(
+        !response.status().is_success(),
+        "CommandOutput with oversized length prefix must not return 2xx, got {}",
+        response.status()
+    );
+
+    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
+
+    socket.close(None).await?;
+    server.listeners.stop("out-cmdout-overlen").await?;
+    Ok(())
+}
+
+// ── handle_command_error_callback truncated body tests ──────────────────────
+
+/// `handle_command_error_callback` with a valid Win32 error class but no error code
+/// (truncated body) must return a non-2xx HTTP status and no event.
+#[tokio::test]
+async fn command_error_win32_truncated_body_returns_error_no_broadcast()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    server
+        .listeners
+        .create(common::http_listener_config("out-cmderr-win32-trunc", listener_port))
+        .await?;
+    drop(listener_guard);
+    server.listeners.start("out-cmderr-win32-trunc").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_00B0_u32;
+    let key = [0xB0; AGENT_KEY_LENGTH];
+    let iv = [0xB1; AGENT_IV_LENGTH];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // Win32 error class (0x01) but no error code after it.
+    let payload = u32::from(DemonCallbackError::Win32).to_le_bytes().to_vec();
+
+    let response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandError),
+            0xE0,
+            &payload,
+        ))
+        .send()
+        .await?;
+
+    assert!(
+        !response.status().is_success(),
+        "Win32 error with truncated body must not return 2xx, got {}",
+        response.status()
+    );
+
+    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
+
+    socket.close(None).await?;
+    server.listeners.stop("out-cmderr-win32-trunc").await?;
+    Ok(())
+}
+
+/// `handle_command_error_callback` with a valid Token error class but no status u32
+/// (truncated body) must return a non-2xx HTTP status and no event.
+#[tokio::test]
+async fn command_error_token_truncated_body_returns_error_no_broadcast()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    server
+        .listeners
+        .create(common::http_listener_config("out-cmderr-token-trunc", listener_port))
+        .await?;
+    drop(listener_guard);
+    server.listeners.start("out-cmderr-token-trunc").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_00B1_u32;
+    let key = [0xB2; AGENT_KEY_LENGTH];
+    let iv = [0xB3; AGENT_IV_LENGTH];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // Token error class (0x03) but no status u32 after it.
+    let payload = u32::from(DemonCallbackError::Token).to_le_bytes().to_vec();
+
+    let response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandError),
+            0xE1,
+            &payload,
+        ))
+        .send()
+        .await?;
+
+    assert!(
+        !response.status().is_success(),
+        "Token error with truncated body must not return 2xx, got {}",
+        response.status()
+    );
+
+    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
+
+    socket.close(None).await?;
+    server.listeners.stop("out-cmderr-token-trunc").await?;
+    Ok(())
+}
+
+// ── handle_sleep_callback truncated payload tests ───────────────────────────
+
+/// `handle_sleep_callback` with an empty payload (zero bytes) must return a
+/// non-2xx HTTP status and must NOT broadcast any events.
+#[tokio::test]
+async fn sleep_callback_empty_payload_returns_error_no_broadcast()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    server.listeners.create(common::http_listener_config("out-sleep-empty", listener_port)).await?;
+    drop(listener_guard);
+    server.listeners.start("out-sleep-empty").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_00C0_u32;
+    let key = [0xC0; AGENT_KEY_LENGTH];
+    let iv = [0xC1; AGENT_IV_LENGTH];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // Send CommandSleep with zero bytes — no sleep_delay or sleep_jitter.
+    let response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandSleep),
+            0xF0,
+            &[], // empty payload
+        ))
+        .send()
+        .await?;
+
+    assert!(
+        !response.status().is_success(),
+        "empty CommandSleep payload must not return 2xx, got {}",
+        response.status()
+    );
+
+    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
+
+    socket.close(None).await?;
+    server.listeners.stop("out-sleep-empty").await?;
+    Ok(())
+}
+
+/// `handle_sleep_callback` with only the sleep_delay u32 but missing the sleep_jitter u32
+/// must return a non-2xx HTTP status and must NOT broadcast any events.
+#[tokio::test]
+async fn sleep_callback_truncated_missing_jitter_returns_error_no_broadcast()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    server.listeners.create(common::http_listener_config("out-sleep-trunc", listener_port)).await?;
+    drop(listener_guard);
+    server.listeners.start("out-sleep-trunc").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_00C1_u32;
+    let key = [0xC2; AGENT_KEY_LENGTH];
+    let iv = [0xC3; AGENT_IV_LENGTH];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // Only sleep_delay (4 bytes), missing sleep_jitter.
+    let payload = 10_u32.to_le_bytes().to_vec(); // delay=10, no jitter
+
+    let response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandSleep),
+            0xF1,
+            &payload,
+        ))
+        .send()
+        .await?;
+
+    assert!(
+        !response.status().is_success(),
+        "truncated CommandSleep (missing jitter) must not return 2xx, got {}",
+        response.status()
+    );
+
+    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
+
+    socket.close(None).await?;
+    server.listeners.stop("out-sleep-trunc").await?;
+    Ok(())
+}

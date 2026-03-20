@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 555 | 212 | 31 |
-| Bugs filed against | 50 | 34 | 9 |
+| Tasks closed | 557 | 212 | 31 |
+| Bugs filed against | 51 | 34 | 9 |
 | Bug rate (bugs/task) | 0.09 | 0.16 | 0.29 |
 | Quality score | 91% | 84% | 71% |
 
-*Bug rates: Claude 50/555=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 51/557=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 4 | 21 | 0 |
 | Memory / resource leaks | 2 | 10 | 1 |
 | Startup / lifecycle regressions | 1 | 8 | 0 |
-| Test infrastructure / flakiness | 2 | 0 | 0 |
+| Test infrastructure / flakiness | 3 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
 | Correctness / pagination | 18 | 7 | 1 |
@@ -2863,3 +2863,13 @@ Build: cargo check passed, clippy passed (0 warnings), cargo test passed (all wo
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: cargo check passed, clippy passed (0 warnings), cargo test passed (2283 tests across all crates, 0 failures)
+
+### QA Review — 2026-03-20 14:30 — 634de92..0060b51
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 1 | Closed 7eah (pivot List single-entry test), a2o7 (pivot SmbDisconnect callback tests — success/cascade/failure paths). Added ~250 lines of well-structured tests with good coverage of success, cascade, and failure paths. Currently has 3jal claimed (resolve_bind_addr error path test — WIP in main.rs). Bug filed: pre-existing flaky websocket integration tests (he5j7). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (0 warnings), cargo test 1602 passed / 3 failed (3 pre-existing websocket flaky tests — filed as red-cell-c2-he5j7)

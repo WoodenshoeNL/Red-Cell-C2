@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 576 | 212 | 31 |
+| Tasks closed | 579 | 212 | 31 |
 | Bugs filed against | 51 | 34 | 9 |
 | Bug rate (bugs/task) | 0.09 | 0.16 | 0.29 |
 | Quality score | 91% | 84% | 71% |
 
-*Bug rates: Claude 51/576=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 51/579=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-20 23:30 — ba337578..5a40dabe
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 0 | Closed 5jrmz (QA checkpoint), vu8zc (malformed agent ID tests for GET/DELETE/POST agent endpoints — 9 new tests), rp9g6 (HEAD method coverage for fallback handler). All test-only changes, clean code. Currently working on 9z6bx (config file permissions) — WIP has clippy needless_return and a failing overwrite-permissions test to resolve before commit. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (clean on committed code), cargo test ~1806 passed / 0 failed
 
 ### QA Review — 2026-03-20 22:15 — a249b408..ee7f38da
 

@@ -940,6 +940,20 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn name_id_returns_eight_zero_chars_for_agent_id_zero() {
+        let mut record = minimal_agent_record();
+        record.agent_id = 0;
+        assert_eq!(record.name_id(), "00000000");
+    }
+
+    #[test]
+    fn name_id_returns_ffffffff_for_agent_id_u32_max() {
+        let mut record = minimal_agent_record();
+        record.agent_id = u32::MAX;
+        assert_eq!(record.name_id(), "FFFFFFFF");
+    }
+
     /// Helper: builds a valid `AgentRecord` JSON value, then applies overrides.
     fn agent_record_json(overrides: serde_json::Value) -> serde_json::Value {
         let mut base = json!({

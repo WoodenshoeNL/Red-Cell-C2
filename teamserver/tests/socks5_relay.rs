@@ -906,3 +906,101 @@ async fn socket_close_callback_routes_to_relay_close_client()
     server.listeners.stop("sock-dispatch-close").await?;
     Ok(())
 }
+
+/// A `CommandSocket` callback with an unknown/invalid `DemonSocketCommand`
+/// discriminant must not panic or corrupt relay state.  The HTTP response
+/// should be a non-panic error (the listener returns a fake-404), and
+/// subsequent valid callbacks must still be processed correctly.
+#[tokio::test]
+async fn unknown_socket_subcommand_does_not_panic_or_corrupt_state()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    server
+        .listeners
+        .create(common::http_listener_config("sock-dispatch-unknown", listener_port))
+        .await?;
+    drop(listener_guard);
+    server.listeners.start("sock-dispatch-unknown").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xBB01_0099_u32;
+    let key = [0xAA; AGENT_KEY_LENGTH];
+    let iv = [0xBB; AGENT_IV_LENGTH];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    // Start a SOCKS server and connect a client so we have relay state to verify.
+    let (socks_port, socks_guard) = common::available_port()?;
+    drop(socks_guard);
+    server.sockets.add_socks_server(agent_id, &socks_port.to_string()).await?;
+
+    let mut socks_client =
+        timeout(Duration::from_secs(2), TcpStream::connect(format!("127.0.0.1:{socks_port}")))
+            .await??;
+    socks5_handshake(&mut socks_client).await?;
+    socks5_connect_ipv4(&mut socks_client, [93, 184, 216, 34], 80).await?;
+
+    let socket_id = dequeue_socket_id(&server.agent_registry, agent_id).await?;
+
+    // --- Send a CommandSocket callback with an unknown subcommand value (99). ---
+    let unknown_subcommand: u32 = 99;
+    let mut unknown_payload = Vec::new();
+    unknown_payload.extend_from_slice(&unknown_subcommand.to_le_bytes());
+    // Append some dummy bytes to simulate a plausible but invalid payload.
+    unknown_payload.extend_from_slice(&[0u8; 16]);
+
+    let response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandSocket),
+            0x99,
+            &unknown_payload,
+        ))
+        .send()
+        .await?;
+
+    // The listener should respond without panicking.  On dispatch errors the HTTP
+    // listener returns a fake-404 (the standard evasion response), so we accept
+    // either 200 or 404 — the important thing is no 5xx / connection reset.
+    let status = response.status().as_u16();
+    assert!(
+        status == 200 || status == 404,
+        "expected 200 or 404 for unknown subcommand, got {status}"
+    );
+
+    // --- Verify relay state is not corrupted: finish_connect still works. ---
+    server.sockets.finish_connect(agent_id, socket_id, true, 0).await?;
+
+    let (reply, _addr, _port) =
+        timeout(Duration::from_secs(2), read_socks5_reply(&mut socks_client, SOCKS_ATYP_IPV4))
+            .await??;
+    assert_eq!(
+        reply, SOCKS_REPLY_SUCCEEDED,
+        "SOCKS client must still receive a success reply after an unknown subcommand callback"
+    );
+
+    // --- Verify subsequent valid callbacks still work. ---
+    // Send relay data to the client via write_client_data (not through HTTP this
+    // time, since the ctr_offset after the error is indeterminate — the key point
+    // is that the relay state is intact).
+    let relay_data = b"post-error data";
+    server.sockets.write_client_data(agent_id, socket_id, relay_data).await?;
+
+    let mut received = vec![0u8; relay_data.len()];
+    timeout(Duration::from_secs(2), socks_client.read_exact(&mut received)).await??;
+    assert_eq!(
+        received,
+        relay_data.as_slice(),
+        "SOCKS client must receive data after an unknown subcommand callback"
+    );
+
+    server.sockets.clear_socks_servers(agent_id).await?;
+    server.listeners.stop("sock-dispatch-unknown").await?;
+    Ok(())
+}

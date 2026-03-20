@@ -413,7 +413,13 @@ fn format_found_tokens(parser: &mut CallbackParser<'_>) -> Result<String, Comman
 
 #[cfg(test)]
 mod tests {
+    use red_cell_common::demon::DemonTokenCommand;
+    use red_cell_common::operator::OperatorMessage;
+    use serde_json::Value;
+
     use super::super::CallbackParser;
+    use super::handle_token_callback;
+    use crate::EventBus;
 
     /// Helper: append a little-endian u32 to a buffer.
     fn push_u32(buf: &mut Vec<u8>, val: u32) {
@@ -951,5 +957,509 @@ mod tests {
             yes_count >= 2,
             "expected at least 2 'Yes' (Local+Remote) for delegation: {output}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // handle_token_callback integration tests
+    // -----------------------------------------------------------------------
+
+    const AGENT_ID: u32 = 0xDEAD_BEEF;
+    const REQUEST_ID: u32 = 42;
+    const TOKEN_CMD: u32 = 40; // DemonCommand::CommandToken
+
+    /// Build a payload with the subcommand u32 prepended.
+    fn token_payload(subcmd: DemonTokenCommand, rest: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        push_u32(&mut buf, subcmd as u32);
+        buf.extend_from_slice(rest);
+        buf
+    }
+
+    /// Call `handle_token_callback` and capture the broadcast event.
+    async fn call_and_recv(
+        payload: &[u8],
+    ) -> (Result<Option<Vec<u8>>, super::super::CommandDispatchError>, Option<OperatorMessage>)
+    {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let result = handle_token_callback(&events, AGENT_ID, REQUEST_ID, payload).await;
+        // Drop the bus so the receiver sees the channel close after pending messages.
+        drop(events);
+        let msg = rx.recv().await;
+        (result, msg)
+    }
+
+    /// Assert that the broadcast message is an AgentResponse with expected kind/message.
+    /// Returns the output field for further assertions.
+    fn assert_response(
+        msg: &OperatorMessage,
+        expected_kind: &str,
+        expected_message: &str,
+    ) -> String {
+        let OperatorMessage::AgentResponse(m) = msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        assert_eq!(m.info.demon_id, format!("{AGENT_ID:08X}"));
+        assert_eq!(m.info.command_id, TOKEN_CMD.to_string());
+        assert_eq!(
+            m.info.extra.get("Type").and_then(Value::as_str),
+            Some(expected_kind),
+            "expected kind={expected_kind}, extra={:?}",
+            m.info.extra
+        );
+        assert_eq!(
+            m.info.extra.get("Message").and_then(Value::as_str),
+            Some(expected_message),
+            "expected message={expected_message}, extra={:?}",
+            m.info.extra
+        );
+        m.info.output.clone()
+    }
+
+    // -- Impersonate --
+
+    #[tokio::test]
+    async fn handle_impersonate_success() {
+        let mut rest = Vec::new();
+        push_u32(&mut rest, 1); // success = non-zero
+        push_string(&mut rest, "CORP\\admin");
+        let payload = token_payload(DemonTokenCommand::Impersonate, &rest);
+
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+        let msg = msg.expect("should broadcast");
+        assert_response(&msg, "Good", "Successfully impersonated CORP\\admin");
+    }
+
+    #[tokio::test]
+    async fn handle_impersonate_failure() {
+        let mut rest = Vec::new();
+        push_u32(&mut rest, 0); // success = 0 → failure
+        push_string(&mut rest, "CORP\\user");
+        let payload = token_payload(DemonTokenCommand::Impersonate, &rest);
+
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        assert_response(&msg, "Error", "Failed to impersonate CORP\\user");
+    }
+
+    // -- Steal --
+
+    #[tokio::test]
+    async fn handle_steal() {
+        let mut rest = Vec::new();
+        push_utf16(&mut rest, "CORP\\admin");
+        push_u32(&mut rest, 7); // token_id
+        push_u32(&mut rest, 1234); // target_pid
+        let payload = token_payload(DemonTokenCommand::Steal, &rest);
+
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        assert_response(
+            &msg,
+            "Good",
+            "Successfully stole and impersonated token from 1234 User:[CORP\\admin] TokenID:[7]",
+        );
+    }
+
+    // -- Revert --
+
+    #[tokio::test]
+    async fn handle_revert_success() {
+        let mut rest = Vec::new();
+        push_u32(&mut rest, 1); // success
+        let payload = token_payload(DemonTokenCommand::Revert, &rest);
+
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        assert_response(&msg, "Good", "Successful reverted token to itself");
+    }
+
+    #[tokio::test]
+    async fn handle_revert_failure() {
+        let mut rest = Vec::new();
+        push_u32(&mut rest, 0);
+        let payload = token_payload(DemonTokenCommand::Revert, &rest);
+
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        assert_response(&msg, "Error", "Failed to revert token to itself");
+    }
+
+    // -- Make --
+
+    #[tokio::test]
+    async fn handle_make_success() {
+        let mut rest = Vec::new();
+        push_utf16(&mut rest, "CORP\\newuser");
+        let payload = token_payload(DemonTokenCommand::Make, &rest);
+
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        assert_response(&msg, "Good", "Successfully created and impersonated token: CORP\\newuser");
+    }
+
+    #[tokio::test]
+    async fn handle_make_empty_payload_is_error() {
+        // Make with empty rest payload → "Failed to create token"
+        let payload = token_payload(DemonTokenCommand::Make, &[]);
+
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        assert_response(&msg, "Error", "Failed to create token");
+    }
+
+    // -- GetUid --
+
+    #[tokio::test]
+    async fn handle_getuid_elevated() {
+        let mut rest = Vec::new();
+        push_u32(&mut rest, 1); // elevated
+        push_utf16(&mut rest, "NT AUTHORITY\\SYSTEM");
+        let payload = token_payload(DemonTokenCommand::GetUid, &rest);
+
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        assert_response(&msg, "Good", "Token User: NT AUTHORITY\\SYSTEM (Admin)");
+    }
+
+    #[tokio::test]
+    async fn handle_getuid_not_elevated() {
+        let mut rest = Vec::new();
+        push_u32(&mut rest, 0); // not elevated
+        push_utf16(&mut rest, "CORP\\user");
+        let payload = token_payload(DemonTokenCommand::GetUid, &rest);
+
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        assert_response(&msg, "Good", "Token User: CORP\\user");
+    }
+
+    // -- Clear --
+
+    #[tokio::test]
+    async fn handle_clear() {
+        let payload = token_payload(DemonTokenCommand::Clear, &[]);
+
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        assert_response(&msg, "Good", "Token vault has been cleared");
+    }
+
+    // -- Remove --
+
+    #[tokio::test]
+    async fn handle_remove_success() {
+        let mut rest = Vec::new();
+        push_u32(&mut rest, 1); // success
+        push_u32(&mut rest, 5); // token_id
+        let payload = token_payload(DemonTokenCommand::Remove, &rest);
+
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        assert_response(&msg, "Good", "Successful removed token [5] from vault");
+    }
+
+    #[tokio::test]
+    async fn handle_remove_failure() {
+        let mut rest = Vec::new();
+        push_u32(&mut rest, 0); // failure
+        push_u32(&mut rest, 3); // token_id
+        let payload = token_payload(DemonTokenCommand::Remove, &rest);
+
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        assert_response(&msg, "Error", "Failed to remove token [3] from vault");
+    }
+
+    // -- List --
+
+    #[tokio::test]
+    async fn handle_list_empty_vault() {
+        // List with no token entries after the subcommand
+        let payload = token_payload(DemonTokenCommand::List, &[]);
+
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        let output = assert_response(&msg, "Info", "Token Vault:");
+        assert!(output.contains("token vault is empty"), "output={output}");
+    }
+
+    #[tokio::test]
+    async fn handle_list_with_entries() {
+        let mut rest = Vec::new();
+        push_u32(&mut rest, 0); // index
+        push_u32(&mut rest, 0x10); // handle
+        push_utf16(&mut rest, "CORP\\admin");
+        push_u32(&mut rest, 1234); // pid
+        push_u32(&mut rest, 1); // stolen
+        push_u32(&mut rest, 1); // impersonating
+        let payload = token_payload(DemonTokenCommand::List, &rest);
+
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        let output = assert_response(&msg, "Info", "Token Vault:");
+        assert!(output.contains("CORP\\admin"));
+        assert!(output.contains("stolen"));
+    }
+
+    // -- PrivsGetOrList --
+
+    #[tokio::test]
+    async fn handle_privs_list() {
+        let mut rest = Vec::new();
+        push_u32(&mut rest, 1); // priv_list = non-zero → list mode
+        push_string(&mut rest, "SeDebugPrivilege");
+        push_u32(&mut rest, 3); // Enabled
+        let payload = token_payload(DemonTokenCommand::PrivsGetOrList, &rest);
+
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        let output = assert_response(&msg, "Good", "List Privileges for current Token:");
+        assert!(output.contains("SeDebugPrivilege :: Enabled"));
+    }
+
+    #[tokio::test]
+    async fn handle_privs_get_success() {
+        let mut rest = Vec::new();
+        push_u32(&mut rest, 0); // priv_list = 0 → get mode
+        push_u32(&mut rest, 1); // success
+        push_string(&mut rest, "SeDebugPrivilege");
+        let payload = token_payload(DemonTokenCommand::PrivsGetOrList, &rest);
+
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        assert_response(&msg, "Good", "The privilege SeDebugPrivilege was successfully enabled");
+    }
+
+    #[tokio::test]
+    async fn handle_privs_get_failure() {
+        let mut rest = Vec::new();
+        push_u32(&mut rest, 0); // priv_list = 0 → get mode
+        push_u32(&mut rest, 0); // failure
+        push_string(&mut rest, "SeDebugPrivilege");
+        let payload = token_payload(DemonTokenCommand::PrivsGetOrList, &rest);
+
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        assert_response(&msg, "Error", "Failed to enable the SeDebugPrivilege privilege");
+    }
+
+    // -- FindTokens --
+
+    #[tokio::test]
+    async fn handle_find_tokens_success() {
+        let mut rest = Vec::new();
+        push_u32(&mut rest, 1); // success
+        push_u32(&mut rest, 1); // num_tokens
+        push_utf16(&mut rest, "CORP\\admin");
+        push_u32(&mut rest, 500); // pid
+        push_u32(&mut rest, 0x60); // handle
+        push_u32(&mut rest, 0x3000); // High integrity
+        push_u32(&mut rest, 2); // Impersonation level
+        push_u32(&mut rest, 2); // Impersonation token type
+        let payload = token_payload(DemonTokenCommand::FindTokens, &rest);
+
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        let output = assert_response(&msg, "Info", "Tokens available:");
+        assert!(output.contains("CORP\\admin"));
+        assert!(output.contains("High"));
+    }
+
+    #[tokio::test]
+    async fn handle_find_tokens_failure() {
+        let mut rest = Vec::new();
+        push_u32(&mut rest, 0); // success = 0 → failure
+        let payload = token_payload(DemonTokenCommand::FindTokens, &rest);
+
+        let (result, msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        let msg = msg.expect("should broadcast");
+        assert_response(&msg, "Error", "Failed to list existing tokens");
+    }
+
+    // -- Error paths --
+
+    #[tokio::test]
+    async fn handle_invalid_subcommand() {
+        let mut payload = Vec::new();
+        push_u32(&mut payload, 9999); // invalid subcommand
+
+        let events = EventBus::default();
+        let result = handle_token_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let err_str = err.to_string();
+        assert!(
+            err_str.contains("0x00000028"), // CommandToken = 40 = 0x28
+            "error should reference token command id: {err_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_empty_payload() {
+        let payload: &[u8] = &[];
+
+        let events = EventBus::default();
+        let result = handle_token_callback(&events, AGENT_ID, REQUEST_ID, payload).await;
+        assert!(result.is_err(), "empty payload should fail to read subcommand");
+    }
+
+    #[tokio::test]
+    async fn handle_truncated_impersonate_payload() {
+        // Impersonate needs success(u32) + user(string) — provide only subcommand
+        let payload = token_payload(DemonTokenCommand::Impersonate, &[]);
+
+        let events = EventBus::default();
+        let result = handle_token_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(result.is_err(), "truncated Impersonate should fail");
+    }
+
+    #[tokio::test]
+    async fn handle_truncated_steal_payload() {
+        // Steal needs utf16 + u32 + u32 — provide only subcommand
+        let payload = token_payload(DemonTokenCommand::Steal, &[]);
+
+        let events = EventBus::default();
+        let result = handle_token_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(result.is_err(), "truncated Steal should fail");
+    }
+
+    #[tokio::test]
+    async fn handle_truncated_revert_payload() {
+        let payload = token_payload(DemonTokenCommand::Revert, &[]);
+
+        let events = EventBus::default();
+        let result = handle_token_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(result.is_err(), "truncated Revert should fail");
+    }
+
+    #[tokio::test]
+    async fn handle_truncated_getuid_payload() {
+        let payload = token_payload(DemonTokenCommand::GetUid, &[]);
+
+        let events = EventBus::default();
+        let result = handle_token_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(result.is_err(), "truncated GetUid should fail");
+    }
+
+    #[tokio::test]
+    async fn handle_truncated_remove_payload() {
+        // Remove needs success(u32) + token_id(u32)
+        let mut rest = Vec::new();
+        push_u32(&mut rest, 1); // success only, missing token_id
+        let payload = token_payload(DemonTokenCommand::Remove, &rest);
+
+        let events = EventBus::default();
+        let result = handle_token_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(result.is_err(), "truncated Remove should fail");
+    }
+
+    #[tokio::test]
+    async fn handle_truncated_find_tokens_payload() {
+        // FindTokens with success=1 but missing the num_tokens field
+        let mut rest = Vec::new();
+        push_u32(&mut rest, 1); // success = 1, but no num_tokens follows
+        let payload = token_payload(DemonTokenCommand::FindTokens, &rest);
+
+        let events = EventBus::default();
+        let result = handle_token_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        // format_found_tokens reads num_tokens — should fail on truncated payload
+        assert!(result.is_err(), "truncated FindTokens should fail");
+    }
+
+    #[tokio::test]
+    async fn handle_truncated_privs_get_or_list_payload() {
+        let payload = token_payload(DemonTokenCommand::PrivsGetOrList, &[]);
+
+        let events = EventBus::default();
+        let result = handle_token_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(result.is_err(), "truncated PrivsGetOrList should fail");
+    }
+
+    #[tokio::test]
+    async fn handle_all_subcommands_return_none() {
+        // Verify every successful subcommand returns Ok(None) — no response payload.
+        let test_cases: Vec<Vec<u8>> = {
+            let mut cases = Vec::new();
+
+            // Impersonate (success)
+            let mut r = Vec::new();
+            push_u32(&mut r, 1);
+            push_string(&mut r, "user");
+            cases.push(token_payload(DemonTokenCommand::Impersonate, &r));
+
+            // Steal
+            let mut r = Vec::new();
+            push_utf16(&mut r, "user");
+            push_u32(&mut r, 1);
+            push_u32(&mut r, 2);
+            cases.push(token_payload(DemonTokenCommand::Steal, &r));
+
+            // List (empty)
+            cases.push(token_payload(DemonTokenCommand::List, &[]));
+
+            // PrivsGetOrList (list mode, empty)
+            let mut r = Vec::new();
+            push_u32(&mut r, 1);
+            cases.push(token_payload(DemonTokenCommand::PrivsGetOrList, &r));
+
+            // Make (empty → error path)
+            cases.push(token_payload(DemonTokenCommand::Make, &[]));
+
+            // GetUid
+            let mut r = Vec::new();
+            push_u32(&mut r, 0);
+            push_utf16(&mut r, "user");
+            cases.push(token_payload(DemonTokenCommand::GetUid, &r));
+
+            // Revert
+            let mut r = Vec::new();
+            push_u32(&mut r, 1);
+            cases.push(token_payload(DemonTokenCommand::Revert, &r));
+
+            // Remove
+            let mut r = Vec::new();
+            push_u32(&mut r, 1);
+            push_u32(&mut r, 0);
+            cases.push(token_payload(DemonTokenCommand::Remove, &r));
+
+            // Clear
+            cases.push(token_payload(DemonTokenCommand::Clear, &[]));
+
+            // FindTokens (failure path)
+            let mut r = Vec::new();
+            push_u32(&mut r, 0);
+            cases.push(token_payload(DemonTokenCommand::FindTokens, &r));
+
+            cases
+        };
+
+        for (i, payload) in test_cases.iter().enumerate() {
+            let events = EventBus::default();
+            let _rx = events.subscribe();
+            let result = handle_token_callback(&events, AGENT_ID, REQUEST_ID, payload).await;
+            assert!(result.is_ok(), "case {i} should succeed");
+            assert_eq!(result.unwrap(), None, "case {i} should return None");
+        }
     }
 }

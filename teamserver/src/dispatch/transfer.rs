@@ -1587,6 +1587,27 @@ mod tests {
     }
 
     #[test]
+    fn byte_count_near_kb_boundary() {
+        // 999_999 bytes is 999.999 kB — should still display as kB, not MB
+        assert_eq!(byte_count(999_999), "1000.00 kB");
+    }
+
+    #[test]
+    fn byte_count_near_tb_boundary() {
+        // 999_999_999_999_999 bytes — exercises the GB→TB boundary
+        assert_eq!(byte_count(999_999_999_999_999), "1000.00 TB");
+    }
+
+    #[test]
+    fn byte_count_u64_max() {
+        // u64::MAX = 18_446_744_073_709_551_615 — verify no panic from f64 conversion
+        // f64 loses precision at this magnitude: ≈ 18446744.07 TB
+        let result = byte_count(u64::MAX);
+        assert!(result.ends_with(" TB"), "expected TB suffix, got: {result}");
+        assert!(result.starts_with("18446744"), "expected ~18446744 TB, got: {result}");
+    }
+
+    #[test]
     fn transfer_progress_text_zero_total() {
         assert_eq!(transfer_progress_text(0, 0), "0.00%");
     }

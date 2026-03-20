@@ -751,3 +751,176 @@ async fn dns_listener_survives_malformation_barrage() -> Result<(), Box<dyn std:
     manager.stop("dns-barrage").await?;
     Ok(())
 }
+
+/// Two agents communicating concurrently through the same DNS listener must not
+/// have their upload chunk buffers or download response queues mixed up.
+#[tokio::test]
+async fn dns_listener_concurrent_multi_agent_sessions_are_isolated()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None);
+    let mut event_receiver = events.subscribe();
+
+    let port = free_udp_port();
+    let domain = "c2.example.com";
+
+    // Agent A parameters.
+    let agent_id_a = 0xAAAA_0001_u32;
+    let key_a = [0x11; AGENT_KEY_LENGTH];
+    let iv_a = [0x22; AGENT_IV_LENGTH];
+
+    // Agent B parameters — distinct key/iv so cross-contamination is detectable.
+    let agent_id_b = 0xBBBB_0002_u32;
+    let key_b = [0x33; AGENT_KEY_LENGTH];
+    let iv_b = [0x44; AGENT_IV_LENGTH];
+
+    manager.create(dns_listener("dns-concurrent", port, domain)).await?;
+    manager.start("dns-concurrent").await?;
+
+    // Each agent needs its own UDP socket so their packets interleave naturally.
+    let client_a = {
+        let s = UdpSocket::bind("127.0.0.1:0").await?;
+        s.connect(format!("127.0.0.1:{port}")).await?;
+        s
+    };
+    let client_b = {
+        let s = UdpSocket::bind("127.0.0.1:0").await?;
+        s.connect(format!("127.0.0.1:{port}")).await?;
+        s
+    };
+
+    // Wait for the listener to be ready using a throwaway probe.
+    let _probe_client = wait_for_dns_listener(port).await?;
+
+    // 1. Upload DEMON_INIT for both agents concurrently.
+    let init_body_a = common::valid_demon_init_body(agent_id_a, key_a, iv_a);
+    let init_body_b = common::valid_demon_init_body(agent_id_b, key_b, iv_b);
+
+    let (init_result_a, init_result_b) = tokio::join!(
+        dns_upload_demon_packet(&client_a, agent_id_a, &init_body_a, domain, 0x1000),
+        dns_upload_demon_packet(&client_b, agent_id_b, &init_body_b, domain, 0x2000),
+    );
+
+    assert_eq!(init_result_a?, "ack", "agent A DEMON_INIT must be acknowledged");
+    assert_eq!(init_result_b?, "ack", "agent B DEMON_INIT must be acknowledged");
+
+    // 2. Verify both agents are registered with correct, distinct keys.
+    let stored_a =
+        registry.get(agent_id_a).await.ok_or("agent A should be registered after init")?;
+    let stored_b =
+        registry.get(agent_id_b).await.ok_or("agent B should be registered after init")?;
+
+    assert_eq!(
+        stored_a.encryption.aes_key.as_slice(),
+        &key_a,
+        "agent A must have its own AES key (no cross-contamination)"
+    );
+    assert_eq!(stored_a.encryption.aes_iv.as_slice(), &iv_a, "agent A must have its own AES IV");
+    assert_eq!(
+        stored_b.encryption.aes_key.as_slice(),
+        &key_b,
+        "agent B must have its own AES key (no cross-contamination)"
+    );
+    assert_eq!(stored_b.encryption.aes_iv.as_slice(), &iv_b, "agent B must have its own AES IV");
+
+    // 3. Drain the two AgentNew events (order is non-deterministic).
+    let mut new_agent_ids = Vec::new();
+    for _ in 0..2 {
+        let event = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
+        let Some(OperatorMessage::AgentNew(msg)) = event else {
+            panic!("expected AgentNew event, got {event:?}");
+        };
+        new_agent_ids.push(msg.info.name_id.clone());
+    }
+    new_agent_ids.sort();
+    let mut expected_ids = vec![format!("{agent_id_a:08X}"), format!("{agent_id_b:08X}")];
+    expected_ids.sort();
+    assert_eq!(new_agent_ids, expected_ids, "both AgentNew events must fire");
+
+    // 4. Download init ACK for each agent and verify decryption with the correct key.
+    let (ack_a, ack_b) = tokio::join!(
+        dns_download_response(&client_a, agent_id_a, domain, 0x3000),
+        dns_download_response(&client_b, agent_id_b, domain, 0x4000),
+    );
+
+    let ack_payload_a = ack_a?;
+    let ack_payload_b = ack_b?;
+
+    let decrypted_a = red_cell_common::crypto::decrypt_agent_data(&key_a, &iv_a, &ack_payload_a)?;
+    assert_eq!(
+        decrypted_a.as_slice(),
+        &agent_id_a.to_le_bytes(),
+        "agent A's init ACK must contain agent A's id"
+    );
+
+    let decrypted_b = red_cell_common::crypto::decrypt_agent_data(&key_b, &iv_b, &ack_payload_b)?;
+    assert_eq!(
+        decrypted_b.as_slice(),
+        &agent_id_b.to_le_bytes(),
+        "agent B's init ACK must contain agent B's id"
+    );
+
+    // Cross-check: decrypting A's ACK with B's key must NOT produce A's agent_id.
+    let cross_decrypt = red_cell_common::crypto::decrypt_agent_data(&key_b, &iv_b, &ack_payload_a);
+    if let Ok(cross) = cross_decrypt {
+        assert_ne!(
+            cross.as_slice(),
+            &agent_id_a.to_le_bytes(),
+            "decrypting agent A's ACK with agent B's key must not produce a valid agent_id"
+        );
+    }
+
+    let ctr_offset_a = red_cell_common::crypto::ctr_blocks_for_len(ack_payload_a.len());
+    let ctr_offset_b = red_cell_common::crypto::ctr_blocks_for_len(ack_payload_b.len());
+
+    // 5. Send COMMAND_CHECKIN callbacks from both agents concurrently.
+    let callback_body_a = common::valid_demon_callback_body(
+        agent_id_a,
+        key_a,
+        iv_a,
+        ctr_offset_a,
+        u32::from(DemonCommand::CommandCheckin),
+        6,
+        &[],
+    );
+    let callback_body_b = common::valid_demon_callback_body(
+        agent_id_b,
+        key_b,
+        iv_b,
+        ctr_offset_b,
+        u32::from(DemonCommand::CommandCheckin),
+        7,
+        &[],
+    );
+
+    let (cb_result_a, cb_result_b) = tokio::join!(
+        dns_upload_demon_packet(&client_a, agent_id_a, &callback_body_a, domain, 0x5000),
+        dns_upload_demon_packet(&client_b, agent_id_b, &callback_body_b, domain, 0x6000),
+    );
+
+    assert_eq!(cb_result_a?, "ack", "agent A COMMAND_CHECKIN must be acknowledged");
+    assert_eq!(cb_result_b?, "ack", "agent B COMMAND_CHECKIN must be acknowledged");
+
+    // 6. Drain the two AgentUpdate events and verify both agents are marked Alive.
+    let mut update_agent_ids = Vec::new();
+    for _ in 0..2 {
+        let event = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
+        let Some(OperatorMessage::AgentUpdate(msg)) = event else {
+            panic!("expected AgentUpdate event, got {event:?}");
+        };
+        assert_eq!(msg.info.marked, "Alive", "checkin must mark agent as Alive");
+        update_agent_ids.push(msg.info.agent_id.clone());
+    }
+    update_agent_ids.sort();
+    assert_eq!(update_agent_ids, expected_ids, "both agents must receive AgentUpdate events");
+
+    // 7. Verify both agents still exist in the registry with correct metadata.
+    let active = registry.list_active().await;
+    assert_eq!(active.len(), 2, "registry must contain exactly two agents");
+
+    manager.stop("dns-concurrent").await?;
+    Ok(())
+}

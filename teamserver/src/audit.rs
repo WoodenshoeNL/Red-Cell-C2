@@ -115,7 +115,9 @@ pub struct AuditQuery {
     pub target_kind: Option<String>,
     /// Filter by target identifier.
     pub target_id: Option<String>,
-    /// Filter by related agent id in hex or decimal form.
+    /// Filter by related agent id in hexadecimal (with optional `0x` prefix).
+    /// Purely numeric strings like `"256"` are interpreted as hex `0x256`, not
+    /// decimal. Values that are not valid hex are silently ignored.
     pub agent_id: Option<String>,
     /// Filter by command label.
     pub command: Option<String>,
@@ -502,6 +504,13 @@ fn parse_timestamp_filter(value: &str) -> Option<OffsetDateTime> {
     OffsetDateTime::parse(value, &Rfc3339).ok()
 }
 
+/// Parse a query-string agent-id value as **hexadecimal** and normalise it to
+/// an 8-digit uppercase hex string (e.g. `"0xCAFE"` → `"0000CAFE"`).
+///
+/// Input is always interpreted as hex — an optional `0x`/`0X` prefix is
+/// stripped but does not change the radix.  A purely numeric string like
+/// `"256"` therefore maps to hex `0x0256` (decimal 598), **not** decimal 256.
+/// Returns `None` for empty or non-hex input.
 fn parse_agent_id_filter(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -732,6 +741,23 @@ mod tests {
         assert_eq!(parse_agent_id_filter("16").as_deref(), Some("00000016"));
         assert!(parse_agent_id_filter("").is_none());
         assert!(parse_agent_id_filter("ZZZZ").is_none());
+    }
+
+    /// Ambiguous all-digit strings are treated as hex, not decimal.
+    /// `"256"` → hex 0x0256 (=598 decimal) → `"00000256"`, NOT decimal 256 (=0x100) → `"00000100"`.
+    #[test]
+    fn parse_agent_id_filter_treats_ambiguous_numeric_input_as_hex_not_decimal() {
+        // "256" as hex is 0x256 = 598; as decimal it would be 0x100.
+        assert_eq!(parse_agent_id_filter("256").as_deref(), Some("00000256"));
+        assert_ne!(parse_agent_id_filter("256").as_deref(), Some("00000100"));
+
+        // "10" as hex is 0x10 = 16; as decimal it would be 0x0A.
+        assert_eq!(parse_agent_id_filter("10").as_deref(), Some("00000010"));
+        assert_ne!(parse_agent_id_filter("10").as_deref(), Some("0000000A"));
+
+        // "100" as hex is 0x100 = 256; as decimal it would be 0x64.
+        assert_eq!(parse_agent_id_filter("100").as_deref(), Some("00000100"));
+        assert_ne!(parse_agent_id_filter("100").as_deref(), Some("00000064"));
     }
 
     #[test]

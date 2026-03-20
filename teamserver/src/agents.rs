@@ -400,7 +400,10 @@ impl AgentRegistry {
     {
         let mut cleanup_hooks = match self.cleanup_hooks.lock() {
             Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
+            Err(poisoned) => {
+                warn!("agent cleanup hooks mutex poisoned — recovering");
+                poisoned.into_inner()
+            }
         };
         cleanup_hooks.push(Arc::new(move |agent_id| Box::pin(hook(agent_id))));
     }
@@ -1041,7 +1044,10 @@ impl AgentRegistry {
         let cleanup_hooks = {
             let hooks = match self.cleanup_hooks.lock() {
                 Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
+                Err(poisoned) => {
+                    warn!("agent cleanup hooks mutex poisoned — recovering");
+                    poisoned.into_inner()
+                }
             };
             hooks.clone()
         };

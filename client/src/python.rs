@@ -2348,14 +2348,22 @@ fn settablayout(title: String, layout: String) -> PyResult<()> {
 fn lock_mutex<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     match mutex.lock() {
         Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
+        Err(poisoned) => {
+            warn!("mutex poisoned in python runtime — recovering with potentially corrupted state");
+            poisoned.into_inner()
+        }
     }
 }
 
 fn lock_app_state(app_state: &SharedAppState) -> std::sync::MutexGuard<'_, AppState> {
     match app_state.lock() {
         Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
+        Err(poisoned) => {
+            warn!(
+                "app state mutex poisoned in python module — recovering with potentially corrupted state"
+            );
+            poisoned.into_inner()
+        }
     }
 }
 

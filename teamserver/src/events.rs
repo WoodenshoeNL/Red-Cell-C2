@@ -51,7 +51,10 @@ impl EventBus {
         if matches!(event, OperatorMessage::TeamserverLog(_)) {
             let mut history = match self.recent_teamserver_logs.lock() {
                 Ok(history) => history,
-                Err(poisoned) => poisoned.into_inner(),
+                Err(poisoned) => {
+                    warn!("teamserver log history mutex poisoned — recovering");
+                    poisoned.into_inner()
+                }
             };
             if self.history_capacity == 0 {
                 return self.sender.send(event).unwrap_or_default();
@@ -69,7 +72,10 @@ impl EventBus {
     pub fn recent_teamserver_logs(&self) -> Vec<OperatorMessage> {
         match self.recent_teamserver_logs.lock() {
             Ok(history) => history.iter().cloned().collect(),
-            Err(poisoned) => poisoned.into_inner().iter().cloned().collect(),
+            Err(poisoned) => {
+                warn!("teamserver log history mutex poisoned — recovering");
+                poisoned.into_inner().iter().cloned().collect()
+            }
         }
     }
 }

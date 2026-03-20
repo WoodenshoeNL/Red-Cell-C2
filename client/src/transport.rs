@@ -1514,7 +1514,12 @@ fn set_connection_status(
 fn lock_app_state(app_state: &SharedAppState) -> MutexGuard<'_, AppState> {
     match app_state.lock() {
         Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
+        Err(poisoned) => {
+            warn!(
+                "app state mutex poisoned in transport layer — recovering with potentially corrupted state"
+            );
+            poisoned.into_inner()
+        }
     }
 }
 

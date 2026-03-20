@@ -567,14 +567,28 @@ fn password_verifier_for_sha3_cached(password_hash: &str) -> Result<String, Auth
         // (values are never modified after insertion). A poisoned state means a prior
         // thread panicked while inserting, leaving the HashMap in a valid-but-incomplete
         // state — missing one entry at worst, never corrupted.
-        let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = cache.lock().unwrap_or_else(|e| {
+            tracing::warn!(
+                "password verifier cache mutex poisoned — recovering (append-only cache)"
+            );
+            e.into_inner()
+        });
         if let Some(cached) = guard.get(&key) {
             return Ok(cached.clone());
         }
     }
 
     let verifier = password_verifier_for_sha3_impl(password_hash)?;
-    cache.lock().unwrap_or_else(|e| e.into_inner()).entry(key).or_insert_with(|| verifier.clone());
+    cache
+        .lock()
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                "password verifier cache mutex poisoned — recovering (append-only cache)"
+            );
+            e.into_inner()
+        })
+        .entry(key)
+        .or_insert_with(|| verifier.clone());
     Ok(verifier)
 }
 

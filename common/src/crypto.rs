@@ -46,12 +46,24 @@ pub const AGENT_IV_LENGTH: usize = 16;
 const AGENT_CTR_BLOCK_LEN: u64 = 16;
 
 /// Fresh AES key material assigned to an agent session.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// The [`Debug`] implementation deliberately redacts key and IV bytes to
+/// prevent accidental exposure of key material in logs or error chains.
+#[derive(Clone, PartialEq, Eq)]
 pub struct AgentCryptoMaterial {
     /// AES-256 session key.
     pub key: [u8; AGENT_KEY_LENGTH],
     /// Initial CTR counter block.
     pub iv: [u8; AGENT_IV_LENGTH],
+}
+
+impl std::fmt::Debug for AgentCryptoMaterial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentCryptoMaterial")
+            .field("key", &"[redacted]")
+            .field("iv", &"[redacted]")
+            .finish()
+    }
 }
 
 /// Errors returned by agent transport crypto helpers.
@@ -238,9 +250,10 @@ mod tests {
     use hex_literal::hex;
 
     use super::{
-        AGENT_IV_LENGTH, AGENT_KEY_LENGTH, CryptoError, ctr_blocks_for_len, decrypt_agent_data,
-        decrypt_agent_data_at_offset, encrypt_agent_data, encrypt_agent_data_at_offset,
-        generate_agent_crypto_material, hash_password_sha3, is_weak_aes_iv, is_weak_aes_key,
+        AGENT_IV_LENGTH, AGENT_KEY_LENGTH, AgentCryptoMaterial, CryptoError, ctr_blocks_for_len,
+        decrypt_agent_data, decrypt_agent_data_at_offset, encrypt_agent_data,
+        encrypt_agent_data_at_offset, generate_agent_crypto_material, hash_password_sha3,
+        is_weak_aes_iv, is_weak_aes_key,
     };
 
     #[test]
@@ -589,6 +602,24 @@ mod tests {
             "two successive calls must not return the same session key"
         );
         assert_ne!(first.iv, second.iv, "two successive calls must not return the same session IV");
+    }
+
+    #[test]
+    fn agent_crypto_material_debug_redacts_key_and_iv() {
+        let material =
+            AgentCryptoMaterial { key: [0xAA; AGENT_KEY_LENGTH], iv: [0xBB; AGENT_IV_LENGTH] };
+        let debug_output = format!("{material:?}");
+
+        assert!(
+            debug_output.contains("[redacted]"),
+            "Debug output must contain '[redacted]', got: {debug_output}"
+        );
+        assert!(!debug_output.contains("170"), "Debug output must not contain raw key byte values");
+        assert!(!debug_output.contains("187"), "Debug output must not contain raw IV byte values");
+        assert!(
+            !debug_output.contains("0xAA") && !debug_output.contains("0xaa"),
+            "Debug output must not contain hex key bytes"
+        );
     }
 
     #[test]

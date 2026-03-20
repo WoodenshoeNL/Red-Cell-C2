@@ -130,7 +130,6 @@ pub fn build_router(state: TeamserverState) -> Router {
 
     let mut router = Router::new()
         .route("/havoc", get(crate::websocket_handler::<TeamserverState>))
-        .route("/havoc/", get(crate::websocket_handler::<TeamserverState>))
         .nest("/api/v1", api_routes(api));
 
     if let Some(ref bridge) = state.service_bridge {
@@ -370,19 +369,25 @@ mod tests {
         );
     }
 
-    /// Verify `/havoc` still routes correctly when `NormalizePathLayer` is applied,
-    /// matching the production `main.rs` setup.
+    /// Verify that `/havoc/` (with trailing slash) routes correctly when
+    /// `NormalizePathLayer` is applied as an outer tower service wrapper,
+    /// matching the production `main.rs` setup via `NormalizedMakeService`.
     #[tokio::test]
-    async fn havoc_prefix_routed_with_normalize_path_layer() {
-        use tower::ServiceExt as _;
+    async fn havoc_trailing_slash_routed_with_normalize_path_layer() {
+        use tower::{Layer, ServiceExt as _};
         use tower_http::normalize_path::NormalizePathLayer;
 
         let state = build_test_state().await;
-        let svc = build_router(state).layer(NormalizePathLayer::trim_trailing_slash());
+        // Apply NormalizePathLayer as an outer service wrapper (NOT via
+        // Router::layer) so that the URI is rewritten before routing.
+        let svc = NormalizePathLayer::trim_trailing_slash().layer(build_router(state));
 
         let response = svc
             .oneshot(
-                Request::builder().uri("/havoc").body(Body::empty()).expect("request should build"),
+                Request::builder()
+                    .uri("/havoc/")
+                    .body(Body::empty())
+                    .expect("request should build"),
             )
             .await
             .expect("router should respond");
@@ -390,8 +395,36 @@ mod tests {
         assert_ne!(
             response.status(),
             StatusCode::NOT_FOUND,
-            "/havoc must NOT 404 when NormalizePathLayer is applied"
+            "/havoc/ must NOT 404 when NormalizePathLayer normalizes the trailing slash"
         );
+    }
+
+    /// Verify that `/api/v1/` (with trailing slash) routes correctly when
+    /// `NormalizePathLayer` is applied, matching the production setup.
+    #[tokio::test]
+    async fn api_v1_trailing_slash_routed_with_normalize_path_layer() {
+        use tower::{Layer, ServiceExt as _};
+        use tower_http::normalize_path::NormalizePathLayer;
+
+        let state = build_test_state().await;
+        let svc = NormalizePathLayer::trim_trailing_slash().layer(build_router(state));
+
+        let response = svc
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_ne!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "/api/v1/ must NOT 404 when NormalizePathLayer normalizes the trailing slash"
+        );
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     /// Build a valid Demon init packet for use in external listener tests.

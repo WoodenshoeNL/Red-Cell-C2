@@ -9,8 +9,8 @@ use clap::Parser;
 use red_cell::{
     AgentLivenessMonitor, AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService,
     DEFAULT_MAX_REGISTERED_AGENTS, Database, EventBus, ListenerManager, ListenerManagerError,
-    LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService, PluginRuntime,
-    SocketRelayManager, TeamserverState, build_router, spawn_agent_liveness_monitor,
+    LoginRateLimiter, NormalizedMakeService, OperatorConnectionManager, PayloadBuilderService,
+    PluginRuntime, SocketRelayManager, TeamserverState, build_router, spawn_agent_liveness_monitor,
 };
 use red_cell_common::config::{Profile, ProfileValidationError};
 use red_cell_common::tls::{
@@ -124,9 +124,12 @@ async fn main() -> Result<()> {
 
     info!("starting teamserver on https://{bind_addr}");
 
+    let make_svc =
+        NormalizedMakeService::new(router.into_make_service_with_connect_info::<SocketAddr>());
+
     axum_server::bind_rustls(bind_addr, tls_config)
         .handle(handle)
-        .serve(router.into_make_service_with_connect_info::<SocketAddr>())
+        .serve(make_svc)
         .await
         .context("teamserver exited with an error")?;
 

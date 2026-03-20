@@ -12,6 +12,7 @@ pub mod demon;
 pub mod dispatch;
 pub mod events;
 pub mod listeners;
+pub mod normalize;
 pub mod payload_builder;
 pub mod plugins;
 pub(crate) mod rate_limiter;
@@ -68,6 +69,7 @@ pub use listeners::{
     listener_config_from_operator, listener_error_event, listener_event_for_action,
     listener_removed_event, operator_requests_start,
 };
+pub use normalize::NormalizedMakeService;
 pub use payload_builder::{
     BuildProgress, PayloadArtifact, PayloadBuildError, PayloadBuilderService, PayloadCache,
 };

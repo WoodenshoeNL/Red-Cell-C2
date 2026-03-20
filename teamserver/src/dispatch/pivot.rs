@@ -410,6 +410,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pivot_list_single_entry_returns_table_with_one() {
+        let events = EventBus::new(16);
+        let mut rx = events.subscribe();
+
+        let mut payload = Vec::new();
+        let demon_id: u32 = 0x1234_ABCD;
+        let pipe = r"\\.\pipe\single_pivot";
+        push_u32(&mut payload, demon_id);
+        push_utf16(&mut payload, pipe);
+
+        let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandPivot));
+
+        let result = handle_pivot_list_callback(&events, AGENT_ID, REQUEST_ID, &mut parser).await;
+
+        assert!(result.is_ok());
+        assert!(matches!(result.as_ref(), Ok(None)));
+
+        let msg = rx.recv().await.expect("should receive agent response");
+        let OperatorMessage::AgentResponse(resp) = &msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(message.contains("[1]"), "expected count [1] in message, got {message:?}");
+
+        let output = &resp.info.output;
+        assert!(output.contains("1234abcd"), "expected demon_id hex in output, got {output:?}");
+        assert!(output.contains(pipe), "expected pipe path in output, got {output:?}");
+        assert!(
+            output.contains("DemonID") && output.contains("Named Pipe"),
+            "expected table header in output, got {output:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn pivot_list_truncated_payload_returns_error() {
         let events = EventBus::new(16);
 

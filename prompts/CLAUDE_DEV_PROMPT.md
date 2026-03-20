@@ -172,3 +172,27 @@ git push
   test against known Havoc-produced ciphertext and packet structures
 - If a task is too large for one session, split it into sub-tasks via beads and close only
   what you actually finished
+
+---
+
+## Session Summary (MANDATORY)
+
+When you are done with your task, your **very last output** must be a structured summary block
+in exactly this format:
+
+```
+=== SESSION SUMMARY ===
+Task: <issue-id>
+Status: <closed|still-in-progress|blocked>
+What changed:
+- <concise bullet describing each meaningful change>
+- <e.g. "Added 3 unit tests for DNS listener malformed query rejection">
+- <e.g. "Fixed off-by-one in CTR counter sync logic">
+Files touched:
+- <list of key files modified or created>
+Issues created: <new-issue-id or "none">
+Tests: <passed|failed|skipped — with count if available>
+=== END SUMMARY ===
+```
+
+This summary is parsed by the loop script and shown to the operator. Do not skip it.

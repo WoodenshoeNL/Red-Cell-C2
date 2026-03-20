@@ -236,6 +236,29 @@ def do_sleep(seconds: float, jitter_seconds: float, log: Logger):
     time.sleep(actual)
 
 
+# ── Output parsing ────────────────────────────────────────────────────────────
+
+def extract_session_summary(output: str) -> list:
+    """
+    Extract the structured session summary block from agent output.
+    Returns a list of lines between === SESSION SUMMARY === and === END SUMMARY ===,
+    or an empty list if no summary block is found.
+    """
+    lines = output.splitlines()
+    in_summary = False
+    result = []
+    for line in lines:
+        stripped = line.strip()
+        if "=== SESSION SUMMARY ===" in stripped:
+            in_summary = True
+            continue
+        if "=== END SUMMARY ===" in stripped:
+            break
+        if in_summary and stripped:
+            result.append(stripped)
+    return result
+
+
 # ── Dev loop helpers ───────────────────────────────────────────────────────────
 
 def issue_status_from_jsonl(task_id: str) -> str:
@@ -627,6 +650,19 @@ Start directly with understanding the task and implementing it.
             log.log(f"WARNING: {agent.title()} exited with code {exit_code} for task {next_id}")
         else:
             log.log(f"{agent.title()} completed task {next_id}")
+
+        # Extract and log the session summary if present
+        summary = extract_session_summary(output)
+        if summary:
+            for line in summary:
+                log.log(f"  {line}")
+        else:
+            # Fallback: log the last few non-empty lines of output
+            tail = [l.strip() for l in output.splitlines() if l.strip()][-5:]
+            if tail:
+                log.log("  (no structured summary — last output lines:)")
+                for line in tail:
+                    log.log(f"  {line}")
 
         # Claude only: commit any uncommitted changes left by a token-limit interruption
         if agent == "claude":

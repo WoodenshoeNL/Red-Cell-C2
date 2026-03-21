@@ -133,7 +133,7 @@ def build_agent_cmd(agent: str, model: str) -> tuple:
     Claude and Codex read the prompt from stdin; Cursor takes it as a positional arg.
     """
     if agent == "claude":
-        cmd = ["claude", "-p", "--dangerously-skip-permissions", "--output-format", "stream-json"]
+        cmd = ["claude", "-p", "--dangerously-skip-permissions", "--verbose", "--output-format", "stream-json"]
         if model:
             cmd += ["--model", model]
         return cmd, True

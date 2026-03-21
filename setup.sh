@@ -82,6 +82,10 @@ else
                 ok "git: pulled $NEW_COMMITS new commit(s)"
                 git log --oneline "$BEFORE..$AFTER" | sed 's/^/        /'
             fi
+            if [[ -f "$SCRIPT_DIR/.stop" ]]; then
+                rm "$SCRIPT_DIR/.stop"
+                ok ".stop file removed — agent loops can run"
+            fi
         else
             warn "git pull --ff-only failed (diverged?). Check manually:"
             echo "  git status; git log --oneline -5"

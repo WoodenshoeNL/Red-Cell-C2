@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 662 | 212 | 31 |
-| Bugs filed against | 59 | 34 | 9 |
+| Tasks closed | 664 | 212 | 31 |
+| Bugs filed against | 62 | 34 | 9 |
 | Bug rate (bugs/task) | 0.09 | 0.16 | 0.29 |
 | Quality score | 91% | 84% | 71% |
 
-*Bug rates: Claude 59/662=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 62/664=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -23,15 +23,15 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 4 | 0 | 0 |
 | Missing tests / stale tests | 33 | 13 | 5 |
 | Clippy warnings | 4 | 0 | 1 |
-| Protocol errors | 7 | 27 | 3 |
+| Protocol errors | 8 | 27 | 3 |
 | Security issues | 29 | 36 | 0 |
 | Architecture drift | 4 | 21 | 0 |
 | Memory / resource leaks | 2 | 10 | 1 |
 | Startup / lifecycle regressions | 1 | 8 | 0 |
-| Test infrastructure / flakiness | 7 | 0 | 0 |
+| Test infrastructure / flakiness | 8 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
-| Correctness / pagination | 20 | 7 | 1 |
+| Correctness / pagination | 23 | 7 | 1 |
 | Workflow / close-hygiene | 14 | 0 | 0 |
 | Code reuse / duplication | 6 | 0 | 0 |
 
@@ -3178,3 +3178,15 @@ Full `cargo test --workspace` completed. 10 tests still failing in assembly_disp
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: cargo check passed, clippy passed on committed code (3 dead-code warnings in red-cell-cli from uncommitted in-progress files on local machine — not a real failure); cargo test FAILED — 3 tests in e2e_operator_agent_session failing with HTTP 404 (degenerate key collision, tracked in ottnp)
+
+### Arch Review — 2026-03-21 12:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude (Sonnet 4.6) | 1 | 1 completeness | client-cli all commands except `status` return "not yet implemented" (u0mtb, P2) |
+| Claude (Opus 4.6) | 3 | 2 correctness, 1 protocol | service bridge `handle_agent_output` discards callback data (t3cjg, P3); DNS download silently truncates for responses > ~8 MB due to u16 seq overflow (r4tk9, P3); service bridge agent registration uses truncating `as u32` casts on PID/sleep fields (f1ir2, P3) |
+| Codex | 0 | — | No new issues found. |
+| Cursor | 0 | — | No new issues found. |
+
+Overall codebase health: **on track**
+Biggest blindspot: DNS C2 download protocol has a silent truncation bug for large payloads (> ~8 MB) due to u16 sequence counter overflow — no error is signalled to the agent and the response will be silently incomplete. All other architecture constraints (Axum, sqlx, HCL, thiserror/anyhow split, egui, Rust edition 2024) verified clean. Zero `todo!`/`unimplemented!` in production code. Zero clippy warnings. Zero unwrap/expect in non-test production paths. Security posture remains strong: constant-time comparisons, RBAC enforced at all layers, WebSocket pre-auth commands blocked, rate limiting on all auth endpoints, crypto material zeroized.

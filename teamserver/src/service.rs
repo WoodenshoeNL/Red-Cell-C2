@@ -70,6 +70,12 @@ const BODY_LISTENER_START: &str = "ListenerStart";
 /// Delay applied before responding to a failed service auth attempt.
 const FAILED_AUTH_DELAY: Duration = Duration::from_secs(2);
 
+/// Maximum service bridge WebSocket message size accepted by the teamserver (1 MiB).
+///
+/// This matches the operator WebSocket limit and prevents a service client from
+/// causing unbounded memory allocation via oversized frames.
+const SERVICE_MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+
 // ── Error types ──────────────────────────────────────────────────────
 
 /// Errors produced by the service bridge.
@@ -217,7 +223,9 @@ async fn service_websocket_handler(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     websocket: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    websocket.on_upgrade(move |socket| handle_service_socket(state, socket, addr.ip()))
+    websocket
+        .max_message_size(SERVICE_MAX_MESSAGE_SIZE)
+        .on_upgrade(move |socket| handle_service_socket(state, socket, addr.ip()))
 }
 
 // ── WebSocket connection handler ─────────────────────────────────────

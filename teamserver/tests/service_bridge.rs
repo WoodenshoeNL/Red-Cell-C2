@@ -337,3 +337,24 @@ async fn service_bridge_dispatch_unknown_type_does_not_crash() {
     // Connection should still be open — close gracefully.
     client.close(None).await.expect("graceful close");
 }
+
+#[tokio::test]
+async fn service_bridge_rejects_oversized_messages() {
+    let (addr, _registry, _events) = spawn_service_server("pw", "svc").await.expect("spawn");
+    let mut client = connect_service(addr, "svc").await;
+
+    // Send an oversized frame (> 1 MiB). Auth happens post-upgrade, so this
+    // tests that the size limit is enforced even before authentication.
+    let oversized = "x".repeat(1024 * 1024 + 1);
+    client.send(ClientMessage::Text(oversized.into())).await.expect("send oversized");
+
+    // The server should close the connection or return an error.
+    let frame = timeout(Duration::from_secs(5), client.next())
+        .await
+        .expect("socket should react to oversized message")
+        .expect("connection should close or error");
+    assert!(
+        matches!(frame, Err(_) | Ok(ClientMessage::Close(_))),
+        "expected close or error for oversized frame, got: {frame:?}"
+    );
+}

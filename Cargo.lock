@@ -4770,6 +4770,16 @@ dependencies = [
 [[package]]
 name = "specter"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rand 0.9.2",
+ "red-cell-common",
+ "reqwest",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "spin"

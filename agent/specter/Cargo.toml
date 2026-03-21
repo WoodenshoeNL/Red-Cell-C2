@@ -7,7 +7,22 @@ repository.workspace = true
 rust-version.workspace = true
 description = "Rust rewrite of the Demon agent — full protocol and feature parity with the original"
 
+[[bin]]
+name = "specter"
+path = "src/main.rs"
+
 [lints]
 workspace = true
 
 [dependencies]
+red-cell-common = { path = "../../common" }
+thiserror = "2.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+rand = "0.9"
+anyhow = "1"
+
+[dev-dependencies]
+red-cell-common = { path = "../../common" }

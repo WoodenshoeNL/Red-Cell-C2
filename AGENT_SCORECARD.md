@@ -9,30 +9,30 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 659 | 212 | 31 |
-| Bugs filed against | 56 | 34 | 9 |
-| Bug rate (bugs/task) | 0.08 | 0.16 | 0.29 |
-| Quality score | 92% | 84% | 71% |
+| Tasks closed | 662 | 212 | 31 |
+| Bugs filed against | 59 | 34 | 9 |
+| Bug rate (bugs/task) | 0.09 | 0.16 | 0.29 |
+| Quality score | 91% | 84% | 71% |
 
-*Bug rates: Claude 56/659=0.08, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 59/662=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 4 | 0 | 0 |
-| Missing tests / stale tests | 32 | 13 | 5 |
+| Missing tests / stale tests | 33 | 13 | 5 |
 | Clippy warnings | 4 | 0 | 1 |
 | Protocol errors | 7 | 27 | 3 |
 | Security issues | 29 | 36 | 0 |
 | Architecture drift | 4 | 21 | 0 |
 | Memory / resource leaks | 2 | 10 | 1 |
 | Startup / lifecycle regressions | 1 | 8 | 0 |
-| Test infrastructure / flakiness | 6 | 0 | 0 |
+| Test infrastructure / flakiness | 7 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
 | Correctness / pagination | 20 | 7 | 1 |
-| Workflow / close-hygiene | 13 | 0 | 0 |
+| Workflow / close-hygiene | 14 | 0 | 0 |
 | Code reuse / duplication | 6 | 0 | 0 |
 
 ---
@@ -3168,3 +3168,13 @@ Build: cargo check passed, clippy passed (0 warnings), full suite times out (eac
 ### QA Review Addendum — 2026-03-21 (background test run completed)
 
 Full `cargo test --workspace` completed. 10 tests still failing in assembly_dispatch — r1r4q fix was partial. Bug filed: yfc2o (P1, workflow/close-hygiene + test infrastructure: premature close of r1r4q, 10 remaining degenerate-key tests at lines 294/704/763/820/876/925/987/1048/1107/1166 of assembly_dispatch.rs).
+
+### QA Review — 2026-03-21 — 4967d7c8..8ee18bba
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 3 | Closed: rm2k8 (websocket auth-timeout flake fix — login first, spawn second socket; clean fix), yfc2o (degenerate key follow-up in assembly_dispatch — 10 remaining tests fixed), wlzon (client-cli scaffold: workspace membership, Cargo.toml, clap CLI structure, bare invocation, all subcommand stubs). Bugs filed: ottnp (P1, test infra — degenerate key sweep STILL incomplete; e2e_operator_agent_session.rs has 3 confirmed failing tests, mock_demon_agent_checkin.rs has 9 tests sharing the same [0x41;32] key, plus 5 more files remain untouched), 6109v (P3, workflow/close-hygiene — client-cli --help has no examples on any subcommand; AGENTS.md non-negotiable rule), y2uep (P3, missing tests — client-cli scaffold has zero unit tests; AGENTS.md non-negotiable rule). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed on committed code (3 dead-code warnings in red-cell-cli from uncommitted in-progress files on local machine — not a real failure); cargo test FAILED — 3 tests in e2e_operator_agent_session failing with HTTP 404 (degenerate key collision, tracked in ottnp)

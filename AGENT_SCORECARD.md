@@ -10,11 +10,11 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 664 | 212 | 31 |
-| Bugs filed against | 62 | 34 | 9 |
-| Bug rate (bugs/task) | 0.09 | 0.16 | 0.29 |
-| Quality score | 91% | 84% | 71% |
+| Bugs filed against | 66 | 34 | 9 |
+| Bug rate (bugs/task) | 0.10 | 0.16 | 0.29 |
+| Quality score | 90% | 84% | 71% |
 
-*Bug rates: Claude 62/664=0.09, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 66/664=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -25,13 +25,13 @@ Each loop run updates the running totals and appends a review entry.
 | Clippy warnings | 4 | 0 | 1 |
 | Protocol errors | 8 | 27 | 3 |
 | Security issues | 29 | 36 | 0 |
-| Architecture drift | 4 | 21 | 0 |
+| Architecture drift | 5 | 21 | 0 |
 | Memory / resource leaks | 2 | 10 | 1 |
 | Startup / lifecycle regressions | 1 | 8 | 0 |
 | Test infrastructure / flakiness | 8 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
-| Correctness / pagination | 23 | 7 | 1 |
+| Correctness / pagination | 24 | 7 | 1 |
 | Workflow / close-hygiene | 14 | 0 | 0 |
 | Code reuse / duplication | 6 | 0 | 0 |
 
@@ -3190,3 +3190,13 @@ Build: cargo check passed, clippy passed on committed code (3 dead-code warnings
 
 Overall codebase health: **on track**
 Biggest blindspot: DNS C2 download protocol has a silent truncation bug for large payloads (> ~8 MB) due to u16 sequence counter overflow — no error is signalled to the agent and the response will be silently incomplete. All other architecture constraints (Axum, sqlx, HCL, thiserror/anyhow split, egui, Rust edition 2024) verified clean. Zero `todo!`/`unimplemented!` in production code. Zero clippy warnings. Zero unwrap/expect in non-test production paths. Security posture remains strong: constant-time comparisons, RBAC enforced at all layers, WebSocket pre-auth commands blocked, rate limiting on all auth endpoints, crypto material zeroized.
+
+### QA Review — 2026-03-21 — 8ee18bba..9704816f
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 3 | Closed: pmgnz (auth resolution, HTTP client, status command — 27 unit tests, clean code), ottnp (degenerate key sweep across 7 test files; e2e/mock/output/socks5/screenshot/external/havoc all fixed). Bugs filed: kw3bc (P2, correctness — ConfigError::ParseError/ReadError wrongly map to exit 3 AUTH_FAILURE; only MissingToken should be exit 3), 1q30u (P3, architecture drift — unused anyhow dependency in Cargo.toml despite anyhow being prohibited for library code), h3nky (P3, test infra — resolve_returns_missing_server/token_error tests non-asserting when config file exists in CWD; if-let guard means test passes vacuously). Also corrected top-line bugs total to 66 (arch review filed 4 bugs but forgot to update totals). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (0 warnings), cargo test not run (pg5a1 still in_progress — stashed changes indicate comfy-table text-mode work underway)

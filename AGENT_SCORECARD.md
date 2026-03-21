@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 664 | 212 | 31 |
-| Bugs filed against | 66 | 34 | 9 |
+| Tasks closed | 667 | 212 | 31 |
+| Bugs filed against | 68 | 34 | 9 |
 | Bug rate (bugs/task) | 0.10 | 0.16 | 0.29 |
 | Quality score | 90% | 84% | 71% |
 
-*Bug rates: Claude 66/664=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 68/667=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -25,8 +25,8 @@ Each loop run updates the running totals and appends a review entry.
 | Clippy warnings | 4 | 0 | 1 |
 | Protocol errors | 8 | 27 | 3 |
 | Security issues | 29 | 36 | 0 |
-| Architecture drift | 5 | 21 | 0 |
-| Memory / resource leaks | 2 | 10 | 1 |
+| Architecture drift | 6 | 21 | 0 |
+| Memory / resource leaks | 3 | 10 | 1 |
 | Startup / lifecycle regressions | 1 | 8 | 0 |
 | Test infrastructure / flakiness | 8 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
@@ -3200,3 +3200,15 @@ Biggest blindspot: DNS C2 download protocol has a silent truncation bug for larg
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: cargo check passed, clippy passed (0 warnings), cargo test not run (pg5a1 still in_progress — stashed changes indicate comfy-table text-mode work underway)
+
+### QA Review — 2026-03-21 — 25edb2be..3397a649
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 2 | Closed: pg5a1 (output system — JSON/text mode, TextRender trait, error codes; OutputFormat moved to output.rs, blanket Vec<T:TextRow> impl, comfy-table text rendering, 86 unit tests all green), 3gw8h (agent subcommands — list, show, exec --wait, output --watch, kill, upload, download; full test coverage, examples in --help). Also: two test-review chore commits filed new test gap issues. Bugs filed: fd0vd (P3, resource leak — watch_output creates new ctrl_c listener on every loop iteration; after ~64 iterations Tokio signal receiver capacity exhausted, Ctrl-C stops working), 8a1xg (P3, architecture drift — upload/download use blocking std::fs I/O in async context, should use tokio::fs). |
+| Codex | 0 | 0 | One test-coverage chore commit (8b62b857) filed 2 new test gap issues (e4kt8, hy9q1). No tasks closed. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed (committed code), clippy passed -D warnings on committed code (0 warnings), 86/86 client-cli unit tests passed. Active WIP uncommitted in working tree (listener.rs + client.rs additions) by aj92n dev agent — WIP has dead_code clippy warning for put_empty/delete_no_body which will resolve when listener commands use them.
+
+*Addendum — aj92n committed during review (67f03093..c0d5add5):* Claude closed aj92n (listener commands — list, show, create, start, stop, delete; 30 new unit tests; idempotent start/stop via 409 detection; clippy clean). Scorecard totals updated to include this task (+1 Claude task closed = 667 total). No new bugs found in listener code. Tables updated below.

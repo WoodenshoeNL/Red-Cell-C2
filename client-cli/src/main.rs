@@ -7,8 +7,10 @@ mod config;
 mod error;
 mod output;
 
-use error::{CliError, EXIT_SUCCESS};
+use error::{CliError, EXIT_GENERAL, EXIT_SUCCESS};
 use output::OutputFormat;
+
+// ── top-level CLI ─────────────────────────────────────────────────────────────
 
 /// Red Cell C2 command-line client.
 ///
@@ -33,6 +35,10 @@ use output::OutputFormat;
 #[derive(Debug, Parser)]
 #[command(name = "red-cell-cli", author, version, about, long_about = None)]
 #[command(propagate_version = true)]
+#[command(disable_help_subcommand = true)]
+#[command(
+    after_help = "Environment:\n  RC_SERVER   Teamserver URL  (e.g. https://ts.example.com:40056)\n  RC_TOKEN    API token\n\nExamples:\n  red-cell-cli status\n  red-cell-cli agent list\n  red-cell-cli agent exec abc123 --cmd whoami --wait"
+)]
 pub struct Cli {
     /// Teamserver base URL (e.g. https://teamserver:40056)
     #[arg(long, short = 's', env = "RC_SERVER", global = true)]
@@ -54,6 +60,8 @@ pub struct Cli {
     pub command: Option<Commands>,
 }
 
+// ── subcommands ───────────────────────────────────────────────────────────────
+
 /// Available top-level subcommands.
 #[derive(Debug, Subcommand)]
 pub enum Commands {
@@ -70,6 +78,7 @@ pub enum Commands {
     /// Examples:
     ///   red-cell-cli agent list
     ///   red-cell-cli agent show <id>
+    ///   red-cell-cli agent exec <id> --cmd whoami --wait
     #[command(verbatim_doc_comment)]
     Agent {
         #[command(subcommand)]
@@ -81,6 +90,7 @@ pub enum Commands {
     /// Examples:
     ///   red-cell-cli listener list
     ///   red-cell-cli listener show mylistener
+    ///   red-cell-cli listener create --name http1 --type http --port 443
     #[command(verbatim_doc_comment)]
     Listener {
         #[command(subcommand)]
@@ -92,6 +102,7 @@ pub enum Commands {
     /// Examples:
     ///   red-cell-cli payload list
     ///   red-cell-cli payload build --listener http1 --os windows --arch x86_64
+    ///   red-cell-cli payload download <id> --out ./payload.exe
     #[command(verbatim_doc_comment)]
     Payload {
         #[command(subcommand)]
@@ -103,6 +114,7 @@ pub enum Commands {
     /// Examples:
     ///   red-cell-cli operator list
     ///   red-cell-cli operator create alice --role operator
+    ///   red-cell-cli operator set-role alice admin
     #[command(verbatim_doc_comment)]
     Operator {
         #[command(subcommand)]
@@ -112,9 +124,10 @@ pub enum Commands {
     /// View and stream the audit log.
     ///
     /// Examples:
-    ///   red-cell-cli audit list
-    ///   red-cell-cli audit tail
-    #[command(verbatim_doc_comment)]
+    ///   red-cell-cli log list
+    ///   red-cell-cli log list --operator alice --limit 50
+    ///   red-cell-cli log tail
+    #[command(name = "log", verbatim_doc_comment)]
     Audit {
         #[command(subcommand)]
         action: AuditCommands,
@@ -130,7 +143,21 @@ pub enum Commands {
         #[arg(long)]
         agent: String,
     },
+
+    /// Show help for a subcommand (alias: `<command> --help`).
+    ///
+    /// Examples:
+    ///   red-cell-cli help
+    ///   red-cell-cli help agent
+    ///   red-cell-cli help listener
+    #[command(verbatim_doc_comment)]
+    Help {
+        /// Subcommand to show help for (omit for top-level help)
+        command: Option<String>,
+    },
 }
+
+// ── agent subcommands ─────────────────────────────────────────────────────────
 
 /// Agent subcommands.
 #[derive(Debug, Subcommand)]
@@ -174,7 +201,8 @@ pub enum AgentCommands {
         #[arg(long)]
         timeout: Option<u64>,
     },
-    /// Retrieve pending task output from an agent
+
+    /// Retrieve pending task output from an agent.
     ///
     /// Examples:
     ///   red-cell-cli agent output abc123
@@ -191,6 +219,7 @@ pub enum AgentCommands {
         #[arg(long)]
         since: Option<String>,
     },
+
     /// Terminate an agent.
     ///
     /// Examples:
@@ -237,6 +266,8 @@ pub enum AgentCommands {
         dst: String,
     },
 }
+
+// ── listener subcommands ──────────────────────────────────────────────────────
 
 /// Listener subcommands.
 #[derive(Debug, Subcommand)]
@@ -341,10 +372,17 @@ pub enum ListenerCommands {
     },
 }
 
+// ── payload subcommands ───────────────────────────────────────────────────────
+
 /// Payload subcommands.
 #[derive(Debug, Subcommand)]
 pub enum PayloadCommands {
-    /// Build a new payload
+    /// Build a new payload.
+    ///
+    /// Examples:
+    ///   red-cell-cli payload build --listener http1 --os windows --arch x86_64
+    ///   red-cell-cli payload build --listener dns1  --os linux   --arch aarch64
+    #[command(verbatim_doc_comment)]
     Build {
         /// Listener ID the payload connects back to
         #[arg(long)]
@@ -356,9 +394,19 @@ pub enum PayloadCommands {
         #[arg(long)]
         arch: String,
     },
-    /// List previously built payloads
+
+    /// List previously built payloads.
+    ///
+    /// Examples:
+    ///   red-cell-cli payload list
+    #[command(verbatim_doc_comment)]
     List,
-    /// Download a built payload to disk
+
+    /// Download a built payload to disk.
+    ///
+    /// Examples:
+    ///   red-cell-cli payload download <id> --out ./payload.exe
+    #[command(verbatim_doc_comment)]
     Download {
         /// Payload ID
         id: String,
@@ -368,12 +416,24 @@ pub enum PayloadCommands {
     },
 }
 
+// ── operator subcommands ──────────────────────────────────────────────────────
+
 /// Operator subcommands.
 #[derive(Debug, Subcommand)]
 pub enum OperatorCommands {
-    /// List all operators
+    /// List all operators.
+    ///
+    /// Examples:
+    ///   red-cell-cli operator list
+    #[command(verbatim_doc_comment)]
     List,
-    /// Create a new operator account
+
+    /// Create a new operator account.
+    ///
+    /// Examples:
+    ///   red-cell-cli operator create alice --role operator
+    ///   red-cell-cli operator create bob   --role admin
+    #[command(verbatim_doc_comment)]
     Create {
         /// Operator username
         username: String,
@@ -381,12 +441,23 @@ pub enum OperatorCommands {
         #[arg(long, default_value = "operator")]
         role: String,
     },
-    /// Delete an operator account
+
+    /// Delete an operator account.
+    ///
+    /// Examples:
+    ///   red-cell-cli operator delete alice
+    #[command(verbatim_doc_comment)]
     Delete {
         /// Operator username
         username: String,
     },
-    /// Change an operator's role
+
+    /// Change an operator's role.
+    ///
+    /// Examples:
+    ///   red-cell-cli operator set-role alice admin
+    ///   red-cell-cli operator set-role bob   viewer
+    #[command(verbatim_doc_comment)]
     SetRole {
         /// Operator username
         username: String,
@@ -395,10 +466,18 @@ pub enum OperatorCommands {
     },
 }
 
+// ── audit/log subcommands ─────────────────────────────────────────────────────
+
 /// Audit log subcommands.
 #[derive(Debug, Subcommand)]
 pub enum AuditCommands {
-    /// List audit log entries (newest first)
+    /// List audit log entries (newest first).
+    ///
+    /// Examples:
+    ///   red-cell-cli log list
+    ///   red-cell-cli log list --operator alice --limit 50
+    ///   red-cell-cli log list --action exec
+    #[command(verbatim_doc_comment)]
     List {
         /// Filter by operator username
         #[arg(long)]
@@ -410,11 +489,46 @@ pub enum AuditCommands {
         #[arg(long, default_value = "100")]
         limit: u32,
     },
-    /// Stream new audit log entries as they arrive
+
+    /// Stream new audit log entries as they arrive.
+    ///
+    /// Examples:
+    ///   red-cell-cli log tail
+    #[command(verbatim_doc_comment)]
     Tail,
 }
 
-// ── entry point ──────────────────────────────────────────────────────────────
+// ── help handler ──────────────────────────────────────────────────────────────
+
+/// Print help for the given subcommand name, or top-level help if `None`.
+///
+/// Returns the appropriate process exit code.
+fn handle_help(command: Option<&str>) -> i32 {
+    use clap::CommandFactory;
+    let mut root = Cli::command();
+    match command {
+        None => {
+            root.print_help().ok();
+            println!();
+            EXIT_SUCCESS
+        }
+        Some(name) => {
+            if let Some(sub) = root.find_subcommand_mut(name) {
+                sub.print_long_help().ok();
+                println!();
+                EXIT_SUCCESS
+            } else {
+                eprintln!("error: unknown command '{name}'");
+                eprintln!();
+                root.print_help().ok();
+                println!();
+                EXIT_GENERAL
+            }
+        }
+    }
+}
+
+// ── entry point ───────────────────────────────────────────────────────────────
 
 fn main() {
     tracing_subscriber::fmt()
@@ -427,10 +541,16 @@ fn main() {
     // Bare invocation: print help and exit 0.
     if cli.command.is_none() {
         use clap::CommandFactory;
-        let mut cmd = Cli::command();
-        cmd.print_help().unwrap_or(());
+        Cli::command().print_help().ok();
         println!();
         std::process::exit(EXIT_SUCCESS);
+    }
+
+    // `help [command]` doesn't need a server or token — handle it before the
+    // async runtime is started.
+    if let Some(Commands::Help { ref command }) = cli.command {
+        let code = handle_help(command.as_deref());
+        std::process::exit(code);
     }
 
     let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
@@ -445,7 +565,7 @@ fn main() {
     std::process::exit(exit_code);
 }
 
-// ── async dispatcher ─────────────────────────────────────────────────────────
+// ── async dispatcher ──────────────────────────────────────────────────────────
 
 async fn dispatch(cli: Cli) -> i32 {
     // Capture output format before partial moves.
@@ -501,5 +621,178 @@ async fn dispatch(cli: Cli) -> i32 {
             output::print_error(&err);
             err.exit_code()
         }
+
+        // Handled synchronously in main() before the runtime is started;
+        // this arm exists only for exhaustiveness.
+        Commands::Help { .. } => EXIT_SUCCESS,
+    }
+}
+
+// ── tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use clap::{CommandFactory, Parser};
+
+    use super::*;
+
+    // ── top-level help content ───────────────────────────────────────────────
+
+    #[test]
+    fn top_level_help_contains_rc_server() {
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("RC_SERVER"), "top-level help must mention RC_SERVER");
+    }
+
+    #[test]
+    fn top_level_help_contains_rc_token() {
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("RC_TOKEN"), "top-level help must mention RC_TOKEN");
+    }
+
+    #[test]
+    fn top_level_help_contains_examples_section() {
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("Examples:"), "top-level help must have an Examples section");
+        assert!(
+            help.contains("red-cell-cli status"),
+            "top-level help examples must include 'red-cell-cli status'"
+        );
+        assert!(
+            help.contains("red-cell-cli agent list"),
+            "top-level help examples must include 'red-cell-cli agent list'"
+        );
+    }
+
+    #[test]
+    fn top_level_help_contains_environment_section() {
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("Environment:"), "top-level help must have an Environment section");
+    }
+
+    // ── per-subcommand examples ──────────────────────────────────────────────
+
+    /// Every direct child of the root command must have "Examples:" in its long help.
+    #[test]
+    fn every_top_level_subcommand_has_examples() {
+        let mut cmd = Cli::command();
+        for sub in cmd.get_subcommands_mut() {
+            let name = sub.get_name().to_owned();
+            let help = sub.render_long_help().to_string();
+            assert!(
+                help.contains("Examples:"),
+                "subcommand '{name}' help is missing an Examples section"
+            );
+        }
+    }
+
+    /// Spot-check a selection of second-level subcommands for examples.
+    #[test]
+    fn nested_subcommands_have_examples() {
+        let mut cmd = Cli::command();
+
+        // agent → exec
+        let agent_exec_help = cmd
+            .find_subcommand_mut("agent")
+            .expect("agent subcommand")
+            .find_subcommand_mut("exec")
+            .expect("agent exec subcommand")
+            .render_long_help()
+            .to_string();
+        assert!(agent_exec_help.contains("Examples:"), "agent exec help missing Examples");
+
+        // listener → create
+        let mut cmd2 = Cli::command();
+        let listener_create_help = cmd2
+            .find_subcommand_mut("listener")
+            .expect("listener subcommand")
+            .find_subcommand_mut("create")
+            .expect("listener create subcommand")
+            .render_long_help()
+            .to_string();
+        assert!(
+            listener_create_help.contains("Examples:"),
+            "listener create help missing Examples"
+        );
+
+        // log → list
+        let mut cmd3 = Cli::command();
+        let log_list_help = cmd3
+            .find_subcommand_mut("log")
+            .expect("log subcommand")
+            .find_subcommand_mut("list")
+            .expect("log list subcommand")
+            .render_long_help()
+            .to_string();
+        assert!(log_list_help.contains("Examples:"), "log list help missing Examples");
+    }
+
+    // ── help subcommand parsing ───────────────────────────────────────────────
+
+    #[test]
+    fn bare_invocation_yields_none_command() {
+        let cli = Cli::try_parse_from(["red-cell-cli"]).expect("parse bare invocation");
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn help_subcommand_parses_with_no_arg() {
+        let cli = Cli::try_parse_from(["red-cell-cli", "help"]).expect("parse 'help'");
+        assert!(matches!(cli.command, Some(Commands::Help { command: None })));
+    }
+
+    #[test]
+    fn help_subcommand_parses_with_agent_arg() {
+        let cli =
+            Cli::try_parse_from(["red-cell-cli", "help", "agent"]).expect("parse 'help agent'");
+        assert!(
+            matches!(&cli.command, Some(Commands::Help { command: Some(c) }) if c == "agent"),
+            "expected Help {{ command: Some(\"agent\") }}"
+        );
+    }
+
+    #[test]
+    fn help_subcommand_parses_with_listener_arg() {
+        let cli = Cli::try_parse_from(["red-cell-cli", "help", "listener"])
+            .expect("parse 'help listener'");
+        assert!(
+            matches!(&cli.command, Some(Commands::Help { command: Some(c) }) if c == "listener")
+        );
+    }
+
+    // ── unknown command handling ──────────────────────────────────────────────
+
+    #[test]
+    fn unknown_command_fails_to_parse_without_panic() {
+        let result = Cli::try_parse_from(["red-cell-cli", "frobnicator"]);
+        assert!(result.is_err(), "unknown command must fail to parse");
+    }
+
+    #[test]
+    fn handle_help_unknown_returns_exit_general() {
+        let code = handle_help(Some("totally-unknown-command"));
+        assert_eq!(code, EXIT_GENERAL);
+    }
+
+    #[test]
+    fn handle_help_none_returns_exit_success() {
+        let code = handle_help(None);
+        assert_eq!(code, EXIT_SUCCESS);
+    }
+
+    #[test]
+    fn handle_help_known_command_returns_exit_success() {
+        let code = handle_help(Some("agent"));
+        assert_eq!(code, EXIT_SUCCESS);
+    }
+
+    // ── log command name ──────────────────────────────────────────────────────
+
+    #[test]
+    fn audit_variant_is_exposed_as_log_command() {
+        // The CLI name must be "log", not "audit".
+        let cli =
+            Cli::try_parse_from(["red-cell-cli", "log", "list"]).expect("'log list' must parse");
+        assert!(matches!(cli.command, Some(Commands::Audit { .. })));
     }
 }

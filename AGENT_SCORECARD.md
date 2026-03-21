@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 658 | 212 | 31 |
+| Tasks closed | 659 | 212 | 31 |
 | Bugs filed against | 55 | 34 | 9 |
 | Bug rate (bugs/task) | 0.08 | 0.16 | 0.29 |
 | Quality score | 92% | 84% | 71% |
 
-*Bug rates: Claude 55/658=0.08, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 55/659=0.08, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -3154,3 +3154,13 @@ Build: cargo check passed, clippy passed (0 warnings), cargo test FAILED — 34 
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: cargo check passed, clippy passed (0 warnings), cargo test FAILED — r1r4q still unresolved (20 assembly_dispatch + 9 http_listener_pipeline + 5 pivot_dispatch), plus intermittent websocket flake (rm2k8)
+
+### QA Review — 2026-03-21 — 031676cc..68e63f1d
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed r1r4q: replaced degenerate AES key/IV arrays (single-byte repeated values) with distinct diverse keys across 20 integration tests in assembly_dispatch.rs, http_listener_pipeline.rs, and pivot_dispatch.rs — the uniform keys caused keystream collisions under AES-256-CTR. Also added loop.py build-artifact cleanup (cargo sweep with incremental fallback) triggered every DEV_CLEAN_EVERY=10 dev iterations and after every review run. Claimed rm2k8 (websocket flaky test) and has unstaged in-progress fix. No new bugs filed. Code quality is high. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (0 warnings), full suite times out (each integration test ~30s × 260+ tests); sampled tests pass (r1r4q fix confirmed). rm2k8 (websocket flake) fix in progress but not yet committed.

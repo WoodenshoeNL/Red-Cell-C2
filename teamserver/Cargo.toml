@@ -52,6 +52,8 @@ zeroize = "1"
 ## Run with:
 ##   cargo test --features havoc-compat -p red-cell havoc_compatibility
 havoc-compat = []
+## Expose test-only helpers (e.g. StuckDeliveryGuard) for integration tests.
+test-helpers = []
 
 [dev-dependencies]
 futures-util = "0.3"

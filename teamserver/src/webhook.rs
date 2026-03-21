@@ -95,7 +95,7 @@ impl AuditWebhookNotifier {
     ///
     /// Returns a guard that decrements the pending counter when dropped.
     /// Used to test shutdown timeout paths without real network I/O.
-    #[doc(hidden)]
+    #[cfg(feature = "test-helpers")]
     pub fn simulate_stuck_delivery(&self) -> StuckDeliveryGuard {
         self.delivery_state.pending.fetch_add(1, Ordering::SeqCst);
         StuckDeliveryGuard { delivery_state: self.delivery_state.clone() }
@@ -204,12 +204,13 @@ impl AuditWebhookNotifier {
 ///
 /// Dropping the guard decrements the pending counter and wakes any waiting
 /// shutdown call so the test does not leak state.
-#[doc(hidden)]
+#[cfg(feature = "test-helpers")]
 #[derive(Debug)]
 pub struct StuckDeliveryGuard {
     delivery_state: Arc<DeliveryState>,
 }
 
+#[cfg(feature = "test-helpers")]
 impl Drop for StuckDeliveryGuard {
     fn drop(&mut self) {
         self.delivery_state.pending.fetch_sub(1, Ordering::SeqCst);

@@ -83,7 +83,7 @@ pub use service::{ServiceBridge, ServiceBridgeError, service_routes};
 pub use shutdown::ShutdownController;
 pub use sockets::{SocketRelayError, SocketRelayManager};
 pub use webhook::AuditWebhookNotifier;
-#[doc(hidden)]
+#[cfg(feature = "test-helpers")]
 pub use webhook::StuckDeliveryGuard;
 pub use websocket::{
     LoginRateLimiter, OperatorConnectionManager, routes as websocket_routes, websocket_handler,

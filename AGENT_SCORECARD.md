@@ -24,7 +24,7 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 32 | 13 | 5 |
 | Clippy warnings | 4 | 0 | 1 |
 | Protocol errors | 7 | 27 | 3 |
-| Security issues | 24 | 36 | 0 |
+| Security issues | 29 | 36 | 0 |
 | Architecture drift | 4 | 21 | 0 |
 | Memory / resource leaks | 2 | 10 | 1 |
 | Startup / lifecycle regressions | 1 | 8 | 0 |
@@ -3122,3 +3122,14 @@ Build: passed (cargo check, clippy -D warnings clean, 869 tests pass across work
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: passed (cargo check, clippy -D warnings clean, 2060 tests pass across workspace with --features test-helpers)
+
+### Arch Review — 2026-03-21 16:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 5 | security (5) | All findings in service bridge (service.rs): timing-vulnerable password comparison (P1), no auth rate limiting (P2), no WS message size limit (P2), no audit logging (P2), plaintext password re-hashed per attempt (P3). All trace to initial service bridge implementation commit d9c14a33. |
+| Codex | 0 | — | No new findings this review. |
+| Cursor | 0 | — | No new findings this review. |
+
+Overall codebase health: on track
+Biggest blindspot: service bridge security hardening — the operator WebSocket has rate limiting, size limits, constant-time auth, and audit logging, but none of these were carried over to the service bridge endpoint.

@@ -10,11 +10,11 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 658 | 212 | 31 |
-| Bugs filed against | 54 | 34 | 9 |
+| Bugs filed against | 55 | 34 | 9 |
 | Bug rate (bugs/task) | 0.08 | 0.16 | 0.29 |
 | Quality score | 92% | 84% | 71% |
 
-*Bug rates: Claude 54/658=0.08, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 55/658=0.08, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 4 | 21 | 0 |
 | Memory / resource leaks | 2 | 10 | 1 |
 | Startup / lifecycle regressions | 1 | 8 | 0 |
-| Test infrastructure / flakiness | 5 | 0 | 0 |
+| Test infrastructure / flakiness | 6 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
 | Correctness / pagination | 20 | 7 | 1 |
@@ -3144,3 +3144,13 @@ Biggest blindspot: service bridge security hardening — the operator WebSocket 
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: cargo check passed, clippy passed (0 warnings), cargo test FAILED — 34 tests failing in assembly_dispatch (20), http_listener_pipeline (9), pivot_dispatch (5) due to r1r4q
+
+### QA Review — 2026-03-21 — 18a54dd8..407c261c
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 1 | Commits 9d3212fb and 407c261c are tooling-only changes to loop.py: adds --output-format=stream-json + --verbose to claude dev loop and parses stream events for human-readable terminal output. Clean code, good error handling, no Rust changes. Bug filed: rm2k8 (P3: flaky websocket test — websocket_listener_commands_broadcast_and_persist_state panics with Close(None) during full suite, passes in isolation; pre-existing, first observed this run as prior runs stopped early at r1r4q failures). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (0 warnings), cargo test FAILED — r1r4q still unresolved (20 assembly_dispatch + 9 http_listener_pipeline + 5 pivot_dispatch), plus intermittent websocket flake (rm2k8)

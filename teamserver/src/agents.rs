@@ -1056,6 +1056,12 @@ impl AgentRegistry {
             hook(agent_id).await;
         }
     }
+
+    /// Return the number of retained request contexts (test-only).
+    #[cfg(test)]
+    async fn request_contexts_count(&self) -> usize {
+        self.request_contexts.read().await.len()
+    }
 }
 
 fn decode_crypto_material(
@@ -1156,7 +1162,7 @@ mod tests {
     use uuid::Uuid;
     use zeroize::Zeroizing;
 
-    use super::{AgentRegistry, Job, MAX_JOB_QUEUE_DEPTH};
+    use super::{AgentRegistry, Job, MAX_JOB_QUEUE_DEPTH, MAX_REQUEST_CONTEXTS};
     use crate::database::{Database, LinkRecord, TeamserverError};
 
     /// Generate a non-degenerate test key from a seed byte.
@@ -3397,6 +3403,145 @@ mod tests {
 
         assert!(
             matches!(error, TeamserverError::AgentNotFound { agent_id } if agent_id == unknown_id)
+        );
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Negative / bounds tests for DoS-protection limits
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn insert_allows_registration_after_removal_frees_slot() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::with_max_registered_agents(database, 2);
+        let first = sample_agent(0xBB00_0001);
+        let second = sample_agent(0xBB00_0002);
+        let third = sample_agent(0xBB00_0003);
+
+        registry.insert(first.clone()).await?;
+        registry.insert(second.clone()).await?;
+
+        // Cap is reached — third registration must fail.
+        let err = registry.insert(third.clone()).await.expect_err("third insert must fail at cap");
+        assert!(matches!(err, TeamserverError::MaxRegisteredAgentsExceeded { .. }));
+
+        // Remove one agent to free a slot.
+        registry.remove(first.agent_id).await?;
+
+        // Now the third registration must succeed.
+        registry.insert(third.clone()).await?;
+        assert!(registry.get(third.agent_id).await.is_some());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn enqueue_job_evicts_oldest_request_contexts_at_capacity() -> Result<(), TeamserverError>
+    {
+        // To trigger the eviction branch inside `enqueue_job` we need to
+        // accumulate more than MAX_REQUEST_CONTEXTS entries.  Since each agent
+        // can hold at most MAX_JOB_QUEUE_DEPTH jobs, we cycle through
+        // enqueue-then-dequeue rounds using multiple agents so that the request
+        // contexts keep accumulating (they persist after dequeue) while the job
+        // queues are drained to make room.
+        let registry = AgentRegistry::new(test_database().await?);
+
+        // We need ceil(MAX_REQUEST_CONTEXTS + 1, MAX_JOB_QUEUE_DEPTH) agents
+        // to accumulate enough contexts.  Use a few extra rounds to be safe.
+        let agents_needed = (MAX_REQUEST_CONTEXTS / MAX_JOB_QUEUE_DEPTH) + 2;
+
+        // Register all the agents we'll need.
+        let mut agent_ids = Vec::with_capacity(agents_needed);
+        for i in 0..agents_needed as u32 {
+            let agent_id = 0xCC00_0000 + i;
+            registry.insert(sample_agent(agent_id)).await?;
+            agent_ids.push(agent_id);
+        }
+
+        // Enqueue MAX_JOB_QUEUE_DEPTH jobs per agent — each creates a request
+        // context keyed by (agent_id, request_id).  Use a global counter for
+        // timestamps so the eviction order is deterministic.
+        let mut global_seq: u32 = 0;
+        for &agent_id in &agent_ids {
+            for j in 0..MAX_JOB_QUEUE_DEPTH as u32 {
+                let job = Job {
+                    command: 0x2000 + j,
+                    request_id: j,
+                    payload: vec![0],
+                    command_line: String::new(),
+                    task_id: String::new(),
+                    created_at: format!(
+                        "2026-03-10T00:{:02}:{:02}Z",
+                        global_seq / 60,
+                        global_seq % 60
+                    ),
+                    operator: String::new(),
+                };
+                global_seq += 1;
+                registry.enqueue_job(agent_id, job).await?;
+            }
+        }
+
+        // Total contexts created = agents_needed * MAX_JOB_QUEUE_DEPTH
+        // which exceeds MAX_REQUEST_CONTEXTS, so eviction must have fired.
+        let total_created = agents_needed * MAX_JOB_QUEUE_DEPTH;
+        assert!(
+            total_created > MAX_REQUEST_CONTEXTS,
+            "test setup: expected {total_created} > {MAX_REQUEST_CONTEXTS}"
+        );
+
+        let remaining = registry.request_contexts_count().await;
+        assert!(
+            remaining <= MAX_REQUEST_CONTEXTS,
+            "request contexts ({remaining}) must not exceed MAX_REQUEST_CONTEXTS ({MAX_REQUEST_CONTEXTS}) after eviction"
+        );
+
+        // After eviction the count is pruned to MAX_REQUEST_CONTEXTS / 2,
+        // then the remaining enqueues from subsequent agents add more.  The
+        // exact number depends on ordering, but it must be well below the
+        // total we created.
+        assert!(
+            remaining < total_created,
+            "eviction must have removed some contexts: {remaining} should be less than {total_created}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn enqueue_job_queue_full_for_pivoted_agent() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let root = sample_agent_with_crypto(0xDD00_0001, test_key(0xAA), test_iv(0xBB));
+        let child = sample_agent_with_crypto(0xDD00_0002, test_key(0xCC), test_iv(0xDD));
+        registry.insert(root.clone()).await?;
+        registry.insert(child.clone()).await?;
+        registry.add_link(root.agent_id, child.agent_id).await?;
+
+        // Fill the root's queue (pivoted jobs land on root).
+        for i in 0..MAX_JOB_QUEUE_DEPTH as u32 {
+            registry.enqueue_job(child.agent_id, sample_job(i)).await?;
+        }
+
+        // One more for the child (routed to root) must be rejected.
+        let err = registry
+            .enqueue_job(child.agent_id, sample_job(MAX_JOB_QUEUE_DEPTH as u32))
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(
+                err,
+                TeamserverError::QueueFull {
+                    agent_id,
+                    max_queue_depth,
+                    queued
+                } if agent_id == root.agent_id
+                    && max_queue_depth == MAX_JOB_QUEUE_DEPTH
+                    && queued == MAX_JOB_QUEUE_DEPTH
+            ),
+            "expected QueueFull for root, got: {err}"
         );
 
         Ok(())

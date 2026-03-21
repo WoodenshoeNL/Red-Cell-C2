@@ -104,7 +104,9 @@ pub enum ServiceBridgeError {
 /// Manages connected service clients and registered service agents/listeners.
 #[derive(Debug, Clone)]
 pub struct ServiceBridge {
-    config: ServiceConfig,
+    endpoint: String,
+    /// Pre-computed SHA3-256 hash of the service password (plaintext is dropped).
+    password_hash: String,
     inner: Arc<RwLock<ServiceBridgeInner>>,
 }
 
@@ -120,15 +122,23 @@ struct ServiceBridgeInner {
 
 impl ServiceBridge {
     /// Create a new service bridge from the profile configuration.
+    ///
+    /// The SHA3-256 hash of the password is computed once at construction time
+    /// and the plaintext password is dropped immediately.
     #[must_use]
     pub fn new(config: ServiceConfig) -> Self {
-        Self { config, inner: Arc::new(RwLock::new(ServiceBridgeInner::default())) }
+        let password_hash = hash_password_sha3(&config.password);
+        Self {
+            endpoint: config.endpoint,
+            password_hash,
+            inner: Arc::new(RwLock::new(ServiceBridgeInner::default())),
+        }
     }
 
     /// Return the configured endpoint path (without leading slash).
     #[must_use]
     pub fn endpoint(&self) -> &str {
-        &self.config.endpoint
+        &self.endpoint
     }
 
     /// Return the number of currently connected service clients.
@@ -217,7 +227,7 @@ async fn handle_service_socket(state: crate::TeamserverState, mut socket: WebSoc
     }
 
     // Authenticate the client.
-    let client_id = match authenticate(&mut socket, &bridge.config).await {
+    let client_id = match authenticate(&mut socket, &bridge.password_hash).await {
         Ok(id) => id,
         Err(e) => {
             warn!(%e, "service client authentication failed");
@@ -292,9 +302,11 @@ async fn handle_service_socket(state: crate::TeamserverState, mut socket: WebSoc
 ///
 /// Expects a JSON message: `{"Head":{"Type":"Register"},"Body":{"Password":"..."}}`
 /// Responds with: `{"Head":{"Type":"Register"},"Body":{"Success":true/false}}`
+///
+/// `server_hash` is the pre-computed SHA3-256 hex digest of the server password.
 async fn authenticate(
     socket: &mut WebSocket,
-    config: &ServiceConfig,
+    server_hash: &str,
 ) -> Result<Uuid, ServiceBridgeError> {
     let message = match socket.recv().await {
         Some(Ok(WsMessage::Text(text))) => text,
@@ -317,7 +329,6 @@ async fn authenticate(
         .unwrap_or_default();
 
     let client_hash = hash_password_sha3(client_password);
-    let server_hash = hash_password_sha3(&config.password);
     let success: bool = client_hash.as_bytes().ct_eq(server_hash.as_bytes()).into();
 
     let response = serde_json::json!({
@@ -1745,12 +1756,12 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_correct_password_succeeds() {
-        let config =
-            ServiceConfig { endpoint: "test".to_owned(), password: "correct-pw".to_owned() };
+        let server_hash = hash_password_sha3("correct-pw");
 
         let (mut server_ws, mut client_ws) = ws_pair().await;
 
-        let auth_handle = tokio::spawn(async move { authenticate(&mut server_ws, &config).await });
+        let auth_handle =
+            tokio::spawn(async move { authenticate(&mut server_ws, &server_hash).await });
 
         let register_msg = serde_json::json!({
             "Head": { "Type": "Register" },
@@ -1768,12 +1779,12 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_wrong_password_fails() {
-        let config =
-            ServiceConfig { endpoint: "test".to_owned(), password: "correct-pw".to_owned() };
+        let server_hash = hash_password_sha3("correct-pw");
 
         let (mut server_ws, mut client_ws) = ws_pair().await;
 
-        let auth_handle = tokio::spawn(async move { authenticate(&mut server_ws, &config).await });
+        let auth_handle =
+            tokio::spawn(async move { authenticate(&mut server_ws, &server_hash).await });
 
         let register_msg = serde_json::json!({
             "Head": { "Type": "Register" },
@@ -1798,11 +1809,12 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_malformed_json_fails() {
-        let config = ServiceConfig { endpoint: "test".to_owned(), password: "pw".to_owned() };
+        let server_hash = hash_password_sha3("pw");
 
         let (mut server_ws, mut client_ws) = ws_pair().await;
 
-        let auth_handle = tokio::spawn(async move { authenticate(&mut server_ws, &config).await });
+        let auth_handle =
+            tokio::spawn(async move { authenticate(&mut server_ws, &server_hash).await });
 
         client_send(&mut client_ws, "this is not json!!!").await;
 
@@ -1816,11 +1828,12 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_non_register_head_type_fails() {
-        let config = ServiceConfig { endpoint: "test".to_owned(), password: "pw".to_owned() };
+        let server_hash = hash_password_sha3("pw");
 
         let (mut server_ws, mut client_ws) = ws_pair().await;
 
-        let auth_handle = tokio::spawn(async move { authenticate(&mut server_ws, &config).await });
+        let auth_handle =
+            tokio::spawn(async move { authenticate(&mut server_ws, &server_hash).await });
 
         let message = serde_json::json!({
             "Head": { "Type": "Agent" },
@@ -1838,11 +1851,12 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_missing_password_field_fails() {
-        let config = ServiceConfig { endpoint: "test".to_owned(), password: "secret".to_owned() };
+        let server_hash = hash_password_sha3("secret");
 
         let (mut server_ws, mut client_ws) = ws_pair().await;
 
-        let auth_handle = tokio::spawn(async move { authenticate(&mut server_ws, &config).await });
+        let auth_handle =
+            tokio::spawn(async move { authenticate(&mut server_ws, &server_hash).await });
 
         let message = serde_json::json!({
             "Head": { "Type": "Register" },
@@ -1864,11 +1878,12 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_empty_password_matches_empty_config() {
-        let config = ServiceConfig { endpoint: "test".to_owned(), password: String::new() };
+        let server_hash = hash_password_sha3("");
 
         let (mut server_ws, mut client_ws) = ws_pair().await;
 
-        let auth_handle = tokio::spawn(async move { authenticate(&mut server_ws, &config).await });
+        let auth_handle =
+            tokio::spawn(async move { authenticate(&mut server_ws, &server_hash).await });
 
         let message = serde_json::json!({
             "Head": { "Type": "Register" },

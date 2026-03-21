@@ -30,8 +30,8 @@ use axum::{
 use red_cell_common::config::ServiceConfig;
 use red_cell_common::crypto::hash_password_sha3;
 use red_cell_common::operator::{
-    EventCode, Message, MessageHead, OperatorMessage, ServiceAgentRegistrationInfo,
-    ServiceListenerRegistrationInfo, TeamserverLogInfo,
+    AgentResponseInfo, EventCode, Message, MessageHead, OperatorMessage,
+    ServiceAgentRegistrationInfo, ServiceListenerRegistrationInfo, TeamserverLogInfo,
 };
 use serde_json::Value;
 use thiserror::Error;
@@ -416,10 +416,7 @@ async fn handle_agent_message(
         BODY_AGENT_REGISTER => {
             handle_agent_instance_register(message, events, agent_registry).await
         }
-        BODY_AGENT_RESPONSE => {
-            debug!("service agent response received");
-            Ok(())
-        }
+        BODY_AGENT_RESPONSE => handle_agent_response(message, events).await,
         BODY_AGENT_OUTPUT => handle_agent_output(message, events).await,
         other => {
             debug!(body_type = %other, "unknown service agent sub-message type");
@@ -651,6 +648,53 @@ async fn handle_agent_output(message: &Value, events: &EventBus) -> Result<(), S
     // Broadcast as a teamserver log for operator visibility.
     let log_event = service_log_event(&format!("agent output from service agent {agent_id}"));
     events.broadcast(log_event);
+
+    Ok(())
+}
+
+/// Handle an `AgentResponse` message — extract response data from a service
+/// client and broadcast it to connected operators.
+///
+/// The Havoc service protocol sends responses with the following body fields:
+/// - `Agent.NameID` — hex agent identifier
+/// - `Response` — base64-encoded response payload
+/// - `RandID` — correlation identifier for request-response pairing
+async fn handle_agent_response(
+    message: &Value,
+    events: &EventBus,
+) -> Result<(), ServiceBridgeError> {
+    let body =
+        message.get("Body").ok_or_else(|| ServiceBridgeError::MissingField("Body".to_owned()))?;
+
+    let agent_id = body
+        .get("Agent")
+        .and_then(|a| a.get("NameID"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+
+    let response_data = body.get("Response").and_then(Value::as_str).unwrap_or_default();
+
+    let rand_id = body.get("RandID").and_then(Value::as_str).unwrap_or_default();
+
+    debug!(%agent_id, %rand_id, response_len = response_data.len(), "service agent response");
+
+    // Broadcast the response as an AgentResponse event so operators see it.
+    let event = OperatorMessage::AgentResponse(Message {
+        head: MessageHead {
+            event: EventCode::Session,
+            user: "service".to_owned(),
+            timestamp: OffsetDateTime::now_utc().unix_timestamp().to_string(),
+            one_time: String::new(),
+        },
+        info: AgentResponseInfo {
+            demon_id: agent_id.to_owned(),
+            command_id: rand_id.to_owned(),
+            output: response_data.to_owned(),
+            command_line: None,
+            extra: Default::default(),
+        },
+    });
+    events.broadcast(event);
 
     Ok(())
 }
@@ -1331,6 +1375,77 @@ mod tests {
             .await
             .expect_err("should fail without AgentHeader");
         assert!(matches!(err, ServiceBridgeError::MissingField(_)));
+    }
+
+    // ── AgentResponse handler tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn handle_agent_response_broadcasts_event() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+
+        let message = serde_json::json!({
+            "Head": { "Type": HEAD_AGENT },
+            "Body": {
+                "Type": BODY_AGENT_RESPONSE,
+                "Agent": { "NameID": "DEAD0001" },
+                "Response": "SGVsbG8gV29ybGQ=",
+                "RandID": "abc123",
+            },
+        });
+
+        handle_agent_response(&message, &events).await.expect("response handling should succeed");
+
+        let event = rx.recv().await.expect("event should be broadcast");
+        match event {
+            OperatorMessage::AgentResponse(msg) => {
+                assert_eq!(msg.info.demon_id, "DEAD0001");
+                assert_eq!(msg.info.command_id, "abc123");
+                assert_eq!(msg.info.output, "SGVsbG8gV29ybGQ=");
+                assert!(msg.info.command_line.is_none());
+                assert_eq!(msg.head.event, EventCode::Session);
+                assert_eq!(msg.head.user, "service");
+            }
+            _ => panic!("expected AgentResponse event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_agent_response_missing_body_returns_error() {
+        let events = EventBus::default();
+
+        let message = serde_json::json!({
+            "Head": { "Type": HEAD_AGENT },
+        });
+
+        let err =
+            handle_agent_response(&message, &events).await.expect_err("should fail without Body");
+        assert!(matches!(err, ServiceBridgeError::MissingField(_)));
+    }
+
+    #[tokio::test]
+    async fn handle_agent_response_missing_optional_fields_uses_defaults() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+
+        let message = serde_json::json!({
+            "Head": { "Type": HEAD_AGENT },
+            "Body": {
+                "Type": BODY_AGENT_RESPONSE,
+            },
+        });
+
+        handle_agent_response(&message, &events).await.expect("should succeed with defaults");
+
+        let event = rx.recv().await.expect("event should be broadcast");
+        match event {
+            OperatorMessage::AgentResponse(msg) => {
+                assert_eq!(msg.info.demon_id, "unknown");
+                assert_eq!(msg.info.command_id, "");
+                assert_eq!(msg.info.output, "");
+            }
+            _ => panic!("expected AgentResponse event"),
+        }
     }
 
     #[tokio::test]

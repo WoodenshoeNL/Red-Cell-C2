@@ -1229,3 +1229,311 @@ async fn stale_ctr_offset_callback_returns_404_and_preserves_state()
     harness.shutdown().await?;
     Ok(())
 }
+
+/// Concurrent reconnect probes from the same agent must all succeed and leave the CTR offset
+/// unchanged.  The `encrypt_for_agent_without_advancing` path acquires the `ctr_block_offset`
+/// mutex, so concurrent calls are serialised — but we must verify that no probe corrupts the
+/// offset or causes a panic under real concurrency.
+#[tokio::test]
+async fn concurrent_reconnect_probes_preserve_ctr_offset() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut harness = spawn_server_with_http_listener("edge-http-concurrent-reconnect").await?;
+    let listener_port = harness.listener_port;
+
+    let agent_id = 0xCAFE_0001_u32;
+    let key = [0xA1; AGENT_KEY_LENGTH];
+    let iv = [0xB2; AGENT_IV_LENGTH];
+
+    // Register the agent.
+    let init_bytes = harness
+        .client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_init_body(agent_id, key, iv))
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+
+    let mut agent_ctr_offset = 0_u64;
+    let init_ack = decrypt_agent_data_at_offset(&key, &iv, agent_ctr_offset, &init_bytes)?;
+    assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
+    agent_ctr_offset += ctr_blocks_for_len(init_bytes.len());
+
+    // Consume AgentNew event.
+    let _agent_new = common::read_operator_message(&mut harness.socket).await?;
+
+    let offset_before = harness.server.agent_registry.ctr_offset(agent_id).await?;
+
+    // Fire 20 concurrent reconnect probes.
+    let mut join_set = tokio::task::JoinSet::new();
+    for _ in 0..20 {
+        let body = common::valid_demon_reconnect_body(agent_id);
+        let url = format!("http://127.0.0.1:{listener_port}/");
+        join_set.spawn(async move {
+            let client = reqwest::Client::new();
+            let resp = client
+                .post(&url)
+                .body(body)
+                .send()
+                .await
+                .expect("reconnect request should succeed")
+                .error_for_status()
+                .expect("reconnect should return 200");
+            resp.bytes().await.expect("should read reconnect ACK bytes")
+        });
+    }
+
+    let mut ack_count = 0_usize;
+    while let Some(result) = join_set.join_next().await {
+        let ack_bytes = result?;
+        // Every reconnect ACK must be decryptable at the same offset (non-advancing).
+        let ack_plaintext = decrypt_agent_data_at_offset(&key, &iv, agent_ctr_offset, &ack_bytes)?;
+        assert_eq!(
+            ack_plaintext.as_slice(),
+            &agent_id.to_le_bytes(),
+            "reconnect ACK #{ack_count} must echo agent_id"
+        );
+        ack_count += 1;
+    }
+    assert_eq!(ack_count, 20);
+
+    // CTR offset must be unchanged.
+    let offset_after = harness.server.agent_registry.ctr_offset(agent_id).await?;
+    assert_eq!(
+        offset_after, offset_before,
+        "CTR offset must not drift after concurrent reconnect probes"
+    );
+
+    // Verify the agent session is still functional — a callback at the original offset must work.
+    harness
+        .client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            agent_ctr_offset,
+            u32::from(DemonCommand::CommandGetJob),
+            1,
+            &[],
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    harness.shutdown().await?;
+    Ok(())
+}
+
+/// A reconnect probe arriving while a callback is being processed must not corrupt the CTR
+/// offset.  The two-phase decrypt pattern (`decrypt_from_agent_without_advancing` +
+/// `advance_ctr_for_agent`) acquires and releases the mutex between phases, so a reconnect
+/// probe could theoretically encrypt at the same offset during the gap.  Since the reconnect
+/// ACK uses `encrypt_for_agent_without_advancing`, the offset must remain stable.
+///
+/// This test fires callbacks and reconnect probes concurrently from separate tasks.
+#[tokio::test]
+async fn reconnect_probe_interleaved_with_callbacks_preserves_sync()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut harness = spawn_server_with_http_listener("edge-http-reconnect-interleave").await?;
+    let listener_port = harness.listener_port;
+
+    let agent_id = 0xCAFE_0002_u32;
+    let key = [0xC3; AGENT_KEY_LENGTH];
+    let iv = [0xD4; AGENT_IV_LENGTH];
+
+    // Register.
+    let init_bytes = harness
+        .client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_init_body(agent_id, key, iv))
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+
+    let mut agent_ctr_offset = 0_u64;
+    let init_ack = decrypt_agent_data_at_offset(&key, &iv, agent_ctr_offset, &init_bytes)?;
+    assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
+    agent_ctr_offset += ctr_blocks_for_len(init_bytes.len());
+
+    let _agent_new = common::read_operator_message(&mut harness.socket).await?;
+
+    // Run 10 sequential cycles: for each cycle, fire a callback and a reconnect probe
+    // concurrently.  After each cycle, the callback advances the agent's offset by the
+    // callback payload size, and the reconnect must not have interfered.
+    for cycle in 0..10_u32 {
+        let callback_body = common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            agent_ctr_offset,
+            u32::from(DemonCommand::CommandGetJob),
+            cycle + 1,
+            &[],
+        );
+        let reconnect_body = common::valid_demon_reconnect_body(agent_id);
+
+        let url = format!("http://127.0.0.1:{listener_port}/");
+        let url2 = url.clone();
+
+        // Fire both concurrently.
+        let callback_handle = tokio::spawn(async move {
+            let client = reqwest::Client::new();
+            client.post(&url).body(callback_body).send().await
+        });
+        let reconnect_handle = tokio::spawn(async move {
+            let client = reqwest::Client::new();
+            client.post(&url2).body(reconnect_body).send().await
+        });
+
+        let (cb_result, rc_result) = tokio::try_join!(callback_handle, reconnect_handle)?;
+        let cb_resp = cb_result?.error_for_status()?;
+        let _rc_resp = rc_result?.error_for_status()?;
+
+        // The callback carries an encrypted 4-byte inner length prefix (empty payload).
+        // `valid_demon_callback_body` with `&[]` produces a 4-byte plaintext (the BE length 0).
+        let callback_encrypted_len = 4; // BE u32 length prefix
+        agent_ctr_offset += ctr_blocks_for_len(callback_encrypted_len);
+
+        // Verify the server offset matches what the agent expects after the callback.
+        let server_offset = harness.server.agent_registry.ctr_offset(agent_id).await?;
+        assert_eq!(
+            server_offset, agent_ctr_offset,
+            "cycle {cycle}: server CTR offset must equal agent-side tracking after callback + reconnect"
+        );
+
+        let _ = cb_resp.bytes().await?;
+    }
+
+    // Final callback to prove the session is still fully synchronised.
+    harness
+        .client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            agent_ctr_offset,
+            u32::from(DemonCommand::CommandGetJob),
+            100,
+            &[],
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    harness.shutdown().await?;
+    Ok(())
+}
+
+/// Rapid reconnect-callback cycles must not cause counter drift.  This test performs many
+/// reconnect → callback pairs in tight succession, verifying that the CTR offset advances
+/// exactly as expected and the session remains usable throughout.
+#[tokio::test]
+async fn rapid_reconnect_callback_cycles_no_counter_drift() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut harness = spawn_server_with_http_listener("edge-http-rapid-cycles").await?;
+    let listener_port = harness.listener_port;
+
+    let agent_id = 0xCAFE_0003_u32;
+    let key = [0xE5; AGENT_KEY_LENGTH];
+    let iv = [0xF6; AGENT_IV_LENGTH];
+
+    // Register.
+    let init_bytes = harness
+        .client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_init_body(agent_id, key, iv))
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+
+    let mut agent_ctr_offset = 0_u64;
+    let init_ack = decrypt_agent_data_at_offset(&key, &iv, agent_ctr_offset, &init_bytes)?;
+    assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
+    agent_ctr_offset += ctr_blocks_for_len(init_bytes.len());
+
+    let _agent_new = common::read_operator_message(&mut harness.socket).await?;
+
+    // 30 rapid cycles: reconnect → callback → verify offset.
+    for cycle in 0..30_u32 {
+        // Reconnect probe (non-advancing).
+        let reconnect_bytes = harness
+            .client
+            .post(format!("http://127.0.0.1:{listener_port}/"))
+            .body(common::valid_demon_reconnect_body(agent_id))
+            .send()
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await?;
+
+        // Verify reconnect ACK is at the current offset.
+        let reconnect_ack =
+            decrypt_agent_data_at_offset(&key, &iv, agent_ctr_offset, &reconnect_bytes)?;
+        assert_eq!(
+            reconnect_ack.as_slice(),
+            &agent_id.to_le_bytes(),
+            "cycle {cycle}: reconnect ACK must decrypt at current offset"
+        );
+
+        // CTR must not have moved.
+        assert_eq!(
+            harness.server.agent_registry.ctr_offset(agent_id).await?,
+            agent_ctr_offset,
+            "cycle {cycle}: CTR must not advance after reconnect ACK"
+        );
+
+        // Callback (advancing).
+        harness
+            .client
+            .post(format!("http://127.0.0.1:{listener_port}/"))
+            .body(common::valid_demon_callback_body(
+                agent_id,
+                key,
+                iv,
+                agent_ctr_offset,
+                u32::from(DemonCommand::CommandGetJob),
+                cycle + 1,
+                &[],
+            ))
+            .send()
+            .await?
+            .error_for_status()?;
+
+        // The callback's encrypted portion is the 4-byte inner length prefix.
+        agent_ctr_offset += ctr_blocks_for_len(4);
+
+        // Verify the server agrees.
+        assert_eq!(
+            harness.server.agent_registry.ctr_offset(agent_id).await?,
+            agent_ctr_offset,
+            "cycle {cycle}: server CTR must match agent tracking after callback"
+        );
+    }
+
+    // Final validation: one more callback to prove no drift accumulated.
+    harness
+        .client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            agent_ctr_offset,
+            u32::from(DemonCommand::CommandGetJob),
+            999,
+            &[],
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    harness.shutdown().await?;
+    Ok(())
+}

@@ -1,7 +1,15 @@
 # Cargo configuration for Red-Cell-C2
 #
-# No custom linker flags needed — PyO3's build script emits the correct
-# -L path to the system library directory, and install.sh ensures the
-# unversioned libpython3.X.so symlink exists there.
+# PyO3's build script emits -L /usr/lib/x86_64-linux-gnu to find libpython3.12,
+# but that directory only ships the versioned .so.1.0 (no bare .so symlink)
+# unless python3.12-dev is installed or install.sh has been run with root.
+#
+# The .python-lib/ directory at the workspace root contains the required
+# unversioned symlink (libpython3.12.so -> /usr/lib/x86_64-linux-gnu/libpython3.12.so.1.0).
+# The [build] rustflags entry below adds it to the linker search path so
+# that local dev builds and CI work without needing sudo / install.sh.
 #
 # To use a custom Python, set PYO3_PYTHON=/path/to/python3 instead.
+
+[build]
+rustflags = ["-L", ".python-lib"]

@@ -39,7 +39,7 @@ use tokio_tungstenite::{
 use tracing::warn;
 use url::Url;
 
-use crate::login::TlsFailure;
+use crate::login::{TlsFailure, TlsFailureKind};
 use crate::python::PythonRuntime;
 
 /// Default maximum number of events kept in the notification log.
@@ -1182,11 +1182,13 @@ async fn run_connection_manager(
                     // TLS certificate errors do not self-heal — stop retrying and surface
                     // the cert fingerprint so the UI can offer an exception prompt.
                     let message = classify_tls_error(&raw);
+                    let kind = classify_tls_failure_kind(&raw);
                     {
                         let mut state = lock_app_state(&app_state);
                         state.tls_failure = Some(TlsFailure {
                             message: message.clone(),
                             cert_fingerprint: captured_fp,
+                            kind,
                         });
                         state.connection_status = ConnectionStatus::Error(message);
                     }
@@ -1277,6 +1279,32 @@ pub(crate) fn classify_tls_error(err: &str) -> String {
             .to_owned();
     }
     err.to_owned()
+}
+
+/// Classify the TLS failure into a [`TlsFailureKind`] for UI rendering.
+///
+/// Fingerprint mismatches (from TOFU pinned certs) map to [`TlsFailureKind::CertificateChanged`].
+/// Unknown-issuer errors (self-signed, first connect) map to [`TlsFailureKind::UnknownServer`].
+/// Everything else is a generic [`TlsFailureKind::CertificateError`].
+pub(crate) fn classify_tls_failure_kind(err: &str) -> TlsFailureKind {
+    if err.contains("certificate fingerprint mismatch") {
+        // Extract the stored (expected) fingerprint from the error message.
+        // Format: "certificate fingerprint mismatch: expected <hex64>, got <hex64>"
+        let stored = err
+            .strip_suffix(|_: char| false)
+            .unwrap_or(err)
+            .split("expected ")
+            .nth(1)
+            .and_then(|s| s.split(',').next())
+            .unwrap_or("")
+            .trim()
+            .to_owned();
+        return TlsFailureKind::CertificateChanged { stored_fingerprint: stored };
+    }
+    if err.contains("UnknownIssuer") || err.contains("unknown issuer") {
+        return TlsFailureKind::UnknownServer;
+    }
+    TlsFailureKind::CertificateError
 }
 
 async fn connect_websocket(

@@ -1,3 +1,4 @@
+mod known_servers;
 mod local_config;
 mod login;
 mod python;
@@ -14,6 +15,7 @@ use clap::Parser;
 use eframe::egui::{
     self, Align, Align2, Color32, FontId, Key, Layout, Pos2, Rect, RichText, Sense, Stroke,
 };
+use known_servers::{KnownServersStore, host_port_from_url};
 use local_config::LocalConfig;
 use login::{LoginAction, LoginState, render_login_dialog};
 use python::{
@@ -59,8 +61,13 @@ struct Cli {
     cert_fingerprint: Option<String>,
     /// Disable TLS certificate verification entirely. DANGEROUS: makes connections
     /// vulnerable to man-in-the-middle attacks. Prefer --ca-cert or --cert-fingerprint.
-    #[arg(long, default_value_t = false)]
+    /// Deprecated: TOFU is now the default — this flag will be removed in a future release.
+    #[arg(long, default_value_t = false, hide = true)]
     accept_invalid_certs: bool,
+    /// Remove a previously trusted server from the known-servers store and exit.
+    /// Specify the host:port (e.g. "10.0.0.1:40056") to purge.
+    #[arg(long)]
+    purge_known_server: Option<String>,
 }
 
 /// Application lifecycle phase.
@@ -973,6 +980,7 @@ struct SessionGraphLayout {
 struct ClientApp {
     phase: AppPhase,
     local_config: LocalConfig,
+    known_servers: KnownServersStore,
     cli_server_url: String,
     scripts_dir: Option<PathBuf>,
     tls_verification: TlsVerification,
@@ -984,12 +992,15 @@ struct ClientApp {
 impl ClientApp {
     fn new(cli: Cli) -> Result<Self> {
         let local_config = LocalConfig::load();
+        let known_servers = KnownServersStore::load();
         let login_state = LoginState::new(&cli.server, &local_config);
-        let tls_verification = resolve_tls_verification(&cli, &local_config)?;
+        let tls_verification =
+            resolve_tls_verification(&cli, &local_config, &known_servers, &cli.server)?;
 
         Ok(Self {
             phase: AppPhase::Login(login_state),
             local_config,
+            known_servers,
             cli_server_url: cli.server,
             scripts_dir: cli.scripts_dir,
             tls_verification,
@@ -1018,6 +1029,14 @@ impl ClientApp {
         login_state.set_connecting();
 
         let server_url = login_state.server_url.trim().to_owned();
+
+        // Re-resolve TLS verification for the actual server URL the user typed,
+        // in case it differs from the CLI default (TOFU is per host:port).
+        if let Some(host_port) = host_port_from_url(&server_url) {
+            if let Some(entry) = self.known_servers.lookup(&host_port) {
+                self.tls_verification = TlsVerification::Fingerprint(entry.fingerprint.clone());
+            }
+        }
         let app_state = Arc::new(Mutex::new(AppState::new(server_url.clone())));
         let scripts_dir =
             self.scripts_dir.clone().or_else(|| self.local_config.resolved_scripts_dir());
@@ -1070,6 +1089,27 @@ impl ClientApp {
                 login_state.set_error(format!("Connection failed: {error}"));
             }
         }
+    }
+
+    /// Handle the user trusting (or re-trusting) a server certificate.
+    ///
+    /// Stores the fingerprint in the known-servers file keyed by host:port,
+    /// updates the TLS verification mode to pin against that fingerprint, and
+    /// also persists the fingerprint in the legacy per-client config for
+    /// backwards compatibility.
+    fn handle_trust_certificate(&mut self, fingerprint: String) {
+        let server_url = match &self.phase {
+            AppPhase::Login(login_state) => login_state.server_url.trim().to_owned(),
+            _ => self.cli_server_url.clone(),
+        };
+        if let Some(host_port) = host_port_from_url(&server_url) {
+            self.known_servers.trust(&host_port, &fingerprint, None);
+            self.known_servers.save();
+        }
+        // Also keep the legacy global fingerprint for backwards compat.
+        self.local_config.cert_fingerprint = Some(fingerprint.clone());
+        self.tls_verification = TlsVerification::Fingerprint(fingerprint);
+        self.local_config.save();
     }
 
     fn check_auth_response(&mut self) {
@@ -2304,13 +2344,16 @@ impl ClientApp {
         match &mut self.phase {
             AppPhase::Login(login_state) => {
                 let action = render_login_dialog(ctx, login_state);
-                if action == LoginAction::Submit {
-                    self.handle_login_submit(ctx);
-                } else if let LoginAction::TrustCertificate(fingerprint) = action {
-                    self.local_config.cert_fingerprint = Some(fingerprint.clone());
-                    self.tls_verification = TlsVerification::Fingerprint(fingerprint);
-                    self.local_config.save();
-                    self.handle_login_submit(ctx);
+                match action {
+                    LoginAction::Submit => {
+                        self.handle_login_submit(ctx);
+                    }
+                    LoginAction::TrustCertificate(fingerprint)
+                    | LoginAction::AcceptChangedCertificate(fingerprint) => {
+                        self.handle_trust_certificate(fingerprint);
+                        self.handle_login_submit(ctx);
+                    }
+                    LoginAction::Waiting => {}
                 }
             }
             AppPhase::Authenticating { .. } => {
@@ -4904,13 +4947,16 @@ impl eframe::App for ClientApp {
                     return;
                 };
                 let action = render_login_dialog(ctx, login_state);
-                if action == LoginAction::Submit {
-                    self.handle_login_submit(ctx);
-                } else if let LoginAction::TrustCertificate(fingerprint) = action {
-                    self.local_config.cert_fingerprint = Some(fingerprint.clone());
-                    self.tls_verification = TlsVerification::Fingerprint(fingerprint);
-                    self.local_config.save();
-                    self.handle_login_submit(ctx);
+                match action {
+                    LoginAction::Submit => {
+                        self.handle_login_submit(ctx);
+                    }
+                    LoginAction::TrustCertificate(fingerprint)
+                    | LoginAction::AcceptChangedCertificate(fingerprint) => {
+                        self.handle_trust_certificate(fingerprint);
+                        self.handle_login_submit(ctx);
+                    }
+                    LoginAction::Waiting => {}
                 }
             }
             AppPhase::Authenticating { app_state, .. } => {
@@ -4945,14 +4991,22 @@ fn validate_fingerprint(fingerprint: &str, source: &str) -> Result<String> {
     Ok(fingerprint.to_owned())
 }
 
-/// Determine the TLS verification mode from CLI flags, falling back to local config.
+/// Determine the TLS verification mode from CLI flags, falling back to known-servers
+/// TOFU store, then local config.
 ///
 /// Precedence: CLI `--accept-invalid-certs` > CLI `--cert-fingerprint` > CLI `--ca-cert`
-///           > config `cert_fingerprint` > config `ca_cert` > system root CAs.
+///           > known-servers TOFU store > config `cert_fingerprint` > config `ca_cert`
+///           > system root CAs (with fingerprint capture for TOFU prompts).
 ///
 /// Returns an error if a provided fingerprint is not a valid SHA-256 hex digest.
-fn resolve_tls_verification(cli: &Cli, config: &LocalConfig) -> Result<TlsVerification> {
+fn resolve_tls_verification(
+    cli: &Cli,
+    config: &LocalConfig,
+    known_servers: &KnownServersStore,
+    server_url: &str,
+) -> Result<TlsVerification> {
     if cli.accept_invalid_certs {
+        tracing::warn!("--accept-invalid-certs is deprecated; TOFU is now the default TLS mode");
         return Ok(TlsVerification::DangerousSkipVerify);
     }
     if let Some(fingerprint) = &cli.cert_fingerprint {
@@ -4962,6 +5016,12 @@ fn resolve_tls_verification(cli: &Cli, config: &LocalConfig) -> Result<TlsVerifi
     if let Some(ca_path) = &cli.ca_cert {
         return Ok(TlsVerification::CustomCa(ca_path.clone()));
     }
+    // TOFU: check the known-servers store for a previously trusted fingerprint.
+    if let Some(host_port) = host_port_from_url(server_url) {
+        if let Some(entry) = known_servers.lookup(&host_port) {
+            return Ok(TlsVerification::Fingerprint(entry.fingerprint.clone()));
+        }
+    }
     if let Some(fingerprint) = &config.cert_fingerprint {
         let validated = validate_fingerprint(fingerprint, "config file")?;
         return Ok(TlsVerification::Fingerprint(validated));
@@ -4969,6 +5029,9 @@ fn resolve_tls_verification(cli: &Cli, config: &LocalConfig) -> Result<TlsVerifi
     if let Some(ca_path) = &config.ca_cert {
         return Ok(TlsVerification::CustomCa(ca_path.clone()));
     }
+    // Default: standard CA verification with fingerprint capture.
+    // For self-signed teamservers this will fail with UnknownIssuer,
+    // triggering the TOFU prompt in the login UI.
     Ok(TlsVerification::CertificateAuthority)
 }
 
@@ -5023,6 +5086,19 @@ fn havoc_dark_theme() -> egui::Visuals {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Handle --purge-known-server: remove the entry and exit.
+    if let Some(host_port) = &cli.purge_known_server {
+        let mut store = KnownServersStore::load();
+        if store.remove(host_port) {
+            store.save();
+            println!("Removed {host_port} from known servers.");
+        } else {
+            println!("No entry found for {host_port} in known servers.");
+        }
+        return Ok(());
+    }
+
     launch_client(cli)
 }
 
@@ -7194,10 +7270,12 @@ mod tests {
             ca_cert: Some(PathBuf::from("/tmp/ca.pem")),
             cert_fingerprint: Some("abcd".to_owned()),
             accept_invalid_certs: true,
+            purge_known_server: None,
         };
         let config = LocalConfig::default();
         assert!(matches!(
-            resolve_tls_verification(&cli, &config).unwrap(),
+            resolve_tls_verification(&cli, &config, &KnownServersStore::default(), &cli.server)
+                .unwrap(),
             TlsVerification::DangerousSkipVerify
         ));
     }
@@ -7211,10 +7289,11 @@ mod tests {
             ca_cert: Some(PathBuf::from("/tmp/ca.pem")),
             cert_fingerprint: Some(valid_fp.clone()),
             accept_invalid_certs: false,
+            purge_known_server: None,
         };
         let config = LocalConfig::default();
         assert!(matches!(
-            resolve_tls_verification(&cli, &config).unwrap(),
+            resolve_tls_verification(&cli, &config, &KnownServersStore::default(), &cli.server).unwrap(),
             TlsVerification::Fingerprint(ref fp) if fp == &valid_fp
         ));
     }
@@ -7228,11 +7307,12 @@ mod tests {
             ca_cert: None,
             cert_fingerprint: None,
             accept_invalid_certs: false,
+            purge_known_server: None,
         };
         let config =
             LocalConfig { cert_fingerprint: Some(valid_fp.clone()), ..LocalConfig::default() };
         assert!(matches!(
-            resolve_tls_verification(&cli, &config).unwrap(),
+            resolve_tls_verification(&cli, &config, &KnownServersStore::default(), &cli.server).unwrap(),
             TlsVerification::Fingerprint(ref fp) if fp == &valid_fp
         ));
     }
@@ -7245,10 +7325,11 @@ mod tests {
             ca_cert: Some(PathBuf::from("/tmp/cli-ca.pem")),
             cert_fingerprint: None,
             accept_invalid_certs: false,
+            purge_known_server: None,
         };
         let config = LocalConfig::default();
         assert!(matches!(
-            resolve_tls_verification(&cli, &config).unwrap(),
+            resolve_tls_verification(&cli, &config, &KnownServersStore::default(), &cli.server).unwrap(),
             TlsVerification::CustomCa(ref path) if path == &PathBuf::from("/tmp/cli-ca.pem")
         ));
     }
@@ -7261,13 +7342,14 @@ mod tests {
             ca_cert: Some(PathBuf::from("/tmp/cli-ca.pem")),
             cert_fingerprint: None,
             accept_invalid_certs: false,
+            purge_known_server: None,
         };
         let config = LocalConfig {
             ca_cert: Some(PathBuf::from("/tmp/config-ca.pem")),
             ..LocalConfig::default()
         };
         assert!(matches!(
-            resolve_tls_verification(&cli, &config).unwrap(),
+            resolve_tls_verification(&cli, &config, &KnownServersStore::default(), &cli.server).unwrap(),
             TlsVerification::CustomCa(ref path) if path == &PathBuf::from("/tmp/cli-ca.pem")
         ));
     }
@@ -7280,13 +7362,14 @@ mod tests {
             ca_cert: None,
             cert_fingerprint: None,
             accept_invalid_certs: false,
+            purge_known_server: None,
         };
         let config = LocalConfig {
             ca_cert: Some(PathBuf::from("/tmp/config-ca.pem")),
             ..LocalConfig::default()
         };
         assert!(matches!(
-            resolve_tls_verification(&cli, &config).unwrap(),
+            resolve_tls_verification(&cli, &config, &KnownServersStore::default(), &cli.server).unwrap(),
             TlsVerification::CustomCa(ref path) if path == &PathBuf::from("/tmp/config-ca.pem")
         ));
     }
@@ -7299,10 +7382,12 @@ mod tests {
             ca_cert: None,
             cert_fingerprint: None,
             accept_invalid_certs: false,
+            purge_known_server: None,
         };
         let config = LocalConfig::default();
         assert!(matches!(
-            resolve_tls_verification(&cli, &config).unwrap(),
+            resolve_tls_verification(&cli, &config, &KnownServersStore::default(), &cli.server)
+                .unwrap(),
             TlsVerification::CertificateAuthority
         ));
     }
@@ -7356,9 +7441,12 @@ mod tests {
             ca_cert: None,
             cert_fingerprint: Some("not-a-valid-fingerprint".to_owned()),
             accept_invalid_certs: false,
+            purge_known_server: None,
         };
         let config = LocalConfig::default();
-        let err = resolve_tls_verification(&cli, &config).unwrap_err();
+        let err =
+            resolve_tls_verification(&cli, &config, &KnownServersStore::default(), &cli.server)
+                .unwrap_err();
         assert!(err.to_string().contains("--cert-fingerprint"), "error: {err}");
     }
 
@@ -7370,10 +7458,13 @@ mod tests {
             ca_cert: None,
             cert_fingerprint: None,
             accept_invalid_certs: false,
+            purge_known_server: None,
         };
         let config =
             LocalConfig { cert_fingerprint: Some("zzzz".to_owned()), ..LocalConfig::default() };
-        let err = resolve_tls_verification(&cli, &config).unwrap_err();
+        let err =
+            resolve_tls_verification(&cli, &config, &KnownServersStore::default(), &cli.server)
+                .unwrap_err();
         assert!(err.to_string().contains("config file"), "error: {err}");
     }
 
@@ -7386,11 +7477,75 @@ mod tests {
             ca_cert: None,
             cert_fingerprint: Some("bad".to_owned()),
             accept_invalid_certs: true,
+            purge_known_server: None,
         };
         let config = LocalConfig::default();
         assert!(matches!(
-            resolve_tls_verification(&cli, &config).unwrap(),
+            resolve_tls_verification(&cli, &config, &KnownServersStore::default(), &cli.server)
+                .unwrap(),
             TlsVerification::DangerousSkipVerify
+        ));
+    }
+
+    #[test]
+    fn resolve_tls_uses_known_servers_fingerprint() {
+        let fp = "c".repeat(64);
+        let mut known = KnownServersStore::default();
+        known.trust("127.0.0.1:40056", &fp, None);
+        let cli = Cli {
+            server: DEFAULT_SERVER_URL.to_owned(),
+            scripts_dir: None,
+            ca_cert: None,
+            cert_fingerprint: None,
+            accept_invalid_certs: false,
+            purge_known_server: None,
+        };
+        let config = LocalConfig::default();
+        assert!(matches!(
+            resolve_tls_verification(&cli, &config, &known, &cli.server).unwrap(),
+            TlsVerification::Fingerprint(ref f) if f == &fp
+        ));
+    }
+
+    #[test]
+    fn resolve_tls_cli_fingerprint_overrides_known_servers() {
+        let known_fp = "d".repeat(64);
+        let cli_fp = "e".repeat(64);
+        let mut known = KnownServersStore::default();
+        known.trust("127.0.0.1:40056", &known_fp, None);
+        let cli = Cli {
+            server: DEFAULT_SERVER_URL.to_owned(),
+            scripts_dir: None,
+            ca_cert: None,
+            cert_fingerprint: Some(cli_fp.clone()),
+            accept_invalid_certs: false,
+            purge_known_server: None,
+        };
+        let config = LocalConfig::default();
+        assert!(matches!(
+            resolve_tls_verification(&cli, &config, &known, &cli.server).unwrap(),
+            TlsVerification::Fingerprint(ref f) if f == &cli_fp
+        ));
+    }
+
+    #[test]
+    fn resolve_tls_known_servers_overrides_config_fingerprint() {
+        let known_fp = "f".repeat(64);
+        let config_fp = "0".repeat(64);
+        let mut known = KnownServersStore::default();
+        known.trust("127.0.0.1:40056", &known_fp, None);
+        let cli = Cli {
+            server: DEFAULT_SERVER_URL.to_owned(),
+            scripts_dir: None,
+            ca_cert: None,
+            cert_fingerprint: None,
+            accept_invalid_certs: false,
+            purge_known_server: None,
+        };
+        let config = LocalConfig { cert_fingerprint: Some(config_fp), ..LocalConfig::default() };
+        assert!(matches!(
+            resolve_tls_verification(&cli, &config, &known, &cli.server).unwrap(),
+            TlsVerification::Fingerprint(ref f) if f == &known_fp
         ));
     }
 
@@ -7418,6 +7573,7 @@ mod tests {
             ca_cert: None,
             cert_fingerprint: None,
             accept_invalid_certs: false,
+            purge_known_server: None,
         };
         let app = ClientApp::new(cli).unwrap();
         assert!(matches!(app.phase, AppPhase::Login(_)));
@@ -7431,6 +7587,7 @@ mod tests {
             ca_cert: None,
             cert_fingerprint: None,
             accept_invalid_certs: false,
+            purge_known_server: None,
         };
         let app = ClientApp::new(cli).unwrap();
         match &app.phase {
@@ -8410,6 +8567,7 @@ mod tests {
                 login_state,
             },
             local_config: LocalConfig::default(),
+            known_servers: KnownServersStore::default(),
             cli_server_url: DEFAULT_SERVER_URL.to_owned(),
             scripts_dir: None,
             tls_verification: TlsVerification::CertificateAuthority,

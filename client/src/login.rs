@@ -11,6 +11,20 @@ const LOGIN_PANEL_WIDTH: f32 = 400.0;
 #[allow(dead_code)]
 const CONNECTING_COLOR: Color32 = Color32::from_rgb(232, 182, 83);
 
+/// Classifies the kind of TLS failure for UI rendering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TlsFailureKind {
+    /// Regular TLS error (expired, hostname mismatch, etc.)
+    CertificateError,
+    /// First connection to an unknown server — show TOFU accept prompt.
+    UnknownServer,
+    /// Server certificate has changed since first trust — show SSH-style warning.
+    CertificateChanged {
+        /// The previously trusted fingerprint.
+        stored_fingerprint: String,
+    },
+}
+
 /// Details about a TLS connection failure, surfaced to the UI for actionable messaging.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TlsFailure {
@@ -18,6 +32,8 @@ pub struct TlsFailure {
     pub message: String,
     /// SHA-256 fingerprint (64 lowercase hex chars) of the server's certificate, if captured.
     pub cert_fingerprint: Option<String>,
+    /// What kind of failure this is (determines UI rendering).
+    pub kind: TlsFailureKind,
 }
 
 /// Tracks which field should receive initial focus on the next frame.
@@ -115,8 +131,10 @@ pub(crate) enum LoginAction {
     Waiting,
     /// User submitted the login form.
     Submit,
-    /// User chose to trust the server certificate by its fingerprint.
+    /// User chose to trust a new server's certificate by its fingerprint.
     TrustCertificate(String),
+    /// User explicitly accepted a changed certificate (overrides the SSH-style warning).
+    AcceptChangedCertificate(String),
 }
 
 /// Render the login dialog into the given egui context. Returns the action taken.
@@ -187,40 +205,9 @@ pub(crate) fn render_login_dialog(ctx: &egui::Context, state: &mut LoginState) -
                     }
 
                     if let Some(failure) = &state.tls_failure.clone() {
-                        egui::Frame::NONE
-                            .inner_margin(10.0)
-                            .corner_radius(4.0)
-                            .fill(Color32::from_rgb(50, 30, 30))
-                            .show(ui, |ui| {
-                                ui.set_min_width(LOGIN_PANEL_WIDTH);
-                                ui.colored_label(
-                                    Color32::from_rgb(215, 83, 83),
-                                    "TLS Certificate Error",
-                                );
-                                if let Some(fp) = &failure.cert_fingerprint {
-                                    ui.add_space(4.0);
-                                    ui.label(
-                                        RichText::new("Server certificate fingerprint:").small(),
-                                    );
-                                    ui.add(
-                                        TextEdit::singleline(&mut fp.clone())
-                                            .font(egui::TextStyle::Monospace)
-                                            .desired_width(f32::INFINITY)
-                                            .interactive(false),
-                                    );
-                                    ui.add_space(6.0);
-                                    if ui
-                                        .button(RichText::new("Trust this certificate").strong())
-                                        .on_hover_text(
-                                            "Pin this certificate fingerprint and reconnect. \
-                                             Only do this if you recognise this certificate.",
-                                        )
-                                        .clicked()
-                                    {
-                                        action = LoginAction::TrustCertificate(fp.clone());
-                                    }
-                                }
-                            });
+                        if let Some(tls_action) = render_tls_failure_panel(ui, failure) {
+                            action = tls_action;
+                        }
                         ui.add_space(8.0);
                     }
 
@@ -245,6 +232,153 @@ pub(crate) fn render_login_dialog(ctx: &egui::Context, state: &mut LoginState) -
         });
     });
 
+    action
+}
+
+/// Render the TLS failure panel, varying appearance by [`TlsFailureKind`].
+///
+/// Returns `Some(LoginAction)` if the user clicked a trust/accept button.
+#[allow(dead_code)]
+fn render_tls_failure_panel(ui: &mut egui::Ui, failure: &TlsFailure) -> Option<LoginAction> {
+    let mut action = None;
+    match &failure.kind {
+        TlsFailureKind::CertificateChanged { stored_fingerprint } => {
+            // SSH-style "HOST IDENTIFICATION HAS CHANGED" warning.
+            egui::Frame::NONE
+                .inner_margin(10.0)
+                .corner_radius(4.0)
+                .fill(Color32::from_rgb(80, 20, 20))
+                .show(ui, |ui| {
+                    ui.set_min_width(LOGIN_PANEL_WIDTH);
+                    ui.colored_label(
+                        Color32::from_rgb(255, 80, 80),
+                        RichText::new("⚠  WARNING: SERVER CERTIFICATE HAS CHANGED!  ⚠")
+                            .strong()
+                            .size(14.0),
+                    );
+                    ui.add_space(6.0);
+                    ui.colored_label(
+                        Color32::from_rgb(220, 160, 160),
+                        "Someone could be eavesdropping on you right now \
+                         (man-in-the-middle attack). It is also possible that the \
+                         server's certificate was legitimately renewed.",
+                    );
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("Previously trusted fingerprint:").small());
+                    ui.add(
+                        TextEdit::singleline(&mut stored_fingerprint.clone())
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(f32::INFINITY)
+                            .interactive(false),
+                    );
+                    if let Some(fp) = &failure.cert_fingerprint {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("Current server fingerprint:").small());
+                        ui.add(
+                            TextEdit::singleline(&mut fp.clone())
+                                .font(egui::TextStyle::Monospace)
+                                .desired_width(f32::INFINITY)
+                                .interactive(false),
+                        );
+                        ui.add_space(8.0);
+                        ui.colored_label(
+                            Color32::from_rgb(220, 160, 160),
+                            "If you expected this change, you may accept the new certificate. \
+                             Otherwise, DO NOT connect.",
+                        );
+                        ui.add_space(6.0);
+                        if ui
+                            .button(
+                                RichText::new("Accept new certificate")
+                                    .strong()
+                                    .color(Color32::from_rgb(255, 120, 120)),
+                            )
+                            .on_hover_text(
+                                "Replace the stored fingerprint with the new one and reconnect. \
+                                 Only do this if you trust the server.",
+                            )
+                            .clicked()
+                        {
+                            action = Some(LoginAction::AcceptChangedCertificate(fp.clone()));
+                        }
+                    }
+                });
+        }
+        TlsFailureKind::UnknownServer => {
+            // TOFU prompt for first connection to a new server.
+            egui::Frame::NONE
+                .inner_margin(10.0)
+                .corner_radius(4.0)
+                .fill(Color32::from_rgb(40, 40, 20))
+                .show(ui, |ui| {
+                    ui.set_min_width(LOGIN_PANEL_WIDTH);
+                    ui.colored_label(
+                        Color32::from_rgb(232, 182, 83),
+                        RichText::new("Unknown Server Certificate").strong(),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        "This is the first time connecting to this server. \
+                         Verify the certificate fingerprint with your administrator.",
+                    );
+                    if let Some(fp) = &failure.cert_fingerprint {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("Server certificate fingerprint:").small());
+                        ui.add(
+                            TextEdit::singleline(&mut fp.clone())
+                                .font(egui::TextStyle::Monospace)
+                                .desired_width(f32::INFINITY)
+                                .interactive(false),
+                        );
+                        ui.add_space(6.0);
+                        if ui
+                            .button(RichText::new("Trust this certificate").strong())
+                            .on_hover_text(
+                                "Store this certificate fingerprint and reconnect. \
+                                 Only do this if you recognise this certificate.",
+                            )
+                            .clicked()
+                        {
+                            action = Some(LoginAction::TrustCertificate(fp.clone()));
+                        }
+                    }
+                });
+        }
+        TlsFailureKind::CertificateError => {
+            // Generic TLS certificate error (expired, hostname mismatch, etc.)
+            egui::Frame::NONE
+                .inner_margin(10.0)
+                .corner_radius(4.0)
+                .fill(Color32::from_rgb(50, 30, 30))
+                .show(ui, |ui| {
+                    ui.set_min_width(LOGIN_PANEL_WIDTH);
+                    ui.colored_label(Color32::from_rgb(215, 83, 83), "TLS Certificate Error");
+                    ui.add_space(4.0);
+                    ui.label(&failure.message);
+                    if let Some(fp) = &failure.cert_fingerprint {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("Server certificate fingerprint:").small());
+                        ui.add(
+                            TextEdit::singleline(&mut fp.clone())
+                                .font(egui::TextStyle::Monospace)
+                                .desired_width(f32::INFINITY)
+                                .interactive(false),
+                        );
+                        ui.add_space(6.0);
+                        if ui
+                            .button(RichText::new("Trust this certificate").strong())
+                            .on_hover_text(
+                                "Pin this certificate fingerprint and reconnect. \
+                                 Only do this if you recognise this certificate.",
+                            )
+                            .clicked()
+                        {
+                            action = Some(LoginAction::TrustCertificate(fp.clone()));
+                        }
+                    }
+                });
+        }
+    }
     action
 }
 
@@ -414,7 +548,11 @@ mod tests {
     }
 
     fn make_tls_failure(msg: &str, fp: Option<&str>) -> TlsFailure {
-        TlsFailure { message: msg.to_owned(), cert_fingerprint: fp.map(str::to_owned) }
+        TlsFailure {
+            message: msg.to_owned(),
+            cert_fingerprint: fp.map(str::to_owned),
+            kind: TlsFailureKind::CertificateError,
+        }
     }
 
     #[test]

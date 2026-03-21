@@ -1,5 +1,6 @@
 //! Public client crate API used by integration tests and shared binary modules.
 
+pub mod known_servers;
 pub mod local_config;
 pub mod login;
 
@@ -14,5 +15,11 @@ mod tests {
     fn crate_root_exposes_login_module() {
         let cfg = crate::local_config::LocalConfig::default();
         let _state = crate::login::LoginState::new("wss://localhost:40056", &cfg);
+    }
+
+    #[test]
+    fn crate_root_exposes_known_servers_module() {
+        let store = crate::known_servers::KnownServersStore::default();
+        assert!(store.is_empty());
     }
 }

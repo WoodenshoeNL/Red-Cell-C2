@@ -3,6 +3,7 @@ members = [
     "common",
     "teamserver",
     "client",
+    "client-cli",
     "agent/specter",
 ]
 resolver = "3"

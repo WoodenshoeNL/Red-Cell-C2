@@ -10,11 +10,11 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 659 | 212 | 31 |
-| Bugs filed against | 55 | 34 | 9 |
+| Bugs filed against | 56 | 34 | 9 |
 | Bug rate (bugs/task) | 0.08 | 0.16 | 0.29 |
 | Quality score | 92% | 84% | 71% |
 
-*Bug rates: Claude 55/659=0.08, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 56/659=0.08, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -32,7 +32,7 @@ Each loop run updates the running totals and appends a review entry.
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
 | Correctness / pagination | 20 | 7 | 1 |
-| Workflow / close-hygiene | 12 | 0 | 0 |
+| Workflow / close-hygiene | 13 | 0 | 0 |
 | Code reuse / duplication | 6 | 0 | 0 |
 
 ---
@@ -3164,3 +3164,7 @@ Build: cargo check passed, clippy passed (0 warnings), cargo test FAILED — r1r
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: cargo check passed, clippy passed (0 warnings), full suite times out (each integration test ~30s × 260+ tests); sampled tests pass (r1r4q fix confirmed). rm2k8 (websocket flake) fix in progress but not yet committed.
+
+### QA Review Addendum — 2026-03-21 (background test run completed)
+
+Full `cargo test --workspace` completed. 10 tests still failing in assembly_dispatch — r1r4q fix was partial. Bug filed: yfc2o (P1, workflow/close-hygiene + test infrastructure: premature close of r1r4q, 10 remaining degenerate-key tests at lines 294/704/763/820/876/925/987/1048/1107/1166 of assembly_dispatch.rs).

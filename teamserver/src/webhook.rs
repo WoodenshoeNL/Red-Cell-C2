@@ -358,8 +358,8 @@ impl<'a> DiscordEmbed<'a> {
 /// - Backticks are removed (would break inline-code delimiters in the description).
 /// - Newlines and carriage returns are replaced with spaces.
 /// - `@everyone` and `@here` are defused by inserting a zero-width space after `@`.
-/// - Angle-bracket mention syntax (`<@…>`, `<@&…>`, `<#…>`) is stripped of the
-///   leading `<` so Discord does not parse them as mentions.
+/// - Angle-bracket mention syntax (`<@…>`, `<@&…>`, `<#…>`) is defused by
+///   inserting a zero-width space before `<` so Discord does not parse them as mentions.
 fn sanitize_discord_text(input: &str) -> String {
     let mut result = input.replace('`', "").replace(['\n', '\r'], " ");
     // Defuse broadcast mentions by inserting a zero-width space (U+200B) after @.
@@ -367,6 +367,7 @@ fn sanitize_discord_text(input: &str) -> String {
     result = result.replace("@here", "@\u{200b}here");
     // Defuse user/role/channel mention syntax: <@id>, <@&id>, <#id>.
     result = result.replace("<@", "\u{200b}<@");
+    result = result.replace("<#", "\u{200b}<#");
     result
 }
 
@@ -1492,6 +1493,11 @@ mod tests {
 
         let role_mention = sanitize_discord_text("<@&456>");
         assert!(!role_mention.starts_with("<@"));
+
+        // Channel mentions are defused.
+        let channel_mention = sanitize_discord_text("<#789>");
+        assert!(!channel_mention.starts_with("<#"));
+        assert!(channel_mention.contains("\u{200b}<#"));
 
         // Plain text passes through unchanged.
         assert_eq!(sanitize_discord_text("hello world"), "hello world");

@@ -1717,4 +1717,363 @@ mod tests {
             "expected ListenerMark from dispatched handler"
         );
     }
+
+    // ── authenticate() tests ─────────────────────────────────────────
+
+    /// Helper: send a text message from the tungstenite client side of a ws_pair.
+    async fn client_send(
+        client: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        text: &str,
+    ) {
+        use futures_util::SinkExt as _;
+        use tokio_tungstenite::tungstenite::Message as TungMsg;
+        client.send(TungMsg::Text(text.into())).await.expect("client send");
+    }
+
+    /// Helper: read a text message from the tungstenite client side.
+    async fn client_recv(
+        client: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> String {
+        use futures_util::StreamExt as _;
+        let msg = client.next().await.expect("should receive").expect("not error");
+        msg.into_text().expect("text message").to_string()
+    }
+
+    #[tokio::test]
+    async fn authenticate_correct_password_succeeds() {
+        let config =
+            ServiceConfig { endpoint: "test".to_owned(), password: "correct-pw".to_owned() };
+
+        let (mut server_ws, mut client_ws) = ws_pair().await;
+
+        let auth_handle = tokio::spawn(async move { authenticate(&mut server_ws, &config).await });
+
+        let register_msg = serde_json::json!({
+            "Head": { "Type": "Register" },
+            "Body": { "Password": "correct-pw" },
+        });
+        client_send(&mut client_ws, &register_msg.to_string()).await;
+
+        let response_text = client_recv(&mut client_ws).await;
+        let response: Value = serde_json::from_str(&response_text).expect("valid json");
+        assert!(response["Body"]["Success"].as_bool().expect("bool"), "auth should succeed");
+
+        let result = auth_handle.await.expect("join");
+        assert!(result.is_ok(), "authenticate should return Ok");
+    }
+
+    #[tokio::test]
+    async fn authenticate_wrong_password_fails() {
+        let config =
+            ServiceConfig { endpoint: "test".to_owned(), password: "correct-pw".to_owned() };
+
+        let (mut server_ws, mut client_ws) = ws_pair().await;
+
+        let auth_handle = tokio::spawn(async move { authenticate(&mut server_ws, &config).await });
+
+        let register_msg = serde_json::json!({
+            "Head": { "Type": "Register" },
+            "Body": { "Password": "wrong-pw" },
+        });
+        client_send(&mut client_ws, &register_msg.to_string()).await;
+
+        let response_text = client_recv(&mut client_ws).await;
+        let response: Value = serde_json::from_str(&response_text).expect("valid json");
+        assert!(
+            !response["Body"]["Success"].as_bool().expect("bool"),
+            "auth should report failure"
+        );
+
+        let result = auth_handle.await.expect("join");
+        assert!(result.is_err(), "authenticate should return Err");
+        assert!(
+            matches!(result.unwrap_err(), ServiceBridgeError::AuthenticationFailed),
+            "expected AuthenticationFailed error"
+        );
+    }
+
+    #[tokio::test]
+    async fn authenticate_malformed_json_fails() {
+        let config = ServiceConfig { endpoint: "test".to_owned(), password: "pw".to_owned() };
+
+        let (mut server_ws, mut client_ws) = ws_pair().await;
+
+        let auth_handle = tokio::spawn(async move { authenticate(&mut server_ws, &config).await });
+
+        client_send(&mut client_ws, "this is not json!!!").await;
+
+        let result = auth_handle.await.expect("join");
+        assert!(result.is_err(), "malformed JSON should fail");
+        assert!(
+            matches!(result.unwrap_err(), ServiceBridgeError::Json(_)),
+            "expected Json parse error"
+        );
+    }
+
+    #[tokio::test]
+    async fn authenticate_non_register_head_type_fails() {
+        let config = ServiceConfig { endpoint: "test".to_owned(), password: "pw".to_owned() };
+
+        let (mut server_ws, mut client_ws) = ws_pair().await;
+
+        let auth_handle = tokio::spawn(async move { authenticate(&mut server_ws, &config).await });
+
+        let message = serde_json::json!({
+            "Head": { "Type": "Agent" },
+            "Body": { "Password": "pw" },
+        });
+        client_send(&mut client_ws, &message.to_string()).await;
+
+        let result = auth_handle.await.expect("join");
+        assert!(result.is_err(), "non-Register type should fail");
+        assert!(
+            matches!(result.unwrap_err(), ServiceBridgeError::AuthenticationFailed),
+            "expected AuthenticationFailed error"
+        );
+    }
+
+    #[tokio::test]
+    async fn authenticate_missing_password_field_fails() {
+        let config = ServiceConfig { endpoint: "test".to_owned(), password: "secret".to_owned() };
+
+        let (mut server_ws, mut client_ws) = ws_pair().await;
+
+        let auth_handle = tokio::spawn(async move { authenticate(&mut server_ws, &config).await });
+
+        let message = serde_json::json!({
+            "Head": { "Type": "Register" },
+            "Body": {},
+        });
+        client_send(&mut client_ws, &message.to_string()).await;
+
+        // Missing Password defaults to empty string, which won't match "secret"
+        let response_text = client_recv(&mut client_ws).await;
+        let response: Value = serde_json::from_str(&response_text).expect("valid json");
+        assert!(
+            !response["Body"]["Success"].as_bool().expect("bool"),
+            "missing password should fail auth"
+        );
+
+        let result = auth_handle.await.expect("join");
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn authenticate_empty_password_matches_empty_config() {
+        let config = ServiceConfig { endpoint: "test".to_owned(), password: String::new() };
+
+        let (mut server_ws, mut client_ws) = ws_pair().await;
+
+        let auth_handle = tokio::spawn(async move { authenticate(&mut server_ws, &config).await });
+
+        let message = serde_json::json!({
+            "Head": { "Type": "Register" },
+            "Body": { "Password": "" },
+        });
+        client_send(&mut client_ws, &message.to_string()).await;
+
+        let response_text = client_recv(&mut client_ws).await;
+        let response: Value = serde_json::from_str(&response_text).expect("valid json");
+        assert!(response["Body"]["Success"].as_bool().expect("bool"));
+
+        let result = auth_handle.await.expect("join");
+        assert!(result.is_ok());
+    }
+
+    // ── handle_agent_output tests ────────────────────────────────────
+
+    #[tokio::test]
+    async fn handle_agent_output_broadcasts_log_event() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+
+        let message = serde_json::json!({
+            "Head": { "Type": HEAD_AGENT },
+            "Body": {
+                "Type": BODY_AGENT_OUTPUT,
+                "AgentID": "CAFE0001",
+                "Callback": { "Output": "command output here" },
+            },
+        });
+
+        handle_agent_output(&message, &events).await.expect("agent output should succeed");
+
+        let event = rx.recv().await.expect("event should be broadcast");
+        match event {
+            OperatorMessage::TeamserverLog(msg) => {
+                assert!(msg.info.text.contains("CAFE0001"));
+                assert_eq!(msg.head.user, "service");
+                assert_eq!(msg.head.event, EventCode::Teamserver);
+            }
+            other => panic!("expected TeamserverLog, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_agent_output_missing_body_returns_error() {
+        let events = EventBus::default();
+
+        let message = serde_json::json!({
+            "Head": { "Type": HEAD_AGENT },
+        });
+
+        let err =
+            handle_agent_output(&message, &events).await.expect_err("should fail without Body");
+        assert!(matches!(err, ServiceBridgeError::MissingField(ref f) if f.contains("Body")));
+    }
+
+    #[tokio::test]
+    async fn handle_agent_output_missing_agent_id_uses_unknown() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+
+        let message = serde_json::json!({
+            "Head": { "Type": HEAD_AGENT },
+            "Body": {
+                "Type": BODY_AGENT_OUTPUT,
+            },
+        });
+
+        handle_agent_output(&message, &events).await.expect("should succeed with defaults");
+
+        let event = rx.recv().await.expect("event should be broadcast");
+        match event {
+            OperatorMessage::TeamserverLog(msg) => {
+                assert!(msg.info.text.contains("unknown"));
+            }
+            other => panic!("expected TeamserverLog, got: {other:?}"),
+        }
+    }
+
+    // ── handle_agent_message dispatch tests ──────────────────────────
+
+    #[tokio::test]
+    async fn handle_agent_message_dispatches_agent_register() {
+        let bridge = ServiceBridge::new(ServiceConfig {
+            endpoint: "test".to_owned(),
+            password: "pw".to_owned(),
+        });
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let registry = test_registry().await;
+
+        let message = serde_json::json!({
+            "Head": { "Type": HEAD_AGENT },
+            "Body": {
+                "Type": BODY_AGENT_REGISTER,
+                "AgentHeader": {
+                    "AgentID": "FF001122",
+                    "MagicValue": "0",
+                },
+                "RegisterInfo": {
+                    "Hostname": "DISPATCH-TEST",
+                    "Username": "user1",
+                },
+            },
+        });
+
+        let (mut server_ws, _client_ws) = ws_pair().await;
+
+        handle_agent_message(&message, &bridge, &events, &registry, &mut server_ws)
+            .await
+            .expect("dispatch to AgentRegister should succeed");
+
+        let agent = registry.get(0xFF00_1122).await.expect("agent should be registered");
+        assert_eq!(agent.hostname, "DISPATCH-TEST");
+
+        let event = rx.recv().await.expect("event should be broadcast");
+        assert!(matches!(event, OperatorMessage::AgentNew(_)));
+    }
+
+    #[tokio::test]
+    async fn handle_agent_message_dispatches_agent_response() {
+        let bridge = ServiceBridge::new(ServiceConfig {
+            endpoint: "test".to_owned(),
+            password: "pw".to_owned(),
+        });
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let registry = test_registry().await;
+
+        let message = serde_json::json!({
+            "Head": { "Type": HEAD_AGENT },
+            "Body": {
+                "Type": BODY_AGENT_RESPONSE,
+                "Agent": { "NameID": "DISPATCH01" },
+                "Response": "dGVzdA==",
+                "RandID": "dispatch-rand",
+            },
+        });
+
+        let (mut server_ws, _client_ws) = ws_pair().await;
+
+        handle_agent_message(&message, &bridge, &events, &registry, &mut server_ws)
+            .await
+            .expect("dispatch to AgentResponse should succeed");
+
+        let event = rx.recv().await.expect("event should be broadcast");
+        match event {
+            OperatorMessage::AgentResponse(msg) => {
+                assert_eq!(msg.info.demon_id, "DISPATCH01");
+                assert_eq!(msg.info.command_id, "dispatch-rand");
+            }
+            other => panic!("expected AgentResponse, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_agent_message_dispatches_agent_output() {
+        let bridge = ServiceBridge::new(ServiceConfig {
+            endpoint: "test".to_owned(),
+            password: "pw".to_owned(),
+        });
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+        let registry = test_registry().await;
+
+        let message = serde_json::json!({
+            "Head": { "Type": HEAD_AGENT },
+            "Body": {
+                "Type": BODY_AGENT_OUTPUT,
+                "AgentID": "OUTPUT01",
+                "Callback": { "Output": "hello" },
+            },
+        });
+
+        let (mut server_ws, _client_ws) = ws_pair().await;
+
+        handle_agent_message(&message, &bridge, &events, &registry, &mut server_ws)
+            .await
+            .expect("dispatch to AgentOutput should succeed");
+
+        let event = rx.recv().await.expect("event should be broadcast");
+        assert!(matches!(event, OperatorMessage::TeamserverLog(_)));
+    }
+
+    #[tokio::test]
+    async fn handle_agent_message_unknown_body_type_returns_ok() {
+        let bridge = ServiceBridge::new(ServiceConfig {
+            endpoint: "test".to_owned(),
+            password: "pw".to_owned(),
+        });
+        let events = EventBus::default();
+        let registry = test_registry().await;
+
+        let message = serde_json::json!({
+            "Head": { "Type": HEAD_AGENT },
+            "Body": {
+                "Type": "SomethingCompletelyUnknown",
+            },
+        });
+
+        let (mut server_ws, _client_ws) = ws_pair().await;
+
+        let result =
+            handle_agent_message(&message, &bridge, &events, &registry, &mut server_ws).await;
+        assert!(result.is_ok(), "unknown agent body type should be silently ignored");
+    }
 }

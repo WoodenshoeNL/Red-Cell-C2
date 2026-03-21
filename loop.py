@@ -133,7 +133,7 @@ def build_agent_cmd(agent: str, model: str) -> tuple:
     Claude and Codex read the prompt from stdin; Cursor takes it as a positional arg.
     """
     if agent == "claude":
-        cmd = ["claude", "-p", "--dangerously-skip-permissions", "--verbose"]
+        cmd = ["claude", "-p", "--dangerously-skip-permissions", "--output-format", "stream-json"]
         if model:
             cmd += ["--model", model]
         return cmd, True
@@ -161,8 +161,13 @@ def run_agent(
     """
     Run the agent with prompt_content. Streams output to terminal and log files.
     Returns (exit_code, full_output_text).
+
+    For claude (stream-json mode): raw JSON is written to log files; human-readable
+    tool/text events are printed to the terminal. The returned text is the extracted
+    final response from the result event.
     """
     cmd, uses_stdin = build_agent_cmd(agent, model)
+    is_stream_json = agent == "claude"
 
     if not uses_stdin:
         # Cursor: prompt is the final positional argument
@@ -192,20 +197,36 @@ def run_agent(
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         log_handles.append(open(extra_log_file, "w"))
 
-    output_lines = []
+    raw_lines = []
     try:
         for line in proc.stdout:
-            print(line, end="", flush=True)
+            # Always write raw line to log files
             for fh in log_handles:
                 fh.write(line)
                 fh.flush()
-            output_lines.append(line)
+            raw_lines.append(line)
+
+            if is_stream_json:
+                stripped = line.strip()
+                if stripped:
+                    try:
+                        event = json.loads(stripped)
+                        formatted = format_stream_event(event)
+                        if formatted is not None:
+                            print(formatted, flush=True)
+                    except json.JSONDecodeError:
+                        print(line, end="", flush=True)
+            else:
+                print(line, end="", flush=True)
     finally:
         for fh in log_handles:
             fh.close()
 
     proc.wait()
-    return proc.returncode, "".join(output_lines)
+
+    if is_stream_json:
+        return proc.returncode, extract_text_from_stream(raw_lines)
+    return proc.returncode, "".join(raw_lines)
 
 
 # ── Sleep with jitter ──────────────────────────────────────────────────────────
@@ -257,6 +278,80 @@ def extract_session_summary(output: str) -> list:
         if in_summary and stripped:
             result.append(stripped)
     return result
+
+
+def format_stream_event(event: dict) -> str | None:
+    """
+    Convert a claude stream-json event to a human-readable line.
+    Returns None for events that should be silently skipped.
+    """
+    t = event.get("type", "")
+
+    if t == "tool_use":
+        name = event.get("name", "?")
+        inp = event.get("input", {})
+        if name == "Read":
+            detail = inp.get("file_path", "?")
+        elif name == "Bash":
+            detail = inp.get("command", "?").strip().replace("\n", "; ")[:120]
+        elif name == "Grep":
+            detail = f"'{inp.get('pattern', '')}' in {inp.get('path', inp.get('directory', '.'))}"
+        elif name == "Glob":
+            detail = inp.get("pattern", "?")
+        elif name in ("Edit", "Write"):
+            detail = inp.get("file_path", "?")
+        elif name == "Agent":
+            detail = inp.get("description", inp.get("prompt", "?"))[:100]
+        else:
+            detail = str(inp)[:100]
+        return f"  [{name}] {detail}"
+
+    if t == "assistant":
+        texts = [
+            b.get("text", "")
+            for b in event.get("message", {}).get("content", [])
+            if b.get("type") == "text"
+        ]
+        combined = " ".join(texts).strip()
+        return combined if combined else None
+
+    if t == "result":
+        subtype = event.get("subtype", "unknown")
+        duration = event.get("duration_ms", 0) / 1000
+        cost = event.get("total_cost_usd", 0)
+        turns = event.get("num_turns", "?")
+        return f"  [result] {subtype} — {turns} turns, {duration:.0f}s, ${cost:.4f}"
+
+    return None  # skip system, tool_result, etc.
+
+
+def extract_text_from_stream(raw_lines: list) -> str:
+    """
+    Extract the final text response from a claude stream-json session.
+    Pulls from the 'result' event, falling back to concatenated assistant text blocks.
+    """
+    for line in reversed(raw_lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            event = json.loads(stripped)
+            if event.get("type") == "result":
+                return event.get("result", "")
+        except json.JSONDecodeError:
+            pass
+    # Fallback: collect assistant text blocks in order
+    texts = []
+    for line in raw_lines:
+        try:
+            event = json.loads(line.strip())
+            if event.get("type") == "assistant":
+                for block in event.get("message", {}).get("content", []):
+                    if block.get("type") == "text":
+                        texts.append(block.get("text", ""))
+        except json.JSONDecodeError:
+            pass
+    return "\n".join(texts)
 
 
 # ── Dev loop helpers ───────────────────────────────────────────────────────────

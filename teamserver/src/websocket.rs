@@ -3165,10 +3165,11 @@ mod tests {
     #[tokio::test]
     async fn websocket_broadcasts_operator_presence_changes() {
         let state = TestState::new().await;
+        // Login each socket immediately after connecting to avoid the 5-second
+        // unauthenticated-connection timeout firing under heavy parallel-test load.
         let (mut first, server) = spawn_server(state.clone()).await;
-        let (mut second, _) = spawn_server(state).await;
-
         login(&mut first, "operator", "password1234").await;
+        let (mut second, _) = spawn_server(state).await;
         login(&mut second, "analyst", "readonly").await;
 
         let joined = read_operator_message(&mut first).await;
@@ -3192,10 +3193,11 @@ mod tests {
     #[tokio::test]
     async fn websocket_broadcasts_chat_messages_to_other_operators() {
         let state = TestState::new().await;
+        // Login each socket immediately after connecting to avoid the 5-second
+        // unauthenticated-connection timeout firing under heavy parallel-test load.
         let (mut sender, server) = spawn_server(state.clone()).await;
-        let (mut observer, _) = spawn_server(state).await;
-
         login(&mut sender, "operator", "password1234").await;
+        let (mut observer, _) = spawn_server(state).await;
         login(&mut observer, "analyst", "readonly").await;
         let _presence = read_operator_message(&mut sender).await;
 
@@ -3463,10 +3465,11 @@ mod tests {
         let state = TestState::new().await;
         let registry = state.registry.clone();
         registry.insert(sample_agent(0xDEAD_BEEF)).await.expect("agent should insert");
+        // Login each socket immediately after connecting to avoid the 5-second
+        // unauthenticated-connection timeout firing under heavy parallel-test load.
         let (mut sender, server) = spawn_server(state.clone()).await;
-        let (mut observer, _) = spawn_server(state).await;
-
         login(&mut sender, "operator", "password1234").await;
+        let (mut observer, _) = spawn_server(state).await;
         login(&mut observer, "operator", "password1234").await;
         let snapshot = read_operator_message(&mut sender).await;
         assert!(matches!(snapshot, OperatorMessage::AgentNew(_)));
@@ -4145,10 +4148,12 @@ mod tests {
     async fn websocket_listener_commands_broadcast_and_persist_state() {
         let state = TestState::new().await;
         let listeners = state.listeners.clone();
+        // Login each socket immediately after connecting to avoid the 5-second
+        // unauthenticated-connection timeout firing while the other login round-trip
+        // is in flight under heavy parallel-test load.
         let (mut sender, server) = spawn_server(state.clone()).await;
-        let (mut observer, _) = spawn_server(state).await;
-
         login(&mut sender, "operator", "password1234").await;
+        let (mut observer, _) = spawn_server(state).await;
         login(&mut observer, "operator", "password1234").await;
 
         sender

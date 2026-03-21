@@ -5,4 +5,5 @@
 
 pub mod agent;
 pub mod listener;
+pub mod payload;
 pub mod status;

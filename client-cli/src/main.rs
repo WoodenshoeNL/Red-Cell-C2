@@ -379,20 +379,29 @@ pub enum ListenerCommands {
 pub enum PayloadCommands {
     /// Build a new payload.
     ///
+    /// Without --wait: submits the build job and returns a job_id immediately.
+    /// With --wait:    blocks until the build completes and returns payload metadata.
+    ///
     /// Examples:
-    ///   red-cell-cli payload build --listener http1 --os windows --arch x86_64
-    ///   red-cell-cli payload build --listener dns1  --os linux   --arch aarch64
+    ///   red-cell-cli payload build --listener http1 --arch x86_64 --format exe
+    ///   red-cell-cli payload build --listener dns1  --arch aarch64 --format bin --sleep 5 --wait
     #[command(verbatim_doc_comment)]
     Build {
-        /// Listener ID the payload connects back to
+        /// Listener name the payload connects back to
         #[arg(long)]
         listener: String,
-        /// Target OS (windows, linux, macos)
-        #[arg(long)]
-        os: String,
         /// Target architecture (x86_64, x86, aarch64)
         #[arg(long)]
         arch: String,
+        /// Output format (exe, dll, bin)
+        #[arg(long)]
+        format: String,
+        /// Agent sleep interval in seconds
+        #[arg(long)]
+        sleep: Option<u64>,
+        /// Block until the build finishes (polls for completion)
+        #[arg(long)]
+        wait: bool,
     },
 
     /// List previously built payloads.
@@ -405,14 +414,14 @@ pub enum PayloadCommands {
     /// Download a built payload to disk.
     ///
     /// Examples:
-    ///   red-cell-cli payload download <id> --out ./payload.exe
+    ///   red-cell-cli payload download <id> --dst ./payload.exe
     #[command(verbatim_doc_comment)]
     Download {
         /// Payload ID
         id: String,
-        /// Local output path
+        /// Local path to write the downloaded payload
         #[arg(long)]
-        out: String,
+        dst: String,
     },
 }
 
@@ -612,11 +621,10 @@ async fn dispatch(cli: Cli) -> i32 {
 
         Commands::Listener { action } => commands::listener::run(&api_client, &fmt, action).await,
 
+        Commands::Payload { action } => commands::payload::run(&api_client, &fmt, action).await,
+
         // Remaining commands are implemented in downstream issues.
-        Commands::Payload { .. }
-        | Commands::Operator { .. }
-        | Commands::Audit { .. }
-        | Commands::Session { .. } => {
+        Commands::Operator { .. } | Commands::Audit { .. } | Commands::Session { .. } => {
             let err = CliError::General("this subcommand is not yet implemented".to_owned());
             output::print_error(&err);
             err.exit_code()

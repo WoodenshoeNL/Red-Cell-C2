@@ -28,10 +28,18 @@ pub const EXIT_TIMEOUT: i32 = 5;
 
 /// Machine-readable error codes emitted on stderr.
 pub const ERROR_CODE_GENERAL: &str = "ERROR";
+/// Machine-readable error code for missing/unknown resource.
 pub const ERROR_CODE_NOT_FOUND: &str = "NOT_FOUND";
+/// Machine-readable error code for authentication/authorisation failure.
 pub const ERROR_CODE_AUTH_FAILURE: &str = "AUTH_FAILURE";
-pub const ERROR_CODE_SERVER_UNREACHABLE: &str = "SERVER_UNREACHABLE";
+/// Machine-readable error code for connectivity failure.
+pub const ERROR_CODE_UNREACHABLE: &str = "UNREACHABLE";
+/// Machine-readable error code for timeout.
 pub const ERROR_CODE_TIMEOUT: &str = "TIMEOUT";
+/// Machine-readable error code for invalid argument combination.
+pub const ERROR_CODE_INVALID_ARGS: &str = "INVALID_ARGS";
+/// Machine-readable error code for unexpected server-side errors.
+pub const ERROR_CODE_SERVER_ERROR: &str = "SERVER_ERROR";
 
 /// All errors that a CLI command can produce.
 #[derive(Debug, Error)]
@@ -52,6 +60,17 @@ pub enum CliError {
     #[error("timeout: {0}")]
     Timeout(String),
 
+    /// Invalid combination of flags or arguments supplied by the caller.
+    ///
+    /// Used by downstream command modules — not yet constructed in this crate.
+    #[allow(dead_code)]
+    #[error("invalid arguments: {0}")]
+    InvalidArgs(String),
+
+    /// An unexpected 5xx response was returned by the teamserver.
+    #[error("server error: {0}")]
+    ServerError(String),
+
     /// Configuration error (missing server URL, missing token, parse failure).
     #[error("configuration error: {0}")]
     Config(#[from] crate::config::ConfigError),
@@ -70,6 +89,8 @@ impl CliError {
             CliError::ServerUnreachable(_) => EXIT_SERVER_UNREACHABLE,
             CliError::NotFound(_) => EXIT_NOT_FOUND,
             CliError::Timeout(_) => EXIT_TIMEOUT,
+            CliError::InvalidArgs(_) => EXIT_GENERAL,
+            CliError::ServerError(_) => EXIT_GENERAL,
             CliError::Config(_) => EXIT_AUTH_FAILURE, // missing token → treat as auth failure
             CliError::General(_) => EXIT_GENERAL,
         }
@@ -80,9 +101,11 @@ impl CliError {
     pub fn error_code(&self) -> &'static str {
         match self {
             CliError::AuthFailure(_) => ERROR_CODE_AUTH_FAILURE,
-            CliError::ServerUnreachable(_) => ERROR_CODE_SERVER_UNREACHABLE,
+            CliError::ServerUnreachable(_) => ERROR_CODE_UNREACHABLE,
             CliError::NotFound(_) => ERROR_CODE_NOT_FOUND,
             CliError::Timeout(_) => ERROR_CODE_TIMEOUT,
+            CliError::InvalidArgs(_) => ERROR_CODE_INVALID_ARGS,
+            CliError::ServerError(_) => ERROR_CODE_SERVER_ERROR,
             CliError::Config(_) => ERROR_CODE_AUTH_FAILURE,
             CliError::General(_) => ERROR_CODE_GENERAL,
         }
@@ -104,7 +127,21 @@ mod tests {
     fn server_unreachable_has_correct_exit_code() {
         let err = CliError::ServerUnreachable("refused".to_owned());
         assert_eq!(err.exit_code(), EXIT_SERVER_UNREACHABLE);
-        assert_eq!(err.error_code(), ERROR_CODE_SERVER_UNREACHABLE);
+        assert_eq!(err.error_code(), ERROR_CODE_UNREACHABLE);
+    }
+
+    #[test]
+    fn invalid_args_exits_1_with_correct_code() {
+        let err = CliError::InvalidArgs("--foo and --bar are mutually exclusive".to_owned());
+        assert_eq!(err.exit_code(), EXIT_GENERAL);
+        assert_eq!(err.error_code(), ERROR_CODE_INVALID_ARGS);
+    }
+
+    #[test]
+    fn server_error_exits_1_with_correct_code() {
+        let err = CliError::ServerError("500 Internal Server Error".to_owned());
+        assert_eq!(err.exit_code(), EXIT_GENERAL);
+        assert_eq!(err.error_code(), ERROR_CODE_SERVER_ERROR);
     }
 
     #[test]

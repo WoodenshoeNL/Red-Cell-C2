@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 mod client;
@@ -8,6 +8,7 @@ mod error;
 mod output;
 
 use error::{CliError, EXIT_SUCCESS};
+use output::OutputFormat;
 
 /// Red Cell C2 command-line client.
 ///
@@ -51,15 +52,6 @@ pub struct Cli {
 
     #[command(subcommand)]
     pub command: Option<Commands>,
-}
-
-/// Output format for command results.
-#[derive(Debug, Clone, ValueEnum)]
-pub enum OutputFormat {
-    /// Structured JSON (machine-readable, default)
-    Json,
-    /// Human-readable text
-    Text,
 }
 
 /// Available top-level subcommands.
@@ -347,6 +339,9 @@ fn main() {
 // ── async dispatcher ─────────────────────────────────────────────────────────
 
 async fn dispatch(cli: Cli) -> i32 {
+    // Capture output format before partial moves.
+    let fmt = cli.output.clone();
+
     // Resolve configuration (CLI flags + env vars were already absorbed by
     // clap; this step adds the file-based fallbacks).
     let resolved = match config::resolve(cli.server, cli.token, cli.timeout) {
@@ -375,7 +370,7 @@ async fn dispatch(cli: Cli) -> i32 {
     match command {
         Commands::Status => match commands::status::run(&api_client).await {
             Ok(data) => {
-                output::print_success(&data);
+                output::print_success(&fmt, &data);
                 EXIT_SUCCESS
             }
             Err(e) => {

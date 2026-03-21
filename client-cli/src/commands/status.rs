@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::client::ApiClient;
 use crate::error::CliError;
+use crate::output::TextRender;
 
 // ── server response shapes ───────────────────────────────────────────────────
 
@@ -37,6 +38,23 @@ pub struct StatusData {
     pub agents: usize,
     /// Number of configured listeners.
     pub listeners: usize,
+}
+
+impl TextRender for StatusData {
+    fn render_text(&self) -> String {
+        use comfy_table::{Cell, ContentArrangement, Table};
+        let mut table = Table::new();
+        table.set_content_arrangement(ContentArrangement::Dynamic);
+        table.set_header([Cell::new("Field"), Cell::new("Value")]);
+        table.add_row([Cell::new("version"), Cell::new(&self.version)]);
+        table.add_row([
+            Cell::new("uptime_secs"),
+            Cell::new(self.uptime_secs.map_or_else(|| "unknown".to_owned(), |s| s.to_string())),
+        ]);
+        table.add_row([Cell::new("agents"), Cell::new(self.agents.to_string())]);
+        table.add_row([Cell::new("listeners"), Cell::new(self.listeners.to_string())]);
+        table.to_string()
+    }
 }
 
 // ── command handler ──────────────────────────────────────────────────────────

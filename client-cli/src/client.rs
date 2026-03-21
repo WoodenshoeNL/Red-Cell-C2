@@ -100,6 +100,10 @@ async fn map_response<T: DeserializeOwned>(
             .json::<T>()
             .await
             .map_err(|e| CliError::General(format!("failed to parse server response: {e}"))),
+        s if s.is_server_error() => {
+            let body = response.text().await.unwrap_or_else(|_| "(unreadable body)".to_owned());
+            Err(CliError::ServerError(format!("server returned {s}: {body}")))
+        }
         s => {
             let body = response.text().await.unwrap_or_else(|_| "(unreadable body)".to_owned());
             Err(CliError::General(format!("server returned {s}: {body}")))

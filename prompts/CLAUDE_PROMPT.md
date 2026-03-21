@@ -151,6 +151,13 @@ For each recently changed Rust file, check:
 - New protocol handling must have round-trip tests
 - Integration tests must be updated when agent checkin flow changes
 
+**client-cli compliance** (when touching `./client-cli`):
+- All stdout output must be valid JSON (`{"ok": true, "data": ...}` / `{"ok": false, "error": ...}`)
+- No interactive prompts — everything via flags or env vars
+- Exit codes must match the spec in AGENTS.md (0/1/2/3/4/5)
+- No egui or GUI dependencies
+- `--help` on every subcommand must include at least one example
+
 ---
 
 ## Step 7 — Create Issues for Problems Found

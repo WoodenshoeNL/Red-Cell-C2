@@ -17,8 +17,8 @@ Rewrite of the [Havoc C2 framework](./src/Havoc) in Rust — teamserver and oper
 
 | Concern | Decision |
 |---|---|
-| **Repo structure** | Cargo workspace: `./teamserver`, `./client`, `./common` at repo root. Agent source in `./agent/`. Profiles in `./profiles/`. |
-| **Binaries** | `red-cell` (teamserver), `red-cell-client` (operator GUI) |
+| **Repo structure** | Cargo workspace: `./teamserver`, `./client`, `./client-cli`, `./common` at repo root. Agent source in `./agent/`. Profiles in `./profiles/`. |
+| **Binaries** | `red-cell` (teamserver), `red-cell-client` (operator GUI), `red-cell-cli` (AI-agent CLI) |
 | **Rust edition** | 2024, latest stable |
 | **Teamserver framework** | Axum + Tokio |
 | **Database** | SQLite via sqlx |
@@ -29,6 +29,98 @@ Rewrite of the [Havoc C2 framework](./src/Havoc) in Rust — teamserver and oper
 | **Plugin system** | Python via PyO3 (client + teamserver) |
 | **New features** | RBAC, REST API, DNS listener, structured audit logging |
 | **Testing** | Full suite: unit + integration (mock Demon agent) + E2E |
+
+## client-cli Design Spec (`red-cell-cli`)
+
+An AI-agent-optimized CLI client that lives alongside the GUI client. Every design decision
+optimises for machine consumption, not human aesthetics.
+
+### Non-negotiable rules
+
+| Rule | Rationale |
+|---|---|
+| JSON on stdout by default | Agents parse output — no guessing at table formats |
+| Structured errors on stderr | Agents can redirect stdout/stderr independently |
+| Zero interactive prompts | Dev loops cannot respond to prompts; everything via flags/env vars |
+| Exit codes are documented and stable | Agents branch on exit code, not string matching |
+| `--help` everywhere includes examples | Agents discover usage without docs |
+| Bare invocation prints all commands | First thing an agent tries when exploring a new tool |
+
+### Output contract
+
+```
+stdout (success): {"ok": true, "data": <payload>}
+stderr (failure): {"ok": false, "error": "ERROR_CODE", "message": "human text"}
+```
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | General / argument error |
+| 2 | Not found (agent/listener/operator does not exist) |
+| 3 | Auth failure (bad token, insufficient role) |
+| 4 | Server unreachable |
+| 5 | Timeout (--timeout exceeded) |
+
+### Auth resolution order (first wins)
+
+1. `--server` / `--token` CLI flags
+2. `RC_SERVER` / `RC_TOKEN` environment variables
+3. `.red-cell-cli.toml` in current or any parent directory
+4. `~/.config/red-cell-cli/config.toml`
+
+### Command surface
+
+```
+red-cell-cli [--server URL] [--token TOKEN] [--output json|text] [--timeout N]
+
+  status                              Server health check
+  agent list                          List all active agents
+  agent show <id>                     Full agent details
+  agent exec <id> --cmd <cmd>         Execute command [--wait] [--timeout N]
+  agent output <id>                   Fetch pending output [--watch to stream]
+  agent kill <id>                     Terminate agent [--wait]
+  agent upload <id> --src --dst       Upload file to agent
+  agent download <id> --src --dst     Download file from agent
+  listener list                       List all listeners
+  listener show <name>                Show listener config + status
+  listener create --name --type ...   Create listener (http/dns/smb/external)
+  listener start/stop/delete <name>   Lifecycle management
+  operator list/create/delete         RBAC operator management
+  payload build/list/download         Payload building
+  log list/tail                       Audit log (--watch to stream)
+  session [--agent <id>]              Persistent JSON pipe (see below)
+```
+
+### Session mode
+
+For long-running agent interactions, `session` keeps a single WebSocket connection open and
+reads newline-delimited JSON from stdin, writing responses to stdout:
+
+```json
+→ {"cmd": "agent.exec", "id": "abc123", "command": "whoami", "wait": true}
+← {"ok": true, "cmd": "agent.exec", "data": {"output": "DOMAIN\\user", "exit_code": 0}}
+→ {"cmd": "ping"}
+← {"ok": true, "data": {"pong": true}}
+→ {"cmd": "exit"}
+```
+
+Commands mirror the CLI surface (`agent.list`, `agent.exec`, `listener.list`, etc.).
+EOF on stdin or `{"cmd": "exit"}` terminates cleanly.
+
+### Architecture compliance (QA checklist)
+
+- Binary crate in `./client-cli/`, workspace member
+- No egui / GUI dependencies
+- Shares code with `./common` — never duplicates teamserver types
+- All async via Tokio (no async-std)
+- Errors via `thiserror` (not `anyhow` in library code)
+- No `unwrap()`/`expect()` in non-test code
+- Every public function has a unit test
+
+---
 
 The original Havoc source lives in `./src/Havoc` as reference only — **do not modify it, do not stage it, do not delete it**. It is committed to git for cross-machine sync, but it is **read-only**. Agents must never edit, create, or delete any file under `./src/`. It is there purely so the code can be read as a reference implementation.
 

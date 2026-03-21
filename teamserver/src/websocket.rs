@@ -134,7 +134,7 @@ impl LoginRateLimiter {
     }
 
     /// Return `true` if the given IP has not exceeded the failed-attempt threshold.
-    async fn is_allowed(&self, ip: IpAddr) -> bool {
+    pub(crate) async fn is_allowed(&self, ip: IpAddr) -> bool {
         let mut windows = self.windows.lock().await;
         let Some(window) = windows.get_mut(&ip) else {
             return true;
@@ -149,7 +149,7 @@ impl LoginRateLimiter {
     }
 
     /// Record a failed login attempt from the given IP.
-    async fn record_failure(&self, ip: IpAddr) {
+    pub(crate) async fn record_failure(&self, ip: IpAddr) {
         let mut windows = self.windows.lock().await;
         let now = Instant::now();
 
@@ -169,7 +169,7 @@ impl LoginRateLimiter {
     }
 
     /// Clear the failure counter for an IP after a successful login.
-    async fn record_success(&self, ip: IpAddr) {
+    pub(crate) async fn record_success(&self, ip: IpAddr) {
         self.windows.lock().await.remove(&ip);
     }
 

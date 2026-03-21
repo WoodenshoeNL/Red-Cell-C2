@@ -17,12 +17,14 @@
 //! - `Agent` — agent task, response, output, registration, and build messages
 //! - `Listener` — listener management (add, start, ExternalC2)
 
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     Router,
     extract::{
-        FromRef, State,
+        ConnectInfo, FromRef, State,
         ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
     },
     response::IntoResponse,
@@ -45,7 +47,7 @@ use uuid::Uuid;
 
 use crate::agent_events::agent_new_event;
 use crate::database::TeamserverError;
-use crate::{AgentRegistry, EventBus, PivotInfo};
+use crate::{AgentRegistry, EventBus, LoginRateLimiter, PivotInfo};
 
 // ── Constants ────────────────────────────────────────────────────────
 
@@ -65,6 +67,9 @@ const BODY_AGENT_OUTPUT: &str = "AgentOutput";
 const BODY_LISTENER_ADD: &str = "ListenerAdd";
 const BODY_LISTENER_START: &str = "ListenerStart";
 
+/// Delay applied before responding to a failed service auth attempt.
+const FAILED_AUTH_DELAY: Duration = Duration::from_secs(2);
+
 // ── Error types ──────────────────────────────────────────────────────
 
 /// Errors produced by the service bridge.
@@ -73,6 +78,10 @@ pub enum ServiceBridgeError {
     /// Authentication failed.
     #[error("service client authentication failed")]
     AuthenticationFailed,
+
+    /// Too many failed authentication attempts from this IP.
+    #[error("service client rate limited")]
+    RateLimited,
 
     /// WebSocket send/receive failure.
     #[error("websocket error: {0}")]
@@ -205,15 +214,20 @@ pub fn service_routes(bridge: &ServiceBridge) -> Router<crate::TeamserverState> 
 #[instrument(skip(state, websocket))]
 async fn service_websocket_handler(
     State(state): State<crate::TeamserverState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     websocket: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    websocket.on_upgrade(move |socket| handle_service_socket(state, socket))
+    websocket.on_upgrade(move |socket| handle_service_socket(state, socket, addr.ip()))
 }
 
 // ── WebSocket connection handler ─────────────────────────────────────
 
 /// Handle a single service client WebSocket connection.
-async fn handle_service_socket(state: crate::TeamserverState, mut socket: WebSocket) {
+async fn handle_service_socket(
+    state: crate::TeamserverState,
+    mut socket: WebSocket,
+    client_ip: IpAddr,
+) {
     let Some(ref bridge) = state.service_bridge else {
         warn!("service bridge handler invoked but no service bridge configured");
         return;
@@ -226,15 +240,18 @@ async fn handle_service_socket(state: crate::TeamserverState, mut socket: WebSoc
         return;
     }
 
-    // Authenticate the client.
-    let client_id = match authenticate(&mut socket, &bridge.password_hash).await {
-        Ok(id) => id,
-        Err(e) => {
-            warn!(%e, "service client authentication failed");
-            let _ = socket.send(WsMessage::Close(None)).await;
-            return;
-        }
-    };
+    let rate_limiter = &state.login_rate_limiter;
+
+    // Authenticate the client (with rate limiting).
+    let client_id =
+        match authenticate(&mut socket, &bridge.password_hash, rate_limiter, client_ip).await {
+            Ok(id) => id,
+            Err(e) => {
+                warn!(%e, %client_ip, "service client authentication failed");
+                let _ = socket.send(WsMessage::Close(None)).await;
+                return;
+            }
+        };
 
     info!(%client_id, "service client authenticated");
     bridge.add_client(client_id).await;
@@ -304,10 +321,19 @@ async fn handle_service_socket(state: crate::TeamserverState, mut socket: WebSoc
 /// Responds with: `{"Head":{"Type":"Register"},"Body":{"Success":true/false}}`
 ///
 /// `server_hash` is the pre-computed SHA3-256 hex digest of the server password.
+/// Rate limiting is enforced per source IP using the shared [`LoginRateLimiter`].
 async fn authenticate(
     socket: &mut WebSocket,
     server_hash: &str,
+    rate_limiter: &LoginRateLimiter,
+    client_ip: IpAddr,
 ) -> Result<Uuid, ServiceBridgeError> {
+    // Check rate limit before processing the attempt.
+    if !rate_limiter.is_allowed(client_ip).await {
+        warn!(%client_ip, "service auth rate limited");
+        return Err(ServiceBridgeError::RateLimited);
+    }
+
     let message = match socket.recv().await {
         Some(Ok(WsMessage::Text(text))) => text,
         _ => return Err(ServiceBridgeError::AuthenticationFailed),
@@ -342,7 +368,14 @@ async fn authenticate(
         .await
         .map_err(ServiceBridgeError::WebSocket)?;
 
-    if success { Ok(Uuid::new_v4()) } else { Err(ServiceBridgeError::AuthenticationFailed) }
+    if success {
+        rate_limiter.record_success(client_ip).await;
+        Ok(Uuid::new_v4())
+    } else {
+        tokio::time::sleep(FAILED_AUTH_DELAY).await;
+        rate_limiter.record_failure(client_ip).await;
+        Err(ServiceBridgeError::AuthenticationFailed)
+    }
 }
 
 // ── Message dispatch ─────────────────────────────────────────────────
@@ -1760,8 +1793,11 @@ mod tests {
 
         let (mut server_ws, mut client_ws) = ws_pair().await;
 
-        let auth_handle =
-            tokio::spawn(async move { authenticate(&mut server_ws, &server_hash).await });
+        let auth_handle = tokio::spawn(async move {
+            let rl = LoginRateLimiter::new();
+            let ip: IpAddr = "127.0.0.1".parse().expect("valid IP");
+            authenticate(&mut server_ws, &server_hash, &rl, ip).await
+        });
 
         let register_msg = serde_json::json!({
             "Head": { "Type": "Register" },
@@ -1783,8 +1819,11 @@ mod tests {
 
         let (mut server_ws, mut client_ws) = ws_pair().await;
 
-        let auth_handle =
-            tokio::spawn(async move { authenticate(&mut server_ws, &server_hash).await });
+        let auth_handle = tokio::spawn(async move {
+            let rl = LoginRateLimiter::new();
+            let ip: IpAddr = "127.0.0.1".parse().expect("valid IP");
+            authenticate(&mut server_ws, &server_hash, &rl, ip).await
+        });
 
         let register_msg = serde_json::json!({
             "Head": { "Type": "Register" },
@@ -1813,8 +1852,11 @@ mod tests {
 
         let (mut server_ws, mut client_ws) = ws_pair().await;
 
-        let auth_handle =
-            tokio::spawn(async move { authenticate(&mut server_ws, &server_hash).await });
+        let auth_handle = tokio::spawn(async move {
+            let rl = LoginRateLimiter::new();
+            let ip: IpAddr = "127.0.0.1".parse().expect("valid IP");
+            authenticate(&mut server_ws, &server_hash, &rl, ip).await
+        });
 
         client_send(&mut client_ws, "this is not json!!!").await;
 
@@ -1832,8 +1874,11 @@ mod tests {
 
         let (mut server_ws, mut client_ws) = ws_pair().await;
 
-        let auth_handle =
-            tokio::spawn(async move { authenticate(&mut server_ws, &server_hash).await });
+        let auth_handle = tokio::spawn(async move {
+            let rl = LoginRateLimiter::new();
+            let ip: IpAddr = "127.0.0.1".parse().expect("valid IP");
+            authenticate(&mut server_ws, &server_hash, &rl, ip).await
+        });
 
         let message = serde_json::json!({
             "Head": { "Type": "Agent" },
@@ -1855,8 +1900,11 @@ mod tests {
 
         let (mut server_ws, mut client_ws) = ws_pair().await;
 
-        let auth_handle =
-            tokio::spawn(async move { authenticate(&mut server_ws, &server_hash).await });
+        let auth_handle = tokio::spawn(async move {
+            let rl = LoginRateLimiter::new();
+            let ip: IpAddr = "127.0.0.1".parse().expect("valid IP");
+            authenticate(&mut server_ws, &server_hash, &rl, ip).await
+        });
 
         let message = serde_json::json!({
             "Head": { "Type": "Register" },
@@ -1882,8 +1930,11 @@ mod tests {
 
         let (mut server_ws, mut client_ws) = ws_pair().await;
 
-        let auth_handle =
-            tokio::spawn(async move { authenticate(&mut server_ws, &server_hash).await });
+        let auth_handle = tokio::spawn(async move {
+            let rl = LoginRateLimiter::new();
+            let ip: IpAddr = "127.0.0.1".parse().expect("valid IP");
+            authenticate(&mut server_ws, &server_hash, &rl, ip).await
+        });
 
         let message = serde_json::json!({
             "Head": { "Type": "Register" },
@@ -2090,5 +2141,63 @@ mod tests {
         let result =
             handle_agent_message(&message, &bridge, &events, &registry, &mut server_ws).await;
         assert!(result.is_ok(), "unknown agent body type should be silently ignored");
+    }
+
+    #[tokio::test]
+    async fn authenticate_rate_limits_after_max_failures() {
+        let server_hash = hash_password_sha3("correct-pw");
+        let rate_limiter = LoginRateLimiter::new();
+        let ip: IpAddr = "10.0.0.99".parse().expect("valid IP");
+
+        // Exhaust the rate limiter for this IP (5 failures).
+        for _ in 0..5 {
+            rate_limiter.record_failure(ip).await;
+        }
+
+        // The next attempt should be rate-limited without even reading a message.
+        let (mut server_ws, _client_ws) = ws_pair().await;
+        let result = authenticate(&mut server_ws, &server_hash, &rate_limiter, ip).await;
+        assert!(result.is_err(), "should be rate limited");
+        assert!(
+            matches!(result.unwrap_err(), ServiceBridgeError::RateLimited),
+            "expected RateLimited error"
+        );
+    }
+
+    #[tokio::test]
+    async fn authenticate_allows_different_ip_when_one_is_limited() {
+        let server_hash = hash_password_sha3("correct-pw");
+        let rate_limiter = LoginRateLimiter::new();
+        let blocked_ip: IpAddr = "10.0.0.100".parse().expect("valid IP");
+        let allowed_ip: IpAddr = "10.0.0.101".parse().expect("valid IP");
+
+        // Exhaust the rate limiter for blocked_ip.
+        for _ in 0..5 {
+            rate_limiter.record_failure(blocked_ip).await;
+        }
+
+        // blocked_ip should be rejected.
+        let (mut server_ws, _client_ws) = ws_pair().await;
+        let result = authenticate(&mut server_ws, &server_hash, &rate_limiter, blocked_ip).await;
+        assert!(matches!(result.unwrap_err(), ServiceBridgeError::RateLimited));
+
+        // allowed_ip should still work (correct password).
+        let (mut server_ws2, mut client_ws2) = ws_pair().await;
+        let rl = rate_limiter.clone();
+        let hash = server_hash.clone();
+        let auth_handle =
+            tokio::spawn(
+                async move { authenticate(&mut server_ws2, &hash, &rl, allowed_ip).await },
+            );
+
+        let msg = serde_json::json!({
+            "Head": { "Type": "Register" },
+            "Body": { "Password": "correct-pw" },
+        });
+        client_send(&mut client_ws2, &msg.to_string()).await;
+        let _ = client_recv(&mut client_ws2).await;
+
+        let result = auth_handle.await.expect("join");
+        assert!(result.is_ok(), "unblocked IP should authenticate successfully");
     }
 }

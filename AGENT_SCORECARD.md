@@ -10,11 +10,11 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 670 | 212 | 31 |
-| Bugs filed against | 73 | 34 | 9 |
+| Bugs filed against | 75 | 34 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.16 | 0.29 |
 | Quality score | 89% | 84% | 71% |
 
-*Bug rates: Claude 73/670=0.11, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 75/670=0.11, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -31,8 +31,8 @@ Each loop run updates the running totals and appends a review entry.
 | Test infrastructure / flakiness | 11 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
-| Correctness / pagination | 24 | 7 | 1 |
-| Workflow / close-hygiene | 15 | 0 | 0 |
+| Correctness / pagination | 25 | 7 | 1 |
+| Workflow / close-hygiene | 16 | 0 | 0 |
 | Code reuse / duplication | 6 | 0 | 0 |
 
 ---
@@ -3222,3 +3222,16 @@ Build: cargo check passed (committed code), clippy passed -D warnings on committ
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: cargo check passed, clippy passed -D warnings (0 warnings), 116/116 client-cli tests pass (operator.rs not compiled — acchp). Dev agent claiming ywkih at session end.
+
+### Arch Review — 2026-03-21 07:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 2 | correctness, workflow/close-hygiene | 9snjs (P2): ApiClient::put() method missing from client.rs — operator commit 17124c87 claimed "Also adds ApiClient::put()" but only added operator.rs; the put() method with JSON body was never implemented. Blocks operator set-role when module is wired up. wonha (P3): operator.rs VALID_ROLES uses "viewer" but server's OperatorRole::Analyst serializes as "analyst" — sending role="viewer" would get a 422 from the server. Both issues are latent (operator.rs is currently orphaned per acchp). |
+| Codex | 0 | — | No activity; no code to review. |
+| Cursor | 0 | — | No activity; no code to review. |
+
+Overall codebase health: **on track**
+Biggest blindspot: The operator subcommand cluster (commit 17124c87) — the implementation file was committed but the supporting infrastructure (ApiClient::put, mod.rs entry, main.rs dispatch) was not. Three of four required pieces are missing. If someone attempts to use `operator set-role`, it would fail even after fixing the wiring. The existing red-cell-c2-acchp bug partially covers this but misses the missing put() method and the wrong role name.
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (0 warnings), `cargo test` — common 282+6 passed, cli 116 passed (operator.rs orphaned, 26 tests not compiled), teamserver unit tests observed passing before timeout.

@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 667 | 212 | 31 |
-| Bugs filed against | 70 | 34 | 9 |
+| Tasks closed | 670 | 212 | 31 |
+| Bugs filed against | 73 | 34 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.16 | 0.29 |
 | Quality score | 89% | 84% | 71% |
 
-*Bug rates: Claude 70/667=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 73/670=0.11, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -26,13 +26,13 @@ Each loop run updates the running totals and appends a review entry.
 | Protocol errors | 8 | 27 | 3 |
 | Security issues | 29 | 36 | 0 |
 | Architecture drift | 6 | 21 | 0 |
-| Memory / resource leaks | 3 | 10 | 1 |
+| Memory / resource leaks | 4 | 10 | 1 |
 | Startup / lifecycle regressions | 1 | 8 | 0 |
-| Test infrastructure / flakiness | 10 | 0 | 0 |
+| Test infrastructure / flakiness | 11 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
 | Correctness / pagination | 24 | 7 | 1 |
-| Workflow / close-hygiene | 14 | 0 | 0 |
+| Workflow / close-hygiene | 15 | 0 | 0 |
 | Code reuse / duplication | 6 | 0 | 0 |
 
 ---
@@ -3212,3 +3212,13 @@ Build: cargo check passed, clippy passed (0 warnings), cargo test not run (pg5a1
 Build: cargo check passed (committed code), clippy passed -D warnings on committed code (0 warnings), 86/86 client-cli unit tests passed. Active WIP uncommitted in working tree (listener.rs + client.rs additions) by aj92n dev agent — WIP has dead_code clippy warning for put_empty/delete_no_body which will resolve when listener commands use them.
 
 *Addendum — aj92n committed during review (67f03093..c0d5add5):* Claude closed aj92n (listener commands — list, show, create, start, stop, delete; 30 new unit tests; idempotent start/stop via 409 detection; clippy clean). Scorecard totals updated to include this task (+1 Claude task closed = 667 total). No new bugs found in listener code. Tables updated below.
+
+### QA Review — 2026-03-21 — c0d5add5..f07b6b33
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 3 | Closed: 2ayp0 (payload subcommands — list, build --wait polling, download; 15 unit tests), qq8q0 (self-documenting help — Environment/Examples sections, help subcommand, verbatim_doc_comment, log rename, 14 new tests; 116/116 pass), od22p (operator RBAC subcommands — list, create, delete, set-role; ApiClient::put(); 26 unit tests). Bugs filed: r0qpf (P3, memory — payload download() uses blocking std::fs I/O in async, same pattern as 8a1xg in agent.rs), 179vx (P3, test infra — build validation tests duplicate production match logic inline; change to build() wouldn't be caught), acchp (P2, close-hygiene — operator.rs committed but pub mod operator; missing from mod.rs and dispatch not wired in main.rs; 26 tests silently not run; operator commands unreachable). |
+| Codex | 0 | 0 | One test-coverage chore commit filed 2 new test gap issues. No tasks closed. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed -D warnings (0 warnings), 116/116 client-cli tests pass (operator.rs not compiled — acchp). Dev agent claiming ywkih at session end.

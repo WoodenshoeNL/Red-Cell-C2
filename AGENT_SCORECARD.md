@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 670 | 212 | 31 |
-| Bugs filed against | 75 | 34 | 9 |
-| Bug rate (bugs/task) | 0.11 | 0.16 | 0.29 |
-| Quality score | 89% | 84% | 71% |
+| Tasks closed | 672 | 212 | 31 |
+| Bugs filed against | 78 | 34 | 9 |
+| Bug rate (bugs/task) | 0.12 | 0.16 | 0.29 |
+| Quality score | 88% | 84% | 71% |
 
-*Bug rates: Claude 75/670=0.11, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 78/672=0.12, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -31,9 +31,9 @@ Each loop run updates the running totals and appends a review entry.
 | Test infrastructure / flakiness | 11 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
-| Correctness / pagination | 25 | 7 | 1 |
+| Correctness / pagination | 26 | 7 | 1 |
 | Workflow / close-hygiene | 16 | 0 | 0 |
-| Code reuse / duplication | 6 | 0 | 0 |
+| Code reuse / duplication | 7 | 0 | 0 |
 
 ---
 
@@ -3235,3 +3235,13 @@ Overall codebase health: **on track**
 Biggest blindspot: The operator subcommand cluster (commit 17124c87) — the implementation file was committed but the supporting infrastructure (ApiClient::put, mod.rs entry, main.rs dispatch) was not. Three of four required pieces are missing. If someone attempts to use `operator set-role`, it would fail even after fixing the wiring. The existing red-cell-c2-acchp bug partially covers this but misses the missing put() method and the wrong role name.
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (0 warnings), `cargo test` — common 282+6 passed, cli 116 passed (operator.rs orphaned, 26 tests not compiled), teamserver unit tests observed passing before timeout.
+
+### QA Review — 2026-03-22 — 9977c164..b3549c38
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 3 | Closed: ywkih (audit log — log list with --limit/--since/--operator/--agent/--action filters, log tail --follow streaming; 13 unit tests), ijk31 (session mode — persistent newline-delimited JSON pipe; ping/exit/agent.*/listener.* commands, --agent default id, Ctrl-C/EOF shutdown; 18 unit tests; 146/146 tests pass). Bugs filed: vmxuu (P2, correctness — tail_follow() uses entries.last() as cursor instead of entries.first(); entries are newest-first so oldest timestamp is used, causing all-but-oldest to re-emit on every poll), 6afhr (P3, correctness — session agent.kill with wait=true ignores msg.timeout field, always uses hardcoded 60s unlike exec() which reads timeout), s28a6 (P3, code-reuse — session.rs privately re-defines RawAgent/JobStatus/OutputEntry already in agent.rs; any schema change requires dual updates). |
+| Codex | 0 | 0 | One test-coverage chore commit (7d3a045a): scanned files 32-43, filed 3 new issues (x57pl P2 queue_agent_task QueueFull not mapped, 77zht P3 kill_agent audit tests, 80tvo P4 list_agents dead-agent visibility). No tasks closed. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (0 warnings), `cargo test -p red-cell-cli` — 146/146 passed. Teamserver tests still running at review close.

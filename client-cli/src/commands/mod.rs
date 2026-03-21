@@ -7,4 +7,5 @@ pub mod agent;
 pub mod audit;
 pub mod listener;
 pub mod payload;
+pub mod session;
 pub mod status;

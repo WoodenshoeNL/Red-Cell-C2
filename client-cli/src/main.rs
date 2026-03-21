@@ -133,15 +133,24 @@ pub enum Commands {
         action: AuditCommands,
     },
 
-    /// Start a persistent JSON-pipe session with an agent.
+    /// Start a persistent JSON-pipe session for long-running agent interactions.
+    ///
+    /// Reads newline-delimited JSON commands from stdin and writes JSON
+    /// responses to stdout.  Keeps a single authenticated connection open so
+    /// re-auth overhead is paid only once.
+    ///
+    /// If --agent is given, commands that require an agent ID will use it as
+    /// the default when "id" is not present in the JSON message.
     ///
     /// Examples:
+    ///   red-cell-cli session
     ///   red-cell-cli session --agent abc123
+    ///   echo '{"cmd":"ping"}' | red-cell-cli session
     #[command(verbatim_doc_comment)]
     Session {
-        /// Agent ID to open a session with
+        /// Default agent ID (used when a command does not include "id")
         #[arg(long)]
-        agent: String,
+        agent: Option<String>,
     },
 
     /// Show help for a subcommand (alias: `<command> --help`).
@@ -640,8 +649,10 @@ async fn dispatch(cli: Cli) -> i32 {
 
         Commands::Audit { action } => commands::audit::run(&api_client, &fmt, action).await,
 
+        Commands::Session { agent } => commands::session::run(&api_client, agent.as_deref()).await,
+
         // Remaining commands are implemented in downstream issues.
-        Commands::Operator { .. } | Commands::Session { .. } => {
+        Commands::Operator { .. } => {
             let err = CliError::General("this subcommand is not yet implemented".to_owned());
             output::print_error(&err);
             err.exit_code()

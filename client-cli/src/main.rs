@@ -486,6 +486,7 @@ pub enum AuditCommands {
     ///   red-cell-cli log list
     ///   red-cell-cli log list --operator alice --limit 50
     ///   red-cell-cli log list --action exec
+    ///   red-cell-cli log list --since 2026-03-21T00:00:00Z --agent abc123
     #[command(verbatim_doc_comment)]
     List {
         /// Filter by operator username
@@ -494,6 +495,12 @@ pub enum AuditCommands {
         /// Filter by action type
         #[arg(long)]
         action: Option<String>,
+        /// Filter by agent ID
+        #[arg(long)]
+        agent: Option<String>,
+        /// Only return entries at or after this ISO 8601 UTC timestamp
+        #[arg(long)]
+        since: Option<String>,
         /// Maximum entries to return
         #[arg(long, default_value = "100")]
         limit: u32,
@@ -501,10 +508,18 @@ pub enum AuditCommands {
 
     /// Stream new audit log entries as they arrive.
     ///
+    /// Prints the last 20 entries.  With --follow, streams new entries as
+    /// JSON lines until Ctrl-C.
+    ///
     /// Examples:
     ///   red-cell-cli log tail
+    ///   red-cell-cli log tail --follow
     #[command(verbatim_doc_comment)]
-    Tail,
+    Tail {
+        /// Stream new entries as they arrive (prints JSON lines until Ctrl-C)
+        #[arg(long)]
+        follow: bool,
+    },
 }
 
 // ── help handler ──────────────────────────────────────────────────────────────
@@ -623,8 +638,10 @@ async fn dispatch(cli: Cli) -> i32 {
 
         Commands::Payload { action } => commands::payload::run(&api_client, &fmt, action).await,
 
+        Commands::Audit { action } => commands::audit::run(&api_client, &fmt, action).await,
+
         // Remaining commands are implemented in downstream issues.
-        Commands::Operator { .. } | Commands::Audit { .. } | Commands::Session { .. } => {
+        Commands::Operator { .. } | Commands::Session { .. } => {
             let err = CliError::General("this subcommand is not yet implemented".to_owned());
             output::print_error(&err);
             err.exit_code()

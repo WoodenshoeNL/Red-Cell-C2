@@ -4,6 +4,7 @@
 //! downstream issues are implemented.
 
 pub mod agent;
+pub mod audit;
 pub mod listener;
 pub mod payload;
 pub mod status;

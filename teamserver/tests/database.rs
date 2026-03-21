@@ -15,6 +15,7 @@ use red_cell_common::{
 use serde_json::json;
 use sqlx::sqlite::SqliteConnectOptions;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tempfile::TempDir;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -2732,6 +2733,409 @@ async fn session_activity_combined_activity_filter_with_pagination() -> Result<(
 
     assert_eq!(page.total, 3);
     assert!(page.items.is_empty());
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Failure injection tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn operations_after_pool_close_return_connection_error() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let agents = database.agents();
+
+    // Seed one agent so we know the schema is valid.
+    agents.create(&sample_agent(0xCE00_0001)).await?;
+
+    // Close the pool — simulates connection loss.
+    database.close().await;
+
+    // Every subsequent operation should fail with a pool/connection error.
+    let create_err = agents
+        .create(&sample_agent(0xCE00_0002))
+        .await
+        .expect_err("create after pool close should fail");
+    assert!(
+        matches!(create_err, TeamserverError::Database(_)),
+        "expected Database error after pool close, got: {create_err:?}"
+    );
+
+    let list_err = agents.list().await.expect_err("list after pool close should fail");
+    assert!(matches!(list_err, TeamserverError::Database(_)));
+
+    let get_err = agents.get(0xCE00_0001).await.expect_err("get after pool close should fail");
+    assert!(matches!(get_err, TeamserverError::Database(_)));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn loot_operations_after_pool_close_return_connection_error() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let agents = database.agents();
+    let loot = database.loot();
+
+    agents.create(&sample_agent(0xCE00_0010)).await?;
+    let record = LootRecord {
+        id: None,
+        agent_id: 0xCE00_0010,
+        kind: "credential".to_owned(),
+        name: "test.dmp".to_owned(),
+        file_path: None,
+        size_bytes: Some(16),
+        captured_at: "2026-03-20T12:00:00Z".to_owned(),
+        data: Some(vec![0xAB]),
+        metadata: None,
+    };
+
+    loot.create(&record).await?;
+    database.close().await;
+
+    let err = loot.create(&record).await.expect_err("loot create after close should fail");
+    assert!(matches!(err, TeamserverError::Database(_)));
+
+    let err = loot.list().await.expect_err("loot list after close should fail");
+    assert!(matches!(err, TeamserverError::Database(_)));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn listener_operations_after_pool_close_return_connection_error()
+-> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let listeners = database.listeners();
+
+    listeners.create(&sample_listener()).await?;
+    database.close().await;
+
+    let err = listeners.list().await.expect_err("listener list after close should fail");
+    assert!(matches!(err, TeamserverError::Database(_)));
+
+    let err = listeners
+        .create(&sample_listener())
+        .await
+        .expect_err("listener create after close should fail");
+    assert!(matches!(err, TeamserverError::Database(_)));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_duplicate_primary_key_returns_constraint_error() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let agents = database.agents();
+
+    agents.create(&sample_agent(0xCE00_0020)).await?;
+
+    let error = agents
+        .create(&sample_agent(0xCE00_0020))
+        .await
+        .expect_err("duplicate agent_id insert should fail");
+
+    assert!(matches!(error, TeamserverError::Database(_)));
+    let TeamserverError::Database(sqlx::Error::Database(db_err)) = &error else {
+        panic!("expected sqlite constraint error for duplicate agent_id");
+    };
+    assert!(
+        db_err.message().contains("UNIQUE constraint failed"),
+        "message should mention UNIQUE constraint: {}",
+        db_err.message()
+    );
+
+    // Original row must still be intact.
+    let agents_list = agents.list().await?;
+    assert_eq!(agents_list.len(), 1);
+    assert_eq!(agents_list[0].agent_id, 0xCE00_0020);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn transaction_rollback_on_duplicate_agent_preserves_database_state()
+-> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let agents = database.agents();
+
+    // Insert two distinct agents.
+    agents.create(&sample_agent(0xCE00_0030)).await?;
+    agents.create(&sample_agent(0xCE00_0031)).await?;
+
+    // Attempting a duplicate should fail but leave both originals intact.
+    let _ = agents.create(&sample_agent(0xCE00_0030)).await;
+
+    let stored = agents.list().await?;
+    assert_eq!(stored.len(), 2, "both original agents must survive failed insert");
+    assert!(stored.iter().any(|a| a.agent_id == 0xCE00_0030));
+    assert!(stored.iter().any(|a| a.agent_id == 0xCE00_0031));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_writes_serialize_correctly_with_single_connection()
+-> Result<(), TeamserverError> {
+    let database = Arc::new(test_database().await?);
+    let mut handles = Vec::new();
+
+    // Spawn 10 concurrent agent inserts, each with a unique ID.
+    for i in 0u32..10 {
+        let db = Arc::clone(&database);
+        handles.push(tokio::spawn(async move {
+            let agent = sample_agent(0xCC00_0000 + i);
+            db.agents().create(&agent).await
+        }));
+    }
+
+    for handle in handles {
+        handle.await.expect("task should not panic")?;
+    }
+
+    let stored = database.agents().list().await?;
+    assert_eq!(stored.len(), 10, "all 10 concurrent inserts should succeed");
+
+    // Verify all IDs are present.
+    for i in 0u32..10 {
+        assert!(
+            stored.iter().any(|a| a.agent_id == 0xCC00_0000 + i),
+            "agent 0x{:08X} missing",
+            0xCC00_0000 + i
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_loot_writes_with_fk_serialize_correctly() -> Result<(), TeamserverError> {
+    let database = Arc::new(test_database().await?);
+    let agents = database.agents();
+
+    agents.create(&sample_agent(0xCC00_0100)).await?;
+
+    let mut handles = Vec::new();
+    for i in 0u32..10 {
+        let db = Arc::clone(&database);
+        handles.push(tokio::spawn(async move {
+            let record = LootRecord {
+                id: None,
+                agent_id: 0xCC00_0100,
+                kind: "file".to_owned(),
+                name: format!("loot-{i}.bin"),
+                file_path: None,
+                size_bytes: Some(i64::from(i)),
+                captured_at: "2026-03-20T12:00:00Z".to_owned(),
+                data: Some(vec![i as u8]),
+                metadata: None,
+            };
+            db.loot().create(&record).await
+        }));
+    }
+
+    for handle in handles {
+        handle.await.expect("task should not panic")?;
+    }
+
+    let stored = database.loot().list_for_agent(0xCC00_0100).await?;
+    assert_eq!(stored.len(), 10, "all 10 concurrent loot inserts should succeed");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn write_to_read_only_database_returns_error() -> Result<(), TeamserverError> {
+    let temp_dir = TempDir::new().expect("tempdir should be created");
+    let db_path = temp_dir.path().join("readonly.sqlite");
+
+    // Create the database and seed it.
+    let database = Database::connect(&db_path).await?;
+    database.agents().create(&sample_agent(0xCE00_0040)).await?;
+    database.close().await;
+
+    // Make the database file read-only.
+    let mut perms = std::fs::metadata(&db_path).expect("metadata").permissions();
+    perms.set_readonly(true);
+    std::fs::set_permissions(&db_path, perms).expect("set_permissions");
+
+    // Reconnect to the read-only file.
+    let options = SqliteConnectOptions::new().filename(&db_path).foreign_keys(true);
+    let database = Database::connect_with_options(options).await?;
+
+    let write_err = database
+        .agents()
+        .create(&sample_agent(0xCE00_0041))
+        .await
+        .expect_err("write to read-only database should fail");
+
+    assert!(
+        matches!(write_err, TeamserverError::Database(_)),
+        "expected Database error for read-only write, got: {write_err:?}"
+    );
+
+    // Original data should still be readable.
+    let agents = database.agents().list().await?;
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0].agent_id, 0xCE00_0040);
+
+    // Restore permissions so temp_dir cleanup succeeds.
+    let mut perms = std::fs::metadata(&db_path).expect("metadata").permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    std::fs::set_permissions(&db_path, perms).expect("restore permissions");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn audit_log_insert_after_pool_close_returns_connection_error() -> Result<(), TeamserverError>
+{
+    let database = test_database().await?;
+    let audit = database.audit_log();
+
+    let entry = AuditLogEntry {
+        id: None,
+        actor: "operator".to_owned(),
+        action: "test_action".to_owned(),
+        target_kind: "agent".to_owned(),
+        target_id: Some("0x1234".to_owned()),
+        details: None,
+        occurred_at: "2026-03-20T12:00:00Z".to_owned(),
+    };
+
+    audit.create(&entry).await?;
+    database.close().await;
+
+    let err = audit.create(&entry).await.expect_err("audit insert after close should fail");
+    assert!(matches!(err, TeamserverError::Database(_)));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_response_fk_violation_leaves_table_unchanged() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let agents = database.agents();
+    let responses = database.agent_responses();
+
+    // Create a valid agent and insert one response.
+    agents.create(&sample_agent(0xCE00_0050)).await?;
+    let valid_response = AgentResponseRecord {
+        id: None,
+        agent_id: 0xCE00_0050,
+        command_id: 1,
+        request_id: 100,
+        response_type: "info".to_owned(),
+        message: "ok".to_owned(),
+        output: "done".to_owned(),
+        command_line: None,
+        task_id: None,
+        operator: None,
+        received_at: "2026-03-20T12:00:00Z".to_owned(),
+        extra: None,
+    };
+    responses.create(&valid_response).await?;
+
+    // Attempt to insert a response for a non-existent agent.
+    let invalid_response = AgentResponseRecord { agent_id: 0xDEAD_BEEF, ..valid_response.clone() };
+
+    let err = responses
+        .create(&invalid_response)
+        .await
+        .expect_err("response insert with unknown agent_id should fail");
+
+    assert!(
+        matches!(err, TeamserverError::Database(_)),
+        "expected Database error for FK violation, got: {err:?}"
+    );
+
+    // Only the valid response should exist.
+    let stored = responses.list_for_agent(0xCE00_0050).await?;
+    assert_eq!(stored.len(), 1, "valid response must survive FK-violating insert attempt");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_duplicate_agent_inserts_only_one_succeeds() -> Result<(), TeamserverError> {
+    let database = Arc::new(test_database().await?);
+    let mut handles = Vec::new();
+
+    // Spawn 5 tasks all trying to insert the same agent_id.
+    for _ in 0..5 {
+        let db = Arc::clone(&database);
+        handles.push(tokio::spawn(
+            async move { db.agents().create(&sample_agent(0xCC00_D000)).await },
+        ));
+    }
+
+    let mut successes = 0usize;
+    let mut failures = 0usize;
+    for handle in handles {
+        match handle.await.expect("task should not panic") {
+            Ok(()) => successes += 1,
+            Err(_) => failures += 1,
+        }
+    }
+
+    assert_eq!(successes, 1, "exactly one concurrent insert should succeed");
+    assert_eq!(failures, 4, "remaining inserts should fail with constraint error");
+
+    let stored = database.agents().list().await?;
+    assert_eq!(stored.len(), 1);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn operator_create_after_pool_close_returns_connection_error() -> Result<(), TeamserverError>
+{
+    let database = test_database().await?;
+    let operators = database.operators();
+
+    let operator = PersistedOperator {
+        username: "neo".to_owned(),
+        password_verifier: "xyz".to_owned(),
+        role: OperatorRole::Operator,
+    };
+
+    operators.create(&operator).await?;
+    database.close().await;
+
+    let err = operators
+        .create(&PersistedOperator {
+            username: "morpheus".to_owned(),
+            password_verifier: "abc".to_owned(),
+            role: OperatorRole::Admin,
+        })
+        .await
+        .expect_err("operator create after close should fail");
+
+    assert!(matches!(err, TeamserverError::Database(_)));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn link_create_after_pool_close_returns_connection_error() -> Result<(), TeamserverError> {
+    let database = test_database().await?;
+    let agents = database.agents();
+    let links = database.links();
+
+    let parent = sample_agent(0xCE00_0060);
+    let child = sample_agent(0xCE00_0061);
+    agents.create(&parent).await?;
+    agents.create(&child).await?;
+
+    database.close().await;
+
+    let err = links
+        .create(LinkRecord { parent_agent_id: parent.agent_id, link_agent_id: child.agent_id })
+        .await
+        .expect_err("link create after close should fail");
+
+    assert!(matches!(err, TeamserverError::Database(_)));
 
     Ok(())
 }

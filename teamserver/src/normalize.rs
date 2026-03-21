@@ -61,8 +61,6 @@ where
 mod tests {
     use super::*;
 
-    use std::convert::Infallible;
-
     use axum::Router;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};

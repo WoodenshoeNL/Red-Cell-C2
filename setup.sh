@@ -175,11 +175,25 @@ else
     ok "Git identity: $GIT_USER <$GIT_EMAIL>"
 fi
 
-# ── 8. Logs directory ─────────────────────────────────────────────────────────
+# ── 8. cargo-sweep — build artifact cleaner ────────────────────────────────────
+echo ""
+echo "--- cargo-sweep ---"
+if command -v cargo-sweep &>/dev/null; then
+    ok "cargo-sweep: $(cargo-sweep --version 2>/dev/null | head -1)"
+else
+    warn "cargo-sweep not found — installing (needed for auto build-cache cleanup)"
+    if cargo install cargo-sweep --quiet 2>/dev/null; then
+        ok "cargo-sweep installed"
+    else
+        warn "cargo-sweep install failed — loop.py will fall back to manual incremental cleanup"
+    fi
+fi
+
+# ── 9. Logs directory ─────────────────────────────────────────────────────────
 mkdir -p "$SCRIPT_DIR/logs"
 ok "logs/ directory ready"
 
-# ── 9. Summary ────────────────────────────────────────────────────────────────
+# ── 10. Summary ───────────────────────────────────────────────────────────────
 echo ""
 HOSTNAME_ID="${HOSTNAME:-$(hostname)}"
 echo "=== Ready on ${HOSTNAME_ID} ==="

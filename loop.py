@@ -39,6 +39,7 @@ DEFAULT_SLEEP = {
 DEV_SLEEP_NO_WORK     = 60     # wait when no tasks are ready
 DEV_SLEEP_BETWEEN     = 15     # wait between tasks when --sleep not set
 DEV_SLEEP_TOKEN_LIMIT = 1200   # wait after Claude context limit hit
+DEV_CLEAN_EVERY       = 10     # run build-artifact cleanup every N dev iterations
 
 # Dev loops use agent-specific prompts (Co-Authored-By differs per agent)
 DEV_PROMPTS = {
@@ -413,6 +414,44 @@ def repair_db_if_needed(log: Logger, rename_prefix: bool):
         log.log("WARNING: DB rebuild failed")
 
 
+def clean_build_artifacts(log: Logger):
+    """
+    Remove stale Rust build artifacts to keep target/debug from growing unboundedly.
+
+    Strategy (in order of preference):
+    1. cargo sweep --time 1  — removes files unused for >24 h, keeps active artifacts
+    2. Fallback: delete target/debug/incremental entirely (always safe; just slows
+       the next incremental build slightly)
+
+    Called after every review-loop iteration and every DEV_CLEAN_EVERY dev iterations.
+    """
+    import shutil
+
+    target_debug = SCRIPT_DIR / "target" / "debug"
+    if not target_debug.exists():
+        return
+
+    # Prefer cargo-sweep: surgical, keeps recently-used deps and incremental data
+    if subprocess.run(["which", "cargo-sweep"], capture_output=True).returncode == 0:
+        r = subprocess.run(
+            ["cargo", "sweep", "--time", "1"],
+            capture_output=True, text=True, cwd=str(SCRIPT_DIR),
+        )
+        if r.returncode == 0:
+            log.log("build cache: cargo sweep --time 1 ok")
+            return
+        log.log(f"build cache: cargo sweep failed ({r.stderr.strip()[:80]}) — falling back")
+
+    # Fallback: nuke incremental (31 GB in practice; always safe to delete)
+    incremental = target_debug / "incremental"
+    if incremental.exists():
+        try:
+            shutil.rmtree(incremental)
+            log.log("build cache: removed target/debug/incremental")
+        except OSError as e:
+            log.log(f"build cache: could not remove incremental: {e}")
+
+
 def reset_stuck_tasks(log: Logger, stale_threshold_secs: int):
     """Reset any in_progress tasks that have been stuck longer than the threshold."""
     r = br(["list", "--status=in_progress", "--json"])
@@ -783,6 +822,10 @@ Start directly with understanding the task and implementing it.
 
         log.log("========================LOOP=========================")
 
+        # Periodically clean up stale build artifacts (every DEV_CLEAN_EVERY iterations)
+        if iteration % DEV_CLEAN_EVERY == 0:
+            clean_build_artifacts(log)
+
         if token_limit_hit:
             log.log(f"Token limit hit — sleeping {DEV_SLEEP_TOKEN_LIMIT}s before next iteration")
             time.sleep(DEV_SLEEP_TOKEN_LIMIT)
@@ -850,6 +893,10 @@ def review_loop(args, log: Logger):
             log.log(f"WARNING: {agent.title()} exited with code {exit_code}")
         else:
             log.log(f"{loop_type.title()} review completed successfully")
+
+        # Clean up stale build artifacts after every review run — review loops run
+        # cargo check/clippy/test which are the main contributors to target/debug growth.
+        clean_build_artifacts(log)
 
         iteration += 1
 

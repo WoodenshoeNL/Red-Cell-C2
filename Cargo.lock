@@ -4065,6 +4065,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "red-cell-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "red-cell-common",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "red-cell-client"
 version = "0.1.0"
 dependencies = [

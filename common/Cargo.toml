@@ -16,6 +16,8 @@ cipher = "0.4"
 ctr = "0.9"
 getrandom = "0.3"
 zeroize = { version = "1", features = ["derive"] }
+hkdf = "0.12"
+sha2 = "0.10"
 sha3 = "0.10"
 hcl = { package = "hcl-rs", version = "0.19.4" }
 rcgen = { version = "0.14.7", default-features = false, features = ["pem", "crypto", "aws_lc_rs"] }

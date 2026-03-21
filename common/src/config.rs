@@ -776,6 +776,15 @@ pub struct DemonConfig {
     /// PE/loader binary customization.
     #[serde(rename = "Binary", default)]
     pub binary: Option<BinaryConfig>,
+    /// Optional shared secret for HKDF-based session key derivation.
+    ///
+    /// When set, the teamserver derives session keys via HKDF-SHA256 over
+    /// agent-supplied key material and this secret, rather than using the raw
+    /// agent keys directly.  Compatible agents (Specter / Archon) must embed
+    /// the same secret and perform the matching derivation.  Legacy Demon
+    /// agents do not support this — leave unset for Havoc compatibility.
+    #[serde(rename = "InitSecret", default)]
+    pub init_secret: Option<String>,
     /// Whether to trust `X-Forwarded-For`.
     #[serde(rename = "TrustXForwardedFor", default)]
     pub trust_x_forwarded_for: bool,

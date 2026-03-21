@@ -3,8 +3,8 @@
 use std::borrow::Cow;
 
 use red_cell_common::crypto::{
-    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, CryptoError, decrypt_agent_data, is_weak_aes_iv,
-    is_weak_aes_key,
+    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, CryptoError, decrypt_agent_data, derive_session_keys,
+    is_weak_aes_iv, is_weak_aes_key,
 };
 use red_cell_common::demon::{DemonCommand, DemonEnvelope, DemonHeader, DemonProtocolError};
 use red_cell_common::{AgentEncryptionInfo, AgentRecord};
@@ -100,13 +100,30 @@ pub enum DemonParserError {
 #[derive(Clone, Debug)]
 pub struct DemonPacketParser {
     registry: AgentRegistry,
+    /// Optional server secret for HKDF-based session key derivation.
+    ///
+    /// When set, agent-supplied key material from `DEMON_INIT` is mixed with this
+    /// secret via [`red_cell_common::crypto::derive_session_keys`] before being
+    /// stored as the session key.  Compatible agents (Specter / Archon) must
+    /// perform the same derivation.  Legacy Demon agents do not support this.
+    init_secret: Option<Vec<u8>>,
 }
 
 impl DemonPacketParser {
     /// Create a packet parser that resolves agent session keys from the provided registry.
     #[must_use]
     pub fn new(registry: AgentRegistry) -> Self {
-        Self { registry }
+        Self { registry, init_secret: None }
+    }
+
+    /// Create a packet parser with HKDF-based session key derivation enabled.
+    ///
+    /// When `init_secret` is `Some`, the teamserver derives session keys from
+    /// agent-supplied material mixed with the secret via HKDF-SHA256, preventing
+    /// unauthenticated agents from choosing their own session keys.
+    #[must_use]
+    pub fn with_init_secret(registry: AgentRegistry, init_secret: Option<Vec<u8>>) -> Self {
+        Self { registry, init_secret }
     }
 
     /// Parse an incoming Demon request and update the registry for newly registered agents.
@@ -175,7 +192,13 @@ impl DemonPacketParser {
                 ));
             }
 
-            let agent = parse_init_agent(envelope.header.agent_id, remaining, &external_ip, now)?;
+            let agent = parse_init_agent(
+                envelope.header.agent_id,
+                remaining,
+                &external_ip,
+                now,
+                self.init_secret.as_deref(),
+            )?;
             self.registry
                 .insert_with_listener_and_ctr_offset(agent.clone(), listener_name, 0)
                 .await?;
@@ -301,6 +324,7 @@ fn parse_init_agent(
     payload: &[u8],
     external_ip: &str,
     now: OffsetDateTime,
+    init_secret: Option<&[u8]>,
 ) -> Result<AgentRecord, DemonParserError> {
     let mut offset = 0_usize;
     let key = read_fixed::<AGENT_KEY_LENGTH>(payload, &mut offset, "init AES key")?;
@@ -360,15 +384,36 @@ fn parse_init_agent(
         now.format(&Rfc3339).map_err(|_| DemonParserError::InvalidInit("invalid timestamp"))?;
     let kill_date = parse_kill_date(kill_date)?;
 
+    // When a server secret is configured, derive the actual session keys via HKDF
+    // so that the stored key material differs from what the agent supplied on the
+    // wire.  This prevents an attacker who can reach the listener from choosing
+    // their own session keys — without the server secret they cannot predict the
+    // derived material.  The init packet itself is still decrypted with the raw
+    // agent keys (above), but all subsequent session traffic uses the derived keys.
+    let encryption = if let Some(secret) = init_secret {
+        let derived = derive_session_keys(&key, &iv, secret)
+            .map_err(|_| DemonParserError::InvalidInit("HKDF session key derivation failed"))?;
+        tracing::info!(
+            agent_id = format_args!("0x{parsed_agent_id:08X}"),
+            "derived session keys via HKDF (init_secret configured)"
+        );
+        AgentEncryptionInfo {
+            aes_key: Zeroizing::new(derived.key.to_vec()),
+            aes_iv: Zeroizing::new(derived.iv.to_vec()),
+        }
+    } else {
+        AgentEncryptionInfo {
+            aes_key: Zeroizing::new(key.to_vec()),
+            aes_iv: Zeroizing::new(iv.to_vec()),
+        }
+    };
+
     Ok(AgentRecord {
         agent_id: parsed_agent_id,
         active: true,
         reason: String::new(),
         note: String::new(),
-        encryption: AgentEncryptionInfo {
-            aes_key: Zeroizing::new(key.to_vec()),
-            aes_iv: Zeroizing::new(iv.to_vec()),
-        },
+        encryption,
         hostname,
         username,
         domain_name,
@@ -2124,6 +2169,71 @@ mod tests {
             wrong_plaintext,
             agent_id.to_le_bytes(),
             "decrypting reconnect ACK at wrong CTR offset must not yield the correct agent_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_init_with_init_secret_derives_different_session_keys() {
+        let registry = test_registry().await;
+        let secret = b"test-server-secret-value".to_vec();
+        let parser = DemonPacketParser::with_init_secret(registry.clone(), Some(secret));
+        let key = test_key(0x41);
+        let iv = test_iv(0x24);
+        let packet = build_init_packet(0xAABB_CCDD, key, iv);
+
+        let parsed = parser
+            .parse_at(&packet, "10.0.0.1".to_owned(), datetime!(2026-03-09 19:30:00 UTC))
+            .await
+            .expect("init with init_secret should succeed");
+
+        let ParsedDemonPacket::Init(init) = parsed else {
+            panic!("expected init packet");
+        };
+
+        // The stored session keys should be HKDF-derived, not the raw agent keys.
+        assert_ne!(
+            init.agent.encryption.aes_key.as_slice(),
+            &key,
+            "session key must differ from raw agent key when init_secret is set"
+        );
+        assert_ne!(
+            init.agent.encryption.aes_iv.as_slice(),
+            &iv,
+            "session IV must differ from raw agent IV when init_secret is set"
+        );
+
+        // Verify the agent was registered with the derived keys.
+        let stored = registry.get(0xAABB_CCDD).await.expect("agent should be registered");
+        assert_eq!(stored.encryption, init.agent.encryption);
+    }
+
+    #[tokio::test]
+    async fn parse_init_without_init_secret_stores_raw_keys() {
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry.clone());
+        let key = test_key(0x41);
+        let iv = test_iv(0x24);
+        let packet = build_init_packet(0xDDCC_BBAA, key, iv);
+
+        let parsed = parser
+            .parse_at(&packet, "10.0.0.2".to_owned(), datetime!(2026-03-09 19:30:00 UTC))
+            .await
+            .expect("init without init_secret should succeed");
+
+        let ParsedDemonPacket::Init(init) = parsed else {
+            panic!("expected init packet");
+        };
+
+        // Without init_secret, the raw agent keys should be stored directly.
+        assert_eq!(
+            init.agent.encryption.aes_key.as_slice(),
+            &key,
+            "session key must equal raw agent key when no init_secret"
+        );
+        assert_eq!(
+            init.agent.encryption.aes_iv.as_slice(),
+            &iv,
+            "session IV must equal raw agent IV when no init_secret"
         );
     }
 }

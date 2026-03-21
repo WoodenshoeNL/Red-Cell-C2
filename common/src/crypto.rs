@@ -35,6 +35,8 @@
 use aes::Aes256;
 use cipher::{InvalidLength, KeyIvInit, StreamCipher, StreamCipherSeek};
 use ctr::Ctr128BE;
+use hkdf::Hkdf;
+use sha2::Sha256;
 use sha3::{Digest, Sha3_256};
 use thiserror::Error;
 
@@ -217,6 +219,64 @@ pub fn generate_agent_crypto_material() -> Result<AgentCryptoMaterial, CryptoErr
     Ok(AgentCryptoMaterial { key, iv })
 }
 
+/// Derive session keys from agent-supplied key material and a server secret via HKDF-SHA256.
+///
+/// When a listener is configured with an `InitSecret`, the teamserver does not use the
+/// agent-supplied AES key and IV directly for post-init session traffic.  Instead, the
+/// raw agent material is mixed with the server secret through HKDF to produce the actual
+/// session key and IV.  A compatible agent (Specter / Archon) must perform the same
+/// derivation so both sides agree on the session keys.
+///
+/// This prevents an attacker who can reach the listener from choosing their own session
+/// keys: without knowing the server secret they cannot derive the correct session material
+/// and subsequent encrypted traffic will be unintelligible.
+///
+/// The HKDF extraction step uses the server secret as salt and the agent key as input
+/// keying material.  Two separate `expand` calls with distinct `info` tags produce the
+/// 32-byte session key and 16-byte session IV.
+///
+/// # Errors
+///
+/// Returns [`CryptoError::InvalidKeyLength`] if the agent-supplied key is not
+/// [`AGENT_KEY_LENGTH`] bytes, or [`CryptoError::InvalidIvLength`] if the IV is not
+/// [`AGENT_IV_LENGTH`] bytes.
+pub fn derive_session_keys(
+    agent_key: &[u8],
+    agent_iv: &[u8],
+    server_secret: &[u8],
+) -> Result<AgentCryptoMaterial, CryptoError> {
+    if agent_key.len() != AGENT_KEY_LENGTH {
+        return Err(CryptoError::InvalidKeyLength {
+            expected: AGENT_KEY_LENGTH,
+            actual: agent_key.len(),
+        });
+    }
+    if agent_iv.len() != AGENT_IV_LENGTH {
+        return Err(CryptoError::InvalidIvLength {
+            expected: AGENT_IV_LENGTH,
+            actual: agent_iv.len(),
+        });
+    }
+
+    // Concatenate agent key + IV as the input keying material so both values
+    // contribute entropy to the derived output.
+    let mut ikm = Vec::with_capacity(AGENT_KEY_LENGTH + AGENT_IV_LENGTH);
+    ikm.extend_from_slice(agent_key);
+    ikm.extend_from_slice(agent_iv);
+
+    let hk = Hkdf::<Sha256>::new(Some(server_secret), &ikm);
+
+    let mut derived_key = [0u8; AGENT_KEY_LENGTH];
+    hk.expand(b"red-cell-session-key", &mut derived_key)
+        .expect("HKDF-SHA256 expand for 32-byte key cannot fail");
+
+    let mut derived_iv = [0u8; AGENT_IV_LENGTH];
+    hk.expand(b"red-cell-session-iv", &mut derived_iv)
+        .expect("HKDF-SHA256 expand for 16-byte IV cannot fail");
+
+    Ok(AgentCryptoMaterial { key: derived_key, iv: derived_iv })
+}
+
 /// Hash a password with SHA3-256 and return the lowercase hex digest.
 ///
 /// This matches the Havoc operator protocol which sends `Password` as a SHA3-256 hex string.
@@ -284,7 +344,7 @@ mod tests {
 
     use super::{
         AGENT_IV_LENGTH, AGENT_KEY_LENGTH, AgentCryptoMaterial, CryptoError, ctr_blocks_for_len,
-        decrypt_agent_data, decrypt_agent_data_at_offset, encrypt_agent_data,
+        decrypt_agent_data, decrypt_agent_data_at_offset, derive_session_keys, encrypt_agent_data,
         encrypt_agent_data_at_offset, generate_agent_crypto_material, hash_password_sha3,
         is_weak_aes_iv, is_weak_aes_key,
     };
@@ -914,5 +974,114 @@ mod tests {
         assert!(
             matches!(error, CryptoError::InvalidCtrOffset { block_offset } if block_offset == overflow_offset),
         );
+    }
+
+    #[test]
+    fn derive_session_keys_produces_correct_length_output() {
+        let key = hex!(
+            "603deb1015ca71be2b73aef0857d7781
+             1f352c073b6108d72d9810a30914dff4"
+        );
+        let iv = hex!("000102030405060708090a0b0c0d0e0f");
+        let secret = b"test-server-secret";
+
+        let derived =
+            derive_session_keys(&key, &iv, secret).expect("HKDF derivation should succeed");
+
+        assert_eq!(derived.key.len(), AGENT_KEY_LENGTH);
+        assert_eq!(derived.iv.len(), AGENT_IV_LENGTH);
+    }
+
+    #[test]
+    fn derive_session_keys_differs_from_raw_input() {
+        let key = hex!(
+            "603deb1015ca71be2b73aef0857d7781
+             1f352c073b6108d72d9810a30914dff4"
+        );
+        let iv = hex!("000102030405060708090a0b0c0d0e0f");
+        let secret = b"test-server-secret";
+
+        let derived =
+            derive_session_keys(&key, &iv, secret).expect("HKDF derivation should succeed");
+
+        assert_ne!(derived.key, key, "derived key must differ from input key");
+        assert_ne!(derived.iv, iv, "derived IV must differ from input IV");
+    }
+
+    #[test]
+    fn derive_session_keys_is_deterministic() {
+        let key = [0x42; AGENT_KEY_LENGTH];
+        let iv = [0x24; AGENT_IV_LENGTH];
+        let secret = b"determinism-check";
+
+        let first = derive_session_keys(&key, &iv, secret).expect("first derivation");
+        let second = derive_session_keys(&key, &iv, secret).expect("second derivation");
+
+        assert_eq!(first, second, "same inputs must produce identical output");
+    }
+
+    #[test]
+    fn derive_session_keys_different_secrets_produce_different_keys() {
+        let key = [0x42; AGENT_KEY_LENGTH];
+        let iv = [0x24; AGENT_IV_LENGTH];
+
+        let derived_a =
+            derive_session_keys(&key, &iv, b"secret-a").expect("derivation with secret A");
+        let derived_b =
+            derive_session_keys(&key, &iv, b"secret-b").expect("derivation with secret B");
+
+        assert_ne!(
+            derived_a.key, derived_b.key,
+            "different server secrets must produce different keys"
+        );
+    }
+
+    #[test]
+    fn derive_session_keys_different_agent_keys_produce_different_output() {
+        let iv = [0x24; AGENT_IV_LENGTH];
+        let secret = b"same-secret";
+
+        let mut key_a = [0u8; AGENT_KEY_LENGTH];
+        key_a[0] = 1;
+        let mut key_b = [0u8; AGENT_KEY_LENGTH];
+        key_b[0] = 2;
+
+        let derived_a = derive_session_keys(&key_a, &iv, secret).expect("derivation A");
+        let derived_b = derive_session_keys(&key_b, &iv, secret).expect("derivation B");
+
+        assert_ne!(derived_a.key, derived_b.key);
+    }
+
+    #[test]
+    fn derive_session_keys_rejects_invalid_key_length() {
+        let error = derive_session_keys(&[0u8; 16], &[0u8; AGENT_IV_LENGTH], b"secret")
+            .expect_err("short key should be rejected");
+
+        assert!(matches!(error, CryptoError::InvalidKeyLength { expected: 32, actual: 16 }));
+    }
+
+    #[test]
+    fn derive_session_keys_rejects_invalid_iv_length() {
+        let error = derive_session_keys(&[0u8; AGENT_KEY_LENGTH], &[0u8; 8], b"secret")
+            .expect_err("short IV should be rejected");
+
+        assert!(matches!(error, CryptoError::InvalidIvLength { expected: 16, actual: 8 }));
+    }
+
+    #[test]
+    fn derive_session_keys_output_is_usable_for_encryption() {
+        let key = [0x42; AGENT_KEY_LENGTH];
+        let iv = [0x24; AGENT_IV_LENGTH];
+        let secret = b"round-trip-secret";
+
+        let derived = derive_session_keys(&key, &iv, secret).expect("derivation");
+        let plaintext = b"hello from derived keys";
+
+        let ciphertext = encrypt_agent_data(&derived.key, &derived.iv, plaintext)
+            .expect("encrypt with derived key");
+        let recovered = decrypt_agent_data(&derived.key, &derived.iv, &ciphertext)
+            .expect("decrypt with derived key");
+
+        assert_eq!(recovered, plaintext);
     }
 }

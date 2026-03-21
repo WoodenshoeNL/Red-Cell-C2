@@ -1,0 +1,94 @@
+//! `red-cell-cli status` — teamserver health and connectivity check.
+//!
+//! Calls the REST API to verify that:
+//! 1. The server is reachable (GET `/api/v1/` does not return a network error).
+//! 2. The supplied credentials are accepted (GET `/api/v1/agents` returns 200).
+//!
+//! On success it prints:
+//!
+//! ```json
+//! {"ok": true, "data": {"version": "v1", "uptime_secs": null, "agents": 4, "listeners": 2}}
+//! ```
+
+use serde::{Deserialize, Serialize};
+
+use crate::client::ApiClient;
+use crate::error::CliError;
+
+// ── server response shapes ───────────────────────────────────────────────────
+
+/// Subset of the `/api/v1/` root response that we care about.
+#[derive(Debug, Deserialize)]
+struct ApiRootResponse {
+    version: String,
+    // Other fields (prefix, openapi_path, …) are ignored.
+}
+
+// ── public output type ───────────────────────────────────────────────────────
+
+/// Data returned by the `status` command.
+#[derive(Debug, Clone, Serialize)]
+pub struct StatusData {
+    /// API version string reported by the teamserver.
+    pub version: String,
+    /// Server uptime in seconds.  `null` until the teamserver exposes this.
+    pub uptime_secs: Option<u64>,
+    /// Number of currently tracked agents.
+    pub agents: usize,
+    /// Number of configured listeners.
+    pub listeners: usize,
+}
+
+// ── command handler ──────────────────────────────────────────────────────────
+
+/// Execute the `status` command and return the structured result.
+///
+/// # Errors
+///
+/// Returns a [`CliError`] if any of the API calls fail.  The error variant
+/// indicates the appropriate process exit code.
+pub async fn run(client: &ApiClient) -> Result<StatusData, CliError> {
+    // Step 1 — API root (no auth required → proves reachability).
+    let root: ApiRootResponse = client.get_anon("/").await?;
+
+    // Step 2 — agent list (auth required → proves token is valid).
+    let agents: Vec<serde_json::Value> = client.get("/agents").await?;
+
+    // Step 3 — listener list (auth required).
+    let listeners: Vec<serde_json::Value> = client.get("/listeners").await?;
+
+    Ok(StatusData {
+        version: root.version,
+        uptime_secs: None, // not yet exposed by the teamserver REST API
+        agents: agents.len(),
+        listeners: listeners.len(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_data_serialises_with_null_uptime() {
+        let data =
+            StatusData { version: "v1".to_owned(), uptime_secs: None, agents: 3, listeners: 1 };
+        let json = serde_json::to_value(&data).unwrap();
+        assert_eq!(json["version"], "v1");
+        assert!(json["uptime_secs"].is_null());
+        assert_eq!(json["agents"], 3);
+        assert_eq!(json["listeners"], 1);
+    }
+
+    #[test]
+    fn status_data_serialises_with_uptime() {
+        let data = StatusData {
+            version: "v1".to_owned(),
+            uptime_secs: Some(123),
+            agents: 0,
+            listeners: 0,
+        };
+        let json = serde_json::to_value(&data).unwrap();
+        assert_eq!(json["uptime_secs"], 123);
+    }
+}

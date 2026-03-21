@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 638 | 212 | 31 |
-| Bugs filed against | 53 | 34 | 9 |
+| Tasks closed | 658 | 212 | 31 |
+| Bugs filed against | 54 | 34 | 9 |
 | Bug rate (bugs/task) | 0.08 | 0.16 | 0.29 |
 | Quality score | 92% | 84% | 71% |
 
-*Bug rates: Claude 53/638=0.08, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 54/658=0.08, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 4 | 21 | 0 |
 | Memory / resource leaks | 2 | 10 | 1 |
 | Startup / lifecycle regressions | 1 | 8 | 0 |
-| Test infrastructure / flakiness | 4 | 0 | 0 |
+| Test infrastructure / flakiness | 5 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
 | Correctness / pagination | 20 | 7 | 1 |
@@ -3133,3 +3133,14 @@ Build: passed (cargo check, clippy -D warnings clean, 2060 tests pass across wor
 
 Overall codebase health: on track
 Biggest blindspot: service bridge security hardening — the operator WebSocket has rate limiting, size limits, constant-time auth, and audit logging, but none of these were carried over to the service bridge endpoint.
+
+### QA Review — 2026-03-21 16:30 — e8b1f4a5..18a54dd8
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude (Opus/dev02) | 18 | 1 | Closed: t1awj (expand degenerate key detection), g2o4x (HKDF-SHA256 session key derivation), lx315 (CTR counter sync tests), 1dcro (agent registration negative tests), uq8c7 (DB failure injection tests), r6z5q (Specter agent skeleton), l1bgr (SSH TOFU client), arygx (BODY_AGENT_RESPONSE handler), 3zhoq (BODY_LISTENER_START handler), mzan5 (constant-time password comparison), 7il8t (service bridge tests), jlc2p (unreachable→CipherConstruction error variant), hlsyd (gate webhook tests behind feature flag), ctz60 (remove unused import), 58s50 (SHA3 hash at startup), 3g3t8 (service bridge rate limiting), 621xc (WS message size limit), 7b9td (service bridge audit logging), d4bsg (fallback routing test fix). Bug filed: r1r4q — t1awj's key sweep missed assembly_dispatch, http_listener_pipeline, pivot_dispatch (34 tests failing). |
+| Claude (Sonnet/dev01) | 2 | 0 | Closed: 6ss0k (agent_deletion_cleanup fix — non-degenerate IV), 8zjgi (agent_liveness_timeout fix). Clean work. Also added CLAUDE.md hook to auto-remove .stop on session start. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: cargo check passed, clippy passed (0 warnings), cargo test FAILED — 34 tests failing in assembly_dispatch (20), http_listener_pipeline (9), pivot_dispatch (5) due to r1r4q

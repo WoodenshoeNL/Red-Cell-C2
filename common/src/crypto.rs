@@ -151,26 +151,59 @@ pub fn decrypt_agent_data_at_offset(
     apply_agent_keystream(key, iv, block_offset, ciphertext)
 }
 
-/// Returns `true` if every byte in `key` is zero.
+/// Returns `true` if `key` exhibits a degenerate pattern indicating broken or
+/// uninitialized key material.
 ///
-/// An all-zero key is a trivially weak value that a misconfigured or
-/// unauthenticated agent might send.  Both the DemonInit parser and the
+/// Detected patterns:
+/// - All-zero (uninitialized memory)
+/// - All-0xFF
+/// - Single repeating byte (e.g. `0xAA` repeated 32 times)
+/// - Short repeating pattern of 2, 4, or 8 bytes (e.g. `[0xDE, 0xAD]` repeated)
+///
+/// The Demon agent generates keys via OS CSPRNG, so a degenerate key from a
+/// legitimate agent indicates a broken RNG.  Both the DemonInit parser and the
 /// COMMAND_CHECKIN handler use this predicate to reject such material before
 /// it can be installed as a live session key.
 #[must_use]
 pub fn is_weak_aes_key(key: &[u8]) -> bool {
-    !key.is_empty() && key.iter().all(|&b| b == 0)
+    has_short_repeating_pattern(key)
 }
 
-/// Returns `true` if every byte in `iv` is zero.
+/// Returns `true` if `iv` exhibits a degenerate pattern indicating broken or
+/// uninitialized key material.
 ///
-/// An all-zero IV combined with a non-zero key is technically valid for
-/// AES-CTR but is a strong indicator of uninitialized or replayed key
-/// material.  Both the DemonInit parser and the COMMAND_CHECKIN handler
-/// reject this condition for the same reason as [`is_weak_aes_key`].
+/// Detected patterns are the same as [`is_weak_aes_key`]: all-zero, all-0xFF,
+/// single repeating byte, or short repeating patterns of 2, 4, or 8 bytes.
+///
+/// Both the DemonInit parser and the COMMAND_CHECKIN handler reject this
+/// condition for the same reason as [`is_weak_aes_key`].
 #[must_use]
 pub fn is_weak_aes_iv(iv: &[u8]) -> bool {
-    !iv.is_empty() && iv.iter().all(|&b| b == 0)
+    has_short_repeating_pattern(iv)
+}
+
+/// Returns `true` if `data` consists entirely of a short repeating pattern,
+/// indicating degenerate key or IV material.
+///
+/// Checked pattern lengths: 1, 2, 4, and 8 bytes.  The data length must be
+/// at least twice the pattern length (i.e. the pattern must repeat at least
+/// once) for it to be considered degenerate.
+fn has_short_repeating_pattern(data: &[u8]) -> bool {
+    if data.is_empty() {
+        return false;
+    }
+
+    for pattern_len in [1, 2, 4, 8] {
+        if data.len() < pattern_len * 2 || data.len() % pattern_len != 0 {
+            continue;
+        }
+        let pattern = &data[..pattern_len];
+        if data.chunks_exact(pattern_len).all(|chunk| chunk == pattern) {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Generate fresh per-agent AES-256-CTR key material.
@@ -294,6 +327,100 @@ mod tests {
     #[test]
     fn is_weak_aes_iv_empty_slice_is_not_weak() {
         assert!(!is_weak_aes_iv(&[]));
+    }
+
+    #[test]
+    fn is_weak_aes_key_detects_all_0xff() {
+        assert!(is_weak_aes_key(&[0xFF; AGENT_KEY_LENGTH]));
+    }
+
+    #[test]
+    fn is_weak_aes_iv_detects_all_0xff() {
+        assert!(is_weak_aes_iv(&[0xFF; AGENT_IV_LENGTH]));
+    }
+
+    #[test]
+    fn is_weak_aes_key_detects_single_repeating_byte() {
+        assert!(is_weak_aes_key(&[0xAA; AGENT_KEY_LENGTH]));
+        assert!(is_weak_aes_key(&[0x42; AGENT_KEY_LENGTH]));
+    }
+
+    #[test]
+    fn is_weak_aes_iv_detects_single_repeating_byte() {
+        assert!(is_weak_aes_iv(&[0xAA; AGENT_IV_LENGTH]));
+        assert!(is_weak_aes_iv(&[0x42; AGENT_IV_LENGTH]));
+    }
+
+    #[test]
+    fn is_weak_aes_key_detects_two_byte_repeating_pattern() {
+        // [0xDE, 0xAD] repeated 16 times = 32 bytes
+        let key: Vec<u8> = [0xDE, 0xAD].iter().copied().cycle().take(AGENT_KEY_LENGTH).collect();
+        assert!(is_weak_aes_key(&key));
+    }
+
+    #[test]
+    fn is_weak_aes_iv_detects_two_byte_repeating_pattern() {
+        let iv: Vec<u8> = [0xCA, 0xFE].iter().copied().cycle().take(AGENT_IV_LENGTH).collect();
+        assert!(is_weak_aes_iv(&iv));
+    }
+
+    #[test]
+    fn is_weak_aes_key_detects_four_byte_repeating_pattern() {
+        // [0xDE, 0xAD, 0xBE, 0xEF] repeated 8 times = 32 bytes
+        let key: Vec<u8> =
+            [0xDE, 0xAD, 0xBE, 0xEF].iter().copied().cycle().take(AGENT_KEY_LENGTH).collect();
+        assert!(is_weak_aes_key(&key));
+    }
+
+    #[test]
+    fn is_weak_aes_iv_detects_four_byte_repeating_pattern() {
+        let iv: Vec<u8> =
+            [0xDE, 0xAD, 0xBE, 0xEF].iter().copied().cycle().take(AGENT_IV_LENGTH).collect();
+        assert!(is_weak_aes_iv(&iv));
+    }
+
+    #[test]
+    fn is_weak_aes_key_detects_eight_byte_repeating_pattern() {
+        // 8-byte pattern repeated 4 times = 32 bytes
+        let key: Vec<u8> = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
+            .iter()
+            .copied()
+            .cycle()
+            .take(AGENT_KEY_LENGTH)
+            .collect();
+        assert!(is_weak_aes_key(&key));
+    }
+
+    #[test]
+    fn is_weak_aes_iv_detects_eight_byte_repeating_pattern() {
+        // 8-byte pattern repeated 2 times = 16 bytes
+        let iv: Vec<u8> = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
+            .iter()
+            .copied()
+            .cycle()
+            .take(AGENT_IV_LENGTH)
+            .collect();
+        assert!(is_weak_aes_iv(&iv));
+    }
+
+    #[test]
+    fn is_weak_aes_key_accepts_non_repeating_pattern() {
+        // A key with genuine variety should not be flagged
+        let key: [u8; AGENT_KEY_LENGTH] = [
+            0x60, 0x3d, 0xeb, 0x10, 0x15, 0xca, 0x71, 0xbe, 0x2b, 0x73, 0xae, 0xf0, 0x85, 0x7d,
+            0x77, 0x81, 0x1f, 0x35, 0x2c, 0x07, 0x3b, 0x61, 0x08, 0xd7, 0x2d, 0x98, 0x10, 0xa3,
+            0x09, 0x14, 0xdf, 0xf4,
+        ];
+        assert!(!is_weak_aes_key(&key));
+    }
+
+    #[test]
+    fn is_weak_aes_key_accepts_nearly_repeating_pattern() {
+        // A 4-byte pattern that almost repeats but differs in the last chunk
+        let mut key: Vec<u8> =
+            [0xDE, 0xAD, 0xBE, 0xEF].iter().copied().cycle().take(AGENT_KEY_LENGTH).collect();
+        key[AGENT_KEY_LENGTH - 1] = 0x00; // break the pattern
+        assert!(!is_weak_aes_key(&key));
     }
 
     #[test]

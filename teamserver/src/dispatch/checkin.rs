@@ -193,22 +193,22 @@ fn validate_checkin_transport_material(
     if is_weak_aes_key(aes_key) {
         warn!(
             agent_id = format_args!("0x{agent_id:08X}"),
-            "rejecting COMMAND_CHECKIN with all-zero AES key"
+            "rejecting COMMAND_CHECKIN with degenerate AES key"
         );
         return Err(CommandDispatchError::InvalidCallbackPayload {
             command_id: u32::from(DemonCommand::CommandCheckin),
-            message: "all-zero AES key is not allowed".to_owned(),
+            message: "degenerate AES key is not allowed".to_owned(),
         });
     }
 
     if is_weak_aes_iv(aes_iv) {
         warn!(
             agent_id = format_args!("0x{agent_id:08X}"),
-            "rejecting COMMAND_CHECKIN with all-zero AES IV"
+            "rejecting COMMAND_CHECKIN with degenerate AES IV"
         );
         return Err(CommandDispatchError::InvalidCallbackPayload {
             command_id: u32::from(DemonCommand::CommandCheckin),
-            message: "all-zero AES IV is not allowed".to_owned(),
+            message: "degenerate AES IV is not allowed".to_owned(),
         });
     }
 
@@ -227,6 +227,16 @@ mod tests {
 
     use super::*;
     use crate::{AgentRegistry, Database, EventBus};
+
+    /// Generate a non-degenerate test key from a seed byte.
+    fn test_key(seed: u8) -> [u8; AGENT_KEY_LENGTH] {
+        core::array::from_fn(|i| seed.wrapping_add(i as u8))
+    }
+
+    /// Generate a non-degenerate test IV from a seed byte.
+    fn test_iv(seed: u8) -> [u8; AGENT_IV_LENGTH] {
+        core::array::from_fn(|i| seed.wrapping_add(i as u8))
+    }
 
     #[test]
     fn decode_working_hours_zero_returns_none() {
@@ -347,10 +357,10 @@ mod tests {
     #[tokio::test]
     async fn handle_checkin_rejects_key_rotation_and_preserves_original_session_key()
     -> Result<(), Box<dyn std::error::Error>> {
-        let original_key = [0xAA; AGENT_KEY_LENGTH];
-        let original_iv = [0xBB; AGENT_IV_LENGTH];
-        let attacker_key = [0xCC; AGENT_KEY_LENGTH];
-        let attacker_iv = [0xDD; AGENT_IV_LENGTH];
+        let original_key = test_key(0xAA);
+        let original_iv = test_iv(0xBB);
+        let attacker_key = test_key(0xCC);
+        let attacker_iv = test_iv(0xDD);
         let agent_id = 0xDEAD_0001;
 
         let database = Database::connect_in_memory().await?;
@@ -386,8 +396,8 @@ mod tests {
     #[tokio::test]
     async fn handle_checkin_accepts_same_key_without_triggering_rotation_guard()
     -> Result<(), Box<dyn std::error::Error>> {
-        let key = [0xAA; AGENT_KEY_LENGTH];
-        let iv = [0xBB; AGENT_IV_LENGTH];
+        let key = test_key(0xAA);
+        let iv = test_iv(0xBB);
         let agent_id = 0xDEAD_0002;
 
         let database = Database::connect_in_memory().await?;
@@ -416,8 +426,8 @@ mod tests {
     /// malformed CHECKIN frames reaching the parser.
     #[test]
     fn parse_checkin_metadata_rejects_truncated_payload() {
-        let key = [0xAA; AGENT_KEY_LENGTH];
-        let iv = [0xBB; AGENT_IV_LENGTH];
+        let key = test_key(0xAA);
+        let iv = test_iv(0xBB);
         let agent_id = 0xDEAD_0003;
         let existing = sample_agent(agent_id, key, iv);
 
@@ -451,7 +461,7 @@ mod tests {
     #[test]
     fn validate_checkin_transport_material_rejects_all_zero_key() {
         let key = [0u8; AGENT_KEY_LENGTH];
-        let iv = [0xAAu8; AGENT_IV_LENGTH];
+        let iv = test_iv(0xAA);
         let err = validate_checkin_transport_material(0x1234, &key, &iv)
             .expect_err("all-zero key must be rejected");
         match err {
@@ -464,7 +474,7 @@ mod tests {
 
     #[test]
     fn validate_checkin_transport_material_rejects_all_zero_iv() {
-        let key = [0xBBu8; AGENT_KEY_LENGTH];
+        let key = test_key(0xBB);
         let iv = [0u8; AGENT_IV_LENGTH];
         let err = validate_checkin_transport_material(0x1234, &key, &iv)
             .expect_err("all-zero IV must be rejected");
@@ -492,21 +502,49 @@ mod tests {
     }
 
     #[test]
+    fn validate_checkin_transport_material_rejects_repeating_byte_key() {
+        let key = [0xAA; AGENT_KEY_LENGTH];
+        let iv = test_iv(0xBB);
+        let err = validate_checkin_transport_material(0x1234, &key, &iv)
+            .expect_err("repeating-byte key must be rejected");
+        match err {
+            CommandDispatchError::InvalidCallbackPayload { message, .. } => {
+                assert!(message.contains("key"), "message should mention key: {message}");
+            }
+            other => panic!("expected InvalidCallbackPayload, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_checkin_transport_material_rejects_repeating_byte_iv() {
+        let key = test_key(0xBB);
+        let iv = [0xCC; AGENT_IV_LENGTH];
+        let err = validate_checkin_transport_material(0x1234, &key, &iv)
+            .expect_err("repeating-byte IV must be rejected");
+        match err {
+            CommandDispatchError::InvalidCallbackPayload { message, .. } => {
+                assert!(message.contains("IV"), "message should mention IV: {message}");
+            }
+            other => panic!("expected InvalidCallbackPayload, got: {other:?}"),
+        }
+    }
+
+    #[test]
     fn validate_checkin_transport_material_accepts_valid_material() {
-        let key = [0xAAu8; AGENT_KEY_LENGTH];
-        let iv = [0xBBu8; AGENT_IV_LENGTH];
+        let key = test_key(0xAA);
+        let iv = test_iv(0xBB);
         validate_checkin_transport_material(0x1234, &key, &iv)
             .expect("valid key and IV must be accepted");
     }
 
     /// A key with only the last byte non-zero is NOT considered weak by
-    /// `is_weak_aes_key` (which only rejects all-zero keys).  Verify that
+    /// `is_weak_aes_key` (not a repeating pattern).  Verify that
     /// `validate_checkin_transport_material` passes this boundary case.
     #[test]
     fn validate_checkin_transport_material_accepts_partially_zeroed_key() {
         let mut key = [0u8; AGENT_KEY_LENGTH];
         key[AGENT_KEY_LENGTH - 1] = 1;
-        let iv = [0xCCu8; AGENT_IV_LENGTH];
+        let iv = test_iv(0xCC);
         validate_checkin_transport_material(0x1234, &key, &iv)
             .expect("partially-zeroed key (last byte non-zero) must be accepted");
     }
@@ -514,7 +552,7 @@ mod tests {
     /// Same boundary test for IV: only the first byte is non-zero.
     #[test]
     fn validate_checkin_transport_material_accepts_partially_zeroed_iv() {
-        let key = [0xAAu8; AGENT_KEY_LENGTH];
+        let key = test_key(0xAA);
         let mut iv = [0u8; AGENT_IV_LENGTH];
         iv[0] = 1;
         validate_checkin_transport_material(0x1234, &key, &iv)
@@ -526,8 +564,8 @@ mod tests {
     #[tokio::test]
     async fn handle_checkin_empty_payload_updates_last_call_in_only()
     -> Result<(), Box<dyn std::error::Error>> {
-        let key = [0xAA; AGENT_KEY_LENGTH];
-        let iv = [0xBB; AGENT_IV_LENGTH];
+        let key = test_key(0xAA);
+        let iv = test_iv(0xBB);
         let agent_id = 0xDEAD_0010;
 
         let database = Database::connect_in_memory().await?;
@@ -552,8 +590,8 @@ mod tests {
     #[tokio::test]
     async fn handle_checkin_truncated_payload_does_not_mutate_agent()
     -> Result<(), Box<dyn std::error::Error>> {
-        let key = [0xAA; AGENT_KEY_LENGTH];
-        let iv = [0xBB; AGENT_IV_LENGTH];
+        let key = test_key(0xAA);
+        let iv = test_iv(0xBB);
         let agent_id = 0xDEAD_0011;
 
         let database = Database::connect_in_memory().await?;
@@ -584,8 +622,8 @@ mod tests {
     /// This prevents silent state corruption from misrouted or tampered frames.
     #[test]
     fn parse_checkin_metadata_rejects_agent_id_mismatch() {
-        let key = [0xAA; AGENT_KEY_LENGTH];
-        let iv = [0xBB; AGENT_IV_LENGTH];
+        let key = test_key(0xAA);
+        let iv = test_iv(0xBB);
         let envelope_agent_id = 0xDEAD_0004;
         let payload_agent_id = 0xDEAD_FFFF; // different from envelope
         let existing = sample_agent(envelope_agent_id, key, iv);
@@ -627,8 +665,8 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         use red_cell_common::operator::OperatorMessage;
 
-        let key = [0xAA; AGENT_KEY_LENGTH];
-        let iv = [0xBB; AGENT_IV_LENGTH];
+        let key = test_key(0xAA);
+        let iv = test_iv(0xBB);
         let agent_id = 0xDEAD_0020;
 
         let database = Database::connect_in_memory().await?;
@@ -688,8 +726,8 @@ mod tests {
     #[tokio::test]
     async fn handle_checkin_weak_aes_key_rejects_and_does_not_mutate()
     -> Result<(), Box<dyn std::error::Error>> {
-        let good_key = [0xAA; AGENT_KEY_LENGTH];
-        let good_iv = [0xBB; AGENT_IV_LENGTH];
+        let good_key = test_key(0xAA);
+        let good_iv = test_iv(0xBB);
         let agent_id = 0xDEAD_0030;
 
         let database = Database::connect_in_memory().await?;
@@ -727,8 +765,8 @@ mod tests {
     #[tokio::test]
     async fn handle_checkin_weak_aes_iv_rejects_and_does_not_mutate()
     -> Result<(), Box<dyn std::error::Error>> {
-        let good_key = [0xAA; AGENT_KEY_LENGTH];
-        let good_iv = [0xBB; AGENT_IV_LENGTH];
+        let good_key = test_key(0xAA);
+        let good_iv = test_iv(0xBB);
         let agent_id = 0xDEAD_0031;
 
         let database = Database::connect_in_memory().await?;
@@ -764,8 +802,8 @@ mod tests {
     /// `handle_checkin` happy-path integration test above.
     #[test]
     fn parse_checkin_metadata_populates_all_fields() {
-        let key = [0xAA; AGENT_KEY_LENGTH];
-        let iv = [0xBB; AGENT_IV_LENGTH];
+        let key = test_key(0xAA);
+        let iv = test_iv(0xBB);
         let agent_id = 0xDEAD_0040;
         let existing = sample_agent(agent_id, key, iv);
 
@@ -806,8 +844,8 @@ mod tests {
     /// heartbeat-only (no metadata update).
     #[test]
     fn parse_checkin_metadata_empty_payload_returns_none() {
-        let key = [0xAA; AGENT_KEY_LENGTH];
-        let iv = [0xBB; AGENT_IV_LENGTH];
+        let key = test_key(0xAA);
+        let iv = test_iv(0xBB);
         let agent_id = 0xDEAD_0041;
         let existing = sample_agent(agent_id, key, iv);
 
@@ -823,8 +861,8 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         use red_cell_common::operator::OperatorMessage;
 
-        let key = [0xAA; AGENT_KEY_LENGTH];
-        let iv = [0xBB; AGENT_IV_LENGTH];
+        let key = test_key(0xAA);
+        let iv = test_iv(0xBB);
         let agent_id = 0xDEAD_0050;
 
         let database = Database::connect_in_memory().await?;

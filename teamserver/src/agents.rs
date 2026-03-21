@@ -8,7 +8,7 @@ use std::sync::Mutex as StdMutex;
 
 use red_cell_common::crypto::{
     AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len, decrypt_agent_data_at_offset,
-    encrypt_agent_data_at_offset,
+    encrypt_agent_data_at_offset, is_weak_aes_key,
 };
 use red_cell_common::demon::{DemonCommand, DemonMessage, DemonPackage};
 use red_cell_common::{AgentEncryptionInfo, AgentRecord};
@@ -1065,14 +1065,14 @@ fn decode_crypto_material(
 {
     let key = copy_fixed::<AGENT_KEY_LENGTH>(agent_id, "aes_key", &encryption.aes_key)?;
     let iv = copy_fixed::<AGENT_IV_LENGTH>(agent_id, "aes_iv", &encryption.aes_iv)?;
-    if key.iter().all(|byte| *byte == 0) {
+    if is_weak_aes_key(key.as_ref()) {
         warn!(
             agent_id = format_args!("0x{agent_id:08X}"),
-            "rejecting stored all-zero AES key for agent transport"
+            "rejecting stored degenerate AES key for agent transport"
         );
         return Err(TeamserverError::InvalidAgentCrypto {
             agent_id,
-            message: "all-zero AES keys are not allowed".to_owned(),
+            message: "degenerate AES keys are not allowed".to_owned(),
         });
     }
     Ok((key, iv))
@@ -1158,6 +1158,16 @@ mod tests {
 
     use super::{AgentRegistry, Job, MAX_JOB_QUEUE_DEPTH};
     use crate::database::{Database, LinkRecord, TeamserverError};
+
+    /// Generate a non-degenerate test key from a seed byte.
+    fn test_key(seed: u8) -> [u8; AGENT_KEY_LENGTH] {
+        core::array::from_fn(|i| seed.wrapping_add(i as u8))
+    }
+
+    /// Generate a non-degenerate test IV from a seed byte.
+    fn test_iv(seed: u8) -> [u8; AGENT_IV_LENGTH] {
+        core::array::from_fn(|i| seed.wrapping_add(i as u8))
+    }
 
     fn temp_db_path() -> std::path::PathBuf {
         std::env::temp_dir().join(format!("red-cell-agent-registry-{}.sqlite", Uuid::new_v4()))
@@ -1265,11 +1275,7 @@ mod tests {
     async fn load_restores_persisted_ctr_offsets() -> Result<(), TeamserverError> {
         let database = test_database().await?;
         let registry = AgentRegistry::new(database.clone());
-        let agent = sample_agent_with_crypto(
-            0x1000_0ABC,
-            [0x11; AGENT_KEY_LENGTH],
-            [0x22; AGENT_IV_LENGTH],
-        );
+        let agent = sample_agent_with_crypto(0x1000_0ABC, test_key(0x11), test_iv(0x22));
 
         registry.insert(agent.clone()).await?;
         registry.set_ctr_offset(agent.agent_id, 7).await?;
@@ -1891,8 +1897,8 @@ mod tests {
     #[tokio::test]
     async fn encrypt_for_agent_advances_ctr_offset_per_message() -> Result<(), TeamserverError> {
         let registry = AgentRegistry::new(test_database().await?);
-        let key = [0x31; AGENT_KEY_LENGTH];
-        let iv = [0x41; AGENT_IV_LENGTH];
+        let key = test_key(0x31);
+        let iv = test_iv(0x41);
         let agent = sample_agent_with_crypto(0x1000_0701, key, iv);
         let plaintext = b"first encrypted payload";
 
@@ -1915,11 +1921,7 @@ mod tests {
     async fn encrypt_and_decrypt_for_agent_round_trip() -> Result<(), TeamserverError> {
         let sender = AgentRegistry::new(test_database().await?);
         let receiver = AgentRegistry::new(test_database().await?);
-        let agent = sample_agent_with_crypto(
-            0x1000_0702,
-            [0x52; AGENT_KEY_LENGTH],
-            [0x62; AGENT_IV_LENGTH],
-        );
+        let agent = sample_agent_with_crypto(0x1000_0702, test_key(0x52), test_iv(0x62));
         let plaintext = b"callback payload requiring ctr synchronisation";
 
         sender.insert(agent.clone()).await?;
@@ -1942,8 +1944,8 @@ mod tests {
     async fn encrypt_for_agent_empty_plaintext_returns_empty_and_preserves_ctr()
     -> Result<(), TeamserverError> {
         let registry = AgentRegistry::new(test_database().await?);
-        let key = [0xA1; AGENT_KEY_LENGTH];
-        let iv = [0xB1; AGENT_IV_LENGTH];
+        let key = test_key(0xA1);
+        let iv = test_iv(0xB1);
         let agent = sample_agent_with_crypto(0x1000_0E01, key, iv);
 
         registry.insert(agent.clone()).await?;
@@ -1965,8 +1967,8 @@ mod tests {
     async fn decrypt_from_agent_empty_ciphertext_returns_empty_and_preserves_ctr()
     -> Result<(), TeamserverError> {
         let registry = AgentRegistry::new(test_database().await?);
-        let key = [0xA2; AGENT_KEY_LENGTH];
-        let iv = [0xB2; AGENT_IV_LENGTH];
+        let key = test_key(0xA2);
+        let iv = test_iv(0xB2);
         let agent = sample_agent_with_crypto(0x1000_0E02, key, iv);
 
         registry.insert(agent.clone()).await?;
@@ -1988,8 +1990,8 @@ mod tests {
     async fn encrypt_empty_then_non_empty_preserves_keystream_continuity()
     -> Result<(), TeamserverError> {
         let registry = AgentRegistry::new(test_database().await?);
-        let key = [0xA3; AGENT_KEY_LENGTH];
-        let iv = [0xB3; AGENT_IV_LENGTH];
+        let key = test_key(0xA3);
+        let iv = test_iv(0xB3);
         let agent = sample_agent_with_crypto(0x1000_0E03, key, iv);
         let payload = b"payload after empty";
 
@@ -2013,8 +2015,8 @@ mod tests {
     #[tokio::test]
     async fn set_ctr_offset_changes_agent_transport_keystream() -> Result<(), TeamserverError> {
         let registry = AgentRegistry::new(test_database().await?);
-        let key = [0x73; AGENT_KEY_LENGTH];
-        let iv = [0x83; AGENT_IV_LENGTH];
+        let key = test_key(0x73);
+        let iv = test_iv(0x83);
         let agent = sample_agent_with_crypto(0x1000_0703, key, iv);
         let starting_offset = 9;
         let plaintext = b"offset-aware encryption";
@@ -2039,8 +2041,8 @@ mod tests {
     async fn encrypt_for_agent_without_advancing_keeps_ctr_unchanged() -> Result<(), TeamserverError>
     {
         let registry = AgentRegistry::new(test_database().await?);
-        let key = [0x74; AGENT_KEY_LENGTH];
-        let iv = [0x84; AGENT_IV_LENGTH];
+        let key = test_key(0x74);
+        let iv = test_iv(0x84);
         let agent = sample_agent_with_crypto(0x1000_0705, key, iv);
         let starting_offset = 11;
         let plaintext = b"preview-only encryption";
@@ -2063,8 +2065,8 @@ mod tests {
     async fn decrypt_from_agent_without_advancing_keeps_ctr_unchanged()
     -> Result<(), TeamserverError> {
         let registry = AgentRegistry::new(test_database().await?);
-        let key = [0x75; AGENT_KEY_LENGTH];
-        let iv = [0x85; AGENT_IV_LENGTH];
+        let key = test_key(0x75);
+        let iv = test_iv(0x85);
         let agent = sample_agent_with_crypto(0x1000_0706, key, iv);
         let starting_offset = 7;
         let plaintext = b"decrypt-without-advance payload";
@@ -2086,8 +2088,8 @@ mod tests {
     #[tokio::test]
     async fn advance_ctr_for_agent_commits_offset_correctly() -> Result<(), TeamserverError> {
         let registry = AgentRegistry::new(test_database().await?);
-        let key = [0x76; AGENT_KEY_LENGTH];
-        let iv = [0x86; AGENT_IV_LENGTH];
+        let key = test_key(0x76);
+        let iv = test_iv(0x86);
         let agent = sample_agent_with_crypto(0x1000_0707, key, iv);
         let starting_offset = 3;
         let payload = b"advance-ctr test payload";
@@ -2119,8 +2121,8 @@ mod tests {
         // decrypt_from_agent (which advances atomically in one step).
         let registry_split = AgentRegistry::new(test_database().await?);
         let registry_atomic = AgentRegistry::new(test_database().await?);
-        let key = [0x77; AGENT_KEY_LENGTH];
-        let iv = [0x87; AGENT_IV_LENGTH];
+        let key = test_key(0x77);
+        let iv = test_iv(0x87);
         let agent = sample_agent_with_crypto(0x1000_0708, key, iv);
         let plaintext = b"split vs atomic ctr advance";
 
@@ -2151,11 +2153,8 @@ mod tests {
     #[tokio::test]
     async fn zero_key_agent_transport_is_rejected() -> Result<(), TeamserverError> {
         let registry = AgentRegistry::new(test_database().await?);
-        let agent = sample_agent_with_crypto(
-            0x1000_0704,
-            [0x00; AGENT_KEY_LENGTH],
-            [0x00; AGENT_IV_LENGTH],
-        );
+        let agent =
+            sample_agent_with_crypto(0x1000_0704, [0u8; AGENT_KEY_LENGTH], [0u8; AGENT_IV_LENGTH]);
         let plaintext = b"plaintext transport";
 
         registry.insert(agent.clone()).await?;
@@ -2368,21 +2367,9 @@ mod tests {
     #[tokio::test]
     async fn enqueue_job_routes_linked_child_to_root_parent_queue() -> Result<(), TeamserverError> {
         let registry = AgentRegistry::new(test_database().await?);
-        let root = sample_agent_with_crypto(
-            0x1000_0010,
-            [0x11; AGENT_KEY_LENGTH],
-            [0x22; AGENT_IV_LENGTH],
-        );
-        let pivot = sample_agent_with_crypto(
-            0x1000_0011,
-            [0x33; AGENT_KEY_LENGTH],
-            [0x44; AGENT_IV_LENGTH],
-        );
-        let child = sample_agent_with_crypto(
-            0x1000_0012,
-            [0x55; AGENT_KEY_LENGTH],
-            [0x66; AGENT_IV_LENGTH],
-        );
+        let root = sample_agent_with_crypto(0x1000_0010, test_key(0x11), test_iv(0x22));
+        let pivot = sample_agent_with_crypto(0x1000_0011, test_key(0x33), test_iv(0x44));
+        let child = sample_agent_with_crypto(0x1000_0012, test_key(0x55), test_iv(0x66));
         registry.insert(root.clone()).await?;
         registry.insert(pivot.clone()).await?;
         registry.insert(child.clone()).await?;
@@ -2998,11 +2985,7 @@ mod tests {
 
         let database = test_database().await?;
         let registry = AgentRegistry::new(database.clone());
-        let agent = sample_agent_with_crypto(
-            0x1000_F002,
-            [0xAA; AGENT_KEY_LENGTH],
-            [0xBB; AGENT_IV_LENGTH],
-        );
+        let agent = sample_agent_with_crypto(0x1000_F002, test_key(0xAA), test_iv(0xBB));
         registry.insert(agent.clone()).await?;
 
         let original_enc = registry.encryption(agent.agent_id).await?;
@@ -3148,11 +3131,7 @@ mod tests {
     {
         let database = test_database().await?;
         let registry = AgentRegistry::new(database);
-        let agent = sample_agent_with_crypto(
-            0x1000_FFFE,
-            [0xCC; AGENT_KEY_LENGTH],
-            [0xDD; AGENT_IV_LENGTH],
-        );
+        let agent = sample_agent_with_crypto(0x1000_FFFE, test_key(0xCC), test_iv(0xDD));
         registry.insert(agent.clone()).await?;
 
         // i64::MAX as u64 is the largest offset storable in SQLite.
@@ -3180,11 +3159,7 @@ mod tests {
     async fn advance_ctr_for_agent_succeeds_at_i64_max_boundary() -> Result<(), TeamserverError> {
         let database = test_database().await?;
         let registry = AgentRegistry::new(database);
-        let agent = sample_agent_with_crypto(
-            0x1000_FFFD,
-            [0xCC; AGENT_KEY_LENGTH],
-            [0xDD; AGENT_IV_LENGTH],
-        );
+        let agent = sample_agent_with_crypto(0x1000_FFFD, test_key(0xCC), test_iv(0xDD));
         registry.insert(agent.clone()).await?;
 
         // Set to (i64::MAX - 1) as u64, then advance by 1 block → i64::MAX as u64.
@@ -3206,11 +3181,7 @@ mod tests {
     {
         let database = test_database().await?;
         let registry = AgentRegistry::new(database);
-        let agent = sample_agent_with_crypto(
-            0x1000_FFFC,
-            [0xCC; AGENT_KEY_LENGTH],
-            [0xDD; AGENT_IV_LENGTH],
-        );
+        let agent = sample_agent_with_crypto(0x1000_FFFC, test_key(0xCC), test_iv(0xDD));
         registry.insert(agent.clone()).await?;
 
         let max_storable = i64::MAX as u64;
@@ -3302,11 +3273,7 @@ mod tests {
     async fn set_encryption_updates_both_memory_and_database() -> Result<(), TeamserverError> {
         let database = test_database().await?;
         let registry = AgentRegistry::new(database.clone());
-        let agent = sample_agent_with_crypto(
-            0x1000_0D04,
-            [0x11; AGENT_KEY_LENGTH],
-            [0x22; AGENT_IV_LENGTH],
-        );
+        let agent = sample_agent_with_crypto(0x1000_0D04, test_key(0x11), test_iv(0x22));
         registry.insert(agent.clone()).await?;
 
         let new_enc = AgentEncryptionInfo {

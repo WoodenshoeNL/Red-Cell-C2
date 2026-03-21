@@ -3454,6 +3454,16 @@ mod tests {
     use tokio::time::{sleep, timeout};
     use zeroize::Zeroizing;
 
+    /// Generate a non-degenerate test key from a seed byte.
+    fn test_key(seed: u8) -> [u8; AGENT_KEY_LENGTH] {
+        core::array::from_fn(|i| seed.wrapping_add(i as u8))
+    }
+
+    /// Generate a non-degenerate test IV from a seed byte.
+    fn test_iv(seed: u8) -> [u8; AGENT_IV_LENGTH] {
+        core::array::from_fn(|i| seed.wrapping_add(i as u8))
+    }
+
     fn http_listener(name: &str, port: u16) -> ListenerConfig {
         ListenerConfig::from(HttpListenerConfig {
             name: name.to_owned(),
@@ -4244,8 +4254,8 @@ mod tests {
         let manager = ListenerManager::new(database, registry, events, sockets, None);
         let port = available_port()?;
         let agent_id = 1;
-        let key = [0x41; AGENT_KEY_LENGTH];
-        let iv = [0x24; AGENT_IV_LENGTH];
+        let key = test_key(0x41);
+        let iv = test_iv(0x24);
         let config = ListenerConfig::from(HttpListenerConfig {
             name: "edge-https".to_owned(),
             kill_date: None,
@@ -4393,8 +4403,8 @@ mod tests {
         manager.start("edge-http-init").await?;
         wait_for_listener(port, false).await?;
 
-        let key = [0x41; AGENT_KEY_LENGTH];
-        let iv = [0x24; AGENT_IV_LENGTH];
+        let key = test_key(0x41);
+        let iv = test_iv(0x24);
         let response = Client::new()
             .post(format!("http://127.0.0.1:{port}/"))
             .body(valid_demon_init_body(0x1234_5678, key, iv))
@@ -4438,8 +4448,8 @@ mod tests {
         manager.start("edge-http-audit-init").await?;
         wait_for_listener(port, false).await?;
 
-        let key = [0x41; AGENT_KEY_LENGTH];
-        let iv = [0x24; AGENT_IV_LENGTH];
+        let key = test_key(0x41);
+        let iv = test_iv(0x24);
         let agent_id = 0xDEAD_CAFE_u32;
         let response = Client::new()
             .post(format!("http://127.0.0.1:{port}/"))
@@ -4487,11 +4497,7 @@ mod tests {
             .post(format!("http://127.0.0.1:{port}/"))
             .header("X-Forwarded-For", "198.51.100.24")
             .header("X-Real-IP", "198.51.100.25")
-            .body(valid_demon_init_body(
-                0x1111_2222,
-                [0x41; AGENT_KEY_LENGTH],
-                [0x24; AGENT_IV_LENGTH],
-            ))
+            .body(valid_demon_init_body(0x1111_2222, test_key(0x41), test_iv(0x24)))
             .send()
             .await?;
 
@@ -4526,11 +4532,7 @@ mod tests {
         let response = Client::new()
             .post(format!("http://127.0.0.1:{port}/"))
             .header("X-Forwarded-For", "203.0.113.200, 198.51.100.24")
-            .body(valid_demon_init_body(
-                0x3333_4444,
-                [0x41; AGENT_KEY_LENGTH],
-                [0x24; AGENT_IV_LENGTH],
-            ))
+            .body(valid_demon_init_body(0x3333_4444, test_key(0x41), test_iv(0x24)))
             .send()
             .await?;
 
@@ -4561,11 +4563,7 @@ mod tests {
             let agent_id = 0x1000_0000 + attempt;
             let response = client
                 .post(format!("http://127.0.0.1:{port}/"))
-                .body(valid_demon_init_body(
-                    agent_id,
-                    [0x41; AGENT_KEY_LENGTH],
-                    [0x24; AGENT_IV_LENGTH],
-                ))
+                .body(valid_demon_init_body(agent_id, test_key(0x41), test_iv(0x24)))
                 .send()
                 .await?;
             assert_eq!(response.status(), StatusCode::OK);
@@ -4575,11 +4573,7 @@ mod tests {
         let blocked_agent_id = 0x1000_00FF;
         let blocked = client
             .post(format!("http://127.0.0.1:{port}/"))
-            .body(valid_demon_init_body(
-                blocked_agent_id,
-                [0x41; AGENT_KEY_LENGTH],
-                [0x24; AGENT_IV_LENGTH],
-            ))
+            .body(valid_demon_init_body(blocked_agent_id, test_key(0x41), test_iv(0x24)))
             .send()
             .await?;
         assert_eq!(blocked.status(), StatusCode::NOT_FOUND);
@@ -4598,8 +4592,8 @@ mod tests {
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
         let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
         let port = available_port()?;
-        let key = [0x51; AGENT_KEY_LENGTH];
-        let iv = [0x19; AGENT_IV_LENGTH];
+        let key = test_key(0x51);
+        let iv = test_iv(0x19);
         let agent_id = 0x1020_3040;
 
         registry.insert(sample_agent_info(agent_id, key, iv)).await?;
@@ -4636,8 +4630,8 @@ mod tests {
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
         let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
         let port = available_port()?;
-        let key = [0x31; AGENT_KEY_LENGTH];
-        let iv = [0x17; AGENT_IV_LENGTH];
+        let key = test_key(0x31);
+        let iv = test_iv(0x17);
         let agent_id = 0x0BAD_F00D;
         let config = ListenerConfig::from(HttpListenerConfig {
             name: "edge-http-decoy-success".to_owned(),
@@ -4702,8 +4696,8 @@ mod tests {
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
         let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
         let port = available_port()?;
-        let key = [0x52; AGENT_KEY_LENGTH];
-        let iv = [0x1A; AGENT_IV_LENGTH];
+        let key = test_key(0x52);
+        let iv = test_iv(0x1A);
         let agent_id = 0x1020_3040;
         let client = Client::new();
 
@@ -4748,8 +4742,8 @@ mod tests {
         let client = Client::new();
         // Use an agent_id that is never registered so decrypt_from_agent returns AgentNotFound.
         let agent_id = 0xCAFE_BABE;
-        let key = [0xAA; AGENT_KEY_LENGTH];
-        let iv = [0xBB; AGENT_IV_LENGTH];
+        let key = test_key(0xAA);
+        let iv = test_iv(0xBB);
 
         manager.create(http_listener("edge-http-unknown-callback", port)).await?;
         manager.start("edge-http-unknown-callback").await?;
@@ -4890,8 +4884,8 @@ mod tests {
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
         let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
         let port = available_port()?;
-        let key = [0x61; AGENT_KEY_LENGTH];
-        let iv = [0x27; AGENT_IV_LENGTH];
+        let key = test_key(0x61);
+        let iv = test_iv(0x27);
         let agent_id = 0x5566_7788;
 
         registry.insert(sample_agent_info(agent_id, key, iv)).await?;
@@ -4980,11 +4974,11 @@ mod tests {
             ListenerManager::new(database.clone(), registry.clone(), events.clone(), sockets, None);
         let mut event_receiver = events.subscribe();
         let port = available_port()?;
-        let key = [0x71; AGENT_KEY_LENGTH];
-        let iv = [0x37; AGENT_IV_LENGTH];
+        let key = test_key(0x71);
+        let iv = test_iv(0x37);
         // A different key/IV that the agent embeds in its CHECKIN — must be rejected.
-        let attempted_key = [0x12; AGENT_KEY_LENGTH];
-        let attempted_iv = [0x34; AGENT_IV_LENGTH];
+        let attempted_key = test_key(0x12);
+        let attempted_iv = test_iv(0x34);
         let agent_id = 0xCAFE_BABE;
 
         registry.insert(sample_agent_info(agent_id, key, iv)).await?;
@@ -5069,8 +5063,8 @@ mod tests {
         manager.start("edge-smb-init").await?;
         wait_for_smb_listener(&pipe_name).await?;
 
-        let key = [0x41; AGENT_KEY_LENGTH];
-        let iv = [0x24; AGENT_IV_LENGTH];
+        let key = test_key(0x41);
+        let iv = test_iv(0x24);
         let mut stream = connect_smb_stream(&pipe_name).await?;
         write_test_smb_frame(
             &mut stream,
@@ -5124,7 +5118,7 @@ mod tests {
             write_test_smb_frame(
                 &mut stream,
                 agent_id,
-                &valid_demon_init_body(agent_id, [0x41; AGENT_KEY_LENGTH], [0x24; AGENT_IV_LENGTH]),
+                &valid_demon_init_body(agent_id, test_key(0x41), test_iv(0x24)),
             )
             .await?;
 
@@ -5139,11 +5133,7 @@ mod tests {
         write_test_smb_frame(
             &mut stream,
             extra_agent_id,
-            &valid_demon_init_body(
-                extra_agent_id,
-                [0x41; AGENT_KEY_LENGTH],
-                [0x24; AGENT_IV_LENGTH],
-            ),
+            &valid_demon_init_body(extra_agent_id, test_key(0x41), test_iv(0x24)),
         )
         .await?;
         let (extra_resp_id, extra_resp) = read_test_smb_frame(&mut stream).await?;
@@ -5161,8 +5151,8 @@ mod tests {
         // token for each one before dispatch.
         // Attempt MAX+1: rate-limiter blocks.
         let repeated_agent_id = 0x3000_0000_u32;
-        let repeated_key = [0x51; AGENT_KEY_LENGTH];
-        let repeated_iv = [0x25; AGENT_IV_LENGTH];
+        let repeated_key = test_key(0x51);
+        let repeated_iv = test_iv(0x25);
 
         let mut rate_stream = connect_smb_stream(&pipe_name).await?;
 
@@ -5218,11 +5208,11 @@ mod tests {
         let mut event_receiver = events.subscribe();
         let pipe_name = unique_smb_pipe_name("pivot-init");
         let parent_id = 0x1111_2222;
-        let parent_key = [0x31; AGENT_KEY_LENGTH];
-        let parent_iv = [0x41; AGENT_IV_LENGTH];
+        let parent_key = test_key(0x31);
+        let parent_iv = test_iv(0x41);
         let child_id = 0x3333_4444;
-        let child_key = [0x51; AGENT_KEY_LENGTH];
-        let child_iv = [0x61; AGENT_IV_LENGTH];
+        let child_key = test_key(0x51);
+        let child_iv = test_iv(0x61);
 
         registry.insert(sample_agent_info(parent_id, parent_key, parent_iv)).await?;
         registry.insert(sample_agent_info(child_id, child_key, child_iv)).await?;
@@ -5270,8 +5260,8 @@ mod tests {
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
         let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
         let pipe_name = unique_smb_pipe_name("jobs");
-        let key = [0x61; AGENT_KEY_LENGTH];
-        let iv = [0x27; AGENT_IV_LENGTH];
+        let key = test_key(0x61);
+        let iv = test_iv(0x27);
         let agent_id = 0x5566_7788;
 
         registry.insert(sample_agent_info(agent_id, key, iv)).await?;
@@ -6431,8 +6421,7 @@ mod tests {
 
         for attempt in 0..=MAX_DEMON_INIT_ATTEMPTS_PER_IP {
             let agent_id = 0x3000_0000 + attempt;
-            let payload =
-                valid_demon_init_body(agent_id, [0x41; AGENT_KEY_LENGTH], [0x24; AGENT_IV_LENGTH]);
+            let payload = valid_demon_init_body(agent_id, test_key(0x41), test_iv(0x24));
             let chunks: Vec<&[u8]> = payload.chunks(39).collect();
             let total = u16::try_from(chunks.len()).expect("chunk count should fit in u16");
             let expected_txt = if attempt < MAX_DEMON_INIT_ATTEMPTS_PER_IP { "ack" } else { "err" };
@@ -7152,8 +7141,7 @@ mod tests {
         // agent_registry() must return the same underlying handle: an insert via the returned
         // registry is visible through the original handle.
         let returned_registry = manager.agent_registry();
-        let agent =
-            sample_agent_info(0xCAFE_BABE, [0x41; AGENT_KEY_LENGTH], [0x24; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0xCAFE_BABE, test_key(0x41), test_iv(0x24));
         returned_registry.insert(agent).await.expect("agent insert should succeed");
         assert!(registry.get(0xCAFE_BABE).await.is_some(), "registry handle must be shared");
 
@@ -7247,7 +7235,7 @@ mod tests {
 
         // Insert an agent and then remove it to trigger the cleanup chain.
         let agent_id: u32 = 0x1234_5678;
-        let agent = sample_agent_info(agent_id, [0x41; AGENT_KEY_LENGTH], [0x24; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(agent_id, test_key(0x41), test_iv(0x24));
         registry.insert(agent).await.expect("agent insert should succeed");
         registry.remove(agent_id).await.expect("agent removal should succeed");
 
@@ -7346,8 +7334,8 @@ mod tests {
         manager.start("plugin-init-wiring").await?;
         wait_for_listener(port, false).await?;
 
-        let key = [0x41; AGENT_KEY_LENGTH];
-        let iv = [0x24; AGENT_IV_LENGTH];
+        let key = test_key(0x41);
+        let iv = test_iv(0x24);
         let response = Client::new()
             .post(format!("http://127.0.0.1:{port}/"))
             .body(valid_demon_init_body(0xABCD_1234, key, iv))

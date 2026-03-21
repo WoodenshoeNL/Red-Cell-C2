@@ -1680,6 +1680,16 @@ mod tests {
     };
     use crate::{AgentRegistry, Database, EventBus, Job, SocketRelayManager, TeamserverError};
 
+    /// Generate a non-degenerate test key from a seed byte.
+    fn test_key(seed: u8) -> [u8; AGENT_KEY_LENGTH] {
+        core::array::from_fn(|i| seed.wrapping_add(i as u8))
+    }
+
+    /// Generate a non-degenerate test IV from a seed byte.
+    fn test_iv(seed: u8) -> [u8; AGENT_IV_LENGTH] {
+        core::array::from_fn(|i| seed.wrapping_add(i as u8))
+    }
+
     fn sample_agent_info(
         agent_id: u32,
         key: [u8; AGENT_KEY_LENGTH],
@@ -1992,8 +2002,8 @@ mod tests {
             sockets,
             None,
         );
-        let key = [0x55; AGENT_KEY_LENGTH];
-        let iv = [0x22; AGENT_IV_LENGTH];
+        let key = test_key(0x55);
+        let iv = test_iv(0x22);
         let agent_id = 0x5566_7788;
 
         registry.insert(sample_agent_info(agent_id, key, iv)).await?;
@@ -2043,12 +2053,12 @@ mod tests {
         let root_id = 0x0102_0304;
         let pivot_id = 0x1112_1314;
         let child_id = 0x2122_2324;
-        let root_key = [0x10; AGENT_KEY_LENGTH];
-        let root_iv = [0x20; AGENT_IV_LENGTH];
-        let pivot_key = [0x30; AGENT_KEY_LENGTH];
-        let pivot_iv = [0x40; AGENT_IV_LENGTH];
-        let child_key = [0x50; AGENT_KEY_LENGTH];
-        let child_iv = [0x60; AGENT_IV_LENGTH];
+        let root_key = test_key(0x10);
+        let root_iv = test_iv(0x20);
+        let pivot_key = test_key(0x30);
+        let pivot_iv = test_iv(0x40);
+        let child_key = test_key(0x50);
+        let child_iv = test_iv(0x60);
 
         registry.insert(sample_agent_info(root_id, root_key, root_iv)).await?;
         registry.insert(sample_agent_info(pivot_id, pivot_key, pivot_iv)).await?;
@@ -2116,11 +2126,11 @@ mod tests {
             None,
         );
         let parent_id = 0x4546_4748;
-        let parent_key = [0x21; AGENT_KEY_LENGTH];
-        let parent_iv = [0x31; AGENT_IV_LENGTH];
+        let parent_key = test_key(0x21);
+        let parent_iv = test_iv(0x31);
         let child_id = 0x5152_5354;
-        let child_key = [0x41; AGENT_KEY_LENGTH];
-        let child_iv = [0x51; AGENT_IV_LENGTH];
+        let child_key = test_key(0x41);
+        let child_iv = test_iv(0x51);
 
         registry
             .insert_with_listener(sample_agent_info(parent_id, parent_key, parent_iv), "http-main")
@@ -2169,11 +2179,11 @@ mod tests {
             None,
         );
         let parent_id = 0xAABB_CCDD;
-        let parent_key = [0x11; AGENT_KEY_LENGTH];
-        let parent_iv = [0x22; AGENT_IV_LENGTH];
+        let parent_key = test_key(0x11);
+        let parent_iv = test_iv(0x22);
         let child_id = 0x1122_3344;
-        let child_key = [0x33; AGENT_KEY_LENGTH];
-        let child_iv = [0x44; AGENT_IV_LENGTH];
+        let child_key = test_key(0x33);
+        let child_iv = test_iv(0x44);
 
         registry
             .insert_with_listener(
@@ -2224,8 +2234,8 @@ mod tests {
             None,
         );
         let parent_id = 0x1234_5678;
-        let parent_key = [0xAA; AGENT_KEY_LENGTH];
-        let parent_iv = [0xBB; AGENT_IV_LENGTH];
+        let parent_key = test_key(0xAA);
+        let parent_iv = test_iv(0xBB);
         registry
             .insert_with_listener(sample_agent_info(parent_id, parent_key, parent_iv), "http-main")
             .await?;
@@ -2300,8 +2310,8 @@ mod tests {
         );
         let parent_id = 0xABCD_1234_u32;
         let child_id = 0x5678_EF01_u32;
-        let parent_key = [0xCC; AGENT_KEY_LENGTH];
-        let parent_iv = [0xDD; AGENT_IV_LENGTH];
+        let parent_key = test_key(0xCC);
+        let parent_iv = test_iv(0xDD);
         registry
             .insert_with_listener(sample_agent_info(parent_id, parent_key, parent_iv), "smb-test")
             .await?;
@@ -2375,8 +2385,8 @@ mod tests {
             None,
         );
         let agent_id = 0xAAAA_BBBB;
-        let key = [0x11; AGENT_KEY_LENGTH];
-        let iv = [0x22; AGENT_IV_LENGTH];
+        let key = test_key(0x11);
+        let iv = test_iv(0x22);
         registry.insert(sample_agent_info(agent_id, key, iv)).await?;
 
         // demon_id = 0x1 is only 1 hex digit — must be padded to "00000001", not "10000000"
@@ -2425,8 +2435,8 @@ mod tests {
             None,
         );
         let agent_id = 0xAAAA_BBBB;
-        let key = [0x11; AGENT_KEY_LENGTH];
-        let iv = [0x22; AGENT_IV_LENGTH];
+        let key = test_key(0x11);
+        let iv = test_iv(0x22);
         registry.insert(sample_agent_info(agent_id, key, iv)).await?;
 
         let response = dispatcher
@@ -2477,8 +2487,8 @@ mod tests {
             None,
         );
         let agent_id = 0xCCCC_DDDD;
-        let key = [0x33; AGENT_KEY_LENGTH];
-        let iv = [0x44; AGENT_IV_LENGTH];
+        let key = test_key(0x33);
+        let iv = test_iv(0x44);
         registry.insert(sample_agent_info(agent_id, key, iv)).await?;
 
         let response = dispatcher
@@ -2522,8 +2532,8 @@ mod tests {
             None,
         );
         let parent_id = 0x8182_8384;
-        let parent_key = [0x81; AGENT_KEY_LENGTH];
-        let parent_iv = [0x82; AGENT_IV_LENGTH];
+        let parent_key = test_key(0x81);
+        let parent_iv = test_iv(0x82);
         registry
             .insert_with_listener(sample_agent_info(parent_id, parent_key, parent_iv), "http-main")
             .await?;
@@ -2582,10 +2592,10 @@ mod tests {
         );
         let parent_id = 0x9192_9394;
         let child_id = 0xA1A2_A3A4;
-        let parent_key = [0x91; AGENT_KEY_LENGTH];
-        let parent_iv = [0x92; AGENT_IV_LENGTH];
-        let child_key = [0xA1; AGENT_KEY_LENGTH];
-        let child_iv = [0xA2; AGENT_IV_LENGTH];
+        let parent_key = test_key(0x91);
+        let parent_iv = test_iv(0x92);
+        let child_key = test_key(0xA1);
+        let child_iv = test_iv(0xA2);
 
         // Register parent and child, then link them.
         registry
@@ -2669,8 +2679,8 @@ mod tests {
         );
         let parent_id = 0xB1B2_B3B4;
         let child_id = 0xC1C2_C3C4;
-        let parent_key = [0xB1; AGENT_KEY_LENGTH];
-        let parent_iv = [0xB2; AGENT_IV_LENGTH];
+        let parent_key = test_key(0xB1);
+        let parent_iv = test_iv(0xB2);
 
         // Only register parent — no link exists to child.
         registry
@@ -2716,8 +2726,8 @@ mod tests {
             sockets,
             None,
         );
-        let key = [0x77; AGENT_KEY_LENGTH];
-        let iv = [0x44; AGENT_IV_LENGTH];
+        let key = test_key(0x77);
+        let iv = test_iv(0x44);
         let agent_id = 0x1020_3040;
 
         registry.insert(sample_agent_info(agent_id, key, iv)).await?;
@@ -2766,8 +2776,8 @@ mod tests {
             sockets,
             None,
         );
-        let key = [0x77; AGENT_KEY_LENGTH];
-        let iv = [0x44; AGENT_IV_LENGTH];
+        let key = test_key(0x77);
+        let iv = test_iv(0x44);
         let agent_id = 0x1020_3040;
 
         registry.insert(sample_agent_info(agent_id, key, iv)).await?;
@@ -2808,8 +2818,8 @@ mod tests {
             sockets,
             None,
         );
-        let key = [0x77; AGENT_KEY_LENGTH];
-        let iv = [0x44; AGENT_IV_LENGTH];
+        let key = test_key(0x77);
+        let iv = test_iv(0x44);
         let agent_id = 0x1020_3040;
 
         registry.insert(sample_agent_info(agent_id, key, iv)).await?;
@@ -2854,10 +2864,10 @@ mod tests {
             sockets,
             None,
         );
-        let key = [0x77; AGENT_KEY_LENGTH];
-        let iv = [0x44; AGENT_IV_LENGTH];
-        let refreshed_key = [0x12; AGENT_KEY_LENGTH];
-        let refreshed_iv = [0x34; AGENT_IV_LENGTH];
+        let key = test_key(0x77);
+        let iv = test_iv(0x44);
+        let refreshed_key = test_key(0x12);
+        let refreshed_iv = test_iv(0x34);
         let agent_id = 0x1020_3040;
 
         registry.insert(sample_agent_info(agent_id, key, iv)).await?;
@@ -2931,10 +2941,10 @@ mod tests {
             sockets,
             None,
         );
-        let original_key = [0x77; AGENT_KEY_LENGTH];
-        let original_iv = [0x44; AGENT_IV_LENGTH];
-        let attempted_key = [0x12; AGENT_KEY_LENGTH];
-        let attempted_iv = [0x34; AGENT_IV_LENGTH];
+        let original_key = test_key(0x77);
+        let original_iv = test_iv(0x44);
+        let attempted_key = test_key(0x12);
+        let attempted_iv = test_iv(0x34);
         let agent_id = 0x1020_304A;
         let pre_checkin_plaintext = b"advance shared ctr state";
         let post_checkin_plaintext = b"sleep 45 5";
@@ -3006,10 +3016,10 @@ mod tests {
             sockets,
             None,
         );
-        let key = [0x77; AGENT_KEY_LENGTH];
-        let iv = [0x44; AGENT_IV_LENGTH];
-        let refreshed_key = [0x12; AGENT_KEY_LENGTH];
-        let refreshed_iv = [0x34; AGENT_IV_LENGTH];
+        let key = test_key(0x77);
+        let iv = test_iv(0x44);
+        let refreshed_key = test_key(0x12);
+        let refreshed_iv = test_iv(0x34);
         let agent_id = 0x1020_3041;
 
         registry.insert(sample_agent_info(agent_id, key, iv)).await?;
@@ -3063,8 +3073,8 @@ mod tests {
             sockets,
             None,
         );
-        let original_key = [0x77; AGENT_KEY_LENGTH];
-        let original_iv = [0x44; AGENT_IV_LENGTH];
+        let original_key = test_key(0x77);
+        let original_iv = test_iv(0x44);
         let agent_id = 0x1020_3043;
 
         let original = sample_agent_info(agent_id, original_key, original_iv);
@@ -3076,11 +3086,7 @@ mod tests {
                 agent_id,
                 u32::from(DemonCommand::CommandCheckin),
                 6,
-                &sample_checkin_metadata_payload(
-                    agent_id,
-                    [0; AGENT_KEY_LENGTH],
-                    [0x34; AGENT_IV_LENGTH],
-                ),
+                &sample_checkin_metadata_payload(agent_id, [0; AGENT_KEY_LENGTH], test_iv(0x34)),
             )
             .await
             .expect_err("all-zero key rotation must be rejected");
@@ -3089,7 +3095,7 @@ mod tests {
             error,
             CommandDispatchError::InvalidCallbackPayload { command_id, ref message }
                 if command_id == u32::from(DemonCommand::CommandCheckin)
-                    && message == "all-zero AES key is not allowed"
+                    && message == "degenerate AES key is not allowed"
         ));
 
         let updated = registry
@@ -3129,8 +3135,8 @@ mod tests {
             sockets,
             None,
         );
-        let original_key = [0x77; AGENT_KEY_LENGTH];
-        let original_iv = [0x44; AGENT_IV_LENGTH];
+        let original_key = test_key(0x77);
+        let original_iv = test_iv(0x44);
         let agent_id = 0x1020_3044;
 
         let original = sample_agent_info(agent_id, original_key, original_iv);
@@ -3142,11 +3148,7 @@ mod tests {
                 agent_id,
                 u32::from(DemonCommand::CommandCheckin),
                 6,
-                &sample_checkin_metadata_payload(
-                    agent_id,
-                    [0x55; AGENT_KEY_LENGTH],
-                    [0; AGENT_IV_LENGTH],
-                ),
+                &sample_checkin_metadata_payload(agent_id, test_key(0x55), [0; AGENT_IV_LENGTH]),
             )
             .await
             .expect_err("all-zero IV rotation must be rejected");
@@ -3155,7 +3157,7 @@ mod tests {
             error,
             CommandDispatchError::InvalidCallbackPayload { command_id, ref message }
                 if command_id == u32::from(DemonCommand::CommandCheckin)
-                    && message == "all-zero AES IV is not allowed"
+                    && message == "degenerate AES IV is not allowed"
         ));
 
         let updated = registry
@@ -3223,10 +3225,10 @@ mod tests {
             sockets,
             None,
         );
-        let key = [0x77; AGENT_KEY_LENGTH];
-        let iv = [0x44; AGENT_IV_LENGTH];
-        let refreshed_key = [0x12; AGENT_KEY_LENGTH];
-        let refreshed_iv = [0x34; AGENT_IV_LENGTH];
+        let key = test_key(0x77);
+        let iv = test_iv(0x44);
+        let refreshed_key = test_key(0x12);
+        let refreshed_iv = test_iv(0x34);
         let agent_id = 0x1020_3041;
         let working_hours = 0x8000_002A;
 
@@ -3275,13 +3277,13 @@ mod tests {
             None,
         );
         let parent_id = 0x4546_4748;
-        let parent_key = [0x21; AGENT_KEY_LENGTH];
-        let parent_iv = [0x31; AGENT_IV_LENGTH];
+        let parent_key = test_key(0x21);
+        let parent_iv = test_iv(0x31);
         let agent_id = 0x5152_5354;
-        let key = [0x77; AGENT_KEY_LENGTH];
-        let iv = [0x44; AGENT_IV_LENGTH];
-        let rotated_key = [0x12; AGENT_KEY_LENGTH];
-        let rotated_iv = [0x34; AGENT_IV_LENGTH];
+        let key = test_key(0x77);
+        let iv = test_iv(0x44);
+        let rotated_key = test_key(0x12);
+        let rotated_iv = test_iv(0x34);
 
         registry.insert(sample_agent_info(parent_id, parent_key, parent_iv)).await?;
         registry.insert_with_listener(sample_agent_info(agent_id, key, iv), "smb").await?;
@@ -3458,13 +3460,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xABCD_EE01,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xABCD_EE01, test_key(0x11), test_iv(0x22))).await?;
         registry
             .enqueue_job(
                 0xABCD_EE01,
@@ -3676,13 +3672,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xABCD_EE02,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xABCD_EE02, test_key(0x11), test_iv(0x22))).await?;
         registry
             .enqueue_job(
                 0xABCD_EE02,
@@ -3755,13 +3745,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xABCD_EF01,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xABCD_EF01, test_key(0x11), test_iv(0x22))).await?;
         let dispatcher = CommandDispatcher::with_builtin_handlers(
             registry,
             events,
@@ -3819,13 +3803,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xABCD_EF11,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xABCD_EF11, test_key(0x11), test_iv(0x22))).await?;
         let dispatcher = CommandDispatcher::with_builtin_handlers(
             registry,
             events,
@@ -3917,13 +3895,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xABCD_EF12,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xABCD_EF12, test_key(0x11), test_iv(0x22))).await?;
         let dispatcher = CommandDispatcher::with_builtin_handlers(
             registry,
             events,
@@ -4041,13 +4013,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xABCD_EF13,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xABCD_EF13, test_key(0x11), test_iv(0x22))).await?;
         let dispatcher = CommandDispatcher::with_builtin_handlers(
             registry,
             events,
@@ -4371,13 +4337,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xABCD_EF21,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xABCD_EF21, test_key(0x11), test_iv(0x22))).await?;
         let dispatcher = CommandDispatcher::with_builtin_handlers(
             registry,
             events,
@@ -4449,13 +4409,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xABCD_EF22,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xABCD_EF22, test_key(0x11), test_iv(0x22))).await?;
         let dispatcher = CommandDispatcher::with_builtin_handlers(
             registry,
             events,
@@ -4571,13 +4525,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xABCD_EF23,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xABCD_EF23, test_key(0x11), test_iv(0x22))).await?;
         let dispatcher = CommandDispatcher::with_builtin_handlers(
             registry,
             events,
@@ -4620,13 +4568,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xABCD_EF31,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xABCD_EF31, test_key(0x11), test_iv(0x22))).await?;
         let dispatcher = CommandDispatcher::with_builtin_handlers_and_max_download_bytes(
             registry,
             events,
@@ -4700,13 +4642,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xF500_0001,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xF500_0001, test_key(0x11), test_iv(0x22))).await?;
         let dispatcher =
             CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
 
@@ -4738,13 +4674,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xF500_0002,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xF500_0002, test_key(0x11), test_iv(0x22))).await?;
         let dispatcher =
             CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
 
@@ -4774,13 +4704,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xF500_0003,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xF500_0003, test_key(0x11), test_iv(0x22))).await?;
         let dispatcher =
             CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
 
@@ -4812,13 +4736,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xF500_0004,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xF500_0004, test_key(0x11), test_iv(0x22))).await?;
         let dispatcher =
             CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
 
@@ -4849,13 +4767,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xF500_0005,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xF500_0005, test_key(0x11), test_iv(0x22))).await?;
         let dispatcher =
             CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
 
@@ -4885,13 +4797,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xF500_0006,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xF500_0006, test_key(0x11), test_iv(0x22))).await?;
         let dispatcher =
             CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
 
@@ -4926,13 +4832,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xF500_0007,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xF500_0007, test_key(0x11), test_iv(0x22))).await?;
         let dispatcher =
             CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
 
@@ -4967,13 +4867,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xF500_0008,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xF500_0008, test_key(0x11), test_iv(0x22))).await?;
         let dispatcher =
             CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
 
@@ -5008,13 +4902,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xF500_0009,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xF500_0009, test_key(0x11), test_iv(0x22))).await?;
         let dispatcher =
             CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
 
@@ -5049,13 +4937,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xF500_000A,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xF500_000A, test_key(0x11), test_iv(0x22))).await?;
         let dispatcher =
             CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
 
@@ -5085,13 +4967,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xF500_000B,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xF500_000B, test_key(0x11), test_iv(0x22))).await?;
         let dispatcher =
             CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
 
@@ -5126,13 +5002,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xF500_000C,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xF500_000C, test_key(0x11), test_iv(0x22))).await?;
         let dispatcher =
             CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
 
@@ -5167,13 +5037,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xF500_0010,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xF500_0010, test_key(0x11), test_iv(0x22))).await?;
         let dispatcher =
             CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
 
@@ -5219,13 +5083,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xF500_0011,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xF500_0011, test_key(0x11), test_iv(0x22))).await?;
         let dispatcher =
             CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
 
@@ -5287,13 +5145,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xF500_0012,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xF500_0012, test_key(0x11), test_iv(0x22))).await?;
         let dispatcher =
             CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
 
@@ -5350,13 +5202,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xF500_0013,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xF500_0013, test_key(0x11), test_iv(0x22))).await?;
         let dispatcher =
             CommandDispatcher::with_builtin_handlers(registry, events, database, sockets, None);
 
@@ -5392,13 +5238,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xABCD_EF41,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xABCD_EF41, test_key(0x11), test_iv(0x22))).await?;
         let dispatcher = CommandDispatcher::with_builtin_handlers_and_max_download_bytes(
             registry,
             events,
@@ -5473,13 +5313,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xABCD_EF60,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xABCD_EF60, test_key(0x11), test_iv(0x22))).await?;
         let dispatcher = CommandDispatcher::with_builtin_handlers_and_max_download_bytes(
             registry,
             events,
@@ -5547,13 +5381,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xABCD_EF61,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xABCD_EF61, test_key(0x11), test_iv(0x22))).await?;
         let dispatcher = CommandDispatcher::with_builtin_handlers_and_max_download_bytes(
             registry,
             events,
@@ -5622,13 +5450,7 @@ mod tests {
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        registry
-            .insert(sample_agent_info(
-                0xABCD_EF62,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xABCD_EF62, test_key(0x11), test_iv(0x22))).await?;
         let dispatcher = CommandDispatcher::with_builtin_handlers_and_max_download_bytes(
             registry,
             events,
@@ -7157,13 +6979,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());
-        registry
-            .insert(sample_agent_info(
-                0x1234_5678,
-                [0x11; AGENT_KEY_LENGTH],
-                [0x22; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0x1234_5678, test_key(0x11), test_iv(0x22))).await?;
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -7729,13 +7545,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());
-        registry
-            .insert(sample_agent_info(
-                0xAABB_CCDD,
-                [0x41; AGENT_KEY_LENGTH],
-                [0x24; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xAABB_CCDD, test_key(0x41), test_iv(0x24))).await?;
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
@@ -7781,13 +7591,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());
-        registry
-            .insert(sample_agent_info(
-                0xBBCC_DD01,
-                [0x51; AGENT_KEY_LENGTH],
-                [0x34; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xBBCC_DD01, test_key(0x51), test_iv(0x34))).await?;
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
@@ -7833,13 +7637,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());
-        registry
-            .insert(sample_agent_info(
-                0xBBCC_DD02,
-                [0x52; AGENT_KEY_LENGTH],
-                [0x35; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0xBBCC_DD02, test_key(0x52), test_iv(0x35))).await?;
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
@@ -7888,13 +7686,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;
         let registry = AgentRegistry::new(database.clone());
-        registry
-            .insert(sample_agent_info(
-                0x1020_3040,
-                [0x42; AGENT_KEY_LENGTH],
-                [0x25; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(0x1020_3040, test_key(0x42), test_iv(0x25))).await?;
         let events = EventBus::default();
         let mut receiver = events.subscribe();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
@@ -8122,8 +7914,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0xAABB_CCDD, [0x21; AGENT_KEY_LENGTH], [0x43; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0xAABB_CCDD, test_key(0x21), test_iv(0x43));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -8186,8 +7977,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0xAABB_CCDD, [0x21; AGENT_KEY_LENGTH], [0x43; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0xAABB_CCDD, test_key(0x21), test_iv(0x43));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -8244,8 +8034,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0xAABB_CCDD, [0x21; AGENT_KEY_LENGTH], [0x43; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0xAABB_CCDD, test_key(0x21), test_iv(0x43));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -8281,8 +8070,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0xAABB_CCDD, [0x21; AGENT_KEY_LENGTH], [0x43; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0xAABB_CCDD, test_key(0x21), test_iv(0x43));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -8337,8 +8125,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0xAABB_CCDD, [0x21; AGENT_KEY_LENGTH], [0x43; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0xAABB_CCDD, test_key(0x21), test_iv(0x43));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -8437,8 +8224,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0x1122_3344, [0x12; AGENT_KEY_LENGTH], [0x34; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0x1122_3344, test_key(0x12), test_iv(0x34));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -8510,8 +8296,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0x1122_3344, [0x12; AGENT_KEY_LENGTH], [0x34; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0x1122_3344, test_key(0x12), test_iv(0x34));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -8562,8 +8347,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0x1122_3344, [0x12; AGENT_KEY_LENGTH], [0x34; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0x1122_3344, test_key(0x12), test_iv(0x34));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -8607,8 +8391,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0x1122_3344, [0x12; AGENT_KEY_LENGTH], [0x34; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0x1122_3344, test_key(0x12), test_iv(0x34));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -8651,8 +8434,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0x1122_3344, [0x12; AGENT_KEY_LENGTH], [0x34; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0x1122_3344, test_key(0x12), test_iv(0x34));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -8695,8 +8477,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0x1122_3344, [0x12; AGENT_KEY_LENGTH], [0x34; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0x1122_3344, test_key(0x12), test_iv(0x34));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -8738,8 +8519,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0x1122_3344, [0x12; AGENT_KEY_LENGTH], [0x34; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0x1122_3344, test_key(0x12), test_iv(0x34));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -8775,8 +8555,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0x1122_3344, [0x12; AGENT_KEY_LENGTH], [0x34; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0x1122_3344, test_key(0x12), test_iv(0x34));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -8812,8 +8591,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0x1122_3344, [0x12; AGENT_KEY_LENGTH], [0x34; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0x1122_3344, test_key(0x12), test_iv(0x34));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -8863,8 +8641,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0x1122_3344, [0x12; AGENT_KEY_LENGTH], [0x34; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0x1122_3344, test_key(0x12), test_iv(0x34));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -8913,8 +8690,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0x5566_7788, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0x5566_7788, test_key(0x56), test_iv(0x78));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -8975,8 +8751,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0x5566_7799, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0x5566_7799, test_key(0x56), test_iv(0x78));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -9027,8 +8802,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0x5566_7800, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0x5566_7800, test_key(0x56), test_iv(0x78));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -9074,8 +8848,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0x5566_7801, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0x5566_7801, test_key(0x56), test_iv(0x78));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -9183,8 +8956,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0xCAFEBABE, [0x66; AGENT_KEY_LENGTH], [0x77; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0xCAFEBABE, test_key(0x66), test_iv(0x77));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -9295,8 +9067,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0xB0B1B2B3, [0x11; AGENT_KEY_LENGTH], [0x22; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0xB0B1B2B3, test_key(0x11), test_iv(0x22));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -9591,8 +9362,8 @@ mod tests {
             sockets,
             None,
         );
-        let key = [0x77; AGENT_KEY_LENGTH];
-        let iv = [0x44; AGENT_IV_LENGTH];
+        let key = test_key(0x77);
+        let iv = test_iv(0x44);
         let agent_id = 0xABCD_1234_u32;
 
         registry.insert(sample_agent_info(agent_id, key, iv)).await?;
@@ -9672,11 +9443,11 @@ mod tests {
         );
 
         let parent_id = 0x1111_2222;
-        let parent_key = [0xAA; AGENT_KEY_LENGTH];
-        let parent_iv = [0xBB; AGENT_IV_LENGTH];
+        let parent_key = test_key(0xAA);
+        let parent_iv = test_iv(0xBB);
         let child_id = 0x3333_4444;
-        let child_key = [0xCC; AGENT_KEY_LENGTH];
-        let child_iv = [0xDD; AGENT_IV_LENGTH];
+        let child_key = test_key(0xCC);
+        let child_iv = test_iv(0xDD);
 
         // Register both parent and child agents.
         registry.insert(sample_agent_info(parent_id, parent_key, parent_iv)).await?;
@@ -9761,14 +9532,14 @@ mod tests {
         );
 
         let parent_id = 0xAAAA_BBBB;
-        let parent_key = [0x11; AGENT_KEY_LENGTH];
-        let parent_iv = [0x22; AGENT_IV_LENGTH];
+        let parent_key = test_key(0x11);
+        let parent_iv = test_iv(0x22);
         registry.insert(sample_agent_info(parent_id, parent_key, parent_iv)).await?;
 
         // Build an envelope for a non-existent inner agent.
         let unknown_child_id = 0xDEAD_FACE;
-        let fake_key = [0x99; AGENT_KEY_LENGTH];
-        let fake_iv = [0x88; AGENT_IV_LENGTH];
+        let fake_key = test_key(0x99);
+        let fake_iv = test_iv(0x88);
         let inner_envelope = valid_callback_envelope(
             unknown_child_id,
             &fake_key,
@@ -9803,8 +9574,8 @@ mod tests {
         );
 
         let parent_id = 0xBBCC_DDEE;
-        let parent_key = [0x33; AGENT_KEY_LENGTH];
-        let parent_iv = [0x44; AGENT_IV_LENGTH];
+        let parent_key = test_key(0x33);
+        let parent_iv = test_iv(0x44);
         registry.insert(sample_agent_info(parent_id, parent_key, parent_iv)).await?;
 
         // Build a pivot SmbCommand payload with truncated inner data (too short for an
@@ -9840,11 +9611,11 @@ mod tests {
         );
 
         let parent_id = 0xD1D2_D3D4;
-        let parent_key = [0xD1; AGENT_KEY_LENGTH];
-        let parent_iv = [0xD2; AGENT_IV_LENGTH];
+        let parent_key = test_key(0xD1);
+        let parent_iv = test_iv(0xD2);
         let child_id = 0xE1E2_E3E4;
-        let child_key = [0xE1; AGENT_KEY_LENGTH];
-        let child_iv = [0xE2; AGENT_IV_LENGTH];
+        let child_key = test_key(0xE1);
+        let child_iv = test_iv(0xE2);
 
         // Register both agents so the parser can look up the child's key to decrypt.
         registry
@@ -9921,11 +9692,11 @@ mod tests {
         );
 
         let parent_id = 0xF1F2_F3F4;
-        let parent_key = [0xF1; AGENT_KEY_LENGTH];
-        let parent_iv = [0xF2; AGENT_IV_LENGTH];
+        let parent_key = test_key(0xF1);
+        let parent_iv = test_iv(0xF2);
         let child_id = 0xA5A6_A7A8;
-        let child_key = [0xA5; AGENT_KEY_LENGTH];
-        let child_iv = [0xA6; AGENT_IV_LENGTH];
+        let child_key = test_key(0xA5);
+        let child_iv = test_iv(0xA6);
 
         registry.insert(sample_agent_info(parent_id, parent_key, parent_iv)).await?;
 
@@ -9975,8 +9746,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0xCF01_0001, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0xCF01_0001, test_key(0x56), test_iv(0x78));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -10012,8 +9782,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0xCF01_0002, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0xCF01_0002, test_key(0x56), test_iv(0x78));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -10049,8 +9818,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0xCF01_0003, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0xCF01_0003, test_key(0x56), test_iv(0x78));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -10088,8 +9856,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0xCF01_0004, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0xCF01_0004, test_key(0x56), test_iv(0x78));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -10128,8 +9895,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0xCF01_0005, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0xCF01_0005, test_key(0x56), test_iv(0x78));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -10170,8 +9936,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0xCF01_0006, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0xCF01_0006, test_key(0x56), test_iv(0x78));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -10207,8 +9972,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0xCF01_0007, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0xCF01_0007, test_key(0x56), test_iv(0x78));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -10263,8 +10027,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0xCF01_0008, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0xCF01_0008, test_key(0x56), test_iv(0x78));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -10300,8 +10063,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0xCF01_0009, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0xCF01_0009, test_key(0x56), test_iv(0x78));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -10337,8 +10099,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0xCF01_000A, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0xCF01_000A, test_key(0x56), test_iv(0x78));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -10377,8 +10138,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0xCF01_000B, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0xCF01_000B, test_key(0x56), test_iv(0x78));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -10433,8 +10193,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0xCF01_000C, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0xCF01_000C, test_key(0x56), test_iv(0x78));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -10476,8 +10235,7 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::new(16);
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let agent =
-            sample_agent_info(0xCF01_000D, [0x56; AGENT_KEY_LENGTH], [0x78; AGENT_IV_LENGTH]);
+        let agent = sample_agent_info(0xCF01_000D, test_key(0x56), test_iv(0x78));
         registry.insert(agent).await?;
 
         let dispatcher = CommandDispatcher::with_builtin_handlers(
@@ -10640,8 +10398,8 @@ mod tests {
         assert!(dispatcher.handles_command(u32::from(DemonCommand::CommandGetJob)));
 
         let agent_id = 0xCAFE_0001;
-        let key = [0xAA; AGENT_KEY_LENGTH];
-        let iv = [0xBB; AGENT_IV_LENGTH];
+        let key = test_key(0xAA);
+        let iv = test_iv(0xBB);
         registry.insert(sample_agent_info(agent_id, key, iv)).await?;
 
         // With no queued jobs, CommandGetJob handler returns None (empty queue path).

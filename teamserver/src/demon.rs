@@ -310,17 +310,17 @@ fn parse_init_agent(
     if is_weak_aes_key(&key) {
         warn!(
             agent_id = format_args!("0x{agent_id:08X}"),
-            "rejecting DEMON_INIT with all-zero AES key"
+            "rejecting DEMON_INIT with degenerate AES key"
         );
-        return Err(DemonParserError::InvalidInit("all-zero AES key is not allowed"));
+        return Err(DemonParserError::InvalidInit("degenerate AES key is not allowed"));
     }
 
     if is_weak_aes_iv(&iv) {
         warn!(
             agent_id = format_args!("0x{agent_id:08X}"),
-            "rejecting DEMON_INIT with all-zero AES IV"
+            "rejecting DEMON_INIT with degenerate AES IV"
         );
-        return Err(DemonParserError::InvalidInit("all-zero AES IV is not allowed"));
+        return Err(DemonParserError::InvalidInit("degenerate AES IV is not allowed"));
     }
 
     let decrypted = Cow::Owned(decrypt_agent_data(&key, &iv, encrypted)?);
@@ -513,6 +513,17 @@ mod tests {
     };
     use crate::{AgentRegistry, Database};
 
+    /// Generate a non-degenerate test key from a seed byte.
+    /// Each byte differs, so no repeating-pattern check will flag it.
+    fn test_key(seed: u8) -> [u8; AGENT_KEY_LENGTH] {
+        core::array::from_fn(|i| seed.wrapping_add(i as u8))
+    }
+
+    /// Generate a non-degenerate test IV from a seed byte.
+    fn test_iv(seed: u8) -> [u8; AGENT_IV_LENGTH] {
+        core::array::from_fn(|i| seed.wrapping_add(i as u8))
+    }
+
     fn u32_be(value: u32) -> [u8; 4] {
         value.to_be_bytes()
     }
@@ -651,7 +662,7 @@ mod tests {
         let mut payload = Vec::new();
         payload.extend_from_slice(&u32_be(u32::from(DemonCommand::DemonInit)));
         payload.extend_from_slice(&u32_be(7));
-        payload.extend_from_slice(&[0xAB; AGENT_KEY_LENGTH]);
+        payload.extend_from_slice(&test_key(0xAB));
         payload.extend_from_slice(&[0; AGENT_IV_LENGTH]);
         payload.extend_from_slice(&metadata);
 
@@ -688,8 +699,8 @@ mod tests {
     async fn parse_registers_new_agent_from_demon_init() {
         let registry = test_registry().await;
         let parser = DemonPacketParser::new(registry.clone());
-        let key = [0x41; AGENT_KEY_LENGTH];
-        let iv = [0x24; AGENT_IV_LENGTH];
+        let key = test_key(0x41);
+        let iv = test_iv(0x24);
         let packet = build_init_packet(0x1234_5678, key, iv);
 
         let parsed = parser
@@ -722,8 +733,8 @@ mod tests {
     async fn parse_preserves_signed_working_hours_bitmask_from_demon_init() {
         let registry = test_registry().await;
         let parser = DemonPacketParser::new(registry);
-        let key = [0x41; AGENT_KEY_LENGTH];
-        let iv = [0x24; AGENT_IV_LENGTH];
+        let key = test_key(0x41);
+        let iv = test_iv(0x24);
         let working_hours = i32::MIN | 0x2A;
         let packet = build_init_packet_with_working_hours(0x1234_5678, key, iv, working_hours);
 
@@ -743,8 +754,8 @@ mod tests {
     async fn parse_stores_no_kill_date_when_init_kill_date_is_zero() {
         let registry = test_registry().await;
         let parser = DemonPacketParser::new(registry);
-        let key = [0x51; AGENT_KEY_LENGTH];
-        let iv = [0x34; AGENT_IV_LENGTH];
+        let key = test_key(0x51);
+        let iv = test_iv(0x34);
         let packet =
             build_init_packet_with_kill_date_and_working_hours(0x1234_5678, key, iv, 0, 0b101010);
 
@@ -764,8 +775,7 @@ mod tests {
     async fn parse_for_listener_persists_accepting_listener_name() {
         let registry = test_registry().await;
         let parser = DemonPacketParser::new(registry.clone());
-        let packet =
-            build_init_packet(0x2233_4455, [0x31; AGENT_KEY_LENGTH], [0x42; AGENT_IV_LENGTH]);
+        let packet = build_init_packet(0x2233_4455, test_key(0x31), test_iv(0x42));
 
         parser
             .parse_for_listener(&packet, "203.0.113.20", "http-main")
@@ -779,8 +789,8 @@ mod tests {
     async fn parse_decrypts_callback_packages_for_existing_agent() {
         let registry = test_registry().await;
         let parser = DemonPacketParser::new(registry.clone());
-        let key = [0x41; AGENT_KEY_LENGTH];
-        let iv = [0x24; AGENT_IV_LENGTH];
+        let key = test_key(0x41);
+        let iv = test_iv(0x24);
         let init_packet = build_init_packet(0x0102_0304, key, iv);
         parser
             .parse_at(&init_packet, "198.51.100.5".to_owned(), datetime!(2026-03-09 19:31:00 UTC))
@@ -821,8 +831,8 @@ mod tests {
     async fn parse_returns_reconnect_for_existing_agent_init_probe() {
         let registry = test_registry().await;
         let parser = DemonPacketParser::new(registry.clone());
-        let key = [0x41; AGENT_KEY_LENGTH];
-        let iv = [0x24; AGENT_IV_LENGTH];
+        let key = test_key(0x41);
+        let iv = test_iv(0x24);
         let init_packet = build_init_packet(0x1111_2222, key, iv);
         parser
             .parse_at(&init_packet, "192.0.2.10".to_owned(), datetime!(2026-03-09 19:33:00 UTC))
@@ -859,8 +869,8 @@ mod tests {
         let registry = test_registry().await;
         let parser = DemonPacketParser::new(registry.clone());
         let agent_id = 0x1111_2222;
-        let first_key = [0x41; AGENT_KEY_LENGTH];
-        let first_iv = [0x24; AGENT_IV_LENGTH];
+        let first_key = test_key(0x41);
+        let first_iv = test_iv(0x24);
         let first_packet = build_init_packet(agent_id, first_key, first_iv);
         parser
             .parse_for_listener(&first_packet, "192.0.2.10", "http-main")
@@ -872,8 +882,7 @@ mod tests {
             registry.listener_name(agent_id).await.expect("listener should exist");
         let ctr_before = registry.ctr_offset(agent_id).await.expect("ctr offset should exist");
 
-        let duplicate_packet =
-            build_init_packet(agent_id, [0x99; AGENT_KEY_LENGTH], [0x55; AGENT_IV_LENGTH]);
+        let duplicate_packet = build_init_packet(agent_id, test_key(0x99), test_iv(0x55));
         let error = parser
             .parse_for_listener(&duplicate_packet, "198.51.100.99", "smb-secondary")
             .await
@@ -897,8 +906,8 @@ mod tests {
     #[tokio::test]
     async fn build_init_ack_encrypts_agent_identifier() {
         let registry = test_registry().await;
-        let key = [0x33; AGENT_KEY_LENGTH];
-        let iv = [0x44; AGENT_IV_LENGTH];
+        let key = test_key(0x33);
+        let iv = test_iv(0x44);
         let agent_id: u32 = 0xAABB_CCDD;
 
         let init_packet = build_init_packet(agent_id, key, iv);
@@ -921,8 +930,8 @@ mod tests {
             Database::connect(temp_db_path()).await.expect("temp database should initialize");
         let registry = AgentRegistry::new(database.clone());
         let parser = DemonPacketParser::new(registry.clone());
-        let key = [0x55; AGENT_KEY_LENGTH];
-        let iv = [0x66; AGENT_IV_LENGTH];
+        let key = test_key(0x55);
+        let iv = test_iv(0x66);
         let agent_id: u32 = 0x1122_3344;
 
         let init_packet = build_init_packet(agent_id, key, iv);
@@ -947,8 +956,8 @@ mod tests {
             Database::connect(temp_db_path()).await.expect("temp database should initialize");
         let registry = AgentRegistry::new(database.clone());
         let parser = DemonPacketParser::new(registry);
-        let key = [0x57; AGENT_KEY_LENGTH];
-        let iv = [0x68; AGENT_IV_LENGTH];
+        let key = test_key(0x57);
+        let iv = test_iv(0x68);
         let agent_id: u32 = 0x2233_4455;
 
         let init_packet = build_init_packet(agent_id, key, iv);
@@ -1014,8 +1023,8 @@ mod tests {
         let registry = test_registry().await;
         let parser = DemonPacketParser::new(registry.clone());
         let agent_id = 0xDEAD_BEEF_u32;
-        let key = [0xAA; AGENT_KEY_LENGTH];
-        let iv = [0xBB; AGENT_IV_LENGTH];
+        let key = test_key(0xAA);
+        let iv = test_iv(0xBB);
 
         // Register the agent.
         let init_packet = build_init_packet(agent_id, key, iv);
@@ -1069,8 +1078,8 @@ mod tests {
     #[tokio::test]
     async fn build_reconnect_ack_uses_current_ctr_offset_without_advancing_registry_state() {
         let registry = test_registry().await;
-        let key = [0x56; AGENT_KEY_LENGTH];
-        let iv = [0x67; AGENT_IV_LENGTH];
+        let key = test_key(0x56);
+        let iv = test_iv(0x67);
         let agent_id: u32 = 0x5566_7788;
 
         let init_packet = build_init_packet(agent_id, key, iv);
@@ -1095,8 +1104,8 @@ mod tests {
     async fn successive_messages_advance_the_keystream() {
         let registry = test_registry().await;
         let parser = DemonPacketParser::new(registry.clone());
-        let key = [0x77; AGENT_KEY_LENGTH];
-        let iv = [0x88; AGENT_IV_LENGTH];
+        let key = test_key(0x77);
+        let iv = test_iv(0x88);
         let agent_id: u32 = 0xDEAD_BEEF;
 
         let init_packet = build_init_packet(agent_id, key, iv);
@@ -1122,8 +1131,7 @@ mod tests {
     async fn parse_rejects_init_with_mismatched_agent_id() {
         let registry = test_registry().await;
         let parser = DemonPacketParser::new(registry);
-        let mut packet =
-            build_init_packet(0x9999_AAAA, [0x41; AGENT_KEY_LENGTH], [0x24; AGENT_IV_LENGTH]);
+        let mut packet = build_init_packet(0x9999_AAAA, test_key(0x41), test_iv(0x24));
         let start = 12 + 8 + AGENT_KEY_LENGTH + AGENT_IV_LENGTH;
         packet[start..start + 4].copy_from_slice(&u32_be(0x1111_2222));
 
@@ -1147,8 +1155,8 @@ mod tests {
             .expect_err("zero-key init must be rejected");
 
         assert!(
-            matches!(error, DemonParserError::InvalidInit("all-zero AES key is not allowed")),
-            "expected zero-key init rejection, got: {error}"
+            matches!(error, DemonParserError::InvalidInit("degenerate AES key is not allowed")),
+            "expected degenerate-key init rejection, got: {error}"
         );
         assert!(registry.get(0x1357_9BDF).await.is_none(), "rejected init must not register");
     }
@@ -1165,8 +1173,8 @@ mod tests {
             .expect_err("zero-IV init must be rejected");
 
         assert!(
-            matches!(error, DemonParserError::InvalidInit("all-zero AES IV is not allowed")),
-            "expected zero-IV init rejection, got: {error}"
+            matches!(error, DemonParserError::InvalidInit("degenerate AES IV is not allowed")),
+            "expected degenerate-IV init rejection, got: {error}"
         );
         assert!(registry.get(0x1357_9BDF).await.is_none(), "rejected init must not register");
     }
@@ -1176,8 +1184,8 @@ mod tests {
         let registry = test_registry().await;
         let parser = DemonPacketParser::new(registry.clone());
         let agent_id = 0x1357_9BDF;
-        let key = [0x21; AGENT_KEY_LENGTH];
-        let iv = [0x31; AGENT_IV_LENGTH];
+        let key = test_key(0x21);
+        let iv = test_iv(0x31);
         let packet = build_init_packet_with_kill_date_and_working_hours(
             agent_id,
             key,
@@ -1204,7 +1212,7 @@ mod tests {
 
         parser
             .parse_at(
-                &build_init_packet(0x1357_9BDF, [0x21; AGENT_KEY_LENGTH], [0x31; AGENT_IV_LENGTH]),
+                &build_init_packet(0x1357_9BDF, test_key(0x21), test_iv(0x31)),
                 "203.0.113.77".to_owned(),
                 datetime!(2026-03-10 10:15:00 UTC),
             )
@@ -1213,7 +1221,7 @@ mod tests {
 
         let error = parser
             .parse_at(
-                &build_init_packet(0x2468_ACED, [0x22; AGENT_KEY_LENGTH], [0x32; AGENT_IV_LENGTH]),
+                &build_init_packet(0x2468_ACED, test_key(0x22), test_iv(0x32)),
                 "203.0.113.78".to_owned(),
                 datetime!(2026-03-10 10:16:00 UTC),
             )
@@ -1289,8 +1297,8 @@ mod tests {
     async fn parse_rejects_init_with_zero_header_id_and_different_payload_id() {
         let registry = test_registry().await;
         let parser = DemonPacketParser::new(registry);
-        let key = [0x55; AGENT_KEY_LENGTH];
-        let iv = [0x66; AGENT_IV_LENGTH];
+        let key = test_key(0x55);
+        let iv = test_iv(0x66);
         let spoofed_id: u32 = 0xAAAA_BBBB;
 
         let metadata = build_init_metadata(spoofed_id);
@@ -1325,8 +1333,8 @@ mod tests {
     async fn parse_rejects_init_with_zero_agent_id_in_both_header_and_payload() {
         let registry = test_registry().await;
         let parser = DemonPacketParser::new(registry);
-        let key = [0x55; AGENT_KEY_LENGTH];
-        let iv = [0x66; AGENT_IV_LENGTH];
+        let key = test_key(0x55);
+        let iv = test_iv(0x66);
 
         // Build a fully well-formed init packet with agent_id=0 everywhere.
         let packet = build_init_packet(0, key, iv);
@@ -1539,8 +1547,8 @@ mod tests {
     async fn parse_checkin_with_truncated_inner_payload_returns_parse_error() {
         let registry = test_registry().await;
         let parser = DemonPacketParser::new(registry.clone());
-        let key = [0x41; AGENT_KEY_LENGTH];
-        let iv = [0x24; AGENT_IV_LENGTH];
+        let key = test_key(0x41);
+        let iv = test_iv(0x24);
         let agent_id: u32 = 0x0A0B_0C0D;
 
         // Register the agent.
@@ -1694,8 +1702,8 @@ mod tests {
     #[tokio::test]
     async fn parse_returns_buffer_too_short_for_truncated_demon_init_payload() {
         let agent_id: u32 = 0xCAFE_BABE;
-        let key = [0x41_u8; AGENT_KEY_LENGTH];
-        let iv = [0x24_u8; AGENT_IV_LENGTH];
+        let key = test_key(0x41);
+        let iv = test_iv(0x24);
 
         // (label, inner_payload_len)
         // inner_payload_len is the number of bytes of (key ++ iv ++ encrypted_metadata)
@@ -1878,8 +1886,8 @@ mod tests {
 
         // Build a callback envelope — the ciphertext content does not matter because
         // the error fires before decryption, when the stored key fails length check.
-        let dummy_key = [0x55; AGENT_KEY_LENGTH];
-        let dummy_iv = [0x66; AGENT_IV_LENGTH];
+        let dummy_key = test_key(0x55);
+        let dummy_iv = test_iv(0x66);
         let callback_packet = build_callback_packet(agent_id, dummy_key, dummy_iv, 0);
         let parser = DemonPacketParser::new(registry);
 
@@ -1904,8 +1912,8 @@ mod tests {
         let agent = agent_with_raw_crypto(agent_id, vec![0xCC; AGENT_KEY_LENGTH], vec![0xDD; 2]);
         registry.insert(agent).await.expect("insert should succeed");
 
-        let dummy_key = [0x57; AGENT_KEY_LENGTH];
-        let dummy_iv = [0x68; AGENT_IV_LENGTH];
+        let dummy_key = test_key(0x57);
+        let dummy_iv = test_iv(0x68);
         let callback_packet = build_callback_packet(agent_id, dummy_key, dummy_iv, 0);
         let parser = DemonPacketParser::new(registry);
 
@@ -1930,8 +1938,8 @@ mod tests {
         let unregistered_id: u32 = 0xBADA_9E00;
 
         // Build a well-formed callback envelope targeting an agent ID the registry does not know.
-        let dummy_key = [0x41; AGENT_KEY_LENGTH];
-        let dummy_iv = [0x24; AGENT_IV_LENGTH];
+        let dummy_key = test_key(0x41);
+        let dummy_iv = test_iv(0x24);
         let callback_packet = build_callback_packet(unregistered_id, dummy_key, dummy_iv, 0);
 
         let error = parser
@@ -1971,8 +1979,8 @@ mod tests {
     #[tokio::test]
     async fn build_init_ack_wire_format_is_exactly_four_le_bytes_of_agent_id() {
         let registry = test_registry().await;
-        let key = [0xA1; AGENT_KEY_LENGTH];
-        let iv = [0xB2; AGENT_IV_LENGTH];
+        let key = test_key(0xA1);
+        let iv = test_iv(0xB2);
         let agent_id: u32 = 0x1234_5678;
 
         let init_packet = build_init_packet(agent_id, key, iv);
@@ -2009,8 +2017,8 @@ mod tests {
     #[tokio::test]
     async fn build_init_ack_successive_calls_produce_different_ciphertext() {
         let registry = test_registry().await;
-        let key = [0xC3; AGENT_KEY_LENGTH];
-        let iv = [0xD4; AGENT_IV_LENGTH];
+        let key = test_key(0xC3);
+        let iv = test_iv(0xD4);
         let agent_id: u32 = 0xAAAA_BBBB;
 
         let init_packet = build_init_packet(agent_id, key, iv);
@@ -2037,8 +2045,8 @@ mod tests {
     #[tokio::test]
     async fn build_reconnect_ack_wire_format_at_various_ctr_offsets() {
         let registry = test_registry().await;
-        let key = [0xE5; AGENT_KEY_LENGTH];
-        let iv = [0xF6; AGENT_IV_LENGTH];
+        let key = test_key(0xE5);
+        let iv = test_iv(0xF6);
         let agent_id: u32 = 0xCCDD_EEFF;
 
         let init_packet = build_init_packet(agent_id, key, iv);
@@ -2091,8 +2099,8 @@ mod tests {
     #[tokio::test]
     async fn build_reconnect_ack_decrypting_at_wrong_offset_yields_garbage() {
         let registry = test_registry().await;
-        let key = [0x17; AGENT_KEY_LENGTH];
-        let iv = [0x28; AGENT_IV_LENGTH];
+        let key = test_key(0x17);
+        let iv = test_iv(0x28);
         let agent_id: u32 = 0x1111_2222;
 
         let init_packet = build_init_packet(agent_id, key, iv);

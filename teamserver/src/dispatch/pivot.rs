@@ -333,6 +333,16 @@ mod tests {
     use crate::dispatch::{BuiltinDispatchContext, DownloadTracker};
     use crate::{AgentRegistry, Database, EventBus, SocketRelayManager};
 
+    /// Generate a non-degenerate test key from a seed byte.
+    fn test_key(seed: u8) -> [u8; AGENT_KEY_LENGTH] {
+        core::array::from_fn(|i| seed.wrapping_add(i as u8))
+    }
+
+    /// Generate a non-degenerate test IV from a seed byte.
+    fn test_iv(seed: u8) -> [u8; AGENT_IV_LENGTH] {
+        core::array::from_fn(|i| seed.wrapping_add(i as u8))
+    }
+
     const AGENT_ID: u32 = 0xBEEF_0001;
     const REQUEST_ID: u32 = 42;
 
@@ -630,8 +640,8 @@ mod tests {
         let mut rx = events.subscribe();
 
         let child_id: u32 = 0x3333_4444;
-        let child_key = [0xCC; AGENT_KEY_LENGTH];
-        let child_iv = [0xDD; AGENT_IV_LENGTH];
+        let child_key = test_key(0xCC);
+        let child_iv = test_iv(0xDD);
         registry.insert(sample_agent_info(child_id, child_key, child_iv)).await?;
 
         // Build a valid callback envelope from the child agent containing a
@@ -704,8 +714,8 @@ mod tests {
         let (database, registry, events, sockets, downloads) = setup_dispatch_context().await;
 
         let child_id: u32 = 0x5555_6666;
-        let child_key = [0xEE; AGENT_KEY_LENGTH];
-        let child_iv = [0xFF; AGENT_IV_LENGTH];
+        let child_key = test_key(0xEE);
+        let child_iv = test_iv(0xFF);
         registry.insert(sample_agent_info(child_id, child_key, child_iv)).await?;
 
         // Build a DemonInit envelope (not a callback), which the handler must reject.
@@ -821,8 +831,8 @@ mod tests {
         let mut rx = events.subscribe();
 
         let child_id: u32 = 0x7777_8888;
-        let child_key = [0x11; AGENT_KEY_LENGTH];
-        let child_iv = [0x22; AGENT_IV_LENGTH];
+        let child_key = test_key(0x11);
+        let child_iv = test_iv(0x22);
         registry.insert(sample_agent_info(child_id, child_key, child_iv)).await?;
 
         let context = BuiltinDispatchContext {
@@ -883,10 +893,10 @@ mod tests {
 
         let parent_id: u32 = 0xAAAA_0001;
         let child_id: u32 = 0xAAAA_0002;
-        let parent_key = [0x10; AGENT_KEY_LENGTH];
-        let parent_iv = [0x11; AGENT_IV_LENGTH];
-        let child_key = [0x20; AGENT_KEY_LENGTH];
-        let child_iv = [0x21; AGENT_IV_LENGTH];
+        let parent_key = test_key(0x10);
+        let parent_iv = test_iv(0x11);
+        let child_key = test_key(0x20);
+        let child_iv = test_iv(0x21);
 
         registry.insert(sample_agent_info(parent_id, parent_key, parent_iv)).await?;
         registry.insert(sample_agent_info(child_id, child_key, child_iv)).await?;
@@ -954,19 +964,9 @@ mod tests {
         let child_id: u32 = 0xBBBB_0002;
         let grandchild_id: u32 = 0xBBBB_0003;
 
-        registry
-            .insert(sample_agent_info(parent_id, [0x30; AGENT_KEY_LENGTH], [0x31; AGENT_IV_LENGTH]))
-            .await?;
-        registry
-            .insert(sample_agent_info(child_id, [0x40; AGENT_KEY_LENGTH], [0x41; AGENT_IV_LENGTH]))
-            .await?;
-        registry
-            .insert(sample_agent_info(
-                grandchild_id,
-                [0x50; AGENT_KEY_LENGTH],
-                [0x51; AGENT_IV_LENGTH],
-            ))
-            .await?;
+        registry.insert(sample_agent_info(parent_id, test_key(0x30), test_iv(0x31))).await?;
+        registry.insert(sample_agent_info(child_id, test_key(0x40), test_iv(0x41))).await?;
+        registry.insert(sample_agent_info(grandchild_id, test_key(0x50), test_iv(0x51))).await?;
 
         // parent -> child -> grandchild
         registry.add_link(parent_id, child_id).await?;
@@ -1026,12 +1026,8 @@ mod tests {
         let parent_id: u32 = 0xCCCC_0001;
         let child_id: u32 = 0xCCCC_0002;
 
-        registry
-            .insert(sample_agent_info(parent_id, [0x60; AGENT_KEY_LENGTH], [0x61; AGENT_IV_LENGTH]))
-            .await?;
-        registry
-            .insert(sample_agent_info(child_id, [0x70; AGENT_KEY_LENGTH], [0x71; AGENT_IV_LENGTH]))
-            .await?;
+        registry.insert(sample_agent_info(parent_id, test_key(0x60), test_iv(0x61))).await?;
+        registry.insert(sample_agent_info(child_id, test_key(0x70), test_iv(0x71))).await?;
         registry.add_link(parent_id, child_id).await?;
 
         // success == 0 means failure
@@ -1100,12 +1096,8 @@ mod tests {
         let child_id: u32 = 0xDD00_0002;
 
         // Register both agents and establish a link so disconnect_link can work.
-        registry
-            .insert(sample_agent_info(parent_id, [0xA0; AGENT_KEY_LENGTH], [0xA1; AGENT_IV_LENGTH]))
-            .await?;
-        registry
-            .insert(sample_agent_info(child_id, [0xB0; AGENT_KEY_LENGTH], [0xB1; AGENT_IV_LENGTH]))
-            .await?;
+        registry.insert(sample_agent_info(parent_id, test_key(0xA0), test_iv(0xA1))).await?;
+        registry.insert(sample_agent_info(child_id, test_key(0xB0), test_iv(0xB1))).await?;
         registry.add_link(parent_id, child_id).await?;
 
         // Mark child as dead so we can verify reconnect reactivates it.
@@ -1167,12 +1159,8 @@ mod tests {
         let parent_id: u32 = 0xEE00_0001;
         let child_id: u32 = 0xEE00_0002;
 
-        registry
-            .insert(sample_agent_info(parent_id, [0xC0; AGENT_KEY_LENGTH], [0xC1; AGENT_IV_LENGTH]))
-            .await?;
-        registry
-            .insert(sample_agent_info(child_id, [0xD0; AGENT_KEY_LENGTH], [0xD1; AGENT_IV_LENGTH]))
-            .await?;
+        registry.insert(sample_agent_info(parent_id, test_key(0xC0), test_iv(0xC1))).await?;
+        registry.insert(sample_agent_info(child_id, test_key(0xD0), test_iv(0xD1))).await?;
 
         // Child is already active — reconnect should still succeed.
         let inner_envelope = valid_init_envelope_bytes(child_id);
@@ -1200,9 +1188,7 @@ mod tests {
         let mut rx = events.subscribe();
 
         let parent_id: u32 = 0xFF00_0001;
-        registry
-            .insert(sample_agent_info(parent_id, [0xE0; AGENT_KEY_LENGTH], [0xE1; AGENT_IV_LENGTH]))
-            .await?;
+        registry.insert(sample_agent_info(parent_id, test_key(0xE0), test_iv(0xE1))).await?;
 
         // success == 0, error_code == 5 (ERROR_ACCESS_DENIED)
         let mut payload = Vec::new();

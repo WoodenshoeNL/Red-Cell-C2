@@ -86,12 +86,9 @@ pub enum CryptoError {
     /// Randomness for new key material could not be obtained from the OS.
     #[error("failed to generate agent key material: {0}")]
     RandomGeneration(String),
-}
-
-impl From<InvalidLength> for CryptoError {
-    fn from(_: InvalidLength) -> Self {
-        unreachable!("length validation is performed before cipher construction")
-    }
+    /// The underlying cipher could not be constructed (unexpected key/IV length).
+    #[error("cipher construction failed: {0}")]
+    CipherConstruction(#[from] InvalidLength),
 }
 
 type AgentCtr = Ctr128BE<Aes256>;
@@ -340,6 +337,7 @@ fn validate_key_and_iv(key: &[u8], iv: &[u8]) -> Result<(), CryptoError> {
 
 #[cfg(test)]
 mod tests {
+    use cipher::InvalidLength;
     use hex_literal::hex;
 
     use super::{
@@ -949,6 +947,16 @@ mod tests {
         assert!(
             message.contains("999") && message.contains("overflowed"),
             "InvalidCtrOffset display must contain the offset and 'overflowed', got: {message}"
+        );
+    }
+
+    #[test]
+    fn crypto_error_cipher_construction_display() {
+        let error = CryptoError::CipherConstruction(InvalidLength);
+        let message = error.to_string();
+        assert!(
+            message.contains("cipher construction failed"),
+            "CipherConstruction display must contain 'cipher construction failed', got: {message}"
         );
     }
 

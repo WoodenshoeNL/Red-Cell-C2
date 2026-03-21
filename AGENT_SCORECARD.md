@@ -9,20 +9,20 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 635 | 212 | 31 |
-| Bugs filed against | 51 | 34 | 9 |
+| Tasks closed | 638 | 212 | 31 |
+| Bugs filed against | 53 | 34 | 9 |
 | Bug rate (bugs/task) | 0.08 | 0.16 | 0.29 |
 | Quality score | 92% | 84% | 71% |
 
-*Bug rates: Claude 51/635=0.08, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 53/638=0.08, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 4 | 0 | 0 |
-| Missing tests / stale tests | 31 | 13 | 5 |
-| Clippy warnings | 3 | 0 | 1 |
+| Missing tests / stale tests | 32 | 13 | 5 |
+| Clippy warnings | 4 | 0 | 1 |
 | Protocol errors | 7 | 27 | 3 |
 | Security issues | 24 | 36 | 0 |
 | Architecture drift | 4 | 21 | 0 |
@@ -3112,3 +3112,13 @@ Build: passed (cargo check, clippy -D warnings clean, 3044 tests pass across wor
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: passed (cargo check, clippy -D warnings clean, 869 tests pass across workspace)
+
+### QA Review — 2026-03-21 07:45 — 635d6de0..e8b1f4a5
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 2 | Closed j84p0 (NormalizedMakeService — proper app-wide trailing-slash normalization replacing duplicate route hack). Closed 134lc (gate test helpers StuckDeliveryGuard/simulate_stuck_delivery behind `test-helpers` feature flag). Closed fiu4y (defuse `<#channel>` mention syntax in sanitize_discord_text). Filed hlsyd (P3: cargo test fails without --features test-helpers — tests in main.rs call feature-gated methods without being gated themselves). Filed ctz60 (P4: unused Infallible import in normalize.rs test module). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: passed (cargo check, clippy -D warnings clean, 2060 tests pass across workspace with --features test-helpers)

@@ -7,7 +7,8 @@
 //! ## Authentication
 //!
 //! Clients connect via WebSocket and send a JSON `Register` message containing
-//! the service password. The password is verified using SHA3-256 comparison.
+//! the service password. The password is verified using constant-time SHA3-256
+//! comparison via [`subtle::ConstantTimeEq`].
 //!
 //! ## Protocol
 //!
@@ -35,6 +36,7 @@ use red_cell_common::operator::{
     TeamserverLogInfo,
 };
 use serde_json::Value;
+use subtle::ConstantTimeEq;
 use thiserror::Error;
 use time::OffsetDateTime;
 use tokio::sync::RwLock;
@@ -316,7 +318,7 @@ async fn authenticate(
 
     let client_hash = hash_password_sha3(client_password);
     let server_hash = hash_password_sha3(&config.password);
-    let success = client_hash == server_hash;
+    let success: bool = client_hash.as_bytes().ct_eq(server_hash.as_bytes()).into();
 
     let response = serde_json::json!({
         "Head": { "Type": HEAD_REGISTER },

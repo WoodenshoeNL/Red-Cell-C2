@@ -46,8 +46,12 @@ use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::agent_events::agent_new_event;
+use crate::audit::{AuditDetails, AuditResultStatus, audit_details};
 use crate::database::TeamserverError;
-use crate::{AgentRegistry, EventBus, LoginRateLimiter, PivotInfo};
+use crate::{
+    AgentRegistry, AuditWebhookNotifier, Database, EventBus, LoginRateLimiter, PivotInfo,
+    record_operator_action_with_notifications,
+};
 
 // ── Constants ────────────────────────────────────────────────────────
 
@@ -256,12 +260,30 @@ async fn handle_service_socket(
             Ok(id) => id,
             Err(e) => {
                 warn!(%e, %client_ip, "service client authentication failed");
+                log_service_action(
+                    &state.database,
+                    &state.webhooks,
+                    "service.auth",
+                    "service_client",
+                    Some(client_ip.to_string()),
+                    audit_details(AuditResultStatus::Failure, None, None, None),
+                )
+                .await;
                 let _ = socket.send(WsMessage::Close(None)).await;
                 return;
             }
         };
 
     info!(%client_id, "service client authenticated");
+    log_service_action(
+        &state.database,
+        &state.webhooks,
+        "service.auth",
+        "service_client",
+        Some(client_id.to_string()),
+        audit_details(AuditResultStatus::Success, None, None, None),
+    )
+    .await;
     bridge.add_client(client_id).await;
 
     // Broadcast a log event to operators.
@@ -297,6 +319,8 @@ async fn handle_service_socket(
             bridge,
             &state.events,
             &state.agent_registry,
+            &state.database,
+            &state.webhooks,
             &mut socket,
             &mut client_agents,
             &mut client_listeners,
@@ -389,11 +413,14 @@ async fn authenticate(
 // ── Message dispatch ─────────────────────────────────────────────────
 
 /// Dispatch a parsed JSON message to the appropriate handler.
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_message(
     message: &Value,
     bridge: &ServiceBridge,
     events: &EventBus,
     agent_registry: &AgentRegistry,
+    database: &Database,
+    webhooks: &AuditWebhookNotifier,
     socket: &mut WebSocket,
     client_agents: &mut Vec<String>,
     client_listeners: &mut Vec<String>,
@@ -402,9 +429,25 @@ async fn dispatch_message(
         message.get("Head").and_then(|h| h.get("Type")).and_then(Value::as_str).unwrap_or_default();
 
     match head_type {
-        HEAD_REGISTER_AGENT => handle_register_agent(message, bridge, events, client_agents).await,
-        HEAD_AGENT => handle_agent_message(message, bridge, events, agent_registry, socket).await,
-        HEAD_LISTENER => handle_listener_message(message, bridge, events, client_listeners).await,
+        HEAD_REGISTER_AGENT => {
+            handle_register_agent(message, bridge, events, database, webhooks, client_agents).await
+        }
+        HEAD_AGENT => {
+            handle_agent_message(
+                message,
+                bridge,
+                events,
+                agent_registry,
+                database,
+                webhooks,
+                socket,
+            )
+            .await
+        }
+        HEAD_LISTENER => {
+            handle_listener_message(message, bridge, events, database, webhooks, client_listeners)
+                .await
+        }
         other => {
             debug!(message_type = %other, "unknown service message type");
             Ok(())
@@ -420,6 +463,8 @@ async fn handle_register_agent(
     message: &Value,
     bridge: &ServiceBridge,
     events: &EventBus,
+    database: &Database,
+    webhooks: &AuditWebhookNotifier,
     client_agents: &mut Vec<String>,
 ) -> Result<(), ServiceBridgeError> {
     let agent_data = message
@@ -436,6 +481,16 @@ async fn handle_register_agent(
     client_agents.push(agent_name.to_owned());
 
     info!(name = %agent_name, "service agent registered");
+
+    log_service_action(
+        database,
+        webhooks,
+        "service.register_agent",
+        "agent_type",
+        Some(agent_name.to_owned()),
+        audit_details(AuditResultStatus::Success, None, None, None),
+    )
+    .await;
 
     // Broadcast to operators.
     let agent_json = serde_json::to_string(agent_data)?;
@@ -461,15 +516,20 @@ async fn handle_agent_message(
     _bridge: &ServiceBridge,
     events: &EventBus,
     agent_registry: &AgentRegistry,
+    database: &Database,
+    webhooks: &AuditWebhookNotifier,
     socket: &mut WebSocket,
 ) -> Result<(), ServiceBridgeError> {
     let body_type =
         message.get("Body").and_then(|b| b.get("Type")).and_then(Value::as_str).unwrap_or_default();
 
     match body_type {
-        BODY_AGENT_TASK => handle_agent_task(message, events, agent_registry, socket).await,
+        BODY_AGENT_TASK => {
+            handle_agent_task(message, events, agent_registry, database, webhooks, socket).await
+        }
         BODY_AGENT_REGISTER => {
-            handle_agent_instance_register(message, events, agent_registry).await
+            handle_agent_instance_register(message, events, agent_registry, database, webhooks)
+                .await
         }
         BODY_AGENT_RESPONSE => handle_agent_response(message, events).await,
         BODY_AGENT_OUTPUT => handle_agent_output(message, events).await,
@@ -489,6 +549,8 @@ async fn handle_agent_task(
     message: &Value,
     events: &EventBus,
     agent_registry: &AgentRegistry,
+    database: &Database,
+    webhooks: &AuditWebhookNotifier,
     socket: &mut WebSocket,
 ) -> Result<(), ServiceBridgeError> {
     let body =
@@ -537,6 +599,16 @@ async fn handle_agent_task(
             agent_registry.enqueue_job(agent_id, job).await?;
             info!(agent_id = %agent_id_str, "service agent task enqueued");
 
+            log_service_action(
+                database,
+                webhooks,
+                "service.agent_task",
+                "agent",
+                Some(agent_id_str.to_owned()),
+                audit_details(AuditResultStatus::Success, Some(agent_id), Some("Add"), None),
+            )
+            .await;
+
             let log_event =
                 service_log_event(&format!("task enqueued for agent {agent_id_str} via service"));
             events.broadcast(log_event);
@@ -583,6 +655,8 @@ async fn handle_agent_instance_register(
     message: &Value,
     events: &EventBus,
     agent_registry: &AgentRegistry,
+    database: &Database,
+    webhooks: &AuditWebhookNotifier,
 ) -> Result<(), ServiceBridgeError> {
     let body =
         message.get("Body").ok_or_else(|| ServiceBridgeError::MissingField("Body".to_owned()))?;
@@ -684,6 +758,16 @@ async fn handle_agent_instance_register(
     agent_registry.insert(agent).await?;
     info!(agent_id = %agent_id_str, "service agent instance registered");
 
+    log_service_action(
+        database,
+        webhooks,
+        "service.agent_register",
+        "agent",
+        Some(agent_id_str.to_owned()),
+        audit_details(AuditResultStatus::Success, Some(agent_id), None, None),
+    )
+    .await;
+
     events.broadcast(event);
 
     Ok(())
@@ -761,14 +845,18 @@ async fn handle_listener_message(
     message: &Value,
     bridge: &ServiceBridge,
     events: &EventBus,
+    database: &Database,
+    webhooks: &AuditWebhookNotifier,
     client_listeners: &mut Vec<String>,
 ) -> Result<(), ServiceBridgeError> {
     let body_type =
         message.get("Body").and_then(|b| b.get("Type")).and_then(Value::as_str).unwrap_or_default();
 
     match body_type {
-        BODY_LISTENER_ADD => handle_listener_add(message, bridge, events, client_listeners).await,
-        BODY_LISTENER_START => handle_listener_start(message, events).await,
+        BODY_LISTENER_ADD => {
+            handle_listener_add(message, bridge, events, database, webhooks, client_listeners).await
+        }
+        BODY_LISTENER_START => handle_listener_start(message, events, database, webhooks).await,
         other => {
             debug!(body_type = %other, "unknown service listener sub-message type");
             Ok(())
@@ -782,6 +870,8 @@ async fn handle_listener_add(
     message: &Value,
     bridge: &ServiceBridge,
     events: &EventBus,
+    database: &Database,
+    webhooks: &AuditWebhookNotifier,
     client_listeners: &mut Vec<String>,
 ) -> Result<(), ServiceBridgeError> {
     let listener = message
@@ -798,6 +888,16 @@ async fn handle_listener_add(
     client_listeners.push(name.to_owned());
 
     info!(name = %name, "service listener registered");
+
+    log_service_action(
+        database,
+        webhooks,
+        "service.listener_add",
+        "listener",
+        Some(name.to_owned()),
+        audit_details(AuditResultStatus::Success, None, None, None),
+    )
+    .await;
 
     let listener_json = serde_json::to_string(listener)?;
     let event = OperatorMessage::ServiceListenerRegister(Message {
@@ -829,6 +929,8 @@ async fn handle_listener_add(
 async fn handle_listener_start(
     message: &Value,
     events: &EventBus,
+    database: &Database,
+    webhooks: &AuditWebhookNotifier,
 ) -> Result<(), ServiceBridgeError> {
     let body =
         message.get("Body").ok_or_else(|| ServiceBridgeError::MissingField("Body".to_owned()))?;
@@ -881,6 +983,15 @@ async fn handle_listener_start(
             %name, %protocol, %host, %port_bind, %error_text,
             "service listener start failed"
         );
+        log_service_action(
+            database,
+            webhooks,
+            "service.listener_start",
+            "listener",
+            Some(name.to_owned()),
+            audit_details(AuditResultStatus::Failure, None, None, None),
+        )
+        .await;
         let event = OperatorMessage::ListenerError(Message {
             head,
             info: ListenerErrorInfo { error: error_text.to_owned(), name: name.to_owned() },
@@ -891,6 +1002,15 @@ async fn handle_listener_start(
             %name, %protocol, %host, %port_bind, %status,
             "service listener started"
         );
+        log_service_action(
+            database,
+            webhooks,
+            "service.listener_start",
+            "listener",
+            Some(name.to_owned()),
+            audit_details(AuditResultStatus::Success, None, None, None),
+        )
+        .await;
         let event = OperatorMessage::ListenerMark(Message {
             head,
             info: ListenerMarkInfo { name: name.to_owned(), mark: "Online".to_owned() },
@@ -902,6 +1022,33 @@ async fn handle_listener_start(
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
+
+/// Persist a structured audit-log entry for a service bridge action.
+///
+/// This mirrors `log_operator_action` in `websocket.rs` but uses the actor
+/// `"service"` to distinguish service bridge actions from operator actions.
+async fn log_service_action(
+    database: &Database,
+    webhooks: &AuditWebhookNotifier,
+    action: &str,
+    target_kind: &str,
+    target_id: Option<String>,
+    details: AuditDetails,
+) {
+    if let Err(error) = record_operator_action_with_notifications(
+        database,
+        webhooks,
+        "service",
+        action,
+        target_kind,
+        target_id,
+        details,
+    )
+    .await
+    {
+        warn!(action, %error, "failed to persist service audit log entry");
+    }
+}
 
 /// Build a teamserver log event attributed to the service bridge.
 fn service_log_event(text: &str) -> OperatorMessage {
@@ -921,6 +1068,13 @@ fn service_log_event(text: &str) -> OperatorMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Create a test database and webhook notifier pair for audit logging tests.
+    async fn test_audit_deps() -> (Database, AuditWebhookNotifier) {
+        let database = crate::database::Database::connect_in_memory().await.expect("in-memory db");
+        let webhooks = AuditWebhookNotifier::default();
+        (database, webhooks)
+    }
 
     #[test]
     fn service_bridge_creates_with_config() {
@@ -1033,6 +1187,7 @@ mod tests {
             password: "pw".to_owned(),
         });
         let events = EventBus::default();
+        let (db, wh) = test_audit_deps().await;
         let mut client_listeners = Vec::new();
 
         let message = serde_json::json!({
@@ -1041,13 +1196,15 @@ mod tests {
         });
 
         let result =
-            handle_listener_message(&message, &bridge, &events, &mut client_listeners).await;
+            handle_listener_message(&message, &bridge, &events, &db, &wh, &mut client_listeners)
+                .await;
         assert!(result.is_ok(), "unknown listener sub-type should be silently ignored");
         assert!(client_listeners.is_empty(), "no listener should be registered");
     }
 
     #[tokio::test]
     async fn handle_register_agent_broadcasts_event() {
+        let (db, wh) = test_audit_deps().await;
         let bridge = ServiceBridge::new(ServiceConfig {
             endpoint: "test".to_owned(),
             password: "pw".to_owned(),
@@ -1067,7 +1224,7 @@ mod tests {
             },
         });
 
-        handle_register_agent(&message, &bridge, &events, &mut client_agents)
+        handle_register_agent(&message, &bridge, &events, &db, &wh, &mut client_agents)
             .await
             .expect("registration should succeed");
 
@@ -1085,6 +1242,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_listener_add_broadcasts_event() {
+        let (db, wh) = test_audit_deps().await;
         let bridge = ServiceBridge::new(ServiceConfig {
             endpoint: "test".to_owned(),
             password: "pw".to_owned(),
@@ -1104,7 +1262,7 @@ mod tests {
             },
         });
 
-        handle_listener_add(&message, &bridge, &events, &mut client_listeners)
+        handle_listener_add(&message, &bridge, &events, &db, &wh, &mut client_listeners)
             .await
             .expect("listener add should succeed");
 
@@ -1121,6 +1279,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_register_agent_rejects_duplicate() {
+        let (db, wh) = test_audit_deps().await;
         let bridge = ServiceBridge::new(ServiceConfig {
             endpoint: "test".to_owned(),
             password: "pw".to_owned(),
@@ -1135,12 +1294,12 @@ mod tests {
             },
         });
 
-        handle_register_agent(&message, &bridge, &events, &mut client_agents)
+        handle_register_agent(&message, &bridge, &events, &db, &wh, &mut client_agents)
             .await
             .expect("first registration should succeed");
 
         let mut client_agents2 = Vec::new();
-        let err = handle_register_agent(&message, &bridge, &events, &mut client_agents2)
+        let err = handle_register_agent(&message, &bridge, &events, &db, &wh, &mut client_agents2)
             .await
             .expect_err("duplicate should fail");
 
@@ -1152,6 +1311,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_agent_name_returns_error() {
+        let (db, wh) = test_audit_deps().await;
         let bridge = ServiceBridge::new(ServiceConfig {
             endpoint: "test".to_owned(),
             password: "pw".to_owned(),
@@ -1166,7 +1326,7 @@ mod tests {
             },
         });
 
-        let err = handle_register_agent(&message, &bridge, &events, &mut client_agents)
+        let err = handle_register_agent(&message, &bridge, &events, &db, &wh, &mut client_agents)
             .await
             .expect_err("missing Name should fail");
 
@@ -1257,6 +1417,7 @@ mod tests {
     #[tokio::test]
     async fn handle_agent_task_add_enqueues_job() {
         use base64::Engine as _;
+        let (db, wh) = test_audit_deps().await;
 
         let registry = test_registry().await;
         let agent_id: u32 = 0xAABB_CCDD;
@@ -1280,7 +1441,7 @@ mod tests {
 
         let (mut server_ws, _client_ws) = ws_pair().await;
 
-        handle_agent_task(&message, &events, &registry, &mut server_ws)
+        handle_agent_task(&message, &events, &registry, &db, &wh, &mut server_ws)
             .await
             .expect("task add should succeed");
 
@@ -1300,6 +1461,7 @@ mod tests {
     async fn handle_agent_task_get_returns_queued_payloads() {
         use base64::Engine as _;
         use futures_util::StreamExt as _;
+        let (db, wh) = test_audit_deps().await;
 
         let registry = test_registry().await;
         let agent_id: u32 = 0x1122_3344;
@@ -1335,7 +1497,7 @@ mod tests {
 
         let (mut server_ws, mut client_ws) = ws_pair().await;
 
-        handle_agent_task(&message, &events, &registry, &mut server_ws)
+        handle_agent_task(&message, &events, &registry, &db, &wh, &mut server_ws)
             .await
             .expect("task get should succeed");
 
@@ -1355,6 +1517,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_agent_task_missing_body_returns_error() {
+        let (db, wh) = test_audit_deps().await;
         let registry = test_registry().await;
         let events = EventBus::default();
 
@@ -1364,7 +1527,7 @@ mod tests {
 
         let (mut server_ws, _client_ws) = ws_pair().await;
 
-        let err = handle_agent_task(&message, &events, &registry, &mut server_ws)
+        let err = handle_agent_task(&message, &events, &registry, &db, &wh, &mut server_ws)
             .await
             .expect_err("should fail");
         assert!(matches!(err, ServiceBridgeError::MissingField(_)));
@@ -1372,6 +1535,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_agent_task_add_invalid_base64_returns_error() {
+        let (db, wh) = test_audit_deps().await;
         let registry = test_registry().await;
         let agent_id: u32 = 0xDEAD_BEEF;
         registry.insert(test_agent_record(agent_id)).await.expect("insert agent");
@@ -1389,7 +1553,7 @@ mod tests {
 
         let (mut server_ws, _client_ws) = ws_pair().await;
 
-        let err = handle_agent_task(&message, &events, &registry, &mut server_ws)
+        let err = handle_agent_task(&message, &events, &registry, &db, &wh, &mut server_ws)
             .await
             .expect_err("should fail");
         assert!(matches!(err, ServiceBridgeError::Base64Decode(_)));
@@ -1397,6 +1561,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_agent_task_add_unknown_agent_returns_error() {
+        let (db, wh) = test_audit_deps().await;
         let registry = test_registry().await;
         let events = EventBus::default();
 
@@ -1412,7 +1577,7 @@ mod tests {
 
         let (mut server_ws, _client_ws) = ws_pair().await;
 
-        let err = handle_agent_task(&message, &events, &registry, &mut server_ws)
+        let err = handle_agent_task(&message, &events, &registry, &db, &wh, &mut server_ws)
             .await
             .expect_err("should fail for unknown agent");
         assert!(matches!(err, ServiceBridgeError::AgentRegistry(_)));
@@ -1422,6 +1587,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_agent_instance_register_inserts_and_broadcasts() {
+        let (db, wh) = test_audit_deps().await;
         let registry = test_registry().await;
         let events = EventBus::default();
         let mut rx = events.subscribe();
@@ -1451,7 +1617,7 @@ mod tests {
             },
         });
 
-        handle_agent_instance_register(&message, &events, &registry)
+        handle_agent_instance_register(&message, &events, &registry, &db, &wh)
             .await
             .expect("registration should succeed");
 
@@ -1468,6 +1634,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_agent_instance_register_duplicate_returns_error() {
+        let (db, wh) = test_audit_deps().await;
         let registry = test_registry().await;
         let events = EventBus::default();
 
@@ -1487,11 +1654,11 @@ mod tests {
             },
         });
 
-        handle_agent_instance_register(&message, &events, &registry)
+        handle_agent_instance_register(&message, &events, &registry, &db, &wh)
             .await
             .expect("first registration should succeed");
 
-        let err = handle_agent_instance_register(&message, &events, &registry)
+        let err = handle_agent_instance_register(&message, &events, &registry, &db, &wh)
             .await
             .expect_err("duplicate should fail");
         assert!(matches!(err, ServiceBridgeError::AgentRegistry(_)));
@@ -1499,6 +1666,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_agent_instance_register_missing_header_returns_error() {
+        let (db, wh) = test_audit_deps().await;
         let registry = test_registry().await;
         let events = EventBus::default();
 
@@ -1510,7 +1678,7 @@ mod tests {
             },
         });
 
-        let err = handle_agent_instance_register(&message, &events, &registry)
+        let err = handle_agent_instance_register(&message, &events, &registry, &db, &wh)
             .await
             .expect_err("should fail without AgentHeader");
         assert!(matches!(err, ServiceBridgeError::MissingField(_)));
@@ -1589,6 +1757,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_agent_instance_register_invalid_hex_id_returns_error() {
+        let (db, wh) = test_audit_deps().await;
         let registry = test_registry().await;
         let events = EventBus::default();
 
@@ -1604,7 +1773,7 @@ mod tests {
             },
         });
 
-        let err = handle_agent_instance_register(&message, &events, &registry)
+        let err = handle_agent_instance_register(&message, &events, &registry, &db, &wh)
             .await
             .expect_err("should fail with invalid hex");
         assert!(matches!(err, ServiceBridgeError::MissingField(_)));
@@ -1632,12 +1801,15 @@ mod tests {
 
     #[tokio::test]
     async fn listener_start_broadcasts_online_mark() {
+        let (db, wh) = test_audit_deps().await;
         let events = EventBus::default();
         let mut rx = events.subscribe();
 
         let message = listener_start_message("online", "");
 
-        handle_listener_start(&message, &events).await.expect("listener start should succeed");
+        handle_listener_start(&message, &events, &db, &wh)
+            .await
+            .expect("listener start should succeed");
 
         let event = rx.recv().await.expect("event should be broadcast");
         match event {
@@ -1651,12 +1823,13 @@ mod tests {
 
     #[tokio::test]
     async fn listener_start_broadcasts_error_on_failure() {
+        let (db, wh) = test_audit_deps().await;
         let events = EventBus::default();
         let mut rx = events.subscribe();
 
         let message = listener_start_message("error", "bind: address already in use");
 
-        handle_listener_start(&message, &events)
+        handle_listener_start(&message, &events, &db, &wh)
             .await
             .expect("listener start should succeed even on error status");
 
@@ -1672,13 +1845,16 @@ mod tests {
 
     #[tokio::test]
     async fn listener_start_error_text_nonempty_overrides_status() {
+        let (db, wh) = test_audit_deps().await;
         let events = EventBus::default();
         let mut rx = events.subscribe();
 
         // Status is "online" but error text is non-empty — should still treat as error.
         let message = listener_start_message("online", "partial failure");
 
-        handle_listener_start(&message, &events).await.expect("listener start should succeed");
+        handle_listener_start(&message, &events, &db, &wh)
+            .await
+            .expect("listener start should succeed");
 
         let event = rx.recv().await.expect("event should be broadcast");
         assert!(
@@ -1689,6 +1865,7 @@ mod tests {
 
     #[tokio::test]
     async fn listener_start_rejects_missing_name() {
+        let (db, wh) = test_audit_deps().await;
         let events = EventBus::default();
 
         let message = serde_json::json!({
@@ -1704,8 +1881,9 @@ mod tests {
             },
         });
 
-        let err =
-            handle_listener_start(&message, &events).await.expect_err("missing Name should fail");
+        let err = handle_listener_start(&message, &events, &db, &wh)
+            .await
+            .expect_err("missing Name should fail");
         assert!(
             matches!(err, ServiceBridgeError::MissingField(ref f) if f.contains("Name")),
             "expected MissingField mentioning Name, got: {err:?}"
@@ -1714,16 +1892,19 @@ mod tests {
 
     #[tokio::test]
     async fn listener_start_rejects_missing_body() {
+        let (db, wh) = test_audit_deps().await;
         let events = EventBus::default();
         let message = serde_json::json!({ "Head": { "Type": HEAD_LISTENER } });
 
-        let err =
-            handle_listener_start(&message, &events).await.expect_err("missing Body should fail");
+        let err = handle_listener_start(&message, &events, &db, &wh)
+            .await
+            .expect_err("missing Body should fail");
         assert!(matches!(err, ServiceBridgeError::MissingField(ref f) if f.contains("Body")));
     }
 
     #[tokio::test]
     async fn listener_start_rejects_missing_status() {
+        let (db, wh) = test_audit_deps().await;
         let events = EventBus::default();
 
         let message = serde_json::json!({
@@ -1739,8 +1920,9 @@ mod tests {
             },
         });
 
-        let err =
-            handle_listener_start(&message, &events).await.expect_err("missing Status should fail");
+        let err = handle_listener_start(&message, &events, &db, &wh)
+            .await
+            .expect_err("missing Status should fail");
         assert!(
             matches!(err, ServiceBridgeError::MissingField(ref f) if f.contains("Status")),
             "expected MissingField mentioning Status, got: {err:?}"
@@ -1749,6 +1931,7 @@ mod tests {
 
     #[tokio::test]
     async fn listener_message_dispatches_start() {
+        let (db, wh) = test_audit_deps().await;
         let bridge = ServiceBridge::new(ServiceConfig {
             endpoint: "test".to_owned(),
             password: "pw".to_owned(),
@@ -1759,7 +1942,7 @@ mod tests {
 
         let message = listener_start_message("online", "");
 
-        handle_listener_message(&message, &bridge, &events, &mut client_listeners)
+        handle_listener_message(&message, &bridge, &events, &db, &wh, &mut client_listeners)
             .await
             .expect("dispatch to listener start should succeed");
 
@@ -1768,6 +1951,150 @@ mod tests {
             matches!(event, OperatorMessage::ListenerMark(_)),
             "expected ListenerMark from dispatched handler"
         );
+    }
+
+    // ── Audit logging tests ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn register_agent_creates_audit_entry() {
+        let (db, wh) = test_audit_deps().await;
+        let bridge = ServiceBridge::new(ServiceConfig {
+            endpoint: "test".to_owned(),
+            password: "pw".to_owned(),
+        });
+        let events = EventBus::default();
+        let mut client_agents = Vec::new();
+
+        let message = serde_json::json!({
+            "Head": { "Type": HEAD_REGISTER_AGENT },
+            "Body": { "Agent": { "Name": "AuditTestAgent" } },
+        });
+
+        handle_register_agent(&message, &bridge, &events, &db, &wh, &mut client_agents)
+            .await
+            .expect("registration should succeed");
+
+        let query = crate::audit::AuditQuery {
+            action: Some("service.register_agent".to_owned()),
+            ..Default::default()
+        };
+        let page = crate::audit::query_audit_log(&db, &query).await.expect("query should succeed");
+        assert_eq!(page.total, 1, "expected one audit entry for agent registration");
+        assert_eq!(page.items[0].actor, "service");
+        assert_eq!(page.items[0].target_kind, "agent_type");
+        assert_eq!(page.items[0].target_id.as_deref(), Some("AuditTestAgent"));
+    }
+
+    #[tokio::test]
+    async fn listener_add_creates_audit_entry() {
+        let (db, wh) = test_audit_deps().await;
+        let bridge = ServiceBridge::new(ServiceConfig {
+            endpoint: "test".to_owned(),
+            password: "pw".to_owned(),
+        });
+        let events = EventBus::default();
+        let mut client_listeners = Vec::new();
+
+        let message = serde_json::json!({
+            "Head": { "Type": HEAD_LISTENER },
+            "Body": {
+                "Type": BODY_LISTENER_ADD,
+                "Listener": { "Name": "audit-listener" },
+            },
+        });
+
+        handle_listener_add(&message, &bridge, &events, &db, &wh, &mut client_listeners)
+            .await
+            .expect("listener add should succeed");
+
+        let query = crate::audit::AuditQuery {
+            action: Some("service.listener_add".to_owned()),
+            ..Default::default()
+        };
+        let page = crate::audit::query_audit_log(&db, &query).await.expect("query should succeed");
+        assert_eq!(page.total, 1, "expected one audit entry for listener add");
+        assert_eq!(page.items[0].actor, "service");
+        assert_eq!(page.items[0].target_id.as_deref(), Some("audit-listener"));
+    }
+
+    #[tokio::test]
+    async fn listener_start_creates_audit_entry() {
+        let (db, wh) = test_audit_deps().await;
+        let events = EventBus::default();
+
+        let message = listener_start_message("online", "");
+        handle_listener_start(&message, &events, &db, &wh)
+            .await
+            .expect("listener start should succeed");
+
+        let query = crate::audit::AuditQuery {
+            action: Some("service.listener_start".to_owned()),
+            ..Default::default()
+        };
+        let page = crate::audit::query_audit_log(&db, &query).await.expect("query should succeed");
+        assert_eq!(page.total, 1, "expected one audit entry for listener start");
+        assert_eq!(page.items[0].actor, "service");
+        assert_eq!(page.items[0].result_status, AuditResultStatus::Success,);
+    }
+
+    #[tokio::test]
+    async fn listener_start_failure_creates_audit_entry_with_failure_status() {
+        let (db, wh) = test_audit_deps().await;
+        let events = EventBus::default();
+
+        let message = listener_start_message("error", "bind failed");
+        handle_listener_start(&message, &events, &db, &wh)
+            .await
+            .expect("listener start (error) should succeed");
+
+        let query = crate::audit::AuditQuery {
+            action: Some("service.listener_start".to_owned()),
+            ..Default::default()
+        };
+        let page = crate::audit::query_audit_log(&db, &query).await.expect("query should succeed");
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].result_status, AuditResultStatus::Failure,);
+    }
+
+    #[tokio::test]
+    async fn agent_instance_register_creates_audit_entry() {
+        let (db, wh) = test_audit_deps().await;
+        let registry = test_registry().await;
+        let events = EventBus::default();
+
+        let message = serde_json::json!({
+            "Head": { "Type": HEAD_AGENT },
+            "Body": {
+                "Type": BODY_AGENT_REGISTER,
+                "AgentHeader": { "AgentID": "ABCD1234", "MagicValue": "DEADBEEF" },
+                "RegisterInfo": {
+                    "Hostname": "HOST",
+                    "Username": "user",
+                    "DomainName": "DOMAIN",
+                    "ExternalIP": "10.0.0.1",
+                    "InternalIP": "192.168.1.1",
+                    "ProcessName": "svc.exe",
+                    "ProcessPID": 100,
+                    "ProcessArch": "x64",
+                    "OSVersion": "Windows 10",
+                    "OSArch": "x64",
+                },
+            },
+        });
+
+        handle_agent_instance_register(&message, &events, &registry, &db, &wh)
+            .await
+            .expect("agent registration should succeed");
+
+        let query = crate::audit::AuditQuery {
+            action: Some("service.agent_register".to_owned()),
+            ..Default::default()
+        };
+        let page = crate::audit::query_audit_log(&db, &query).await.expect("query should succeed");
+        assert_eq!(page.total, 1, "expected one audit entry for agent instance register");
+        assert_eq!(page.items[0].actor, "service");
+        assert_eq!(page.items[0].target_kind, "agent");
+        assert_eq!(page.items[0].agent_id.as_deref(), Some("ABCD1234"));
     }
 
     // ── authenticate() tests ─────────────────────────────────────────
@@ -2027,6 +2354,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_agent_message_dispatches_agent_register() {
+        let (db, wh) = test_audit_deps().await;
         let bridge = ServiceBridge::new(ServiceConfig {
             endpoint: "test".to_owned(),
             password: "pw".to_owned(),
@@ -2052,7 +2380,7 @@ mod tests {
 
         let (mut server_ws, _client_ws) = ws_pair().await;
 
-        handle_agent_message(&message, &bridge, &events, &registry, &mut server_ws)
+        handle_agent_message(&message, &bridge, &events, &registry, &db, &wh, &mut server_ws)
             .await
             .expect("dispatch to AgentRegister should succeed");
 
@@ -2065,6 +2393,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_agent_message_dispatches_agent_response() {
+        let (db, wh) = test_audit_deps().await;
         let bridge = ServiceBridge::new(ServiceConfig {
             endpoint: "test".to_owned(),
             password: "pw".to_owned(),
@@ -2085,7 +2414,7 @@ mod tests {
 
         let (mut server_ws, _client_ws) = ws_pair().await;
 
-        handle_agent_message(&message, &bridge, &events, &registry, &mut server_ws)
+        handle_agent_message(&message, &bridge, &events, &registry, &db, &wh, &mut server_ws)
             .await
             .expect("dispatch to AgentResponse should succeed");
 
@@ -2101,6 +2430,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_agent_message_dispatches_agent_output() {
+        let (db, wh) = test_audit_deps().await;
         let bridge = ServiceBridge::new(ServiceConfig {
             endpoint: "test".to_owned(),
             password: "pw".to_owned(),
@@ -2120,7 +2450,7 @@ mod tests {
 
         let (mut server_ws, _client_ws) = ws_pair().await;
 
-        handle_agent_message(&message, &bridge, &events, &registry, &mut server_ws)
+        handle_agent_message(&message, &bridge, &events, &registry, &db, &wh, &mut server_ws)
             .await
             .expect("dispatch to AgentOutput should succeed");
 
@@ -2130,6 +2460,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_agent_message_unknown_body_type_returns_ok() {
+        let (db, wh) = test_audit_deps().await;
         let bridge = ServiceBridge::new(ServiceConfig {
             endpoint: "test".to_owned(),
             password: "pw".to_owned(),
@@ -2147,7 +2478,8 @@ mod tests {
         let (mut server_ws, _client_ws) = ws_pair().await;
 
         let result =
-            handle_agent_message(&message, &bridge, &events, &registry, &mut server_ws).await;
+            handle_agent_message(&message, &bridge, &events, &registry, &db, &wh, &mut server_ws)
+                .await;
         assert!(result.is_ok(), "unknown agent body type should be silently ignored");
     }
 

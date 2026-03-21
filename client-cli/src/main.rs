@@ -135,62 +135,104 @@ pub enum Commands {
 /// Agent subcommands.
 #[derive(Debug, Subcommand)]
 pub enum AgentCommands {
-    /// List all registered agents
+    /// List all registered agents.
+    ///
+    /// Examples:
+    ///   red-cell-cli agent list
+    #[command(verbatim_doc_comment)]
     List,
-    /// Show details of a single agent
+
+    /// Show full details of a single agent.
+    ///
+    /// Examples:
+    ///   red-cell-cli agent show abc123
+    #[command(verbatim_doc_comment)]
     Show {
         /// Agent ID
         id: String,
     },
-    /// Execute a shell command on an agent
+
+    /// Execute a shell command on an agent.
+    ///
+    /// Without --wait: returns immediately with a job ID.
+    /// With --wait:    blocks until the agent returns output (exit code 5 on timeout).
+    ///
+    /// Examples:
+    ///   red-cell-cli agent exec abc123 --cmd "whoami"
+    ///   red-cell-cli agent exec abc123 --cmd "ipconfig /all" --wait --timeout 30
+    #[command(verbatim_doc_comment)]
     Exec {
         /// Agent ID
         id: String,
-        /// Command to execute
+        /// Shell command to execute on the agent
         #[arg(long)]
         cmd: String,
-        /// Wait for output before returning
+        /// Block until the agent returns output
         #[arg(long)]
         wait: bool,
-        /// Override per-command timeout (seconds)
+        /// Seconds to wait before returning exit code 5 (default: 60)
         #[arg(long)]
         timeout: Option<u64>,
     },
     /// Retrieve pending task output from an agent
+    ///
+    /// Examples:
+    ///   red-cell-cli agent output abc123
+    ///   red-cell-cli agent output abc123 --watch
+    ///   red-cell-cli agent output abc123 --since job_xyz --watch
+    #[command(verbatim_doc_comment)]
     Output {
         /// Agent ID
         id: String,
-        /// Stream new output as it arrives
+        /// Stream new output as it arrives (prints JSON lines until Ctrl-C)
         #[arg(long)]
         watch: bool,
+        /// Only fetch output newer than this job ID
+        #[arg(long)]
+        since: Option<String>,
     },
-    /// Terminate an agent
+    /// Terminate an agent.
+    ///
+    /// Examples:
+    ///   red-cell-cli agent kill abc123
+    ///   red-cell-cli agent kill abc123 --wait
+    #[command(verbatim_doc_comment)]
     Kill {
         /// Agent ID
         id: String,
-        /// Wait for confirmation before returning
+        /// Block until the agent's status becomes "dead"
         #[arg(long)]
         wait: bool,
     },
-    /// Upload a file to an agent
+
+    /// Upload a local file to an agent.
+    ///
+    /// Examples:
+    ///   red-cell-cli agent upload abc123 --src ./payload.exe --dst "C:\\Temp\\p.exe"
+    #[command(verbatim_doc_comment)]
     Upload {
         /// Agent ID
         id: String,
-        /// Local source file path
+        /// Local path of the file to upload
         #[arg(long)]
         src: String,
-        /// Remote destination path on the agent
+        /// Destination path on the remote agent
         #[arg(long)]
         dst: String,
     },
-    /// Download a file from an agent
+
+    /// Download a file from an agent to local disk.
+    ///
+    /// Examples:
+    ///   red-cell-cli agent download abc123 --src /etc/passwd --dst ./passwd.txt
+    #[command(verbatim_doc_comment)]
     Download {
         /// Agent ID
         id: String,
-        /// Remote source path on the agent
+        /// Source path on the remote agent
         #[arg(long)]
         src: String,
-        /// Local destination path
+        /// Local path to write the downloaded file
         #[arg(long)]
         dst: String,
     },
@@ -378,9 +420,11 @@ async fn dispatch(cli: Cli) -> i32 {
                 e.exit_code()
             }
         },
+
+        Commands::Agent { action } => commands::agent::run(&api_client, &fmt, action).await,
+
         // Remaining commands are implemented in downstream issues.
-        Commands::Agent { .. }
-        | Commands::Listener { .. }
+        Commands::Listener { .. }
         | Commands::Payload { .. }
         | Commands::Operator { .. }
         | Commands::Audit { .. }

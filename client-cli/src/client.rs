@@ -8,6 +8,7 @@
 use std::time::Duration;
 
 use reqwest::{Client, StatusCode};
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tracing::instrument;
 
@@ -66,6 +67,92 @@ impl ApiClient {
             .map_err(|e| map_reqwest_error(e, &url))?;
 
         map_response(response, path).await
+    }
+
+    /// Issue an authenticated `POST` request to `path` under `/api/v1` with a
+    /// JSON body and deserialise the response body as `T`.
+    ///
+    /// # Errors
+    ///
+    /// Same mapping as [`ApiClient::get`].
+    #[instrument(skip(self, body), fields(path = %path))]
+    pub async fn post<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, CliError> {
+        let url = format!("{}/api/v1{path}", self.base_url);
+
+        let response = self
+            .inner
+            .post(&url)
+            .header(API_KEY_HEADER, &self.token)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| map_reqwest_error(e, &url))?;
+
+        map_response(response, path).await
+    }
+
+    /// Issue an authenticated `POST` with raw binary body to `path` under
+    /// `/api/v1` and deserialise the JSON response as `T`.
+    ///
+    /// Sends `Content-Type: application/octet-stream`.
+    #[instrument(skip(self, data), fields(path = %path, bytes = data.len()))]
+    pub async fn post_bytes<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        data: Vec<u8>,
+    ) -> Result<T, CliError> {
+        let url = format!("{}/api/v1{path}", self.base_url);
+
+        let response = self
+            .inner
+            .post(&url)
+            .header(API_KEY_HEADER, &self.token)
+            .header("Content-Type", "application/octet-stream")
+            .body(data)
+            .send()
+            .await
+            .map_err(|e| map_reqwest_error(e, &url))?;
+
+        map_response(response, path).await
+    }
+
+    /// Issue an authenticated `GET` to `path` under `/api/v1` and return the
+    /// raw response bytes.
+    ///
+    /// Used for binary downloads.
+    #[instrument(skip(self), fields(path = %path))]
+    pub async fn get_raw_bytes(&self, path: &str) -> Result<Vec<u8>, CliError> {
+        let url = format!("{}/api/v1{path}", self.base_url);
+
+        let response = self
+            .inner
+            .get(&url)
+            .header(API_KEY_HEADER, &self.token)
+            .send()
+            .await
+            .map_err(|e| map_reqwest_error(e, &url))?;
+
+        match response.status() {
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(CliError::AuthFailure(
+                format!("server rejected credentials ({})", response.status()),
+            )),
+            StatusCode::NOT_FOUND => {
+                Err(CliError::NotFound(format!("{path} does not exist on the server")))
+            }
+            s if s.is_success() => response
+                .bytes()
+                .await
+                .map(|b| b.to_vec())
+                .map_err(|e| CliError::General(format!("failed to read response body: {e}"))),
+            s => {
+                let body = response.text().await.unwrap_or_else(|_| "(unreadable)".to_owned());
+                Err(CliError::General(format!("server returned {s}: {body}")))
+            }
+        }
     }
 
     /// Issue an unauthenticated `GET` to `path` under `/api/v1`.

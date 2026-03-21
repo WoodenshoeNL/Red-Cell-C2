@@ -10,11 +10,11 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 667 | 212 | 31 |
-| Bugs filed against | 69 | 34 | 9 |
-| Bug rate (bugs/task) | 0.10 | 0.16 | 0.29 |
-| Quality score | 90% | 84% | 71% |
+| Bugs filed against | 70 | 34 | 9 |
+| Bug rate (bugs/task) | 0.11 | 0.16 | 0.29 |
+| Quality score | 89% | 84% | 71% |
 
-*Bug rates: Claude 69/667=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 70/667=0.10, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 6 | 21 | 0 |
 | Memory / resource leaks | 3 | 10 | 1 |
 | Startup / lifecycle regressions | 1 | 8 | 0 |
-| Test infrastructure / flakiness | 9 | 0 | 0 |
+| Test infrastructure / flakiness | 10 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
 | Correctness / pagination | 24 | 7 | 1 |

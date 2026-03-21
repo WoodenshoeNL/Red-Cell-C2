@@ -1425,6 +1425,7 @@ mod tests {
         assert!(pool.is_closed(), "database should be closed even after listener timeout");
     }
 
+    #[cfg(feature = "test-helpers")]
     #[tokio::test]
     async fn shutdown_sequence_warns_when_webhook_drain_times_out() {
         let (state, shutdown) = build_shutdown_test_state().await;
@@ -1444,6 +1445,7 @@ mod tests {
         assert!(pool.is_closed(), "database should be closed even after webhook timeout");
     }
 
+    #[cfg(feature = "test-helpers")]
     #[tokio::test]
     async fn shutdown_sequence_warns_when_both_listener_and_webhook_drain_time_out() {
         let (state, shutdown) = build_shutdown_test_state().await;

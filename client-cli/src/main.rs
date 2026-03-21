@@ -241,35 +241,102 @@ pub enum AgentCommands {
 /// Listener subcommands.
 #[derive(Debug, Subcommand)]
 pub enum ListenerCommands {
-    /// List all configured listeners
+    /// List all configured listeners.
+    ///
+    /// Examples:
+    ///   red-cell-cli listener list
+    #[command(verbatim_doc_comment)]
     List,
-    /// Show details of a listener
+
+    /// Show full details of a single listener.
+    ///
+    /// Examples:
+    ///   red-cell-cli listener show http1
+    #[command(verbatim_doc_comment)]
     Show {
-        /// Listener name or ID
+        /// Listener name
         name: String,
     },
-    /// Create a new listener
+
+    /// Create a new listener.
+    ///
+    /// For simple cases supply individual flags; for complex HTTP listeners
+    /// with headers, URIs, or proxy config pass --config-json instead.
+    ///
+    /// Examples:
+    ///   red-cell-cli listener create --name http1 --type http --port 443
+    ///   red-cell-cli listener create --name dns1  --type dns  --domain c2.evil.example.com
+    ///   red-cell-cli listener create --name smb1  --type smb  --pipe-name my-pipe
+    ///   red-cell-cli listener create --name ext1  --type external --endpoint /bridge
+    ///   red-cell-cli listener create --name http1 --type http --config-json '{"name":"http1","host_bind":"0.0.0.0","port_bind":443,"host_rotation":"round-robin"}'
+    #[command(verbatim_doc_comment)]
     Create {
-        /// Listener name
+        /// Listener display name
         #[arg(long)]
         name: String,
-        /// Protocol (http, dns, smb, external)
+
+        /// Protocol: http, dns, smb, or external
         #[arg(long = "type")]
         listener_type: String,
+
+        /// Bind port (HTTP default: 443, DNS default: 53)
+        #[arg(long)]
+        port: Option<u16>,
+
+        /// Local interface to bind (default: 0.0.0.0)
+        #[arg(long, default_value = "0.0.0.0")]
+        host: String,
+
+        /// C2 domain suffix handled by a DNS listener (required for --type dns)
+        #[arg(long)]
+        domain: Option<String>,
+
+        /// Named pipe for SMB pivot traffic (required for --type smb)
+        #[arg(long)]
+        pipe_name: Option<String>,
+
+        /// HTTP path registered on the teamserver (required for --type external)
+        #[arg(long)]
+        endpoint: Option<String>,
+
+        /// Enable TLS for HTTP listeners (HTTPS)
+        #[arg(long, default_value_t = false)]
+        secure: bool,
+
+        /// Full listener config as a raw JSON object (overrides all flags
+        /// above; the JSON must match the server's inner config shape for
+        /// the chosen --type)
+        #[arg(long)]
+        config_json: Option<String>,
     },
-    /// Start a stopped listener
+
+    /// Start a stopped listener (idempotent: already-running returns ok).
+    ///
+    /// Examples:
+    ///   red-cell-cli listener start http1
+    #[command(verbatim_doc_comment)]
     Start {
-        /// Listener name or ID
+        /// Listener name
         name: String,
     },
-    /// Stop a running listener
+
+    /// Stop a running listener (idempotent: already-stopped returns ok).
+    ///
+    /// Examples:
+    ///   red-cell-cli listener stop http1
+    #[command(verbatim_doc_comment)]
     Stop {
-        /// Listener name or ID
+        /// Listener name
         name: String,
     },
-    /// Delete a listener (must be stopped first)
+
+    /// Delete a listener.
+    ///
+    /// Examples:
+    ///   red-cell-cli listener delete http1
+    #[command(verbatim_doc_comment)]
     Delete {
-        /// Listener name or ID
+        /// Listener name
         name: String,
     },
 }
@@ -423,9 +490,10 @@ async fn dispatch(cli: Cli) -> i32 {
 
         Commands::Agent { action } => commands::agent::run(&api_client, &fmt, action).await,
 
+        Commands::Listener { action } => commands::listener::run(&api_client, &fmt, action).await,
+
         // Remaining commands are implemented in downstream issues.
-        Commands::Listener { .. }
-        | Commands::Payload { .. }
+        Commands::Payload { .. }
         | Commands::Operator { .. }
         | Commands::Audit { .. }
         | Commands::Session { .. } => {

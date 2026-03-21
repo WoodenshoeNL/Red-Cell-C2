@@ -155,6 +155,71 @@ impl ApiClient {
         }
     }
 
+    /// Issue an authenticated `PUT` request to `path` under `/api/v1` with no
+    /// body and deserialise the JSON response as `T`.
+    ///
+    /// Used for state-transition endpoints that take no payload (e.g.
+    /// `PUT /listeners/{name}/start`).  A 409 Conflict response is mapped to
+    /// [`CliError::General`] with the server error body included in the message
+    /// so callers can inspect it for idempotency handling.
+    ///
+    /// # Errors
+    ///
+    /// Same mapping as [`ApiClient::get`].
+    #[instrument(skip(self), fields(path = %path))]
+    pub async fn put_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T, CliError> {
+        let url = format!("{}/api/v1{path}", self.base_url);
+
+        let response = self
+            .inner
+            .put(&url)
+            .header(API_KEY_HEADER, &self.token)
+            .send()
+            .await
+            .map_err(|e| map_reqwest_error(e, &url))?;
+
+        map_response(response, path).await
+    }
+
+    /// Issue an authenticated `DELETE` request to `path` under `/api/v1`.
+    ///
+    /// Expects a 204 No Content response.  Any 2xx response is treated as
+    /// success; the response body is discarded.
+    ///
+    /// # Errors
+    ///
+    /// Same mapping as [`ApiClient::get`].
+    #[instrument(skip(self), fields(path = %path))]
+    pub async fn delete_no_body(&self, path: &str) -> Result<(), CliError> {
+        let url = format!("{}/api/v1{path}", self.base_url);
+
+        let response = self
+            .inner
+            .delete(&url)
+            .header(API_KEY_HEADER, &self.token)
+            .send()
+            .await
+            .map_err(|e| map_reqwest_error(e, &url))?;
+
+        match response.status() {
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(CliError::AuthFailure(
+                format!("server rejected credentials ({})", response.status()),
+            )),
+            StatusCode::NOT_FOUND => {
+                Err(CliError::NotFound(format!("{path} does not exist on the server")))
+            }
+            s if s.is_success() => Ok(()),
+            s if s.is_server_error() => {
+                let body = response.text().await.unwrap_or_else(|_| "(unreadable body)".to_owned());
+                Err(CliError::ServerError(format!("server returned {s}: {body}")))
+            }
+            s => {
+                let body = response.text().await.unwrap_or_else(|_| "(unreadable body)".to_owned());
+                Err(CliError::General(format!("server returned {s}: {body}")))
+            }
+        }
+    }
+
     /// Issue an unauthenticated `GET` to `path` under `/api/v1`.
     ///
     /// Used for endpoints that do not require authentication (e.g. the API
@@ -236,6 +301,22 @@ mod tests {
         let cfg = test_config("https://127.0.0.1:1"); // port 1 is never open
         let client = ApiClient::new(&cfg).unwrap();
         let result: Result<serde_json::Value, _> = client.get("/agents").await;
+        assert!(matches!(result, Err(CliError::ServerUnreachable(_))));
+    }
+
+    #[tokio::test]
+    async fn put_empty_returns_server_unreachable_on_connection_refused() {
+        let cfg = test_config("https://127.0.0.1:1");
+        let client = ApiClient::new(&cfg).unwrap();
+        let result: Result<serde_json::Value, _> = client.put_empty("/listeners/foo/start").await;
+        assert!(matches!(result, Err(CliError::ServerUnreachable(_))));
+    }
+
+    #[tokio::test]
+    async fn delete_no_body_returns_server_unreachable_on_connection_refused() {
+        let cfg = test_config("https://127.0.0.1:1");
+        let client = ApiClient::new(&cfg).unwrap();
+        let result = client.delete_no_body("/listeners/foo").await;
         assert!(matches!(result, Err(CliError::ServerUnreachable(_))));
     }
 }

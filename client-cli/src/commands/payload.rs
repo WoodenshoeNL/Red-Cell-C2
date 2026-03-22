@@ -299,13 +299,14 @@ async fn download(client: &ApiClient, id: &str, dst: &str) -> Result<DownloadRes
     let dst_path = Path::new(dst);
     if let Some(parent) = dst_path.parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {
-            std::fs::create_dir_all(parent).map_err(|e| {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
                 CliError::General(format!("failed to create directory {}: {e}", parent.display()))
             })?;
         }
     }
 
-    std::fs::write(dst_path, &bytes)
+    tokio::fs::write(dst_path, &bytes)
+        .await
         .map_err(|e| CliError::General(format!("failed to write payload to {dst}: {e}")))?;
 
     Ok(DownloadResult { id: id.to_owned(), dst: dst.to_owned(), size_bytes })

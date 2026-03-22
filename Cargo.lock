@@ -4913,11 +4913,16 @@ name = "specter"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
+ "futures-util",
  "rand 0.9.2",
+ "red-cell",
  "red-cell-common",
  "reqwest",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-tungstenite 0.26.2",
  "tracing",
  "tracing-subscriber",
 ]

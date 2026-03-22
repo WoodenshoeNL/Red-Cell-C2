@@ -976,6 +976,23 @@ mod tests {
         assert!(!encoded.contains(' '));
     }
 
+    #[test]
+    fn percent_encode_empty_string() {
+        assert_eq!(percent_encode(""), "");
+    }
+
+    #[test]
+    fn percent_encode_multibyte_utf8() {
+        // 'é' encodes to bytes 0xC3 0xA9 — each byte must be individually percent-encoded.
+        assert_eq!(percent_encode("caf\u{e9}"), "caf%c3%a9");
+    }
+
+    #[test]
+    fn percent_encode_literal_percent() {
+        // '%' (0x25) is not in the safe set and must be encoded to prevent double-encoding bugs.
+        assert_eq!(percent_encode("/tmp/%test"), "/tmp/%25test");
+    }
+
     // ── from_raw helpers ──────────────────────────────────────────────────────
 
     #[test]

@@ -91,7 +91,8 @@ impl CliError {
             CliError::Timeout(_) => EXIT_TIMEOUT,
             CliError::InvalidArgs(_) => EXIT_GENERAL,
             CliError::ServerError(_) => EXIT_GENERAL,
-            CliError::Config(_) => EXIT_AUTH_FAILURE, // missing token → treat as auth failure
+            CliError::Config(crate::config::ConfigError::MissingToken) => EXIT_AUTH_FAILURE,
+            CliError::Config(_) => EXIT_GENERAL,
             CliError::General(_) => EXIT_GENERAL,
         }
     }
@@ -106,7 +107,8 @@ impl CliError {
             CliError::Timeout(_) => ERROR_CODE_TIMEOUT,
             CliError::InvalidArgs(_) => ERROR_CODE_INVALID_ARGS,
             CliError::ServerError(_) => ERROR_CODE_SERVER_ERROR,
-            CliError::Config(_) => ERROR_CODE_AUTH_FAILURE,
+            CliError::Config(crate::config::ConfigError::MissingToken) => ERROR_CODE_AUTH_FAILURE,
+            CliError::Config(_) => ERROR_CODE_GENERAL,
             CliError::General(_) => ERROR_CODE_GENERAL,
         }
     }
@@ -166,8 +168,40 @@ mod tests {
     }
 
     #[test]
-    fn config_error_treated_as_auth_failure() {
+    fn config_missing_token_exits_auth_failure() {
         let err: CliError = crate::config::ConfigError::MissingToken.into();
         assert_eq!(err.exit_code(), EXIT_AUTH_FAILURE);
+        assert_eq!(err.error_code(), ERROR_CODE_AUTH_FAILURE);
+    }
+
+    #[test]
+    fn config_missing_server_exits_general() {
+        let err: CliError = crate::config::ConfigError::MissingServer.into();
+        assert_eq!(err.exit_code(), EXIT_GENERAL);
+        assert_eq!(err.error_code(), ERROR_CODE_GENERAL);
+    }
+
+    #[test]
+    fn config_read_error_exits_general() {
+        let err: CliError = crate::config::ConfigError::ReadError {
+            path: std::path::PathBuf::from("/tmp/config.toml"),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"),
+        }
+        .into();
+        assert_eq!(err.exit_code(), EXIT_GENERAL);
+        assert_eq!(err.error_code(), ERROR_CODE_GENERAL);
+    }
+
+    #[test]
+    fn config_parse_error_exits_general() {
+        let source: toml::de::Error =
+            toml::from_str::<toml::Value>("not = [valid @@@@").unwrap_err();
+        let err: CliError = crate::config::ConfigError::ParseError {
+            path: std::path::PathBuf::from("/tmp/config.toml"),
+            source,
+        }
+        .into();
+        assert_eq!(err.exit_code(), EXIT_GENERAL);
+        assert_eq!(err.error_code(), ERROR_CODE_GENERAL);
     }
 }

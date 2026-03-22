@@ -297,6 +297,14 @@ fn map_reqwest_error(e: reqwest::Error, url: &str) -> CliError {
     } else if e.is_connect() {
         CliError::ServerUnreachable(format!("cannot connect to {url}: {e}"))
     } else {
+        // All other reqwest errors (redirect loops, decode failures, invalid
+        // headers, etc.) are collapsed to ServerUnreachable.  This is
+        // intentional: the caller cannot act on the distinction, and the exit
+        // code contract (exit 4) covers any situation where a usable response
+        // was not obtained.  If a finer-grained mapping is ever needed for a
+        // specific error kind (e.g. is_redirect()), add a new branch above
+        // this one — the test `map_reqwest_error_else_branch_maps_to_server_unreachable`
+        // will catch any accidental change to this fallthrough.
         CliError::ServerUnreachable(format!("network error reaching {url}: {e}"))
     }
 }
@@ -355,5 +363,58 @@ mod tests {
         let client = ApiClient::new(&cfg).unwrap();
         let result = client.delete_no_body("/listeners/foo").await;
         assert!(matches!(result, Err(CliError::ServerUnreachable(_))));
+    }
+
+    /// Verify that the `else` fallthrough branch of `map_reqwest_error` maps
+    /// non-timeout, non-connect errors to `CliError::ServerUnreachable`.
+    ///
+    /// A redirect error is used as the trigger: a plain TCP listener returns a
+    /// 301 response; the reqwest client is configured with
+    /// `redirect::Policy::limited(0)` so it immediately refuses to follow the
+    /// redirect and returns an error where `is_redirect()` is true while both
+    /// `is_timeout()` and `is_connect()` are false.  This is the canonical
+    /// "other network error" that exercises the else branch.
+    #[tokio::test]
+    async fn map_reqwest_error_else_branch_maps_to_server_unreachable() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        // Bind on a random port so the test is parallel-safe.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Serve exactly one connection: read the HTTP request and respond with
+        // a 301 redirect (the destination does not need to be reachable).
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let response = "HTTP/1.1 301 Moved Permanently\r\n\
+                                Location: http://127.0.0.1:1/\r\n\
+                                Content-Length: 0\r\n\
+                                Connection: close\r\n\
+                                \r\n";
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+
+        // Build a client that refuses to follow any redirects so that the
+        // 301 response immediately surfaces as a redirect error.
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::limited(0))
+            .build()
+            .unwrap();
+
+        let url = format!("http://{addr}/probe");
+        let err = client.get(&url).send().await.unwrap_err();
+
+        // Confirm this exercises the else branch (not timeout, not connect).
+        assert!(!err.is_timeout(), "expected non-timeout error for else-branch test");
+        assert!(!err.is_connect(), "expected non-connect error for else-branch test");
+
+        let mapped = map_reqwest_error(err, &url);
+        assert!(
+            matches!(mapped, CliError::ServerUnreachable(_)),
+            "else branch must map to ServerUnreachable, got: {mapped:?}",
+        );
     }
 }

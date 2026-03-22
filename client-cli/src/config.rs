@@ -252,21 +252,24 @@ timeout = 60
 
     #[test]
     fn resolve_returns_missing_server_error() {
-        // Ensure no config file in cwd interferes; this is a unit test only.
+        let tmp = TempDir::new().unwrap();
+        let original = std::env::current_dir().unwrap();
+        let _guard = CWD_LOCK.lock().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
         let err = resolve(None, Some("tok".to_owned()), 30);
-        // May succeed if a config file exists in the test runner's cwd.
-        // We only assert the error variant when it does fail.
-        if let Err(e) = err {
-            assert!(matches!(e, ConfigError::MissingServer));
-        }
+        std::env::set_current_dir(&original).unwrap();
+        assert!(matches!(err, Err(ConfigError::MissingServer)));
     }
 
     #[test]
     fn resolve_returns_missing_token_error() {
+        let tmp = TempDir::new().unwrap();
+        let original = std::env::current_dir().unwrap();
+        let _guard = CWD_LOCK.lock().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
         let err = resolve(Some("https://ts:40056".to_owned()), None, 30);
-        if let Err(e) = err {
-            assert!(matches!(e, ConfigError::MissingToken));
-        }
+        std::env::set_current_dir(&original).unwrap();
+        assert!(matches!(err, Err(ConfigError::MissingToken)));
     }
 
     #[test]

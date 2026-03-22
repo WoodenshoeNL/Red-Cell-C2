@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 672 | 212 | 31 |
-| Bugs filed against | 78 | 34 | 9 |
+| Tasks closed | 674 | 212 | 31 |
+| Bugs filed against | 79 | 34 | 9 |
 | Bug rate (bugs/task) | 0.12 | 0.16 | 0.29 |
 | Quality score | 88% | 84% | 71% |
 
-*Bug rates: Claude 78/672=0.12, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 79/674=0.12, Codex 34/212=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -31,7 +31,7 @@ Each loop run updates the running totals and appends a review entry.
 | Test infrastructure / flakiness | 12 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
-| Correctness / pagination | 30 | 7 | 1 |
+| Correctness / pagination | 31 | 7 | 1 |
 | Workflow / close-hygiene | 16 | 0 | 0 |
 | Code reuse / duplication | 7 | 0 | 0 |
 
@@ -3360,3 +3360,13 @@ Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (0 warnings), `cargo
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: skipped — no source changes since last review.
+
+### QA Review — 2026-03-22 12:15 — 44ded922..19cb1162
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 1 | Closed: 14g32 (Specter send_ctr_offset fix), 7zlce (degenerate key array fix). Bug filed: y3ya5 (P2 — checkin() returns raw encrypted bytes, recv_ctr_offset never advanced). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (0 warnings), `cargo test -p specter` ✓ (18/18 passed). Full workspace test suite running — duplicate-init fix pending confirmation.

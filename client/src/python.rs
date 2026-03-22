@@ -1010,6 +1010,50 @@ impl PythonRuntime {
     fn command_names(&self) -> Vec<String> {
         self.inner.api_state.command_names()
     }
+
+    #[cfg(test)]
+    fn new_zombie_for_test() -> Self {
+        let api_state = Arc::new(PythonApiState {
+            app_state: Arc::new(Mutex::new(AppState::new(
+                "wss://127.0.0.1:40056/havoc/".to_owned(),
+            ))),
+            commands: Mutex::new(BTreeMap::new()),
+            agent_checkin_callbacks: Mutex::new(Vec::new()),
+            command_response_callbacks: Mutex::new(Vec::new()),
+            loot_captured_callbacks: Mutex::new(Vec::new()),
+            listener_changed_callbacks: Mutex::new(Vec::new()),
+            script_tabs: Mutex::new(BTreeMap::new()),
+            current_script: Mutex::new(None),
+            output_entries: Mutex::new(Vec::new()),
+            script_records: Mutex::new(BTreeMap::new()),
+            outgoing_tx: Mutex::new(None),
+            task_result_senders: Mutex::new(HashMap::new()),
+            task_result_receivers: Mutex::new(HashMap::new()),
+            command_history: Mutex::new(HashMap::new()),
+        });
+        let (command_tx, command_rx) = mpsc::channel();
+        drop(command_rx);
+
+        Python::with_gil(|py| {
+            lock_mutex(&api_state.commands).insert(
+                "zombie".to_owned(),
+                RegisteredCommand {
+                    script_name: "zombie".to_owned(),
+                    description: None,
+                    options: Vec::new(),
+                    callback: Arc::new(py.None()),
+                },
+            );
+        });
+
+        Self {
+            inner: Arc::new(PythonRuntimeInner {
+                api_state,
+                command_tx,
+                join_handle: Mutex::new(None),
+            }),
+        }
+    }
 }
 
 fn python_thread_main(
@@ -2680,6 +2724,41 @@ mod tests {
             thread::sleep(Duration::from_millis(25));
         }
         false
+    }
+
+    #[test]
+    fn zombie_runtime_emit_agent_checkin_returns_thread_unavailable() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let runtime = PythonRuntime::new_zombie_for_test();
+
+        let result = runtime.emit_agent_checkin("DEADBEEF".to_owned());
+
+        assert!(matches!(result, Err(PythonRuntimeError::ThreadUnavailable)));
+    }
+
+    #[test]
+    fn zombie_runtime_emit_loot_captured_returns_thread_unavailable() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let runtime = PythonRuntime::new_zombie_for_test();
+
+        let result = runtime.emit_loot_captured(sample_loot_item(
+            "DEADBEEF",
+            crate::transport::LootKind::Other,
+            "notes.txt",
+            Some("c2FtcGxl"),
+        ));
+
+        assert!(matches!(result, Err(PythonRuntimeError::ThreadUnavailable)));
+    }
+
+    #[test]
+    fn zombie_runtime_execute_registered_command_returns_thread_unavailable() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let runtime = PythonRuntime::new_zombie_for_test();
+
+        let result = runtime.execute_registered_command("DEADBEEF", "zombie");
+
+        assert!(matches!(result, Err(PythonRuntimeError::ThreadUnavailable)));
     }
 
     #[test]

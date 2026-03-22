@@ -555,6 +555,20 @@ mod tests {
         }
     }
 
+    fn make_changed_certificate_failure(
+        msg: &str,
+        stored_fingerprint: &str,
+        new_fingerprint: Option<&str>,
+    ) -> TlsFailure {
+        TlsFailure {
+            message: msg.to_owned(),
+            cert_fingerprint: new_fingerprint.map(str::to_owned),
+            kind: TlsFailureKind::CertificateChanged {
+                stored_fingerprint: stored_fingerprint.to_owned(),
+            },
+        }
+    }
+
     #[test]
     fn set_tls_failure_stores_failure() {
         let mut state = default_login_state();
@@ -608,11 +622,19 @@ mod tests {
         input: egui::RawInput,
         state: &mut LoginState,
     ) -> LoginAction {
+        run_dialog_with_output(ctx, input, state).0
+    }
+
+    fn run_dialog_with_output(
+        ctx: &egui::Context,
+        input: egui::RawInput,
+        state: &mut LoginState,
+    ) -> (LoginAction, egui::FullOutput) {
         let mut action = LoginAction::Waiting;
-        let _ = ctx.run(input, |ctx| {
+        let output = ctx.run(input, |ctx| {
             action = render_login_dialog(ctx, state);
         });
-        action
+        (action, output)
     }
 
     /// Build a `RawInput` that injects an Enter key press.
@@ -645,6 +667,51 @@ mod tests {
             modifiers: Modifiers::NONE,
         });
         input
+    }
+
+    fn collect_shape_text(shape: &egui::epaint::Shape, text: &mut String) {
+        match shape {
+            egui::epaint::Shape::Text(text_shape) => {
+                text.push_str(&text_shape.galley.job.text);
+                text.push('\n');
+            }
+            egui::epaint::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect_shape_text(shape, text);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn find_text_rect_in_shape(shape: &egui::epaint::Shape, needle: &str) -> Option<Rect> {
+        match shape {
+            egui::epaint::Shape::Text(text_shape) => text_shape
+                .galley
+                .job
+                .text
+                .contains(needle)
+                .then(|| text_shape.visual_bounding_rect()),
+            egui::epaint::Shape::Vec(shapes) => {
+                shapes.iter().find_map(|shape| find_text_rect_in_shape(shape, needle))
+            }
+            _ => None,
+        }
+    }
+
+    fn rendered_text(output: &egui::FullOutput) -> String {
+        let mut text = String::new();
+        for clipped_shape in &output.shapes {
+            collect_shape_text(&clipped_shape.shape, &mut text);
+        }
+        text
+    }
+
+    fn find_rendered_text_rect(output: &egui::FullOutput, needle: &str) -> Option<Rect> {
+        output
+            .shapes
+            .iter()
+            .find_map(|clipped_shape| find_text_rect_in_shape(&clipped_shape.shape, needle))
     }
 
     #[test]
@@ -724,5 +791,68 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn render_accept_changed_certificate_button_returns_new_fingerprint() {
+        let ctx = egui::Context::default();
+        let stored_fingerprint = "stored001122334455";
+        let new_fingerprint = "newaabbccddeeff00";
+        let mut state = submittable_login_state();
+        state.set_tls_failure(make_changed_certificate_failure(
+            "certificate changed",
+            stored_fingerprint,
+            Some(new_fingerprint),
+        ));
+
+        let (_, output) = run_dialog_with_output(&ctx, base_raw_input(), &mut state);
+        let button_rect = find_rendered_text_rect(&output, "Accept new certificate")
+            .expect("should render 'Accept new certificate' button text");
+
+        state.tls_failure = Some(make_changed_certificate_failure(
+            "certificate changed",
+            stored_fingerprint,
+            Some(new_fingerprint),
+        ));
+        let action = run_dialog(&ctx, input_with_click(button_rect.center()), &mut state);
+
+        assert_eq!(action, LoginAction::AcceptChangedCertificate(new_fingerprint.to_owned()));
+    }
+
+    #[test]
+    fn render_changed_certificate_panel_shows_stored_and_current_fingerprints() {
+        let ctx = egui::Context::default();
+        let stored_fingerprint = "stored001122334455";
+        let new_fingerprint = "newaabbccddeeff00";
+        let mut state = submittable_login_state();
+        state.set_tls_failure(make_changed_certificate_failure(
+            "certificate changed",
+            stored_fingerprint,
+            Some(new_fingerprint),
+        ));
+
+        let (_, output) = run_dialog_with_output(&ctx, base_raw_input(), &mut state);
+        let rendered = rendered_text(&output);
+
+        assert!(
+            rendered.contains("Previously trusted fingerprint:"),
+            "warning panel should label the stored fingerprint"
+        );
+        assert!(
+            rendered.contains(stored_fingerprint),
+            "warning panel should show the stored fingerprint"
+        );
+        assert!(
+            rendered.contains("Current server fingerprint:"),
+            "warning panel should label the current fingerprint"
+        );
+        assert!(
+            rendered.contains(new_fingerprint),
+            "warning panel should show the new fingerprint"
+        );
+        assert!(
+            rendered.contains("Accept new certificate"),
+            "warning panel should render the acceptance button"
+        );
     }
 }

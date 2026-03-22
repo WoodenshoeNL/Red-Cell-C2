@@ -851,6 +851,68 @@ mod tests {
         assert_eq!(OutputEntry::headers().len(), e.row().len());
     }
 
+    #[test]
+    fn output_entry_row_79_chars_not_truncated() {
+        let output: String = "x".repeat(79);
+        let e = OutputEntry {
+            job_id: "j".to_owned(),
+            command: None,
+            output: output.clone(),
+            exit_code: None,
+            created_at: "t".to_owned(),
+        };
+        let row = e.row();
+        assert_eq!(row[4], output);
+        assert_eq!(row[4].chars().count(), 79);
+    }
+
+    #[test]
+    fn output_entry_row_80_chars_not_truncated() {
+        let output: String = "x".repeat(80);
+        let e = OutputEntry {
+            job_id: "j".to_owned(),
+            command: None,
+            output: output.clone(),
+            exit_code: None,
+            created_at: "t".to_owned(),
+        };
+        let row = e.row();
+        assert_eq!(row[4], output);
+        assert_eq!(row[4].chars().count(), 80);
+    }
+
+    #[test]
+    fn output_entry_row_81_chars_truncated_to_80() {
+        let output: String = "x".repeat(81);
+        let e = OutputEntry {
+            job_id: "j".to_owned(),
+            command: None,
+            output,
+            exit_code: None,
+            created_at: "t".to_owned(),
+        };
+        let row = e.row();
+        assert_eq!(row[4].chars().count(), 80);
+        assert_eq!(row[4], "x".repeat(80));
+    }
+
+    #[test]
+    fn output_entry_row_truncation_counts_unicode_chars_not_bytes() {
+        // Each 'é' is 2 bytes but 1 Unicode scalar value.
+        // 81 such chars should be truncated to 80 chars (not 80 bytes).
+        let output: String = "é".repeat(81);
+        let e = OutputEntry {
+            job_id: "j".to_owned(),
+            command: None,
+            output,
+            exit_code: None,
+            created_at: "t".to_owned(),
+        };
+        let row = e.row();
+        assert_eq!(row[4].chars().count(), 80);
+        assert_eq!(row[4], "é".repeat(80));
+    }
+
     // ── KillResult ────────────────────────────────────────────────────────────
 
     #[test]

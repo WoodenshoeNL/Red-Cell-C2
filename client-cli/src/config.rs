@@ -154,10 +154,14 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::sync::Mutex;
 
     use tempfile::TempDir;
 
     use super::*;
+
+    /// Serialises tests that mutate the process-wide CWD.
+    static CWD_LOCK: Mutex<()> = Mutex::new(());
 
     fn write_config(dir: &Path, content: &str) -> PathBuf {
         let path = dir.join(".red-cell-cli.toml");
@@ -269,5 +273,57 @@ timeout = 60
     fn resolve_uses_explicit_timeout_over_file() {
         let cfg = resolve(Some("https://ts:40056".to_owned()), Some("tok".to_owned()), 45).unwrap();
         assert_eq!(cfg.timeout, 45);
+    }
+
+    // ── resolve: file-based fallback ─────────────────────────────────────────
+
+    /// All three values absent from CLI/env — all must come from the config file.
+    /// Also verifies that a file-supplied `timeout` overrides the default of 30.
+    #[test]
+    fn resolve_reads_server_token_and_timeout_from_config_file() {
+        let tmp = TempDir::new().unwrap();
+        write_config(
+            tmp.path(),
+            r#"
+server  = "https://file-ts:40056"
+token   = "file-tok"
+timeout = 90
+"#,
+        );
+
+        let original = std::env::current_dir().unwrap();
+        let _guard = CWD_LOCK.lock().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        let result = resolve(None, None, 30);
+        std::env::set_current_dir(&original).unwrap();
+
+        let cfg = result.expect("resolve should succeed with file config");
+        assert_eq!(cfg.server, "https://file-ts:40056");
+        assert_eq!(cfg.token, "file-tok");
+        assert_eq!(cfg.timeout, 90, "file timeout should override default 30");
+    }
+
+    /// CLI provides `server`; file provides `token` — partial override.
+    /// The CLI value must win for `server`; the file value must fill `token`.
+    #[test]
+    fn resolve_cli_server_overrides_file_server_file_token_used() {
+        let tmp = TempDir::new().unwrap();
+        write_config(
+            tmp.path(),
+            r#"
+server = "https://file-ts:40056"
+token  = "file-tok"
+"#,
+        );
+
+        let original = std::env::current_dir().unwrap();
+        let _guard = CWD_LOCK.lock().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        let result = resolve(Some("https://cli-ts:9999".to_owned()), None, 30);
+        std::env::set_current_dir(&original).unwrap();
+
+        let cfg = result.expect("resolve should succeed with partial override");
+        assert_eq!(cfg.server, "https://cli-ts:9999", "CLI server must win");
+        assert_eq!(cfg.token, "file-tok", "token must come from file");
     }
 }

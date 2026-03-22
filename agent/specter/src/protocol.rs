@@ -131,9 +131,11 @@ pub fn build_callback_packet(
 
 /// Parse the teamserver's init acknowledgement response.
 ///
-/// The response body is the raw AES-256-CTR encrypted agent_id (4 bytes LE).
+/// The response body is the AES-256-CTR encrypted agent_id (4 bytes LE).
 /// After a successful init, the teamserver encrypts the agent_id at CTR offset 0
-/// and the agent validates the decrypted value matches its own ID.
+/// using either the raw registration key material or HKDF-derived session keys,
+/// depending on listener configuration. The agent validates the decrypted value
+/// matches its own ID.
 ///
 /// Returns the CTR block offset consumed by the ACK (1 block for 4 bytes).
 pub fn parse_init_ack(
@@ -337,6 +339,29 @@ mod tests {
                 .expect("encrypt");
 
         let blocks = parse_init_ack(&ack_body, agent_id, &crypto).expect("parse");
+        assert!(blocks >= 1);
+    }
+
+    #[test]
+    fn parse_init_ack_valid_with_hkdf_session_crypto() {
+        let raw_crypto = generate_agent_crypto_material().expect("keygen");
+        let session_crypto = red_cell_common::crypto::derive_session_keys(
+            &raw_crypto.key,
+            &raw_crypto.iv,
+            b"listener-init-secret",
+        )
+        .expect("derive session keys");
+        let agent_id: u32 = 0xBEEF_CAFE;
+
+        let ack_plaintext = agent_id.to_le_bytes();
+        let ack_body = red_cell_common::crypto::encrypt_agent_data(
+            &session_crypto.key,
+            &session_crypto.iv,
+            &ack_plaintext,
+        )
+        .expect("encrypt");
+
+        let blocks = parse_init_ack(&ack_body, agent_id, &session_crypto).expect("parse");
         assert!(blocks >= 1);
     }
 

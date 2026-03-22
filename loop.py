@@ -722,13 +722,23 @@ def dev_loop(args, log: Logger):
             if r.returncode == 0:
                 try:
                     issues = json.loads(r.stdout)
-                    # Apply zone filter if specified
+                    # Apply zone filter if specified.
+                    # br ready --json omits labels, so cross-reference with
+                    # br list --status=open --json which includes them.
                     if zones:
                         zone_labels = {f"zone:{z}" for z in zones}
-                        issues = [
-                            i for i in issues
-                            if zone_labels.intersection(set(i.get("labels", [])))
-                        ]
+                        ready_ids = {i["id"] for i in issues}
+                        r2 = br(["list", "--status=open", "--json"])
+                        if r2.returncode == 0:
+                            all_open = json.loads(r2.stdout)
+                            labeled = {
+                                i["id"]: i for i in all_open
+                                if zone_labels.intersection(set(i.get("labels", [])))
+                            }
+                            issues = [
+                                labeled[iid] for iid in ready_ids
+                                if iid in labeled
+                            ]
                     tasks = [i for i in issues if i.get("issue_type", "task") != "epic"]
                     pool = tasks if tasks else issues
                     candidates = [i["id"] for i in pool[:20]]

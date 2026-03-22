@@ -253,8 +253,8 @@ timeout = 60
     #[test]
     fn resolve_returns_missing_server_error() {
         let tmp = TempDir::new().unwrap();
-        let original = std::env::current_dir().unwrap();
         let _guard = CWD_LOCK.lock().unwrap();
+        let original = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
         let err = resolve(None, Some("tok".to_owned()), 30);
         std::env::set_current_dir(&original).unwrap();
@@ -264,8 +264,8 @@ timeout = 60
     #[test]
     fn resolve_returns_missing_token_error() {
         let tmp = TempDir::new().unwrap();
-        let original = std::env::current_dir().unwrap();
         let _guard = CWD_LOCK.lock().unwrap();
+        let original = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
         let err = resolve(Some("https://ts:40056".to_owned()), None, 30);
         std::env::set_current_dir(&original).unwrap();
@@ -294,8 +294,8 @@ timeout = 90
 "#,
         );
 
-        let original = std::env::current_dir().unwrap();
         let _guard = CWD_LOCK.lock().unwrap();
+        let original = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
         let result = resolve(None, None, 30);
         std::env::set_current_dir(&original).unwrap();
@@ -319,8 +319,8 @@ token  = "file-tok"
 "#,
         );
 
-        let original = std::env::current_dir().unwrap();
         let _guard = CWD_LOCK.lock().unwrap();
+        let original = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
         let result = resolve(Some("https://cli-ts:9999".to_owned()), None, 30);
         std::env::set_current_dir(&original).unwrap();

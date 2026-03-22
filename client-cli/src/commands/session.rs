@@ -44,6 +44,8 @@ use tokio::io::AsyncBufReadExt as _;
 use tokio::time::sleep;
 use tracing::instrument;
 
+use super::agent::{JobStatusResponse, JobSubmitResponse, RawAgent, RawOutputEntry};
+use super::listener::RawListenerSummary;
 use crate::client::ApiClient;
 use crate::error::{CliError, EXIT_GENERAL, EXIT_SUCCESS};
 
@@ -80,57 +82,6 @@ struct SessionCmd {
     /// Listener name for `listener.show`.
     #[serde(default)]
     name: Option<String>,
-}
-
-// ── raw API shapes (private to this module) ───────────────────────────────────
-
-#[derive(Debug, Deserialize, Serialize)]
-struct RawAgent {
-    id: String,
-    hostname: String,
-    os: String,
-    last_seen: String,
-    status: String,
-    arch: Option<String>,
-    username: Option<String>,
-    domain: Option<String>,
-    internal_ip: Option<String>,
-    process_name: Option<String>,
-    pid: Option<u64>,
-    sleep_interval: Option<u64>,
-    jitter: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct JobSubmitResponse {
-    job_id: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct JobStatus {
-    job_id: String,
-    status: String,
-    output: Option<String>,
-    exit_code: Option<i32>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct OutputEntry {
-    job_id: String,
-    command: Option<String>,
-    output: String,
-    exit_code: Option<i32>,
-    created_at: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct RawListener {
-    name: String,
-    #[serde(rename = "type")]
-    listener_type: String,
-    status: String,
-    host: Option<String>,
-    port: Option<u16>,
 }
 
 // ── entry point ───────────────────────────────────────────────────────────────
@@ -245,7 +196,7 @@ async fn dispatch(
                 Some(job_id) => format!("/agents/{id}/output?since={job_id}"),
                 None => format!("/agents/{id}/output"),
             };
-            let entries: Vec<OutputEntry> = client.get(&path).await?;
+            let entries: Vec<RawOutputEntry> = client.get(&path).await?;
             Ok(serde_json::to_value(entries)
                 .map_err(|e| CliError::General(format!("serialise error: {e}")))?)
         }
@@ -258,7 +209,7 @@ async fn dispatch(
         }
 
         "listener.list" => {
-            let listeners: Vec<RawListener> = client.get("/listeners").await?;
+            let listeners: Vec<RawListenerSummary> = client.get("/listeners").await?;
             Ok(serde_json::to_value(listeners)
                 .map_err(|e| CliError::General(format!("serialise error: {e}")))?)
         }
@@ -267,7 +218,7 @@ async fn dispatch(
             let name = msg.name.as_deref().ok_or_else(|| {
                 CliError::InvalidArgs("listener.show requires a \"name\" field".to_owned())
             })?;
-            let listener: RawListener = client.get(&format!("/listeners/{name}")).await?;
+            let listener: RawListenerSummary = client.get(&format!("/listeners/{name}")).await?;
             Ok(serde_json::to_value(listener)
                 .map_err(|e| CliError::General(format!("serialise error: {e}")))?)
         }
@@ -311,7 +262,7 @@ async fn exec(
             )));
         }
 
-        let status: JobStatus = client.get(&job_path).await?;
+        let status: JobStatusResponse = client.get(&job_path).await?;
         match status.status.as_str() {
             "done" | "error" => {
                 return Ok(serde_json::json!({

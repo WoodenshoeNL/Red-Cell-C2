@@ -33,45 +33,45 @@ const POLL_INTERVAL: Duration = Duration::from_millis(1_000);
 
 // ── raw API response shapes ───────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
-struct RawAgent {
-    id: String,
-    hostname: String,
-    os: String,
-    last_seen: String,
-    status: String,
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct RawAgent {
+    pub(crate) id: String,
+    pub(crate) hostname: String,
+    pub(crate) os: String,
+    pub(crate) last_seen: String,
+    pub(crate) status: String,
     // Detail-only fields — absent on the list endpoint.
-    arch: Option<String>,
-    username: Option<String>,
-    domain: Option<String>,
-    internal_ip: Option<String>,
-    process_name: Option<String>,
-    pid: Option<u64>,
-    sleep_interval: Option<u64>,
-    jitter: Option<u64>,
+    pub(crate) arch: Option<String>,
+    pub(crate) username: Option<String>,
+    pub(crate) domain: Option<String>,
+    pub(crate) internal_ip: Option<String>,
+    pub(crate) process_name: Option<String>,
+    pub(crate) pid: Option<u64>,
+    pub(crate) sleep_interval: Option<u64>,
+    pub(crate) jitter: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
-struct JobSubmitResponse {
-    job_id: String,
+pub(crate) struct JobSubmitResponse {
+    pub(crate) job_id: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct JobStatusResponse {
-    job_id: String,
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct JobStatusResponse {
+    pub(crate) job_id: String,
     /// `"pending"` | `"running"` | `"done"` | `"error"`
-    status: String,
-    output: Option<String>,
-    exit_code: Option<i32>,
+    pub(crate) status: String,
+    pub(crate) output: Option<String>,
+    pub(crate) exit_code: Option<i32>,
 }
 
-#[derive(Debug, Deserialize)]
-struct RawOutputEntry {
-    job_id: String,
-    command: Option<String>,
-    output: String,
-    exit_code: Option<i32>,
-    created_at: String,
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct RawOutputEntry {
+    pub(crate) job_id: String,
+    pub(crate) command: Option<String>,
+    pub(crate) output: String,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) created_at: String,
 }
 
 #[derive(Debug, Deserialize)]

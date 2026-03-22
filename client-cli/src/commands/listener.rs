@@ -25,19 +25,19 @@ use crate::output::{OutputFormat, TextRender, TextRow, print_error, print_succes
 ///
 /// Uses `serde_json::Value` for `config` because the nested tagged-enum shape
 /// (`{"protocol":"http","config":{...}}`) is complex to replicate locally.
-#[derive(Debug, Deserialize)]
-struct RawListenerSummary {
-    name: String,
-    protocol: String,
-    state: RawListenerState,
-    config: serde_json::Value,
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct RawListenerSummary {
+    pub(crate) name: String,
+    pub(crate) protocol: String,
+    pub(crate) state: RawListenerState,
+    pub(crate) config: serde_json::Value,
 }
 
 /// Raw listener runtime state from the server.
-#[derive(Debug, Deserialize)]
-struct RawListenerState {
-    status: String,
-    last_error: Option<String>,
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct RawListenerState {
+    pub(crate) status: String,
+    pub(crate) last_error: Option<String>,
 }
 
 // ── public output types ───────────────────────────────────────────────────────

@@ -71,7 +71,8 @@ async fn main() -> Result<()> {
         sockets.clone(),
         Some(plugins.clone()),
         profile.teamserver.max_download_bytes.unwrap_or(512 * 1024 * 1024),
-    );
+    )
+    .with_demon_init_secret(profile.demon.init_secret.as_deref().map(|s| s.as_bytes().to_vec()));
     plugins.attach_listener_manager(listeners.clone()).await;
     let payload_builder = PayloadBuilderService::from_profile(&profile)
         .context("failed to validate Demon build toolchain")?;

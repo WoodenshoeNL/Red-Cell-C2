@@ -461,6 +461,13 @@ pub struct ListenerManager {
     operations: Arc<Mutex<()>>,
     /// Active external listener endpoints keyed by path (e.g. `"/bridge"`).
     external_endpoints: Arc<RwLock<BTreeMap<String, Arc<ExternalListenerState>>>>,
+    /// Optional server secret for HKDF-based session key derivation.
+    ///
+    /// When set, this secret is passed to every [`DemonPacketParser`] so that
+    /// DEMON_INIT key material is mixed with the secret via HKDF-SHA256 before
+    /// being stored as the session key.  Corresponds to `DemonConfig.init_secret`
+    /// in the HCL profile.
+    demon_init_secret: Option<Vec<u8>>,
 }
 
 impl ListenerManager {
@@ -515,7 +522,19 @@ impl ListenerManager {
             active_handles: Arc::new(RwLock::new(BTreeMap::new())),
             operations: Arc::new(Mutex::new(())),
             external_endpoints: Arc::new(RwLock::new(BTreeMap::new())),
+            demon_init_secret: None,
         }
+    }
+
+    /// Set the HKDF server secret used by all listener packet parsers.
+    ///
+    /// Call this before any listeners are spawned.  All clones of this manager
+    /// (e.g. those handed to the plugin runtime) must be made after this call
+    /// so they inherit the secret.
+    #[must_use]
+    pub fn with_demon_init_secret(mut self, secret: Option<Vec<u8>>) -> Self {
+        self.demon_init_secret = secret;
+        self
     }
 
     /// Return the listener persistence repository used by the manager.
@@ -963,6 +982,7 @@ impl HttpListenerState {
         demon_init_rate_limiter: DemonInitRateLimiter,
         unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
         shutdown: ShutdownController,
+        init_secret: Option<Vec<u8>>,
     ) -> Result<Self, ListenerManagerError> {
         let method = parse_method(config)?;
         let trusted_proxy_peers = config
@@ -993,7 +1013,7 @@ impl HttpListenerState {
             trusted_proxy_peers,
             registry: registry.clone(),
             database: database.clone(),
-            parser: DemonPacketParser::new(registry.clone()),
+            parser: DemonPacketParser::with_init_secret(registry.clone(), init_secret),
             dispatcher: CommandDispatcher::with_builtin_handlers_and_downloads(
                 registry.clone(),
                 events.clone(),
@@ -1051,12 +1071,13 @@ impl SmbListenerState {
         demon_init_rate_limiter: DemonInitRateLimiter,
         unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
         shutdown: ShutdownController,
+        init_secret: Option<Vec<u8>>,
     ) -> Self {
         Self {
             config: config.clone(),
             registry: registry.clone(),
             database: database.clone(),
-            parser: DemonPacketParser::new(registry.clone()),
+            parser: DemonPacketParser::with_init_secret(registry.clone(), init_secret),
             events: events.clone(),
             demon_init_rate_limiter,
             unknown_callback_probe_audit_limiter,
@@ -1316,6 +1337,7 @@ async fn spawn_http_listener_runtime(
     demon_init_rate_limiter: DemonInitRateLimiter,
     unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
     shutdown: ShutdownController,
+    init_secret: Option<Vec<u8>>,
 ) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
     let state = Arc::new(HttpListenerState::build(
         config,
@@ -1328,6 +1350,7 @@ async fn spawn_http_listener_runtime(
         demon_init_rate_limiter,
         unknown_callback_probe_audit_limiter,
         shutdown,
+        init_secret,
     )?);
     let address = format!("{}:{}", config.host_bind, config.port_bind);
     let listener = TcpListener::bind(address.as_str()).await.map_err(|error| {
@@ -1660,6 +1683,7 @@ async fn spawn_smb_listener_runtime(
     demon_init_rate_limiter: DemonInitRateLimiter,
     unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
     shutdown: ShutdownController,
+    init_secret: Option<Vec<u8>>,
 ) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
     let state = Arc::new(SmbListenerState::build(
         config,
@@ -1672,6 +1696,7 @@ async fn spawn_smb_listener_runtime(
         demon_init_rate_limiter,
         unknown_callback_probe_audit_limiter,
         shutdown,
+        init_secret,
     ));
     let listener_name = normalized_smb_pipe_name(&config.pipe_name);
     let socket_name = smb_local_socket_name(&config.pipe_name).map_err(|error| {
@@ -1888,12 +1913,13 @@ fn spawn_external_listener_runtime(
     unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
     shutdown: ShutdownController,
     external_endpoints: Arc<RwLock<BTreeMap<String, Arc<ExternalListenerState>>>>,
+    init_secret: Option<Vec<u8>>,
 ) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
     let state = Arc::new(ExternalListenerState {
         config: config.clone(),
         registry: registry.clone(),
         database: database.clone(),
-        parser: DemonPacketParser::new(registry.clone()),
+        parser: DemonPacketParser::with_init_secret(registry.clone(), init_secret),
         events: events.clone(),
         _demon_init_rate_limiter: demon_init_rate_limiter,
         unknown_callback_probe_audit_limiter,
@@ -1984,6 +2010,7 @@ impl ListenerManager {
                     self.demon_init_rate_limiter.clone(),
                     self.unknown_callback_probe_audit_limiter.clone(),
                     self.shutdown.clone(),
+                    self.demon_init_secret.clone(),
                 )
                 .await
             }
@@ -1999,6 +2026,7 @@ impl ListenerManager {
                     self.demon_init_rate_limiter.clone(),
                     self.unknown_callback_probe_audit_limiter.clone(),
                     self.shutdown.clone(),
+                    self.demon_init_secret.clone(),
                 )
                 .await
             }
@@ -2014,6 +2042,7 @@ impl ListenerManager {
                     self.demon_init_rate_limiter.clone(),
                     self.unknown_callback_probe_audit_limiter.clone(),
                     self.shutdown.clone(),
+                    self.demon_init_secret.clone(),
                 )
                 .await
             }
@@ -2029,6 +2058,7 @@ impl ListenerManager {
                 self.unknown_callback_probe_audit_limiter.clone(),
                 self.shutdown.clone(),
                 self.external_endpoints.clone(),
+                self.demon_init_secret.clone(),
             ),
         }?;
 
@@ -2175,12 +2205,13 @@ impl DnsListenerState {
         demon_init_rate_limiter: DemonInitRateLimiter,
         unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
         shutdown: ShutdownController,
+        init_secret: Option<Vec<u8>>,
     ) -> Self {
         Self {
             config: config.clone(),
             registry: registry.clone(),
             database: database.clone(),
-            parser: DemonPacketParser::new(registry.clone()),
+            parser: DemonPacketParser::with_init_secret(registry.clone(), init_secret),
             events: events.clone(),
             dispatcher: CommandDispatcher::with_builtin_handlers_and_downloads(
                 registry.clone(),
@@ -2731,6 +2762,7 @@ async fn spawn_dns_listener_runtime(
     demon_init_rate_limiter: DemonInitRateLimiter,
     unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
     shutdown: ShutdownController,
+    init_secret: Option<Vec<u8>>,
 ) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
     if dns_allowed_query_types(&config.record_types).is_none() {
         return Err(ListenerManagerError::StartFailed {
@@ -2753,6 +2785,7 @@ async fn spawn_dns_listener_runtime(
         demon_init_rate_limiter,
         unknown_callback_probe_audit_limiter,
         shutdown,
+        init_secret,
     ));
     let addr = format!("{}:{}", config.host_bind, config.port_bind);
 
@@ -6055,6 +6088,7 @@ mod tests {
             DemonInitRateLimiter::new(),
             UnknownCallbackProbeAuditLimiter::new(),
             ShutdownController::new(),
+            None,
         )
     }
 
@@ -6076,6 +6110,7 @@ mod tests {
             DemonInitRateLimiter::new(),
             UnknownCallbackProbeAuditLimiter::new(),
             ShutdownController::new(),
+            None,
         )
         .await
         .expect("dns runtime should start");
@@ -6105,6 +6140,7 @@ mod tests {
             DemonInitRateLimiter::new(),
             UnknownCallbackProbeAuditLimiter::new(),
             shutdown,
+            None,
         )
         .await
     }
@@ -6347,6 +6383,7 @@ mod tests {
             DemonInitRateLimiter::new(),
             UnknownCallbackProbeAuditLimiter::new(),
             shutdown.clone(),
+            None,
         )
         .await
         .expect("dns runtime should start");
@@ -6622,6 +6659,7 @@ mod tests {
             DemonInitRateLimiter::new(),
             UnknownCallbackProbeAuditLimiter::new(),
             ShutdownController::new(),
+            None,
         )
         .await
         {

@@ -24,14 +24,14 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 34 | 13 | 5 |
 | Clippy warnings | 4 | 0 | 1 |
 | Protocol errors | 10 | 27 | 3 |
-| Security issues | 31 | 38 | 0 |
+| Security issues | 32 | 38 | 0 |
 | Architecture drift | 6 | 21 | 0 |
 | Memory / resource leaks | 5 | 10 | 1 |
 | Startup / lifecycle regressions | 1 | 8 | 0 |
-| Test infrastructure / flakiness | 11 | 0 | 0 |
+| Test infrastructure / flakiness | 12 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
-| Correctness / pagination | 26 | 7 | 1 |
+| Correctness / pagination | 29 | 7 | 1 |
 | Workflow / close-hygiene | 16 | 0 | 0 |
 | Code reuse / duplication | 7 | 0 | 0 |
 
@@ -3317,3 +3317,15 @@ Build: skipped — no Rust source files changed in this review range.
 | Cursor | 0 | 0 | No activity. |
 
 Build: skipped — no Rust source files changed in this review range.
+
+### Arch Review — 2026-03-22 (pass 3)
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude Opus | 2 | security (1), test infra (1) | uq3u6 (P1 — init_secret config field never wired to any listener's DemonPacketParser; HKDF feature is silently dead), eahmt (P2 — test uses repeating-byte key vectors now caught by expanded weak-key check; one test fails) |
+| Claude Sonnet | 3 | correctness (3) | uy7vn (P2 — operator list CLI fails: RawOperatorSummary expects created_at not in server response), udxd2 (P2 — operator create CLI fails: RawCreateResponse expects token not in server response), 37mdh (P2 task — DELETE /operators/{username} and PUT /operators/{username}/role not implemented in REST API) |
+| Codex | 0 | — | No findings this pass |
+| Cursor | 0 | — | No findings this pass |
+
+Overall codebase health: on track
+Biggest blindspot: The init_secret security feature (uq3u6) is silently inert across all 4 listener types — users who configure InitSecret get zero protection. The operator CLI subcommands (delete, set-role, list, create) are all broken due to schema and endpoint mismatches between CLI and server.

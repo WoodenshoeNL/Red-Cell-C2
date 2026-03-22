@@ -1,0 +1,32 @@
+[package]
+name = "phantom"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+repository = "https://github.com/michel/Red-Cell-C2"
+rust-version = "1.85"
+description = "Rust Linux agent scaffold for Red Cell C2 with Demon-compatible transport primitives"
+
+[workspace]
+
+[[bin]]
+name = "phantom"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"
+
+[dependencies]
+anyhow = "1"
+rand = "0.9"
+red-cell-common = { path = "../../common" }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+thiserror = "2.0"
+tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

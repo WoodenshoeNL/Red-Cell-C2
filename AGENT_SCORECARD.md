@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 674 | 212 | 31 |
-| Bugs filed against | 79 | 34 | 9 |
+| Tasks closed | 679 | 213 | 31 |
+| Bugs filed against | 80 | 34 | 9 |
 | Bug rate (bugs/task) | 0.12 | 0.16 | 0.29 |
 | Quality score | 88% | 84% | 71% |
 
-*Bug rates: Claude 79/674=0.12, Codex 34/212=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 80/679=0.12, Codex 34/213=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -32,7 +32,7 @@ Each loop run updates the running totals and appends a review entry.
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
 | Correctness / pagination | 31 | 7 | 1 |
-| Workflow / close-hygiene | 16 | 0 | 0 |
+| Workflow / close-hygiene | 17 | 0 | 0 |
 | Code reuse / duplication | 7 | 0 | 0 |
 
 ---
@@ -3370,3 +3370,13 @@ Build: skipped — no source changes since last review.
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (0 warnings), `cargo test -p specter` ✓ (18/18 passed). Full workspace test suite running — duplicate-init fix pending confirmation.
+
+### QA Review — 2026-03-22 13:00 — 19cb1162..1e8050e0
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 5 | 1 | Closed: uq3u6 (init_secret wired to all 4 listeners), u0mtb (operator subcommands + ApiClient::put() + dispatch wired), kw3bc (ConfigError exit codes), or6yo (multi-agent liveness discrimination test), yr5om (negative ctr_block_offset rejection test). Also: zone system added to loop.py/AGENTS.md. Bug filed: 3k939 (P3 — acchp/9snjs not closed after u0mtb fixed them). |
+| Codex | 1 | 0 | Closed: tjt9p (login AcceptChangedCertificate headless UI coverage, including zombie ThreadUnavailable tests in python.rs). Claimed drp8f and vd075 (in_progress). |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (0 warnings), full workspace tests running (results pending — known failures: uru8k / smb timeout 3d6s5 per prior periods).

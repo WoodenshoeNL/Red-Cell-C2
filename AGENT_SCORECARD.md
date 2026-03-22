@@ -3256,3 +3256,13 @@ Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (0 warnings), `cargo
 | Cursor | 0 | 0 | No activity. |
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (0 warnings), `cargo test -p red-cell-cli` — 146/146 passed. Teamserver tests still running at review close.
+
+### QA Review — 2026-03-22 — b3549c38..e48f6f72
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | Two test-review chore commits (30ce4ee4, e48f6f72): scanned dispatch files 44–53 then up to 66 of 93. Issues filed (not bugs against Claude): gdklb (P3, beacon_output utf8/oem credential path untested), p93i7 (P3, handle_net_callback 5 subcommands missing truncation tests), 5tktc (P3, ReversePortForwardRemove truncated payload untested), j9evj (P4, job List mid-row truncation untested), 64fxs (P4, job_type_name/job_state_name Unknown fallback untested), r22xz (P3, handle_config_callback 10 DemonConfigKey variants untested), 02myo (P4, handle_demon_info_callback ProcCreate truncation untested), w5l7v (P4, DemonProcessCommand::Kill truncation untested), 3rm6r (P3, agent_deletion_cleanup non-existent agent test missing), 6l0og (P2, AgentRemove RBAC non-admin rejection untested), 8t4o4 (P3, ctr_offset_persistence unknown-agent-ID error untested), i96sc (P3, api_key_auth rate-limit enforcement untested), n1fmi (P2, auth_audit_trail token absent assertion missing), q8m9m (P3, api_key_auth malformed Bearer header untested). No tasks closed. |
+| Codex | 0 | 0 | One test-coverage chore commit (35acfa58): scanned files 44–56 (dispatch/* + events.rs + lib.rs). Filed 3 coverage issues (attribution uncertain — commit message did not list issue IDs). No tasks closed. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (0 warnings), `cargo test -p red-cell-common -p red-cell-cli` — all passed. Teamserver (red-cell) tests running at review close.

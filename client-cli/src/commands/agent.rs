@@ -588,8 +588,9 @@ async fn upload(
     src: &str,
     dst: &str,
 ) -> Result<TransferResult, CliError> {
-    let data =
-        std::fs::read(src).map_err(|e| CliError::General(format!("cannot read {src}: {e}")))?;
+    let data = tokio::fs::read(src)
+        .await
+        .map_err(|e| CliError::General(format!("cannot read {src}: {e}")))?;
 
     let encoded_dst = percent_encode(dst);
     let path = format!("/agents/{id}/upload?dst={encoded_dst}");
@@ -624,7 +625,8 @@ async fn download(
     let path = format!("/agents/{id}/download?src={encoded_src}");
     let bytes = client.get_raw_bytes(&path).await?;
 
-    std::fs::write(dst, &bytes)
+    tokio::fs::write(dst, &bytes)
+        .await
         .map_err(|e| CliError::General(format!("cannot write {dst}: {e}")))?;
 
     Ok(TransferResult {

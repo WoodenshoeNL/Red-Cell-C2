@@ -28,6 +28,7 @@ red-cell-common = { path = "../../common" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 thiserror = "2.0"
 tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "time"] }
+time = { version = "0.3", features = ["local-offset"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 

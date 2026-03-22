@@ -20,13 +20,13 @@ Each loop run updates the running totals and appends a review entry.
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
-| unwrap / expect in production | 4 | 0 | 0 |
+| unwrap / expect in production | 5 | 0 | 0 |
 | Missing tests / stale tests | 33 | 13 | 5 |
 | Clippy warnings | 4 | 0 | 1 |
 | Protocol errors | 8 | 27 | 3 |
-| Security issues | 29 | 36 | 0 |
+| Security issues | 31 | 38 | 0 |
 | Architecture drift | 6 | 21 | 0 |
-| Memory / resource leaks | 4 | 10 | 1 |
+| Memory / resource leaks | 5 | 10 | 1 |
 | Startup / lifecycle regressions | 1 | 8 | 0 |
 | Test infrastructure / flakiness | 11 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
@@ -40,6 +40,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-22
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 3 | security (1), unwrap/expect (1), memory/resource (1) | ow66u (partial — co-authorship), xbdgg (HKDF expect() in production), aaf7r (unstructured stderr in CLI), b0r71 (DNS response buffer unbounded) |
+| Codex | 2 | security (2) | ow66u (ApiKeyConfig+ServiceConfig Debug secret exposure), qt7cj (service bridge SHA3-only password hashing) |
+| Cursor | 0 | — | No findings this pass |
+
+Overall codebase health: on track
+Biggest blindspot: DNS pending responses map has no size cap — an agent flood registering and calling in without downloading could grow this map without bound. Lower severity than a true pre-auth DoS since agents must be registered first, but worth fixing before production deployment.
 
 ### QA Review — 2026-03-20 — 1c5f7181..382e9e20
 

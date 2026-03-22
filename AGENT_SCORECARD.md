@@ -23,7 +23,7 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 5 | 0 | 0 |
 | Missing tests / stale tests | 34 | 13 | 5 |
 | Clippy warnings | 4 | 0 | 1 |
-| Protocol errors | 10 | 27 | 3 |
+| Protocol errors | 12 | 27 | 3 |
 | Security issues | 32 | 38 | 0 |
 | Architecture drift | 6 | 21 | 0 |
 | Memory / resource leaks | 5 | 10 | 1 |
@@ -31,7 +31,7 @@ Each loop run updates the running totals and appends a review entry.
 | Test infrastructure / flakiness | 12 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
-| Correctness / pagination | 29 | 7 | 1 |
+| Correctness / pagination | 30 | 7 | 1 |
 | Workflow / close-hygiene | 16 | 0 | 0 |
 | Code reuse / duplication | 7 | 0 | 0 |
 
@@ -40,6 +40,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-22 (pass 3)
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 4 | correctness (2), protocol (2) | n9rei (P2 — service bridge AgentOutput handler drops actual callback data, only emits generic log), v97lj (P3 — u64→u32 silent truncation for ProcessPID/SleepDelay/SleepJitter in service bridge), w331c (P3 — DEMON_INIT outer/inner agent_id mismatch not validated), 0wzmo (P3 — service bridge MagicValue never validated against 0xDEADBEEF) |
+| Codex | 0 | — | No findings this pass |
+| Cursor | 0 | — | No findings this pass |
+
+Overall codebase health: on track
+Biggest blindspot: `handle_agent_output` (service.rs:777-791) discards actual agent callback content — service agents' command outputs are silently invisible to operators. The bug has existed since the service bridge was written and is masked by tests that only assert a log event is emitted, not that the callback body is forwarded.
 
 ### Arch Review — 2026-03-22
 

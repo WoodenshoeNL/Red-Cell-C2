@@ -616,4 +616,82 @@ mod tests {
             "expected ServerUnreachable, got {result:?}"
         );
     }
+
+    // ── dispatch: agent.output URL construction ───────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_agent_output_without_since_hits_plain_url() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        // No `since` field — URL must be /agents/{id}/output (no query string).
+        let msg: SessionCmd =
+            serde_json::from_str(r#"{"cmd":"agent.output","id":"agent1"}"#).expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::ServerUnreachable(_))),
+            "expected ServerUnreachable (no since), got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_agent_output_with_since_appends_query_param() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        // `since` set — URL must be /agents/{id}/output?since=job_xyz.
+        let msg: SessionCmd =
+            serde_json::from_str(r#"{"cmd":"agent.output","id":"agent1","since":"job_xyz"}"#)
+                .expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::ServerUnreachable(_))),
+            "expected ServerUnreachable (with since), got {result:?}"
+        );
+    }
+
+    // ── dispatch: listener.show ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_listener_show_with_name_hits_server() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd =
+            serde_json::from_str(r#"{"cmd":"listener.show","name":"http1"}"#).expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::ServerUnreachable(_))),
+            "expected ServerUnreachable for listener.show with name, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_listener_show_without_name_returns_invalid_args() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"listener.show"}"#).expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::InvalidArgs(_))),
+            "expected InvalidArgs when name missing, got {result:?}"
+        );
+    }
 }

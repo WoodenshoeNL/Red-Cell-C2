@@ -944,10 +944,7 @@ mod tests {
     #[test]
     fn extract_info_dns_missing_domain_shows_question_mark() {
         // DNS config present but domain field absent → domain falls back to "?"
-        let raw = make_raw(
-            "dns",
-            serde_json::json!({"protocol":"dns","config":{"port_bind":53}}),
-        );
+        let raw = make_raw("dns", serde_json::json!({"protocol":"dns","config":{"port_bind":53}}));
         let info = extract_info(&raw);
         assert!(info.contains('?'), "expected '?' in info, got: {info}");
         assert!(info.contains("53"));
@@ -963,10 +960,7 @@ mod tests {
     #[test]
     fn extract_info_smb_missing_pipe_name_shows_question_mark() {
         // SMB config present but pipe_name absent → falls back to "?"
-        let raw = make_raw(
-            "smb",
-            serde_json::json!({"protocol":"smb","config":{"name":"s"}}),
-        );
+        let raw = make_raw("smb", serde_json::json!({"protocol":"smb","config":{"name":"s"}}));
         let info = extract_info(&raw);
         assert!(info.contains('?'), "expected '?' in info, got: {info}");
     }

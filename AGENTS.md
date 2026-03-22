@@ -122,6 +122,57 @@ EOF on stdin or `{"cmd": "exit"}` terminates cleanly.
 
 ---
 
+## Zone System
+
+Dev loops can be scoped to a **zone** so multiple agents can run in parallel without file conflicts.
+Each zone maps to a workspace crate. Issues carry a `zone:<name>` beads label.
+
+| Zone | Paths | Beads label |
+|------|-------|-------------|
+| `teamserver` | `teamserver/` | `zone:teamserver` |
+| `client-cli` | `client-cli/` | `zone:client-cli` |
+| `client` | `client/` | `zone:client` |
+| `common` | `common/` | `zone:common` |
+| `agent` | `agent/` | `zone:agent` |
+
+### Running a zone-scoped dev loop
+
+```bash
+# Single zone
+./loop.py --agent claude --loop dev --zone client-cli
+./loop.py --agent codex  --loop dev --zone teamserver
+
+# Multiple zones on one agent
+./loop.py --agent cursor --loop dev --zone client-cli client
+
+# No --zone = all zones (default behaviour, unchanged)
+./loop.py --agent claude --loop dev
+```
+
+### Zone rules for dev agents
+
+When `--zone` is set, the loop injects a strict constraint into the prompt:
+
+- **Only modify files inside the allowed zone paths.**
+- If work in another zone is needed, **create a beads issue** for it and label it:
+  ```bash
+  br create --title="..." --description="..." --type=task --priority=<N>
+  br update <new-id> --add-label zone:<zone>
+  ```
+- Never reach across zone boundaries yourself.
+
+### Labelling new issues
+
+When creating issues, always add the correct zone label:
+```bash
+br create --title="fix: ..." --type=bug --priority=2
+br update <id> --add-label zone:teamserver
+```
+
+The QA and arch loops review all zones and are not zone-scoped.
+
+---
+
 The original Havoc source lives in `./src/Havoc` as reference only — **do not modify it, do not stage it, do not delete it**. It is committed to git for cross-machine sync, but it is **read-only**. Agents must never edit, create, or delete any file under `./src/`. It is there purely so the code can be read as a reference implementation.
 
 ### Profiles

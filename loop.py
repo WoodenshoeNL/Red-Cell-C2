@@ -41,6 +41,15 @@ DEV_SLEEP_BETWEEN     = 15     # wait between tasks when --sleep not set
 DEV_SLEEP_TOKEN_LIMIT = 1200   # wait after Claude context limit hit
 DEV_CLEAN_EVERY       = 10     # run build-artifact cleanup every N dev iterations
 
+# Valid zone names and their corresponding source paths
+ZONES = {
+    "client-cli": ["client-cli/"],
+    "client":     ["client/"],
+    "teamserver": ["teamserver/"],
+    "common":     ["common/"],
+    "agent":      ["agent/"],
+}
+
 # Dev loops use agent-specific prompts (Co-Authored-By differs per agent)
 DEV_PROMPTS = {
     "claude": "prompts/CLAUDE_DEV_PROMPT.md",
@@ -641,9 +650,11 @@ def dev_loop(args, log: Logger):
         log.log(f"ERROR: {prompt_file} not found. Exiting.")
         sys.exit(1)
 
+    zones = args.zone or []
     max_iters = args.iterations
     iteration = 0
 
+    zone_desc = ", ".join(zones) if zones else "all zones"
     log.banner([
         f"{agent.title()} development loop starting",
         f"Agent ID:  {agent_id}",
@@ -651,6 +662,7 @@ def dev_loop(args, log: Logger):
         f"Log:       {log.log_file.name}",
         f"Max runs:  {'unlimited' if max_iters == 0 else max_iters}",
         f"Stale thr: {args.stale_threshold}m",
+        f"Zones:     {zone_desc}",
     ])
 
     lock_path = SCRIPT_DIR / ".agent-claim.lock"
@@ -710,6 +722,13 @@ def dev_loop(args, log: Logger):
             if r.returncode == 0:
                 try:
                     issues = json.loads(r.stdout)
+                    # Apply zone filter if specified
+                    if zones:
+                        zone_labels = {f"zone:{z}" for z in zones}
+                        issues = [
+                            i for i in issues
+                            if zone_labels.intersection(set(i.get("labels", [])))
+                        ]
                     tasks = [i for i in issues if i.get("issue_type", "task") != "epic"]
                     pool = tasks if tasks else issues
                     candidates = [i["id"] for i in pool[:20]]
@@ -747,6 +766,31 @@ def dev_loop(args, log: Logger):
         ready_lines = "\n".join(ready_output.splitlines()[:15])
         in_progress = br(["list", "--status=in_progress"]).stdout.strip() or "None"
 
+        # Build zone constraint block (injected only when zones are restricted)
+        if zones:
+            allowed_paths = []
+            for z in zones:
+                allowed_paths.extend(ZONES.get(z, [f"{z}/"]))
+            paths_list = "\n".join(f"- `{p}`" for p in allowed_paths)
+            zone_block = f"""
+---
+
+## Zone Constraint
+
+You are operating in zone(s): {', '.join(f'`{z}`' for z in zones)}
+
+**STRICT**: Only modify files inside:
+{paths_list}
+
+If you discover that work in another zone is required to complete this task, do NOT make
+those changes yourself. Instead, create a beads issue for that work:
+  `br create --title="..." --description="..." --type=task --priority=<N>`
+Then add the appropriate zone label:
+  `br update <new-id> --add-label zone:<zone>`
+"""
+        else:
+            zone_block = ""
+
         runtime_prompt = f"""{dev_prompt}
 
 ---
@@ -757,7 +801,7 @@ def dev_loop(args, log: Logger):
 **Agent**: `{agent_id}`
 
 {task_details}
-
+{zone_block}
 ---
 
 ## Current Beads State
@@ -929,6 +973,9 @@ loop types:
 
 examples:
   ./loop.py --agent claude --loop dev
+  ./loop.py --agent claude --loop dev  --zone client-cli
+  ./loop.py --agent codex  --loop dev  --zone teamserver
+  ./loop.py --agent cursor --loop dev  --zone client-cli client
   ./loop.py --agent claude --loop dev  --sleep 0 --iterations 1
   ./loop.py --agent codex  --loop qa   --sleep 20
   ./loop.py --agent claude --loop arch --sleep 120 --jitter 15
@@ -977,6 +1024,19 @@ examples:
         help=(
             "Claude model to use (claude agent only). "
             "Example: claude-opus-4-6. Default: claude-sonnet-4-6"
+        ),
+    )
+    parser.add_argument(
+        "--zone",
+        nargs="+",
+        choices=list(ZONES.keys()),
+        metavar="ZONE",
+        help=(
+            "Restrict dev loop to one or more zones: "
+            + ", ".join(ZONES.keys())
+            + ". Omit to work across all zones. "
+            "Only applies to --loop dev. "
+            "Example: --zone client-cli  or  --zone teamserver common"
         ),
     )
     parser.add_argument(

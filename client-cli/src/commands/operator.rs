@@ -19,14 +19,14 @@ use crate::output::{OutputFormat, TextRender, TextRow, print_error, print_succes
 
 // ── valid roles ───────────────────────────────────────────────────────────────
 
-const VALID_ROLES: &[&str] = &["admin", "operator", "viewer"];
+const VALID_ROLES: &[&str] = &["admin", "operator", "analyst"];
 
 fn validate_role(role: &str) -> Result<(), CliError> {
     if VALID_ROLES.contains(&role) {
         Ok(())
     } else {
         Err(CliError::InvalidArgs(format!(
-            "unknown role '{role}': expected admin, operator, or viewer"
+            "unknown role '{role}': expected admin, operator, or analyst"
         )))
     }
 }
@@ -60,7 +60,7 @@ struct RawOk {
 pub struct OperatorRow {
     /// Operator username.
     pub username: String,
-    /// Assigned role: `"admin"`, `"operator"`, or `"viewer"`.
+    /// Assigned role: `"admin"`, `"operator"`, or `"analyst"`.
     pub role: String,
     /// RFC 3339 creation timestamp.
     pub created_at: String,
@@ -231,7 +231,7 @@ async fn delete(client: &ApiClient, username: &str) -> Result<DeleteResult, CliE
 /// # Examples
 /// ```text
 /// red-cell-cli operator set-role alice admin
-/// red-cell-cli operator set-role bob   viewer
+/// red-cell-cli operator set-role bob   analyst
 /// ```
 #[instrument(skip(client))]
 async fn set_role(
@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn validate_role_accepts_all_valid_roles() {
-        for role in ["admin", "operator", "viewer"] {
+        for role in ["admin", "operator", "analyst"] {
             assert!(validate_role(role).is_ok(), "'{role}' should be accepted");
         }
     }
@@ -366,10 +366,10 @@ mod tests {
 
     #[test]
     fn set_role_result_render_contains_username_and_role() {
-        let r = SetRoleResult { username: "dave".to_owned(), role: "viewer".to_owned() };
+        let r = SetRoleResult { username: "dave".to_owned(), role: "analyst".to_owned() };
         let rendered = r.render_text();
         assert!(rendered.contains("dave"));
-        assert!(rendered.contains("viewer"));
+        assert!(rendered.contains("analyst"));
     }
 
     #[test]
@@ -405,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn set_role_validation_accepts_viewer() {
-        assert!(validate_role("viewer").is_ok());
+    fn set_role_validation_accepts_analyst() {
+        assert!(validate_role("analyst").is_ok());
     }
 }

@@ -3266,3 +3266,13 @@ Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (0 warnings), `cargo
 | Cursor | 0 | 0 | No activity. |
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (0 warnings), `cargo test -p red-cell-common -p red-cell-cli` — all passed. Teamserver (red-cell) tests running at review close.
+
+### QA Review — 2026-03-22 — 66750e36..dd3e14fb
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | Two chore commits: one QA checkpoint (c6166ad9), one test-review scan advancing index to 18 (dd3e14fb). No Rust code changed. Issues previously filed in this scanning work carry over. |
+| Codex | 0 | 0 | One test-coverage chore commit (418adfe2): scanned files, filed coverage gap issues, advanced scan index to 8. No Rust code changed, no tasks closed. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (0 warnings), `cargo test --workspace` — 1 known failure: `http_listener_pipeline_rejects_duplicate_init_preserves_original_key` (tracked as red-cell-c2-7zlce / red-cell-c2-uru8k). All other tests pass.

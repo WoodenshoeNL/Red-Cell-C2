@@ -148,6 +148,7 @@ pub fn parse_tasking_response(
 }
 
 /// Build a generic output callback packet.
+#[allow(dead_code)]
 pub fn build_output_packet(
     agent_id: u32,
     crypto: &AgentCryptoMaterial,
@@ -167,6 +168,7 @@ pub fn build_output_packet(
 }
 
 /// Build a generic error callback packet.
+#[allow(dead_code)]
 pub fn build_error_packet(
     agent_id: u32,
     crypto: &AgentCryptoMaterial,
@@ -188,6 +190,7 @@ pub fn build_error_packet(
 }
 
 /// Build an exit callback packet.
+#[allow(dead_code)]
 pub fn build_exit_packet(
     agent_id: u32,
     crypto: &AgentCryptoMaterial,
@@ -211,7 +214,7 @@ pub fn callback_ctr_blocks(callback_payload_len: usize) -> u64 {
     ctr_blocks_for_len(12 + callback_payload_len)
 }
 
-fn build_callback_packet(
+pub(crate) fn build_callback_packet(
     agent_id: u32,
     crypto: &AgentCryptoMaterial,
     send_ctr_offset: u64,

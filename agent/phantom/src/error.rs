@@ -38,6 +38,10 @@ pub enum PhantomError {
     #[error("process error: {0}")]
     Process(String),
 
+    /// A socket operation failed.
+    #[error("socket error: {0}")]
+    Socket(String),
+
     /// Configuration is invalid.
     #[error("invalid configuration: {0}")]
     InvalidConfig(&'static str),

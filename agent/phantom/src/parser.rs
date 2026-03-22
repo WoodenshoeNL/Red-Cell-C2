@@ -33,6 +33,14 @@ impl<'a> TaskParser<'a> {
         Ok(i16::from_le_bytes(array))
     }
 
+    /// Read a 64-bit signed integer from the payload.
+    pub fn int64(&mut self) -> Result<i64, PhantomError> {
+        let bytes = self.read_exact(8)?;
+        let array: [u8; 8] =
+            bytes.try_into().map_err(|_| PhantomError::TaskParse("failed to read int64"))?;
+        Ok(i64::from_le_bytes(array))
+    }
+
     /// Read a single byte.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn byte(&mut self) -> Result<u8, PhantomError> {
@@ -95,11 +103,14 @@ mod tests {
 
     #[test]
     fn parser_reads_little_endian_scalars() {
-        let mut parser =
-            TaskParser::new(&[0x78, 0x56, 0x34, 0x12, 0x34, 0x12, 0xAB, 0x01, 0x00, 0x00, 0x00]);
+        let mut parser = TaskParser::new(&[
+            0x78, 0x56, 0x34, 0x12, 0x34, 0x12, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
+            0xAB, 0x01, 0x00, 0x00, 0x00,
+        ]);
 
         assert_eq!(parser.int32().expect("int32"), 0x1234_5678);
         assert_eq!(parser.int16().expect("int16"), 0x1234);
+        assert_eq!(parser.int64().expect("int64"), 0x0102_0304_0506_0708);
         assert_eq!(parser.byte().expect("byte"), 0xAB);
         assert!(parser.bool32().expect("bool32"));
     }

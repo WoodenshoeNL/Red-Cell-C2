@@ -155,6 +155,34 @@ impl ApiClient {
         }
     }
 
+    /// Issue an authenticated `PUT` request to `path` under `/api/v1` with a
+    /// JSON body and deserialise the response body as `T`.
+    ///
+    /// Used for update endpoints such as `PUT /operators/{name}/role`.
+    ///
+    /// # Errors
+    ///
+    /// Same mapping as [`ApiClient::get`].
+    #[instrument(skip(self, body), fields(path = %path))]
+    pub async fn put<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, CliError> {
+        let url = format!("{}/api/v1{path}", self.base_url);
+
+        let response = self
+            .inner
+            .put(&url)
+            .header(API_KEY_HEADER, &self.token)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| map_reqwest_error(e, &url))?;
+
+        map_response(response, path).await
+    }
+
     /// Issue an authenticated `PUT` request to `path` under `/api/v1` with no
     /// body and deserialise the JSON response as `T`.
     ///
@@ -301,6 +329,15 @@ mod tests {
         let cfg = test_config("https://127.0.0.1:1"); // port 1 is never open
         let client = ApiClient::new(&cfg).unwrap();
         let result: Result<serde_json::Value, _> = client.get("/agents").await;
+        assert!(matches!(result, Err(CliError::ServerUnreachable(_))));
+    }
+
+    #[tokio::test]
+    async fn put_returns_server_unreachable_on_connection_refused() {
+        let cfg = test_config("https://127.0.0.1:1");
+        let client = ApiClient::new(&cfg).unwrap();
+        let body = serde_json::json!({"role": "viewer"});
+        let result: Result<serde_json::Value, _> = client.put("/operators/alice/role", &body).await;
         assert!(matches!(result, Err(CliError::ServerUnreachable(_))));
     }
 

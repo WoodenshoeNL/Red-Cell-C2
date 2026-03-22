@@ -651,12 +651,7 @@ async fn dispatch(cli: Cli) -> i32 {
 
         Commands::Session { agent } => commands::session::run(&api_client, agent.as_deref()).await,
 
-        // Remaining commands are implemented in downstream issues.
-        Commands::Operator { .. } => {
-            let err = CliError::General("this subcommand is not yet implemented".to_owned());
-            output::print_error(&err);
-            err.exit_code()
-        }
+        Commands::Operator { action } => commands::operator::run(&api_client, &fmt, action).await,
 
         // Handled synchronously in main() before the runtime is started;
         // this arm exists only for exhaustiveness.

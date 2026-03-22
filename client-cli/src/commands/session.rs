@@ -253,7 +253,8 @@ async fn dispatch(
         "agent.kill" => {
             let id = agent_id(msg, default_agent)?;
             let wait = msg.wait.unwrap_or(false);
-            kill(client, id, wait).await
+            let timeout_secs = msg.timeout.unwrap_or(DEFAULT_EXEC_TIMEOUT_SECS);
+            kill(client, id, wait, timeout_secs).await
         }
 
         "listener.list" => {
@@ -332,6 +333,7 @@ async fn kill(
     client: &ApiClient,
     agent_id: &str,
     wait: bool,
+    timeout_secs: u64,
 ) -> Result<serde_json::Value, CliError> {
     #[derive(Serialize)]
     struct Empty {}
@@ -341,13 +343,12 @@ async fn kill(
         return Ok(serde_json::json!({"agent_id": agent_id, "status": "kill_sent"}));
     }
 
-    let deadline = Instant::now() + Duration::from_secs(DEFAULT_EXEC_TIMEOUT_SECS);
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
 
     loop {
         if Instant::now() >= deadline {
             return Err(CliError::Timeout(format!(
-                "timed out waiting for agent {agent_id} to die after {}s",
-                DEFAULT_EXEC_TIMEOUT_SECS
+                "timed out waiting for agent {agent_id} to die after {timeout_secs}s"
             )));
         }
 
@@ -692,6 +693,188 @@ mod tests {
         assert!(
             matches!(result, Err(CliError::InvalidArgs(_))),
             "expected InvalidArgs when name missing, got {result:?}"
+        );
+    }
+
+    // ── exec / kill polling paths (using wiremock) ────────────────────────────
+
+    /// Helper: build a `ResolvedConfig` pointing at the given mock server URI.
+    fn mock_cfg(server_uri: &str) -> crate::config::ResolvedConfig {
+        crate::config::ResolvedConfig {
+            server: server_uri.to_owned(),
+            token: "test-token".to_owned(),
+            timeout: 5,
+        }
+    }
+
+    /// Helper: a minimal JSON object that deserialises as [`RawAgent`].
+    fn raw_agent_json(status: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": "agent1",
+            "hostname": "host1",
+            "os": "linux",
+            "last_seen": "2026-01-01T00:00:00Z",
+            "status": status
+        })
+    }
+
+    /// `exec wait=false` — POST job, return job_id immediately without polling.
+    #[tokio::test]
+    async fn exec_wait_false_returns_job_id_without_polling() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/agents/agent1/jobs"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"job_id": "job-abc"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
+        let result = exec(&client, "agent1", "whoami", false, 60).await.expect("exec must succeed");
+
+        assert_eq!(result["job_id"], "job-abc");
+    }
+
+    /// `exec wait=true` — poll until status is `"done"`, return output.
+    #[tokio::test]
+    async fn exec_wait_true_returns_output_when_job_done() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/agents/agent1/jobs"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"job_id": "job-xyz"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/agents/agent1/jobs/job-xyz"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "job_id": "job-xyz",
+                "status": "done",
+                "output": "root\n",
+                "exit_code": 0
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
+        let result =
+            exec(&client, "agent1", "whoami", true, 60).await.expect("exec wait=true must succeed");
+
+        assert_eq!(result["job_id"], "job-xyz");
+        assert_eq!(result["output"], "root\n");
+        assert_eq!(result["exit_code"], 0);
+    }
+
+    /// `exec wait=true, timeout=0` — deadline is already expired on first loop
+    /// iteration → returns `CliError::Timeout` without polling.
+    #[tokio::test]
+    async fn exec_wait_true_timeout_zero_returns_cli_timeout() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/agents/agent1/jobs"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"job_id": "job-timeout"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
+        let result = exec(&client, "agent1", "whoami", true, 0).await;
+
+        assert!(
+            matches!(result, Err(CliError::Timeout(_))),
+            "expected Timeout with timeout_secs=0, got {result:?}"
+        );
+    }
+
+    /// `kill wait=false` — POST kill, return `kill_sent` immediately without polling.
+    #[tokio::test]
+    async fn kill_wait_false_returns_kill_sent_without_polling() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/agents/agent1/kill"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
+        let result =
+            kill(&client, "agent1", false, 60).await.expect("kill wait=false must succeed");
+
+        assert_eq!(result["agent_id"], "agent1");
+        assert_eq!(result["status"], "kill_sent");
+    }
+
+    /// `kill wait=true` — poll until agent status is `"dead"`, return success.
+    #[tokio::test]
+    async fn kill_wait_true_returns_success_when_agent_dies() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/agents/agent1/kill"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/agents/agent1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(raw_agent_json("dead")))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
+        let result = kill(&client, "agent1", true, 60).await.expect("kill wait=true must succeed");
+
+        assert_eq!(result["agent_id"], "agent1");
+        assert_eq!(result["status"], "dead");
+    }
+
+    /// `kill wait=true, timeout=0` — deadline is already expired on first loop
+    /// iteration → returns `CliError::Timeout` without polling the agent status.
+    #[tokio::test]
+    async fn kill_wait_true_timeout_zero_returns_cli_timeout() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/agents/agent1/kill"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
+        let result = kill(&client, "agent1", true, 0).await;
+
+        assert!(
+            matches!(result, Err(CliError::Timeout(_))),
+            "expected Timeout with timeout_secs=0, got {result:?}"
         );
     }
 }

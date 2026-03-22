@@ -109,4 +109,33 @@ mod tests {
         let json = serde_json::to_value(&data).unwrap();
         assert_eq!(json["uptime_secs"], 123);
     }
+
+    #[test]
+    fn render_text_none_uptime_shows_unknown() {
+        let data =
+            StatusData { version: "v1".to_owned(), uptime_secs: None, agents: 4, listeners: 2 };
+        let output = data.render_text();
+        assert!(output.contains("version"), "missing 'version' row label");
+        assert!(output.contains("v1"), "missing version value");
+        assert!(output.contains("uptime_secs"), "missing 'uptime_secs' row label");
+        assert!(output.contains("unknown"), "None uptime should render as 'unknown'");
+        assert!(output.contains("agents"), "missing 'agents' row label");
+        assert!(output.contains('4'), "missing agents count");
+        assert!(output.contains("listeners"), "missing 'listeners' row label");
+        assert!(output.contains('2'), "missing listeners count");
+    }
+
+    #[test]
+    fn render_text_some_uptime_shows_numeric_value() {
+        let data = StatusData {
+            version: "v2".to_owned(),
+            uptime_secs: Some(3600),
+            agents: 0,
+            listeners: 0,
+        };
+        let output = data.render_text();
+        assert!(output.contains("uptime_secs"), "missing 'uptime_secs' row label");
+        assert!(output.contains("3600"), "Some(3600) uptime should render as '3600'");
+        assert!(!output.contains("unknown"), "Some uptime must not render as 'unknown'");
+    }
 }

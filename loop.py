@@ -727,8 +727,13 @@ def dev_loop(args, log: Logger):
                     # br list --status=open --json which includes them.
                     if zones:
                         zone_labels = {f"zone:{z}" for z in zones}
+                        # br ready caps at 20; re-query with a high limit so
+                        # lower-priority zone issues aren't silently excluded.
+                        r_wide = br(["ready", "--json", "--limit", "500"])
+                        if r_wide.returncode == 0:
+                            issues = json.loads(r_wide.stdout)
                         ready_ids = {i["id"] for i in issues}
-                        r2 = br(["list", "--status=open", "--json"])
+                        r2 = br(["list", "--status=open", "--json", "--limit", "0"])
                         if r2.returncode == 0:
                             all_open = json.loads(r2.stdout)
                             labeled = {

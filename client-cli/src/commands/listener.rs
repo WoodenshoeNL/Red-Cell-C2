@@ -898,6 +898,96 @@ mod tests {
         assert!(info.contains("/bridge"));
     }
 
+    // ── extract_info fallback '?' paths ──────────────────────────────────────
+
+    fn make_raw(protocol: &str, config: serde_json::Value) -> RawListenerSummary {
+        RawListenerSummary {
+            name: "x".to_owned(),
+            protocol: protocol.to_owned(),
+            state: RawListenerState { status: "Created".to_owned(), last_error: None },
+            config,
+        }
+    }
+
+    #[test]
+    fn extract_info_http_missing_host_bind_shows_question_mark() {
+        // config inner has port_bind but no host_bind → host falls back to "?"
+        let raw = make_raw(
+            "http",
+            serde_json::json!({"protocol":"http","config":{"port_bind":443,"secure":false}}),
+        );
+        let info = extract_info(&raw);
+        assert!(info.contains('?'), "expected '?' in info, got: {info}");
+        assert!(info.contains("443"));
+    }
+
+    #[test]
+    fn extract_info_http_missing_port_bind_shows_question_mark() {
+        // config inner has host_bind but no port_bind → port falls back to "?"
+        let raw = make_raw(
+            "http",
+            serde_json::json!({"protocol":"http","config":{"host_bind":"0.0.0.0","secure":false}}),
+        );
+        let info = extract_info(&raw);
+        assert!(info.contains('?'), "expected '?' in info, got: {info}");
+        assert!(info.contains("0.0.0.0"));
+    }
+
+    #[test]
+    fn extract_info_http_empty_config_shows_question_marks() {
+        // Entire config object absent — both host and port fall back to "?"
+        let raw = make_raw("http", serde_json::json!({}));
+        let info = extract_info(&raw);
+        assert!(info.contains('?'), "expected '?' in info, got: {info}");
+    }
+
+    #[test]
+    fn extract_info_dns_missing_domain_shows_question_mark() {
+        // DNS config present but domain field absent → domain falls back to "?"
+        let raw = make_raw(
+            "dns",
+            serde_json::json!({"protocol":"dns","config":{"port_bind":53}}),
+        );
+        let info = extract_info(&raw);
+        assert!(info.contains('?'), "expected '?' in info, got: {info}");
+        assert!(info.contains("53"));
+    }
+
+    #[test]
+    fn extract_info_dns_empty_config_shows_question_mark() {
+        let raw = make_raw("dns", serde_json::json!({}));
+        let info = extract_info(&raw);
+        assert!(info.contains('?'), "expected '?' in info, got: {info}");
+    }
+
+    #[test]
+    fn extract_info_smb_missing_pipe_name_shows_question_mark() {
+        // SMB config present but pipe_name absent → falls back to "?"
+        let raw = make_raw(
+            "smb",
+            serde_json::json!({"protocol":"smb","config":{"name":"s"}}),
+        );
+        let info = extract_info(&raw);
+        assert!(info.contains('?'), "expected '?' in info, got: {info}");
+    }
+
+    #[test]
+    fn extract_info_smb_empty_config_shows_question_mark() {
+        let raw = make_raw("smb", serde_json::json!({}));
+        let info = extract_info(&raw);
+        assert!(info.contains('?'), "expected '?' in info, got: {info}");
+    }
+
+    #[test]
+    fn extract_info_unknown_protocol_returns_empty_string() {
+        // An unrecognised protocol (e.g. "grpc") hits the wildcard arm and
+        // intentionally returns "".  This test documents that behaviour so a
+        // future maintainer knows the empty string is deliberate.
+        let raw = make_raw("grpc", serde_json::json!({"protocol":"grpc","config":{}}));
+        let info = extract_info(&raw);
+        assert_eq!(info, "", "unknown protocol should return empty string, got: {info}");
+    }
+
     // ── from_raw helpers ──────────────────────────────────────────────────────
 
     #[test]

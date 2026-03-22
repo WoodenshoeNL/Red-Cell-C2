@@ -3329,3 +3329,13 @@ Build: skipped — no Rust source files changed in this review range.
 
 Overall codebase health: on track
 Biggest blindspot: The init_secret security feature (uq3u6) is silently inert across all 4 listener types — users who configure InitSecret get zero protection. The operator CLI subcommands (delete, set-role, list, create) are all broken due to schema and endpoint mismatches between CLI and server.
+
+### QA Review — 2026-03-22 — 0dc5678b..f6ea430e
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | Two administrative commits: QA checkpoint (c13764be) and arch review filing (f6ea430e). No Rust source changes. Arch review already filed 5 issues (uq3u6, eahmt, uy7vn, udxd2, 37mdh) — accounted for in arch review log entry above. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (0 warnings), `cargo test --workspace` — 1 known failure: `http_listener_pipeline_rejects_duplicate_init_preserves_original_key` (tracked as red-cell-c2-uru8k / red-cell-c2-7zlce / red-cell-c2-eahmt). All other tests pass.

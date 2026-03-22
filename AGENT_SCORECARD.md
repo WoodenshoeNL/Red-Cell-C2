@@ -3379,4 +3379,4 @@ Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (0 warnings), `cargo
 | Codex | 1 | 0 | Closed: tjt9p (login AcceptChangedCertificate headless UI coverage, including zombie ThreadUnavailable tests in python.rs). Claimed drp8f and vd075 (in_progress). |
 | Cursor | 0 | 0 | No activity this period. |
 
-Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (0 warnings), full workspace tests running (results pending — known failures: uru8k / smb timeout 3d6s5 per prior periods).
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (0 warnings), `cargo test --workspace` — 1 pre-existing failure: `listener_lifecycle::agent_reconnects_after_listener_restart` (404 after restart, tracked as 9ncol/loti5). All other tests pass. No new regressions.

@@ -21,9 +21,9 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 5 | 0 | 0 |
-| Missing tests / stale tests | 33 | 13 | 5 |
+| Missing tests / stale tests | 34 | 13 | 5 |
 | Clippy warnings | 4 | 0 | 1 |
-| Protocol errors | 8 | 27 | 3 |
+| Protocol errors | 10 | 27 | 3 |
 | Security issues | 31 | 38 | 0 |
 | Architecture drift | 6 | 21 | 0 |
 | Memory / resource leaks | 5 | 10 | 1 |
@@ -51,6 +51,17 @@ Each loop run updates the running totals and appends a review entry.
 
 Overall codebase health: on track
 Biggest blindspot: DNS pending responses map has no size cap — an agent flood registering and calling in without downloading could grow this map without bound. Lower severity than a true pre-auth DoS since agents must be registered first, but worth fixing before production deployment.
+
+### Arch Review — 2026-03-22 (pass 2)
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 4 | protocol (2), missing tests (1) | 14g32 (P1 — Specter send_ctr_offset wrong after init; all callbacks silently fail), q2q48 (P2 — legacy Demon binary incompatible due to progressive CTR), 10cwu (P3 task — Specter missing HKDF), e0tt2 (P2 task — no init+callback integration test) |
+| Codex | 0 | — | No findings this pass |
+| Cursor | 0 | — | No findings this pass |
+
+Overall codebase health: on track
+Biggest blindspot: Specter agent (14g32) cannot communicate past DEMON_INIT — send_ctr_offset is computed from metadata size instead of the server's actual advancing counter position (1). Every callback is silently dropped. This would only manifest at runtime since there is no integration test exercising the full init+callback loop.
 
 ### QA Review — 2026-03-20 — 1c5f7181..382e9e20
 

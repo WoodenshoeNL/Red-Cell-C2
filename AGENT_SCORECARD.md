@@ -3297,3 +3297,13 @@ Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (0 warnings), `cargo
 | Cursor | 0 | 0 | No activity. |
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (0 warnings), `cargo test --workspace` — still running at review close. Known failure: `http_listener_pipeline_rejects_duplicate_init_preserves_original_key` (tracked as red-cell-c2-uru8k).
+
+### QA Review — 2026-03-22 — fbd078ff..ae77666f
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | One QA checkpoint commit (d8c26236). No Rust code changed. |
+| Codex | 0 | 0 | One test-coverage chore commit (ae77666f): scanned files, advanced scan index to 54, filed 6 coverage gap issues (06y9d P3 handle_pivot_callback error paths; 0qlcv P4 handle_job_callback Died/error paths; 9hbsp P4 handle_command_output_callback inline tests; f65yf P4 loot_context/non_empty_option; hq9yv P4 handle_config_callback string-type subcommands; s8luu P3 handle_screenshot_callback plugin path). No tasks closed. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: skipped — no Rust source files changed in this review range.

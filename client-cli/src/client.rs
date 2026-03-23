@@ -365,6 +365,166 @@ mod tests {
         assert!(matches!(result, Err(CliError::ServerUnreachable(_))));
     }
 
+    // ── post_bytes ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn post_bytes_returns_server_unreachable_on_connection_refused() {
+        let cfg = test_config("https://127.0.0.1:1");
+        let client = ApiClient::new(&cfg).unwrap();
+        let result: Result<serde_json::Value, _> =
+            client.post_bytes("/payload/upload", vec![0xde, 0xad, 0xbe, 0xef]).await;
+        assert!(matches!(result, Err(CliError::ServerUnreachable(_))));
+    }
+
+    // ── get_raw_bytes ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_raw_bytes_returns_server_unreachable_on_connection_refused() {
+        let cfg = test_config("https://127.0.0.1:1");
+        let client = ApiClient::new(&cfg).unwrap();
+        let result = client.get_raw_bytes("/payload/download").await;
+        assert!(matches!(result, Err(CliError::ServerUnreachable(_))));
+    }
+
+    #[tokio::test]
+    async fn get_raw_bytes_returns_auth_failure_on_401() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/payload/download"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let cfg = test_config(&server.uri());
+        let client = ApiClient::new(&cfg).unwrap();
+        let result = client.get_raw_bytes("/payload/download").await;
+        assert!(matches!(result, Err(CliError::AuthFailure(_))));
+    }
+
+    #[tokio::test]
+    async fn get_raw_bytes_returns_auth_failure_on_403() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/payload/download"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+
+        let cfg = test_config(&server.uri());
+        let client = ApiClient::new(&cfg).unwrap();
+        let result = client.get_raw_bytes("/payload/download").await;
+        assert!(matches!(result, Err(CliError::AuthFailure(_))));
+    }
+
+    #[tokio::test]
+    async fn get_raw_bytes_returns_not_found_on_404() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/payload/download"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let cfg = test_config(&server.uri());
+        let client = ApiClient::new(&cfg).unwrap();
+        let result = client.get_raw_bytes("/payload/download").await;
+        assert!(matches!(result, Err(CliError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn get_raw_bytes_returns_bytes_on_200() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let payload = vec![0x01u8, 0x02, 0x03, 0x04];
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/payload/download"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(payload.clone()))
+            .mount(&server)
+            .await;
+
+        let cfg = test_config(&server.uri());
+        let client = ApiClient::new(&cfg).unwrap();
+        let result = client.get_raw_bytes("/payload/download").await;
+        assert_eq!(result.unwrap(), payload);
+    }
+
+    #[tokio::test]
+    async fn get_raw_bytes_returns_general_error_on_5xx() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/payload/download"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
+            .mount(&server)
+            .await;
+
+        let cfg = test_config(&server.uri());
+        let client = ApiClient::new(&cfg).unwrap();
+        let result = client.get_raw_bytes("/payload/download").await;
+        assert!(matches!(result, Err(CliError::General(_))));
+    }
+
+    // ── get_anon ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_anon_returns_server_unreachable_on_connection_refused() {
+        let cfg = test_config("https://127.0.0.1:1");
+        let client = ApiClient::new(&cfg).unwrap();
+        let result: Result<serde_json::Value, _> = client.get_anon("/").await;
+        assert!(matches!(result, Err(CliError::ServerUnreachable(_))));
+    }
+
+    /// `get_anon` must NOT send the `x-api-key` header — if it is accidentally
+    /// re-added a secured endpoint would silently accept the request.
+    #[tokio::test]
+    async fn get_anon_does_not_send_api_key_header() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+        struct RejectIfApiKey;
+
+        impl Respond for RejectIfApiKey {
+            fn respond(&self, request: &Request) -> ResponseTemplate {
+                if request.headers.contains_key("x-api-key") {
+                    // Signal the test that the forbidden header was present.
+                    ResponseTemplate::new(400).set_body_string("api-key-present")
+                } else {
+                    ResponseTemplate::new(200)
+                        .set_body_string("{\"ok\":true}")
+                        .insert_header("content-type", "application/json")
+                }
+            }
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/"))
+            .respond_with(RejectIfApiKey)
+            .mount(&server)
+            .await;
+
+        let cfg = test_config(&server.uri());
+        let client = ApiClient::new(&cfg).unwrap();
+        let result: Result<serde_json::Value, _> = client.get_anon("/").await;
+        // If we get a parse or general error here the header was sent.
+        assert!(result.is_ok(), "get_anon must not send x-api-key; got error: {result:?}",);
+    }
+
+    // ── map_reqwest_error else-branch ────────────────────────────────────────
+
     /// Verify that the `else` fallthrough branch of `map_reqwest_error` maps
     /// non-timeout, non-connect errors to `CliError::ServerUnreachable`.
     ///

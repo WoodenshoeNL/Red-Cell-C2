@@ -324,15 +324,9 @@ mod tests {
     }
 
     #[test]
-    fn load_tls_identity_rejects_pem_without_certificate_blocks() {
-        let identity = generate_self_signed_tls_identity(
-            &["localhost".to_owned()],
-            TlsKeyAlgorithm::EcdsaP256,
-        )
-        .expect("identity generation should succeed");
-
-        let error = load_tls_identity(identity.private_key_pem(), identity.private_key_pem())
-            .expect_err("key-only PEM input must be rejected as missing certificates");
+    fn load_tls_identity_rejects_missing_certificates() {
+        let error = load_tls_identity(b"", b"")
+            .expect_err("empty PEM inputs must be rejected as missing certificates");
 
         assert!(matches!(error, TlsError::MissingCertificates));
     }

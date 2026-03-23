@@ -21,7 +21,7 @@ use crate::output::{OutputFormat, TextRender, TextRow, print_error, print_succes
 
 const VALID_ROLES: &[&str] = &["admin", "operator", "analyst"];
 
-fn validate_role(role: &str) -> Result<(), CliError> {
+pub(crate) fn validate_role(role: &str) -> Result<(), CliError> {
     if VALID_ROLES.contains(&role) {
         Ok(())
     } else {

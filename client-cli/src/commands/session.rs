@@ -34,9 +34,25 @@
 //! | `agent.exec` | `id`, `command` | `wait`, `timeout` |
 //! | `agent.output` | `id` | `since` |
 //! | `agent.kill` | `id` | `wait`, `timeout` |
+//! | `agent.upload` | `id` | — |
+//! | `agent.download` | `id` | — |
 //! | `listener.list` | — | — |
 //! | `listener.show` | `name` | — |
+//! | `listener.create` | `name`, `type` | `port`, `host`, `domain`, `pipe_name`, `endpoint`, `secure`, `config_json` |
+//! | `listener.start` | `name` | — |
+//! | `listener.stop` | `name` | — |
+//! | `listener.delete` | `name` | — |
+//! | `operator.list` | — | — |
+//! | `operator.create` | `username`, `password`, `role` | — |
+//! | `operator.delete` | `username` | — |
+//! | `operator.set-role` | `username`, `role` | — |
+//! | `payload.list` | — | — |
+//! | `payload.build` | `listener`, `arch`, `format` | `sleep`, `wait`, `timeout` |
+//! | `payload.download` | `id`, `dst` | — |
+//! | `log.list` | — | `operator`, `action`, `since`, `id` (agent filter), `limit` |
+//! | `log.tail` | — | — |
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -45,14 +61,23 @@ use tokio::time::sleep;
 use tracing::instrument;
 
 use super::agent::{JobPageResponse, RawAgent, TaskQueuedResponse};
-use super::listener::RawListenerSummary;
+use super::listener::{RawListenerSummary, build_create_body};
+use super::operator::validate_role;
 use crate::client::ApiClient;
 use crate::error::{CliError, EXIT_GENERAL, EXIT_SUCCESS};
 
 /// Default timeout for `agent.exec` with `"wait": true`, in seconds.
 const DEFAULT_EXEC_TIMEOUT_SECS: u64 = 60;
+/// Default timeout for `payload.build` with `"wait": true`, in seconds.
+const DEFAULT_BUILD_TIMEOUT_SECS: u64 = 300;
+/// Default number of entries returned by `log.list` when `limit` is not set.
+const DEFAULT_LOG_LIMIT: u32 = 50;
+/// Number of entries fetched by `log.tail`.
+const LOG_TAIL_LIMIT: u32 = 20;
 /// Polling interval for wait loops.
 const POLL_INTERVAL: Duration = Duration::from_millis(1_000);
+/// Polling interval for build wait loops.
+const BUILD_POLL_INTERVAL: Duration = Duration::from_millis(2_000);
 
 // ── inbound message shape ─────────────────────────────────────────────────────
 
@@ -64,25 +89,156 @@ const POLL_INTERVAL: Duration = Duration::from_millis(1_000);
 struct SessionCmd {
     /// Command name (e.g. `"agent.exec"`, `"ping"`, `"exit"`).
     cmd: String,
-    /// Agent or resource identifier.
+    /// Agent or resource identifier (agent ID, payload ID for `payload.download`).
     #[serde(default)]
     id: Option<String>,
     /// Shell command string for `agent.exec`.
     #[serde(default)]
     command: Option<String>,
-    /// Block until completion for `agent.exec` or `agent.kill`.
+    /// Block until completion for `agent.exec`, `agent.kill`, or `payload.build`.
     #[serde(default)]
     wait: Option<bool>,
-    /// Timeout in seconds for `agent.exec` with `wait = true`.
+    /// Timeout in seconds for `*wait=true` commands.
     #[serde(default)]
     timeout: Option<u64>,
-    /// Only return output newer than this job ID (`agent.output`).
+    /// Only return output newer than this job ID (`agent.output`) or ISO-8601
+    /// timestamp (`log.list`).
     #[serde(default)]
-    #[allow(dead_code)]
     since: Option<String>,
-    /// Listener name for `listener.show`.
+    /// Listener name for `listener.show/start/stop/delete`.
     #[serde(default)]
     name: Option<String>,
+
+    // ── listener.create ───────────────────────────────────────────────────────
+    /// Listener protocol type: `"http"`, `"https"`, `"dns"`, `"smb"`, `"external"`.
+    #[serde(rename = "type", default)]
+    listener_type: Option<String>,
+    /// Port to bind for `listener.create`.
+    #[serde(default)]
+    port: Option<u16>,
+    /// Host/interface to bind for `listener.create` (default `"0.0.0.0"`).
+    #[serde(default)]
+    host: Option<String>,
+    /// DNS domain for `listener.create --type dns`.
+    #[serde(default)]
+    domain: Option<String>,
+    /// Named-pipe name for `listener.create --type smb`.
+    #[serde(default)]
+    pipe_name: Option<String>,
+    /// Bridge endpoint for `listener.create --type external`.
+    #[serde(default)]
+    endpoint: Option<String>,
+    /// Enable TLS for `listener.create --type http`.
+    #[serde(default)]
+    secure: bool,
+    /// Raw inner-config JSON for `listener.create` (overrides all other flags).
+    #[serde(default)]
+    config_json: Option<String>,
+
+    // ── operator commands ─────────────────────────────────────────────────────
+    /// Operator username for `operator.create/delete/set-role`.
+    #[serde(default)]
+    username: Option<String>,
+    /// Operator password for `operator.create`.
+    #[serde(default)]
+    password: Option<String>,
+    /// Operator role for `operator.create/set-role` (`"admin"`, `"operator"`, `"analyst"`).
+    #[serde(default)]
+    role: Option<String>,
+
+    // ── payload commands ──────────────────────────────────────────────────────
+    /// Listener name to embed in the payload (`payload.build`).
+    #[serde(default)]
+    listener: Option<String>,
+    /// CPU architecture for `payload.build` (e.g. `"x86_64"`, `"x86"`).
+    #[serde(default)]
+    arch: Option<String>,
+    /// Payload format for `payload.build`: `"exe"`, `"dll"`, or `"bin"`.
+    #[serde(default)]
+    format: Option<String>,
+    /// Sleep interval in seconds to bake into the payload (`payload.build`).
+    #[serde(default)]
+    sleep: Option<u64>,
+    /// Destination file path for `payload.download`.
+    #[serde(default)]
+    dst: Option<String>,
+
+    // ── log commands ──────────────────────────────────────────────────────────
+    /// Operator name filter for `log.list`.
+    #[serde(default)]
+    operator: Option<String>,
+    /// Action filter for `log.list`.
+    #[serde(default)]
+    action: Option<String>,
+    /// Maximum number of entries to return for `log.list`.
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+// ── local raw API response shapes for new commands ────────────────────────────
+
+/// Minimal operator record returned by `GET /operators` and `POST /operators`.
+#[derive(Debug, Deserialize, Serialize)]
+struct RawOperator {
+    username: String,
+    role: String,
+    online: bool,
+    last_seen: Option<String>,
+}
+
+/// Response from `POST /operators`.
+#[derive(Debug, Deserialize, Serialize)]
+struct RawOperatorCreate {
+    username: String,
+    role: String,
+}
+
+/// Minimal payload record returned by `GET /payloads`.
+#[derive(Debug, Deserialize, Serialize)]
+struct RawPayload {
+    id: String,
+    name: String,
+    arch: String,
+    format: String,
+    built_at: String,
+    #[serde(default)]
+    size_bytes: Option<u64>,
+}
+
+/// Response from `POST /payloads/build`.
+#[derive(Debug, Deserialize)]
+struct BuildSubmitted {
+    job_id: String,
+}
+
+/// Status response from `GET /payloads/jobs/{job_id}`.
+#[derive(Debug, Deserialize)]
+struct BuildStatus {
+    job_id: String,
+    /// `"pending"` | `"running"` | `"done"` | `"error"`
+    status: String,
+    payload_id: Option<String>,
+    size_bytes: Option<u64>,
+    error: Option<String>,
+}
+
+/// A single audit record returned by `GET /audit`.
+#[derive(Debug, Deserialize, Serialize)]
+struct RawAuditRecord {
+    #[allow(dead_code)]
+    id: i64,
+    actor: String,
+    action: String,
+    agent_id: Option<String>,
+    occurred_at: String,
+}
+
+/// Paged audit response from `GET /audit`.
+#[derive(Debug, Deserialize)]
+struct RawAuditPage {
+    #[allow(dead_code)]
+    total: usize,
+    items: Vec<RawAuditRecord>,
 }
 
 // ── entry point ───────────────────────────────────────────────────────────────
@@ -171,6 +327,18 @@ fn agent_id<'a>(msg: &'a SessionCmd, default_agent: Option<&'a str>) -> Result<&
     })
 }
 
+/// Percent-encode characters that are not safe in query-string values.
+fn percent_encode(s: &str) -> String {
+    s.bytes()
+        .flat_map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b':' => {
+                vec![b as char]
+            }
+            other => format!("%{other:02X}").chars().collect::<Vec<_>>(),
+        })
+        .collect()
+}
+
 /// Dispatch a parsed command to the appropriate API call.
 ///
 /// Returns the data payload to be included in the `"data"` field of the
@@ -183,6 +351,7 @@ async fn dispatch(
     match msg.cmd.as_str() {
         "ping" => Ok(serde_json::json!({"pong": true})),
 
+        // ── agent ─────────────────────────────────────────────────────────────
         "agent.list" => {
             let agents: Vec<RawAgent> = client.get("/agents").await?;
             Ok(serde_json::to_value(agents)
@@ -223,6 +392,25 @@ async fn dispatch(
             kill(client, id, wait, timeout_secs).await
         }
 
+        "agent.upload" => {
+            // File upload is not available via the REST API.
+            Err(CliError::General(
+                "agent file upload is not available via the REST API; \
+                 use the WebSocket client (red-cell-client) to transfer files"
+                    .to_owned(),
+            ))
+        }
+
+        "agent.download" => {
+            // File download is not available via the REST API.
+            Err(CliError::General(
+                "agent file download is not available via the REST API; \
+                 use the WebSocket client (red-cell-client) to transfer files"
+                    .to_owned(),
+            ))
+        }
+
+        // ── listener ──────────────────────────────────────────────────────────
         "listener.list" => {
             let listeners: Vec<RawListenerSummary> = client.get("/listeners").await?;
             Ok(serde_json::to_value(listeners)
@@ -237,6 +425,149 @@ async fn dispatch(
             Ok(serde_json::to_value(listener)
                 .map_err(|e| CliError::General(format!("serialise error: {e}")))?)
         }
+
+        "listener.create" => {
+            let name = msg.name.as_deref().ok_or_else(|| {
+                CliError::InvalidArgs("listener.create requires a \"name\" field".to_owned())
+            })?;
+            let listener_type = msg.listener_type.as_deref().ok_or_else(|| {
+                CliError::InvalidArgs("listener.create requires a \"type\" field".to_owned())
+            })?;
+            let host = msg.host.as_deref().unwrap_or("0.0.0.0");
+            let body = build_create_body(
+                name,
+                listener_type,
+                msg.port,
+                host,
+                msg.domain.as_deref(),
+                msg.pipe_name.as_deref(),
+                msg.endpoint.as_deref(),
+                msg.secure,
+                msg.config_json.as_deref(),
+            )?;
+            let raw: RawListenerSummary = client.post("/listeners", &body).await?;
+            Ok(serde_json::to_value(raw)
+                .map_err(|e| CliError::General(format!("serialise error: {e}")))?)
+        }
+
+        "listener.start" => {
+            let name = msg.name.as_deref().ok_or_else(|| {
+                CliError::InvalidArgs("listener.start requires a \"name\" field".to_owned())
+            })?;
+            listener_set_state(client, name, "start").await
+        }
+
+        "listener.stop" => {
+            let name = msg.name.as_deref().ok_or_else(|| {
+                CliError::InvalidArgs("listener.stop requires a \"name\" field".to_owned())
+            })?;
+            listener_set_state(client, name, "stop").await
+        }
+
+        "listener.delete" => {
+            let name = msg.name.as_deref().ok_or_else(|| {
+                CliError::InvalidArgs("listener.delete requires a \"name\" field".to_owned())
+            })?;
+            client.delete_no_body(&format!("/listeners/{name}")).await?;
+            Ok(serde_json::json!({"name": name, "deleted": true}))
+        }
+
+        // ── operator ──────────────────────────────────────────────────────────
+        "operator.list" => {
+            let operators: Vec<RawOperator> = client.get("/operators").await?;
+            Ok(serde_json::to_value(operators)
+                .map_err(|e| CliError::General(format!("serialise error: {e}")))?)
+        }
+
+        "operator.create" => {
+            let username = msg.username.as_deref().ok_or_else(|| {
+                CliError::InvalidArgs("operator.create requires a \"username\" field".to_owned())
+            })?;
+            let password = msg.password.as_deref().ok_or_else(|| {
+                CliError::InvalidArgs("operator.create requires a \"password\" field".to_owned())
+            })?;
+            let role = msg.role.as_deref().ok_or_else(|| {
+                CliError::InvalidArgs("operator.create requires a \"role\" field".to_owned())
+            })?;
+            validate_role(role)?;
+            let body =
+                serde_json::json!({ "username": username, "password": password, "role": role });
+            let raw: RawOperatorCreate = client.post("/operators", &body).await?;
+            Ok(serde_json::to_value(raw)
+                .map_err(|e| CliError::General(format!("serialise error: {e}")))?)
+        }
+
+        "operator.delete" => {
+            let username = msg.username.as_deref().ok_or_else(|| {
+                CliError::InvalidArgs("operator.delete requires a \"username\" field".to_owned())
+            })?;
+            client.delete_no_body(&format!("/operators/{username}")).await?;
+            Ok(serde_json::json!({"username": username, "deleted": true}))
+        }
+
+        "operator.set-role" => {
+            let username = msg.username.as_deref().ok_or_else(|| {
+                CliError::InvalidArgs("operator.set-role requires a \"username\" field".to_owned())
+            })?;
+            let role = msg.role.as_deref().ok_or_else(|| {
+                CliError::InvalidArgs("operator.set-role requires a \"role\" field".to_owned())
+            })?;
+            validate_role(role)?;
+            let body = serde_json::json!({ "role": role });
+            let raw: RawOperator =
+                client.put(&format!("/operators/{username}/role"), &body).await?;
+            Ok(serde_json::to_value(raw)
+                .map_err(|e| CliError::General(format!("serialise error: {e}")))?)
+        }
+
+        // ── payload ───────────────────────────────────────────────────────────
+        "payload.list" => {
+            let payloads: Vec<RawPayload> = client.get("/payloads").await?;
+            Ok(serde_json::to_value(payloads)
+                .map_err(|e| CliError::General(format!("serialise error: {e}")))?)
+        }
+
+        "payload.build" => {
+            let listener = msg.listener.as_deref().ok_or_else(|| {
+                CliError::InvalidArgs("payload.build requires a \"listener\" field".to_owned())
+            })?;
+            let arch = msg.arch.as_deref().ok_or_else(|| {
+                CliError::InvalidArgs("payload.build requires an \"arch\" field".to_owned())
+            })?;
+            let format = msg.format.as_deref().ok_or_else(|| {
+                CliError::InvalidArgs("payload.build requires a \"format\" field".to_owned())
+            })?;
+            super::payload::validate_format(format)?;
+            let wait = msg.wait.unwrap_or(false);
+            let timeout_secs = msg.timeout.unwrap_or(DEFAULT_BUILD_TIMEOUT_SECS);
+            payload_build(client, listener, arch, format, msg.sleep, wait, timeout_secs).await
+        }
+
+        "payload.download" => {
+            let id = msg.id.as_deref().ok_or_else(|| {
+                CliError::InvalidArgs("payload.download requires an \"id\" field".to_owned())
+            })?;
+            let dst = msg.dst.as_deref().ok_or_else(|| {
+                CliError::InvalidArgs("payload.download requires a \"dst\" field".to_owned())
+            })?;
+            payload_download(client, id, dst).await
+        }
+
+        // ── log ───────────────────────────────────────────────────────────────
+        "log.list" => {
+            let limit = msg.limit.unwrap_or(DEFAULT_LOG_LIMIT);
+            log_list(
+                client,
+                limit,
+                msg.since.as_deref(),
+                msg.operator.as_deref(),
+                msg.id.as_deref(),
+                msg.action.as_deref(),
+            )
+            .await
+        }
+
+        "log.tail" => log_list(client, LOG_TAIL_LIMIT, None, None, None, None).await,
 
         unknown => Err(CliError::InvalidArgs(format!("unknown session command: {unknown:?}"))),
     }
@@ -343,6 +674,180 @@ async fn kill(
     }
 }
 
+/// Transition a listener to a new state (`"start"` or `"stop"`).
+///
+/// Issues `PUT /listeners/{name}/{action}`.  Handles idempotent responses:
+/// if the server reports `listener_already_running` or `listener_not_running`
+/// the current state is fetched and returned with `"already_in_state": true`.
+#[instrument(skip(client))]
+async fn listener_set_state(
+    client: &ApiClient,
+    name: &str,
+    action: &str,
+) -> Result<serde_json::Value, CliError> {
+    let already_in_state = match client
+        .put_empty::<RawListenerSummary>(&format!("/listeners/{name}/{action}"))
+        .await
+    {
+        Ok(raw) => {
+            return Ok(serde_json::json!({
+                "name": name,
+                "status": raw.state.status,
+                "already_in_state": false,
+            }));
+        }
+        Err(CliError::General(msg))
+            if msg.contains("listener_already_running") || msg.contains("listener_not_running") =>
+        {
+            true
+        }
+        Err(e) => return Err(e),
+    };
+
+    let raw: RawListenerSummary = client.get(&format!("/listeners/{name}")).await?;
+    Ok(serde_json::json!({
+        "name": name,
+        "status": raw.state.status,
+        "already_in_state": already_in_state,
+    }))
+}
+
+/// Submit a payload build job, optionally waiting for completion.
+///
+/// With `wait=true`, polls `GET /payloads/jobs/{job_id}` until the build
+/// finishes or `timeout_secs` elapse.
+#[instrument(skip(client))]
+async fn payload_build(
+    client: &ApiClient,
+    listener: &str,
+    arch: &str,
+    format: &str,
+    sleep_secs: Option<u64>,
+    wait: bool,
+    timeout_secs: u64,
+) -> Result<serde_json::Value, CliError> {
+    let mut body = serde_json::json!({
+        "listener": listener,
+        "arch": arch,
+        "format": format,
+    });
+    if let Some(s) = sleep_secs {
+        body["sleep"] = serde_json::json!(s);
+    }
+
+    let submitted: BuildSubmitted = client.post("/payloads/build", &body).await?;
+
+    if !wait {
+        return Ok(serde_json::json!({"job_id": submitted.job_id}));
+    }
+
+    // Poll until done or timeout.
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let job_path = format!("/payloads/jobs/{}", submitted.job_id);
+
+    loop {
+        if Instant::now() > deadline {
+            return Err(CliError::Timeout(format!(
+                "payload build job {} did not complete within {timeout_secs}s",
+                submitted.job_id
+            )));
+        }
+
+        let status: BuildStatus = client.get(&job_path).await?;
+
+        match status.status.as_str() {
+            "done" => {
+                let payload_id = status.payload_id.ok_or_else(|| {
+                    CliError::General(format!(
+                        "build job {} reported done but returned no payload_id",
+                        status.job_id
+                    ))
+                })?;
+                return Ok(serde_json::json!({
+                    "id": payload_id,
+                    "size_bytes": status.size_bytes.unwrap_or(0),
+                }));
+            }
+            "error" => {
+                let msg = status.error.unwrap_or_else(|| "unknown build error".to_owned());
+                return Err(CliError::General(format!(
+                    "build job {} failed: {msg}",
+                    status.job_id
+                )));
+            }
+            // "pending" | "running" — keep polling
+            _ => {}
+        }
+
+        sleep(BUILD_POLL_INTERVAL).await;
+    }
+}
+
+/// Download a payload binary and write it to disk.
+///
+/// Calls `GET /payloads/{id}/download`, then writes the raw bytes to `dst`,
+/// creating any missing parent directories.
+#[instrument(skip(client))]
+async fn payload_download(
+    client: &ApiClient,
+    id: &str,
+    dst: &str,
+) -> Result<serde_json::Value, CliError> {
+    let bytes = client.get_raw_bytes(&format!("/payloads/{id}/download")).await?;
+    let size_bytes = bytes.len() as u64;
+
+    let dst_path = Path::new(dst);
+    if let Some(parent) = dst_path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                CliError::General(format!("failed to create destination directory: {e}"))
+            })?;
+        }
+    }
+
+    std::fs::write(dst_path, &bytes)
+        .map_err(|e| CliError::General(format!("failed to write payload to {dst}: {e}")))?;
+
+    Ok(serde_json::json!({
+        "id": id,
+        "dst": dst,
+        "size_bytes": size_bytes,
+    }))
+}
+
+/// Fetch audit log entries with optional filters.
+///
+/// Entries are returned newest-first.  The `agent_id` filter uses the `id`
+/// field in the session message (consistent with other agent-targeting
+/// commands).
+#[instrument(skip(client))]
+async fn log_list(
+    client: &ApiClient,
+    limit: u32,
+    since: Option<&str>,
+    operator: Option<&str>,
+    agent_id: Option<&str>,
+    action: Option<&str>,
+) -> Result<serde_json::Value, CliError> {
+    let mut params: Vec<String> = vec![format!("limit={limit}")];
+    if let Some(s) = since {
+        params.push(format!("since={}", percent_encode(s)));
+    }
+    if let Some(op) = operator {
+        params.push(format!("operator={}", percent_encode(op)));
+    }
+    if let Some(aid) = agent_id {
+        params.push(format!("agent_id={}", percent_encode(aid)));
+    }
+    if let Some(act) = action {
+        params.push(format!("action={}", percent_encode(act)));
+    }
+
+    let path = format!("/audit?{}", params.join("&"));
+    let page: RawAuditPage = client.get(&path).await?;
+    serde_json::to_value(page.items).map_err(|e| CliError::General(format!("serialise error: {e}")))
+}
+
 // ── output helpers ────────────────────────────────────────────────────────────
 
 /// Write a success response line to `writer`.
@@ -430,6 +935,49 @@ mod tests {
     }
 
     #[test]
+    fn listener_create_deserialises_all_fields() {
+        let json = r#"{"cmd":"listener.create","name":"http1","type":"http","port":443,"host":"0.0.0.0","secure":true}"#;
+        let msg: SessionCmd = serde_json::from_str(json).expect("parse listener.create");
+        assert_eq!(msg.name.as_deref(), Some("http1"));
+        assert_eq!(msg.listener_type.as_deref(), Some("http"));
+        assert_eq!(msg.port, Some(443));
+        assert!(msg.secure);
+    }
+
+    #[test]
+    fn operator_create_deserialises_all_fields() {
+        let json =
+            r#"{"cmd":"operator.create","username":"alice","password":"s3cr3t","role":"operator"}"#;
+        let msg: SessionCmd = serde_json::from_str(json).expect("parse operator.create");
+        assert_eq!(msg.username.as_deref(), Some("alice"));
+        assert_eq!(msg.password.as_deref(), Some("s3cr3t"));
+        assert_eq!(msg.role.as_deref(), Some("operator"));
+    }
+
+    #[test]
+    fn payload_build_deserialises_all_fields() {
+        let json = r#"{"cmd":"payload.build","listener":"http1","arch":"x86_64","format":"exe","sleep":5,"wait":true,"timeout":120}"#;
+        let msg: SessionCmd = serde_json::from_str(json).expect("parse payload.build");
+        assert_eq!(msg.listener.as_deref(), Some("http1"));
+        assert_eq!(msg.arch.as_deref(), Some("x86_64"));
+        assert_eq!(msg.format.as_deref(), Some("exe"));
+        assert_eq!(msg.sleep, Some(5));
+        assert_eq!(msg.wait, Some(true));
+        assert_eq!(msg.timeout, Some(120));
+    }
+
+    #[test]
+    fn log_list_deserialises_all_fields() {
+        let json = r#"{"cmd":"log.list","operator":"alice","action":"agent.exec","id":"agent1","since":"2026-01-01T00:00:00Z","limit":25}"#;
+        let msg: SessionCmd = serde_json::from_str(json).expect("parse log.list");
+        assert_eq!(msg.operator.as_deref(), Some("alice"));
+        assert_eq!(msg.action.as_deref(), Some("agent.exec"));
+        assert_eq!(msg.id.as_deref(), Some("agent1"));
+        assert_eq!(msg.since.as_deref(), Some("2026-01-01T00:00:00Z"));
+        assert_eq!(msg.limit, Some(25));
+    }
+
+    #[test]
     fn unknown_fields_are_ignored() {
         let json = r#"{"cmd":"ping","totally_unknown_field":42}"#;
         let msg: SessionCmd = serde_json::from_str(json).expect("unknown fields must not error");
@@ -461,6 +1009,23 @@ mod tests {
             matches!(result, Err(CliError::InvalidArgs(_))),
             "expected InvalidArgs, got {result:?}"
         );
+    }
+
+    // ── percent_encode ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn percent_encode_leaves_safe_chars_unchanged() {
+        assert_eq!(percent_encode("abc123"), "abc123");
+    }
+
+    #[test]
+    fn percent_encode_encodes_space() {
+        assert_eq!(percent_encode("hello world"), "hello%20world");
+    }
+
+    #[test]
+    fn percent_encode_iso8601_timestamp_unchanged() {
+        assert_eq!(percent_encode("2026-01-01T00:00:00Z"), "2026-01-01T00:00:00Z");
     }
 
     // ── emit_ok / emit_error output shape ─────────────────────────────────────
@@ -656,6 +1221,46 @@ mod tests {
         );
     }
 
+    // ── dispatch: agent.upload / agent.download ────────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_agent_upload_returns_general_error() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd =
+            serde_json::from_str(r#"{"cmd":"agent.upload","id":"agent1"}"#).expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::General(_))),
+            "expected General error (upload not available via REST API), got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_agent_download_returns_general_error() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd =
+            serde_json::from_str(r#"{"cmd":"agent.download","id":"agent1"}"#).expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::General(_))),
+            "expected General error (download not available via REST API), got {result:?}"
+        );
+    }
+
     // ── dispatch: listener.show ───────────────────────────────────────────────
 
     #[tokio::test]
@@ -692,6 +1297,501 @@ mod tests {
         assert!(
             matches!(result, Err(CliError::InvalidArgs(_))),
             "expected InvalidArgs when name missing, got {result:?}"
+        );
+    }
+
+    // ── dispatch: listener.create ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_listener_create_without_name_returns_invalid_args() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd =
+            serde_json::from_str(r#"{"cmd":"listener.create","type":"http"}"#).expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::InvalidArgs(_))),
+            "expected InvalidArgs when name missing, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_listener_create_without_type_returns_invalid_args() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd =
+            serde_json::from_str(r#"{"cmd":"listener.create","name":"http1"}"#).expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::InvalidArgs(_))),
+            "expected InvalidArgs when type missing, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_listener_create_with_valid_args_hits_server() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd = serde_json::from_str(
+            r#"{"cmd":"listener.create","name":"http1","type":"http","port":443}"#,
+        )
+        .expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::ServerUnreachable(_))),
+            "expected ServerUnreachable when server not running, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_listener_create_with_unknown_type_returns_invalid_args() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd =
+            serde_json::from_str(r#"{"cmd":"listener.create","name":"x","type":"ftp"}"#)
+                .expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::InvalidArgs(_))),
+            "expected InvalidArgs for unknown listener type, got {result:?}"
+        );
+    }
+
+    // ── dispatch: listener.start / listener.stop ──────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_listener_start_without_name_returns_invalid_args() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"listener.start"}"#).expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::InvalidArgs(_))),
+            "expected InvalidArgs when name missing, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_listener_stop_without_name_returns_invalid_args() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"listener.stop"}"#).expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::InvalidArgs(_))),
+            "expected InvalidArgs when name missing, got {result:?}"
+        );
+    }
+
+    // ── dispatch: listener.delete ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_listener_delete_without_name_returns_invalid_args() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"listener.delete"}"#).expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::InvalidArgs(_))),
+            "expected InvalidArgs when name missing, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_listener_delete_with_name_hits_server() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd =
+            serde_json::from_str(r#"{"cmd":"listener.delete","name":"http1"}"#).expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::ServerUnreachable(_))),
+            "expected ServerUnreachable when server not running, got {result:?}"
+        );
+    }
+
+    // ── dispatch: operator commands ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_operator_list_hits_server() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"operator.list"}"#).expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::ServerUnreachable(_))),
+            "expected ServerUnreachable, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_operator_create_without_username_returns_invalid_args() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd =
+            serde_json::from_str(r#"{"cmd":"operator.create","password":"p","role":"operator"}"#)
+                .expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::InvalidArgs(_))),
+            "expected InvalidArgs when username missing, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_operator_create_without_password_returns_invalid_args() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd = serde_json::from_str(
+            r#"{"cmd":"operator.create","username":"alice","role":"operator"}"#,
+        )
+        .expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::InvalidArgs(_))),
+            "expected InvalidArgs when password missing, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_operator_create_without_role_returns_invalid_args() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd =
+            serde_json::from_str(r#"{"cmd":"operator.create","username":"alice","password":"p"}"#)
+                .expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::InvalidArgs(_))),
+            "expected InvalidArgs when role missing, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_operator_create_with_bad_role_returns_invalid_args() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd = serde_json::from_str(
+            r#"{"cmd":"operator.create","username":"alice","password":"p","role":"superuser"}"#,
+        )
+        .expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::InvalidArgs(_))),
+            "expected InvalidArgs for unknown role, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_operator_delete_without_username_returns_invalid_args() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"operator.delete"}"#).expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::InvalidArgs(_))),
+            "expected InvalidArgs when username missing, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_operator_set_role_without_username_returns_invalid_args() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd =
+            serde_json::from_str(r#"{"cmd":"operator.set-role","role":"admin"}"#).expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::InvalidArgs(_))),
+            "expected InvalidArgs when username missing, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_operator_set_role_without_role_returns_invalid_args() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd =
+            serde_json::from_str(r#"{"cmd":"operator.set-role","username":"alice"}"#)
+                .expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::InvalidArgs(_))),
+            "expected InvalidArgs when role missing, got {result:?}"
+        );
+    }
+
+    // ── dispatch: payload commands ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_payload_list_hits_server() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"payload.list"}"#).expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::ServerUnreachable(_))),
+            "expected ServerUnreachable, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_payload_build_without_listener_returns_invalid_args() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd =
+            serde_json::from_str(r#"{"cmd":"payload.build","arch":"x86_64","format":"exe"}"#)
+                .expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::InvalidArgs(_))),
+            "expected InvalidArgs when listener missing, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_payload_build_without_arch_returns_invalid_args() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd =
+            serde_json::from_str(r#"{"cmd":"payload.build","listener":"http1","format":"exe"}"#)
+                .expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::InvalidArgs(_))),
+            "expected InvalidArgs when arch missing, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_payload_build_without_format_returns_invalid_args() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd =
+            serde_json::from_str(r#"{"cmd":"payload.build","listener":"http1","arch":"x86_64"}"#)
+                .expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::InvalidArgs(_))),
+            "expected InvalidArgs when format missing, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_payload_build_with_bad_format_returns_invalid_args() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd = serde_json::from_str(
+            r#"{"cmd":"payload.build","listener":"http1","arch":"x86_64","format":"zip"}"#,
+        )
+        .expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::InvalidArgs(_))),
+            "expected InvalidArgs for unknown format, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_payload_download_without_id_returns_invalid_args() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd =
+            serde_json::from_str(r#"{"cmd":"payload.download","dst":"/tmp/out.exe"}"#)
+                .expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::InvalidArgs(_))),
+            "expected InvalidArgs when id missing, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_payload_download_without_dst_returns_invalid_args() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd =
+            serde_json::from_str(r#"{"cmd":"payload.download","id":"abc123"}"#).expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::InvalidArgs(_))),
+            "expected InvalidArgs when dst missing, got {result:?}"
+        );
+    }
+
+    // ── dispatch: log commands ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_log_list_hits_server() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"log.list"}"#).expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::ServerUnreachable(_))),
+            "expected ServerUnreachable, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_log_tail_hits_server() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"log.tail"}"#).expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::ServerUnreachable(_))),
+            "expected ServerUnreachable, got {result:?}"
         );
     }
 

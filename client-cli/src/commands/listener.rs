@@ -382,7 +382,7 @@ async fn delete(client: &ApiClient, name: &str) -> Result<ListenerDeleted, CliEr
 /// {"protocol": "http", "config": { <inner config fields> }}
 /// ```
 #[allow(clippy::too_many_arguments)]
-fn build_create_body(
+pub(crate) fn build_create_body(
     name: &str,
     listener_type: &str,
     port: Option<u16>,

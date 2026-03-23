@@ -796,3 +796,104 @@ async fn pivot_connect_self_referential_is_rejected() -> Result<(), Box<dyn std:
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Unregistered parent agent
+// ---------------------------------------------------------------------------
+
+/// Security boundary: a `CommandPivot/SmbConnect` callback sent from an agent
+/// that has never completed DEMON_INIT (i.e., `parent_agent_id` is not in the
+/// registry) must be rejected with HTTP 404, must NOT register any child agent,
+/// and must NOT broadcast an `AgentNew` event.
+///
+/// This mirrors the property already tested for `CommandGetJob` and
+/// `CommandCheckin` in `http_listener_pipeline.rs`.
+#[tokio::test]
+async fn pivot_connect_from_unregistered_parent_returns_404()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Set up a server and listener but do NOT register any parent agent.
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    server
+        .listeners
+        .create(common::http_listener_config("pivot-unregistered", listener_port))
+        .await?;
+    drop(listener_guard);
+    server.listeners.start("pivot-unregistered").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    // Use an agent_id that was never registered via DEMON_INIT.
+    let unregistered_parent_id = 0xBAAD_F00D_u32;
+    let fake_key: [u8; AGENT_KEY_LENGTH] = [
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E,
+        0x1F, 0x20,
+    ];
+    let fake_iv: [u8; AGENT_IV_LENGTH] = [
+        0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18, 0x29, 0x3A, 0x4B, 0x5C, 0x6D, 0x7E, 0x8F,
+        0x90,
+    ];
+
+    // Build a valid-looking CommandPivot/SmbConnect payload with a child agent.
+    let child_agent_id = 0xCC00_DEAD_u32;
+    let child_key: [u8; AGENT_KEY_LENGTH] = [
+        0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F,
+        0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x5B, 0x5C, 0x5D, 0x5E,
+        0x5F, 0x60,
+    ];
+    let child_iv: [u8; AGENT_IV_LENGTH] = [
+        0x12, 0x23, 0x34, 0x45, 0x56, 0x67, 0x78, 0x89, 0x9A, 0xAB, 0xBC, 0xCD, 0xDE, 0xEF, 0xF0,
+        0x01,
+    ];
+
+    let payload = pivot_connect_success_payload(child_agent_id, child_key, child_iv);
+
+    let response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            unregistered_parent_id,
+            fake_key,
+            fake_iv,
+            0,
+            u32::from(DemonCommand::CommandPivot),
+            0x01,
+            &payload,
+        ))
+        .send()
+        .await?;
+
+    // The server must reject the callback with 404 — the parent is unknown.
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "CommandPivot from unregistered parent must return 404"
+    );
+
+    // The child agent must NOT have been registered.
+    assert!(
+        server.agent_registry.get(child_agent_id).await.is_none(),
+        "child agent must not be registered when parent is unregistered"
+    );
+
+    // The unregistered parent must not have been created either.
+    assert!(
+        server.agent_registry.get(unregistered_parent_id).await.is_none(),
+        "unregistered parent must not appear in the registry"
+    );
+
+    // No agents should exist at all.
+    assert!(
+        server.agent_registry.list_active().await.is_empty(),
+        "no agents should be registered after CommandPivot from unknown parent"
+    );
+
+    // No AgentNew event should have been broadcast.
+    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(500)).await;
+
+    Ok(())
+}

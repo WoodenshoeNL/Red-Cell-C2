@@ -6,7 +6,7 @@ use red_cell::{
     SocketRelayManager, TeamserverState, websocket_routes,
 };
 use red_cell_common::config::Profile;
-use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len};
+use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
 use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::OperatorMessage;
 use tokio::net::TcpListener;
@@ -192,15 +192,14 @@ async fn register_agent(
     key: [u8; AGENT_KEY_LENGTH],
     iv: [u8; AGENT_IV_LENGTH],
 ) -> Result<u64, Box<dyn std::error::Error>> {
-    let init_response = client
+    client
         .post(format!("http://127.0.0.1:{listener_port}/"))
         .body(common::valid_demon_init_body(agent_id, key, iv))
         .send()
         .await?
         .error_for_status()?;
-    let init_bytes = init_response.bytes().await?;
-    let ctr_offset = ctr_blocks_for_len(init_bytes.len());
-    Ok(ctr_offset)
+    // DEMON_INIT registers agents in legacy CTR mode — every packet starts at block 0.
+    Ok(0)
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────
@@ -1324,8 +1323,7 @@ async fn bof_payload_shorter_than_subtype_header_does_not_crash()
         404,
         "truncated payload should produce a fake 404, not a crash"
     );
-    let ctr_offset =
-        ctr_offset + red_cell_common::crypto::ctr_blocks_for_len(4 + truncated_payload.len());
+    // Legacy CTR mode: ctr_offset stays at 0 regardless of prior traffic.
 
     // No operator message should have been broadcast.
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(250)).await;
@@ -1416,8 +1414,7 @@ async fn bof_output_truncated_string_does_not_crash() -> Result<(), Box<dyn std:
         404,
         "truncated string payload should produce a fake 404"
     );
-    let ctr_offset =
-        ctr_offset + red_cell_common::crypto::ctr_blocks_for_len(4 + truncated_payload.len());
+    // Legacy CTR mode: ctr_offset stays at 0 regardless of prior traffic.
 
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(250)).await;
 
@@ -1507,8 +1504,7 @@ async fn bof_exception_missing_address_does_not_crash() -> Result<(), Box<dyn st
         404,
         "BOF_EXCEPTION with missing address should produce a fake 404"
     );
-    let ctr_offset =
-        ctr_offset + red_cell_common::crypto::ctr_blocks_for_len(4 + truncated_payload.len());
+    // Legacy CTR mode: ctr_offset stays at 0 regardless of prior traffic.
 
     common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(250)).await;
 
@@ -1803,9 +1799,11 @@ async fn ps_import_callback_truncated_payload_does_not_crash()
         ))
         .send()
         .await?;
-    assert!(
-        response.status().is_success(),
-        "truncated ps_import payload should not crash the server"
+    // Dispatch error produces a fake 404 — the server must not crash.
+    assert_eq!(
+        response.status().as_u16(),
+        404,
+        "truncated ps_import payload should produce a fake 404, not a crash"
     );
 
     // The dispatch error is handled internally — no AgentResponse should be broadcast.

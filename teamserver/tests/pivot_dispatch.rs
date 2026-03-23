@@ -499,10 +499,8 @@ async fn pivot_disconnect_removes_link_and_marks_child_dead()
     assert_eq!(pivots_before.parent, Some(h.parent_agent_id), "child must be linked to parent");
 
     // -- Step 2: disconnect the child via SmbDisconnect --
-    // The first callback consumed ctr_offset; calculate the next offset.
-    let connect_body_len = connect_payload.len() + 4 + 4; // payload + command_id + request_id
-    let blocks_used = (connect_body_len as u64 + 15) / 16;
-    let next_ctr_offset = h.parent_ctr_offset + blocks_used;
+    // Legacy CTR mode: offset stays at 0 regardless of prior traffic.
+    let next_ctr_offset = 0;
 
     let disconnect_payload = pivot_disconnect_success_payload(child_agent_id);
 
@@ -603,9 +601,8 @@ async fn pivot_disconnect_failure_broadcasts_error_without_modifying_registry()
     let _connect_resp = common::read_operator_message(&mut h.socket).await?;
 
     // -- Send SmbDisconnect with success=0 --
-    let connect_body_len = connect_payload.len() + 4 + 4;
-    let blocks_used = (connect_body_len as u64 + 15) / 16;
-    let next_ctr_offset = h.parent_ctr_offset + blocks_used;
+    // Legacy CTR mode: offset stays at 0 regardless of prior traffic.
+    let next_ctr_offset = 0;
 
     let disconnect_payload = pivot_disconnect_failure_payload(child_agent_id);
 

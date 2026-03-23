@@ -10,9 +10,7 @@ use red_cell::{
 };
 use red_cell_common::ExternalListenerConfig;
 use red_cell_common::ListenerConfig;
-use red_cell_common::crypto::{
-    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len, decrypt_agent_data_at_offset,
-};
+use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data_at_offset};
 use red_cell_common::demon::{DemonCommand, DemonMessage};
 use red_cell_common::operator::{AgentTaskInfo, EventCode, Message, MessageHead, OperatorMessage};
 use reqwest::Client;
@@ -112,7 +110,7 @@ async fn external_listener_pipeline_registers_agent_and_broadcasts_checkin()
 
     let decrypted_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_ack)?;
     assert_eq!(decrypted_ack.as_slice(), &agent_id.to_le_bytes());
-    ctr_offset += ctr_blocks_for_len(init_ack.len());
+    // Legacy CTR mode: offset stays at 0.
 
     // ── Verify agent registered ─────────────────────────────────────────────
     let stored = server.agent_registry.get(agent_id).await.ok_or("agent should be registered")?;
@@ -337,7 +335,7 @@ async fn external_listener_task_delivery_happy_path() -> Result<(), Box<dyn std:
     let init_bytes = init_resp.bytes().await?;
     let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
-    ctr_offset += ctr_blocks_for_len(init_bytes.len());
+    // Legacy CTR mode: offset stays at 0.
 
     // ── Connect operator via WebSocket and login ─────────────────────────────
     let (mut socket, _) = connect_async(format!("ws://{}/havoc", server.addr)).await?;
@@ -400,7 +398,7 @@ async fn external_listener_task_delivery_happy_path() -> Result<(), Box<dyn std:
         .send()
         .await?
         .error_for_status()?;
-    ctr_offset += ctr_blocks_for_len(4); // 4-byte length prefix sent by the agent
+    // Legacy CTR mode: offset stays at 0.
     let job_bytes = get_job_resp.bytes().await?;
 
     // ── Agent decrypts and verifies the task ─────────────────────────────────
@@ -460,7 +458,7 @@ async fn external_listener_no_task_poll_returns_empty_body()
     let init_bytes = init_resp.bytes().await?;
     let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
-    ctr_offset += ctr_blocks_for_len(init_bytes.len());
+    // Legacy CTR mode: offset stays at 0.
 
     // ── Poll for jobs immediately — queue is empty ────────────────────────────
     let get_job_resp = client
@@ -524,7 +522,7 @@ async fn external_listener_task_consumed_after_download() -> Result<(), Box<dyn 
     let init_bytes = init_resp.bytes().await?;
     let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
-    ctr_offset += ctr_blocks_for_len(init_bytes.len());
+    // Legacy CTR mode: offset stays at 0.
 
     // ── Connect operator and queue a task ─────────────────────────────────────
     let (mut socket, _) = connect_async(format!("ws://{}/havoc", server.addr)).await?;
@@ -577,7 +575,7 @@ async fn external_listener_task_consumed_after_download() -> Result<(), Box<dyn 
         .send()
         .await?
         .error_for_status()?;
-    ctr_offset += ctr_blocks_for_len(4);
+    // Legacy CTR mode: offset stays at 0.
     let first_bytes = first_resp.bytes().await?;
     assert!(!first_bytes.is_empty(), "first poll must deliver the queued task");
     let first_msg = DemonMessage::from_bytes(first_bytes.as_ref())?;

@@ -3,9 +3,7 @@ mod common;
 use futures_util::SinkExt;
 use red_cell_common::HttpListenerConfig;
 use red_cell_common::config::Profile;
-use red_cell_common::crypto::{
-    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len, decrypt_agent_data_at_offset,
-};
+use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data_at_offset};
 use red_cell_common::demon::{DemonCommand, DemonMessage};
 use red_cell_common::operator::{
     AgentResponseInfo, AgentTaskInfo, EventCode, Message, MessageHead, OperatorMessage,
@@ -120,10 +118,6 @@ fn operator_task_message(
     }))
 }
 
-fn callback_ctr_advance(payload: &[u8]) -> u64 {
-    ctr_blocks_for_len(4 + payload.len())
-}
-
 fn assert_agent_output(
     info: &AgentResponseInfo,
     task_id: &str,
@@ -170,7 +164,7 @@ async fn mock_demon_checkin_get_job_and_output_flow() -> Result<(), Box<dyn std:
     let init_bytes = init_response.bytes().await?;
     let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
-    ctr_offset += ctr_blocks_for_len(init_bytes.len());
+    // Legacy CTR mode: offset stays at 0.
 
     let agent_new = common::read_operator_message(&mut harness.socket).await?;
     let OperatorMessage::AgentNew(message) = agent_new else {
@@ -211,7 +205,7 @@ async fn mock_demon_checkin_get_job_and_output_flow() -> Result<(), Box<dyn std:
     assert_eq!(message.packages[0].command_id, u32::from(DemonCommand::CommandCheckin));
     assert_eq!(message.packages[0].request_id, 0x2A);
     assert!(message.packages[0].payload.is_empty());
-    ctr_offset += ctr_blocks_for_len(4);
+    // Legacy CTR mode: offset stays at 0.
 
     let output_text = "hello from demon";
     let callback_response = harness
@@ -273,7 +267,7 @@ async fn mock_demon_checkin_streams_multiple_output_events_for_one_task()
     let init_bytes = init_response.bytes().await?;
     let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
-    ctr_offset += ctr_blocks_for_len(init_bytes.len());
+    // Legacy CTR mode: offset stays at 0.
 
     let agent_new = common::read_operator_message(&mut harness.socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -307,7 +301,7 @@ async fn mock_demon_checkin_streams_multiple_output_events_for_one_task()
     let message = DemonMessage::from_bytes(job_bytes.as_ref())?;
     assert_eq!(message.packages.len(), 1);
     assert_eq!(message.packages[0].request_id, 0x2A);
-    ctr_offset += ctr_blocks_for_len(4);
+    // Legacy CTR mode: offset stays at 0.
 
     let outputs = ["chunk one\n", "chunk two\n", "chunk three"];
     for output in outputs {
@@ -327,7 +321,7 @@ async fn mock_demon_checkin_streams_multiple_output_events_for_one_task()
             .send()
             .await?
             .error_for_status()?;
-        ctr_offset += callback_ctr_advance(&payload);
+        // Legacy CTR mode: offset stays at 0.
     }
 
     for output in outputs {
@@ -370,7 +364,7 @@ async fn mock_demon_checkin_interleaved_output_keeps_task_attribution()
     let init_bytes = init_response.bytes().await?;
     let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
-    ctr_offset += ctr_blocks_for_len(init_bytes.len());
+    // Legacy CTR mode: offset stays at 0.
 
     let agent_new = common::read_operator_message(&mut harness.socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -411,7 +405,7 @@ async fn mock_demon_checkin_interleaved_output_keeps_task_attribution()
     assert_eq!(message.packages.len(), 2);
     assert_eq!(message.packages[0].request_id, 0x2A);
     assert_eq!(message.packages[1].request_id, 0x2B);
-    ctr_offset += ctr_blocks_for_len(4);
+    // Legacy CTR mode: offset stays at 0.
 
     let callbacks = [
         (0x2A, "shell whoami", "whoami chunk 1"),
@@ -436,7 +430,7 @@ async fn mock_demon_checkin_interleaved_output_keeps_task_attribution()
             .send()
             .await?
             .error_for_status()?;
-        ctr_offset += callback_ctr_advance(&payload);
+        // Legacy CTR mode: offset stays at 0.
     }
 
     for (request_id, command_line, output) in callbacks {
@@ -506,7 +500,7 @@ async fn reconnect_then_subsequent_callback_remains_synchronised()
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes(), "init ACK must echo agent_id");
 
     // Agent advances its counter after consuming the init ACK (counter-consuming).
-    agent_ctr_offset += ctr_blocks_for_len(init_bytes.len());
+    // Legacy CTR mode: offset stays at 0.
 
     // Consume the AgentNew operator event.
     let agent_new = common::read_operator_message(&mut harness.socket).await?;
@@ -607,7 +601,7 @@ async fn get_job_with_empty_task_queue_returns_empty_response()
     let init_bytes = init_response.bytes().await?;
     let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
-    ctr_offset += ctr_blocks_for_len(init_bytes.len());
+    // Legacy CTR mode: offset stays at 0.
 
     // Consume the AgentNew operator event so it doesn't block later reads.
     let agent_new = common::read_operator_message(&mut harness.socket).await?;
@@ -645,7 +639,7 @@ async fn get_job_with_empty_task_queue_returns_empty_response()
         job_bytes.len()
     );
     // The callback itself encrypted 4 bytes (length prefix), advancing the CTR offset.
-    ctr_offset += ctr_blocks_for_len(4);
+    // Legacy CTR mode: offset stays at 0.
 
     // --- Verify CTR synchronisation by sending another callback -------------------
     // Queue a task so the next GET_JOB has work to return.  If the empty-poll had
@@ -712,7 +706,7 @@ async fn unauthenticated_operator_cannot_inject_agent_task()
     let init_bytes = init_response.bytes().await?;
     let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
-    ctr_offset += ctr_blocks_for_len(init_bytes.len());
+    // Legacy CTR mode: offset stays at 0.
 
     // --- Open a second (unauthenticated) WebSocket client -------------------------
     let (mut unauth_socket, _) = connect_async(format!("ws://{}/", harness.server.addr)).await?;
@@ -792,7 +786,7 @@ async fn failed_login_operator_cannot_inject_agent_task() -> Result<(), Box<dyn 
     let init_bytes = init_response.bytes().await?;
     let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
-    ctr_offset += ctr_blocks_for_len(init_bytes.len());
+    // Legacy CTR mode: offset stays at 0.
 
     // --- Attempt login with wrong password ----------------------------------------
     let (mut bad_socket, _) = connect_async(format!("ws://{}/", harness.server.addr)).await?;
@@ -879,7 +873,7 @@ async fn wrong_key_callback_returns_404_and_preserves_ctr_offset()
     let init_bytes = init_response.bytes().await?;
     let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
-    ctr_offset += ctr_blocks_for_len(init_bytes.len());
+    // Legacy CTR mode: offset stays at 0.
 
     let agent_new = common::read_operator_message(&mut harness.socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -982,7 +976,7 @@ async fn duplicate_demon_init_rejected_preserves_original_agent()
     let init_bytes = init_response.bytes().await?;
     let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
-    ctr_offset += ctr_blocks_for_len(init_bytes.len());
+    // Legacy CTR mode: offset stays at 0.
 
     let agent_new = common::read_operator_message(&mut harness.socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
@@ -1117,7 +1111,7 @@ async fn multiple_concurrent_agents_on_same_listener() -> Result<(), Box<dyn std
         let init_ack =
             decrypt_agent_data_at_offset(&agent.key, &agent.iv, agent.ctr_offset, &init_bytes)?;
         assert_eq!(init_ack.as_slice(), &agent.agent_id.to_le_bytes());
-        agent.ctr_offset += ctr_blocks_for_len(init_bytes.len());
+        // Legacy CTR mode: offset stays at 0.
 
         // Consume the AgentNew event.
         let agent_new = common::read_operator_message(&mut harness.socket).await?;
@@ -1165,7 +1159,7 @@ async fn multiple_concurrent_agents_on_same_listener() -> Result<(), Box<dyn std
             "agent 0x{:08X} received wrong task",
             agent.agent_id
         );
-        agent.ctr_offset += ctr_blocks_for_len(4);
+        // Legacy CTR mode: offset stays at 0.
     }
 
     // --- Each agent sends output — verify no cross-contamination --------------------
@@ -1205,9 +1199,9 @@ async fn multiple_concurrent_agents_on_same_listener() -> Result<(), Box<dyn std
     Ok(())
 }
 
-/// A callback sent with a stale (already-consumed) CTR offset must be
-/// rejected with HTTP 404, the server's CTR offset must not change, and
-/// a subsequent callback at the correct offset must still succeed.
+/// In legacy CTR mode (used by DEMON_INIT-registered agents), every packet
+/// uses CTR block offset 0.  Repeated callbacks at offset 0 must all succeed
+/// because legacy mode has no concept of a "stale" offset.
 #[tokio::test]
 async fn stale_ctr_offset_callback_returns_404_and_preserves_state()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -1224,7 +1218,7 @@ async fn stale_ctr_offset_callback_returns_404_and_preserves_state()
         0x96, 0xA9, 0xBC, 0xCF, 0xE2, 0xF5, 0x08, 0x1B, 0x2E, 0x41, 0x54, 0x67, 0x7A, 0x8D, 0xA0,
         0xB3,
     ];
-    let mut ctr_offset = 0_u64;
+    let ctr_offset = 0_u64;
 
     // --- Register the agent ---------------------------------------------------------
     let init_response = harness
@@ -1237,12 +1231,11 @@ async fn stale_ctr_offset_callback_returns_404_and_preserves_state()
     let init_bytes = init_response.bytes().await?;
     let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
-    ctr_offset += ctr_blocks_for_len(init_bytes.len());
 
     let agent_new = common::read_operator_message(&mut harness.socket).await?;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
 
-    // --- First valid callback to advance the server's CTR ---------------------------
+    // --- First callback at offset 0 -------------------------------------------------
     let task = operator_task_message("AA", "checkin", "12345678", DemonCommand::CommandCheckin)?;
     harness.socket.send(ClientMessage::Text(task.into())).await?;
     let _task_echo = common::read_operator_message(&mut harness.socket).await?;
@@ -1267,11 +1260,10 @@ async fn stale_ctr_offset_callback_returns_404_and_preserves_state()
     assert_eq!(message.packages.len(), 1);
     assert_eq!(message.packages[0].request_id, 0xAA);
 
-    let stale_offset = ctr_offset;
-    ctr_offset += ctr_blocks_for_len(4);
     let ctr_after_valid = harness.server.agent_registry.ctr_offset(agent_id).await?;
+    assert_eq!(ctr_after_valid, 0, "legacy CTR mode keeps offset at 0");
 
-    // --- Send a replay with the STALE (pre-advance) CTR offset ----------------------
+    // --- Second callback at same offset 0 (legacy mode allows this) -----------------
     let stale_response = harness
         .client
         .post(format!("http://127.0.0.1:{listener_port}/"))
@@ -1279,27 +1271,27 @@ async fn stale_ctr_offset_callback_returns_404_and_preserves_state()
             agent_id,
             key,
             iv,
-            stale_offset,
+            ctr_offset,
             u32::from(DemonCommand::CommandGetJob),
             2,
             &[],
         ))
         .send()
         .await?;
-    assert_eq!(
-        stale_response.status(),
-        reqwest::StatusCode::NOT_FOUND,
-        "stale-CTR callback must be rejected with fake 404"
+    // Legacy mode: repeated offset 0 is accepted, not rejected.
+    assert!(
+        stale_response.status().is_success(),
+        "legacy CTR mode accepts repeated callbacks at offset 0"
     );
 
-    // --- Verify server CTR offset was NOT changed -----------------------------------
+    // --- Verify server CTR offset remains 0 -----------------------------------------
     assert_eq!(
         harness.server.agent_registry.ctr_offset(agent_id).await?,
-        ctr_after_valid,
-        "CTR offset must not change after stale-offset callback rejection"
+        0,
+        "CTR offset must remain 0 in legacy mode"
     );
 
-    // --- A subsequent callback at the CORRECT offset must succeed --------------------
+    // --- Third callback also succeeds -----------------------------------------------
     let task2 = operator_task_message("BB", "checkin", "12345678", DemonCommand::CommandCheckin)?;
     harness.socket.send(ClientMessage::Text(task2.into())).await?;
     let _task2_echo = common::read_operator_message(&mut harness.socket).await?;
@@ -1367,7 +1359,7 @@ async fn concurrent_reconnect_probes_preserve_ctr_offset() -> Result<(), Box<dyn
     let mut agent_ctr_offset = 0_u64;
     let init_ack = decrypt_agent_data_at_offset(&key, &iv, agent_ctr_offset, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
-    agent_ctr_offset += ctr_blocks_for_len(init_bytes.len());
+    // Legacy CTR mode: offset stays at 0.
 
     // Consume AgentNew event.
     let _agent_new = common::read_operator_message(&mut harness.socket).await?;
@@ -1473,7 +1465,7 @@ async fn reconnect_probe_interleaved_with_callbacks_preserves_sync()
     let mut agent_ctr_offset = 0_u64;
     let init_ack = decrypt_agent_data_at_offset(&key, &iv, agent_ctr_offset, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
-    agent_ctr_offset += ctr_blocks_for_len(init_bytes.len());
+    // Legacy CTR mode: offset stays at 0.
 
     let _agent_new = common::read_operator_message(&mut harness.socket).await?;
 
@@ -1512,7 +1504,7 @@ async fn reconnect_probe_interleaved_with_callbacks_preserves_sync()
         // The callback carries an encrypted 4-byte inner length prefix (empty payload).
         // `valid_demon_callback_body` with `&[]` produces a 4-byte plaintext (the BE length 0).
         let callback_encrypted_len = 4; // BE u32 length prefix
-        agent_ctr_offset += ctr_blocks_for_len(callback_encrypted_len);
+        // Legacy CTR mode: offset stays at 0.
 
         // Verify the server offset matches what the agent expects after the callback.
         let server_offset = harness.server.agent_registry.ctr_offset(agent_id).await?;
@@ -1579,7 +1571,7 @@ async fn rapid_reconnect_callback_cycles_no_counter_drift() -> Result<(), Box<dy
     let mut agent_ctr_offset = 0_u64;
     let init_ack = decrypt_agent_data_at_offset(&key, &iv, agent_ctr_offset, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
-    agent_ctr_offset += ctr_blocks_for_len(init_bytes.len());
+    // Legacy CTR mode: offset stays at 0.
 
     let _agent_new = common::read_operator_message(&mut harness.socket).await?;
 
@@ -1630,7 +1622,7 @@ async fn rapid_reconnect_callback_cycles_no_counter_drift() -> Result<(), Box<dy
             .error_for_status()?;
 
         // The callback's encrypted portion is the 4-byte inner length prefix.
-        agent_ctr_offset += ctr_blocks_for_len(4);
+        // Legacy CTR mode: offset stays at 0.
 
         // Verify the server agrees.
         assert_eq!(

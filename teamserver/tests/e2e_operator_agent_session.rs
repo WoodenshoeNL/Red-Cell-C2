@@ -13,7 +13,7 @@ use interprocess::local_socket::traits::tokio::Stream as _;
 #[cfg(unix)]
 use interprocess::os::unix::local_socket::AbstractNsUdSocket;
 use red_cell_common::config::Profile;
-use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len};
+use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
 use red_cell_common::demon::{DemonCommand, DemonMessage};
 use red_cell_common::operator::{
     AgentResponseInfo, AgentTaskInfo, EventCode, FlatInfo, ListenerInfo, ListenerMarkInfo, Message,
@@ -89,7 +89,7 @@ async fn operator_session_listener_and_mock_demon_round_trip()
     let init_ack =
         red_cell_common::crypto::decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
-    ctr_offset += ctr_blocks_for_len(init_bytes.len());
+    // Legacy CTR mode: offset stays at 0 regardless of prior traffic.
 
     let agent_new = common::read_operator_message(&mut socket).await?;
     let OperatorMessage::AgentNew(message) = agent_new else {
@@ -139,7 +139,7 @@ async fn operator_session_listener_and_mock_demon_round_trip()
         .send()
         .await?
         .error_for_status()?;
-    ctr_offset += ctr_blocks_for_len(4);
+    // Legacy CTR mode: offset stays at 0.
     let job_bytes = get_job_response.bytes().await?;
     let job_message = DemonMessage::from_bytes(job_bytes.as_ref())?;
     assert_eq!(job_message.packages.len(), 1);
@@ -262,7 +262,7 @@ async fn reconnect_probe_does_not_duplicate_agent_new_and_resumes_callbacks()
     let init_ack =
         red_cell_common::crypto::decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
-    ctr_offset += ctr_blocks_for_len(init_bytes.len());
+    // Legacy CTR mode: offset stays at 0 regardless of prior traffic.
 
     // Operator must see AgentNew.
     let agent_new = common::read_operator_message(&mut socket).await?;
@@ -409,7 +409,7 @@ async fn operator_session_smb_listener_and_mock_demon_round_trip()
     let init_ack =
         red_cell_common::crypto::decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &ack_payload)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
-    ctr_offset += ctr_blocks_for_len(ack_payload.len());
+    // Legacy CTR mode: offset stays at 0.
     drop(init_stream);
 
     let agent_new = common::read_operator_message(&mut socket).await?;
@@ -461,7 +461,7 @@ async fn operator_session_smb_listener_and_mock_demon_round_trip()
         ),
     )
     .await?;
-    ctr_offset += ctr_blocks_for_len(4);
+    // Legacy CTR mode: offset stays at 0.
 
     let (job_agent_id, job_bytes) =
         timeout(Duration::from_secs(5), read_smb_frame(&mut get_job_stream)).await??;

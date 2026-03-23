@@ -6,9 +6,7 @@ use futures_util::future::join_all;
 use red_cell::{
     AgentRegistry, Database, EventBus, ListenerManager, MAX_AGENT_MESSAGE_LEN, SocketRelayManager,
 };
-use red_cell_common::crypto::{
-    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len, decrypt_agent_data_at_offset,
-};
+use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data_at_offset};
 use red_cell_common::demon::{DemonCommand, DemonEnvelope};
 use red_cell_common::operator::OperatorMessage;
 use red_cell_common::{HttpListenerConfig, ListenerConfig};
@@ -54,7 +52,7 @@ async fn http_listener_pipeline_registers_agent_and_broadcasts_checkin()
 
     let decrypted_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_ack)?;
     assert_eq!(decrypted_ack.as_slice(), &agent_id.to_le_bytes());
-    ctr_offset += ctr_blocks_for_len(init_ack.len());
+    // Legacy CTR mode: offset stays at 0.
 
     let stored = registry.get(agent_id).await.ok_or("agent should be registered")?;
     let before_checkin = stored.last_call_in.clone();
@@ -686,11 +684,11 @@ async fn http_listener_pipeline_reconnect_probe_after_registration()
 
     let decrypted_init_ack = decrypt_agent_data_at_offset(&key, &iv, 0, &init_ack)?;
     assert_eq!(decrypted_init_ack.as_slice(), &agent_id.to_le_bytes());
-    let ctr_offset = ctr_blocks_for_len(init_ack.len());
-    assert_eq!(ctr_offset, 1, "init ACK should consume exactly one AES block");
+    // DEMON_INIT registers in legacy CTR mode — offset stays at 0.
+    let ctr_offset = 0_u64;
 
-    // Verify the stored CTR offset matches.
-    assert_eq!(registry.ctr_offset(agent_id).await?, ctr_offset);
+    // Verify the stored CTR offset is 0 (legacy mode).
+    assert_eq!(registry.ctr_offset(agent_id).await?, 0);
 
     // Step 2: Send a reconnect probe (DemonInit with empty payload).
     let reconnect_response = client

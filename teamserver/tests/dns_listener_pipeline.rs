@@ -327,8 +327,8 @@ async fn dns_listener_pipeline_registers_agent_and_broadcasts_checkin()
         "init ACK must contain agent_id as LE bytes"
     );
 
-    // Track the CTR offset after the ACK for subsequent callbacks.
-    let ctr_offset = red_cell_common::crypto::ctr_blocks_for_len(ack_payload.len());
+    // DEMON_INIT registers agents in legacy CTR mode — every packet starts at block 0.
+    let ctr_offset = 0;
 
     // 5. Send a COMMAND_CHECKIN callback via DNS upload.
     let before_checkin = stored.last_call_in.clone();
@@ -915,8 +915,9 @@ async fn dns_listener_concurrent_multi_agent_sessions_are_isolated()
         );
     }
 
-    let ctr_offset_a = red_cell_common::crypto::ctr_blocks_for_len(ack_payload_a.len());
-    let ctr_offset_b = red_cell_common::crypto::ctr_blocks_for_len(ack_payload_b.len());
+    // DEMON_INIT registers agents in legacy CTR mode — every packet starts at block 0.
+    let ctr_offset_a = 0;
+    let ctr_offset_b = 0;
 
     // 5. Send COMMAND_CHECKIN callbacks from both agents concurrently.
     let callback_body_a = common::valid_demon_callback_body(

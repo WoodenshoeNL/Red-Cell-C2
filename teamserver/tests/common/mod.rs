@@ -348,7 +348,11 @@ pub fn http_listener_config(name: &str, port: u16) -> red_cell_common::ListenerC
 }
 
 /// Register a fresh agent via `DEMON_INIT` and return the AES-CTR block offset
-/// after the init ACK has been consumed.
+/// to use for subsequent callback packets.
+///
+/// DEMON_INIT always registers agents in legacy CTR mode, where every packet is
+/// encrypted/decrypted starting at CTR block 0.  The returned offset is therefore
+/// always 0.
 pub async fn register_agent(
     client: &reqwest::Client,
     listener_port: u16,
@@ -356,14 +360,14 @@ pub async fn register_agent(
     key: [u8; AGENT_KEY_LENGTH],
     iv: [u8; AGENT_IV_LENGTH],
 ) -> Result<u64, Box<dyn std::error::Error>> {
-    let resp = client
+    client
         .post(format!("http://127.0.0.1:{listener_port}/"))
         .body(valid_demon_init_body(agent_id, key, iv))
         .send()
         .await?
         .error_for_status()?;
-    let bytes = resp.bytes().await?;
-    Ok(red_cell_common::crypto::ctr_blocks_for_len(bytes.len()))
+    // Legacy CTR mode: every packet starts at block 0.
+    Ok(0)
 }
 
 /// Build a standard test [`Profile`] with a single `operator`/`password1234`

@@ -72,6 +72,72 @@ mod tests {
         "hello"
     }
 
+    /// Build a make-service (returns a fresh `Router` clone for each call)
+    /// wrapped with [`NormalizedMakeService`].
+    fn make_normalized() -> NormalizedMakeService<
+        impl Service<
+            (),
+            Response = Router,
+            Error = std::convert::Infallible,
+            Future = impl Future<Output = Result<Router, std::convert::Infallible>> + Send,
+        >,
+    > {
+        let router = Router::new().route("/test", get(hello));
+        let make_svc = tower::service_fn(move |_: ()| {
+            let r = router.clone();
+            async move { Ok::<_, std::convert::Infallible>(r) }
+        });
+        NormalizedMakeService::new(make_svc)
+    }
+
+    /// `NormalizedMakeService::poll_ready` delegates to the inner service.
+    #[tokio::test]
+    async fn normalized_make_service_poll_ready_delegates() {
+        let mut nms = make_normalized();
+        // `ready()` drives `poll_ready` until `Poll::Ready` — if delegation
+        // is broken this will hang or panic.
+        nms.ready().await.expect("poll_ready should succeed");
+    }
+
+    /// Constructing a `NormalizedMakeService` and calling it should return a
+    /// service that strips trailing slashes (end-to-end through the wrapper).
+    #[tokio::test]
+    async fn normalized_make_service_strips_trailing_slash() {
+        let mut nms = make_normalized();
+        nms.ready().await.expect("poll_ready");
+        let svc = nms.call(()).await.expect("call should return wrapped service");
+
+        // With trailing slash — normalization should strip it before routing.
+        let resp = svc
+            .clone()
+            .oneshot(Request::builder().uri("/test/").body(Body::empty()).expect("build"))
+            .await
+            .expect("request");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Without trailing slash — should work as normal.
+        let resp = svc
+            .oneshot(Request::builder().uri("/test").body(Body::empty()).expect("build"))
+            .await
+            .expect("request");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// A path that does not exist should still return 404 even after
+    /// normalization — ensures the wrapper doesn't swallow routing errors.
+    #[tokio::test]
+    async fn normalized_make_service_unknown_path_returns_404() {
+        let mut nms = make_normalized();
+        nms.ready().await.expect("poll_ready");
+        let svc = nms.call(()).await.expect("call");
+
+        let resp = svc
+            .oneshot(Request::builder().uri("/no-such-path/").body(Body::empty()).expect("build"))
+            .await
+            .expect("request");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
     /// Requests with a trailing slash should be routed to the handler
     /// registered without one, thanks to the normalization layer.
     #[tokio::test]

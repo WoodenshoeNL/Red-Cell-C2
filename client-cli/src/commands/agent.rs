@@ -6,14 +6,13 @@
 //! |---|---|---|
 //! | `agent list` | `GET /agents` | table of all agents |
 //! | `agent show <id>` | `GET /agents/{id}` | full agent record |
-//! | `agent exec <id> --cmd <cmd>` | `POST /agents/{id}/jobs` | submit job |
-//! | `agent exec --wait` | submit then poll `GET /agents/{id}/jobs/{job_id}` | block until output |
-//! | `agent output <id>` | `GET /agents/{id}/output` | pending output |
-//! | `agent output --watch` | poll in a loop until Ctrl-C | streaming JSON lines |
-//! | `agent kill <id>` | `POST /agents/{id}/kill` | terminate |
+//! | `agent exec <id> --cmd <cmd>` | `POST /agents/{id}/task` | submit task |
+//! | `agent exec --wait` | submit then poll `GET /jobs?agent_id={id}&task_id={tid}` until dequeued | block until agent picks up job |
+//! | `agent output <id>` | not available via REST API | use WebSocket client |
+//! | `agent kill <id>` | `DELETE /agents/{id}` | terminate |
 //! | `agent kill --wait` | kill then poll `GET /agents/{id}` until dead | block |
-//! | `agent upload <id>` | `POST /agents/{id}/upload?dst=<path>` with binary body | file send |
-//! | `agent download <id>` | `GET /agents/{id}/download?src=<path>` raw bytes | file receive |
+//! | `agent upload <id>` | not yet available via REST API | use WebSocket client |
+//! | `agent download <id>` | not yet available via REST API | use WebSocket client |
 
 use std::time::{Duration, Instant};
 
@@ -51,32 +50,16 @@ pub(crate) struct RawAgent {
     pub(crate) jitter: Option<u64>,
 }
 
+/// Response from `POST /agents/{id}/task` and `DELETE /agents/{id}`.
 #[derive(Debug, Deserialize)]
-pub(crate) struct JobSubmitResponse {
-    pub(crate) job_id: String,
+pub(crate) struct TaskQueuedResponse {
+    pub(crate) task_id: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct JobStatusResponse {
-    pub(crate) job_id: String,
-    /// `"pending"` | `"running"` | `"done"` | `"error"`
-    pub(crate) status: String,
-    pub(crate) output: Option<String>,
-    pub(crate) exit_code: Option<i32>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct RawOutputEntry {
-    pub(crate) job_id: String,
-    pub(crate) command: Option<String>,
-    pub(crate) output: String,
-    pub(crate) exit_code: Option<i32>,
-    pub(crate) created_at: String,
-}
-
+/// Minimal projection of the `GET /jobs` paged response used for polling.
 #[derive(Debug, Deserialize)]
-struct UploadResponse {
-    job_id: String,
+pub(crate) struct JobPageResponse {
+    pub(crate) total: usize,
 }
 
 // ── public output types ───────────────────────────────────────────────────────
@@ -385,9 +368,10 @@ async fn show(client: &ApiClient, id: &str) -> Result<AgentDetail, CliError> {
     Ok(agent_detail_from_raw(raw))
 }
 
-/// `agent exec <id> --cmd <cmd>` — submit a shell command job.
+/// `agent exec <id> --cmd <cmd>` — submit a command task to an agent.
 ///
-/// Returns immediately with the job ID.
+/// POSTs to `POST /agents/{id}/task` using the Demon `AgentTaskInfo` wire
+/// format and returns immediately with the server-assigned task ID.
 ///
 /// # Examples
 /// ```text
@@ -395,18 +379,46 @@ async fn show(client: &ApiClient, id: &str) -> Result<AgentDetail, CliError> {
 /// ```
 #[instrument(skip(client))]
 async fn exec_submit(client: &ApiClient, id: &str, cmd: &str) -> Result<JobSubmitted, CliError> {
+    /// Minimal `AgentTaskInfo` projection — field names match the PascalCase
+    /// serde renames on the canonical `red_cell_common::operator::AgentTaskInfo`
+    /// struct so the server can deserialise them without modification.
     #[derive(Serialize)]
     struct Body<'a> {
-        cmd: &'a str,
+        #[serde(rename = "CommandLine")]
+        command_line: &'a str,
+        /// Numeric demon command identifier as a decimal string.
+        /// `21` = `DemonCommand::CommandJob` — the generic job/shell command.
+        #[serde(rename = "CommandID")]
+        command_id: &'static str,
+        /// Target agent identifier (upper-hex).  The server normalises this
+        /// value; an empty string is replaced with the path parameter.
+        #[serde(rename = "DemonID")]
+        demon_id: &'a str,
+        /// Leave blank so the server generates a unique task identifier.
+        #[serde(rename = "TaskID")]
+        task_id: &'static str,
     }
-    let resp: JobSubmitResponse = client.post(&format!("/agents/{id}/jobs"), &Body { cmd }).await?;
-    Ok(JobSubmitted { job_id: resp.job_id })
+
+    let resp: TaskQueuedResponse = client
+        .post(
+            &format!("/agents/{id}/task"),
+            &Body { command_line: cmd, command_id: "21", demon_id: id, task_id: "" },
+        )
+        .await?;
+    Ok(JobSubmitted { job_id: resp.task_id })
 }
 
-/// `agent exec <id> --cmd <cmd> --wait` — submit job and poll until complete.
+/// `agent exec <id> --cmd <cmd> --wait` — submit task and poll until the agent
+/// dequeues it.
 ///
-/// Polls every second until the job status is `"done"` or `"error"`, or until
+/// Polls `GET /jobs?agent_id={id}&task_id={tid}` every second until the job
+/// disappears from the queue (i.e. the agent has picked it up) or until
 /// `timeout_secs` elapse (exit code 5).
+///
+/// **Note:** the current REST API does not expose command output.  The returned
+/// `ExecResult.output` will contain an explanatory message directing the
+/// operator to the WebSocket client.  Use `red-cell-client` for interactive
+/// sessions with live output.
 ///
 /// # Examples
 /// ```text
@@ -420,53 +432,55 @@ async fn exec_wait(
     timeout_secs: u64,
 ) -> Result<ExecResult, CliError> {
     let submitted = exec_submit(client, id, cmd).await?;
-    let job_id = &submitted.job_id;
+    let task_id = submitted.job_id.clone();
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-    let job_path = format!("/agents/{id}/jobs/{job_id}");
+    let poll_path = format!("/jobs?agent_id={id}&task_id={task_id}");
 
     loop {
         if Instant::now() >= deadline {
             return Err(CliError::Timeout(format!(
-                "timed out waiting for job {job_id} after {timeout_secs}s"
+                "timed out waiting for job {task_id} to be picked up after {timeout_secs}s"
             )));
         }
 
-        let status: JobStatusResponse = client.get(&job_path).await?;
+        let page: JobPageResponse = client.get(&poll_path).await?;
 
-        match status.status.as_str() {
-            "done" | "error" => {
-                return Ok(ExecResult {
-                    job_id: status.job_id,
-                    output: status.output.unwrap_or_default(),
-                    exit_code: status.exit_code,
-                });
-            }
-            _ => {
-                sleep(POLL_INTERVAL).await;
-            }
+        if page.total == 0 {
+            // The agent dequeued the job.  REST does not surface output.
+            return Ok(ExecResult {
+                job_id: task_id,
+                output: "output is not available via the REST API; \
+                         use the WebSocket client (red-cell-client) to receive command output"
+                    .to_owned(),
+                exit_code: None,
+            });
         }
+
+        sleep(POLL_INTERVAL).await;
     }
 }
 
-/// `agent output <id>` — fetch all pending output entries.
+/// `agent output <id>` — not available via the REST API.
 ///
-/// # Examples
-/// ```text
-/// red-cell-cli agent output abc123
-/// red-cell-cli agent output abc123 --since job_xyz
-/// ```
-#[instrument(skip(client))]
+/// The teamserver does not expose a REST endpoint for agent callback output.
+/// Connect with the WebSocket client (`red-cell-client`) to receive live
+/// command output from agents.
+///
+/// # Errors
+///
+/// Always returns [`CliError::General`] explaining that the endpoint does not
+/// exist in the current REST API.
+#[instrument(skip(_client))]
 async fn fetch_output(
-    client: &ApiClient,
-    id: &str,
-    since: Option<&str>,
+    _client: &ApiClient,
+    _id: &str,
+    _since: Option<&str>,
 ) -> Result<Vec<OutputEntry>, CliError> {
-    let path = match since {
-        Some(job_id) => format!("/agents/{id}/output?since={job_id}"),
-        None => format!("/agents/{id}/output"),
-    };
-    let raw: Vec<RawOutputEntry> = client.get(&path).await?;
-    Ok(raw.into_iter().map(output_entry_from_raw).collect())
+    Err(CliError::General(
+        "agent output is not available via the REST API; \
+         use the WebSocket client (red-cell-client) to receive command output"
+            .to_owned(),
+    ))
 }
 
 /// `agent output <id> --watch` — stream new output as JSON lines until Ctrl-C.
@@ -539,8 +553,9 @@ async fn watch_output(
 
 /// `agent kill <id> [--wait]` — send terminate command to an agent.
 ///
-/// With `--wait`, polls `GET /agents/{id}` until `status == "dead"` or 60 s
-/// elapse.
+/// Issues `DELETE /agents/{id}` which queues a [`DemonCommand::CommandExit`]
+/// job on the server side.  With `--wait`, polls `GET /agents/{id}` until
+/// `status == "dead"` or 60 s elapse.
 ///
 /// # Examples
 /// ```text
@@ -549,9 +564,7 @@ async fn watch_output(
 /// ```
 #[instrument(skip(client))]
 async fn kill(client: &ApiClient, id: &str, wait: bool) -> Result<KillResult, CliError> {
-    #[derive(Serialize)]
-    struct Empty {}
-    let _: serde_json::Value = client.post(&format!("/agents/{id}/kill"), &Empty {}).await?;
+    client.delete_no_body(&format!("/agents/{id}")).await?;
 
     if !wait {
         return Ok(KillResult { agent_id: id.to_owned(), status: "kill_sent".to_owned() });
@@ -576,71 +589,52 @@ async fn kill(client: &ApiClient, id: &str, wait: bool) -> Result<KillResult, Cl
     }
 }
 
-/// `agent upload <id> --src <local> --dst <remote>` — upload a local file to
-/// the agent.
+/// `agent upload <id> --src <local> --dst <remote>` — not yet available via
+/// the REST API.
 ///
-/// Reads `src` from disk and `POST`s the raw bytes to
-/// `/agents/{id}/upload?dst=<remote>`.  The server queues a file-write job
-/// and returns its job ID.
+/// File upload to an agent is not exposed as a REST endpoint in the current
+/// teamserver.  Use the interactive WebSocket client (`red-cell-client`) for
+/// file transfers.
 ///
-/// # Examples
-/// ```text
-/// red-cell-cli agent upload abc123 --src ./payload.exe --dst C:\Windows\Temp\p.exe
-/// ```
-#[instrument(skip(client))]
+/// # Errors
+///
+/// Always returns [`CliError::General`].
+#[instrument(skip(_client))]
 async fn upload(
-    client: &ApiClient,
-    id: &str,
-    src: &str,
-    dst: &str,
+    _client: &ApiClient,
+    _id: &str,
+    _src: &str,
+    _dst: &str,
 ) -> Result<TransferResult, CliError> {
-    let data = tokio::fs::read(src)
-        .await
-        .map_err(|e| CliError::General(format!("cannot read {src}: {e}")))?;
-
-    let encoded_dst = percent_encode(dst);
-    let path = format!("/agents/{id}/upload?dst={encoded_dst}");
-    let resp: UploadResponse = client.post_bytes(&path, data).await?;
-
-    Ok(TransferResult {
-        agent_id: id.to_owned(),
-        job_id: Some(resp.job_id),
-        local_path: src.to_owned(),
-        remote_path: dst.to_owned(),
-    })
+    Err(CliError::General(
+        "file upload is not yet supported via the REST API; \
+         use the WebSocket client (red-cell-client) for file transfers"
+            .to_owned(),
+    ))
 }
 
-/// `agent download <id> --src <remote> --dst <local>` — download a file from
-/// the agent to disk.
+/// `agent download <id> --src <remote> --dst <local>` — not yet available via
+/// the REST API.
 ///
-/// Issues `GET /agents/{id}/download?src=<remote>` and writes the raw bytes to
-/// `dst` on the local filesystem.
+/// File download from an agent is not exposed as a REST endpoint in the current
+/// teamserver.  Use the interactive WebSocket client (`red-cell-client`) for
+/// file transfers.
 ///
-/// # Examples
-/// ```text
-/// red-cell-cli agent download abc123 --src /etc/passwd --dst ./passwd.txt
-/// ```
-#[instrument(skip(client))]
+/// # Errors
+///
+/// Always returns [`CliError::General`].
+#[instrument(skip(_client))]
 async fn download(
-    client: &ApiClient,
-    id: &str,
-    src: &str,
-    dst: &str,
+    _client: &ApiClient,
+    _id: &str,
+    _src: &str,
+    _dst: &str,
 ) -> Result<TransferResult, CliError> {
-    let encoded_src = percent_encode(src);
-    let path = format!("/agents/{id}/download?src={encoded_src}");
-    let bytes = client.get_raw_bytes(&path).await?;
-
-    tokio::fs::write(dst, &bytes)
-        .await
-        .map_err(|e| CliError::General(format!("cannot write {dst}: {e}")))?;
-
-    Ok(TransferResult {
-        agent_id: id.to_owned(),
-        job_id: None,
-        local_path: dst.to_owned(),
-        remote_path: src.to_owned(),
-    })
+    Err(CliError::General(
+        "file download is not yet supported via the REST API; \
+         use the WebSocket client (red-cell-client) for file transfers"
+            .to_owned(),
+    ))
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -671,44 +665,6 @@ fn agent_detail_from_raw(r: RawAgent) -> AgentDetail {
         sleep_interval: r.sleep_interval,
         jitter: r.jitter,
     }
-}
-
-fn output_entry_from_raw(r: RawOutputEntry) -> OutputEntry {
-    OutputEntry {
-        job_id: r.job_id,
-        command: r.command,
-        output: r.output,
-        exit_code: r.exit_code,
-        created_at: r.created_at,
-    }
-}
-
-/// Minimal percent-encode for path/query values.
-///
-/// Encodes characters that are unsafe in query-string values: space, `&`, `=`,
-/// `+`, `?`, `#`, `%`, and characters outside ASCII printable range.
-fn percent_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for byte in s.bytes() {
-        match byte {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-'
-            | b'_'
-            | b'.'
-            | b'~'
-            | b'/'
-            | b':'
-            | b'\\' => out.push(byte as char),
-            b => {
-                out.push('%');
-                out.push(char::from_digit((b >> 4) as u32, 16).unwrap_or('0'));
-                out.push(char::from_digit((b & 0xF) as u32, 16).unwrap_or('0'));
-            }
-        }
-    }
-    out
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -957,48 +913,6 @@ mod tests {
         assert!(rendered.contains("/etc/passwd"));
     }
 
-    // ── percent_encode ────────────────────────────────────────────────────────
-
-    #[test]
-    fn percent_encode_leaves_safe_chars_unchanged() {
-        assert_eq!(percent_encode("abc123-_.~/"), "abc123-_.~/");
-    }
-
-    #[test]
-    fn percent_encode_encodes_space() {
-        assert_eq!(percent_encode("hello world"), "hello%20world");
-    }
-
-    #[test]
-    fn percent_encode_encodes_ampersand_and_equals() {
-        assert_eq!(percent_encode("a=b&c=d"), "a%3db%26c%3dd");
-    }
-
-    #[test]
-    fn percent_encode_windows_path() {
-        // Backslash is allowed through (included in safe set).
-        let encoded = percent_encode("C:\\Windows\\Temp\\file.exe");
-        assert!(encoded.contains("C:\\Windows"));
-        assert!(!encoded.contains(' '));
-    }
-
-    #[test]
-    fn percent_encode_empty_string() {
-        assert_eq!(percent_encode(""), "");
-    }
-
-    #[test]
-    fn percent_encode_multibyte_utf8() {
-        // 'é' encodes to bytes 0xC3 0xA9 — each byte must be individually percent-encoded.
-        assert_eq!(percent_encode("caf\u{e9}"), "caf%c3%a9");
-    }
-
-    #[test]
-    fn percent_encode_literal_percent() {
-        // '%' (0x25) is not in the safe set and must be encoded to prevent double-encoding bugs.
-        assert_eq!(percent_encode("/tmp/%test"), "/tmp/%25test");
-    }
-
     // ── from_raw helpers ──────────────────────────────────────────────────────
 
     #[test]
@@ -1059,74 +973,72 @@ mod tests {
         }
     }
 
-    /// Build a minimal `RawOutputEntry` JSON object.
-    fn raw_output_json(job_id: &str, output: &str, exit_code: i32) -> serde_json::Value {
-        serde_json::json!({
-            "job_id": job_id,
-            "command": "whoami",
-            "output": output,
-            "exit_code": exit_code,
-            "created_at": "2026-01-01T00:00:00Z"
-        })
-    }
-
-    /// `exec_wait`: mock returns `status="pending"` on the first poll then
-    /// `status="done"` on the second → function waits through the sleep, then
-    /// returns the output.
+    /// `exec_wait`: mock returns `total=1` (job still queued) on the first poll,
+    /// then `total=0` (agent dequeued it) on the second → function waits
+    /// through the sleep and returns an `ExecResult` with the task_id.
     ///
     /// This test takes ~1 s of real time because `exec_wait` calls
-    /// `sleep(POLL_INTERVAL)` after the "pending" response before re-polling.
+    /// `sleep(POLL_INTERVAL)` after the "still queued" response.
     #[tokio::test]
-    async fn exec_wait_pending_then_done_returns_output() {
-        use wiremock::matchers::{method, path};
+    async fn exec_wait_pending_then_dequeued_returns_task_id() {
+        use wiremock::matchers::{method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
 
-        // POST submit → job_id
+        // POST /agents/{id}/task → task_id
         Mock::given(method("POST"))
-            .and(path("/api/v1/agents/agent1/jobs"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({"job_id": "j1"})),
-            )
+            .and(path("/api/v1/agents/agent1/task"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "agent_id": "AGENT1",
+                "task_id": "TASK001",
+                "queued_jobs": 1
+            })))
             .expect(1)
             .mount(&server)
             .await;
 
-        // First GET → "pending" (fires once, then this mock is exhausted)
+        // First GET /jobs?... → still queued (fires once, then exhausted)
         Mock::given(method("GET"))
-            .and(path("/api/v1/agents/agent1/jobs/j1"))
+            .and(path("/api/v1/jobs"))
+            .and(query_param("agent_id", "agent1"))
+            .and(query_param("task_id", "TASK001"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "job_id": "j1",
-                "status": "pending",
-                "output": null,
-                "exit_code": null
+                "total": 1,
+                "limit": 50,
+                "offset": 0,
+                "items": []
             })))
             .up_to_n_times(1)
             .mount(&server)
             .await;
 
-        // Subsequent GETs → "done" with output
+        // Subsequent GET /jobs?... → empty (agent dequeued the job)
         Mock::given(method("GET"))
-            .and(path("/api/v1/agents/agent1/jobs/j1"))
+            .and(path("/api/v1/jobs"))
+            .and(query_param("agent_id", "agent1"))
+            .and(query_param("task_id", "TASK001"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "job_id": "j1",
-                "status": "done",
-                "output": "root\n",
-                "exit_code": 0
+                "total": 0,
+                "limit": 50,
+                "offset": 0,
+                "items": []
             })))
             .mount(&server)
             .await;
 
         let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
 
-        // exec_wait sleeps POLL_INTERVAL (1 s) after the "pending" response
-        // before re-polling — the test naturally waits that long.
         let result =
             exec_wait(&client, "agent1", "whoami", 30).await.expect("exec_wait must succeed");
-        assert_eq!(result.job_id, "j1");
-        assert_eq!(result.output, "root\n");
-        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(result.job_id, "TASK001");
+        // REST API does not provide output; the string communicates this to the user.
+        assert!(
+            result.output.contains("WebSocket client"),
+            "output message must mention WebSocket client, got: {:?}",
+            result.output
+        );
+        assert_eq!(result.exit_code, None);
     }
 
     /// `exec_wait`: with `timeout_secs=0` the deadline is already expired when
@@ -1139,11 +1051,12 @@ mod tests {
         let server = MockServer::start().await;
 
         Mock::given(method("POST"))
-            .and(path("/api/v1/agents/agent1/jobs"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"job_id": "j-timeout"})),
-            )
+            .and(path("/api/v1/agents/agent1/task"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "agent_id": "AGENT1",
+                "task_id": "TASK-TIMEOUT",
+                "queued_jobs": 1
+            })))
             .expect(1)
             .mount(&server)
             .await;
@@ -1157,163 +1070,43 @@ mod tests {
         );
     }
 
-    /// `fetch_output`: mock returns two entries → both entries are returned and
-    /// the `job_id` values are preserved.
+    /// `fetch_output` always returns a `CliError::General` because the REST
+    /// API does not expose an agent output endpoint.
     #[tokio::test]
-    async fn fetch_output_returns_all_entries() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/api/v1/agents/agent1/output"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-                raw_output_json("job-a", "stdout line 1", 0),
-                raw_output_json("job-b", "stdout line 2", 1),
-            ])))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
-        let entries =
-            fetch_output(&client, "agent1", None).await.expect("fetch_output must succeed");
-
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].job_id, "job-a");
-        assert_eq!(entries[0].output, "stdout line 1");
-        assert_eq!(entries[1].job_id, "job-b");
-        assert_eq!(entries[1].exit_code, Some(1));
-    }
-
-    /// `fetch_output` with a `since` cursor: the query string must include
-    /// `?since=<job_id>` so the server only returns entries newer than the
-    /// cursor.
-    #[tokio::test]
-    async fn fetch_output_with_since_cursor_sends_correct_query() {
-        use wiremock::matchers::{method, path, query_param};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/api/v1/agents/agent1/output"))
-            .and(query_param("since", "cursor-job"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!([raw_output_json(
-                    "newer-job",
-                    "new output",
-                    0
-                ),])),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
-        let entries = fetch_output(&client, "agent1", Some("cursor-job"))
-            .await
-            .expect("fetch_output with cursor must succeed");
-
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].job_id, "newer-job");
-    }
-
-    /// `watch_output`: each entry's `job_id` becomes the `since` cursor for the
-    /// next poll — verify that the second request includes `?since=<last_job_id>`.
-    ///
-    /// The loop sleeps `POLL_INTERVAL` (1 s) between the two polls; the test
-    /// takes ~1 s of real time.
-    #[tokio::test]
-    async fn watch_output_cursor_advances_to_last_entry_job_id() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-
-        // First poll (no cursor) → two entries; exhausts after one use.
-        Mock::given(method("GET"))
-            .and(path("/api/v1/agents/agent1/output"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-                raw_output_json("j1", "first", 0),
-                raw_output_json("j2", "second", 0),
-            ])))
-            .up_to_n_times(1)
-            .mount(&server)
-            .await;
-
-        // Second poll → error so watch_output exits the loop.
-        Mock::given(method("GET"))
-            .and(path("/api/v1/agents/agent1/output"))
-            .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
-            .mount(&server)
-            .await;
-
-        let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
-
-        let exit_code =
-            watch_output(&client, &crate::output::OutputFormat::Json, "agent1", None).await;
-        assert_ne!(exit_code, crate::error::EXIT_SUCCESS, "500 error must yield non-zero exit");
-
-        // Verify the second GET request carried the `since=j2` cursor.
-        let requests = server.received_requests().await.expect("request recording must be enabled");
-        let get_reqs: Vec<_> =
-            requests.iter().filter(|r| r.method == wiremock::http::Method::GET).collect();
-        assert_eq!(get_reqs.len(), 2, "expected exactly 2 GET requests");
-        assert!(get_reqs[0].url.query().is_none(), "first poll must have no since parameter");
-        let second_query = get_reqs[1].url.query().unwrap_or("");
+    async fn fetch_output_returns_not_supported_error() {
+        // No mock server needed — the function returns early without any HTTP call.
+        let cfg = mock_cfg("http://127.0.0.1:1");
+        let client = crate::client::ApiClient::new(&cfg).expect("build client");
+        let result = fetch_output(&client, "agent1", None).await;
         assert!(
-            second_query.contains("since=j2"),
-            "second poll must carry since=j2, got query: {second_query:?}"
+            matches!(result, Err(crate::error::CliError::General(_))),
+            "fetch_output must return CliError::General; got: {result:?}"
         );
     }
 
-    /// `watch_output`: when the server returns an empty list the cursor must
-    /// NOT advance — the next poll must have no `since` parameter.
-    ///
-    /// The loop sleeps `POLL_INTERVAL` (1 s) between the two polls; the test
-    /// takes ~1 s of real time.
+    /// `fetch_output` with a `since` cursor also returns `CliError::General` —
+    /// the cursor value makes no difference when the endpoint does not exist.
     #[tokio::test]
-    async fn watch_output_empty_entries_do_not_advance_cursor() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+    async fn fetch_output_with_since_cursor_also_returns_error() {
+        let cfg = mock_cfg("http://127.0.0.1:1");
+        let client = crate::client::ApiClient::new(&cfg).expect("build client");
+        let result = fetch_output(&client, "agent1", Some("cursor-job")).await;
+        assert!(
+            matches!(result, Err(crate::error::CliError::General(_))),
+            "fetch_output with cursor must still return CliError::General; got: {result:?}"
+        );
+    }
 
-        let server = MockServer::start().await;
-
-        // First poll → empty list; exhausts after one use.
-        Mock::given(method("GET"))
-            .and(path("/api/v1/agents/agent1/output"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
-            .up_to_n_times(1)
-            .mount(&server)
-            .await;
-
-        // Second poll → error so watch_output exits.
-        Mock::given(method("GET"))
-            .and(path("/api/v1/agents/agent1/output"))
-            .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
-            .mount(&server)
-            .await;
-
-        let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
+    /// `watch_output` exits immediately with a non-zero code because the first
+    /// call to `fetch_output` returns a `CliError::General`.
+    #[tokio::test]
+    async fn watch_output_exits_immediately_with_error() {
+        // No mock server: fetch_output never makes an HTTP request.
+        let cfg = mock_cfg("http://127.0.0.1:1");
+        let client = crate::client::ApiClient::new(&cfg).expect("build client");
 
         let exit_code =
             watch_output(&client, &crate::output::OutputFormat::Json, "agent1", None).await;
-        assert_ne!(exit_code, crate::error::EXIT_SUCCESS, "500 error must yield non-zero exit");
-
-        // Both GET requests must have no `since` parameter — the empty list
-        // must not have advanced the cursor.
-        let requests = server.received_requests().await.expect("request recording must be enabled");
-        let get_reqs: Vec<_> =
-            requests.iter().filter(|r| r.method == wiremock::http::Method::GET).collect();
-        assert_eq!(get_reqs.len(), 2, "expected exactly 2 GET requests");
-        for req in &get_reqs {
-            assert!(
-                req.url.query().is_none(),
-                "neither poll should carry a since cursor, got query: {:?}",
-                req.url.query()
-            );
-        }
+        assert_ne!(exit_code, crate::error::EXIT_SUCCESS, "watch_output must exit non-zero");
     }
 }

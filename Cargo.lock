@@ -4202,9 +4202,11 @@ dependencies = [
 name = "red-cell-cli"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "clap",
  "comfy-table",
  "dirs 5.0.1",
+ "red-cell",
  "red-cell-common",
  "reqwest",
  "rustls",
@@ -4215,6 +4217,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "toml",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "wiremock",

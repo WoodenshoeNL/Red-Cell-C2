@@ -44,7 +44,7 @@ use tokio::io::AsyncBufReadExt as _;
 use tokio::time::sleep;
 use tracing::instrument;
 
-use super::agent::{JobStatusResponse, JobSubmitResponse, RawAgent, RawOutputEntry};
+use super::agent::{JobPageResponse, RawAgent, TaskQueuedResponse};
 use super::listener::RawListenerSummary;
 use crate::client::ApiClient;
 use crate::error::{CliError, EXIT_GENERAL, EXIT_SUCCESS};
@@ -78,6 +78,7 @@ struct SessionCmd {
     timeout: Option<u64>,
     /// Only return output newer than this job ID (`agent.output`).
     #[serde(default)]
+    #[allow(dead_code)]
     since: Option<String>,
     /// Listener name for `listener.show`.
     #[serde(default)]
@@ -206,14 +207,13 @@ async fn dispatch(
         }
 
         "agent.output" => {
-            let id = agent_id(msg, default_agent)?;
-            let path = match msg.since.as_deref() {
-                Some(job_id) => format!("/agents/{id}/output?since={job_id}"),
-                None => format!("/agents/{id}/output"),
-            };
-            let entries: Vec<RawOutputEntry> = client.get(&path).await?;
-            Ok(serde_json::to_value(entries)
-                .map_err(|e| CliError::General(format!("serialise error: {e}")))?)
+            // The teamserver does not expose a REST output endpoint.
+            // Operators should use the WebSocket client for live output.
+            Err(CliError::General(
+                "agent output is not available via the REST API; \
+                 use the WebSocket client (red-cell-client) to receive command output"
+                    .to_owned(),
+            ))
         }
 
         "agent.kill" => {
@@ -245,6 +245,11 @@ async fn dispatch(
 // ── command implementations ───────────────────────────────────────────────────
 
 /// Execute a shell command on an agent, optionally waiting for completion.
+///
+/// Submits the command via `POST /agents/{id}/task` using the Demon
+/// `AgentTaskInfo` wire format.  With `wait=true`, polls
+/// `GET /jobs?agent_id={id}&task_id={tid}` until the job is dequeued by the
+/// agent or `timeout_secs` elapse.  Output is not available via REST.
 #[instrument(skip(client))]
 async fn exec(
     client: &ApiClient,
@@ -255,45 +260,58 @@ async fn exec(
 ) -> Result<serde_json::Value, CliError> {
     #[derive(Serialize)]
     struct Body<'a> {
-        cmd: &'a str,
+        #[serde(rename = "CommandLine")]
+        command_line: &'a str,
+        #[serde(rename = "CommandID")]
+        command_id: &'static str,
+        #[serde(rename = "DemonID")]
+        demon_id: &'a str,
+        #[serde(rename = "TaskID")]
+        task_id: &'static str,
     }
 
-    let resp: JobSubmitResponse =
-        client.post(&format!("/agents/{agent_id}/jobs"), &Body { cmd: command }).await?;
-    let job_id = resp.job_id;
+    let resp: TaskQueuedResponse = client
+        .post(
+            &format!("/agents/{agent_id}/task"),
+            &Body { command_line: command, command_id: "21", demon_id: agent_id, task_id: "" },
+        )
+        .await?;
+    let task_id = resp.task_id;
 
     if !wait {
-        return Ok(serde_json::json!({"job_id": job_id}));
+        return Ok(serde_json::json!({"job_id": task_id}));
     }
 
-    // Poll until done or timeout.
+    // Poll until the agent dequeues the job or the deadline is reached.
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-    let job_path = format!("/agents/{agent_id}/jobs/{job_id}");
+    let poll_path = format!("/jobs?agent_id={agent_id}&task_id={task_id}");
 
     loop {
         if Instant::now() >= deadline {
             return Err(CliError::Timeout(format!(
-                "timed out waiting for job {job_id} after {timeout_secs}s"
+                "timed out waiting for job {task_id} to be picked up after {timeout_secs}s"
             )));
         }
 
-        let status: JobStatusResponse = client.get(&job_path).await?;
-        match status.status.as_str() {
-            "done" | "error" => {
-                return Ok(serde_json::json!({
-                    "job_id": status.job_id,
-                    "output": status.output.unwrap_or_default(),
-                    "exit_code": status.exit_code,
-                }));
-            }
-            _ => {
-                sleep(POLL_INTERVAL).await;
-            }
+        let page: JobPageResponse = client.get(&poll_path).await?;
+
+        if page.total == 0 {
+            return Ok(serde_json::json!({
+                "job_id": task_id,
+                "output": "output is not available via the REST API; \
+                           use the WebSocket client (red-cell-client) to receive command output",
+                "exit_code": null,
+            }));
         }
+
+        sleep(POLL_INTERVAL).await;
     }
 }
 
 /// Send a kill command to an agent, optionally waiting until it is dead.
+///
+/// Issues `DELETE /agents/{id}` which the server interprets as a
+/// `CommandExit` task queued on the agent.
 #[instrument(skip(client))]
 async fn kill(
     client: &ApiClient,
@@ -301,9 +319,7 @@ async fn kill(
     wait: bool,
     timeout_secs: u64,
 ) -> Result<serde_json::Value, CliError> {
-    #[derive(Serialize)]
-    struct Empty {}
-    let _: serde_json::Value = client.post(&format!("/agents/{agent_id}/kill"), &Empty {}).await?;
+    client.delete_no_body(&format!("/agents/{agent_id}")).await?;
 
     if !wait {
         return Ok(serde_json::json!({"agent_id": agent_id, "status": "kill_sent"}));
@@ -599,10 +615,10 @@ mod tests {
         );
     }
 
-    // ── dispatch: agent.output URL construction ───────────────────────────────
+    // ── dispatch: agent.output ────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn dispatch_agent_output_without_since_hits_plain_url() {
+    async fn dispatch_agent_output_without_since_returns_general_error() {
         use crate::config::ResolvedConfig;
         let cfg = ResolvedConfig {
             server: "https://127.0.0.1:1".to_owned(),
@@ -611,18 +627,17 @@ mod tests {
             tls_mode: crate::config::TlsMode::SystemRoots,
         };
         let client = ApiClient::new(&cfg).expect("build client");
-        // No `since` field — URL must be /agents/{id}/output (no query string).
         let msg: SessionCmd =
             serde_json::from_str(r#"{"cmd":"agent.output","id":"agent1"}"#).expect("parse");
         let result = dispatch(&client, &msg, None).await;
         assert!(
-            matches!(result, Err(CliError::ServerUnreachable(_))),
-            "expected ServerUnreachable (no since), got {result:?}"
+            matches!(result, Err(CliError::General(_))),
+            "expected General error (output not available via REST API), got {result:?}"
         );
     }
 
     #[tokio::test]
-    async fn dispatch_agent_output_with_since_appends_query_param() {
+    async fn dispatch_agent_output_with_since_returns_general_error() {
         use crate::config::ResolvedConfig;
         let cfg = ResolvedConfig {
             server: "https://127.0.0.1:1".to_owned(),
@@ -631,14 +646,13 @@ mod tests {
             tls_mode: crate::config::TlsMode::SystemRoots,
         };
         let client = ApiClient::new(&cfg).expect("build client");
-        // `since` set — URL must be /agents/{id}/output?since=job_xyz.
         let msg: SessionCmd =
             serde_json::from_str(r#"{"cmd":"agent.output","id":"agent1","since":"job_xyz"}"#)
                 .expect("parse");
         let result = dispatch(&client, &msg, None).await;
         assert!(
-            matches!(result, Err(CliError::ServerUnreachable(_))),
-            "expected ServerUnreachable (with since), got {result:?}"
+            matches!(result, Err(CliError::General(_))),
+            "expected General error (output not available via REST API), got {result:?}"
         );
     }
 
@@ -704,7 +718,7 @@ mod tests {
         })
     }
 
-    /// `exec wait=false` — POST job, return job_id immediately without polling.
+    /// `exec wait=false` — POST task, return task_id immediately without polling.
     #[tokio::test]
     async fn exec_wait_false_returns_job_id_without_polling() {
         use wiremock::matchers::{method, path};
@@ -712,10 +726,12 @@ mod tests {
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api/v1/agents/agent1/jobs"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({"job_id": "job-abc"})),
-            )
+            .and(path("/api/v1/agents/agent1/task"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "agent_id": "AGENT1",
+                "task_id": "TASK-ABC",
+                "queued_jobs": 1
+            })))
             .expect(1)
             .mount(&server)
             .await;
@@ -723,34 +739,39 @@ mod tests {
         let client = ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
         let result = exec(&client, "agent1", "whoami", false, 60).await.expect("exec must succeed");
 
-        assert_eq!(result["job_id"], "job-abc");
+        assert_eq!(result["job_id"], "TASK-ABC");
     }
 
-    /// `exec wait=true` — poll until status is `"done"`, return output.
+    /// `exec wait=true` — poll until agent dequeues the job.  REST does not
+    /// provide output, but the function must succeed with the task_id.
     #[tokio::test]
-    async fn exec_wait_true_returns_output_when_job_done() {
-        use wiremock::matchers::{method, path};
+    async fn exec_wait_true_returns_task_id_when_job_dequeued() {
+        use wiremock::matchers::{method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api/v1/agents/agent1/jobs"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({"job_id": "job-xyz"})),
-            )
+            .and(path("/api/v1/agents/agent1/task"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "agent_id": "AGENT1",
+                "task_id": "TASK-XYZ",
+                "queued_jobs": 1
+            })))
             .expect(1)
             .mount(&server)
             .await;
 
+        // Immediate dequeue (total=0) so no sleep is needed.
         Mock::given(method("GET"))
-            .and(path("/api/v1/agents/agent1/jobs/job-xyz"))
+            .and(path("/api/v1/jobs"))
+            .and(query_param("agent_id", "agent1"))
+            .and(query_param("task_id", "TASK-XYZ"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "job_id": "job-xyz",
-                "status": "done",
-                "output": "root\n",
-                "exit_code": 0
+                "total": 0,
+                "limit": 50,
+                "offset": 0,
+                "items": []
             })))
-            .expect(1)
             .mount(&server)
             .await;
 
@@ -758,9 +779,12 @@ mod tests {
         let result =
             exec(&client, "agent1", "whoami", true, 60).await.expect("exec wait=true must succeed");
 
-        assert_eq!(result["job_id"], "job-xyz");
-        assert_eq!(result["output"], "root\n");
-        assert_eq!(result["exit_code"], 0);
+        assert_eq!(result["job_id"], "TASK-XYZ");
+        // REST API does not provide output.
+        assert!(
+            result["output"].as_str().is_some_and(|s| s.contains("WebSocket client")),
+            "output message must mention WebSocket client"
+        );
     }
 
     /// `exec wait=true, timeout=0` — deadline is already expired on first loop
@@ -772,11 +796,12 @@ mod tests {
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api/v1/agents/agent1/jobs"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"job_id": "job-timeout"})),
-            )
+            .and(path("/api/v1/agents/agent1/task"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "agent_id": "AGENT1",
+                "task_id": "TASK-TIMEOUT",
+                "queued_jobs": 1
+            })))
             .expect(1)
             .mount(&server)
             .await;
@@ -790,16 +815,20 @@ mod tests {
         );
     }
 
-    /// `kill wait=false` — POST kill, return `kill_sent` immediately without polling.
+    /// `kill wait=false` — DELETE /agents/{id}, return `kill_sent` immediately.
     #[tokio::test]
     async fn kill_wait_false_returns_kill_sent_without_polling() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/api/v1/agents/agent1/kill"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/agents/agent1"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "agent_id": "AGENT1",
+                "task_id": "KILL-TASK",
+                "queued_jobs": 1
+            })))
             .expect(1)
             .mount(&server)
             .await;
@@ -812,16 +841,20 @@ mod tests {
         assert_eq!(result["status"], "kill_sent");
     }
 
-    /// `kill wait=true` — poll until agent status is `"dead"`, return success.
+    /// `kill wait=true` — DELETE then poll until agent status is `"dead"`.
     #[tokio::test]
     async fn kill_wait_true_returns_success_when_agent_dies() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/api/v1/agents/agent1/kill"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/agents/agent1"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "agent_id": "AGENT1",
+                "task_id": "KILL-TASK",
+                "queued_jobs": 1
+            })))
             .expect(1)
             .mount(&server)
             .await;
@@ -848,9 +881,13 @@ mod tests {
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/api/v1/agents/agent1/kill"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/agents/agent1"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "agent_id": "AGENT1",
+                "task_id": "KILL-TASK",
+                "queued_jobs": 1
+            })))
             .expect(1)
             .mount(&server)
             .await;

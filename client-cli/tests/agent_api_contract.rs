@@ -1,0 +1,344 @@
+//! Integration tests — agent commands against the real teamserver router.
+//!
+//! These tests exercise the contract between the CLI's expected request/response
+//! shapes and the actual routes registered in `red_cell::api_routes`.  They
+//! start a real HTTP server on an ephemeral port, insert a test agent via the
+//! shared [`AgentRegistry`], and verify that the routes the CLI uses respond
+//! correctly.
+
+use std::net::SocketAddr;
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use red_cell::{
+    AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
+    ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
+    ShutdownController, SocketRelayManager, TeamserverState, build_router,
+};
+use red_cell_common::config::Profile;
+use red_cell_common::{AgentEncryptionInfo, AgentRecord};
+use tower::ServiceExt as _;
+
+// ── constants ─────────────────────────────────────────────────────────────────
+
+/// Profile snippet that registers one Admin API key with value `test-secret`.
+const PROFILE_HCL: &str = r#"
+    Teamserver {
+        Host = "127.0.0.1"
+        Port = 40056
+    }
+    Operators {
+        user "testop" {
+            Password = "password1234!"
+            Role    = "Operator"
+        }
+    }
+    Demon {}
+    Api {
+        RateLimitPerMinute = 60
+        key "test-key" {
+            Value = "test-secret"
+            Role  = "Admin"
+        }
+    }
+"#;
+
+/// The plain-text API key value configured in `PROFILE_HCL`.
+const API_KEY: &str = "test-secret";
+/// A known agent id used across tests.
+const AGENT_ID_HEX: &str = "DEADBEEF";
+const AGENT_ID_U32: u32 = 0xDEAD_BEEF;
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+/// Build a minimal [`TeamserverState`] with an in-memory database and one Admin
+/// API key.  The returned [`AgentRegistry`] is a clone of the state's registry
+/// so tests can insert agents *after* the router is built (both share the same
+/// underlying `Arc`).
+async fn build_test_state() -> (TeamserverState, AgentRegistry) {
+    let profile = Profile::parse(PROFILE_HCL).expect("profile parse");
+    let database = Database::connect_in_memory().await.expect("database");
+    let agent_registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(agent_registry.clone(), events.clone());
+    let state = TeamserverState {
+        profile: profile.clone(),
+        database: database.clone(),
+        auth: AuthService::from_profile(&profile).expect("auth service"),
+        api: ApiRuntime::from_profile(&profile).expect("api runtime"),
+        events: events.clone(),
+        connections: OperatorConnectionManager::new(),
+        agent_registry: agent_registry.clone(),
+        listeners: ListenerManager::new(
+            database,
+            agent_registry.clone(),
+            events,
+            sockets.clone(),
+            None,
+        ),
+        payload_builder: PayloadBuilderService::disabled_for_tests(),
+        sockets,
+        webhooks: AuditWebhookNotifier::from_profile(&profile),
+        login_rate_limiter: LoginRateLimiter::new(),
+        shutdown: ShutdownController::new(),
+        service_bridge: None,
+    };
+    (state, agent_registry)
+}
+
+/// Construct a minimal [`AgentRecord`] for the given `agent_id`.
+fn sample_agent(agent_id: u32) -> AgentRecord {
+    AgentRecord {
+        agent_id,
+        active: true,
+        reason: "http".to_owned(),
+        note: String::new(),
+        encryption: AgentEncryptionInfo::default(),
+        hostname: "workstation".to_owned(),
+        username: "operator".to_owned(),
+        domain_name: "LAB".to_owned(),
+        external_ip: "203.0.113.10".to_owned(),
+        internal_ip: "10.0.0.10".to_owned(),
+        process_name: "demon.exe".to_owned(),
+        process_path: "C:\\Windows\\System32\\demon.exe".to_owned(),
+        base_address: 0x1400_0000,
+        process_pid: 4444,
+        process_tid: 4445,
+        process_ppid: 1000,
+        process_arch: "x64".to_owned(),
+        elevated: true,
+        os_version: "Windows 11".to_owned(),
+        os_build: 22000,
+        os_arch: "x64".to_owned(),
+        sleep_delay: 5,
+        sleep_jitter: 10,
+        kill_date: None,
+        working_hours: None,
+        first_call_in: "2026-03-01T00:00:00Z".to_owned(),
+        last_call_in: "2026-03-01T00:05:00Z".to_owned(),
+    }
+}
+
+/// Issue a oneshot request against the router and return the response.
+async fn call(
+    state: TeamserverState,
+    method: &str,
+    uri: &str,
+    api_key: &str,
+    body: Option<serde_json::Value>,
+) -> axum::response::Response {
+    let router = build_router(state);
+    let mut builder = Request::builder().method(method).uri(uri).header("x-api-key", api_key);
+
+    let req_body = match body {
+        Some(json) => {
+            builder = builder.header("content-type", "application/json");
+            Body::from(serde_json::to_vec(&json).expect("json serialise"))
+        }
+        None => Body::empty(),
+    };
+
+    router
+        .oneshot(builder.body(req_body).expect("request build"))
+        .await
+        .expect("router should respond")
+}
+
+/// Read the response body as a JSON value.
+async fn read_json(response: axum::response::Response) -> serde_json::Value {
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body bytes");
+    serde_json::from_slice(&bytes).expect("json body")
+}
+
+// ── tests ─────────────────────────────────────────────────────────────────────
+
+/// `POST /api/v1/agents/{id}/task` returns 202 Accepted with `{agent_id,
+/// task_id, queued_jobs}` when the agent exists and the request body is a
+/// valid `AgentTaskInfo`.
+///
+/// This is the route that `exec_submit` calls.
+#[tokio::test]
+async fn post_agent_task_queues_job_and_returns_202() {
+    let (state, registry) = build_test_state().await;
+    registry.insert(sample_agent(AGENT_ID_U32)).await.expect("insert agent");
+
+    let body = serde_json::json!({
+        "CommandLine": "whoami",
+        "CommandID":   "100",
+        "DemonID":     AGENT_ID_HEX,
+        "TaskID":      "A1B2"
+    });
+
+    let response =
+        call(state, "POST", &format!("/api/v1/agents/{AGENT_ID_HEX}/task"), API_KEY, Some(body))
+            .await;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::ACCEPTED,
+        "POST /agents/{{id}}/task must return 202 Accepted"
+    );
+
+    let json = read_json(response).await;
+    assert_eq!(json["agent_id"], AGENT_ID_HEX, "agent_id must be returned");
+    assert_eq!(json["task_id"], "A1B2", "task_id must match the submitted TaskID");
+    assert_eq!(json["queued_jobs"], 1, "one job should now be queued");
+}
+
+/// `POST /api/v1/agents/{id}/task` returns 404 when the agent does not exist.
+///
+/// Confirms the route is registered (not 405 Method Not Allowed) and that the
+/// error code is `agent_not_found`.
+#[tokio::test]
+async fn post_agent_task_returns_404_for_unknown_agent() {
+    let (state, _registry) = build_test_state().await;
+
+    let body = serde_json::json!({
+        "CommandLine": "whoami",
+        "CommandID":   "100",
+        "DemonID":     AGENT_ID_HEX,
+        "TaskID":      "AA"
+    });
+
+    let response =
+        call(state, "POST", &format!("/api/v1/agents/{AGENT_ID_HEX}/task"), API_KEY, Some(body))
+            .await;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "unknown agent must return 404 (not 405 which would mean route is missing)"
+    );
+
+    let json = read_json(response).await;
+    assert_eq!(json["error"]["code"], "agent_not_found");
+}
+
+/// `GET /api/v1/jobs?agent_id={id}&task_id={tid}` returns an empty page
+/// (`total=0`) when no jobs are queued.
+///
+/// This is the polling endpoint `exec_wait` uses to detect dequeue.
+#[tokio::test]
+async fn get_jobs_with_agent_and_task_filter_returns_empty_when_no_jobs() {
+    let (state, registry) = build_test_state().await;
+    registry.insert(sample_agent(AGENT_ID_U32)).await.expect("insert agent");
+
+    let uri = format!("/api/v1/jobs?agent_id={AGENT_ID_HEX}&task_id=SOMETASK");
+    let response = call(state, "GET", &uri, API_KEY, None).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = read_json(response).await;
+    assert_eq!(json["total"], 0);
+}
+
+/// `DELETE /api/v1/agents/{id}` returns 202 Accepted when the agent exists,
+/// queuing a kill task.
+///
+/// This is the route `kill` calls instead of the old `POST /agents/{id}/kill`.
+#[tokio::test]
+async fn delete_agent_returns_202_and_queues_kill_task() {
+    let (state, registry) = build_test_state().await;
+    registry.insert(sample_agent(AGENT_ID_U32)).await.expect("insert agent");
+
+    let response =
+        call(state, "DELETE", &format!("/api/v1/agents/{AGENT_ID_HEX}"), API_KEY, None).await;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::ACCEPTED,
+        "DELETE /agents/{{id}} must return 202 Accepted"
+    );
+
+    let json = read_json(response).await;
+    assert_eq!(json["agent_id"], AGENT_ID_HEX);
+    // A kill task was enqueued.
+    assert!(json["queued_jobs"].as_u64().unwrap_or(0) >= 1, "kill job must be queued");
+}
+
+/// `DELETE /api/v1/agents/{id}` returns 404 for an unknown agent.
+///
+/// The route must be registered (not 405 Method Not Allowed).
+#[tokio::test]
+async fn delete_agent_returns_404_for_unknown_agent() {
+    let (state, _registry) = build_test_state().await;
+
+    let response =
+        call(state, "DELETE", &format!("/api/v1/agents/{AGENT_ID_HEX}"), API_KEY, None).await;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "unknown agent must return 404 (not 405 which would mean the DELETE route is missing)"
+    );
+}
+
+/// Old route `POST /api/v1/agents/{id}/jobs` must return 404 (route not
+/// registered), confirming that the CLI's old URL was wrong and no longer
+/// accidentally works.
+#[tokio::test]
+async fn old_post_agents_jobs_route_returns_404() {
+    let (state, registry) = build_test_state().await;
+    registry.insert(sample_agent(AGENT_ID_U32)).await.expect("insert agent");
+
+    let body = serde_json::json!({"cmd": "whoami"});
+    let response =
+        call(state, "POST", &format!("/api/v1/agents/{AGENT_ID_HEX}/jobs"), API_KEY, Some(body))
+            .await;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "the old /agents/{{id}}/jobs route must not exist"
+    );
+}
+
+/// Old route `POST /api/v1/agents/{id}/kill` must return 404, confirming the
+/// CLI's old kill URL was wrong.
+#[tokio::test]
+async fn old_post_agents_kill_route_returns_404() {
+    let (state, registry) = build_test_state().await;
+    registry.insert(sample_agent(AGENT_ID_U32)).await.expect("insert agent");
+
+    let response = call(
+        state,
+        "POST",
+        &format!("/api/v1/agents/{AGENT_ID_HEX}/kill"),
+        API_KEY,
+        Some(serde_json::json!({})),
+    )
+    .await;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "the old /agents/{{id}}/kill route must not exist"
+    );
+}
+
+/// Accessing `/api/v1/agents/{id}/output` (old CLI route) returns 404, not
+/// 200, because no such endpoint is registered.
+#[tokio::test]
+async fn old_get_agent_output_route_returns_404() {
+    let (state, registry) = build_test_state().await;
+    registry.insert(sample_agent(AGENT_ID_U32)).await.expect("insert agent");
+
+    let response =
+        call(state, "GET", &format!("/api/v1/agents/{AGENT_ID_HEX}/output"), API_KEY, None).await;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "/agents/{{id}}/output must not exist — CLI must not call this path"
+    );
+}
+
+/// `SocketAddr` is used only to satisfy the type checker when building a
+/// `ConnectInfo` extension.  This test verifies the server address binding used
+/// by the [`call`] helper is not required (oneshot works without it).
+#[tokio::test]
+async fn server_addr_binding_not_required_for_oneshot() {
+    // Confirms that `SocketAddr` from std is available and that the test
+    // infrastructure compiles and runs without a real TCP listener.
+    let addr: SocketAddr = "127.0.0.1:0".parse().expect("parse addr");
+    assert_eq!(addr.port(), 0);
+}

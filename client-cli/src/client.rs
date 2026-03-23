@@ -107,6 +107,7 @@ impl ApiClient {
     /// `/api/v1` and deserialise the JSON response as `T`.
     ///
     /// Sends `Content-Type: application/octet-stream`.
+    #[allow(dead_code)]
     #[instrument(skip(self, data), fields(path = %path, bytes = data.len()))]
     pub async fn post_bytes<T: DeserializeOwned>(
         &self,

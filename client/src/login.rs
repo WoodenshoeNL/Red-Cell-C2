@@ -1,6 +1,7 @@
 use eframe::egui::{self, Align, Color32, Key, Layout, RichText, TextEdit, Vec2};
 use red_cell_common::crypto::hash_password_sha3;
 use red_cell_common::operator::{EventCode, LoginInfo, Message, MessageHead, OperatorMessage};
+use zeroize::Zeroizing;
 
 use crate::local_config::LocalConfig;
 
@@ -51,7 +52,8 @@ enum FocusRequest {
 pub struct LoginState {
     pub server_url: String,
     pub username: String,
-    pub password: String,
+    /// Login password, wrapped in [`Zeroizing`] so that heap memory is wiped on drop.
+    pub password: Zeroizing<String>,
     pub error_message: Option<String>,
     pub connecting: bool,
     focus_request: FocusRequest,
@@ -71,7 +73,7 @@ impl LoginState {
         Self {
             server_url,
             username,
-            password: String::new(),
+            password: Zeroizing::new(String::new()),
             error_message: None,
             connecting: false,
             focus_request,
@@ -189,7 +191,7 @@ pub(crate) fn render_login_dialog(ctx: &egui::Context, state: &mut LoginState) -
                     ui.label("Password");
                     let password_response = ui.add_sized(
                         Vec2::new(LOGIN_PANEL_WIDTH, 28.0),
-                        TextEdit::singleline(&mut state.password)
+                        TextEdit::singleline(&mut *state.password)
                             .password(true)
                             .hint_text("password"),
                     );
@@ -423,7 +425,7 @@ mod tests {
         state.username = "user".to_owned();
         assert!(!state.can_submit());
 
-        state.password = "pass".to_owned();
+        *state.password = "pass".to_owned();
         assert!(state.can_submit());
     }
 
@@ -431,7 +433,7 @@ mod tests {
     fn can_submit_false_when_connecting() {
         let mut state = default_login_state();
         state.username = "user".to_owned();
-        state.password = "pass".to_owned();
+        *state.password = "pass".to_owned();
         state.set_connecting();
         assert!(!state.can_submit());
     }
@@ -440,7 +442,7 @@ mod tests {
     fn can_submit_rejects_whitespace_only_fields() {
         let mut state = default_login_state();
         state.username = "   ".to_owned();
-        state.password = "pass".to_owned();
+        *state.password = "pass".to_owned();
         assert!(!state.can_submit());
 
         state.server_url = "  ".to_owned();
@@ -452,7 +454,7 @@ mod tests {
     fn build_login_message_hashes_password() {
         let mut state = default_login_state();
         state.username = "operator".to_owned();
-        state.password = "secret".to_owned();
+        *state.password = "secret".to_owned();
 
         let message = state.build_login_message();
         match message {
@@ -470,7 +472,7 @@ mod tests {
     fn build_login_message_trims_username() {
         let mut state = default_login_state();
         state.username = "  operator  ".to_owned();
-        state.password = "pass".to_owned();
+        *state.password = "pass".to_owned();
 
         let message = state.build_login_message();
         match message {
@@ -490,7 +492,7 @@ mod tests {
     fn can_submit_accepts_whitespace_only_password() {
         let mut state = default_login_state();
         state.username = "user".to_owned();
-        state.password = "   ".to_owned(); // three spaces — meets MIN_PASSWORD_LENGTH
+        *state.password = "   ".to_owned(); // three spaces — meets MIN_PASSWORD_LENGTH
         assert!(state.can_submit());
     }
 
@@ -501,7 +503,7 @@ mod tests {
     fn build_login_message_does_not_trim_password() {
         let mut state = default_login_state();
         state.username = "operator".to_owned();
-        state.password = " secret".to_owned(); // leading space is intentional
+        *state.password = " secret".to_owned(); // leading space is intentional
 
         let message = state.build_login_message();
         match message {
@@ -511,6 +513,18 @@ mod tests {
             }
             other => panic!("expected Login variant, got {other:?}"),
         }
+    }
+
+    /// The password field must be `Zeroizing<String>` so that heap memory is wiped on drop.
+    /// This test is a compile-time contract: if the field type is changed to a bare `String`,
+    /// the `Zeroizing::clone` call below will fail to compile.
+    #[test]
+    fn password_field_is_zeroizing() {
+        let mut state = default_login_state();
+        *state.password = "hunter2".to_owned();
+        // Confirm we hold a Zeroizing<String> — the explicit type annotation is the assertion.
+        let _z: Zeroizing<String> = state.password.clone();
+        assert_eq!(*_z, "hunter2");
     }
 
     #[test]
@@ -612,7 +626,7 @@ mod tests {
     fn submittable_login_state() -> LoginState {
         let mut state = default_login_state();
         state.username = "operator".to_owned();
-        state.password = "secret".to_owned();
+        *state.password = "secret".to_owned();
         state
     }
 

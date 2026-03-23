@@ -12,7 +12,7 @@ fn login_message_for(
     password: &str,
 ) -> (LoginState, OperatorMessage) {
     let mut state = LoginState::new(cli_server, config);
-    state.password = password.to_owned();
+    *state.password = password.to_owned();
     let message = state.build_login_message();
     (state, message)
 }

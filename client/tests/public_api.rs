@@ -72,7 +72,7 @@ fn login_state_can_submit_requires_non_empty_fields() {
     assert!(!state.can_submit());
 
     state.username = "op".into();
-    state.password = "pass".into();
+    *state.password = "pass".into();
     assert!(state.can_submit());
 
     // Connecting flag blocks submission

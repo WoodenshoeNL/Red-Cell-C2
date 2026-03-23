@@ -80,6 +80,11 @@ const FAILED_AUTH_DELAY: Duration = Duration::from_secs(2);
 /// causing unbounded memory allocation via oversized frames.
 const SERVICE_MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
+/// Maximum time a service client has to send the initial Register frame before
+/// the connection is closed. Mirrors `AUTHENTICATION_FRAME_TIMEOUT` on the
+/// operator WebSocket path.
+const SERVICE_AUTH_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
+
 // ── Error types ──────────────────────────────────────────────────────
 
 /// Errors produced by the service bridge.
@@ -88,6 +93,10 @@ pub enum ServiceBridgeError {
     /// Authentication failed.
     #[error("service client authentication failed")]
     AuthenticationFailed,
+
+    /// The client did not send the initial Register frame in time.
+    #[error("service client authentication timed out")]
+    AuthenticationTimeout,
 
     /// Too many failed authentication attempts from this IP.
     #[error("service client rate limited")]
@@ -366,8 +375,13 @@ async fn authenticate(
         return Err(ServiceBridgeError::RateLimited);
     }
 
-    let message = match socket.recv().await {
-        Some(Ok(WsMessage::Text(text))) => text,
+    let message = match tokio::time::timeout(SERVICE_AUTH_FRAME_TIMEOUT, socket.recv()).await {
+        Ok(Some(Ok(WsMessage::Text(text)))) => text,
+        Err(_) => {
+            warn!(%client_ip, "service auth timed out waiting for Register frame");
+            let _ = socket.send(WsMessage::Close(None)).await;
+            return Err(ServiceBridgeError::AuthenticationTimeout);
+        }
         _ => return Err(ServiceBridgeError::AuthenticationFailed),
     };
 
@@ -2655,5 +2669,30 @@ mod tests {
 
         let result = auth_handle.await.expect("join");
         assert!(result.is_ok(), "unblocked IP should authenticate successfully");
+    }
+
+    #[tokio::test]
+    async fn authenticate_times_out_when_no_frame_sent() {
+        let server_hash = hash_password_sha3("correct-pw");
+        let rate_limiter = LoginRateLimiter::new();
+        let ip: IpAddr = "127.0.0.1".parse().expect("valid IP");
+
+        let (mut server_ws, _client_ws) = ws_pair().await;
+
+        // Hold `_client_ws` open but never send anything — the server side
+        // should time out after SERVICE_AUTH_FRAME_TIMEOUT.
+        let start = tokio::time::Instant::now();
+        let result = authenticate(&mut server_ws, &server_hash, &rate_limiter, ip).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(result, Err(ServiceBridgeError::AuthenticationTimeout)),
+            "expected AuthenticationTimeout, got {result:?}"
+        );
+        // Should complete within a reasonable margin of the timeout.
+        assert!(
+            elapsed < SERVICE_AUTH_FRAME_TIMEOUT + Duration::from_secs(2),
+            "took too long: {elapsed:?}"
+        );
     }
 }

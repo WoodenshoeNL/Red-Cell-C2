@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 749 | 228 | 31 |
+| Tasks closed | 755 | 228 | 31 |
 | Bugs filed against | 86 | 34 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
 | Quality score | 89% | 85% | 71% |
 
-*Bug rates: Claude 86/749=0.11, Codex 34/228=0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 86/755=0.11, Codex 34/228=0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -3589,3 +3589,15 @@ Biggest blindspot: transport hardening and contract validation still diverge at 
 Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`)
 Tests: failed (`cargo test --workspace`: `active_agent_survives_liveness_sweep_that_kills_stale_peer` returned HTTP 404; already tracked as `red-cell-c2-2tgqn`)
 Issues found: `red-cell-c2-3nx5u` (Claude), `red-cell-c2-ytyoq` (Claude), `red-cell-c2-2r8z7` (Claude)
+
+### QA Review — 2026-03-23 21:48 — f5c7dcfd..3d9e2e83
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 6 | 0 | Closed e4kt8, f65yf, eahmt, b1oga, 2tgqn, and pnx5n. The range adds teamserver test coverage for NormalizedMakeService, loot_context/non_empty_option, the handle_checkin plugin branch, DNS operator-agent round trips, and self-referential pivots, and it fixes the legacy CTR offset in the liveness test. |
+| Codex | 0 | 0 | No task-close commits or product-code changes in this range. Current repo health still includes an older clippy failure in listeners.rs outside this review window. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: mixed (`cargo check --workspace` and `cargo clippy --workspace -- -D warnings` passed on `e089441`; after a fast-forward during review, `cargo clippy -p red-cell --tests -- -D warnings` fails on pre-existing `clippy::octal_escapes` at `teamserver/src/listeners.rs:3697`, outside this review range)
+Tests: failed (`cargo test --workspace`: the previously failing liveness test now passes, but `assembly_dispatch` still returns HTTP 404 on 20 callbacks; already tracked as `red-cell-c2-h76st`)
+Issues found: 0 new bugs filed

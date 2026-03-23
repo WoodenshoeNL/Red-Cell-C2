@@ -19,10 +19,11 @@ use red_cell_common::operator::{
     AgentResponseInfo, AgentTaskInfo, EventCode, FlatInfo, ListenerInfo, ListenerMarkInfo, Message,
     MessageHead, NameInfo, OperatorMessage,
 };
-use red_cell_common::{HttpListenerConfig, ListenerConfig, SmbListenerConfig};
+use red_cell_common::{DnsListenerConfig, HttpListenerConfig, ListenerConfig, SmbListenerConfig};
 use serde_json::Value;
 #[cfg(unix)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UdpSocket;
 use tokio::time::{sleep, timeout};
 use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
 
@@ -509,6 +510,408 @@ async fn operator_session_smb_listener_and_mock_demon_round_trip()
     socket.close(None).await?;
     server.listeners.stop(listener_name).await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn operator_session_dns_listener_and_mock_demon_round_trip()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+
+    let dns_port = free_udp_port();
+    let dns_domain = "c2.example.com";
+    let listener_name = "edge-dns";
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+
+    common::login(&mut socket).await?;
+    common::assert_no_operator_message(&mut socket, Duration::from_millis(200)).await;
+
+    // Create a DNS listener via WebSocket.
+    socket
+        .send(ClientMessage::Text(
+            listener_new_dns_message("operator", listener_name, dns_port, dns_domain).into(),
+        ))
+        .await?;
+
+    let listener_created = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::ListenerNew(message) = listener_created else {
+        panic!("expected listener create event");
+    };
+    assert_eq!(message.info.name.as_deref(), Some(listener_name));
+    assert_eq!(message.info.protocol.as_deref(), Some("Dns"));
+    assert_eq!(message.info.status.as_deref(), Some("Offline"));
+
+    let listener_started = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::ListenerMark(message) = listener_started else {
+        panic!("expected listener start event");
+    };
+    assert_eq!(message.head.event, EventCode::Listener);
+    assert_eq!(message.head.user, "operator");
+    assert_eq!(
+        message.info,
+        ListenerMarkInfo { name: listener_name.to_owned(), mark: "Online".to_owned() }
+    );
+
+    server.listeners.update(dns_listener_config(listener_name, dns_port, dns_domain)).await?;
+    let dns_client = wait_for_dns_listener(dns_port).await?;
+
+    let agent_id = 0x1234_5678_u32;
+    let key: [u8; AGENT_KEY_LENGTH] = [
+        0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F,
+        0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8A, 0x8B, 0x8C, 0x8D, 0x8E,
+        0x8F, 0x90,
+    ];
+    let iv: [u8; AGENT_IV_LENGTH] = [
+        0xD1, 0xE2, 0xF3, 0x04, 0x15, 0x26, 0x37, 0x48, 0x59, 0x6A, 0x7B, 0x8C, 0x9D, 0xAE, 0xBF,
+        0xC0,
+    ];
+
+    // 1. Upload DEMON_INIT via chunked DNS queries.
+    let init_body = common::valid_demon_init_body(agent_id, key, iv);
+    let init_result =
+        dns_upload_demon_packet(&dns_client, agent_id, &init_body, dns_domain, 0x1000).await?;
+    assert_eq!(init_result, "ack", "DEMON_INIT upload must be acknowledged");
+
+    // 2. Download init ACK via DNS download queries.
+    let ack_payload = dns_download_response(&dns_client, agent_id, dns_domain, 0x2000).await?;
+    assert!(!ack_payload.is_empty(), "init ACK response must be non-empty");
+    // Legacy Demon agents reset AES-CTR to block 0 for every packet, so both the
+    // init ACK and all subsequent callbacks use offset 0.
+    let decrypted =
+        red_cell_common::crypto::decrypt_agent_data_at_offset(&key, &iv, 0, &ack_payload)?;
+    assert_eq!(decrypted.as_slice(), &agent_id.to_le_bytes());
+
+    // 3. Operator sees AgentNew.
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentNew(message) = agent_new else {
+        panic!("expected agent session event");
+    };
+    assert_eq!(message.info.name_id, "12345678");
+    assert_eq!(message.info.listener, listener_name);
+    assert_eq!(message.info.hostname, "wkstn-01");
+
+    // 4. Second operator connects and sees agent in snapshot.
+    let (mut snapshot_socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut snapshot_socket).await?;
+    let snapshot_agent = read_until_operator_message(&mut snapshot_socket, |msg| {
+        matches!(msg, OperatorMessage::AgentNew(_))
+    })
+    .await?;
+    let OperatorMessage::AgentNew(snapshot_msg) = snapshot_agent else {
+        panic!("expected agent snapshot event for second operator");
+    };
+    assert_eq!(snapshot_msg.info.name_id, "12345678");
+    assert_eq!(snapshot_msg.info.listener, listener_name);
+    assert_eq!(snapshot_msg.info.hostname, "wkstn-01");
+    snapshot_socket.close(None).await?;
+
+    // 5. Operator sends AgentTask.
+    socket.send(ClientMessage::Text(agent_task_message("2A").into())).await?;
+
+    let task_echo = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentTask(message) = task_echo else {
+        panic!("expected agent task echo");
+    };
+    assert_eq!(message.info.demon_id, "12345678");
+    assert_eq!(message.info.task_id, "2A");
+    assert_eq!(message.info.command_line, "checkin");
+
+    // 6. Agent polls for task via DNS: upload CommandGetJob, then download response.
+    // Legacy Demon mode: every callback is encrypted at CTR offset 0.
+    let get_job_body = common::valid_demon_callback_body(
+        agent_id,
+        key,
+        iv,
+        0,
+        u32::from(DemonCommand::CommandGetJob),
+        5,
+        &[],
+    );
+    let get_job_result =
+        dns_upload_demon_packet(&dns_client, agent_id, &get_job_body, dns_domain, 0x3000).await?;
+    assert_eq!(get_job_result, "ack", "CommandGetJob callback must be acknowledged");
+
+    let job_bytes = dns_download_response(&dns_client, agent_id, dns_domain, 0x4000).await?;
+    let job_message = DemonMessage::from_bytes(&job_bytes)?;
+    assert_eq!(job_message.packages.len(), 1);
+    assert_eq!(job_message.packages[0].command_id, u32::from(DemonCommand::CommandCheckin));
+    assert_eq!(job_message.packages[0].request_id, 0x2A);
+    assert!(job_message.packages[0].payload.is_empty());
+
+    // 7. Agent sends CommandOutput callback via DNS upload.
+    let output_text = "hello from dns demon";
+    let callback_body = common::valid_demon_callback_body(
+        agent_id,
+        key,
+        iv,
+        0,
+        u32::from(DemonCommand::CommandOutput),
+        0x2A,
+        &common::command_output_payload(output_text),
+    );
+    let callback_result =
+        dns_upload_demon_packet(&dns_client, agent_id, &callback_body, dns_domain, 0x5000).await?;
+    assert_eq!(callback_result, "ack", "CommandOutput callback must be acknowledged");
+
+    // 8. Operator receives AgentResponse broadcast.
+    let output_event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(message) = output_event else {
+        panic!("expected agent response event");
+    };
+    assert_agent_output(&message.info, output_text);
+
+    socket.close(None).await?;
+    server.listeners.stop(listener_name).await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// DNS helpers
+// ---------------------------------------------------------------------------
+
+/// Base32hex alphabet (RFC 4648 §7).
+const BASE32HEX_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHIJKLMNOPQRSTUV";
+
+/// Encode `data` using base32hex (unpadded, uppercase).
+fn base32hex_encode(data: &[u8]) -> String {
+    let mut result = String::with_capacity((data.len() * 8).div_ceil(5));
+    let mut buf: u32 = 0;
+    let mut bits: u8 = 0;
+
+    for &byte in data {
+        buf = (buf << 8) | u32::from(byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            result.push(char::from(BASE32HEX_ALPHABET[((buf >> bits) & 0x1F) as usize]));
+        }
+    }
+    if bits > 0 {
+        buf <<= 5 - bits;
+        result.push(char::from(BASE32HEX_ALPHABET[(buf & 0x1F) as usize]));
+    }
+    result
+}
+
+/// Decode base32hex (unpadded, case-insensitive) into bytes.
+fn base32hex_decode(input: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut result = Vec::with_capacity(input.len() * 5 / 8);
+    let mut buf: u32 = 0;
+    let mut bits: u8 = 0;
+
+    for ch in input.chars() {
+        let val = match ch {
+            '0'..='9' => (ch as u8) - b'0',
+            'A'..='V' => (ch as u8) - b'A' + 10,
+            'a'..='v' => (ch as u8) - b'a' + 10,
+            '=' => continue,
+            _ => return Err(format!("invalid base32hex character: {ch}").into()),
+        };
+        buf = (buf << 5) | u32::from(val);
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            result.push((buf >> bits) as u8);
+        }
+    }
+    Ok(result)
+}
+
+/// Build a DNS upload qname for the C2 protocol.
+fn dns_upload_qname(agent_id: u32, seq: u16, total: u16, chunk: &[u8], domain: &str) -> String {
+    format!("{}.{seq:x}-{total:x}-{agent_id:08x}.up.{domain}", base32hex_encode(chunk))
+}
+
+/// Build a DNS download qname for the C2 protocol.
+fn dns_download_qname(agent_id: u32, seq: u16, domain: &str) -> String {
+    format!("{seq:x}-{agent_id:08x}.dn.{domain}")
+}
+
+/// Build a minimal DNS TXT query packet.
+fn build_dns_txt_query(id: u16, qname: &str) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&id.to_be_bytes());
+    buf.extend_from_slice(&0x0100_u16.to_be_bytes()); // flags: QR=0, RD=1
+    buf.extend_from_slice(&1_u16.to_be_bytes()); // qdcount
+    buf.extend_from_slice(&0_u16.to_be_bytes()); // ancount
+    buf.extend_from_slice(&0_u16.to_be_bytes()); // nscount
+    buf.extend_from_slice(&0_u16.to_be_bytes()); // arcount
+    for label in qname.split('.') {
+        buf.push(u8::try_from(label.len()).expect("label too long"));
+        buf.extend_from_slice(label.as_bytes());
+    }
+    buf.push(0);
+    buf.extend_from_slice(&16_u16.to_be_bytes()); // QTYPE TXT
+    buf.extend_from_slice(&1_u16.to_be_bytes()); // QCLASS IN
+    buf
+}
+
+/// DNS wire-format header length.
+const DNS_HEADER_LEN: usize = 12;
+
+/// Parse the TXT answer from a DNS response packet.
+fn parse_dns_txt_answer(packet: &[u8]) -> Option<String> {
+    if packet.len() < DNS_HEADER_LEN {
+        return None;
+    }
+    let mut pos = DNS_HEADER_LEN;
+    while pos < packet.len() {
+        let len = usize::from(packet[pos]);
+        pos += 1;
+        if len == 0 {
+            break;
+        }
+        pos = pos.checked_add(len)?;
+    }
+    pos = pos.checked_add(4)?; // QTYPE + QCLASS
+    pos = pos.checked_add(2 + 2 + 2 + 4 + 2)?; // NAME + TYPE + CLASS + TTL + RDLENGTH
+    let txt_len = usize::from(*packet.get(pos)?);
+    let start = pos.checked_add(1)?;
+    let end = start.checked_add(txt_len)?;
+    std::str::from_utf8(packet.get(start..end)?).ok().map(str::to_owned)
+}
+
+/// Find a free UDP port on 127.0.0.1.
+fn free_udp_port() -> u16 {
+    let sock =
+        std::net::UdpSocket::bind("127.0.0.1:0").expect("failed to bind ephemeral UDP socket");
+    sock.local_addr().expect("failed to read local addr").port()
+}
+
+/// Wait for the DNS listener to start responding.
+async fn wait_for_dns_listener(port: u16) -> Result<UdpSocket, Box<dyn std::error::Error>> {
+    let client = UdpSocket::bind("127.0.0.1:0").await?;
+    client.connect(format!("127.0.0.1:{port}")).await?;
+
+    for _ in 0..40 {
+        let packet = build_dns_txt_query(0xFFFF, "probe.other.domain.com");
+        let _ = client.send(&packet).await;
+        let mut buf = vec![0u8; 512];
+        if timeout(Duration::from_millis(50), client.recv(&mut buf)).await.is_ok() {
+            return Ok(client);
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+    Err(format!("DNS listener on port {port} did not become ready").into())
+}
+
+/// Upload a Demon packet via chunked DNS queries. Returns the final TXT answer.
+async fn dns_upload_demon_packet(
+    client: &UdpSocket,
+    agent_id: u32,
+    payload: &[u8],
+    domain: &str,
+    query_id_base: u16,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let chunks: Vec<&[u8]> = payload.chunks(39).collect();
+    let total = u16::try_from(chunks.len())?;
+    let mut last_txt = String::new();
+
+    for (seq, chunk) in chunks.iter().enumerate() {
+        let seq_u16 = u16::try_from(seq)?;
+        let qname = dns_upload_qname(agent_id, seq_u16, total, chunk, domain);
+        let packet = build_dns_txt_query(query_id_base.wrapping_add(seq_u16), &qname);
+        client.send(&packet).await?;
+
+        let mut buf = vec![0u8; 4096];
+        let len = timeout(Duration::from_secs(5), client.recv(&mut buf)).await??;
+        buf.truncate(len);
+        last_txt = parse_dns_txt_answer(&buf).ok_or("failed to parse TXT answer")?;
+    }
+
+    Ok(last_txt)
+}
+
+/// Download the queued DNS response by polling download queries.
+async fn dns_download_response(
+    client: &UdpSocket,
+    agent_id: u32,
+    domain: &str,
+    query_id_base: u16,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut chunks: Vec<String> = Vec::new();
+    let mut expected_total: Option<usize> = None;
+    let mut seq: u16 = 0;
+
+    loop {
+        let qname = dns_download_qname(agent_id, seq, domain);
+        let packet = build_dns_txt_query(query_id_base.wrapping_add(seq), &qname);
+        client.send(&packet).await?;
+
+        let mut buf = vec![0u8; 4096];
+        let len = timeout(Duration::from_secs(5), client.recv(&mut buf)).await??;
+        buf.truncate(len);
+        let txt = parse_dns_txt_answer(&buf).ok_or("failed to parse download TXT answer")?;
+
+        if txt == "wait" {
+            sleep(Duration::from_millis(50)).await;
+            continue;
+        }
+        if txt == "done" {
+            break;
+        }
+
+        let (total_str, b32_chunk) =
+            txt.split_once(' ').ok_or_else(|| format!("unexpected download response: {txt}"))?;
+        let total: usize = total_str.parse()?;
+        if let Some(et) = expected_total {
+            assert_eq!(et, total, "inconsistent total across download chunks");
+        } else {
+            expected_total = Some(total);
+        }
+        chunks.push(b32_chunk.to_owned());
+        seq += 1;
+
+        if chunks.len() >= total {
+            let done_qname = dns_download_qname(agent_id, seq, domain);
+            let done_packet = build_dns_txt_query(query_id_base.wrapping_add(seq), &done_qname);
+            client.send(&done_packet).await?;
+            let mut done_buf = vec![0u8; 4096];
+            let done_len = timeout(Duration::from_secs(5), client.recv(&mut done_buf)).await??;
+            done_buf.truncate(done_len);
+            let done_txt = parse_dns_txt_answer(&done_buf);
+            assert_eq!(done_txt.as_deref(), Some("done"), "expected 'done' after last chunk");
+            break;
+        }
+    }
+
+    let mut assembled = Vec::new();
+    for chunk in &chunks {
+        assembled.extend_from_slice(&base32hex_decode(chunk)?);
+    }
+    Ok(assembled)
+}
+
+fn listener_new_dns_message(user: &str, name: &str, port: u16, domain: &str) -> String {
+    serde_json::to_string(&OperatorMessage::ListenerNew(Message {
+        head: MessageHead {
+            event: EventCode::Listener,
+            user: user.to_owned(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info: ListenerInfo {
+            name: Some(name.to_owned()),
+            protocol: Some("Dns".to_owned()),
+            status: Some("Online".to_owned()),
+            host_bind: Some("127.0.0.1".to_owned()),
+            port_bind: Some(port.to_string()),
+            extra: BTreeMap::from([("Domain".to_owned(), Value::String(domain.to_owned()))]),
+            ..ListenerInfo::default()
+        },
+    }))
+    .expect("dns listener message should serialize")
+}
+
+fn dns_listener_config(name: &str, port: u16, domain: &str) -> ListenerConfig {
+    ListenerConfig::from(DnsListenerConfig {
+        name: name.to_owned(),
+        host_bind: "127.0.0.1".to_owned(),
+        port_bind: port,
+        domain: domain.to_owned(),
+        record_types: vec!["TXT".to_owned()],
+        kill_date: None,
+        working_hours: None,
+    })
 }
 
 /// Spin up a minimal teamserver with Admin, Operator, and Analyst users.

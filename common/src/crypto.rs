@@ -986,35 +986,28 @@ mod tests {
     }
 
     #[test]
-    fn derive_session_keys_produces_correct_length_output() {
+    fn derive_session_keys_matches_external_hkdf_reference_vectors() {
+        // Generated independently with a standalone Python HKDF-SHA256 implementation.
         let key = hex!(
             "603deb1015ca71be2b73aef0857d7781
              1f352c073b6108d72d9810a30914dff4"
         );
         let iv = hex!("000102030405060708090a0b0c0d0e0f");
-        let secret = b"test-server-secret";
-
-        let derived =
-            derive_session_keys(&key, &iv, secret).expect("HKDF derivation should succeed");
-
-        assert_eq!(derived.key.len(), AGENT_KEY_LENGTH);
-        assert_eq!(derived.iv.len(), AGENT_IV_LENGTH);
-    }
-
-    #[test]
-    fn derive_session_keys_differs_from_raw_input() {
-        let key = hex!(
-            "603deb1015ca71be2b73aef0857d7781
-             1f352c073b6108d72d9810a30914dff4"
+        let alpha =
+            derive_session_keys(&key, &iv, b"test-server-secret").expect("alpha derivation");
+        assert_eq!(
+            alpha.key,
+            hex!("7e65607a2ea7519b7242db07dd15c013c10de12d22e225e6f3df3cc37485dd87")
         );
-        let iv = hex!("000102030405060708090a0b0c0d0e0f");
-        let secret = b"test-server-secret";
+        assert_eq!(alpha.iv, hex!("a1c6229d5cfd281f2f917bb8e237d0dc"));
 
-        let derived =
-            derive_session_keys(&key, &iv, secret).expect("HKDF derivation should succeed");
-
-        assert_ne!(derived.key, key, "derived key must differ from input key");
-        assert_ne!(derived.iv, iv, "derived IV must differ from input IV");
+        let bravo =
+            derive_session_keys(&key, &iv, b"test-server-secret-v2").expect("bravo derivation");
+        assert_eq!(
+            bravo.key,
+            hex!("f8c5042675c1f26038b082fb587dfb86afe67230f8909f4962576765018999ec")
+        );
+        assert_eq!(bravo.iv, hex!("65414dcb1c427ca093a8857368d2a214"));
     }
 
     #[test]

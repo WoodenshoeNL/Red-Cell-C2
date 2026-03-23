@@ -3177,6 +3177,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_agents_includes_dead_agents() {
+        // Dead agents must remain visible in GET /agents so operators can use the
+        // endpoint for forensics and inventory.  If someone mistakenly switches the
+        // implementation to list_active() this test will fail.
+        let (app, registry, _) = test_router_with_registry(Some((
+            60,
+            "rest-admin",
+            "secret-admin",
+            OperatorRole::Admin,
+        )))
+        .await;
+
+        registry.insert(sample_agent(0xDEAD_C0DE)).await.expect("agent should insert");
+        registry.mark_dead(0xDEAD_C0DE, "killed by test").await.expect("mark_dead should succeed");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/agents")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        let agents = body.as_array().expect("agents array");
+        assert_eq!(agents.len(), 1, "dead agent must still appear in the list");
+
+        let agent = &agents[0];
+        assert_eq!(agent["AgentID"], 0xDEAD_C0DE_u32);
+        // Active must be false so callers can distinguish dead from alive agents.
+        assert_eq!(agent["Active"], false, "Active field must be false for a dead agent");
+        // LastCallIn must be present so callers can assess when the agent was last seen.
+        assert!(
+            agent.get("LastCallIn").is_some(),
+            "LastCallIn field must be present in the response"
+        );
+        // FirstCallIn must also be present for completeness.
+        assert!(
+            agent.get("FirstCallIn").is_some(),
+            "FirstCallIn field must be present in the response"
+        );
+    }
+
+    #[tokio::test]
     async fn get_agent_omits_transport_crypto_material() {
         let (app, registry, _) = test_router_with_registry(Some((
             60,

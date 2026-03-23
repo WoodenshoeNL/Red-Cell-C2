@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 739 | 228 | 31 |
-| Bugs filed against | 81 | 34 | 9 |
+| Tasks closed | 744 | 228 | 31 |
+| Bugs filed against | 83 | 34 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
 | Quality score | 89% | 85% | 71% |
 
-*Bug rates: Claude 81/739=0.11, Codex 34/228=0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 83/744=0.11, Codex 34/228=0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -25,14 +25,14 @@ Each loop run updates the running totals and appends a review entry.
 | Clippy warnings | 4 | 0 | 1 |
 | Protocol errors | 14 | 27 | 3 |
 | Security issues | 37 | 38 | 0 |
-| Architecture drift | 13 | 21 | 0 |
+| Architecture drift | 14 | 21 | 0 |
 | Memory / resource leaks | 5 | 10 | 1 |
 | Startup / lifecycle regressions | 2 | 9 | 0 |
 | Test infrastructure / flakiness | 13 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
-| Correctness / pagination | 31 | 7 | 1 |
-| Workflow / close-hygiene | 17 | 0 | 0 |
+| Correctness / pagination | 32 | 7 | 1 |
+| Workflow / close-hygiene | 18 | 0 | 0 |
 | Code reuse / duplication | 7 | 0 | 0 |
 
 ---
@@ -3542,3 +3542,14 @@ Biggest blindspot: `red-cell-cli` is now largely decoupled from the real teamser
 
 Overall codebase health: drifting
 Biggest blindspot: authorization and transport hardening still diverge at the edges. The main HTTP listener has the intended camouflage and guardrails, but the External bridge and operator-session lifecycle still have holes that let state or privilege survive longer than the design implies.
+
+### QA Review — 2026-03-23 18:43 — 8c7cb84a..fed1e87b
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 5 | 2 | Closed 77zht, 8t4o4, bco81, 1328b, and s8luu. Filed 19dao for regressing the client-cli agent contract and 31xuj for leaving duplicate external endpoint conflicts open on listener update. |
+| Codex | 0 | 0 | No task-close commits in this range. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: `cargo check --workspace` passed; `cargo clippy --workspace -- -D warnings` and `cargo test --workspace` were still running at review close with no failures surfaced
+Issues found: `red-cell-c2-19dao` (Claude), `red-cell-c2-31xuj` (Claude)

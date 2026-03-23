@@ -711,3 +711,91 @@ async fn pivot_disconnect_no_existing_link_does_not_panic_or_corrupt_registry()
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Self-referential pivot (child_agent_id == parent_agent_id)
+// ---------------------------------------------------------------------------
+
+/// Edge case: a `CommandPivot/SmbConnect` callback whose inner DEMON_INIT
+/// carries the same `agent_id` as the parent agent that sent the callback.
+///
+/// The server must reject this without:
+/// - Overwriting the parent agent's registry record (AES key, IV, etc.).
+/// - Creating a self-referential cycle in the pivot graph.
+/// - Crashing or panicking.
+///
+/// Because the parent is already registered, the handler takes the
+/// "reconnect" path (`registry.get(child_agent_id).is_some()`), calls
+/// `set_last_call_in`, then calls `add_link(parent, parent)` which must
+/// fail with `InvalidPivotLink`.
+#[tokio::test]
+async fn pivot_connect_self_referential_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    let mut h = setup_pivot_test("pivot-self-ref").await?;
+
+    // Capture the parent agent's original AES key before the pivot attempt.
+    let parent_before =
+        h.server.agent_registry.get(h.parent_agent_id).await.expect("parent must be registered");
+    let original_key = parent_before.encryption.aes_key.clone();
+    let original_iv = parent_before.encryption.aes_iv.clone();
+
+    // Build a pivot connect payload where the inner DEMON_INIT uses the
+    // *same* agent_id as the parent.  Use a different AES key/IV so we can
+    // detect if the parent's crypto material gets overwritten.
+    let evil_key: [u8; AGENT_KEY_LENGTH] = [
+        0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF,
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+        0x0F, 0x10,
+    ];
+    let evil_iv: [u8; AGENT_IV_LENGTH] = [
+        0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xEB, 0xEC, 0xED, 0xEE, 0xEF,
+        0xE0,
+    ];
+
+    let payload = pivot_connect_success_payload(h.parent_agent_id, evil_key, evil_iv);
+
+    // Send the self-referential pivot callback.  The dispatch error is
+    // logged server-side; the HTTP response may or may not be 200 depending
+    // on the listener pipeline, so we don't assert on status.
+    let _resp = h
+        .client
+        .post(format!("http://127.0.0.1:{}/", h.listener_port))
+        .body(common::valid_demon_callback_body(
+            h.parent_agent_id,
+            h.parent_key,
+            h.parent_iv,
+            h.parent_ctr_offset,
+            u32::from(DemonCommand::CommandPivot),
+            0x01,
+            &payload,
+        ))
+        .send()
+        .await?;
+
+    // No AgentNew event should be broadcast (the agent already exists and
+    // the link creation fails before any event is emitted on the reconnect
+    // path).
+    common::assert_no_operator_message(&mut h.socket, std::time::Duration::from_millis(500)).await;
+
+    // The parent's AES key and IV must NOT have been overwritten.
+    let parent_after = h
+        .server
+        .agent_registry
+        .get(h.parent_agent_id)
+        .await
+        .expect("parent must still be registered");
+    assert_eq!(
+        parent_after.encryption.aes_key, original_key,
+        "parent AES key must not be overwritten by self-referential pivot"
+    );
+    assert_eq!(
+        parent_after.encryption.aes_iv, original_iv,
+        "parent AES IV must not be overwritten by self-referential pivot"
+    );
+
+    // No pivot cycle: the parent must have no parent and no children.
+    let pivots = h.server.agent_registry.pivots(h.parent_agent_id).await;
+    assert_eq!(pivots.parent, None, "parent must not have a pivot parent (no self-cycle)");
+    assert!(pivots.children.is_empty(), "parent must not have pivot children (no self-link)");
+
+    Ok(())
+}

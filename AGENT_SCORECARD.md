@@ -24,10 +24,10 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 35 | 13 | 5 |
 | Clippy warnings | 4 | 0 | 1 |
 | Protocol errors | 14 | 27 | 3 |
-| Security issues | 34 | 38 | 0 |
+| Security issues | 35 | 38 | 0 |
 | Architecture drift | 10 | 21 | 0 |
 | Memory / resource leaks | 5 | 10 | 1 |
-| Startup / lifecycle regressions | 1 | 8 | 0 |
+| Startup / lifecycle regressions | 2 | 9 | 0 |
 | Test infrastructure / flakiness | 13 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
@@ -40,6 +40,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-23 17:09
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 2 | security (1), startup/lifecycle (1) | 2ki5p (P1 — External listener path bypasses the per-IP DEMON_INIT limiter), 22jji (P2 — graceful shutdown does not wait for in-flight External listener callbacks) |
+| Codex | 1 | startup/lifecycle (1) | 1u9ld (P2 — fresh profile boot does not auto-start profile-defined External listeners) |
+| Cursor | 0 | — | No findings this pass |
+
+Overall codebase health: on track
+Biggest blindspot: External listener parity is still incomplete. The bridge transport now exists and passes current tests, but it silently diverges from the other agent-facing listeners in critical lifecycle and hardening behavior, so startup/shutdown and pre-auth protections are not uniform across transports.
 
 ### QA Review — 2026-03-23 17:15 — aceb1e2e..62285c3f
 

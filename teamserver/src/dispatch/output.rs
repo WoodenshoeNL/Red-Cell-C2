@@ -1447,11 +1447,11 @@ mod tests {
         let result = handle_job_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
         assert_eq!(result.expect("Died must succeed"), None);
 
-        // Drop the event bus so recv will return Err when the queue is empty.
+        // Drop the event bus so recv returns None when the queue is empty.
         drop(events);
-        let recv_result = rx.try_recv();
+        let recv_result = rx.recv().await;
         assert!(
-            recv_result.is_err(),
+            recv_result.is_none(),
             "Died should not broadcast anything, but got {recv_result:?}"
         );
     }

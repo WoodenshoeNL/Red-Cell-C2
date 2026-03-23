@@ -5,7 +5,7 @@
 //! | Command | API call | Notes |
 //! |---|---|---|
 //! | `operator list` | `GET /operators` | table of all operators |
-//! | `operator create <name> --role <role>` | `POST /operators` | token printed once |
+//! | `operator create <name> --role <role>` | `POST /operators` | prints username and assigned role |
 //! | `operator delete <name>` | `DELETE /operators/{username}` | hard delete |
 //! | `operator set-role <name> <role>` | `PUT /operators/{username}/role` | role update |
 
@@ -43,7 +43,7 @@ struct RawOperatorSummary {
 #[derive(Debug, Deserialize)]
 struct RawCreateResponse {
     username: String,
-    token: String,
+    role: String,
 }
 
 /// Opaque server acknowledgement returned by delete / set-role.
@@ -77,23 +77,17 @@ impl TextRow for OperatorRow {
 }
 
 /// Result returned by `operator create`.
-///
-/// The `token` field is a one-time credential — the operator must capture it
-/// immediately; the server will not show it again.
 #[derive(Debug, Clone, Serialize)]
 pub struct CreateResult {
     /// Operator username.
     pub username: String,
-    /// One-time API token for the new operator.
-    pub token: String,
+    /// Role assigned to the new operator.
+    pub role: String,
 }
 
 impl TextRender for CreateResult {
     fn render_text(&self) -> String {
-        format!(
-            "Operator '{}' created.\nToken (save now — not shown again): {}",
-            self.username, self.token
-        )
+        format!("Operator '{}' created with role '{}'.", self.username, self.role)
     }
 }
 
@@ -211,7 +205,7 @@ async fn create(client: &ApiClient, username: &str, role: &str) -> Result<Create
     let body = serde_json::json!({ "username": username, "role": role });
     let raw: RawCreateResponse = client.post("/operators", &body).await?;
 
-    Ok(CreateResult { username: raw.username, token: raw.token })
+    Ok(CreateResult { username: raw.username, role: raw.role })
 }
 
 /// `operator delete <username>` — permanently remove an operator account.
@@ -332,19 +326,34 @@ mod tests {
     // ── CreateResult ──────────────────────────────────────────────────────────
 
     #[test]
-    fn create_result_render_contains_username_and_token() {
-        let r = CreateResult { username: "alice".to_owned(), token: "tok-abc123".to_owned() };
+    fn create_result_render_contains_username_and_role() {
+        let r = CreateResult { username: "alice".to_owned(), role: "operator".to_owned() };
         let rendered = r.render_text();
         assert!(rendered.contains("alice"));
-        assert!(rendered.contains("tok-abc123"));
+        assert!(rendered.contains("operator"));
     }
 
     #[test]
     fn create_result_serialises_both_fields() {
-        let r = CreateResult { username: "bob".to_owned(), token: "tok-xyz".to_owned() };
+        let r = CreateResult { username: "bob".to_owned(), role: "admin".to_owned() };
         let v = serde_json::to_value(&r).expect("serialise");
         assert_eq!(v["username"], "bob");
-        assert_eq!(v["token"], "tok-xyz");
+        assert_eq!(v["role"], "admin");
+    }
+
+    #[test]
+    fn raw_create_response_deserialises_server_shape() {
+        let json = r#"{"username":"carol","role":"analyst"}"#;
+        let raw: RawCreateResponse = serde_json::from_str(json).expect("deserialise");
+        assert_eq!(raw.username, "carol");
+        assert_eq!(raw.role, "analyst");
+    }
+
+    #[test]
+    fn raw_create_response_rejects_missing_role() {
+        // The old buggy shape had `token` instead of `role`; ensure we reject it.
+        let json = r#"{"username":"dave","token":"tok-xyz"}"#;
+        assert!(serde_json::from_str::<RawCreateResponse>(json).is_err());
     }
 
     // ── DeleteResult ──────────────────────────────────────────────────────────

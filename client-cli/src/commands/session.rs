@@ -99,20 +99,35 @@ struct SessionCmd {
 pub async fn run(client: &ApiClient, default_agent: Option<&str>) -> i32 {
     let stdin = tokio::io::stdin();
     let reader = tokio::io::BufReader::new(stdin);
+    let mut stdout = std::io::stdout();
+
+    tokio::select! {
+        code = run_with_io(reader, &mut stdout, client, default_agent) => code,
+        _ = tokio::signal::ctrl_c() => EXIT_SUCCESS,
+    }
+}
+
+/// Inner session loop — reads from `reader`, writes to `writer`.
+///
+/// Extracted from [`run`] so that tests can inject a `BufReader<&[u8]>` for
+/// stdin and a `Vec<u8>` for stdout without touching real file descriptors.
+async fn run_with_io<R, W>(
+    reader: R,
+    writer: &mut W,
+    client: &ApiClient,
+    default_agent: Option<&str>,
+) -> i32
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+    W: std::io::Write,
+{
     let mut lines = reader.lines();
 
     loop {
-        let line_result: std::io::Result<Option<String>> = tokio::select! {
-            result = lines.next_line() => result,
-            _ = tokio::signal::ctrl_c() => {
-                return EXIT_SUCCESS;
-            }
-        };
-
-        match line_result {
+        match lines.next_line().await {
             Err(e) => {
                 // Fatal I/O error on stdin.
-                emit_error("", &CliError::General(format!("stdin read error: {e}")));
+                emit_error_to(writer, "", &CliError::General(format!("stdin read error: {e}")));
                 return EXIT_GENERAL;
             }
             Ok(None) => {
@@ -120,14 +135,14 @@ pub async fn run(client: &ApiClient, default_agent: Option<&str>) -> i32 {
                 return EXIT_SUCCESS;
             }
             Ok(Some(line)) => {
-                let line = line.trim();
+                let line = line.trim().to_owned();
                 if line.is_empty() {
                     continue;
                 }
 
-                match serde_json::from_str::<SessionCmd>(line) {
+                match serde_json::from_str::<SessionCmd>(&line) {
                     Err(e) => {
-                        emit_error("", &CliError::General(format!("invalid JSON: {e}")));
+                        emit_error_to(writer, "", &CliError::General(format!("invalid JSON: {e}")));
                     }
                     Ok(msg) => {
                         let cmd_name = msg.cmd.clone();
@@ -136,8 +151,8 @@ pub async fn run(client: &ApiClient, default_agent: Option<&str>) -> i32 {
                         }
                         let result = dispatch(client, &msg, default_agent).await;
                         match result {
-                            Ok(data) => emit_ok(&cmd_name, data),
-                            Err(e) => emit_error(&cmd_name, &e),
+                            Ok(data) => emit_ok_to(writer, &cmd_name, data),
+                            Err(e) => emit_error_to(writer, &cmd_name, &e),
                         }
                     }
                 }
@@ -314,20 +329,24 @@ async fn kill(
 
 // ── output helpers ────────────────────────────────────────────────────────────
 
-/// Write a success response line to stdout.
-fn emit_ok(cmd: &str, data: serde_json::Value) {
+/// Write a success response line to `writer`.
+fn emit_ok_to(writer: &mut impl std::io::Write, cmd: &str, data: serde_json::Value) {
     let envelope = serde_json::json!({"ok": true, "cmd": cmd, "data": data});
     match serde_json::to_string(&envelope) {
-        Ok(s) => println!("{s}"),
-        Err(_) => println!(r#"{{"ok":true,"cmd":"{cmd}"}}"#),
+        Ok(s) => {
+            let _ = writeln!(writer, "{s}");
+        }
+        Err(_) => {
+            let _ = writeln!(writer, r#"{{"ok":true,"cmd":"{cmd}"}}"#);
+        }
     }
 }
 
-/// Write an error response line to stdout.
+/// Write an error response line to `writer`.
 ///
-/// In session mode all output (including errors) goes to stdout so the
-/// consuming process reads a single coherent stream.
-fn emit_error(cmd: &str, err: &CliError) {
+/// In session mode all output (including errors) goes to the same stream so
+/// the consuming process reads a single coherent NDJSON stream.
+fn emit_error_to(writer: &mut impl std::io::Write, cmd: &str, err: &CliError) {
     let envelope = serde_json::json!({
         "ok": false,
         "cmd": cmd,
@@ -335,9 +354,14 @@ fn emit_error(cmd: &str, err: &CliError) {
         "message": err.to_string(),
     });
     match serde_json::to_string(&envelope) {
-        Ok(s) => println!("{s}"),
+        Ok(s) => {
+            let _ = writeln!(writer, "{s}");
+        }
         Err(_) => {
-            println!(r#"{{"ok":false,"cmd":"{cmd}","error":"ERROR","message":"unknown error"}}"#)
+            let _ = writeln!(
+                writer,
+                r#"{{"ok":false,"cmd":"{cmd}","error":"ERROR","message":"unknown error"}}"#
+            );
         }
     }
 }
@@ -827,5 +851,112 @@ mod tests {
             matches!(result, Err(CliError::Timeout(_))),
             "expected Timeout with timeout_secs=0, got {result:?}"
         );
+    }
+
+    // ── run_with_io: stdin-loop paths ─────────────────────────────────────────
+
+    /// Build a no-network `ApiClient` for loop tests.
+    fn loop_client() -> ApiClient {
+        ApiClient::new(&crate::config::ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+        })
+        .expect("build client")
+    }
+
+    /// Parse all NDJSON lines from `buf` into a `Vec<serde_json::Value>`.
+    fn parse_lines(buf: &[u8]) -> Vec<serde_json::Value> {
+        std::str::from_utf8(buf)
+            .expect("utf8 output")
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).expect("valid JSON line"))
+            .collect()
+    }
+
+    /// Happy path: `{"cmd":"ping"}` → loop emits `{"ok":true,...,"pong":true}`.
+    #[tokio::test]
+    async fn run_loop_ping_emits_pong_response() {
+        let input = b"{\"cmd\":\"ping\"}\n";
+        let reader = tokio::io::BufReader::new(input.as_ref());
+        let client = loop_client();
+        let mut out: Vec<u8> = Vec::new();
+
+        let code = run_with_io(reader, &mut out, &client, None).await;
+
+        assert_eq!(code, EXIT_SUCCESS);
+        let lines = parse_lines(&out);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["ok"], true);
+        assert_eq!(lines[0]["cmd"], "ping");
+        assert_eq!(lines[0]["data"]["pong"], true);
+    }
+
+    /// Exit command: `{"cmd":"exit"}` → returns EXIT_SUCCESS, no output line.
+    #[tokio::test]
+    async fn run_loop_exit_cmd_terminates_with_success() {
+        let input = b"{\"cmd\":\"exit\"}\n";
+        let reader = tokio::io::BufReader::new(input.as_ref());
+        let client = loop_client();
+        let mut out: Vec<u8> = Vec::new();
+
+        let code = run_with_io(reader, &mut out, &client, None).await;
+
+        assert_eq!(code, EXIT_SUCCESS);
+        // exit must not emit any response line
+        assert!(parse_lines(&out).is_empty());
+    }
+
+    /// Invalid JSON: loop emits `{"ok":false,"error":"GENERAL",...}` then continues.
+    #[tokio::test]
+    async fn run_loop_invalid_json_emits_error_and_continues() {
+        // Invalid line first, then a valid ping so we can confirm the loop continues.
+        let input = b"{not valid json}\n{\"cmd\":\"ping\"}\n";
+        let reader = tokio::io::BufReader::new(input.as_ref());
+        let client = loop_client();
+        let mut out: Vec<u8> = Vec::new();
+
+        let code = run_with_io(reader, &mut out, &client, None).await;
+
+        assert_eq!(code, EXIT_SUCCESS);
+        let lines = parse_lines(&out);
+        // First line: error for invalid JSON — CliError::General maps to "ERROR"
+        assert_eq!(lines[0]["ok"], false);
+        assert_eq!(lines[0]["error"], "ERROR");
+        // Second line: successful ping response (proves loop continued)
+        assert_eq!(lines[1]["ok"], true);
+        assert_eq!(lines[1]["data"]["pong"], true);
+    }
+
+    /// Empty lines are skipped; the ping between them is still dispatched.
+    #[tokio::test]
+    async fn run_loop_empty_lines_skipped_valid_command_still_dispatched() {
+        let input = b"\n   \n{\"cmd\":\"ping\"}\n\n";
+        let reader = tokio::io::BufReader::new(input.as_ref());
+        let client = loop_client();
+        let mut out: Vec<u8> = Vec::new();
+
+        let code = run_with_io(reader, &mut out, &client, None).await;
+
+        assert_eq!(code, EXIT_SUCCESS);
+        let lines = parse_lines(&out);
+        // Only the ping response; empty lines must produce no output.
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["data"]["pong"], true);
+    }
+
+    /// Clean EOF on an empty stdin → EXIT_SUCCESS, no output.
+    #[tokio::test]
+    async fn run_loop_clean_eof_returns_success() {
+        let input: &[u8] = b"";
+        let reader = tokio::io::BufReader::new(input);
+        let client = loop_client();
+        let mut out: Vec<u8> = Vec::new();
+
+        let code = run_with_io(reader, &mut out, &client, None).await;
+
+        assert_eq!(code, EXIT_SUCCESS);
+        assert!(parse_lines(&out).is_empty());
     }
 }

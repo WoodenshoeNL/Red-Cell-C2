@@ -20,8 +20,7 @@ use red_cell::{
     AgentRegistry, Database, EventBus, ListenerManager, ListenerStatus, SocketRelayManager,
 };
 use red_cell_common::crypto::{
-    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len, decrypt_agent_data,
-    decrypt_agent_data_at_offset,
+    AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data, decrypt_agent_data_at_offset,
 };
 use red_cell_common::demon::DemonCommand;
 use red_cell_common::operator::OperatorMessage;
@@ -100,6 +99,18 @@ async fn wait_for_smb_listener(pipe_name: &str) -> Result<(), Box<dyn std::error
     Err(format!("SMB listener on pipe `{pipe_name}` did not become ready within 1 s").into())
 }
 
+/// Generate a non-degenerate test AES key from a seed byte.
+///
+/// Produces `[seed, seed+1, seed+2, …]` which passes the server's degenerate-key check.
+fn test_key(seed: u8) -> [u8; AGENT_KEY_LENGTH] {
+    core::array::from_fn(|i| seed.wrapping_add(i as u8))
+}
+
+/// Generate a non-degenerate test AES IV from a seed byte.
+fn test_iv(seed: u8) -> [u8; AGENT_IV_LENGTH] {
+    core::array::from_fn(|i| seed.wrapping_add(i as u8))
+}
+
 /// Write a framed SMB message: `[agent_id u32 LE][payload_len u32 LE][payload]`.
 async fn write_smb_frame(
     stream: &mut LocalSocketStream,
@@ -142,8 +153,8 @@ async fn smb_listener_demon_init_registers_agent_and_returns_ack()
     manager.start("smb-test-init").await?;
     wait_for_smb_listener(&pipe_name).await?;
 
-    let key = [0x41_u8; AGENT_KEY_LENGTH];
-    let iv = [0x24_u8; AGENT_IV_LENGTH];
+    let key = test_key(0x41);
+    let iv = test_iv(0x24);
     let agent_id = 0xDEAD_C0DE_u32;
 
     let mut stream = connect_smb(&pipe_name).await?;
@@ -223,17 +234,15 @@ async fn smb_listener_processes_callback_after_init() -> Result<(), Box<dyn std:
     manager.start("smb-test-callback").await?;
     wait_for_smb_listener(&pipe_name).await?;
 
-    let key = [0x42_u8; AGENT_KEY_LENGTH];
-    let iv = [0x25_u8; AGENT_IV_LENGTH];
+    let key = test_key(0x42);
+    let iv = test_iv(0x25);
     let agent_id = 0xCAFE_BABE_u32;
-    let mut ctr_offset = 0_u64;
 
     // 1. DEMON_INIT
     let mut stream = connect_smb(&pipe_name).await?;
     write_smb_frame(&mut stream, agent_id, &common::valid_demon_init_body(agent_id, key, iv))
         .await?;
-    let (_, ack) = timeout(Duration::from_secs(5), read_smb_frame(&mut stream)).await??;
-    ctr_offset += ctr_blocks_for_len(ack.len());
+    let (_, _ack) = timeout(Duration::from_secs(5), read_smb_frame(&mut stream)).await??;
 
     // Drain the AgentNew event.
     let _ = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
@@ -245,11 +254,12 @@ async fn smb_listener_processes_callback_after_init() -> Result<(), Box<dyn std:
     let mut callback_stream = connect_smb(&pipe_name).await?;
 
     // 2. COMMAND_CHECKIN callback.
+    // Legacy Demon agents reset AES-CTR to block 0 for every packet, so offset is always 0.
     let callback_body = common::valid_demon_callback_body(
         agent_id,
         key,
         iv,
-        ctr_offset,
+        0,
         u32::from(DemonCommand::CommandCheckin),
         6,
         &[],
@@ -296,8 +306,8 @@ async fn smb_listener_rejects_callbacks_from_unregistered_agent()
     manager.start("smb-test-unknown-callback").await?;
     wait_for_smb_listener(&pipe_name).await?;
 
-    let registered_key = [0x43_u8; AGENT_KEY_LENGTH];
-    let registered_iv = [0x26_u8; AGENT_IV_LENGTH];
+    let registered_key = test_key(0x43);
+    let registered_iv = test_iv(0x26);
     let registered_agent_id = 0xA1A2_A3A4_u32;
     let unknown_agent_id = 0xB1B2_B3B4_u32;
 
@@ -378,11 +388,10 @@ async fn smb_listener_rejects_duplicate_init_preserves_original_key()
     wait_for_smb_listener(&pipe_name).await?;
 
     let agent_id = 0xD00D_F00D_u32;
-    let original_key = [0x44_u8; AGENT_KEY_LENGTH];
-    let original_iv = [0x27_u8; AGENT_IV_LENGTH];
-    let hijack_key = [0xBB_u8; AGENT_KEY_LENGTH];
-    let hijack_iv = [0xCC_u8; AGENT_IV_LENGTH];
-    let mut ctr_offset = 0_u64;
+    let original_key = test_key(0x44);
+    let original_iv = test_iv(0x27);
+    let hijack_key = test_key(0xBB);
+    let hijack_iv = test_iv(0xCC);
 
     let mut init_stream = connect_smb(&pipe_name).await?;
     write_smb_frame(
@@ -397,7 +406,6 @@ async fn smb_listener_rejects_duplicate_init_preserves_original_key()
     assert_eq!(ack_agent_id, agent_id, "ack agent_id must match the registered agent");
     let decrypted_ack = decrypt_agent_data(&original_key, &original_iv, &ack_payload)?;
     assert_eq!(decrypted_ack.as_slice(), &agent_id.to_le_bytes());
-    ctr_offset += ctr_blocks_for_len(ack_payload.len());
 
     let registration_event = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
     let Some(OperatorMessage::AgentNew(message)) = registration_event else {
@@ -454,12 +462,14 @@ async fn smb_listener_rejects_duplicate_init_preserves_original_key()
 
     drop(duplicate_stream);
 
+    // Verify that the original key still works for callbacks.
+    // Legacy Demon agents reset AES-CTR to block 0 for every packet.
     let mut callback_stream = connect_smb(&pipe_name).await?;
     let callback_body = common::valid_demon_callback_body(
         agent_id,
         original_key,
         original_iv,
-        ctr_offset,
+        0,
         u32::from(DemonCommand::CommandCheckin),
         6,
         &[],
@@ -559,8 +569,8 @@ async fn smb_listener_rejects_truncated_header_and_partial_payload()
 
     // --- Verify the listener is still healthy: a valid DEMON_INIT must succeed ---
     let valid_agent_id = 0xBEEF_CAFE_u32;
-    let key = [0x55_u8; AGENT_KEY_LENGTH];
-    let iv = [0x33_u8; AGENT_IV_LENGTH];
+    let key = test_key(0x55);
+    let iv = test_iv(0x33);
 
     let mut stream = connect_smb(&pipe_name).await?;
     write_smb_frame(
@@ -601,21 +611,20 @@ async fn smb_listener_rejects_truncated_header_and_partial_payload()
     Ok(())
 }
 
-/// Verify that a reconnect probe over SMB is non-counter-consuming and that a
-/// subsequent callback at the same CTR offset succeeds.
+/// Verify that a reconnect probe over SMB succeeds and a subsequent callback
+/// still works.
+///
+/// Legacy Demon agents reset AES-CTR to block 0 for every packet, so all
+/// encrypt/decrypt operations use offset 0.  The reconnect ACK is also
+/// encrypted at offset 0 (via `encrypt_for_agent_without_advancing`) which
+/// is idempotent in legacy mode.
 ///
 /// Sequence:
-/// 1. Agent does a full init; server responds with init ACK.  Both advance their
-///    CTR counters by `ctr_blocks_for_len(ack.len())`.
-/// 2. Agent sends a reconnect probe (empty `DEMON_INIT` body, no encrypted payload).
-/// 3. Server returns a reconnect ACK encrypted at the current offset without
-///    advancing.  Agent receives the ACK and also does **not** advance its counter.
-/// 4. Agent sends a `COMMAND_GET_JOB` callback encrypted at the same offset.
-///    The server decrypts it successfully, proving both sides remain synchronised.
-///
-/// If the reconnect ACK were counter-consuming, step 4 would fail because the
-/// agent would encrypt at the pre-reconnect offset while the server would try to
-/// decrypt at offset + 1.
+/// 1. Agent does a full init; server responds with init ACK at offset 0.
+/// 2. Agent sends a reconnect probe (empty `DEMON_INIT` body).
+/// 3. Server returns a reconnect ACK encrypted at offset 0.
+/// 4. Agent sends a `COMMAND_GET_JOB` callback encrypted at offset 0.
+///    The server decrypts it successfully, proving the session is still alive.
 #[cfg(unix)]
 #[tokio::test]
 async fn reconnect_then_subsequent_callback_remains_synchronised()
@@ -629,12 +638,10 @@ async fn reconnect_then_subsequent_callback_remains_synchronised()
     wait_for_smb_listener(&pipe_name).await?;
 
     let agent_id = 0xFACE_CAFE_u32;
-    let key = [0x9A_u8; AGENT_KEY_LENGTH];
-    let iv = [0x5B_u8; AGENT_IV_LENGTH];
+    let key = test_key(0x9A);
+    let iv = test_iv(0x5B);
 
     // --- Step 1: full DEMON_INIT ---------------------------------------------------
-    let mut agent_ctr_offset = 0_u64;
-
     let mut init_stream = connect_smb(&pipe_name).await?;
     write_smb_frame(&mut init_stream, agent_id, &common::valid_demon_init_body(agent_id, key, iv))
         .await?;
@@ -643,12 +650,9 @@ async fn reconnect_then_subsequent_callback_remains_synchronised()
         timeout(Duration::from_secs(5), read_smb_frame(&mut init_stream)).await??;
     assert_eq!(ack_agent_id, agent_id, "init ack agent_id must match");
 
-    // Verify the init ACK decrypts at offset 0.
-    let init_ack = decrypt_agent_data_at_offset(&key, &iv, agent_ctr_offset, &ack_payload)?;
+    // Legacy mode: init ACK is encrypted at offset 0.
+    let init_ack = decrypt_agent_data_at_offset(&key, &iv, 0, &ack_payload)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes(), "init ACK must echo agent_id");
-
-    // Agent advances its counter after consuming the init ACK (counter-consuming).
-    agent_ctr_offset += ctr_blocks_for_len(ack_payload.len());
 
     // Drain the AgentNew event.
     let event = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
@@ -660,52 +664,46 @@ async fn reconnect_then_subsequent_callback_remains_synchronised()
     drop(init_stream);
 
     // --- Step 2: reconnect probe ---------------------------------------------------
-    // The reconnect probe carries no encrypted payload — agent counter does NOT change.
     let mut reconnect_stream = connect_smb(&pipe_name).await?;
     write_smb_frame(&mut reconnect_stream, agent_id, &common::valid_demon_reconnect_body(agent_id))
         .await?;
 
-    // --- Step 3: verify reconnect ACK at the current (non-advanced) offset ---------
+    // --- Step 3: verify reconnect ACK at offset 0 (legacy mode) --------------------
     let (reconnect_ack_agent_id, reconnect_ack_payload) =
         timeout(Duration::from_secs(5), read_smb_frame(&mut reconnect_stream)).await??;
     assert_eq!(reconnect_ack_agent_id, agent_id, "reconnect ack agent_id must match");
 
-    let reconnect_ack =
-        decrypt_agent_data_at_offset(&key, &iv, agent_ctr_offset, &reconnect_ack_payload)?;
+    // Legacy mode: reconnect ACK is also encrypted at offset 0.
+    let reconnect_ack = decrypt_agent_data_at_offset(&key, &iv, 0, &reconnect_ack_payload)?;
     assert_eq!(
         reconnect_ack.as_slice(),
         &agent_id.to_le_bytes(),
-        "reconnect ACK must echo agent_id encrypted at the pre-reconnect CTR offset"
+        "reconnect ACK must echo agent_id"
     );
-    // NOT advancing agent_ctr_offset — the reconnect ACK is not counter-consuming.
 
-    // Confirm the server's stored offset also did not advance.
+    // In legacy mode, the stored CTR offset remains 0.
     assert_eq!(
         registry.ctr_offset(agent_id).await?,
-        agent_ctr_offset,
-        "server CTR offset must not advance after sending a reconnect ACK"
+        0,
+        "server CTR offset must remain 0 in legacy mode"
     );
 
     drop(reconnect_stream);
 
-    // --- Step 4: subsequent callback at the same (unchanged) offset ----------------
-    // If the reconnect ACK were counter-consuming, this would fail because the server
-    // would try to decrypt at offset `agent_ctr_offset + 1` while the agent encrypted
-    // at `agent_ctr_offset`.
+    // --- Step 4: subsequent callback at offset 0 -----------------------------------
     let mut callback_stream = connect_smb(&pipe_name).await?;
     let callback_body = common::valid_demon_callback_body(
         agent_id,
         key,
         iv,
-        agent_ctr_offset,
+        0,
         u32::from(DemonCommand::CommandGetJob),
         1,
         &[],
     );
     write_smb_frame(&mut callback_stream, agent_id, &callback_body).await?;
 
-    // A successful response (even empty) proves the server decrypted at the correct
-    // CTR offset.  A desync would cause a decrypt/parse error and no response frame.
+    // A successful response proves the server decrypted the callback correctly.
     let (resp_agent_id, _resp_payload) =
         timeout(Duration::from_secs(5), read_smb_frame(&mut callback_stream)).await??;
     assert_eq!(resp_agent_id, agent_id, "callback response must echo the agent_id");

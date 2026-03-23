@@ -11,7 +11,6 @@ name = "red-cell-cli"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1.0"
 clap = { version = "4.5", features = ["derive", "env"] }
 comfy-table = "7"
 dirs = "5"

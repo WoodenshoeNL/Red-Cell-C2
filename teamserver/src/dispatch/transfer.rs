@@ -808,9 +808,53 @@ mod tests {
 
         let event =
             receiver.recv().await.ok_or("expected AgentResponse event after mem-file callback")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            return Err("expected AgentResponse event".into());
+        };
+        let kind = message.info.extra.get("Type").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(kind, "Good", "success=true must produce Type=\"Good\"; got: {kind}");
+        let msg_text = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
         assert!(
-            matches!(event, OperatorMessage::AgentResponse(_)),
-            "event should be AgentResponse; got: {event:?}"
+            msg_text.contains("registered successfully"),
+            "success=true message must contain \"registered successfully\"; got: {msg_text}"
+        );
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // handle_mem_file_callback — success=false (failure path)
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn mem_file_callback_failure_broadcasts_error_event()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let agent_id: u32 = 0xDEAD_BEEF;
+        let request_id: u32 = 8;
+
+        // Payload: mem_file_id(0x42) + success(0 = false)
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&le32(0x0000_0042));
+        payload.extend_from_slice(&le32(0));
+
+        let result = handle_mem_file_callback(&events, agent_id, request_id, &payload).await?;
+
+        assert_eq!(result, None, "mem-file handler must not produce a reply packet");
+
+        let event = receiver
+            .recv()
+            .await
+            .ok_or("expected AgentResponse event after mem-file failure callback")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            return Err("expected AgentResponse event".into());
+        };
+        let kind = message.info.extra.get("Type").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(kind, "Error", "success=false must produce Type=\"Error\"; got: {kind}");
+        let msg_text = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            msg_text.contains("failed to register"),
+            "success=false message must contain \"failed to register\"; got: {msg_text}"
         );
         Ok(())
     }

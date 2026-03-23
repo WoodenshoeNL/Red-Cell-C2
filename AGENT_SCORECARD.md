@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 729 | 227 | 31 |
+| Tasks closed | 739 | 228 | 31 |
 | Bugs filed against | 81 | 34 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
 | Quality score | 89% | 85% | 71% |
 
-*Bug rates: Claude 81/729=0.11, Codex 34/227=0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 81/739=0.11, Codex 34/228=0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-23 17:15 — aceb1e2e..162155cf
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 10 | 0 | Closed 7fhg5 (legacy CTR mode), rfdmy (external listener oversized-body rejection), 3295a (client password zeroization), r22xz, sz6vi, lozxr, 3rm6r, 5hryt, 80tvo, p93i7. One already-tracked regression remains open: qic8d. |
+| Codex | 1 | 0 | Closed 1332s (empty PEM / missing-certificate TLS test coverage). |
+| Cursor | 0 | 0 | No activity. |
+
+Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`)
+Tests: not completed (`cargo test --workspace` did not finish during review; known slow/hanging auth test remains tracked as red-cell-c2-swpxr)
+Issues found: 0 new bugs filed; verified the current liveness/helper CTR mismatch is already tracked as red-cell-c2-qic8d
 
 ### Arch Review — 2026-03-23 15:30
 

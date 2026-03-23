@@ -424,6 +424,9 @@ pub enum ListenerManagerError {
     /// The WebSocket mark command used an unsupported action.
     #[error("unsupported listener mark `{mark}`")]
     UnsupportedMark { mark: String },
+    /// An external listener endpoint path is already claimed by another listener.
+    #[error("endpoint `{endpoint}` is already registered by listener `{existing_listener}`")]
+    DuplicateEndpoint { endpoint: String, existing_listener: String },
 }
 
 impl IntoResponse for ListenerManagerError {
@@ -438,6 +441,7 @@ impl IntoResponse for ListenerManagerError {
             Self::InvalidConfig { .. } => (StatusCode::BAD_REQUEST, "listener_invalid_config"),
             Self::UnsupportedMark { .. } => (StatusCode::BAD_REQUEST, "listener_unsupported_mark"),
             Self::StartFailed { .. } => (StatusCode::UNPROCESSABLE_ENTITY, "listener_start_failed"),
+            Self::DuplicateEndpoint { .. } => (StatusCode::CONFLICT, "listener_duplicate_endpoint"),
             Self::Database(_) => (StatusCode::INTERNAL_SERVER_ERROR, "listener_error"),
         };
 
@@ -595,6 +599,20 @@ impl ListenerManager {
 
         if repository.exists(config.name()).await? {
             return Err(ListenerManagerError::DuplicateListener { name: config.name().to_owned() });
+        }
+
+        // Reject external listeners whose endpoint path is already claimed.
+        if let ListenerConfig::External(ref ext) = config {
+            for existing in repository.list().await? {
+                if let ListenerConfig::External(ref other) = existing.config {
+                    if other.endpoint == ext.endpoint {
+                        return Err(ListenerManagerError::DuplicateEndpoint {
+                            endpoint: ext.endpoint.clone(),
+                            existing_listener: other.name.clone(),
+                        });
+                    }
+                }
+            }
         }
 
         repository.create(&config).await?;

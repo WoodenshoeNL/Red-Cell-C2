@@ -686,6 +686,62 @@ async fn external_listener_rejects_oversized_body() -> Result<(), Box<dyn std::e
     Ok(())
 }
 
+/// Registering two external listeners on the same endpoint path must fail —
+/// the second `create()` call should return a `DuplicateEndpoint` error.
+#[tokio::test]
+async fn external_listener_pipeline_rejects_duplicate_endpoint_path()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = spawn_server_with_fallback().await?;
+
+    // Register and start listener A on `/shared`.
+    server.listeners.create(external_listener("ext-shared-a", "/shared")).await?;
+    server.listeners.start("ext-shared-a").await?;
+    wait_for_external_endpoint(&server, "/shared").await?;
+    wait_for_teamserver(&server).await?;
+
+    // Attempt to register listener B on the same `/shared` path — must fail.
+    let result = server.listeners.create(external_listener("ext-shared-b", "/shared")).await;
+    assert!(result.is_err(), "duplicate endpoint path must be rejected");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("/shared"),
+        "error must mention the conflicting endpoint path, got: {err_msg}"
+    );
+    assert!(
+        err_msg.contains("ext-shared-a"),
+        "error must mention the existing listener name, got: {err_msg}"
+    );
+
+    // Verify the original listener still works: send an init and confirm registration.
+    let client = Client::new();
+    let key: [u8; AGENT_KEY_LENGTH] = [
+        0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9A, 0x9B, 0x9C, 0x9D, 0x9E,
+        0x9F, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD,
+        0xAE, 0xAF,
+    ];
+    let iv: [u8; AGENT_IV_LENGTH] = [
+        0x84, 0x97, 0xAA, 0xBD, 0xD0, 0xE3, 0xF6, 0x09, 0x1C, 0x2F, 0x42, 0x55, 0x68, 0x7B, 0x8E,
+        0xA1,
+    ];
+    let agent_id = 0xF1F2_F3F4_u32;
+    let bridge_url = format!("http://{}/shared", server.addr);
+    let init_resp = client
+        .post(&bridge_url)
+        .body(common::valid_demon_init_body(agent_id, key, iv))
+        .send()
+        .await?
+        .error_for_status()?;
+    assert!(!init_resp.bytes().await?.is_empty(), "init must succeed on original listener");
+
+    assert!(
+        server.agent_registry.get(agent_id).await.is_some(),
+        "agent must be registered — original listener still owns the endpoint"
+    );
+
+    server.listeners.stop("ext-shared-a").await?;
+    Ok(())
+}
+
 fn external_listener(name: &str, endpoint: &str) -> ListenerConfig {
     ListenerConfig::from(ExternalListenerConfig {
         name: name.to_owned(),

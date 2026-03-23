@@ -3494,6 +3494,60 @@ mod tests {
     }
 
     #[test]
+    fn classify_tls_failure_kind_fingerprint_mismatch() {
+        let kind =
+            classify_tls_failure_kind("certificate fingerprint mismatch: expected aabb, got ccdd");
+        assert_eq!(
+            kind,
+            crate::login::TlsFailureKind::CertificateChanged {
+                stored_fingerprint: "aabb".to_owned(),
+            },
+            "fingerprint mismatch must produce CertificateChanged with the stored fingerprint"
+        );
+    }
+
+    #[test]
+    fn classify_tls_failure_kind_unknown_issuer_uppercase() {
+        let kind = classify_tls_failure_kind("invalid peer certificate: UnknownIssuer");
+        assert_eq!(
+            kind,
+            crate::login::TlsFailureKind::UnknownServer,
+            "UnknownIssuer must map to UnknownServer"
+        );
+    }
+
+    #[test]
+    fn classify_tls_failure_kind_unknown_issuer_lowercase() {
+        let kind = classify_tls_failure_kind("unknown issuer");
+        assert_eq!(
+            kind,
+            crate::login::TlsFailureKind::UnknownServer,
+            "lowercase 'unknown issuer' must map to UnknownServer"
+        );
+    }
+
+    #[test]
+    fn classify_tls_failure_kind_generic_fallthrough() {
+        let kind = classify_tls_failure_kind("invalid peer certificate: certificate expired");
+        assert_eq!(
+            kind,
+            crate::login::TlsFailureKind::CertificateError,
+            "unrecognised error string must fall through to CertificateError"
+        );
+    }
+
+    #[test]
+    fn classify_tls_failure_kind_malformed_mismatch_no_expected_token() {
+        // No "expected " token — fingerprint extraction must return empty string, not panic.
+        let kind = classify_tls_failure_kind("certificate fingerprint mismatch: no tokens here");
+        assert_eq!(
+            kind,
+            crate::login::TlsFailureKind::CertificateChanged { stored_fingerprint: "".to_owned() },
+            "malformed mismatch string must produce CertificateChanged with empty fingerprint"
+        );
+    }
+
+    #[test]
     fn is_tls_cert_error_detects_invalid_cert() {
         assert!(is_tls_cert_error("invalid peer certificate: UnknownIssuer"));
         assert!(is_tls_cert_error("certificate fingerprint mismatch: expected abc, got def"));

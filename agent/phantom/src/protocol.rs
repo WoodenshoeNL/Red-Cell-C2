@@ -305,12 +305,16 @@ pub fn executable_name(path: &Path) -> String {
 mod tests {
     use std::path::Path;
 
-    use red_cell_common::crypto::{decrypt_agent_data, generate_agent_crypto_material};
-    use red_cell_common::demon::{DEMON_MAGIC_VALUE, DemonCommand};
+    use red_cell_common::crypto::{
+        decrypt_agent_data, decrypt_agent_data_at_offset, encrypt_agent_data,
+        generate_agent_crypto_material,
+    };
+    use red_cell_common::demon::{DEMON_MAGIC_VALUE, DemonCallback, DemonCommand};
 
     use super::{
-        AgentMetadata, build_init_packet, build_output_packet, callback_ctr_blocks,
-        executable_name, parse_tasking_response,
+        AgentMetadata, build_error_packet, build_exit_packet, build_init_packet,
+        build_output_packet, callback_ctr_blocks, executable_name, parse_init_ack,
+        parse_tasking_response,
     };
 
     fn metadata() -> AgentMetadata {
@@ -377,6 +381,61 @@ mod tests {
         let response = parse_tasking_response(11, &crypto, 0, &encrypted).expect("response");
         assert_eq!(response.packages.len(), 1);
         assert_eq!(response.next_recv_ctr_offset, callback_ctr_blocks(0));
+    }
+
+    #[test]
+    fn parse_init_ack_returns_consumed_ctr_blocks() {
+        let crypto = generate_agent_crypto_material().expect("crypto");
+        let agent_id = 0x1337_4242_u32;
+        let ack = encrypt_agent_data(&crypto.key, &crypto.iv, &agent_id.to_le_bytes())
+            .expect("encrypted ack");
+
+        let ctr = parse_init_ack(&ack, agent_id, &crypto).expect("parse ack");
+
+        assert_eq!(ctr, 1);
+    }
+
+    #[test]
+    fn parse_init_ack_rejects_agent_id_mismatch() {
+        let crypto = generate_agent_crypto_material().expect("crypto");
+        let ack = encrypt_agent_data(&crypto.key, &crypto.iv, &0x1337_4242_u32.to_le_bytes())
+            .expect("encrypted ack");
+
+        let error = parse_init_ack(&ack, 0x4242_1337, &crypto).expect_err("mismatch");
+        assert!(matches!(
+            error,
+            crate::error::PhantomError::InvalidResponse("init acknowledgement agent_id mismatch")
+        ));
+    }
+
+    #[test]
+    fn error_packet_encodes_callback_discriminator_and_message() {
+        let crypto = generate_agent_crypto_material().expect("crypto");
+        let packet = build_error_packet(7, &crypto, 0, 99, "boom").expect("packet");
+        let envelope = red_cell_common::demon::DemonEnvelope::from_bytes(&packet).expect("env");
+        let plaintext = decrypt_agent_data_at_offset(&crypto.key, &crypto.iv, 0, &envelope.payload)
+            .expect("decrypt");
+
+        assert_eq!(&plaintext[..4], &u32::from(DemonCommand::CommandError).to_be_bytes());
+        assert_eq!(&plaintext[4..8], &99_u32.to_be_bytes());
+        assert_eq!(&plaintext[8..12], &12_u32.to_be_bytes());
+        assert_eq!(&plaintext[12..16], &u32::from(DemonCallback::ErrorMessage).to_be_bytes());
+        assert_eq!(&plaintext[16..20], &4_u32.to_be_bytes());
+        assert_eq!(&plaintext[20..24], b"boom");
+    }
+
+    #[test]
+    fn exit_packet_encodes_exit_method() {
+        let crypto = generate_agent_crypto_material().expect("crypto");
+        let packet = build_exit_packet(7, &crypto, 0, 99, 3).expect("packet");
+        let envelope = red_cell_common::demon::DemonEnvelope::from_bytes(&packet).expect("env");
+        let plaintext = decrypt_agent_data_at_offset(&crypto.key, &crypto.iv, 0, &envelope.payload)
+            .expect("decrypt");
+
+        assert_eq!(&plaintext[..4], &u32::from(DemonCommand::CommandExit).to_be_bytes());
+        assert_eq!(&plaintext[4..8], &99_u32.to_be_bytes());
+        assert_eq!(&plaintext[8..12], &4_u32.to_be_bytes());
+        assert_eq!(&plaintext[12..16], &3_u32.to_be_bytes());
     }
 
     #[test]

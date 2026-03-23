@@ -511,6 +511,73 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn run_exits_cleanly_after_exit_task() -> Result<(), Box<dyn Error + Send + Sync>> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let address = listener.local_addr()?;
+        let (request_tx, request_rx) = mpsc::channel::<Vec<u8>>();
+        let (response_tx, response_rx) = mpsc::channel::<Vec<u8>>();
+
+        let server = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept()?;
+                let request = read_http_request(&mut stream)?;
+                request_tx.send(request)?;
+                let body = response_rx.recv()?;
+                write_http_response(&mut stream, &body)?;
+            }
+            Ok(())
+        });
+
+        let config = PhantomConfig {
+            callback_url: format!("http://{address}/"),
+            sleep_delay_ms: 0,
+            ..PhantomConfig::default()
+        };
+        let mut agent = PhantomAgent::new(config)?;
+
+        response_tx.send(encrypt_agent_data(
+            &agent.session_crypto.key,
+            &agent.session_crypto.iv,
+            &agent.agent_id.to_le_bytes(),
+        )?)?;
+
+        let task = DemonPackage::new(DemonCommand::CommandExit, 42, 1_i32.to_le_bytes().to_vec());
+        let task_message = DemonMessage::new(vec![task]).to_bytes()?;
+        let encrypted_task = encrypt_agent_data_at_offset(
+            &agent.session_crypto.key,
+            &agent.session_crypto.iv,
+            1,
+            &task_message,
+        )?;
+        response_tx.send(DemonEnvelope::new(agent.agent_id, encrypted_task)?.to_bytes())?;
+        response_tx.send(Vec::new())?;
+
+        agent.run().await?;
+
+        let init_packet = request_rx.recv_timeout(std::time::Duration::from_secs(1))?;
+        assert!(!init_packet.is_empty());
+
+        let checkin_packet = request_rx.recv_timeout(std::time::Duration::from_secs(1))?;
+        let envelope = DemonEnvelope::from_bytes(&checkin_packet)?;
+        let decrypted = decrypt_agent_data_at_offset(
+            &agent.session_crypto.key,
+            &agent.session_crypto.iv,
+            0,
+            &envelope.payload,
+        )?;
+        let message = DemonMessage::from_bytes(&decrypted)?;
+        assert_eq!(message.packages.len(), 1);
+        assert_eq!(message.packages[0].command()?, DemonCommand::CommandCheckin);
+
+        let exit_callback_packet = request_rx.recv_timeout(std::time::Duration::from_secs(1))?;
+        assert!(!exit_callback_packet.is_empty());
+
+        let server_result = server.join().map_err(|_| "server thread panicked")?;
+        server_result?;
+        Ok(())
+    }
+
     fn read_http_request(
         stream: &mut std::net::TcpStream,
     ) -> Result<Vec<u8>, Box<dyn Error + Send + Sync>> {

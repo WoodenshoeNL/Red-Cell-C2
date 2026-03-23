@@ -37,7 +37,8 @@ fn validate_role(role: &str) -> Result<(), CliError> {
 struct RawOperatorSummary {
     username: String,
     role: String,
-    created_at: String,
+    online: bool,
+    last_seen: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,17 +63,24 @@ pub struct OperatorRow {
     pub username: String,
     /// Assigned role: `"admin"`, `"operator"`, or `"analyst"`.
     pub role: String,
-    /// RFC 3339 creation timestamp.
-    pub created_at: String,
+    /// Whether the operator is currently connected.
+    pub online: bool,
+    /// RFC 3339 timestamp of the operator's last activity, if any.
+    pub last_seen: Option<String>,
 }
 
 impl TextRow for OperatorRow {
     fn headers() -> Vec<&'static str> {
-        vec!["Username", "Role", "Created At"]
+        vec!["Username", "Role", "Online", "Last Seen"]
     }
 
     fn row(&self) -> Vec<String> {
-        vec![self.username.clone(), self.role.clone(), self.created_at.clone()]
+        vec![
+            self.username.clone(),
+            self.role.clone(),
+            if self.online { "yes".to_owned() } else { "no".to_owned() },
+            self.last_seen.clone().unwrap_or_else(|| "-".to_owned()),
+        ]
     }
 }
 
@@ -244,7 +252,12 @@ async fn set_role(
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn operator_row_from_raw(raw: RawOperatorSummary) -> OperatorRow {
-    OperatorRow { username: raw.username, role: raw.role, created_at: raw.created_at }
+    OperatorRow {
+        username: raw.username,
+        role: raw.role,
+        online: raw.online,
+        last_seen: raw.last_seen,
+    }
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -286,7 +299,8 @@ mod tests {
         let row = OperatorRow {
             username: "alice".to_owned(),
             role: "admin".to_owned(),
-            created_at: "2026-03-21T00:00:00Z".to_owned(),
+            online: true,
+            last_seen: Some("2026-03-21T00:00:00Z".to_owned()),
         };
         assert_eq!(OperatorRow::headers().len(), row.row().len());
     }
@@ -296,12 +310,55 @@ mod tests {
         let row = OperatorRow {
             username: "bob".to_owned(),
             role: "operator".to_owned(),
-            created_at: "2026-03-21T12:00:00Z".to_owned(),
+            online: false,
+            last_seen: Some("2026-03-21T12:00:00Z".to_owned()),
         };
         let v = serde_json::to_value(&row).expect("serialise");
         assert_eq!(v["username"], "bob");
         assert_eq!(v["role"], "operator");
-        assert_eq!(v["created_at"], "2026-03-21T12:00:00Z");
+        assert_eq!(v["online"], false);
+        assert_eq!(v["last_seen"], "2026-03-21T12:00:00Z");
+    }
+
+    #[test]
+    fn operator_row_serialises_null_last_seen() {
+        let row = OperatorRow {
+            username: "carol".to_owned(),
+            role: "analyst".to_owned(),
+            online: false,
+            last_seen: None,
+        };
+        let v = serde_json::to_value(&row).expect("serialise");
+        assert!(v["last_seen"].is_null());
+    }
+
+    #[test]
+    fn operator_row_renders_online_as_yes_no() {
+        let online_row = OperatorRow {
+            username: "a".to_owned(),
+            role: "admin".to_owned(),
+            online: true,
+            last_seen: None,
+        };
+        let offline_row = OperatorRow {
+            username: "b".to_owned(),
+            role: "admin".to_owned(),
+            online: false,
+            last_seen: None,
+        };
+        assert!(online_row.row().contains(&"yes".to_owned()));
+        assert!(offline_row.row().contains(&"no".to_owned()));
+    }
+
+    #[test]
+    fn operator_row_renders_missing_last_seen_as_dash() {
+        let row = OperatorRow {
+            username: "a".to_owned(),
+            role: "admin".to_owned(),
+            online: false,
+            last_seen: None,
+        };
+        assert!(row.row().contains(&"-".to_owned()));
     }
 
     #[test]
@@ -309,7 +366,8 @@ mod tests {
         let rows = vec![OperatorRow {
             username: "alice".to_owned(),
             role: "admin".to_owned(),
-            created_at: "2026-03-21T00:00:00Z".to_owned(),
+            online: true,
+            last_seen: Some("2026-03-21T00:00:00Z".to_owned()),
         }];
         let rendered = rows.render_text();
         assert!(rendered.contains("alice"));
@@ -396,12 +454,40 @@ mod tests {
         let raw = RawOperatorSummary {
             username: "frank".to_owned(),
             role: "operator".to_owned(),
-            created_at: "2026-01-01T00:00:00Z".to_owned(),
+            online: true,
+            last_seen: Some("2026-01-01T00:00:00Z".to_owned()),
         };
         let row = operator_row_from_raw(raw);
         assert_eq!(row.username, "frank");
         assert_eq!(row.role, "operator");
-        assert_eq!(row.created_at, "2026-01-01T00:00:00Z");
+        assert!(row.online);
+        assert_eq!(row.last_seen.as_deref(), Some("2026-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn raw_operator_summary_deserialises_server_shape() {
+        let json = r#"{"username":"grace","role":"admin","online":true,"last_seen":"2026-03-22T10:00:00Z"}"#;
+        let raw: RawOperatorSummary = serde_json::from_str(json).expect("deserialise");
+        assert_eq!(raw.username, "grace");
+        assert_eq!(raw.role, "admin");
+        assert!(raw.online);
+        assert_eq!(raw.last_seen.as_deref(), Some("2026-03-22T10:00:00Z"));
+    }
+
+    #[test]
+    fn raw_operator_summary_deserialises_null_last_seen() {
+        let json = r#"{"username":"hal","role":"operator","online":false,"last_seen":null}"#;
+        let raw: RawOperatorSummary = serde_json::from_str(json).expect("deserialise");
+        assert!(!raw.online);
+        assert!(raw.last_seen.is_none());
+    }
+
+    #[test]
+    fn raw_operator_summary_rejects_old_created_at_shape() {
+        // created_at was the old (wrong) shape — it should no longer deserialise
+        // into RawOperatorSummary because the required `online` field is absent.
+        let json = r#"{"username":"ivan","role":"analyst","created_at":"2026-01-01T00:00:00Z"}"#;
+        assert!(serde_json::from_str::<RawOperatorSummary>(json).is_err());
     }
 
     // ── network-independent role validation via create/set_role logic ─────────

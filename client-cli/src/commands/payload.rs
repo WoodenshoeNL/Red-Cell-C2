@@ -492,6 +492,7 @@ mod tests {
             server: server.uri(),
             token: "tok".to_owned(),
             timeout: 5,
+            tls_mode: crate::config::TlsMode::SystemRoots,
         };
         let client = crate::client::ApiClient::new(&cfg).expect("client");
 
@@ -523,6 +524,7 @@ mod tests {
             server: server.uri(),
             token: "tok".to_owned(),
             timeout: 5,
+            tls_mode: crate::config::TlsMode::SystemRoots,
         };
         let client = crate::client::ApiClient::new(&cfg).expect("client");
 

@@ -94,6 +94,7 @@ mod tests {
             server: server_uri.to_owned(),
             token: "test-token".to_owned(),
             timeout: 5,
+            tls_mode: crate::config::TlsMode::SystemRoots,
         }
     }
 

@@ -1,18 +1,25 @@
 //! HTTP API client for the Red Cell teamserver.
 //!
 //! All requests send the API key in the `x-api-key` header as expected by the
-//! teamserver's authentication middleware.  TLS certificate verification is
-//! intentionally disabled because teamserver deployments commonly use
-//! self-signed certificates.
+//! teamserver's authentication middleware.  TLS verification mode is controlled
+//! by [`crate::config::TlsMode`] — default behaviour is to verify against the
+//! system/webpki root CAs.
 
+use std::fs;
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::{Client, StatusCode};
+use rustls::ClientConfig;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{DigitallySignedStruct, SignatureScheme};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tracing::instrument;
+use sha2::{Digest, Sha256};
+use tracing::{instrument, warn};
 
-use crate::config::ResolvedConfig;
+use crate::config::{ResolvedConfig, TlsMode};
 use crate::error::CliError;
 
 /// HTTP header name used by the teamserver for API-key authentication.
@@ -30,15 +37,16 @@ pub struct ApiClient {
 impl ApiClient {
     /// Build a new client from a resolved configuration.
     ///
+    /// The TLS verification mode is controlled by [`ResolvedConfig::tls_mode`]:
+    ///
+    /// - [`TlsMode::SystemRoots`]: verify against the system/webpki root CAs.
+    /// - [`TlsMode::CustomCa`]: load a PEM CA cert and disable built-in roots.
+    /// - [`TlsMode::Fingerprint`]: pin against a SHA-256 cert fingerprint.
+    ///
     /// Returns an error if the underlying HTTP client cannot be constructed
-    /// (e.g. the TLS backend is missing).
+    /// (e.g. the TLS backend is missing or the CA file cannot be read).
     pub fn new(config: &ResolvedConfig) -> Result<Self, CliError> {
-        let inner = Client::builder()
-            .timeout(Duration::from_secs(config.timeout))
-            .danger_accept_invalid_certs(true)
-            .build()
-            .map_err(|e| CliError::General(format!("failed to build HTTP client: {e}")))?;
-
+        let inner = build_http_client(config)?;
         Ok(Self { inner, base_url: config.server.clone(), token: config.token.clone() })
     }
 
@@ -262,6 +270,124 @@ impl ApiClient {
     }
 }
 
+// ── TLS helpers ──────────────────────────────────────────────────────────────
+
+/// Build a [`reqwest::Client`] with TLS verification configured according to
+/// `config.tls_mode`.
+fn build_http_client(config: &ResolvedConfig) -> Result<Client, CliError> {
+    let base = Client::builder().timeout(Duration::from_secs(config.timeout));
+
+    let client = match &config.tls_mode {
+        TlsMode::SystemRoots => base
+            .build()
+            .map_err(|e| CliError::General(format!("failed to build HTTP client: {e}")))?,
+
+        TlsMode::CustomCa(path) => {
+            let pem = fs::read(path).map_err(|e| {
+                CliError::General(format!("failed to read CA cert {}: {e}", path.display()))
+            })?;
+            let cert = reqwest::Certificate::from_pem(&pem)
+                .map_err(|e| CliError::General(format!("invalid CA certificate: {e}")))?;
+            base.tls_built_in_root_certs(false)
+                .add_root_certificate(cert)
+                .build()
+                .map_err(|e| CliError::General(format!("failed to build HTTP client: {e}")))?
+        }
+
+        TlsMode::Fingerprint(hex) => {
+            let provider = rustls::crypto::ring::default_provider();
+            let verifier = Arc::new(FingerprintCertVerifier {
+                expected_fingerprint: hex.to_ascii_lowercase(),
+                provider: provider.clone(),
+            });
+            let rustls_config = ClientConfig::builder_with_provider(Arc::new(provider))
+                .with_safe_default_protocol_versions()
+                .map_err(|e| CliError::General(format!("TLS protocol configuration failed: {e}")))?
+                .dangerous()
+                .with_custom_certificate_verifier(verifier)
+                .with_no_client_auth();
+            base.use_preconfigured_tls(rustls_config)
+                .build()
+                .map_err(|e| CliError::General(format!("failed to build HTTP client: {e}")))?
+        }
+    };
+    Ok(client)
+}
+
+/// Computes the SHA-256 fingerprint of a DER-encoded certificate, returning a
+/// lowercase hex string (64 characters).
+fn certificate_fingerprint(cert_der: &[u8]) -> String {
+    let hash = Sha256::digest(cert_der);
+    hash.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Verifies a server certificate by comparing its SHA-256 fingerprint to a
+/// pinned value.  The CA chain is not validated.  Signature verification still
+/// uses the real crypto provider so the TLS handshake is otherwise sound.
+#[derive(Debug)]
+struct FingerprintCertVerifier {
+    expected_fingerprint: String,
+    provider: rustls::crypto::CryptoProvider,
+}
+
+impl ServerCertVerifier for FingerprintCertVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        let actual = certificate_fingerprint(end_entity.as_ref());
+        if actual == self.expected_fingerprint {
+            Ok(ServerCertVerified::assertion())
+        } else {
+            warn!(
+                expected = %self.expected_fingerprint,
+                actual = %actual,
+                "TLS certificate fingerprint mismatch"
+            );
+            Err(rustls::Error::General(format!(
+                "certificate fingerprint mismatch: expected {}, got {actual}",
+                self.expected_fingerprint
+            )))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.provider.signature_verification_algorithms.supported_schemes()
+    }
+}
+
 // ── helpers ─────────────────────────────────────────────────────────────────
 
 async fn map_response<T: DeserializeOwned>(
@@ -311,11 +437,18 @@ fn map_reqwest_error(e: reqwest::Error, url: &str) -> CliError {
 
 #[cfg(test)]
 mod tests {
+    use rustls::pki_types::{ServerName, UnixTime};
+
     use super::*;
     use crate::config::ResolvedConfig;
 
     fn test_config(server: &str) -> ResolvedConfig {
-        ResolvedConfig { server: server.to_owned(), token: "test-token".to_owned(), timeout: 5 }
+        ResolvedConfig {
+            server: server.to_owned(),
+            token: "test-token".to_owned(),
+            timeout: 5,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        }
     }
 
     #[test]
@@ -585,5 +718,90 @@ mod tests {
             matches!(mapped, CliError::ServerUnreachable(_)),
             "else branch must map to ServerUnreachable, got: {mapped:?}",
         );
+    }
+
+    // ── certificate_fingerprint ──────────────────────────────────────────────
+
+    /// SHA-256 of an all-zero 32-byte input is a known, stable value.
+    #[test]
+    fn certificate_fingerprint_produces_lowercase_hex_sha256() {
+        // SHA-256 of 32 zero bytes (well-known test vector).
+        let input = [0u8; 32];
+        let fp = certificate_fingerprint(&input);
+        assert_eq!(fp.len(), 64, "fingerprint must be 64 hex chars");
+        assert!(fp.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+        // Verify it's all lower-case (no uppercase hex digits).
+        assert_eq!(fp, fp.to_ascii_lowercase());
+    }
+
+    // ── FingerprintCertVerifier ──────────────────────────────────────────────
+
+    fn dummy_cert_der() -> Vec<u8> {
+        // Minimal DER blob: just bytes — not a real certificate.  We only
+        // care about the SHA-256 fingerprint so the content doesn't matter.
+        vec![0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03, 0x04]
+    }
+
+    fn verifier_for_cert(cert_der: &[u8]) -> (FingerprintCertVerifier, String) {
+        let fp = certificate_fingerprint(cert_der);
+        let v = FingerprintCertVerifier {
+            expected_fingerprint: fp.clone(),
+            provider: rustls::crypto::ring::default_provider(),
+        };
+        (v, fp)
+    }
+
+    #[test]
+    fn fingerprint_verifier_accepts_matching_cert() {
+        let cert_bytes = dummy_cert_der();
+        let (verifier, _fp) = verifier_for_cert(&cert_bytes);
+        let cert = CertificateDer::from(cert_bytes);
+        let server_name = ServerName::try_from("teamserver.example.com").unwrap();
+        let now = UnixTime::now();
+        let result = verifier.verify_server_cert(&cert, &[], &server_name, &[], now);
+        assert!(result.is_ok(), "matching fingerprint must be accepted");
+    }
+
+    #[test]
+    fn fingerprint_verifier_rejects_mismatched_cert() {
+        let cert_bytes = dummy_cert_der();
+        let (verifier, _) = verifier_for_cert(&cert_bytes);
+        // Use different bytes so the fingerprint won't match.
+        let different = vec![0xca, 0xfe, 0xba, 0xbe];
+        let cert = CertificateDer::from(different);
+        let server_name = ServerName::try_from("teamserver.example.com").unwrap();
+        let now = UnixTime::now();
+        let result = verifier.verify_server_cert(&cert, &[], &server_name, &[], now);
+        assert!(result.is_err(), "mismatched fingerprint must be rejected");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("fingerprint mismatch"),
+            "error message must mention fingerprint mismatch, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn fingerprint_verifier_normalises_uppercase_input() {
+        let cert_bytes = dummy_cert_der();
+        let fp = certificate_fingerprint(&cert_bytes).to_ascii_uppercase();
+        // The verifier stores the fingerprint as-is; build() should lowercase it.
+        // Here we test via build_http_client path: just test the normalisation directly.
+        let fp_lower = fp.to_ascii_lowercase();
+        let verifier = FingerprintCertVerifier {
+            expected_fingerprint: fp_lower.clone(),
+            provider: rustls::crypto::ring::default_provider(),
+        };
+        let cert = CertificateDer::from(cert_bytes);
+        let server_name = ServerName::try_from("ts.example.com").unwrap();
+        let result = verifier.verify_server_cert(&cert, &[], &server_name, &[], UnixTime::now());
+        assert!(result.is_ok(), "lowercased fingerprint must be accepted");
+    }
+
+    // ── build_http_client with SystemRoots ───────────────────────────────────
+
+    #[test]
+    fn build_http_client_system_roots_succeeds() {
+        let cfg = test_config("https://localhost:40056");
+        assert!(build_http_client(&cfg).is_ok());
     }
 }

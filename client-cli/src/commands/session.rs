@@ -494,6 +494,7 @@ mod tests {
             server: "https://127.0.0.1:1".to_owned(),
             token: "tok".to_owned(),
             timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
         };
         let client = ApiClient::new(&cfg).expect("build client");
         let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"does.not.exist"}"#).expect("parse");
@@ -513,6 +514,7 @@ mod tests {
             server: "https://127.0.0.1:1".to_owned(),
             token: "tok".to_owned(),
             timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
         };
         let client = ApiClient::new(&cfg).expect("build client");
         let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"ping"}"#).expect("parse");
@@ -529,6 +531,7 @@ mod tests {
             server: "https://127.0.0.1:1".to_owned(),
             token: "tok".to_owned(),
             timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
         };
         let client = ApiClient::new(&cfg).expect("build client");
         let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"agent.show"}"#).expect("parse");
@@ -546,6 +549,7 @@ mod tests {
             server: "https://127.0.0.1:1".to_owned(),
             token: "tok".to_owned(),
             timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
         };
         let client = ApiClient::new(&cfg).expect("build client");
         let msg: SessionCmd =
@@ -566,6 +570,7 @@ mod tests {
             server: "https://127.0.0.1:1".to_owned(),
             token: "tok".to_owned(),
             timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
         };
         let client = ApiClient::new(&cfg).expect("build client");
         let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"agent.list"}"#).expect("parse");
@@ -583,6 +588,7 @@ mod tests {
             server: "https://127.0.0.1:1".to_owned(),
             token: "tok".to_owned(),
             timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
         };
         let client = ApiClient::new(&cfg).expect("build client");
         let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"listener.list"}"#).expect("parse");
@@ -602,6 +608,7 @@ mod tests {
             server: "https://127.0.0.1:1".to_owned(),
             token: "tok".to_owned(),
             timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
         };
         let client = ApiClient::new(&cfg).expect("build client");
         // No `since` field — URL must be /agents/{id}/output (no query string).
@@ -621,6 +628,7 @@ mod tests {
             server: "https://127.0.0.1:1".to_owned(),
             token: "tok".to_owned(),
             timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
         };
         let client = ApiClient::new(&cfg).expect("build client");
         // `since` set — URL must be /agents/{id}/output?since=job_xyz.
@@ -643,6 +651,7 @@ mod tests {
             server: "https://127.0.0.1:1".to_owned(),
             token: "tok".to_owned(),
             timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
         };
         let client = ApiClient::new(&cfg).expect("build client");
         let msg: SessionCmd =
@@ -661,6 +670,7 @@ mod tests {
             server: "https://127.0.0.1:1".to_owned(),
             token: "tok".to_owned(),
             timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
         };
         let client = ApiClient::new(&cfg).expect("build client");
         let msg: SessionCmd = serde_json::from_str(r#"{"cmd":"listener.show"}"#).expect("parse");
@@ -679,6 +689,7 @@ mod tests {
             server: server_uri.to_owned(),
             token: "test-token".to_owned(),
             timeout: 5,
+            tls_mode: crate::config::TlsMode::SystemRoots,
         }
     }
 
@@ -861,6 +872,7 @@ mod tests {
             server: "https://127.0.0.1:1".to_owned(),
             token: "tok".to_owned(),
             timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
         })
         .expect("build client")
     }

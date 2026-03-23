@@ -11,6 +11,21 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use thiserror::Error;
 
+/// Controls how the CLI verifies the teamserver's TLS certificate.
+#[derive(Debug, Clone, Default)]
+pub enum TlsMode {
+    /// Verify against the system/webpki root CAs (default, secure).
+    #[default]
+    SystemRoots,
+    /// Verify against a single custom CA certificate loaded from a PEM file.
+    /// Built-in root CAs are disabled so only this CA is trusted.
+    CustomCa(PathBuf),
+    /// Pin against a specific SHA-256 certificate fingerprint (lowercase hex).
+    /// The CA chain is not checked; only the end-entity cert's fingerprint is
+    /// compared.  Overrides `--ca-cert` when both are supplied.
+    Fingerprint(String),
+}
+
 /// Raw values loaded from a TOML config file.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct FileConfig {
@@ -31,6 +46,8 @@ pub struct ResolvedConfig {
     pub token: String,
     /// Request timeout in seconds.
     pub timeout: u64,
+    /// How the HTTP client should verify the teamserver's TLS certificate.
+    pub tls_mode: TlsMode,
 }
 
 /// Errors that can occur during configuration resolution.
@@ -109,8 +126,9 @@ pub fn load_config_file(path: &Path) -> Result<FileConfig, ConfigError> {
 ///
 /// `cli_timeout` is the value from `--timeout` (or its default of 30).
 ///
-/// Config files are only consulted when the CLI/env did not provide all
-/// required values.
+/// `ca_cert` and `cert_fingerprint` come from `--ca-cert` / `--cert-fingerprint`.
+/// When both are supplied `cert_fingerprint` wins.  Neither is read from config
+/// files — they are CLI-only for security-sensitive TLS decisions.
 ///
 /// ## Known limitation — timeout sentinel
 ///
@@ -128,6 +146,8 @@ pub fn resolve(
     cli_server: Option<String>,
     cli_token: Option<String>,
     cli_timeout: u64,
+    ca_cert: Option<PathBuf>,
+    cert_fingerprint: Option<String>,
 ) -> Result<ResolvedConfig, ConfigError> {
     // Only pay the I/O cost of loading files when something is missing.
     let need_file = cli_server.is_none() || cli_token.is_none();
@@ -161,7 +181,14 @@ pub fn resolve(
         file_config.as_ref().and_then(|c| c.timeout).unwrap_or(cli_timeout)
     };
 
-    Ok(ResolvedConfig { server: server.trim_end_matches('/').to_owned(), token, timeout })
+    // TLS mode: fingerprint wins over CA cert; both are CLI-only (not in file configs).
+    let tls_mode = match (ca_cert, cert_fingerprint) {
+        (_, Some(fp)) => TlsMode::Fingerprint(fp),
+        (Some(path), None) => TlsMode::CustomCa(path),
+        (None, None) => TlsMode::SystemRoots,
+    };
+
+    Ok(ResolvedConfig { server: server.trim_end_matches('/').to_owned(), token, timeout, tls_mode })
 }
 
 #[cfg(test)]
@@ -250,7 +277,9 @@ timeout = 60
 
     #[test]
     fn resolve_uses_cli_values_directly() {
-        let cfg = resolve(Some("https://ts:40056".to_owned()), Some("tok".to_owned()), 30).unwrap();
+        let cfg =
+            resolve(Some("https://ts:40056".to_owned()), Some("tok".to_owned()), 30, None, None)
+                .unwrap();
         assert_eq!(cfg.server, "https://ts:40056");
         assert_eq!(cfg.token, "tok");
         assert_eq!(cfg.timeout, 30);
@@ -259,7 +288,8 @@ timeout = 60
     #[test]
     fn resolve_strips_trailing_slash_from_server() {
         let cfg =
-            resolve(Some("https://ts:40056/".to_owned()), Some("tok".to_owned()), 30).unwrap();
+            resolve(Some("https://ts:40056/".to_owned()), Some("tok".to_owned()), 30, None, None)
+                .unwrap();
         assert_eq!(cfg.server, "https://ts:40056");
     }
 
@@ -269,7 +299,7 @@ timeout = 60
         let _guard = CWD_LOCK.lock().unwrap();
         let original = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
-        let err = resolve(None, Some("tok".to_owned()), 30);
+        let err = resolve(None, Some("tok".to_owned()), 30, None, None);
         std::env::set_current_dir(&original).unwrap();
         assert!(matches!(err, Err(ConfigError::MissingServer)));
     }
@@ -280,14 +310,16 @@ timeout = 60
         let _guard = CWD_LOCK.lock().unwrap();
         let original = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
-        let err = resolve(Some("https://ts:40056".to_owned()), None, 30);
+        let err = resolve(Some("https://ts:40056".to_owned()), None, 30, None, None);
         std::env::set_current_dir(&original).unwrap();
         assert!(matches!(err, Err(ConfigError::MissingToken)));
     }
 
     #[test]
     fn resolve_uses_explicit_timeout_over_file() {
-        let cfg = resolve(Some("https://ts:40056".to_owned()), Some("tok".to_owned()), 45).unwrap();
+        let cfg =
+            resolve(Some("https://ts:40056".to_owned()), Some("tok".to_owned()), 45, None, None)
+                .unwrap();
         assert_eq!(cfg.timeout, 45);
     }
 
@@ -310,7 +342,7 @@ timeout = 90
         let _guard = CWD_LOCK.lock().unwrap();
         let original = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
-        let result = resolve(None, None, 30);
+        let result = resolve(None, None, 30, None, None);
         std::env::set_current_dir(&original).unwrap();
 
         let cfg = result.expect("resolve should succeed with file config");
@@ -342,7 +374,7 @@ timeout = 60
         std::env::set_current_dir(tmp.path()).unwrap();
         // token provided on CLI; server absent → file is loaded.
         // cli_timeout = 30 is the default sentinel, so the file's 60 wins.
-        let result = resolve(None, Some("tok".to_owned()), 30);
+        let result = resolve(None, Some("tok".to_owned()), 30, None, None);
         std::env::set_current_dir(&original).unwrap();
 
         let cfg = result.expect("resolve should succeed");
@@ -369,7 +401,7 @@ token  = "file-tok"
         let _guard = CWD_LOCK.lock().unwrap();
         let original = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
-        let result = resolve(Some("https://cli-ts:9999".to_owned()), None, 30);
+        let result = resolve(Some("https://cli-ts:9999".to_owned()), None, 30, None, None);
         std::env::set_current_dir(&original).unwrap();
 
         let cfg = result.expect("resolve should succeed with partial override");

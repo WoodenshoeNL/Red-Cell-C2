@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
@@ -55,6 +57,19 @@ pub struct Cli {
     /// Request timeout in seconds
     #[arg(long, global = true, default_value = "30")]
     pub timeout: u64,
+
+    /// Path to a custom CA certificate (PEM) used to verify the teamserver's
+    /// TLS certificate.  Built-in root CAs are disabled; only this CA is
+    /// trusted.  Overridden by --cert-fingerprint when both are supplied.
+    #[arg(long, global = true)]
+    pub ca_cert: Option<PathBuf>,
+
+    /// SHA-256 fingerprint (lowercase hex, 64 chars) of the teamserver's
+    /// TLS certificate.  Overrides --ca-cert when both are supplied.
+    /// The certificate chain is not validated; only the end-entity cert's
+    /// fingerprint is compared.
+    #[arg(long, global = true)]
+    pub cert_fingerprint: Option<String>,
 
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -605,7 +620,13 @@ async fn dispatch(cli: Cli) -> i32 {
 
     // Resolve configuration (CLI flags + env vars were already absorbed by
     // clap; this step adds the file-based fallbacks).
-    let resolved = match config::resolve(cli.server, cli.token, cli.timeout) {
+    let resolved = match config::resolve(
+        cli.server,
+        cli.token,
+        cli.timeout,
+        cli.ca_cert,
+        cli.cert_fingerprint,
+    ) {
         Ok(cfg) => cfg,
         Err(e) => {
             let err: CliError = e.into();

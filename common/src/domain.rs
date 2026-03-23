@@ -1069,6 +1069,44 @@ mod tests {
     }
 
     #[test]
+    fn operator_info_serializes_canonical_username_and_round_trips()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let original = OperatorInfo {
+            username: "michel".to_string(),
+            password_hash: Some("abc123".to_string()),
+            role: Some("admin".to_string()),
+            online: true,
+            last_seen: Some("09/03/2026 19:05:00".to_string()),
+        };
+
+        let serialized = serde_json::to_value(&original)?;
+        assert_eq!(serialized.get("Username"), Some(&json!("michel")));
+        assert_eq!(serialized.get("User"), None);
+
+        let from_username: OperatorInfo = serde_json::from_value(json!({
+            "Username": "michel",
+            "PasswordHash": "abc123",
+            "Role": "admin",
+            "Online": true,
+            "LastSeen": "09/03/2026 19:05:00"
+        }))?;
+        assert_eq!(from_username, original);
+
+        let from_user_alias: OperatorInfo = serde_json::from_value(json!({
+            "User": "michel",
+            "PasswordHash": "abc123",
+            "Role": "admin",
+            "Online": true,
+            "LastSeen": "09/03/2026 19:05:00"
+        }))?;
+        assert_eq!(from_user_alias, original);
+
+        let round_trip: OperatorInfo = serde_json::from_value(serialized)?;
+        assert_eq!(round_trip, original);
+        Ok(())
+    }
+
+    #[test]
     fn proxy_port_accepts_string_values() -> Result<(), Box<dyn std::error::Error>> {
         let payload = json!({
             "name": "edge",

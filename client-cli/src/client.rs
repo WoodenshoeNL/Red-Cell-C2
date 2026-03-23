@@ -365,6 +365,15 @@ mod tests {
         assert!(matches!(result, Err(CliError::ServerUnreachable(_))));
     }
 
+    #[tokio::test]
+    async fn post_returns_server_unreachable_on_connection_refused() {
+        let cfg = test_config("https://127.0.0.1:1");
+        let client = ApiClient::new(&cfg).unwrap();
+        let body = serde_json::json!({"name": "test"});
+        let result: Result<serde_json::Value, _> = client.post("/agents", &body).await;
+        assert!(matches!(result, Err(CliError::ServerUnreachable(_))));
+    }
+
     // ── post_bytes ──────────────────────────────────────────────────────────
 
     #[tokio::test]

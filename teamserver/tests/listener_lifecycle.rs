@@ -1106,8 +1106,12 @@ async fn listener_within_working_hours_accepts_demon_init() -> Result<(), Box<dy
     let now_secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
     let utc_hour = ((now_secs % 86400) / 3600) as u8;
     let start = if utc_hour == 0 { 0 } else { utc_hour - 1 };
-    let end = if utc_hour >= 22 { 23 } else { utc_hour + 2 };
-    let working_hours = format!("{start:02}:00-{end:02}:00");
+    let working_hours = if utc_hour >= 22 {
+        format!("{start:02}:00-23:59")
+    } else {
+        let end = utc_hour + 2;
+        format!("{start:02}:00-{end:02}:00")
+    };
 
     manager.create(http_config_with_time("lc-wh-inside", port, None, Some(&working_hours))).await?;
     drop(guard);

@@ -7852,8 +7852,12 @@ mod tests {
         let now_secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         let utc_hour = ((now_secs % 86400) / 3600) as u8;
         let start = if utc_hour == 0 { 0 } else { utc_hour - 1 };
-        let end = if utc_hour >= 22 { 23 } else { utc_hour + 2 };
-        let window = format!("{start:02}:00-{end:02}:00");
+        let window = if utc_hour >= 22 {
+            format!("{start:02}:00-23:59")
+        } else {
+            let end = utc_hour + 2;
+            format!("{start:02}:00-{end:02}:00")
+        };
         assert!(
             !is_outside_working_hours(Some(&window)),
             "current UTC hour {utc_hour} should be inside {window}"

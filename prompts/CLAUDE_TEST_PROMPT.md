@@ -215,7 +215,15 @@ For any code that parses or serializes the Demon binary protocol:
 
 ## Step 5 — Check for Duplicate Issues
 
-Before creating new issues, check what test-related issues are already open:
+Before creating new issues, first check `docs/known-failures.md` for already-tracked
+test failures:
+
+```bash
+cat docs/known-failures.md
+```
+
+If a test you found failing is listed there, do not create a duplicate issue — it is already
+tracked. Then check what test-related issues are already open:
 
 ```bash
 br list --status=open --json 2>/dev/null | python3 -c "

@@ -384,11 +384,40 @@ You are operating in zone(s): {', '.join(f'`{z}`' for z in zones)}
 **STRICT**: Only modify files inside:
 {paths_list}
 
-If you discover that work in another zone is required to complete this task, do NOT make
-those changes yourself. Instead, create a beads issue for that work:
-  `br create --title="..." --description="..." --type=task --priority=<N>`
-Then add the appropriate zone label:
-  `br update <new-id> --add-label zone:<zone>`
+### If a test outside your zone fails
+
+Before filing a bug, check `docs/known-failures.md`:
+
+```bash
+grep -i "<test name or keyword>" docs/known-failures.md
+```
+
+If it is already listed, do NOT create a new issue — the bug is tracked. Link your task
+to the existing issue if relevant: `br dep add <existing-id> <your-task-id>`
+
+If it is NOT listed, create a beads issue with ALL of the following:
+```bash
+br create \\
+  --title="bug: <test name> — <one-line symptom>" \\
+  --description="**Failing test**: <exact test name>
+**Repro command**: <exact cargo test command that reproduces it>
+**Full error output**:
+\`\`\`
+<paste the complete test failure output here — do not truncate>
+\`\`\`
+**Context**: Encountered while working on <your-issue-id> in zone(s): {', '.join(f'`{z}`' for z in zones)}.
+This is outside my zone — needs teamserver/common/client follow-up." \\
+  --type=bug \\
+  --priority=2
+br label add <new-id> zone:<other-zone>
+```
+
+### If work in another zone is required (not a test failure)
+
+```bash
+br create --title="..." --description="..." --type=task --priority=<N>
+br label add <new-id> zone:<zone>
+```
 """
 
 

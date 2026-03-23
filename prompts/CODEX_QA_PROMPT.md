@@ -150,6 +150,16 @@ Tests:
 
 ## Step 7 — Create Issues for Problems Found
 
+**Before filing any test failure bug**, check `docs/known-failures.md`:
+
+```bash
+cat docs/known-failures.md
+```
+
+If the failing test is already listed there, do NOT create a duplicate. If `cargo test`
+found a new persistent failure not in that file, add it to `docs/known-failures.md` as part
+of your commit (Step 9), then file the beads issue.
+
 For each problem, create a beads issue. Always include the responsible agent from Step 3 in
 the description so the scorecard can be updated accurately.
 

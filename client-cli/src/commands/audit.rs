@@ -179,7 +179,7 @@ async fn tail_follow(client: &ApiClient, fmt: &OutputFormat) -> i32 {
         }
         Ok(entries) => {
             // Print existing entries the same way as a plain `log tail`.
-            let latest_ts = entries.last().map(|e| e.ts.clone());
+            let latest_ts = entries.first().map(|e| e.ts.clone());
             for entry in &entries {
                 print_entry_line(fmt, entry);
             }

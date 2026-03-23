@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 725 | 223 | 31 |
+| Tasks closed | 729 | 227 | 31 |
 | Bugs filed against | 81 | 34 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
 | Quality score | 89% | 85% | 71% |
 
-*Bug rates: Claude 81/725=0.11, Codex 34/223=0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 81/729=0.11, Codex 34/227=0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-23 16:00 — fbfad687..8eb88e7a
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 4 | 0 | Closed jrcig (TLS skip-verify fix), 37mdh (DELETE/PUT operator endpoints), udxd2 (RawCreateResponse fix), uy7vn (RawOperatorSummary fix) |
+| Codex | 4 | 0 | Closed won3p (specter clippy lints), 1xut0 (TLS identity test), amaa9 (HKDF reference vectors), qol7s |
+| Cursor | 0 | 0 | No activity |
+
+Build: passed (cargo check + clippy clean, 0 warnings)
+Tests: 26 passed, 1 failed (agent_reconnects_after_listener_restart — pre-existing, tracked by multiple open bugs)
+Issues found: 0 new bugs — all code changes are clean and well-tested
 
 ### QA Review — 2026-03-23 15:15 — 137e825a..7d1d3928
 

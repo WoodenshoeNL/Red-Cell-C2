@@ -21,10 +21,13 @@ use red_cell_common::crypto::{
     encrypt_agent_data_at_offset,
 };
 use red_cell_common::demon::{DemonCommand, DemonMessage, DemonPackage};
-use red_cell_common::{HttpListenerConfig, ListenerConfig};
+use red_cell_common::{DnsListenerConfig, HttpListenerConfig, ListenerConfig};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use tempfile::tempdir;
+use tokio::net::UdpSocket;
+use tokio::time::{sleep, timeout};
 
 #[tokio::test]
 async fn red_cell_packets_match_havoc_at_offset_zero_and_advance_afterward()
@@ -476,4 +479,323 @@ fn go_available() -> bool {
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
+}
+
+// ---------------------------------------------------------------------------
+// DNS transport helpers
+// ---------------------------------------------------------------------------
+
+/// Base32hex alphabet (RFC 4648 §7).
+const BASE32HEX_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHIJKLMNOPQRSTUV";
+
+/// Encode `data` using base32hex (unpadded, uppercase).
+fn base32hex_encode(data: &[u8]) -> String {
+    let mut result = String::with_capacity((data.len() * 8).div_ceil(5));
+    let mut buf: u32 = 0;
+    let mut bits: u8 = 0;
+
+    for &byte in data {
+        buf = (buf << 8) | u32::from(byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            result.push(char::from(BASE32HEX_ALPHABET[((buf >> bits) & 0x1F) as usize]));
+        }
+    }
+    if bits > 0 {
+        buf <<= 5 - bits;
+        result.push(char::from(BASE32HEX_ALPHABET[(buf & 0x1F) as usize]));
+    }
+    result
+}
+
+/// Decode base32hex (unpadded, case-insensitive) into bytes.
+fn base32hex_decode(input: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut result = Vec::with_capacity(input.len() * 5 / 8);
+    let mut buf: u32 = 0;
+    let mut bits: u8 = 0;
+
+    for ch in input.chars() {
+        let val = match ch {
+            '0'..='9' => (ch as u8) - b'0',
+            'A'..='V' => (ch as u8) - b'A' + 10,
+            'a'..='v' => (ch as u8) - b'a' + 10,
+            '=' => continue,
+            _ => return Err(format!("invalid base32hex character: {ch}").into()),
+        };
+        buf = (buf << 5) | u32::from(val);
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            result.push((buf >> bits) as u8);
+        }
+    }
+    Ok(result)
+}
+
+/// Build a DNS upload qname for the C2 protocol.
+fn dns_upload_qname(agent_id: u32, seq: u16, total: u16, chunk: &[u8], domain: &str) -> String {
+    format!("{}.{seq:x}-{total:x}-{agent_id:08x}.up.{domain}", base32hex_encode(chunk))
+}
+
+/// Build a DNS download qname for the C2 protocol.
+fn dns_download_qname(agent_id: u32, seq: u16, domain: &str) -> String {
+    format!("{seq:x}-{agent_id:08x}.dn.{domain}")
+}
+
+/// Build a minimal DNS TXT query packet.
+fn build_dns_txt_query(id: u16, qname: &str) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&id.to_be_bytes());
+    buf.extend_from_slice(&0x0100_u16.to_be_bytes()); // flags: QR=0, RD=1
+    buf.extend_from_slice(&1_u16.to_be_bytes()); // qdcount
+    buf.extend_from_slice(&0_u16.to_be_bytes()); // ancount
+    buf.extend_from_slice(&0_u16.to_be_bytes()); // nscount
+    buf.extend_from_slice(&0_u16.to_be_bytes()); // arcount
+    for label in qname.split('.') {
+        buf.push(u8::try_from(label.len()).expect("label too long"));
+        buf.extend_from_slice(label.as_bytes());
+    }
+    buf.push(0); // zero terminator
+    buf.extend_from_slice(&16_u16.to_be_bytes()); // QTYPE = TXT
+    buf.extend_from_slice(&1_u16.to_be_bytes()); // QCLASS = IN
+    buf
+}
+
+/// DNS wire-format header length.
+const DNS_HEADER_LEN: usize = 12;
+
+/// Parse the TXT answer from a DNS response packet.
+fn parse_dns_txt_answer(packet: &[u8]) -> Option<String> {
+    if packet.len() < DNS_HEADER_LEN {
+        return None;
+    }
+    let mut pos = DNS_HEADER_LEN;
+    while pos < packet.len() {
+        let len = usize::from(packet[pos]);
+        pos += 1;
+        if len == 0 {
+            break;
+        }
+        pos = pos.checked_add(len)?;
+    }
+    pos = pos.checked_add(4)?; // QTYPE + QCLASS
+    pos = pos.checked_add(2 + 2 + 2 + 4 + 2)?; // NAME + TYPE + CLASS + TTL + RDLENGTH
+    let txt_len = usize::from(*packet.get(pos)?);
+    let start = pos.checked_add(1)?;
+    let end = start.checked_add(txt_len)?;
+    std::str::from_utf8(packet.get(start..end)?).ok().map(str::to_owned)
+}
+
+/// Find a free UDP port on 127.0.0.1.
+fn free_udp_port() -> u16 {
+    let sock =
+        std::net::UdpSocket::bind("127.0.0.1:0").expect("failed to bind ephemeral UDP socket");
+    sock.local_addr().expect("failed to read local addr").port()
+}
+
+/// Wait for the DNS listener to start responding.
+async fn wait_for_dns_listener(port: u16) -> Result<UdpSocket, Box<dyn std::error::Error>> {
+    let client = UdpSocket::bind("127.0.0.1:0").await?;
+    client.connect(format!("127.0.0.1:{port}")).await?;
+
+    for _ in 0..40 {
+        let packet = build_dns_txt_query(0xFFFF, "probe.other.domain.com");
+        let _ = client.send(&packet).await;
+        let mut buf = vec![0u8; 512];
+        if timeout(Duration::from_millis(50), client.recv(&mut buf)).await.is_ok() {
+            return Ok(client);
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+    Err(format!("DNS listener on port {port} did not become ready").into())
+}
+
+/// Upload a Demon packet to the DNS listener as chunked DNS queries.
+async fn dns_upload_demon_packet(
+    client: &UdpSocket,
+    agent_id: u32,
+    payload: &[u8],
+    domain: &str,
+    query_id_base: u16,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let chunks: Vec<&[u8]> = payload.chunks(39).collect();
+    let total = u16::try_from(chunks.len())?;
+    let mut last_txt = String::new();
+
+    for (seq, chunk) in chunks.iter().enumerate() {
+        let seq_u16 = u16::try_from(seq)?;
+        let qname = dns_upload_qname(agent_id, seq_u16, total, chunk, domain);
+        let packet = build_dns_txt_query(query_id_base.wrapping_add(seq_u16), &qname);
+        client.send(&packet).await?;
+
+        let mut buf = vec![0u8; 4096];
+        let len = timeout(Duration::from_secs(5), client.recv(&mut buf)).await??;
+        buf.truncate(len);
+        last_txt = parse_dns_txt_answer(&buf).ok_or("failed to parse TXT answer")?;
+    }
+
+    Ok(last_txt)
+}
+
+/// Poll DNS download queries until all chunks are received and reassemble the payload.
+async fn dns_download_response(
+    client: &UdpSocket,
+    agent_id: u32,
+    domain: &str,
+    query_id_base: u16,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut chunks: Vec<String> = Vec::new();
+    let mut expected_total: Option<usize> = None;
+    let mut seq: u16 = 0;
+
+    loop {
+        let qname = dns_download_qname(agent_id, seq, domain);
+        let packet = build_dns_txt_query(query_id_base.wrapping_add(seq), &qname);
+        client.send(&packet).await?;
+
+        let mut buf = vec![0u8; 4096];
+        let len = timeout(Duration::from_secs(5), client.recv(&mut buf)).await??;
+        buf.truncate(len);
+        let txt = parse_dns_txt_answer(&buf).ok_or("failed to parse download TXT answer")?;
+
+        if txt == "wait" {
+            sleep(Duration::from_millis(50)).await;
+            continue;
+        }
+        if txt == "done" {
+            break;
+        }
+
+        let (total_str, b32_chunk) =
+            txt.split_once(' ').ok_or_else(|| format!("unexpected download response: {txt}"))?;
+        let total: usize = total_str.parse()?;
+        if let Some(et) = expected_total {
+            assert_eq!(et, total, "inconsistent total across download chunks");
+        } else {
+            expected_total = Some(total);
+        }
+        chunks.push(b32_chunk.to_owned());
+        seq += 1;
+
+        if chunks.len() >= total {
+            let done_qname = dns_download_qname(agent_id, seq, domain);
+            let done_packet = build_dns_txt_query(query_id_base.wrapping_add(seq), &done_qname);
+            client.send(&done_packet).await?;
+            let mut done_buf = vec![0u8; 4096];
+            let done_len = timeout(Duration::from_secs(5), client.recv(&mut done_buf)).await??;
+            done_buf.truncate(done_len);
+            break;
+        }
+    }
+
+    let mut assembled = Vec::new();
+    for chunk in &chunks {
+        assembled.extend_from_slice(&base32hex_decode(chunk)?);
+    }
+    Ok(assembled)
+}
+
+fn dns_listener(name: &str, port: u16, domain: &str) -> ListenerConfig {
+    ListenerConfig::from(DnsListenerConfig {
+        name: name.to_owned(),
+        host_bind: "127.0.0.1".to_owned(),
+        port_bind: port,
+        domain: domain.to_owned(),
+        record_types: vec!["TXT".to_owned()],
+        kill_date: None,
+        working_hours: None,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// DNS compatibility test
+// ---------------------------------------------------------------------------
+
+/// Cross-validate that a DNS listener's AES-256-CTR init ACK matches the Go
+/// reference implementation byte-for-byte.
+///
+/// The DNS and HTTP listeners share the same `process_demon_transport` function
+/// and therefore the same AES-256-CTR crypto path.  The DNS transport adds
+/// base32hex encoding and multi-chunk framing on top — this test verifies that
+/// the framing layer does not corrupt, pad, or otherwise alter the ciphertext
+/// that reaches the agent.
+///
+/// If the DNS framing ever introduces its own CTR offset accounting (e.g.
+/// padding, counter reset, or a different block alignment rule), this test
+/// will catch the divergence against the Go ground truth.
+#[tokio::test]
+async fn dns_listener_init_ack_matches_havoc_aes_ctr_at_offset_zero()
+-> Result<(), Box<dyn std::error::Error>> {
+    if let Some(reason) = havoc_compatibility_skip_reason() {
+        panic!(
+            "havoc-compat feature is enabled but the Go toolchain is unavailable: {reason}\n\
+             Install Go (https://go.dev/dl/) or run without --features havoc-compat."
+        );
+    }
+
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+
+    let port = free_udp_port();
+    let domain = "c2.compat.test";
+    let agent_id = 0xDEAD_CAFE_u32;
+    let key: [u8; AGENT_KEY_LENGTH] = [
+        0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x6B, 0x6C, 0x6D, 0x6E, 0x6F,
+        0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x41, 0x42, 0x43, 0x44,
+        0x45, 0x46,
+    ];
+    let iv: [u8; AGENT_IV_LENGTH] = [
+        0xD0, 0xE1, 0xF2, 0x03, 0x14, 0x25, 0x36, 0x47, 0x58, 0x69, 0x7A, 0x8B, 0x9C, 0xAD, 0xBE,
+        0xCF,
+    ];
+
+    manager.create(dns_listener("havoc-dns-compat", port, domain)).await?;
+    manager.start("havoc-dns-compat").await?;
+    let client = wait_for_dns_listener(port).await?;
+
+    // 1. Upload a DEMON_INIT via DNS chunked queries.
+    let init_body = common::valid_demon_init_body(agent_id, key, iv);
+    let init_result =
+        dns_upload_demon_packet(&client, agent_id, &init_body, domain, 0x1000).await?;
+    assert_eq!(init_result, "ack", "DEMON_INIT upload must be acknowledged");
+
+    // 2. Download the init ACK ciphertext via DNS download queries.
+    let ack_ciphertext = dns_download_response(&client, agent_id, domain, 0x2000).await?;
+    assert!(!ack_ciphertext.is_empty(), "init ACK must be non-empty");
+
+    // 3. Decrypt the ACK and verify it contains the agent_id (sanity check).
+    let decrypted =
+        red_cell_common::crypto::decrypt_agent_data_at_offset(&key, &iv, 0, &ack_ciphertext)?;
+    assert_eq!(
+        decrypted.as_slice(),
+        &agent_id.to_le_bytes(),
+        "init ACK plaintext must be the agent_id in LE bytes"
+    );
+
+    // 4. Cross-validate: the Go AES-256-CTR implementation at offset 0 must
+    //    produce the same ciphertext the DNS listener delivered.
+    let havoc_ack = havoc_encrypt_many(&key, &iv, 0, &[agent_id.to_le_bytes().to_vec()])?;
+    assert_eq!(
+        ack_ciphertext.as_slice(),
+        havoc_ack[0].as_slice(),
+        "DNS listener init ACK ciphertext must match Go AES-CTR at block offset 0 — \
+         this confirms the DNS transport framing (base32hex chunking) does not alter \
+         the underlying ciphertext produced by the shared crypto path"
+    );
+
+    // 5. Verify the CTR offset advanced correctly for subsequent callbacks.
+    let ctr_offset = ctr_blocks_for_len(ack_ciphertext.len());
+    assert_eq!(ctr_offset, 1, "init ACK should consume one AES block");
+    assert_eq!(
+        registry.ctr_offset(agent_id).await?,
+        ctr_offset,
+        "registry CTR offset must match the init ACK block count"
+    );
+
+    manager.stop("havoc-dns-compat").await?;
+    Ok(())
 }

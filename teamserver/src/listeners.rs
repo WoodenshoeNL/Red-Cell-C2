@@ -7574,4 +7574,98 @@ mod tests {
             other => panic!("expected External, got {other:?}"),
         }
     }
+
+    // ── HTTP required-field rejection tests ──────────────────────────────────
+
+    /// Helper: returns a fully-valid HTTP `ListenerInfo` that
+    /// `listener_config_from_operator` accepts.  Individual tests blank out one
+    /// field at a time to verify rejection.
+    fn valid_http_listener_info() -> ListenerInfo {
+        ListenerInfo {
+            name: Some("http-test".to_owned()),
+            protocol: Some("Http".to_owned()),
+            host_bind: Some("0.0.0.0".to_owned()),
+            host_rotation: Some("round-robin".to_owned()),
+            port_bind: Some("443".to_owned()),
+            secure: Some("false".to_owned()),
+            ..ListenerInfo::default()
+        }
+    }
+
+    #[test]
+    fn listener_config_from_operator_rejects_http_without_name() {
+        let info = ListenerInfo { name: None, ..valid_http_listener_info() };
+        let error = listener_config_from_operator(&info).expect_err("missing Name should fail");
+        assert!(
+            matches!(error, ListenerManagerError::InvalidConfig { .. }),
+            "expected InvalidConfig, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn listener_config_from_operator_rejects_http_without_protocol() {
+        let info = ListenerInfo { protocol: None, ..valid_http_listener_info() };
+        let error = listener_config_from_operator(&info).expect_err("missing Protocol should fail");
+        assert!(
+            matches!(error, ListenerManagerError::InvalidConfig { .. }),
+            "expected InvalidConfig, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn listener_config_from_operator_rejects_unrecognised_protocol() {
+        let info =
+            ListenerInfo { protocol: Some("Telnet".to_owned()), ..valid_http_listener_info() };
+        let error =
+            listener_config_from_operator(&info).expect_err("unrecognised protocol should fail");
+        assert!(
+            matches!(error, ListenerManagerError::InvalidConfig { .. }),
+            "expected InvalidConfig, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn listener_config_from_operator_rejects_http_without_host_bind() {
+        let info = ListenerInfo { host_bind: None, ..valid_http_listener_info() };
+        let error = listener_config_from_operator(&info).expect_err("missing HostBind should fail");
+        assert!(
+            matches!(error, ListenerManagerError::InvalidConfig { .. }),
+            "expected InvalidConfig, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn listener_config_from_operator_rejects_http_without_host_rotation() {
+        let info = ListenerInfo { host_rotation: None, ..valid_http_listener_info() };
+        let error =
+            listener_config_from_operator(&info).expect_err("missing HostRotation should fail");
+        assert!(
+            matches!(error, ListenerManagerError::InvalidConfig { .. }),
+            "expected InvalidConfig, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn listener_config_from_operator_rejects_http_without_port_bind() {
+        let info = ListenerInfo { port_bind: None, ..valid_http_listener_info() };
+        let error = listener_config_from_operator(&info).expect_err("missing PortBind should fail");
+        assert!(
+            matches!(error, ListenerManagerError::InvalidConfig { .. }),
+            "expected InvalidConfig, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn listener_config_from_operator_rejects_http_with_non_numeric_port_bind() {
+        let info = ListenerInfo {
+            port_bind: Some("not-a-number".to_owned()),
+            ..valid_http_listener_info()
+        };
+        let error =
+            listener_config_from_operator(&info).expect_err("non-numeric PortBind should fail");
+        assert!(
+            matches!(error, ListenerManagerError::InvalidConfig { .. }),
+            "expected InvalidConfig, got {error:?}"
+        );
+    }
 }

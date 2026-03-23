@@ -219,7 +219,7 @@ async fn active_agent_survives_liveness_sweep_that_kills_stale_peer()
         0xB1, 0xC2, 0xD3, 0xE4, 0xF5, 0x06, 0x17, 0x28, 0x39, 0x4A, 0x5B, 0x6C, 0x7D, 0x8E, 0x9F,
         0xA0,
     ];
-    let ctr_b = common::register_agent(&client, listener_port, agent_b_id, key_b, iv_b).await?;
+    let _ctr_b = common::register_agent(&client, listener_port, agent_b_id, key_b, iv_b).await?;
     read_until(&mut socket, |msg| matches!(msg, OperatorMessage::AgentNew(_))).await?;
 
     // Verify both agents are initially active.
@@ -236,13 +236,16 @@ async fn active_agent_survives_liveness_sweep_that_kills_stale_peer()
     // Refresh B's last_call_in by sending an empty CommandCheckin callback.
     // An empty CHECKIN payload skips metadata parsing and calls set_last_call_in directly,
     // which is the lightest-weight way to prove the agent is still alive.
+    //
+    // Legacy Demon agents reset AES-CTR to block 0 for every packet, so the
+    // callback must be encrypted at offset 0 regardless of the init ACK size.
     client
         .post(format!("http://127.0.0.1:{listener_port}/"))
         .body(common::valid_demon_callback_body(
             agent_b_id,
             key_b,
             iv_b,
-            ctr_b,
+            0,
             u32::from(DemonCommand::CommandCheckin),
             0,
             &[],

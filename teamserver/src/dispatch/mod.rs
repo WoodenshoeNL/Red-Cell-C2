@@ -8064,6 +8064,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_job_list_truncated_mid_row_returns_invalid_payload()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent = sample_agent_info(0xAABB_CCDD, test_key(0x21), test_iv(0x43));
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry,
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonJobCommand::List));
+        // One complete row: job_id=10, type=1, state=1
+        add_u32(&mut payload, 10);
+        add_u32(&mut payload, 1);
+        add_u32(&mut payload, 1);
+        // Partial row: only job_id present, missing type and state
+        add_u32(&mut payload, 20);
+
+        let result = dispatcher
+            .dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandJob), 42, &payload)
+            .await;
+
+        assert!(result.is_err(), "truncated mid-row payload should be rejected");
+        let err = result.expect_err("truncated mid-row payload must fail");
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got: {err:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn handle_job_suspend_success_and_failure_broadcasts_correct_messages()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;

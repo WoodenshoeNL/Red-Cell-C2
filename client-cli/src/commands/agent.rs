@@ -485,11 +485,17 @@ async fn watch_output(
     since: Option<&str>,
 ) -> i32 {
     let mut cursor: Option<String> = since.map(ToOwned::to_owned);
+    // Create the ctrl_c future once and pin it so we can reuse the same OS-level
+    // signal listener across all loop iterations. Creating a new ctrl_c() future
+    // on every iteration registers a new listener each time; after ~64 iterations
+    // the Tokio global receiver capacity (128) can be exhausted.
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
 
     loop {
         let poll_result = tokio::select! {
             result = fetch_output(client, id, cursor.as_deref()) => result,
-            _ = tokio::signal::ctrl_c() => {
+            _ = &mut ctrl_c => {
                 return EXIT_SUCCESS;
             }
         };
@@ -524,7 +530,7 @@ async fn watch_output(
         let sleep_fut = sleep(POLL_INTERVAL);
         tokio::select! {
             _ = sleep_fut => {}
-            _ = tokio::signal::ctrl_c() => {
+            _ = &mut ctrl_c => {
                 return EXIT_SUCCESS;
             }
         }

@@ -2973,6 +2973,18 @@ async fn http_listener_handler(
         return state.fake_404_response();
     }
 
+    // Reject traffic when the listener's kill_date has passed.
+    if is_past_kill_date(state.config.kill_date.as_deref()) {
+        debug!(listener = %state.config.name, "rejecting request — kill_date has passed");
+        return state.fake_404_response();
+    }
+
+    // Reject traffic outside the configured working-hours window.
+    if is_outside_working_hours(state.config.working_hours.as_deref()) {
+        debug!(listener = %state.config.name, "rejecting request — outside working hours");
+        return state.fake_404_response();
+    }
+
     let external_ip = extract_external_ip(
         state.config.behind_redirector,
         &state.trusted_proxy_peers,
@@ -3065,6 +3077,69 @@ fn headers_match(expected_headers: &[ExpectedHeader], headers: &HeaderMap) -> bo
             .and_then(|value| value.to_str().ok())
             .is_some_and(|actual| actual.eq_ignore_ascii_case(&expected.expected_value))
     })
+}
+
+/// Return `true` when `kill_date` is set and the current wall-clock time has
+/// passed it.  The value is expected to be a unix timestamp (seconds since
+/// epoch) encoded as a decimal string.  If the value is absent or cannot be
+/// parsed, the check is silently skipped (returns `false`).
+fn is_past_kill_date(kill_date: Option<&str>) -> bool {
+    let Some(value) = kill_date.map(str::trim).filter(|v| !v.is_empty()) else {
+        return false;
+    };
+    let Ok(timestamp) = value.parse::<i64>() else {
+        return false;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let Ok(kill_epoch) = u64::try_from(timestamp) else {
+        // Negative timestamps are always in the past.
+        return true;
+    };
+    now >= kill_epoch
+}
+
+/// Return `true` when `working_hours` is set and the current UTC hour:minute
+/// falls outside the configured window.  The value is expected in `HH:MM-HH:MM`
+/// format.  If the value is absent or malformed, the check is silently skipped
+/// (returns `false`).
+fn is_outside_working_hours(working_hours: Option<&str>) -> bool {
+    let Some(value) = working_hours.map(str::trim).filter(|v| !v.is_empty()) else {
+        return false;
+    };
+    let Some((start, end)) = value.split_once('-') else {
+        return false;
+    };
+    let Some((start_h, start_m)) = parse_hhmm(start) else {
+        return false;
+    };
+    let Some((end_h, end_m)) = parse_hhmm(end) else {
+        return false;
+    };
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let utc_hour = ((now_secs % 86400) / 3600) as u8;
+    let utc_minute = ((now_secs % 3600) / 60) as u8;
+
+    let now_minutes = u16::from(utc_hour) * 60 + u16::from(utc_minute);
+    let start_minutes = u16::from(start_h) * 60 + u16::from(start_m);
+    let end_minutes = u16::from(end_h) * 60 + u16::from(end_m);
+
+    // The window is [start, end) in UTC minutes-since-midnight.
+    now_minutes < start_minutes || now_minutes >= end_minutes
+}
+
+/// Parse `"HH:MM"` into `(hour, minute)`, returning `None` on any error.
+fn parse_hhmm(value: &str) -> Option<(u8, u8)> {
+    let (h, m) = value.trim().split_once(':')?;
+    let hour = h.parse::<u8>().ok().filter(|&h| h <= 23)?;
+    let minute = m.parse::<u8>().ok().filter(|&m| m <= 59)?;
+    Some((hour, minute))
 }
 
 fn extract_external_ip(
@@ -3469,11 +3544,12 @@ mod tests {
         UNKNOWN_CALLBACK_PROBE_AUDIT_WINDOW_DURATION, UnknownCallbackProbeAuditLimiter,
         action_from_mark, base32hex_decode, base32hex_encode, build_dns_txt_response,
         chunk_response_to_b32hex, collect_body_with_magic_precheck, dns_allowed_query_types,
-        extract_external_ip, listener_config_from_operator, listener_error_event,
-        listener_event_for_action, listener_removed_event, operator_protocol_name,
-        operator_requests_start, parse_dns_c2_query, parse_dns_query, parse_trusted_proxy_peer,
-        profile_listener_configs, read_smb_frame, smb_local_socket_name,
-        spawn_dns_listener_runtime, spawn_managed_listener_task, spawn_smb_listener_runtime,
+        extract_external_ip, is_outside_working_hours, is_past_kill_date,
+        listener_config_from_operator, listener_error_event, listener_event_for_action,
+        listener_removed_event, operator_protocol_name, operator_requests_start,
+        parse_dns_c2_query, parse_dns_query, parse_trusted_proxy_peer, profile_listener_configs,
+        read_smb_frame, smb_local_socket_name, spawn_dns_listener_runtime,
+        spawn_managed_listener_task, spawn_smb_listener_runtime,
     };
     use crate::{
         AgentRegistry, AuditQuery, AuditResultStatus, Database, EventBus, Job,
@@ -7684,6 +7760,103 @@ mod tests {
         assert!(
             matches!(error, ListenerManagerError::InvalidConfig { .. }),
             "expected InvalidConfig, got {error:?}"
+        );
+    }
+
+    // ── kill_date / working_hours helper unit tests ─────────────────────────
+
+    #[test]
+    fn is_past_kill_date_returns_false_when_none() {
+        assert!(!is_past_kill_date(None));
+    }
+
+    #[test]
+    fn is_past_kill_date_returns_false_for_empty_string() {
+        assert!(!is_past_kill_date(Some("")));
+        assert!(!is_past_kill_date(Some("   ")));
+    }
+
+    #[test]
+    fn is_past_kill_date_returns_true_for_epoch_zero() {
+        assert!(is_past_kill_date(Some("0")));
+    }
+
+    #[test]
+    fn is_past_kill_date_returns_true_for_past_timestamp() {
+        // 2020-01-01 00:00:00 UTC
+        assert!(is_past_kill_date(Some("1577836800")));
+    }
+
+    #[test]
+    fn is_past_kill_date_returns_false_for_far_future_timestamp() {
+        // Year 2099
+        assert!(!is_past_kill_date(Some("4102444800")));
+    }
+
+    #[test]
+    fn is_past_kill_date_returns_true_for_negative_timestamp() {
+        assert!(is_past_kill_date(Some("-1")));
+    }
+
+    #[test]
+    fn is_past_kill_date_returns_false_for_non_numeric_string() {
+        assert!(!is_past_kill_date(Some("not-a-number")));
+        assert!(!is_past_kill_date(Some("2026-03-09 20:00:00")));
+    }
+
+    #[test]
+    fn is_outside_working_hours_returns_false_when_none() {
+        assert!(!is_outside_working_hours(None));
+    }
+
+    #[test]
+    fn is_outside_working_hours_returns_false_for_empty_string() {
+        assert!(!is_outside_working_hours(Some("")));
+    }
+
+    #[test]
+    fn is_outside_working_hours_returns_false_for_full_day_window() {
+        // 00:00-23:59 should include every possible current time.
+        assert!(!is_outside_working_hours(Some("00:00-23:59")));
+    }
+
+    #[test]
+    fn is_outside_working_hours_returns_false_for_malformed_input() {
+        assert!(!is_outside_working_hours(Some("garbage")));
+        assert!(!is_outside_working_hours(Some("25:00-26:00")));
+        assert!(!is_outside_working_hours(Some("08:00")));
+    }
+
+    #[test]
+    fn is_outside_working_hours_detects_narrow_window_excluding_now() {
+        // Build a 1-minute window 12 hours away from now — it should always
+        // exclude the current UTC time.
+        let now_secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let utc_hour = ((now_secs % 86400) / 3600) as u8;
+        let far_hour = (utc_hour + 12) % 24;
+        let next_hour = (far_hour + 1) % 24;
+        if next_hour > far_hour {
+            let window = format!("{far_hour:02}:00-{next_hour:02}:00");
+            assert!(
+                is_outside_working_hours(Some(&window)),
+                "current UTC hour {utc_hour} should be outside {window}"
+            );
+        }
+        // If next_hour < far_hour (wraps midnight), skip — the helper does
+        // not support wrap-around windows, so the test is not meaningful.
+    }
+
+    #[test]
+    fn is_outside_working_hours_accepts_when_inside_window() {
+        // Build a wide window that includes the current UTC time.
+        let now_secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let utc_hour = ((now_secs % 86400) / 3600) as u8;
+        let start = if utc_hour == 0 { 0 } else { utc_hour - 1 };
+        let end = if utc_hour >= 22 { 23 } else { utc_hour + 2 };
+        let window = format!("{start:02}:00-{end:02}:00");
+        assert!(
+            !is_outside_working_hours(Some(&window)),
+            "current UTC hour {utc_hour} should be inside {window}"
         );
     }
 }

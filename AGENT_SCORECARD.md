@@ -21,11 +21,11 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 5 | 0 | 0 |
-| Missing tests / stale tests | 34 | 13 | 5 |
+| Missing tests / stale tests | 35 | 13 | 5 |
 | Clippy warnings | 4 | 0 | 1 |
-| Protocol errors | 13 | 27 | 3 |
+| Protocol errors | 14 | 27 | 3 |
 | Security issues | 34 | 38 | 0 |
-| Architecture drift | 6 | 21 | 0 |
+| Architecture drift | 10 | 21 | 0 |
 | Memory / resource leaks | 5 | 10 | 1 |
 | Startup / lifecycle regressions | 1 | 8 | 0 |
 | Test infrastructure / flakiness | 13 | 0 | 0 |
@@ -3486,3 +3486,14 @@ Issues found: 0 — all changes are test code or formatting, clean quality.
 Overall codebase health: on track
 Biggest blindspot: client-cli TLS verification completely disabled — operators using the CLI for automation have no certificate verification whatsoever, making MitM trivial. The GUI client already has full TOFU/CA/fingerprint support that was never ported.
 Pre-existing failure: agent_reconnects_after_listener_restart (404 after restart) — tracked by 4 open bugs, no progress yet.
+
+### Arch Review — 2026-03-23 16:56
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 6 | architecture drift (4), protocol (1), missing tests (1) | mvvgt: client-cli agent commands target nonexistent REST routes; 2d1jn: client-cli RawAgent schema does not match ApiAgentInfo; 39ucn: operator create/set-role request/response shapes drift from REST API; lhlzp: session mode only implements a subset of the documented CLI surface; 30okz: External listeners enforce a 10 MiB body cap while other agent listeners accept 30 MiB; 2qrdj: no end-to-end client-cli↔teamserver contract test catches this drift. |
+| Codex | 0 | — | No findings this pass |
+| Cursor | 0 | — | No findings this pass |
+
+Overall codebase health: drifting
+Biggest blindspot: `red-cell-cli` is now largely decoupled from the real teamserver contract. Mocked unit tests still pass, but core agent and operator flows do not match the live REST API, so automation built on the documented CLI surface will fail at runtime.

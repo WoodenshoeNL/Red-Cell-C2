@@ -190,6 +190,19 @@ enum BuildOutcome {
 
 // ── command implementations ───────────────────────────────────────────────────
 
+/// Validate that `format` is one of the accepted payload formats.
+///
+/// Returns `Ok(())` for `"exe"`, `"dll"`, or `"bin"`; otherwise returns
+/// [`CliError::InvalidArgs`].
+pub(crate) fn validate_format(format: &str) -> Result<(), CliError> {
+    match format {
+        "exe" | "dll" | "bin" => Ok(()),
+        other => Err(CliError::InvalidArgs(format!(
+            "unknown format '{other}': expected exe, dll, or bin"
+        ))),
+    }
+}
+
 /// `payload list` — fetch all built payloads.
 ///
 /// # Examples
@@ -219,15 +232,7 @@ async fn build(
     sleep_secs: Option<u64>,
     wait: bool,
 ) -> Result<BuildOutcome, CliError> {
-    // Validate format.
-    match format {
-        "exe" | "dll" | "bin" => {}
-        other => {
-            return Err(CliError::InvalidArgs(format!(
-                "unknown format '{other}': expected exe, dll, or bin"
-            )));
-        }
-    }
+    validate_format(format)?;
 
     let mut body = serde_json::json!({
         "listener": listener,
@@ -452,29 +457,19 @@ mod tests {
         assert_eq!(row.arch, "x86_64");
     }
 
-    // ── format validation (tested via build's sync validation path) ────────────
+    // ── format validation ─────────────────────────────────────────────────────
 
-    #[tokio::test]
-    async fn build_rejects_unknown_format() {
-        // We can't call build() end-to-end without a live server, but we can
-        // reach the validation branch by checking what happens with a known-bad
-        // format value via a direct call to the validation logic.
-        // Replicate the validation inline:
-        let result: Result<(), CliError> = match "elf" {
-            "exe" | "dll" | "bin" => Ok(()),
-            other => Err(CliError::InvalidArgs(format!("unknown format '{other}'"))),
-        };
-        assert!(matches!(result, Err(CliError::InvalidArgs(_))));
+    #[test]
+    fn validate_format_rejects_unknown_format() {
+        assert!(matches!(validate_format("elf"), Err(CliError::InvalidArgs(_))));
+        assert!(matches!(validate_format("shellcode"), Err(CliError::InvalidArgs(_))));
+        assert!(matches!(validate_format(""), Err(CliError::InvalidArgs(_))));
     }
 
-    #[tokio::test]
-    async fn build_accepts_valid_formats() {
+    #[test]
+    fn validate_format_accepts_valid_formats() {
         for fmt in ["exe", "dll", "bin"] {
-            let result: Result<(), CliError> = match fmt {
-                "exe" | "dll" | "bin" => Ok(()),
-                other => Err(CliError::InvalidArgs(format!("unknown format '{other}'"))),
-            };
-            assert!(result.is_ok(), "format '{fmt}' should be accepted");
+            assert!(validate_format(fmt).is_ok(), "format '{fmt}' should be accepted");
         }
     }
 
@@ -482,29 +477,62 @@ mod tests {
 
     #[tokio::test]
     async fn download_writes_bytes_to_path() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let payload_bytes = b"HELLO WORLD PAYLOAD";
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/payloads/test-id/download"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(payload_bytes.as_ref()))
+            .mount(&server)
+            .await;
+
+        let cfg = crate::config::ResolvedConfig {
+            server: server.uri(),
+            token: "tok".to_owned(),
+            timeout: 5,
+        };
+        let client = crate::client::ApiClient::new(&cfg).expect("client");
+
         let tmp = tempfile::tempdir().expect("tempdir");
         let dst = tmp.path().join("payload.bin");
-        let dst_str = dst.to_str().expect("path");
+        let dst_str = dst.to_str().expect("valid path");
 
-        // Write directly to test the file-write helper logic.
-        std::fs::write(&dst, b"HELLO").expect("write");
-        let size = dst.metadata().expect("stat").len();
-        assert_eq!(size, 5);
+        let result = download(&client, "test-id", dst_str).await.expect("download");
 
-        // Verify DownloadResult construction.
-        let result =
-            DownloadResult { id: "test".to_owned(), dst: dst_str.to_owned(), size_bytes: size };
-        assert_eq!(result.size_bytes, 5);
+        assert_eq!(result.id, "test-id");
         assert_eq!(result.dst, dst_str);
+        assert_eq!(result.size_bytes, payload_bytes.len() as u64);
+        assert_eq!(std::fs::read(&dst).expect("read file"), payload_bytes);
     }
 
     #[tokio::test]
     async fn download_creates_parent_directory() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/payloads/nested-id/download"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"DATA".as_ref()))
+            .mount(&server)
+            .await;
+
+        let cfg = crate::config::ResolvedConfig {
+            server: server.uri(),
+            token: "tok".to_owned(),
+            timeout: 5,
+        };
+        let client = crate::client::ApiClient::new(&cfg).expect("client");
+
         let tmp = tempfile::tempdir().expect("tempdir");
         let nested = tmp.path().join("a").join("b").join("payload.exe");
-        let parent = nested.parent().expect("parent");
-        std::fs::create_dir_all(parent).expect("mkdir");
-        std::fs::write(&nested, b"DATA").expect("write");
-        assert!(nested.exists());
+        let dst_str = nested.to_str().expect("valid path");
+
+        let result = download(&client, "nested-id", dst_str).await.expect("download");
+
+        assert!(nested.exists(), "download must create parent directories");
+        assert_eq!(result.size_bytes, 4);
     }
 }

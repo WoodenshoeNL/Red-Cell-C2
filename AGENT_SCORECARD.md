@@ -9,29 +9,29 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 746 | 228 | 31 |
-| Bugs filed against | 83 | 34 | 9 |
+| Tasks closed | 749 | 228 | 31 |
+| Bugs filed against | 86 | 34 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
 | Quality score | 89% | 85% | 71% |
 
-*Bug rates: Claude 83/746=0.11, Codex 34/228=0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 86/749=0.11, Codex 34/228=0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
-| unwrap / expect in production | 5 | 0 | 0 |
+| unwrap / expect in production | 6 | 0 | 0 |
 | Missing tests / stale tests | 35 | 13 | 5 |
 | Clippy warnings | 4 | 0 | 1 |
 | Protocol errors | 16 | 27 | 3 |
 | Security issues | 38 | 38 | 0 |
 | Architecture drift | 15 | 21 | 0 |
-| Memory / resource leaks | 5 | 10 | 1 |
+| Memory / resource leaks | 6 | 10 | 1 |
 | Startup / lifecycle regressions | 2 | 9 | 0 |
 | Test infrastructure / flakiness | 14 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
-| Correctness / pagination | 32 | 7 | 1 |
+| Correctness / pagination | 33 | 7 | 1 |
 | Workflow / close-hygiene | 18 | 0 | 0 |
 | Code reuse / duplication | 7 | 0 | 0 |
 
@@ -3577,3 +3577,15 @@ Issues found: `red-cell-c2-19dao` (Claude), `red-cell-c2-31xuj` (Claude)
 
 Overall codebase health: drifting
 Biggest blindspot: transport hardening and contract validation still diverge at the edges. The External listener and task-submission paths are close to the intended design, but they do not consistently enforce the same pre-auth protections, message sizing, or command validation as the main listener surfaces, and the current integration harness is not catching that drift before it lands.
+
+### QA Review — 2026-03-23 20:45 — 6fab04a6..f5c7dcfd
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 3 | Closed 1djk4, 3elji, and by7hm. Filed 3nx5u for loading payload artifacts on metadata reads, ytyoq for misreporting listener lookup failures as 404, and 2r8z7 for introducing expect() into the payload download path. |
+| Codex | 0 | 0 | No task-close commits or product-code changes in this range. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`)
+Tests: failed (`cargo test --workspace`: `active_agent_survives_liveness_sweep_that_kills_stale_peer` returned HTTP 404; already tracked as `red-cell-c2-2tgqn`)
+Issues found: `red-cell-c2-3nx5u` (Claude), `red-cell-c2-ytyoq` (Claude), `red-cell-c2-2r8z7` (Claude)

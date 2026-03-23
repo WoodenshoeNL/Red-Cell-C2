@@ -52,6 +52,25 @@ fn agent_remove_payload(demon_id: &str) -> String {
     .expect("AgentRemove message should serialize")
 }
 
+/// Collect all operator WebSocket messages that arrive within `window`, up to
+/// `max_frames`.  Returns without error once the timeout expires.
+async fn collect_messages_within(
+    socket: &mut common::WsClient,
+    window: Duration,
+    max_frames: usize,
+) -> Vec<OperatorMessage> {
+    let mut collected = Vec::new();
+    for _ in 0..max_frames {
+        let result = tokio::time::timeout(window, common::read_operator_message(socket)).await;
+        match result {
+            Ok(Ok(msg)) => collected.push(msg),
+            // timeout expired or socket error — stop collecting
+            _ => break,
+        }
+    }
+    collected
+}
+
 /// Read operator WebSocket messages until `predicate` matches, discarding
 /// non-matching messages.  Gives up after 20 frames.
 async fn read_until<F>(
@@ -215,5 +234,61 @@ async fn agent_remove_cleans_up_all_state() -> Result<(), Box<dyn std::error::Er
 
     socket.close(None).await?;
     server.listeners.stop(listener_name).await?;
+    Ok(())
+}
+
+/// Sending `AgentRemove` for an agent ID that was never registered must not
+/// broadcast an `AgentRemove` event to operators and must not crash the server.
+///
+/// The server should return an error internally (logged as a `TeamserverLog`
+/// event) and remain available for subsequent requests.
+#[tokio::test]
+async fn agent_remove_nonexistent_id_does_not_broadcast() -> Result<(), Box<dyn std::error::Error>>
+{
+    let server = common::spawn_test_server(admin_profile()).await?;
+
+    // --- Connect operator WebSocket ---
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    // --- Send AgentRemove for an ID that was never registered ---
+    let fake_id = "DEAD1234";
+    socket.send(ClientMessage::Text(agent_remove_payload(fake_id).into())).await?;
+
+    // --- Collect messages that arrive within a short window ---
+    // A TeamserverLog error event may arrive; an AgentRemove must NOT.
+    let messages = collect_messages_within(&mut socket, Duration::from_millis(500), 10).await;
+    for msg in &messages {
+        assert!(
+            !matches!(msg, OperatorMessage::AgentRemove(_)),
+            "server must not broadcast AgentRemove for a non-existent agent ID, got: {msg:?}"
+        );
+    }
+
+    // --- Verify the server is still alive: send a second request and confirm
+    //     it is handled without panicking (another non-existent remove).     ---
+    let fake_id_2 = "DEAD5678";
+    socket.send(ClientMessage::Text(agent_remove_payload(fake_id_2).into())).await?;
+    let messages2 = collect_messages_within(&mut socket, Duration::from_millis(500), 10).await;
+    for msg in &messages2 {
+        assert!(
+            !matches!(msg, OperatorMessage::AgentRemove(_)),
+            "server must not broadcast AgentRemove for a second non-existent agent ID"
+        );
+    }
+
+    // --- Confirm neither agent was silently inserted into the DB ---
+    assert_eq!(
+        server.database.agents().get(0xDEAD_1234).await?,
+        None,
+        "non-existent agent must not appear in DB after failed remove"
+    );
+    assert_eq!(
+        server.database.agents().get(0xDEAD_5678).await?,
+        None,
+        "non-existent agent must not appear in DB after failed remove"
+    );
+
+    socket.close(None).await?;
     Ok(())
 }

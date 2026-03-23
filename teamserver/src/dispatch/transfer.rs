@@ -1074,6 +1074,100 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // handle_beacon_output_callback — OutputUtf8 credential extraction
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn beacon_output_utf8_persists_credential_loot() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let downloads = DownloadTracker::new(1024 * 1024);
+        let agent_id: u32 = 0xDA01_0002;
+        let request_id: u32 = 210;
+
+        register_test_agent(&registry, agent_id).await?;
+
+        // UTF-16LE payload that decodes to a string with a credential pattern.
+        let output_text = "Password : s3cr3t!";
+        let utf16_data = utf16le_bytes(output_text);
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&le32(u32::from(DemonCallback::OutputUtf8)));
+        payload.extend_from_slice(&length_prefixed(&utf16_data));
+
+        let result = handle_beacon_output_callback(
+            &registry, &database, &events, &downloads, None, agent_id, request_id, &payload,
+        )
+        .await?;
+
+        assert_eq!(result, None, "beacon-output handler must not produce a reply packet");
+
+        // First event: AgentResponse carrying the captured output.
+        let first_event = receiver.recv().await.ok_or("expected AgentResponse event for output")?;
+        assert!(
+            matches!(first_event, OperatorMessage::AgentResponse(_)),
+            "first event should be AgentResponse; got: {first_event:?}"
+        );
+
+        // The credential line must have been persisted as a loot record.
+        let loot_records = database.loot().list_for_agent(agent_id).await?;
+        assert!(
+            loot_records.iter().any(|r| r.kind == "credential"),
+            "expected at least one 'credential' loot record from OutputUtf8 path; got: {loot_records:?}"
+        );
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // handle_beacon_output_callback — OutputOem credential extraction
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn beacon_output_oem_persists_credential_loot() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let downloads = DownloadTracker::new(1024 * 1024);
+        let agent_id: u32 = 0xDA02_0002;
+        let request_id: u32 = 211;
+
+        register_test_agent(&registry, agent_id).await?;
+
+        // UTF-16LE payload that decodes to a string with a credential pattern.
+        let output_text = "Password : s3cr3t!";
+        let utf16_data = utf16le_bytes(output_text);
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&le32(u32::from(DemonCallback::OutputOem)));
+        payload.extend_from_slice(&length_prefixed(&utf16_data));
+
+        let result = handle_beacon_output_callback(
+            &registry, &database, &events, &downloads, None, agent_id, request_id, &payload,
+        )
+        .await?;
+
+        assert_eq!(result, None, "beacon-output handler must not produce a reply packet");
+
+        // First event: AgentResponse carrying the captured output.
+        let first_event = receiver.recv().await.ok_or("expected AgentResponse event for output")?;
+        assert!(
+            matches!(first_event, OperatorMessage::AgentResponse(_)),
+            "first event should be AgentResponse; got: {first_event:?}"
+        );
+
+        // The credential line must have been persisted as a loot record.
+        let loot_records = database.loot().list_for_agent(agent_id).await?;
+        assert!(
+            loot_records.iter().any(|r| r.kind == "credential"),
+            "expected at least one 'credential' loot record from OutputOem path; got: {loot_records:?}"
+        );
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
     // handle_beacon_output_callback — ErrorMessage variant
     // ------------------------------------------------------------------
 

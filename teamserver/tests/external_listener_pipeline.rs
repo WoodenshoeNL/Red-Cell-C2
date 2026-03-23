@@ -5,8 +5,8 @@ use std::time::Duration;
 use futures_util::SinkExt;
 use red_cell::{
     AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
-    ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
-    ShutdownController, SocketRelayManager, TeamserverState, build_router,
+    ListenerManager, LoginRateLimiter, MAX_AGENT_MESSAGE_LEN, OperatorConnectionManager,
+    PayloadBuilderService, ShutdownController, SocketRelayManager, TeamserverState, build_router,
 };
 use red_cell_common::ExternalListenerConfig;
 use red_cell_common::ListenerConfig;
@@ -607,6 +607,82 @@ async fn external_listener_task_consumed_after_download() -> Result<(), Box<dyn 
 
     socket.close(None).await?;
     server.listeners.stop("ext-consume").await?;
+    Ok(())
+}
+
+/// Sending a body that exceeds `MAX_AGENT_MESSAGE_LEN` to an external listener
+/// bridge endpoint must be rejected — no agent should be registered.
+#[tokio::test]
+async fn external_listener_rejects_oversized_body() -> Result<(), Box<dyn std::error::Error>> {
+    let server = spawn_server_with_fallback().await?;
+
+    server.listeners.create(external_listener("ext-bridge-oversized", "/oversized")).await?;
+    server.listeners.start("ext-bridge-oversized").await?;
+    wait_for_external_endpoint(&server, "/oversized").await?;
+    wait_for_teamserver(&server).await?;
+
+    let client = Client::new();
+    let bridge_url = format!("http://{}/oversized", server.addr);
+
+    // Build a body that exceeds MAX_AGENT_MESSAGE_LEN (30 MiB).
+    // Include valid Demon magic at bytes 4–7 so the rejection is due to size, not magic.
+    let oversized_len = MAX_AGENT_MESSAGE_LEN + 1;
+    let mut oversized_body = vec![0_u8; oversized_len];
+    // bytes 0–3: size field (BE) — claim the rest of the packet
+    let rest_len = u32::try_from(oversized_len - 4).unwrap_or(u32::MAX);
+    oversized_body[0..4].copy_from_slice(&rest_len.to_be_bytes());
+    // bytes 4–7: valid Demon magic (0xDEADBEEF BE)
+    oversized_body[4..8].copy_from_slice(&0xDEAD_BEEF_u32.to_be_bytes());
+    // bytes 8–11: fake agent_id
+    oversized_body[8..12].copy_from_slice(&0xBAAD_F00D_u32.to_be_bytes());
+
+    let response = client.post(&bridge_url).body(oversized_body).send().await?;
+
+    // The fallback handler enforces a body size limit via `axum::body::to_bytes`;
+    // exceeding it returns 400 Bad Request.
+    assert!(
+        response.status().is_client_error() || response.status().is_server_error(),
+        "oversized body must be rejected with a 4xx/5xx status, got {}",
+        response.status()
+    );
+
+    // The oversized request must not register an agent.
+    assert!(
+        server.agent_registry.get(0xBAAD_F00D).await.is_none(),
+        "oversized body must not register an agent"
+    );
+    assert!(
+        server.agent_registry.list_active().await.is_empty(),
+        "no agent should be active after oversized body"
+    );
+
+    // Verify the listener remains responsive after the oversized request.
+    let key: [u8; red_cell_common::crypto::AGENT_KEY_LENGTH] = [
+        0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF,
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+        0x0F, 0x10,
+    ];
+    let iv: [u8; red_cell_common::crypto::AGENT_IV_LENGTH] = [
+        0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E,
+        0x2F,
+    ];
+    let valid_agent_id = 0xAAAA_BBBB_u32;
+    let valid_response = client
+        .post(&bridge_url)
+        .body(common::valid_demon_init_body(valid_agent_id, key, iv))
+        .send()
+        .await?
+        .error_for_status()?;
+    assert!(
+        !valid_response.bytes().await?.is_empty(),
+        "valid init must succeed after oversized body rejection"
+    );
+    assert!(
+        server.agent_registry.get(valid_agent_id).await.is_some(),
+        "agent must be registered — listener survived oversized body"
+    );
+
+    server.listeners.stop("ext-bridge-oversized").await?;
     Ok(())
 }
 

@@ -24,7 +24,7 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 35 | 13 | 5 |
 | Clippy warnings | 4 | 0 | 1 |
 | Protocol errors | 14 | 27 | 3 |
-| Security issues | 35 | 38 | 0 |
+| Security issues | 37 | 38 | 0 |
 | Architecture drift | 13 | 21 | 0 |
 | Memory / resource leaks | 5 | 10 | 1 |
 | Startup / lifecycle regressions | 2 | 9 | 0 |
@@ -3531,3 +3531,14 @@ Pre-existing failure: agent_reconnects_after_listener_restart (404 after restart
 
 Overall codebase health: drifting
 Biggest blindspot: `red-cell-cli` is now largely decoupled from the real teamserver contract. Mocked unit tests still pass, but core agent and operator flows do not match the live REST API, so automation built on the documented CLI surface will fail at runtime.
+
+### Arch Review — 2026-03-23 16:56
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 2 | security (2) | 1km7p (P1 — External bridge drops Fake404 disposition and answers unknown probes with 200 OK), 291jt (P1 — deleting or role-changing a runtime operator leaves already-issued sessions active with stale privileges) |
+| Codex | 0 | — | No new findings this pass |
+| Cursor | 0 | — | No findings this pass |
+
+Overall codebase health: drifting
+Biggest blindspot: authorization and transport hardening still diverge at the edges. The main HTTP listener has the intended camouflage and guardrails, but the External bridge and operator-session lifecycle still have holes that let state or privilege survive longer than the design implies.

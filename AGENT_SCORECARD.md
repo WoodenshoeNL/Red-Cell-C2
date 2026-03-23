@@ -3551,5 +3551,6 @@ Biggest blindspot: authorization and transport hardening still diverge at the ed
 | Codex | 0 | 0 | No task-close commits in this range. |
 | Cursor | 0 | 0 | No activity. |
 
-Build: `cargo check --workspace` passed; `cargo clippy --workspace -- -D warnings` and `cargo test --workspace` were still running at review close with no failures surfaced
+Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`)
+Tests: not completed (`cargo test --workspace` remained in progress after reporting `auth::tests::authenticate_login_rejects_when_global_cap_reached` running for over 60 seconds; no failures observed before review close)
 Issues found: `red-cell-c2-19dao` (Claude), `red-cell-c2-31xuj` (Claude)

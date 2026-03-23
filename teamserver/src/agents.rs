@@ -5,6 +5,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use red_cell_common::crypto::{
     AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len, decrypt_agent_data_at_offset,
@@ -67,15 +68,23 @@ struct AgentEntry {
     listener_name: RwLock<String>,
     jobs: Mutex<VecDeque<Job>>,
     ctr_block_offset: Mutex<u64>,
+    /// When `true`, AES-CTR always uses block offset 0 (legacy Demon/Archon behaviour).
+    legacy_ctr: AtomicBool,
 }
 
 impl AgentEntry {
-    fn new(info: AgentRecord, listener_name: String, ctr_block_offset: u64) -> Self {
+    fn new(
+        info: AgentRecord,
+        listener_name: String,
+        ctr_block_offset: u64,
+        legacy_ctr: bool,
+    ) -> Self {
         Self {
             info: RwLock::new(info),
             listener_name: RwLock::new(listener_name),
             jobs: Mutex::new(VecDeque::new()),
             ctr_block_offset: Mutex::new(ctr_block_offset),
+            legacy_ctr: AtomicBool::new(legacy_ctr),
         }
     }
 }
@@ -193,7 +202,12 @@ impl AgentRegistry {
         for agent in agents {
             entries.insert(
                 agent.info.agent_id,
-                Arc::new(AgentEntry::new(agent.info, agent.listener_name, agent.ctr_block_offset)),
+                Arc::new(AgentEntry::new(
+                    agent.info,
+                    agent.listener_name,
+                    agent.ctr_block_offset,
+                    agent.legacy_ctr,
+                )),
             );
         }
 
@@ -225,12 +239,31 @@ impl AgentRegistry {
     }
 
     /// Insert a newly registered agent and atomically persist its initial CTR state.
+    ///
+    /// Uses monotonic (non-legacy) CTR mode.  Call [`AgentRegistry::insert_full`]
+    /// with `legacy_ctr = true` for Demon/Archon agents that reset CTR per packet.
     #[instrument(skip(self, agent, listener_name), fields(agent_id = format_args!("0x{:08X}", agent.agent_id), listener_name = %listener_name, ctr_block_offset))]
     pub async fn insert_with_listener_and_ctr_offset(
         &self,
         agent: AgentRecord,
         listener_name: &str,
         ctr_block_offset: u64,
+    ) -> Result<(), TeamserverError> {
+        self.insert_full(agent, listener_name, ctr_block_offset, false).await
+    }
+
+    /// Insert a newly registered agent with explicit control over all transport parameters.
+    ///
+    /// When `legacy_ctr` is `true`, AES-CTR resets to block offset 0 for every packet
+    /// (Demon/Archon compatibility).  When `false`, the monotonic block offset advances
+    /// across packets (Specter behaviour).
+    #[instrument(skip(self, agent, listener_name), fields(agent_id = format_args!("0x{:08X}", agent.agent_id), listener_name = %listener_name, ctr_block_offset, legacy_ctr))]
+    pub async fn insert_full(
+        &self,
+        agent: AgentRecord,
+        listener_name: &str,
+        ctr_block_offset: u64,
+        legacy_ctr: bool,
     ) -> Result<(), TeamserverError> {
         let mut entries = self.entries.write().await;
 
@@ -245,12 +278,15 @@ impl AgentRegistry {
             });
         }
 
-        self.repository
-            .create_with_listener_and_ctr_offset(&agent, listener_name, ctr_block_offset)
-            .await?;
+        self.repository.create_full(&agent, listener_name, ctr_block_offset, legacy_ctr).await?;
         entries.insert(
             agent.agent_id,
-            Arc::new(AgentEntry::new(agent, listener_name.to_owned(), ctr_block_offset)),
+            Arc::new(AgentEntry::new(
+                agent,
+                listener_name.to_owned(),
+                ctr_block_offset,
+                legacy_ctr,
+            )),
         );
         Ok(())
     }
@@ -438,6 +474,27 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Query whether an agent uses legacy per-packet CTR reset (Demon/Archon behaviour).
+    pub async fn legacy_ctr(&self, agent_id: u32) -> Result<bool, TeamserverError> {
+        let entry =
+            self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
+        Ok(entry.legacy_ctr.load(Ordering::Relaxed))
+    }
+
+    /// Set the legacy CTR mode for an agent and persist the change.
+    ///
+    /// When `legacy` is `true`, AES-CTR resets to block offset 0 for every packet
+    /// (Demon/Archon compatibility).  When `false`, the monotonic block offset advances
+    /// across packets (Specter behaviour).
+    #[instrument(skip(self), fields(agent_id = format_args!("0x{:08X}", agent_id), legacy))]
+    pub async fn set_legacy_ctr(&self, agent_id: u32, legacy: bool) -> Result<(), TeamserverError> {
+        let entry =
+            self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
+        self.repository.set_legacy_ctr(agent_id, legacy).await?;
+        entry.legacy_ctr.store(legacy, Ordering::Relaxed);
+        Ok(())
+    }
+
     /// Encrypt a plaintext payload destined for an agent.
     #[instrument(skip(self, plaintext), fields(agent_id = format_args!("0x{:08X}", agent_id), len = plaintext.len()))]
     pub async fn encrypt_for_agent(
@@ -515,6 +572,10 @@ impl AgentRegistry {
     ) -> Result<(), TeamserverError> {
         let entry =
             self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
+        // Legacy mode never advances — every packet starts at block 0.
+        if entry.legacy_ctr.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         let mut ctr_offset = entry.ctr_block_offset.lock().await;
         let current_offset = *ctr_offset;
         let next_offset = next_ctr_offset(current_offset, byte_len)?;
@@ -877,34 +938,52 @@ impl AgentRegistry {
         let (key, iv) = decode_crypto_material(agent_id, &info.encryption)?;
         drop(info);
 
+        let legacy = entry.legacy_ctr.load(Ordering::Relaxed);
         let mut packages = Vec::with_capacity(jobs.len());
-        let mut ctr_offset = entry.ctr_block_offset.lock().await;
-        let starting_offset = *ctr_offset;
-        let mut next_offset = starting_offset;
 
-        for job in jobs {
-            let payload = if job.payload.is_empty() {
-                Vec::new()
-            } else {
-                let encrypted =
-                    encrypt_agent_data_at_offset(&key[..], &iv[..], next_offset, &job.payload)?;
-                next_offset = next_ctr_offset(next_offset, job.payload.len())?;
-                encrypted
-            };
-            packages.push(DemonPackage {
-                command_id: job.command,
-                request_id: job.request_id,
-                payload,
-            });
+        // In legacy mode every packet uses offset 0 — no lock or persistence needed.
+        if legacy {
+            for job in jobs {
+                let payload = if job.payload.is_empty() {
+                    Vec::new()
+                } else {
+                    encrypt_agent_data_at_offset(&key[..], &iv[..], 0, &job.payload)?
+                };
+                packages.push(DemonPackage {
+                    command_id: job.command,
+                    request_id: job.request_id,
+                    payload,
+                });
+            }
+        } else {
+            let mut ctr_offset = entry.ctr_block_offset.lock().await;
+            let starting_offset = *ctr_offset;
+            let mut next_offset = starting_offset;
+
+            for job in jobs {
+                let payload = if job.payload.is_empty() {
+                    Vec::new()
+                } else {
+                    let encrypted =
+                        encrypt_agent_data_at_offset(&key[..], &iv[..], next_offset, &job.payload)?;
+                    next_offset = next_ctr_offset(next_offset, job.payload.len())?;
+                    encrypted
+                };
+                packages.push(DemonPackage {
+                    command_id: job.command,
+                    request_id: job.request_id,
+                    payload,
+                });
+            }
+
+            if next_offset != starting_offset {
+                self.repository.set_ctr_block_offset(agent_id, next_offset).await?;
+                *ctr_offset = next_offset;
+            }
+            drop(ctr_offset);
         }
 
         let bytes = DemonMessage::new(packages).to_bytes().map_err(TeamserverError::from)?;
-
-        if next_offset != starting_offset {
-            self.repository.set_ctr_block_offset(agent_id, next_offset).await?;
-            *ctr_offset = next_offset;
-        }
-        drop(ctr_offset);
 
         Ok(bytes)
     }
@@ -918,6 +997,11 @@ impl AgentRegistry {
         plaintext: &[u8],
         advance: bool,
     ) -> Result<Vec<u8>, TeamserverError> {
+        // Legacy Demon/Archon agents reset CTR to 0 for every packet.
+        if entry.legacy_ctr.load(Ordering::Relaxed) {
+            return Ok(encrypt_agent_data_at_offset(key, iv, 0, plaintext)?);
+        }
+
         let mut ctr_offset = entry.ctr_block_offset.lock().await;
         let current_offset = *ctr_offset;
         let ciphertext = encrypt_agent_data_at_offset(key, iv, current_offset, plaintext)?;
@@ -942,6 +1026,11 @@ impl AgentRegistry {
         ciphertext: &[u8],
         advance: bool,
     ) -> Result<Vec<u8>, TeamserverError> {
+        // Legacy Demon/Archon agents reset CTR to 0 for every packet.
+        if entry.legacy_ctr.load(Ordering::Relaxed) {
+            return Ok(decrypt_agent_data_at_offset(key, iv, 0, ciphertext)?);
+        }
+
         let mut ctr_offset = entry.ctr_block_offset.lock().await;
         let current_offset = *ctr_offset;
         let plaintext = decrypt_agent_data_at_offset(key, iv, current_offset, ciphertext)?;
@@ -3543,6 +3632,145 @@ mod tests {
             ),
             "expected QueueFull for root, got: {err}"
         );
+
+        Ok(())
+    }
+
+    // ── legacy CTR mode tests ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn legacy_ctr_encrypt_always_uses_offset_zero() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let key = test_key(0xC1);
+        let iv = test_iv(0xD1);
+        let agent = sample_agent_with_crypto(0x100A_0C01, key, iv);
+
+        // Insert with legacy_ctr = true
+        registry.insert_full(agent.clone(), "http-legacy", 0, true).await?;
+        assert!(registry.legacy_ctr(agent.agent_id).await?);
+
+        let plaintext = b"legacy demon callback data";
+        let ct1 = registry.encrypt_for_agent(agent.agent_id, plaintext).await?;
+        let ct2 = registry.encrypt_for_agent(agent.agent_id, plaintext).await?;
+
+        // Both must be identical (same offset 0 keystream)
+        assert_eq!(ct1, ct2, "legacy mode must produce identical ciphertext for same plaintext");
+        // Offset must remain at 0
+        assert_eq!(registry.ctr_offset(agent.agent_id).await?, 0);
+        // Verify against direct offset-0 encryption
+        assert_eq!(ct1, encrypt_agent_data_at_offset(&key, &iv, 0, plaintext)?);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_ctr_decrypt_always_uses_offset_zero() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let key = test_key(0xC2);
+        let iv = test_iv(0xD2);
+        let agent = sample_agent_with_crypto(0x100A_0C02, key, iv);
+
+        registry.insert_full(agent.clone(), "http-legacy", 0, true).await?;
+
+        let plaintext = b"response from demon agent";
+        let ciphertext = encrypt_agent_data_at_offset(&key, &iv, 0, plaintext)?;
+
+        // Decrypt twice — both should succeed and offset should not advance
+        let dec1 = registry.decrypt_from_agent(agent.agent_id, &ciphertext).await?;
+        let dec2 = registry.decrypt_from_agent(agent.agent_id, &ciphertext).await?;
+
+        assert_eq!(&dec1[..], plaintext);
+        assert_eq!(&dec2[..], plaintext);
+        assert_eq!(registry.ctr_offset(agent.agent_id).await?, 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_ctr_advance_is_noop() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let agent = sample_agent_with_crypto(0x100A_0C03, test_key(0xC3), test_iv(0xD3));
+
+        registry.insert_full(agent.clone(), "http-legacy", 0, true).await?;
+
+        registry.advance_ctr_for_agent(agent.agent_id, 1024).await?;
+        assert_eq!(
+            registry.ctr_offset(agent.agent_id).await?,
+            0,
+            "advance must be a no-op in legacy mode"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn set_legacy_ctr_toggles_mode_and_persists() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let key = test_key(0xC4);
+        let iv = test_iv(0xD4);
+        let agent = sample_agent_with_crypto(0x100A_0C04, key, iv);
+        let plaintext = b"mode switch test";
+
+        // Start in legacy mode
+        registry.insert_full(agent.clone(), "http-legacy", 0, true).await?;
+        assert!(registry.legacy_ctr(agent.agent_id).await?);
+
+        let ct_legacy = registry.encrypt_for_agent(agent.agent_id, plaintext).await?;
+
+        // Switch to monotonic mode
+        registry.set_legacy_ctr(agent.agent_id, false).await?;
+        assert!(!registry.legacy_ctr(agent.agent_id).await?);
+
+        let ct_mono1 = registry.encrypt_for_agent(agent.agent_id, plaintext).await?;
+        let ct_mono2 = registry.encrypt_for_agent(agent.agent_id, plaintext).await?;
+
+        // First monotonic encryption uses offset 0 (same as legacy), second must differ
+        assert_eq!(ct_legacy, ct_mono1);
+        assert_ne!(ct_mono1, ct_mono2, "monotonic mode must advance");
+        assert!(registry.ctr_offset(agent.agent_id).await? > 0);
+
+        // Verify persistence — reload from DB
+        let persisted =
+            database.agents().get_persisted(agent.agent_id).await?.expect("agent should exist");
+        assert!(!persisted.legacy_ctr, "legacy_ctr=false must be persisted");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_ctr_persists_across_registry_reload() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+
+        // First registry: insert with legacy mode
+        {
+            let registry = AgentRegistry::new(database.clone());
+            let agent = sample_agent_with_crypto(0x100A_0C05, test_key(0xC5), test_iv(0xD5));
+            registry.insert_full(agent, "http-legacy", 0, true).await?;
+        }
+
+        // Second registry: reload from DB
+        let registry = AgentRegistry::load(database).await?;
+        assert!(registry.legacy_ctr(0x100A_0C05).await?, "legacy_ctr must survive registry reload");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn non_legacy_insert_defaults_to_monotonic_mode() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let key = test_key(0xC6);
+        let iv = test_iv(0xD6);
+        let agent = sample_agent_with_crypto(0x100A_0C06, key, iv);
+        let plaintext = b"specter monotonic test";
+
+        // Default insert (non-legacy)
+        registry.insert(agent.clone()).await?;
+        assert!(!registry.legacy_ctr(agent.agent_id).await?);
+
+        let ct1 = registry.encrypt_for_agent(agent.agent_id, plaintext).await?;
+        let ct2 = registry.encrypt_for_agent(agent.agent_id, plaintext).await?;
+        assert_ne!(ct1, ct2, "default insert must use monotonic mode");
 
         Ok(())
     }

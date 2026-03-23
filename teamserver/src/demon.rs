@@ -199,9 +199,8 @@ impl DemonPacketParser {
                 now,
                 self.init_secret.as_deref(),
             )?;
-            self.registry
-                .insert_with_listener_and_ctr_offset(agent.clone(), listener_name, 0)
-                .await?;
+            // Legacy Demon agents reset AES-CTR to block 0 for every packet.
+            self.registry.insert_full(agent.clone(), listener_name, 0, true).await?;
 
             return Ok(ParsedDemonPacket::Init(Box::new(ParsedDemonInit {
                 header: envelope.header,
@@ -843,12 +842,8 @@ mod tests {
             .expect("init should succeed");
 
         let _ack = build_init_ack(&registry, 0x0102_0304).await.expect("ack should build");
-        let callback_packet = build_callback_packet(
-            0x0102_0304,
-            key,
-            iv,
-            ctr_blocks_for_len(std::mem::size_of::<u32>()),
-        );
+        // Legacy mode: CTR stays at 0 after init ACK.
+        let callback_packet = build_callback_packet(0x0102_0304, key, iv, 0);
         let parsed = parser
             .parse_at(
                 &callback_packet,
@@ -966,7 +961,8 @@ mod tests {
         let decrypted =
             decrypt_agent_data_at_offset(&key, &iv, 0, &ack).expect("ack should decrypt");
         assert_eq!(decrypted, agent_id.to_le_bytes());
-        assert_eq!(registry.ctr_offset(agent_id).await.expect("offset"), 1);
+        // Legacy mode: CTR stays at 0.
+        assert_eq!(registry.ctr_offset(agent_id).await.expect("offset"), 0);
     }
 
     #[tokio::test]
@@ -985,14 +981,16 @@ mod tests {
             .await
             .expect("init should succeed");
 
-        let _first_ack = build_init_ack(&registry, agent_id).await.expect("ack should build");
+        let first_ack = build_init_ack(&registry, agent_id).await.expect("ack should build");
 
         let reloaded = AgentRegistry::load(database).await.expect("registry should reload");
 
+        // Legacy mode: offset is still 0 after reload, so the ACK is byte-identical.
         let ack = build_init_ack(&reloaded, agent_id).await.expect("reconnect ack should build");
         let decrypted =
-            decrypt_agent_data_at_offset(&key, &iv, 1, &ack).expect("ack should decrypt");
+            decrypt_agent_data_at_offset(&key, &iv, 0, &ack).expect("ack should decrypt");
         assert_eq!(decrypted, agent_id.to_le_bytes());
+        assert_eq!(first_ack, ack, "legacy mode ACKs at offset 0 must be identical across reloads");
     }
 
     #[tokio::test]
@@ -1078,6 +1076,9 @@ mod tests {
             .await
             .expect("init should succeed");
 
+        // Switch to monotonic mode so CTR advances (this test validates desync protection).
+        registry.set_legacy_ctr(agent_id, false).await.expect("set_legacy_ctr");
+
         // Advance the CTR offset by sending the init ack (simulates the server's normal response).
         let _ack = build_init_ack(&registry, agent_id).await.expect("ack should build");
         let offset_after_ack = registry.ctr_offset(agent_id).await.expect("offset should exist");
@@ -1146,7 +1147,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn successive_messages_advance_the_keystream() {
+    async fn successive_messages_use_same_keystream_in_legacy_mode() {
         let registry = test_registry().await;
         let parser = DemonPacketParser::new(registry.clone());
         let key = test_key(0x77);
@@ -1159,17 +1160,15 @@ mod tests {
             .await
             .expect("init should succeed");
 
+        // Legacy mode: successive encryptions produce identical ciphertext (offset 0).
         let msg = b"same-payload-bytes";
         let ct1 = registry.encrypt_for_agent(agent_id, msg).await.expect("enc1");
         let ct2 = registry.encrypt_for_agent(agent_id, msg).await.expect("enc2");
 
-        assert_ne!(ct1, ct2, "registry should advance the stored CTR block offset");
+        assert_eq!(ct1, ct2, "legacy mode must reuse the same keystream block");
 
         let pt1 = decrypt_agent_data_at_offset(&key, &iv, 0, &ct1).expect("dec1");
-        let pt2 = decrypt_agent_data_at_offset(&key, &iv, ctr_blocks_for_len(msg.len()), &ct2)
-            .expect("dec2");
         assert_eq!(pt1, msg);
-        assert_eq!(pt2, msg);
     }
 
     #[tokio::test]
@@ -2060,7 +2059,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_init_ack_successive_calls_produce_different_ciphertext() {
+    async fn build_init_ack_successive_calls_produce_identical_ciphertext_in_legacy_mode() {
         let registry = test_registry().await;
         let key = test_key(0xC3);
         let iv = test_iv(0xD4);
@@ -2073,22 +2072,25 @@ mod tests {
             .await
             .expect("init should succeed");
 
+        // DEMON_INIT registers with legacy_ctr = true.
+        assert!(registry.legacy_ctr(agent_id).await.expect("legacy_ctr"));
+
         let ack1 = build_init_ack(&registry, agent_id).await.expect("first ack");
         let ack2 = build_init_ack(&registry, agent_id).await.expect("second ack");
 
-        // Both decrypt to the same plaintext (agent_id LE)…
+        // Legacy mode: both decrypt at offset 0 to the same plaintext.
         let pt1 = decrypt_agent_data_at_offset(&key, &iv, 0, &ack1).expect("decrypt ack1");
-        let pt2 = decrypt_agent_data_at_offset(&key, &iv, 1, &ack2).expect("decrypt ack2");
+        let pt2 = decrypt_agent_data_at_offset(&key, &iv, 0, &ack2).expect("decrypt ack2");
         assert_eq!(pt1, agent_id.to_le_bytes());
         assert_eq!(pt2, agent_id.to_le_bytes());
 
-        // …but the ciphertext differs because each call advances the CTR offset.
-        assert_ne!(ack1, ack2, "successive ACKs must use different keystream blocks");
-        assert_eq!(registry.ctr_offset(agent_id).await.expect("offset"), 2);
+        // Legacy mode: ciphertext is identical (same offset 0 keystream, same plaintext).
+        assert_eq!(ack1, ack2, "legacy mode ACKs must be byte-identical");
+        assert_eq!(registry.ctr_offset(agent_id).await.expect("offset"), 0);
     }
 
     #[tokio::test]
-    async fn build_reconnect_ack_wire_format_at_various_ctr_offsets() {
+    async fn build_reconnect_ack_wire_format_legacy_mode() {
         let registry = test_registry().await;
         let key = test_key(0xE5);
         let iv = test_iv(0xF6);
@@ -2101,48 +2103,32 @@ mod tests {
             .await
             .expect("init should succeed");
 
-        // Advance CTR offset to 3 by sending three init ACKs.
+        // Legacy mode: CTR stays at 0 regardless of how many ACKs are sent.
         for _ in 0..3 {
             let _ = build_init_ack(&registry, agent_id).await.expect("ack should build");
         }
-        let offset = registry.ctr_offset(agent_id).await.expect("offset");
-        assert_eq!(offset, 3);
+        assert_eq!(registry.ctr_offset(agent_id).await.expect("offset"), 0);
 
-        // Now send a reconnect ACK — it should encrypt at offset 3 without advancing.
+        // Reconnect ACK encrypts at offset 0 in legacy mode.
         let reconnect_ack = build_reconnect_ack(&registry, agent_id).await.expect("reconnect ack");
+        assert_eq!(reconnect_ack.len(), 4);
 
-        // Wire format: exactly 4 bytes of ciphertext, no framing.
-        assert_eq!(
-            reconnect_ack.len(),
-            4,
-            "reconnect ACK ciphertext must be exactly 4 bytes, got {}",
-            reconnect_ack.len()
-        );
-
-        // Decrypt at the pre-reconnect offset.
-        let plaintext = decrypt_agent_data_at_offset(&key, &iv, offset, &reconnect_ack)
-            .expect("reconnect ack should decrypt at current offset");
+        let plaintext = decrypt_agent_data_at_offset(&key, &iv, 0, &reconnect_ack)
+            .expect("reconnect ack should decrypt at offset 0");
         assert_eq!(plaintext, agent_id.to_le_bytes());
 
-        // CTR offset must not have changed.
-        assert_eq!(
-            registry.ctr_offset(agent_id).await.expect("offset after reconnect"),
-            offset,
-            "reconnect ACK must not advance CTR offset"
-        );
-
-        // A second reconnect ACK at the same offset must produce identical ciphertext
-        // (same keystream block, same plaintext → same output).
+        // A second reconnect ACK must produce identical ciphertext (same offset, same plaintext).
         let reconnect_ack2 =
             build_reconnect_ack(&registry, agent_id).await.expect("second reconnect ack");
         assert_eq!(
             reconnect_ack, reconnect_ack2,
-            "repeated reconnect ACKs at the same offset must be byte-identical"
+            "repeated reconnect ACKs must be byte-identical in legacy mode"
         );
     }
 
     #[tokio::test]
     async fn build_reconnect_ack_decrypting_at_wrong_offset_yields_garbage() {
+        // Use a non-legacy agent to test that wrong-offset decryption fails.
         let registry = test_registry().await;
         let key = test_key(0x17);
         let iv = test_iv(0x28);
@@ -2154,6 +2140,9 @@ mod tests {
             .parse_at(&init_packet, "10.0.0.13".to_owned(), datetime!(2026-03-19 10:03:00 UTC))
             .await
             .expect("init should succeed");
+
+        // Switch to monotonic mode so CTR actually advances.
+        registry.set_legacy_ctr(agent_id, false).await.expect("set_legacy_ctr");
 
         // Advance to offset 1.
         let _ = build_init_ack(&registry, agent_id).await.expect("ack");

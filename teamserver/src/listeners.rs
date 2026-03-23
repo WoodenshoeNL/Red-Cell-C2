@@ -4754,10 +4754,11 @@ mod tests {
 
         assert_eq!(reconnect_response.status(), StatusCode::OK);
         let reconnect_bytes = reconnect_response.bytes().await?;
-        let decrypted = decrypt_agent_data_at_offset(&key, &iv, 1, &reconnect_bytes)?;
+        // Legacy mode: reconnect ACK also uses offset 0.
+        let decrypted = decrypt_agent_data_at_offset(&key, &iv, 0, &reconnect_bytes)?;
 
         assert_eq!(decrypted.as_slice(), &agent_id.to_le_bytes());
-        assert_eq!(registry.ctr_offset(agent_id).await?, 1);
+        assert_eq!(registry.ctr_offset(agent_id).await?, 0);
 
         manager.stop("edge-http-reconnect").await?;
         Ok(())

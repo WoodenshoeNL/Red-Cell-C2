@@ -219,6 +219,10 @@ pub struct PersistedAgent {
     pub listener_name: String,
     /// Shared AES-CTR block offset tracked across decrypt/encrypt operations.
     pub ctr_block_offset: u64,
+    /// When `true`, AES-CTR resets to block offset 0 for every packet (Demon/Archon
+    /// compatibility).  When `false`, the monotonic `ctr_block_offset` advances across
+    /// packets (Specter behaviour).
+    pub legacy_ctr: bool,
 }
 
 impl AgentRepository {
@@ -243,14 +247,29 @@ impl AgentRepository {
     }
 
     /// Insert a new agent row with the listener and initial CTR state for the session.
+    ///
+    /// Uses non-legacy (monotonic) CTR mode.  Use [`AgentRepository::create_full`] to
+    /// set legacy mode for Demon/Archon agents.
     pub async fn create_with_listener_and_ctr_offset(
         &self,
         agent: &AgentRecord,
         listener_name: &str,
         ctr_block_offset: u64,
     ) -> Result<(), TeamserverError> {
+        self.create_full(agent, listener_name, ctr_block_offset, false).await
+    }
+
+    /// Insert a new agent row with all transport parameters.
+    pub async fn create_full(
+        &self,
+        agent: &AgentRecord,
+        listener_name: &str,
+        ctr_block_offset: u64,
+        legacy_ctr: bool,
+    ) -> Result<(), TeamserverError> {
         let mut transaction = self.pool.begin().await?;
-        insert_agent_row(&mut *transaction, agent, listener_name, ctr_block_offset).await?;
+        insert_agent_row(&mut *transaction, agent, listener_name, ctr_block_offset, legacy_ctr)
+            .await?;
         transaction.commit().await?;
         Ok(())
     }
@@ -429,6 +448,23 @@ impl AgentRepository {
     ) -> Result<(), TeamserverError> {
         update_agent_ctr_block_offset(&self.pool, agent_id, ctr_block_offset).await
     }
+
+    /// Persist the legacy CTR mode flag for an agent.
+    pub async fn set_legacy_ctr(
+        &self,
+        agent_id: u32,
+        legacy_ctr: bool,
+    ) -> Result<(), TeamserverError> {
+        let result = sqlx::query("UPDATE ts_agents SET legacy_ctr = ? WHERE agent_id = ?")
+            .bind(bool_to_i64(legacy_ctr))
+            .bind(i64::from(agent_id))
+            .execute(&self.pool)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(TeamserverError::AgentNotFound { agent_id });
+        }
+        Ok(())
+    }
 }
 
 async fn insert_agent_row(
@@ -436,15 +472,16 @@ async fn insert_agent_row(
     agent: &AgentRecord,
     listener_name: &str,
     ctr_block_offset: u64,
+    legacy_ctr: bool,
 ) -> Result<(), TeamserverError> {
     sqlx::query(
         r#"
         INSERT INTO ts_agents (
-            agent_id, active, reason, note, ctr_block_offset, aes_key, aes_iv, hostname, username, domain_name,
+            agent_id, active, reason, note, ctr_block_offset, legacy_ctr, aes_key, aes_iv, hostname, username, domain_name,
             external_ip, internal_ip, process_name, process_path, base_address, process_pid, process_tid,
             process_ppid, process_arch, elevated, os_version, os_build, os_arch, listener_name, sleep_delay,
             sleep_jitter, kill_date, working_hours, first_call_in, last_call_in
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(i64::from(agent.agent_id))
@@ -452,6 +489,7 @@ async fn insert_agent_row(
     .bind(&agent.reason)
     .bind(&agent.note)
     .bind(i64_from_u64("ctr_block_offset", ctr_block_offset)?)
+    .bind(bool_to_i64(legacy_ctr))
     .bind(BASE64_STANDARD.encode(&*agent.encryption.aes_key))
     .bind(BASE64_STANDARD.encode(&*agent.encryption.aes_iv))
     .bind(&agent.hostname)
@@ -1445,6 +1483,7 @@ struct AgentRow {
     working_hours: Option<i64>,
     first_call_in: String,
     last_call_in: String,
+    legacy_ctr: i64,
 }
 
 impl TryFrom<AgentRow> for AgentRecord {
@@ -1505,9 +1544,10 @@ impl TryFrom<AgentRow> for PersistedAgent {
 
     fn try_from(row: AgentRow) -> Result<Self, Self::Error> {
         let ctr_block_offset = u64_from_i64("ctr_block_offset", row.ctr_block_offset)?;
+        let legacy_ctr = bool_from_i64("legacy_ctr", row.legacy_ctr)?;
         let listener_name = row.listener_name.clone();
         let info = AgentRecord::try_from(row)?;
-        Ok(Self { info, listener_name, ctr_block_offset })
+        Ok(Self { info, listener_name, ctr_block_offset, legacy_ctr })
     }
 }
 

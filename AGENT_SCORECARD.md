@@ -25,7 +25,7 @@ Each loop run updates the running totals and appends a review entry.
 | Clippy warnings | 4 | 0 | 1 |
 | Protocol errors | 14 | 27 | 3 |
 | Security issues | 35 | 38 | 0 |
-| Architecture drift | 10 | 21 | 0 |
+| Architecture drift | 13 | 21 | 0 |
 | Memory / resource leaks | 5 | 10 | 1 |
 | Startup / lifecycle regressions | 2 | 9 | 0 |
 | Test infrastructure / flakiness | 13 | 0 | 0 |
@@ -40,6 +40,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-23 17:35
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 3 | architecture drift (3) | 3i1jt (P2 — client-cli audit commands target the wrong route and wrong schema), 2s3ee (P2 — client-cli payload commands target nonexistent REST routes), 3elji (P2 task — teamserver has no payload build/list/download REST API despite the documented client contract) |
+| Codex | 0 | — | No findings this pass |
+| Cursor | 0 | — | No findings this pass |
+
+Overall codebase health: drifting
+Biggest blindspot: `red-cell-cli` still lacks live contract verification against the in-tree Axum server, so entire command groups can ship green under wiremock while being unusable against the real `/api/v1` surface.
 
 ### Arch Review — 2026-03-23 17:09
 

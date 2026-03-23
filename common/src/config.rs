@@ -2654,6 +2654,29 @@ mod tests {
     }
 
     #[test]
+    fn profile_validation_error_display_single_error_format() {
+        let err = ProfileValidationError { errors: vec!["single error".to_owned()] };
+
+        assert_eq!(err.to_string(), "profile validation failed: single error");
+    }
+
+    #[test]
+    fn profile_validation_error_display_two_error_separator_format() {
+        let err = ProfileValidationError {
+            errors: vec!["first error".to_owned(), "second error".to_owned()],
+        };
+
+        assert_eq!(err.to_string(), "profile validation failed: first error; second error");
+    }
+
+    #[test]
+    fn profile_validation_error_display_empty_error_format() {
+        let err = ProfileValidationError { errors: Vec::new() };
+
+        assert_eq!(err.to_string(), "profile validation failed: ");
+    }
+
+    #[test]
     fn parses_teamserver_tls_certificate_paths() {
         let profile = Profile::parse(
             r#"

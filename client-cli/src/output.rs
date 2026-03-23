@@ -85,18 +85,7 @@ impl<T: TextRow> TextRender for Vec<T> {
 /// Stdout and stderr are never mixed; no prose is written to stdout in JSON
 /// mode.
 pub fn print_success<T: Serialize + TextRender>(format: &OutputFormat, payload: &T) {
-    match format {
-        OutputFormat::Json => {
-            let envelope = serde_json::json!({"ok": true, "data": payload});
-            match serde_json::to_string_pretty(&envelope) {
-                Ok(s) => println!("{s}"),
-                Err(_) => println!(r#"{{"ok":true}}"#),
-            }
-        }
-        OutputFormat::Text => {
-            println!("{}", payload.render_text());
-        }
-    }
+    write_success(&mut std::io::stdout(), format, payload);
 }
 
 /// Write an error envelope to **stderr**.
@@ -108,14 +97,47 @@ pub fn print_success<T: Serialize + TextRender>(format: &OutputFormat, payload: 
 /// {"ok": false, "error": "ERROR_CODE", "message": "human readable"}
 /// ```
 pub fn print_error(err: &CliError) {
+    write_error(&mut std::io::stderr(), err);
+}
+
+// ── internal write helpers (accept any `Write` for testability) ───────────────
+
+fn write_success<T: Serialize + TextRender, W: std::io::Write>(
+    out: &mut W,
+    format: &OutputFormat,
+    payload: &T,
+) {
+    match format {
+        OutputFormat::Json => {
+            let envelope = serde_json::json!({"ok": true, "data": payload});
+            match serde_json::to_string_pretty(&envelope) {
+                Ok(s) => {
+                    let _ = writeln!(out, "{s}");
+                }
+                Err(_) => {
+                    let _ = writeln!(out, r#"{{"ok":true}}"#);
+                }
+            }
+        }
+        OutputFormat::Text => {
+            let _ = writeln!(out, "{}", payload.render_text());
+        }
+    }
+}
+
+fn write_error<W: std::io::Write>(out: &mut W, err: &CliError) {
     let envelope = serde_json::json!({
         "ok": false,
         "error": err.error_code(),
         "message": err.to_string(),
     });
     match serde_json::to_string_pretty(&envelope) {
-        Ok(s) => eprintln!("{s}"),
-        Err(_) => eprintln!(r#"{{"ok":false,"error":"ERROR","message":"unknown error"}}"#),
+        Ok(s) => {
+            let _ = writeln!(out, "{s}");
+        }
+        Err(_) => {
+            let _ = writeln!(out, r#"{{"ok":false,"error":"ERROR","message":"unknown error"}}"#);
+        }
     }
 }
 
@@ -273,5 +295,71 @@ mod tests {
         assert!(rendered.contains('B'));
         assert!(rendered.contains('x'));
         assert!(rendered.contains('y'));
+    }
+
+    #[test]
+    fn build_table_zero_rows_does_not_panic_and_contains_headers() {
+        let table = build_table(&["X", "Y"], std::iter::empty::<Vec<String>>());
+        let rendered = table.to_string();
+        assert!(rendered.contains('X'));
+        assert!(rendered.contains('Y'));
+    }
+
+    // ── I/O side-effect tests via write_success / write_error ────────────────
+    //
+    // `print_success` and `print_error` are thin wrappers around the private
+    // `write_success` / `write_error` helpers that accept any `io::Write`.
+    // Testing through those helpers with a `Vec<u8>` buffer avoids the
+    // Rust test-harness stdout capture that prevents fd-level tricks (like
+    // the `gag` crate) from working reliably inside `cargo test`.
+
+    /// Minimal payload that is both [`Serialize`] and [`TextRender`].
+    #[derive(serde::Serialize)]
+    struct FakePayload {
+        value: String,
+    }
+
+    impl TextRender for FakePayload {
+        fn render_text(&self) -> String {
+            format!("rendered={}", self.value)
+        }
+    }
+
+    #[test]
+    fn write_success_json_mode_emits_ok_envelope() {
+        let payload = FakePayload { value: "hello".to_owned() };
+        let mut buf = Vec::new();
+        write_success(&mut buf, &OutputFormat::Json, &payload);
+
+        let output = String::from_utf8(buf).expect("utf-8");
+        let v: serde_json::Value =
+            serde_json::from_str(output.trim()).expect("output is valid JSON");
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["data"]["value"], "hello");
+    }
+
+    #[test]
+    fn write_success_text_mode_invokes_render_text() {
+        let payload = FakePayload { value: "world".to_owned() };
+        let mut buf = Vec::new();
+        write_success(&mut buf, &OutputFormat::Text, &payload);
+
+        let output = String::from_utf8(buf).expect("utf-8");
+        assert!(output.contains("rendered=world"), "expected render_text output, got: {output:?}");
+    }
+
+    #[test]
+    fn write_error_emits_ok_false_envelope_with_code_and_message() {
+        let err = CliError::NotFound("agent-abc".to_owned());
+        let mut buf = Vec::new();
+        write_error(&mut buf, &err);
+
+        let output = String::from_utf8(buf).expect("utf-8");
+        let v: serde_json::Value =
+            serde_json::from_str(output.trim()).expect("output is valid JSON");
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["error"], "NOT_FOUND");
+        let msg = v["message"].as_str().unwrap_or("");
+        assert!(msg.contains("agent-abc"), "message should include entity name");
     }
 }

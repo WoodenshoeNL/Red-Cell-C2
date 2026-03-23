@@ -1106,6 +1106,393 @@ mod tests {
         );
     }
 
+    // -- helpers for encoding length-prefixed fields --
+
+    /// Encode a UTF-8 string as a length-prefixed byte blob (u32 LE length + raw bytes).
+    fn push_length_prefixed_string(buf: &mut Vec<u8>, s: &str) {
+        let bytes = s.as_bytes();
+        push_u32(buf, bytes.len() as u32);
+        buf.extend_from_slice(bytes);
+    }
+
+    /// Encode a string as a length-prefixed UTF-16 LE byte blob.
+    fn push_length_prefixed_utf16(buf: &mut Vec<u8>, s: &str) {
+        let words: Vec<u16> = s.encode_utf16().collect();
+        let byte_len = words.len() * 2;
+        push_u32(buf, byte_len as u32);
+        for w in &words {
+            buf.extend_from_slice(&w.to_le_bytes());
+        }
+    }
+
+    // -- MemoryExecute tests --
+
+    #[tokio::test]
+    async fn config_memory_execute_formats_message_correctly() {
+        let (registry, events) = setup().await;
+        let mut rx = events.subscribe();
+
+        let mut extra = Vec::new();
+        push_u32(&mut extra, 64);
+        let payload = config_payload(u32::from(DemonConfigKey::MemoryExecute), &extra);
+
+        let result =
+            handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert_eq!(result.expect("must succeed"), None);
+
+        let msg = rx.recv().await.expect("should receive agent response");
+        let OperatorMessage::AgentResponse(resp) = &msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            message.contains("64"),
+            "expected message to contain the execute value 64, got {message:?}"
+        );
+    }
+
+    // -- InjectSpawn64 tests --
+
+    #[tokio::test]
+    async fn config_inject_spawn64_formats_message_correctly() {
+        let (registry, events) = setup().await;
+        let mut rx = events.subscribe();
+
+        let mut extra = Vec::new();
+        push_length_prefixed_utf16(&mut extra, "C:\\Windows\\System32\\notepad.exe");
+        let payload = config_payload(u32::from(DemonConfigKey::InjectSpawn64), &extra);
+
+        let result =
+            handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert_eq!(result.expect("must succeed"), None);
+
+        let msg = rx.recv().await.expect("should receive agent response");
+        let OperatorMessage::AgentResponse(resp) = &msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            message.contains("notepad.exe"),
+            "expected message to contain path, got {message:?}"
+        );
+    }
+
+    // -- InjectSpawn32 tests --
+
+    #[tokio::test]
+    async fn config_inject_spawn32_formats_message_correctly() {
+        let (registry, events) = setup().await;
+        let mut rx = events.subscribe();
+
+        let mut extra = Vec::new();
+        push_length_prefixed_utf16(&mut extra, "C:\\Windows\\SysWOW64\\cmd.exe");
+        let payload = config_payload(u32::from(DemonConfigKey::InjectSpawn32), &extra);
+
+        let result =
+            handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert_eq!(result.expect("must succeed"), None);
+
+        let msg = rx.recv().await.expect("should receive agent response");
+        let OperatorMessage::AgentResponse(resp) = &msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(message.contains("cmd.exe"), "expected message to contain path, got {message:?}");
+    }
+
+    // -- ImplantSpfThreadStart tests --
+
+    #[tokio::test]
+    async fn config_spf_thread_start_formats_message_correctly() {
+        let (registry, events) = setup().await;
+        let mut rx = events.subscribe();
+
+        let mut extra = Vec::new();
+        push_length_prefixed_string(&mut extra, "ntdll.dll");
+        push_length_prefixed_string(&mut extra, "RtlUserThreadStart");
+        let payload = config_payload(u32::from(DemonConfigKey::ImplantSpfThreadStart), &extra);
+
+        let result =
+            handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert_eq!(result.expect("must succeed"), None);
+
+        let msg = rx.recv().await.expect("should receive agent response");
+        let OperatorMessage::AgentResponse(resp) = &msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            message.contains("ntdll.dll!RtlUserThreadStart"),
+            "expected module!symbol format, got {message:?}"
+        );
+    }
+
+    // -- ImplantSleepTechnique tests --
+
+    #[tokio::test]
+    async fn config_sleep_technique_formats_message_correctly() {
+        let (registry, events) = setup().await;
+        let mut rx = events.subscribe();
+
+        let mut extra = Vec::new();
+        push_u32(&mut extra, 3);
+        let payload = config_payload(u32::from(DemonConfigKey::ImplantSleepTechnique), &extra);
+
+        let result =
+            handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert_eq!(result.expect("must succeed"), None);
+
+        let msg = rx.recv().await.expect("should receive agent response");
+        let OperatorMessage::AgentResponse(resp) = &msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(message.contains("3"), "expected message to contain technique id, got {message:?}");
+    }
+
+    // -- ImplantCoffeeVeh tests --
+
+    #[tokio::test]
+    async fn config_coffee_veh_true_formats_message_correctly() {
+        let (registry, events) = setup().await;
+        let mut rx = events.subscribe();
+
+        let mut extra = Vec::new();
+        push_u32(&mut extra, 1); // true
+        let payload = config_payload(u32::from(DemonConfigKey::ImplantCoffeeVeh), &extra);
+
+        let result =
+            handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert_eq!(result.expect("must succeed"), None);
+
+        let msg = rx.recv().await.expect("should receive agent response");
+        let OperatorMessage::AgentResponse(resp) = &msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(message.contains("true"), "expected message to contain 'true', got {message:?}");
+    }
+
+    #[tokio::test]
+    async fn config_coffee_veh_false_formats_message_correctly() {
+        let (registry, events) = setup().await;
+        let mut rx = events.subscribe();
+
+        let mut extra = Vec::new();
+        push_u32(&mut extra, 0); // false
+        let payload = config_payload(u32::from(DemonConfigKey::ImplantCoffeeVeh), &extra);
+
+        let result =
+            handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert_eq!(result.expect("must succeed"), None);
+
+        let msg = rx.recv().await.expect("should receive agent response");
+        let OperatorMessage::AgentResponse(resp) = &msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(message.contains("false"), "expected message to contain 'false', got {message:?}");
+    }
+
+    // -- ImplantCoffeeThreaded tests --
+
+    #[tokio::test]
+    async fn config_coffee_threaded_formats_message_correctly() {
+        let (registry, events) = setup().await;
+        let mut rx = events.subscribe();
+
+        let mut extra = Vec::new();
+        push_u32(&mut extra, 1); // true
+        let payload = config_payload(u32::from(DemonConfigKey::ImplantCoffeeThreaded), &extra);
+
+        let result =
+            handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert_eq!(result.expect("must succeed"), None);
+
+        let msg = rx.recv().await.expect("should receive agent response");
+        let OperatorMessage::AgentResponse(resp) = &msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(message.contains("true"), "expected message to contain 'true', got {message:?}");
+    }
+
+    // -- InjectTechnique tests --
+
+    #[tokio::test]
+    async fn config_inject_technique_formats_message_correctly() {
+        let (registry, events) = setup().await;
+        let mut rx = events.subscribe();
+
+        let mut extra = Vec::new();
+        push_u32(&mut extra, 7);
+        let payload = config_payload(u32::from(DemonConfigKey::InjectTechnique), &extra);
+
+        let result =
+            handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert_eq!(result.expect("must succeed"), None);
+
+        let msg = rx.recv().await.expect("should receive agent response");
+        let OperatorMessage::AgentResponse(resp) = &msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(message.contains("7"), "expected message to contain technique id, got {message:?}");
+    }
+
+    // -- InjectSpoofAddr tests --
+
+    #[tokio::test]
+    async fn config_inject_spoof_addr_formats_message_correctly() {
+        let (registry, events) = setup().await;
+        let mut rx = events.subscribe();
+
+        let mut extra = Vec::new();
+        push_length_prefixed_string(&mut extra, "kernel32.dll");
+        push_length_prefixed_string(&mut extra, "CreateThread");
+        let payload = config_payload(u32::from(DemonConfigKey::InjectSpoofAddr), &extra);
+
+        let result =
+            handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert_eq!(result.expect("must succeed"), None);
+
+        let msg = rx.recv().await.expect("should receive agent response");
+        let OperatorMessage::AgentResponse(resp) = &msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            message.contains("kernel32.dll!CreateThread"),
+            "expected module!symbol format, got {message:?}"
+        );
+    }
+
+    // -- ImplantVerbose tests --
+
+    #[tokio::test]
+    async fn config_implant_verbose_true_formats_message_correctly() {
+        let (registry, events) = setup().await;
+        let mut rx = events.subscribe();
+
+        let mut extra = Vec::new();
+        push_u32(&mut extra, 1); // true
+        let payload = config_payload(u32::from(DemonConfigKey::ImplantVerbose), &extra);
+
+        let result =
+            handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert_eq!(result.expect("must succeed"), None);
+
+        let msg = rx.recv().await.expect("should receive agent response");
+        let OperatorMessage::AgentResponse(resp) = &msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(message.contains("true"), "expected message to contain 'true', got {message:?}");
+    }
+
+    #[tokio::test]
+    async fn config_implant_verbose_false_formats_message_correctly() {
+        let (registry, events) = setup().await;
+        let mut rx = events.subscribe();
+
+        let mut extra = Vec::new();
+        push_u32(&mut extra, 0); // false
+        let payload = config_payload(u32::from(DemonConfigKey::ImplantVerbose), &extra);
+
+        let result =
+            handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert_eq!(result.expect("must succeed"), None);
+
+        let msg = rx.recv().await.expect("should receive agent response");
+        let OperatorMessage::AgentResponse(resp) = &msg else {
+            panic!("expected AgentResponse, got {msg:?}");
+        };
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(message.contains("false"), "expected message to contain 'false', got {message:?}");
+    }
+
+    // -- Truncated payload tests for newly-covered read types --
+
+    #[tokio::test]
+    async fn config_memory_execute_truncated_payload_returns_error() {
+        let (registry, events) = setup().await;
+        // MemoryExecute needs u32 after the key, provide none.
+        let payload = config_payload(u32::from(DemonConfigKey::MemoryExecute), &[]);
+
+        let result =
+            handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload).await;
+        let err = result.expect_err("truncated payload must fail");
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn config_inject_spawn64_truncated_payload_returns_error() {
+        let (registry, events) = setup().await;
+        // InjectSpawn64 calls read_utf16 which needs at least a u32 length prefix.
+        let payload = config_payload(u32::from(DemonConfigKey::InjectSpawn64), &[]);
+
+        let result =
+            handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload).await;
+        let err = result.expect_err("truncated utf16 payload must fail");
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn config_spf_thread_start_truncated_second_string_returns_error() {
+        let (registry, events) = setup().await;
+        // Provide one valid string but truncate before the second.
+        let mut extra = Vec::new();
+        push_length_prefixed_string(&mut extra, "ntdll.dll");
+        // No second string — parser should fail on read_string for symbol.
+        let payload = config_payload(u32::from(DemonConfigKey::ImplantSpfThreadStart), &extra);
+
+        let result =
+            handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload).await;
+        let err = result.expect_err("truncated second string must fail");
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn config_coffee_veh_truncated_payload_returns_error() {
+        let (registry, events) = setup().await;
+        // read_bool needs u32 (4 bytes), provide none.
+        let payload = config_payload(u32::from(DemonConfigKey::ImplantCoffeeVeh), &[]);
+
+        let result =
+            handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload).await;
+        let err = result.expect_err("truncated bool payload must fail");
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn config_inject_spoof_addr_truncated_payload_returns_error() {
+        let (registry, events) = setup().await;
+        // Provide first string, omit second.
+        let mut extra = Vec::new();
+        push_length_prefixed_string(&mut extra, "kernel32.dll");
+        let payload = config_payload(u32::from(DemonConfigKey::InjectSpoofAddr), &extra);
+
+        let result =
+            handle_config_callback(&registry, &events, AGENT_ID, REQUEST_ID, &payload).await;
+        let err = result.expect_err("truncated second string must fail");
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+    }
+
     // -- handle_demon_info_callback tests ────────────────────────────────────
 
     fn demon_info_payload_mem_alloc(pointer: u64, size: u32, protection: u32) -> Vec<u8> {

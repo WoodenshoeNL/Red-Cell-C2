@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 744 | 228 | 31 |
+| Tasks closed | 746 | 228 | 31 |
 | Bugs filed against | 83 | 34 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
 | Quality score | 89% | 85% | 71% |
 
-*Bug rates: Claude 83/744=0.11, Codex 34/228=0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 83/746=0.11, Codex 34/228=0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-23 19:44 — fed1e87b..6fab04a6
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed t3cjg and rtk8g. Code changes were limited to the service bridge AgentOutput forwarding path and the listener restart reconnect test vectors. |
+| Codex | 0 | 0 | No task-close commits or product-code changes in this range. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`)
+Tests: failed (`cargo test --workspace`: `active_agent_survives_liveness_sweep_that_kills_stale_peer` returned HTTP 404; already tracked as `red-cell-c2-2tgqn`)
+Issues found: 0 new bugs filed
 
 ### Arch Review — 2026-03-23 17:35
 

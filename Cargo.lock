@@ -4177,7 +4177,6 @@ dependencies = [
 name = "red-cell-cli"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "clap",
  "comfy-table",
  "dirs 5.0.1",

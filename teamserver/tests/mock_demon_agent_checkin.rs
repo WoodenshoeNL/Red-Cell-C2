@@ -1660,3 +1660,114 @@ async fn rapid_reconnect_callback_cycles_no_counter_drift() -> Result<(), Box<dy
     harness.shutdown().await?;
     Ok(())
 }
+
+/// Verify that a malformed (non-JSON) operator WebSocket message closes the
+/// offending connection but does not break task dispatch for other operators.
+///
+/// Regression test: ensures the server-side message loop gracefully handles
+/// parse errors instead of panicking or poisoning shared state.
+#[tokio::test]
+async fn malformed_operator_message_closes_connection_without_breaking_dispatch()
+-> Result<(), Box<dyn std::error::Error>> {
+    use futures_util::StreamExt;
+    use tokio::time::{Duration, timeout};
+
+    let mut harness = spawn_server_with_http_listener("edge-malformed").await?;
+    let listener_port = harness.listener_port;
+
+    // Register a Demon agent so we can verify task dispatch still works.
+    let agent_id = 0x1234_5678;
+    let key: [u8; AGENT_KEY_LENGTH] = [
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E,
+        0x1F, 0x20,
+    ];
+    let iv: [u8; AGENT_IV_LENGTH] = [
+        0xB0, 0xC3, 0xD6, 0xE9, 0xFC, 0x0F, 0x22, 0x35, 0x48, 0x5B, 0x6E, 0x81, 0x94, 0xA7, 0xBA,
+        0xCD,
+    ];
+
+    harness
+        .client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_init_body(agent_id, key, iv))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // Consume the AgentNew event on the first operator socket.
+    let agent_new = common::read_operator_message(&mut harness.socket).await?;
+    assert!(
+        matches!(agent_new, OperatorMessage::AgentNew(_)),
+        "expected AgentNew, got {agent_new:?}"
+    );
+
+    // Open a second operator connection for the "bad" client.
+    let (mut bad_socket, _) = connect_async(format!("ws://{}/", harness.server.addr)).await?;
+    common::login(&mut bad_socket).await?;
+
+    // The second socket receives snapshot events (listeners, agents, etc.).
+    // Drain until we see the AgentNew entry so the socket is ready for our test.
+    let mut saw_agent_new = false;
+    for _ in 0..10 {
+        let event = common::read_operator_message(&mut bad_socket).await?;
+        if matches!(event, OperatorMessage::AgentNew(_)) {
+            saw_agent_new = true;
+            break;
+        }
+    }
+    assert!(saw_agent_new, "expected AgentNew in snapshot on second socket");
+
+    // --- Send malformed (non-JSON) message on the bad socket ---
+    bad_socket.send(ClientMessage::Text("not valid json".into())).await?;
+
+    // The server should close the bad connection.
+    let close_frame = timeout(Duration::from_secs(10), bad_socket.next()).await?;
+    assert!(
+        close_frame
+            .as_ref()
+            .map(|r| r.as_ref().map(|m| m.is_close()).unwrap_or(false))
+            .unwrap_or(true),
+        "expected close frame on bad socket after malformed message, got {close_frame:?}"
+    );
+
+    // --- Verify the good operator connection still works ---
+    // Submit a valid agent task on the original (good) socket.
+    let task = operator_task_message("AA", "checkin", "12345678", DemonCommand::CommandCheckin)?;
+    harness.socket.send(ClientMessage::Text(task.into())).await?;
+
+    // We should receive the task echo, proving the dispatch loop is alive.
+    let task_echo = common::read_operator_message(&mut harness.socket).await?;
+    let OperatorMessage::AgentTask(message) = task_echo else {
+        panic!("expected AgentTask echo on good socket, got {task_echo:?}");
+    };
+    assert_eq!(message.info.demon_id, "12345678");
+    assert_eq!(message.info.task_id, "AA");
+
+    // Confirm the job is actually enqueued — agent can retrieve it.
+    let get_job_response = harness
+        .client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            0,
+            u32::from(DemonCommand::CommandGetJob),
+            7,
+            &[],
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+    let job_bytes = get_job_response.bytes().await?;
+    let jobs = DemonMessage::from_bytes(job_bytes.as_ref())?;
+    assert!(
+        !jobs.packages.is_empty(),
+        "agent should have at least one job enqueued after malformed message on other socket"
+    );
+    assert_eq!(jobs.packages[0].command_id, u32::from(DemonCommand::CommandCheckin));
+
+    harness.shutdown().await?;
+    Ok(())
+}

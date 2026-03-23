@@ -387,6 +387,29 @@ mod tests {
     }
 
     #[test]
+    fn days_to_ymd_leap_year_2000_feb29() {
+        // 2000 is a 400-year leap year: Feb 29 exists.
+        // day 11016 = 2000-02-29, day 11017 = 2000-03-01.
+        assert_eq!(days_to_ymd(11016), (2000, 2, 29));
+        assert_eq!(days_to_ymd(11017), (2000, 3, 1));
+    }
+
+    #[test]
+    fn days_to_ymd_leap_year_2024_feb29() {
+        // 2024 is a 4-year leap year: Feb 29 exists.
+        // day 19782 = 2024-02-29, day 19783 = 2024-03-01.
+        assert_eq!(days_to_ymd(19782), (2024, 2, 29));
+        assert_eq!(days_to_ymd(19783), (2024, 3, 1));
+    }
+
+    #[test]
+    fn days_to_ymd_dec31_to_jan1_boundary() {
+        // 2024-12-31 = day 20088, 2025-01-01 = day 20089.
+        assert_eq!(days_to_ymd(20088), (2024, 12, 31));
+        assert_eq!(days_to_ymd(20089), (2025, 1, 1));
+    }
+
+    #[test]
     fn current_timestamp_looks_like_iso8601() {
         let ts = current_timestamp();
         assert!(ts.ends_with('Z'), "timestamp should end with Z: {ts}");

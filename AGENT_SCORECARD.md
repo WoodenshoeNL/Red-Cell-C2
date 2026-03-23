@@ -24,7 +24,7 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 34 | 13 | 5 |
 | Clippy warnings | 4 | 0 | 1 |
 | Protocol errors | 12 | 27 | 3 |
-| Security issues | 32 | 38 | 0 |
+| Security issues | 33 | 38 | 0 |
 | Architecture drift | 6 | 21 | 0 |
 | Memory / resource leaks | 5 | 10 | 1 |
 | Startup / lifecycle regressions | 1 | 8 | 0 |
@@ -3415,3 +3415,15 @@ Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (0 warnings), `cargo
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (0 warnings)
 Issues found: 0 — all changes are test code or formatting, clean quality.
+
+### Arch Review — 2026-03-23 16:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 2 | security(1), quality(1) | jrcig: client-cli hardcodes danger_accept_invalid_certs(true) with no CA/fingerprint/TOFU alternative (P1 security). won3p: specter missing clippy lint enforcement that phantom has (P3 quality). |
+| Codex | 0 | — | No new findings. Phantom agent code is well-structured with strict lints. |
+| Cursor | 0 | — | No new findings. No recent activity. |
+
+Overall codebase health: on track
+Biggest blindspot: client-cli TLS verification completely disabled — operators using the CLI for automation have no certificate verification whatsoever, making MitM trivial. The GUI client already has full TOFU/CA/fingerprint support that was never ported.
+Pre-existing failure: agent_reconnects_after_listener_restart (404 after restart) — tracked by 4 open bugs, no progress yet.

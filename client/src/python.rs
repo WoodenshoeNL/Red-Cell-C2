@@ -1013,6 +1013,9 @@ impl PythonRuntime {
 
     #[cfg(test)]
     fn new_zombie_for_test() -> Self {
+        // Ensure the Python interpreter is ready before acquiring the GIL.
+        // This is idempotent — safe to call multiple times and from multiple threads.
+        pyo3::prepare_freethreaded_python();
         let api_state = Arc::new(PythonApiState {
             app_state: Arc::new(Mutex::new(AppState::new(
                 "wss://127.0.0.1:40056/havoc/".to_owned(),
@@ -4704,5 +4707,120 @@ red_cell.register_command('boom', boom)\n";
             "only one script descriptor should exist after loading twice"
         );
         assert_eq!(runtime.script_descriptors()[0].registered_command_count, 1);
+    }
+
+    // --- ThreadUnavailable regression tests ---
+    // These tests verify that every dispatch method returns
+    // Err(PythonRuntimeError::ThreadUnavailable) when the internal command
+    // channel is closed (e.g. Python thread crashed or was dropped).
+    //
+    // Each test acquires TEST_GUARD to serialize with other Python tests and
+    // avoid concurrent GIL / ACTIVE_RUNTIME state races.
+
+    #[test]
+    fn emit_agent_checkin_returns_thread_unavailable_on_zombie_runtime() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let runtime = PythonRuntime::new_zombie_for_test();
+        let result = runtime.emit_agent_checkin("dead-agent-id".to_owned());
+        assert!(
+            matches!(result, Err(PythonRuntimeError::ThreadUnavailable)),
+            "expected ThreadUnavailable, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn emit_command_response_returns_thread_unavailable_on_zombie_runtime() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let runtime = PythonRuntime::new_zombie_for_test();
+        let result = runtime.emit_command_response(
+            "dead-agent".to_owned(),
+            "task-1".to_owned(),
+            "output".to_owned(),
+        );
+        assert!(
+            matches!(result, Err(PythonRuntimeError::ThreadUnavailable)),
+            "expected ThreadUnavailable, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn emit_loot_captured_returns_thread_unavailable_on_zombie_runtime() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let runtime = PythonRuntime::new_zombie_for_test();
+        let loot =
+            sample_loot_item("dead-agent", crate::transport::LootKind::Credential, "hash", None);
+        let result = runtime.emit_loot_captured(loot);
+        assert!(
+            matches!(result, Err(PythonRuntimeError::ThreadUnavailable)),
+            "expected ThreadUnavailable, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn emit_listener_changed_returns_thread_unavailable_on_zombie_runtime() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let runtime = PythonRuntime::new_zombie_for_test();
+        let result = runtime.emit_listener_changed("https-443".to_owned(), "started".to_owned());
+        assert!(
+            matches!(result, Err(PythonRuntimeError::ThreadUnavailable)),
+            "expected ThreadUnavailable, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn execute_registered_command_returns_thread_unavailable_on_zombie_runtime() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        // new_zombie_for_test registers a "zombie" command so match_registered_command
+        // succeeds and the send path is exercised.
+        let runtime = PythonRuntime::new_zombie_for_test();
+        let result = runtime.execute_registered_command("dead-agent", "zombie");
+        assert!(
+            matches!(result, Err(PythonRuntimeError::ThreadUnavailable)),
+            "expected ThreadUnavailable, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn activate_tab_returns_thread_unavailable_on_zombie_runtime() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let runtime = PythonRuntime::new_zombie_for_test();
+        let result = runtime.activate_tab("some-tab");
+        assert!(
+            matches!(result, Err(PythonRuntimeError::ThreadUnavailable)),
+            "expected ThreadUnavailable, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn load_script_returns_thread_unavailable_on_zombie_runtime() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let runtime = PythonRuntime::new_zombie_for_test();
+        let result = runtime.load_script("/tmp/nonexistent.py".into());
+        assert!(
+            matches!(result, Err(PythonRuntimeError::ThreadUnavailable)),
+            "expected ThreadUnavailable, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn reload_script_returns_thread_unavailable_on_zombie_runtime() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let runtime = PythonRuntime::new_zombie_for_test();
+        let result = runtime.reload_script("some_script");
+        assert!(
+            matches!(result, Err(PythonRuntimeError::ThreadUnavailable)),
+            "expected ThreadUnavailable, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn unload_script_returns_thread_unavailable_on_zombie_runtime() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let runtime = PythonRuntime::new_zombie_for_test();
+        let result = runtime.unload_script("some_script");
+        assert!(
+            matches!(result, Err(PythonRuntimeError::ThreadUnavailable)),
+            "expected ThreadUnavailable, got: {result:?}"
+        );
     }
 }

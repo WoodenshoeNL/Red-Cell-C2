@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 716 | 220 | 31 |
+| Tasks closed | 718 | 220 | 31 |
 | Bugs filed against | 80 | 34 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
 | Quality score | 89% | 85% | 71% |
 
-*Bug rates: Claude 80/716=0.11, Codex 34/220=0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 80/718=0.11, Codex 34/220=0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -3392,3 +3392,14 @@ Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (0 warnings), `cargo
 | Cursor | 0 | 0 | No activity this period. |
 
 Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (0 warnings), `cargo test --workspace` — 1 pre-existing failure: `listener_lifecycle::agent_reconnects_after_listener_restart` (404 after restart, tracked as 9ncol/loti5). All other tests pass. No new regressions.
+
+### QA Review — 2026-03-23 13:15 — a286774a..f8009753
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed: drp8f (9 ThreadUnavailable regression tests for PythonRuntime dispatch methods), 55uyr (leap year + year-boundary tests for days_to_ymd). Also reformatted crypto.rs and external_listener_pipeline.rs (whitespace only). |
+| Codex | 0 | 0 | Claimed 42dp2 (deserialize bool/u16 out-of-range tests) — still in progress. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: `cargo check` ✓, `cargo clippy -- -D warnings` ✓ (0 warnings)
+Issues found: 0 — all changes are test code or formatting, clean quality.

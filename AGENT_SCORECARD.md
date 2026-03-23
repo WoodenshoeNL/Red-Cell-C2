@@ -3552,5 +3552,5 @@ Biggest blindspot: authorization and transport hardening still diverge at the ed
 | Cursor | 0 | 0 | No activity. |
 
 Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`)
-Tests: not completed (`cargo test --workspace` remained in progress after reporting `auth::tests::authenticate_login_rejects_when_global_cap_reached` running for over 60 seconds; no failures observed before review close)
+Tests: failed (`cargo test --workspace`: `active_agent_survives_liveness_sweep_that_kills_stale_peer` returned HTTP 404; this failure was already tracked in the open issue set before this review)
 Issues found: `red-cell-c2-19dao` (Claude), `red-cell-c2-31xuj` (Claude)

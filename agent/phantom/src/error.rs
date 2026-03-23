@@ -9,6 +9,10 @@ use thiserror::Error;
 /// Top-level error type for Phantom.
 #[derive(Debug, Error)]
 pub enum PhantomError {
+    /// Command-line argument parsing failed.
+    #[error("argument error: {0}")]
+    Argument(String),
+
     /// Protocol encoding or decoding failed.
     #[error("protocol error: {0}")]
     Protocol(#[from] DemonProtocolError),

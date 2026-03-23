@@ -1,5 +1,7 @@
 //! Runtime configuration for the Phantom Linux agent.
 
+use std::ffi::{OsStr, OsString};
+
 use crate::error::PhantomError;
 
 /// Configuration inputs that control Phantom's callback transport and timing.
@@ -22,6 +24,27 @@ pub struct PhantomConfig {
 }
 
 impl PhantomConfig {
+    /// Build a configuration from command-line arguments and environment variables.
+    ///
+    /// Environment variables are applied first and may be overridden by flags:
+    /// `PHANTOM_CALLBACK_URL`, `PHANTOM_INIT_SECRET`, `PHANTOM_USER_AGENT`,
+    /// `PHANTOM_SLEEP_DELAY_MS`, `PHANTOM_SLEEP_JITTER`, `PHANTOM_KILL_DATE`,
+    /// and `PHANTOM_WORKING_HOURS`.
+    pub fn from_sources<I, S, J, K, V>(args: I, env: J) -> Result<Self, PhantomError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<OsString>,
+        J: IntoIterator<Item = (K, V)>,
+        K: Into<OsString>,
+        V: Into<OsString>,
+    {
+        let mut config = Self::default();
+        config.apply_env(env)?;
+        config.apply_args(args)?;
+        config.validate()?;
+        Ok(config)
+    }
+
     /// Validate the configuration before the agent starts.
     pub fn validate(&self) -> Result<(), PhantomError> {
         if self.callback_url.trim().is_empty() {
@@ -33,6 +56,116 @@ impl PhantomConfig {
         if self.sleep_jitter > 100 {
             return Err(PhantomError::InvalidConfig("sleep_jitter must be between 0 and 100"));
         }
+        Ok(())
+    }
+
+    /// Return CLI help text for the Phantom binary.
+    pub fn usage() -> &'static str {
+        concat!(
+            "Usage: phantom [options]\n\n",
+            "Options:\n",
+            "  --callback-url URL       Teamserver callback endpoint\n",
+            "  --init-secret SECRET     HKDF listener init secret\n",
+            "  --user-agent VALUE       HTTP User-Agent header\n",
+            "  --sleep-delay-ms N       Base sleep interval in milliseconds\n",
+            "  --sleep-jitter N         Sleep jitter percentage (0-100)\n",
+            "  --kill-date UNIX_TS      Exit after this Unix timestamp\n",
+            "  --working-hours MASK     Working-hours bitmask advertised in init\n",
+            "  -h, --help               Show this help text\n\n",
+            "Environment:\n",
+            "  PHANTOM_CALLBACK_URL, PHANTOM_INIT_SECRET, PHANTOM_USER_AGENT,\n",
+            "  PHANTOM_SLEEP_DELAY_MS, PHANTOM_SLEEP_JITTER, PHANTOM_KILL_DATE,\n",
+            "  PHANTOM_WORKING_HOURS\n",
+        )
+    }
+
+    fn apply_env<J, K, V>(&mut self, env: J) -> Result<(), PhantomError>
+    where
+        J: IntoIterator<Item = (K, V)>,
+        K: Into<OsString>,
+        V: Into<OsString>,
+    {
+        for (key, value) in env {
+            let key = key.into();
+            let value = value.into();
+            match key.to_str() {
+                Some("PHANTOM_CALLBACK_URL") => {
+                    self.callback_url = parse_os_string(value, "PHANTOM_CALLBACK_URL")?;
+                }
+                Some("PHANTOM_INIT_SECRET") => {
+                    self.init_secret = Some(parse_os_string(value, "PHANTOM_INIT_SECRET")?);
+                }
+                Some("PHANTOM_USER_AGENT") => {
+                    self.user_agent = parse_os_string(value, "PHANTOM_USER_AGENT")?;
+                }
+                Some("PHANTOM_SLEEP_DELAY_MS") => {
+                    self.sleep_delay_ms = parse_os_value(&value, "PHANTOM_SLEEP_DELAY_MS")?;
+                }
+                Some("PHANTOM_SLEEP_JITTER") => {
+                    self.sleep_jitter = parse_os_value(&value, "PHANTOM_SLEEP_JITTER")?;
+                }
+                Some("PHANTOM_KILL_DATE") => {
+                    self.kill_date = Some(parse_os_value(&value, "PHANTOM_KILL_DATE")?);
+                }
+                Some("PHANTOM_WORKING_HOURS") => {
+                    self.working_hours = Some(parse_os_value(&value, "PHANTOM_WORKING_HOURS")?);
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    fn apply_args<I, S>(&mut self, args: I) -> Result<(), PhantomError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<OsString>,
+    {
+        let mut args = args.into_iter().map(Into::into);
+        let _program_name = args.next();
+
+        while let Some(argument) = args.next() {
+            let argument_string = parse_os_string(argument, "argument")?;
+            if matches!(argument_string.as_str(), "-h" | "--help") {
+                continue;
+            }
+
+            let (flag, inline_value) = match argument_string.split_once('=') {
+                Some((flag, value)) => (flag, Some(value.to_string())),
+                None => (argument_string.as_str(), None),
+            };
+
+            let value = match inline_value {
+                Some(value) => value,
+                None => {
+                    let next = args.next().ok_or_else(|| {
+                        PhantomError::Argument(format!("missing value for {flag}"))
+                    })?;
+                    parse_os_string(next, flag)?
+                }
+            };
+
+            match flag {
+                "--callback-url" => self.callback_url = value,
+                "--init-secret" => self.init_secret = Some(value),
+                "--user-agent" => self.user_agent = value,
+                "--sleep-delay-ms" => {
+                    self.sleep_delay_ms = parse_string_value(&value, flag)?;
+                }
+                "--sleep-jitter" => {
+                    self.sleep_jitter = parse_string_value(&value, flag)?;
+                }
+                "--kill-date" => {
+                    self.kill_date = Some(parse_string_value(&value, flag)?);
+                }
+                "--working-hours" => {
+                    self.working_hours = Some(parse_string_value(&value, flag)?);
+                }
+                _ => return Err(PhantomError::Argument(format!("unknown argument {flag}"))),
+            }
+        }
+
         Ok(())
     }
 }
@@ -51,6 +184,29 @@ impl Default for PhantomConfig {
             working_hours: None,
         }
     }
+}
+
+fn parse_os_string(value: OsString, key: &str) -> Result<String, PhantomError> {
+    value.into_string().map_err(|_| PhantomError::Argument(format!("{key} must be valid UTF-8")))
+}
+
+fn parse_os_value<T>(value: &OsStr, key: &str) -> Result<T, PhantomError>
+where
+    T: std::str::FromStr,
+{
+    let value = value
+        .to_str()
+        .ok_or_else(|| PhantomError::Argument(format!("{key} must be valid UTF-8")))?;
+    parse_string_value(value, key)
+}
+
+fn parse_string_value<T>(value: &str, key: &str) -> Result<T, PhantomError>
+where
+    T: std::str::FromStr,
+{
+    value
+        .parse::<T>()
+        .map_err(|_| PhantomError::Argument(format!("invalid value for {key}: {value}")))
 }
 
 #[cfg(test)]
@@ -79,5 +235,83 @@ mod tests {
     fn empty_init_secret_is_rejected() {
         let config = PhantomConfig { init_secret: Some(String::new()), ..Default::default() };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn from_sources_applies_environment_values() {
+        let config = PhantomConfig::from_sources(
+            ["phantom"],
+            [
+                ("PHANTOM_CALLBACK_URL", "https://teamserver.local/"),
+                ("PHANTOM_USER_AGENT", "phantom-test"),
+                ("PHANTOM_SLEEP_DELAY_MS", "1500"),
+                ("PHANTOM_SLEEP_JITTER", "15"),
+                ("PHANTOM_KILL_DATE", "1700000000"),
+                ("PHANTOM_WORKING_HOURS", "255"),
+                ("PHANTOM_INIT_SECRET", "sekrit"),
+            ],
+        )
+        .expect("config");
+
+        assert_eq!(config.callback_url, "https://teamserver.local/");
+        assert_eq!(config.user_agent, "phantom-test");
+        assert_eq!(config.sleep_delay_ms, 1500);
+        assert_eq!(config.sleep_jitter, 15);
+        assert_eq!(config.kill_date, Some(1_700_000_000));
+        assert_eq!(config.working_hours, Some(255));
+        assert_eq!(config.init_secret.as_deref(), Some("sekrit"));
+    }
+
+    #[test]
+    fn from_sources_prefers_cli_over_environment() {
+        let config = PhantomConfig::from_sources(
+            [
+                "phantom",
+                "--callback-url",
+                "https://override.local/",
+                "--sleep-delay-ms=2500",
+                "--sleep-jitter",
+                "5",
+            ],
+            [("PHANTOM_CALLBACK_URL", "https://env.local/"), ("PHANTOM_SLEEP_DELAY_MS", "1000")],
+        )
+        .expect("config");
+
+        assert_eq!(config.callback_url, "https://override.local/");
+        assert_eq!(config.sleep_delay_ms, 2500);
+        assert_eq!(config.sleep_jitter, 5);
+    }
+
+    #[test]
+    fn from_sources_rejects_unknown_arguments() {
+        let error = PhantomConfig::from_sources(
+            ["phantom", "--bogus", "value"],
+            std::iter::empty::<(&str, &str)>(),
+        )
+        .expect_err("unknown flag should fail");
+        assert!(matches!(
+            error,
+            crate::error::PhantomError::Argument(message) if message.contains("--bogus")
+        ));
+    }
+
+    #[test]
+    fn from_sources_rejects_invalid_numeric_values() {
+        let error = PhantomConfig::from_sources(
+            ["phantom", "--sleep-jitter", "oops"],
+            std::iter::empty::<(&str, &str)>(),
+        )
+        .expect_err("invalid number should fail");
+        assert!(matches!(
+            error,
+            crate::error::PhantomError::Argument(message) if message.contains("--sleep-jitter")
+        ));
+    }
+
+    #[test]
+    fn usage_mentions_supported_inputs() {
+        let usage = PhantomConfig::usage();
+        assert!(usage.contains("--callback-url"));
+        assert!(usage.contains("PHANTOM_CALLBACK_URL"));
     }
 }

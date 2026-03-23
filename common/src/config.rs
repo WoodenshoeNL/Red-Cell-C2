@@ -839,7 +839,7 @@ pub struct HeaderConfig {
 }
 
 /// Optional service bridge configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 pub struct ServiceConfig {
     /// Service endpoint name or address.
     #[serde(rename = "Endpoint")]
@@ -847,6 +847,15 @@ pub struct ServiceConfig {
     /// Service shared secret.
     #[serde(rename = "Password")]
     pub password: String,
+}
+
+impl fmt::Debug for ServiceConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ServiceConfig")
+            .field("endpoint", &self.endpoint)
+            .field("password", &"[redacted]")
+            .finish()
+    }
 }
 
 /// Optional REST API configuration.
@@ -867,7 +876,7 @@ impl Default for ApiConfig {
 }
 
 /// A single REST API key definition.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 pub struct ApiKeyConfig {
     /// The secret value accepted by the REST API.
     #[serde(rename = "Value")]
@@ -875,6 +884,15 @@ pub struct ApiKeyConfig {
     /// RBAC role granted to requests using this key.
     #[serde(rename = "Role", default)]
     pub role: OperatorRole,
+}
+
+impl fmt::Debug for ApiKeyConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ApiKeyConfig")
+            .field("value", &"[redacted]")
+            .field("role", &self.role)
+            .finish()
+    }
 }
 
 const fn default_api_rate_limit_per_minute() -> u32 {
@@ -2813,5 +2831,33 @@ mod tests {
             error.errors.iter().any(|message| message.contains("PipeName")),
             "expected PipeName error, got: {error:?}"
         );
+    }
+
+    #[test]
+    fn service_config_debug_redacts_password() {
+        let config = ServiceConfig {
+            endpoint: "https://bridge.example.com".to_owned(),
+            password: "super-secret-password".to_owned(),
+        };
+
+        let debug = format!("{config:?}");
+
+        assert!(debug.contains("ServiceConfig"));
+        assert!(debug.contains("endpoint: \"https://bridge.example.com\""));
+        assert!(debug.contains("password: \"[redacted]\""));
+        assert!(!debug.contains("super-secret-password"));
+    }
+
+    #[test]
+    fn api_key_config_debug_redacts_value() {
+        let config =
+            ApiKeyConfig { value: "rc2-api-key-secret".to_owned(), role: OperatorRole::Admin };
+
+        let debug = format!("{config:?}");
+
+        assert!(debug.contains("ApiKeyConfig"));
+        assert!(debug.contains("value: \"[redacted]\""));
+        assert!(debug.contains("role: Admin"));
+        assert!(!debug.contains("rc2-api-key-secret"));
     }
 }

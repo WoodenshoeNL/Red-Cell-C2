@@ -1040,4 +1040,273 @@ mod tests {
         assert_eq!(d.pid, Some(42));
         assert_eq!(d.domain, None);
     }
+
+    // ── exec_wait / fetch_output / watch_output (using wiremock) ─────────────
+
+    /// Build a `ResolvedConfig` pointing at the given mock server URI.
+    fn mock_cfg(server_uri: &str) -> crate::config::ResolvedConfig {
+        crate::config::ResolvedConfig {
+            server: server_uri.to_owned(),
+            token: "test-token".to_owned(),
+            timeout: 5,
+        }
+    }
+
+    /// Build a minimal `RawOutputEntry` JSON object.
+    fn raw_output_json(job_id: &str, output: &str, exit_code: i32) -> serde_json::Value {
+        serde_json::json!({
+            "job_id": job_id,
+            "command": "whoami",
+            "output": output,
+            "exit_code": exit_code,
+            "created_at": "2026-01-01T00:00:00Z"
+        })
+    }
+
+    /// `exec_wait`: mock returns `status="pending"` on the first poll then
+    /// `status="done"` on the second → function waits through the sleep, then
+    /// returns the output.
+    ///
+    /// This test takes ~1 s of real time because `exec_wait` calls
+    /// `sleep(POLL_INTERVAL)` after the "pending" response before re-polling.
+    #[tokio::test]
+    async fn exec_wait_pending_then_done_returns_output() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // POST submit → job_id
+        Mock::given(method("POST"))
+            .and(path("/api/v1/agents/agent1/jobs"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"job_id": "j1"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // First GET → "pending" (fires once, then this mock is exhausted)
+        Mock::given(method("GET"))
+            .and(path("/api/v1/agents/agent1/jobs/j1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "job_id": "j1",
+                "status": "pending",
+                "output": null,
+                "exit_code": null
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        // Subsequent GETs → "done" with output
+        Mock::given(method("GET"))
+            .and(path("/api/v1/agents/agent1/jobs/j1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "job_id": "j1",
+                "status": "done",
+                "output": "root\n",
+                "exit_code": 0
+            })))
+            .mount(&server)
+            .await;
+
+        let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
+
+        // exec_wait sleeps POLL_INTERVAL (1 s) after the "pending" response
+        // before re-polling — the test naturally waits that long.
+        let result =
+            exec_wait(&client, "agent1", "whoami", 30).await.expect("exec_wait must succeed");
+        assert_eq!(result.job_id, "j1");
+        assert_eq!(result.output, "root\n");
+        assert_eq!(result.exit_code, Some(0));
+    }
+
+    /// `exec_wait`: with `timeout_secs=0` the deadline is already expired when
+    /// the loop first checks it → returns `CliError::Timeout`.
+    #[tokio::test]
+    async fn exec_wait_timeout_zero_returns_cli_timeout() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/agents/agent1/jobs"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"job_id": "j-timeout"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
+        let result = exec_wait(&client, "agent1", "whoami", 0).await;
+
+        assert!(
+            matches!(result, Err(crate::error::CliError::Timeout(_))),
+            "expected CliError::Timeout with timeout_secs=0, got {result:?}"
+        );
+    }
+
+    /// `fetch_output`: mock returns two entries → both entries are returned and
+    /// the `job_id` values are preserved.
+    #[tokio::test]
+    async fn fetch_output_returns_all_entries() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/agents/agent1/output"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                raw_output_json("job-a", "stdout line 1", 0),
+                raw_output_json("job-b", "stdout line 2", 1),
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
+        let entries =
+            fetch_output(&client, "agent1", None).await.expect("fetch_output must succeed");
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].job_id, "job-a");
+        assert_eq!(entries[0].output, "stdout line 1");
+        assert_eq!(entries[1].job_id, "job-b");
+        assert_eq!(entries[1].exit_code, Some(1));
+    }
+
+    /// `fetch_output` with a `since` cursor: the query string must include
+    /// `?since=<job_id>` so the server only returns entries newer than the
+    /// cursor.
+    #[tokio::test]
+    async fn fetch_output_with_since_cursor_sends_correct_query() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/agents/agent1/output"))
+            .and(query_param("since", "cursor-job"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([raw_output_json(
+                    "newer-job",
+                    "new output",
+                    0
+                ),])),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
+        let entries = fetch_output(&client, "agent1", Some("cursor-job"))
+            .await
+            .expect("fetch_output with cursor must succeed");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].job_id, "newer-job");
+    }
+
+    /// `watch_output`: each entry's `job_id` becomes the `since` cursor for the
+    /// next poll — verify that the second request includes `?since=<last_job_id>`.
+    ///
+    /// The loop sleeps `POLL_INTERVAL` (1 s) between the two polls; the test
+    /// takes ~1 s of real time.
+    #[tokio::test]
+    async fn watch_output_cursor_advances_to_last_entry_job_id() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // First poll (no cursor) → two entries; exhausts after one use.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/agents/agent1/output"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                raw_output_json("j1", "first", 0),
+                raw_output_json("j2", "second", 0),
+            ])))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        // Second poll → error so watch_output exits the loop.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/agents/agent1/output"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
+            .mount(&server)
+            .await;
+
+        let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
+
+        let exit_code =
+            watch_output(&client, &crate::output::OutputFormat::Json, "agent1", None).await;
+        assert_ne!(exit_code, crate::error::EXIT_SUCCESS, "500 error must yield non-zero exit");
+
+        // Verify the second GET request carried the `since=j2` cursor.
+        let requests = server.received_requests().await.expect("request recording must be enabled");
+        let get_reqs: Vec<_> =
+            requests.iter().filter(|r| r.method == wiremock::http::Method::GET).collect();
+        assert_eq!(get_reqs.len(), 2, "expected exactly 2 GET requests");
+        assert!(get_reqs[0].url.query().is_none(), "first poll must have no since parameter");
+        let second_query = get_reqs[1].url.query().unwrap_or("");
+        assert!(
+            second_query.contains("since=j2"),
+            "second poll must carry since=j2, got query: {second_query:?}"
+        );
+    }
+
+    /// `watch_output`: when the server returns an empty list the cursor must
+    /// NOT advance — the next poll must have no `since` parameter.
+    ///
+    /// The loop sleeps `POLL_INTERVAL` (1 s) between the two polls; the test
+    /// takes ~1 s of real time.
+    #[tokio::test]
+    async fn watch_output_empty_entries_do_not_advance_cursor() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // First poll → empty list; exhausts after one use.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/agents/agent1/output"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        // Second poll → error so watch_output exits.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/agents/agent1/output"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
+            .mount(&server)
+            .await;
+
+        let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
+
+        let exit_code =
+            watch_output(&client, &crate::output::OutputFormat::Json, "agent1", None).await;
+        assert_ne!(exit_code, crate::error::EXIT_SUCCESS, "500 error must yield non-zero exit");
+
+        // Both GET requests must have no `since` parameter — the empty list
+        // must not have advanced the cursor.
+        let requests = server.received_requests().await.expect("request recording must be enabled");
+        let get_reqs: Vec<_> =
+            requests.iter().filter(|r| r.method == wiremock::http::Method::GET).collect();
+        assert_eq!(get_reqs.len(), 2, "expected exactly 2 GET requests");
+        for req in &get_reqs {
+            assert!(
+                req.url.query().is_none(),
+                "neither poll should carry a since cursor, got query: {:?}",
+                req.url.query()
+            );
+        }
+    }
 }

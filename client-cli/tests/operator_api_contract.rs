@@ -50,9 +50,8 @@ async fn build_test_state() -> TeamserverState {
     let sockets = SocketRelayManager::new(agent_registry.clone(), events.clone());
     // Use from_profile_with_database so runtime operator create/update/delete
     // work correctly (they require the database-backed operator repository).
-    let auth = AuthService::from_profile_with_database(&profile, &database)
-        .await
-        .expect("auth service");
+    let auth =
+        AuthService::from_profile_with_database(&profile, &database).await.expect("auth service");
     TeamserverState {
         profile: profile.clone(),
         database: database.clone(),

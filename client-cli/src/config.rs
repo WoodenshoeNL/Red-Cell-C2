@@ -111,6 +111,19 @@ pub fn load_config_file(path: &Path) -> Result<FileConfig, ConfigError> {
 ///
 /// Config files are only consulted when the CLI/env did not provide all
 /// required values.
+///
+/// ## Known limitation — timeout sentinel
+///
+/// Because clap always produces a concrete `u64` value (defaulting to `30`),
+/// there is no way to distinguish "user explicitly passed `--timeout 30`" from
+/// "user did not pass `--timeout` at all".  When `cli_timeout` arrives as `30`
+/// **and** a config file is loaded (because `server` or `token` was absent
+/// from the CLI), the file's `timeout` field silently wins.
+///
+/// Concretely: if your config file contains `timeout = 60` and you run
+/// `red-cell-cli --timeout 30 --server …`, the resulting timeout will be `60`,
+/// not `30`.  This is a documented trade-off; a future refactor could accept
+/// `Option<u64>` to carry the "was explicitly set" signal from the caller.
 pub fn resolve(
     cli_server: Option<String>,
     cli_token: Option<String>,
@@ -304,6 +317,40 @@ timeout = 90
         assert_eq!(cfg.server, "https://file-ts:40056");
         assert_eq!(cfg.token, "file-tok");
         assert_eq!(cfg.timeout, 90, "file timeout should override default 30");
+    }
+
+    /// Documents the timeout-sentinel limitation: when `cli_timeout` is `30`
+    /// (the clap default) and the config file is loaded (because `server` is
+    /// absent from the CLI), the file's `timeout` value wins — even if the
+    /// user explicitly passed `--timeout 30`.
+    ///
+    /// This test pins the *current* behaviour so that any future change to the
+    /// resolution logic triggers a deliberate, visible test failure.
+    #[test]
+    fn resolve_file_timeout_wins_when_cli_timeout_equals_default_sentinel() {
+        let tmp = TempDir::new().unwrap();
+        write_config(
+            tmp.path(),
+            r#"
+server  = "https://file-ts:40056"
+timeout = 60
+"#,
+        );
+
+        let _guard = CWD_LOCK.lock().unwrap();
+        let original = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        // token provided on CLI; server absent → file is loaded.
+        // cli_timeout = 30 is the default sentinel, so the file's 60 wins.
+        let result = resolve(None, Some("tok".to_owned()), 30);
+        std::env::set_current_dir(&original).unwrap();
+
+        let cfg = result.expect("resolve should succeed");
+        assert_eq!(
+            cfg.timeout, 60,
+            "file timeout (60) must win when cli_timeout equals the default sentinel (30); \
+             see resolve() doc comment for the known-limitation explanation"
+        );
     }
 
     /// CLI provides `server`; file provides `token` — partial override.

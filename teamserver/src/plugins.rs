@@ -204,6 +204,9 @@ struct PluginRuntimeInner {
     listeners: RwLock<Option<ListenerManager>>,
     callbacks: RwLock<BTreeMap<&'static str, Vec<Arc<Py<PyAny>>>>>,
     commands: RwLock<BTreeMap<String, RegisteredCommand>>,
+    /// When true, `invoke_callbacks` returns `Err` immediately — test-only fault injection.
+    #[cfg(test)]
+    force_emit_failure: std::sync::atomic::AtomicBool,
 }
 
 /// Shared embedded Python runtime state.
@@ -233,6 +236,8 @@ impl PluginRuntime {
                 listeners: RwLock::new(None),
                 callbacks: RwLock::new(BTreeMap::new()),
                 commands: RwLock::new(BTreeMap::new()),
+                #[cfg(test)]
+                force_emit_failure: std::sync::atomic::AtomicBool::new(false),
             }),
         };
 
@@ -404,6 +409,33 @@ impl PluginRuntime {
     pub(crate) fn swap_active(runtime: Option<Self>) -> Result<Option<Self>, PluginError> {
         let mut guard = runtime_slot().lock().map_err(|_| PluginError::MutexPoisoned)?;
         Ok(std::mem::replace(&mut *guard, runtime))
+    }
+
+    /// Create a `PluginRuntime` whose `emit_*` methods always return `Err`.
+    ///
+    /// This avoids Python initialization entirely — useful for testing error
+    /// suppression in callers like `handle_screenshot_callback`.
+    #[cfg(test)]
+    pub(crate) fn stub_failing(
+        database: Database,
+        agents: AgentRegistry,
+        events: EventBus,
+        sockets: SocketRelayManager,
+    ) -> Self {
+        Self {
+            inner: Arc::new(PluginRuntimeInner {
+                database,
+                agents,
+                events,
+                _sockets: sockets,
+                plugins_dir: None,
+                runtime_handle: Handle::current(),
+                listeners: RwLock::new(None),
+                callbacks: RwLock::new(BTreeMap::new()),
+                commands: RwLock::new(BTreeMap::new()),
+                force_emit_failure: std::sync::atomic::AtomicBool::new(true),
+            }),
+        }
     }
 
     /// Register a Python callback for the given event.
@@ -589,6 +621,11 @@ impl PluginRuntime {
         event: PluginEvent,
         payload: Value,
     ) -> Result<(), PluginError> {
+        #[cfg(test)]
+        if self.inner.force_emit_failure.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(PluginError::MutexPoisoned);
+        }
+
         let callbacks = {
             let callbacks = self.inner.callbacks.read().await;
             callbacks.get(event.as_str()).cloned().unwrap_or_default()

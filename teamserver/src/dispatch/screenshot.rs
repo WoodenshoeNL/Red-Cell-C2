@@ -340,4 +340,210 @@ mod tests {
         let loot_records = db.loot().list_for_agent(AGENT_ID).await.expect("loot query");
         assert!(loot_records.is_empty());
     }
+
+    // ── Plugin emission path tests ──────────────────────────────────────────
+
+    /// Happy path with plugin: screenshot succeeds, `emit_loot_captured` is
+    /// called, and loot is still stored.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn success_with_plugin_invokes_emit_loot_captured() {
+        use crate::{
+            PluginEvent, PluginRuntime, SocketRelayManager, plugins::PLUGIN_RUNTIME_TEST_MUTEX,
+        };
+        use pyo3::prelude::*;
+        use pyo3::types::{PyDict, PyList};
+
+        let _guard = PLUGIN_RUNTIME_TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+
+        let (registry, db, events) = setup().await;
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let runtime =
+            PluginRuntime::initialize(db.clone(), registry.clone(), events.clone(), sockets, None)
+                .await
+                .expect("plugin runtime init");
+
+        // Create a Python callback that tracks invocations.
+        let (tracker, callback) = tokio::task::spawn_blocking({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| -> PyResult<(Py<PyList>, Py<PyAny>)> {
+                    runtime.install_api_module_for_test(py)?;
+                    let tracker = PyList::empty(py);
+                    let locals = PyDict::new(py);
+                    locals.set_item("_tracker", tracker.clone())?;
+                    let cb = py.eval(
+                        pyo3::ffi::c_str!(
+                            "(lambda t: lambda event: t.append(event.data['kind']))(_tracker)"
+                        ),
+                        None,
+                        Some(&locals),
+                    )?;
+                    Ok((tracker.unbind(), cb.unbind()))
+                })
+            }
+        })
+        .await
+        .expect("spawn_blocking")
+        .expect("python setup");
+
+        runtime
+            .register_callback_for_test(PluginEvent::LootCaptured, callback)
+            .await
+            .expect("register callback");
+
+        let mut rx = events.subscribe();
+        let png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let payload = success_payload(&png);
+
+        let result = handle_screenshot_callback(
+            &registry,
+            &db,
+            &events,
+            Some(&runtime),
+            AGENT_ID,
+            REQUEST_ID,
+            &payload,
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+
+        // Drain the two expected broadcasts (loot-new + screenshot response).
+        let _msg1 = rx.recv().await.expect("loot-new event");
+        let _msg2 = rx.recv().await.expect("screenshot response");
+
+        // Verify loot is persisted.
+        let loot_records = db.loot().list_for_agent(AGENT_ID).await.expect("loot query");
+        assert_eq!(loot_records.len(), 1);
+        assert_eq!(loot_records[0].kind, "screenshot");
+
+        // Verify the plugin callback was invoked exactly once with kind="screenshot".
+        let (count, kind) = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<(usize, String)> {
+                let list = tracker.bind(py);
+                let count = list.len();
+                let first = list.get_item(0)?.extract::<String>()?;
+                Ok((count, first))
+            })
+        })
+        .await
+        .expect("spawn_blocking")
+        .expect("tracker read");
+        assert_eq!(count, 1, "callback should be invoked exactly once");
+        assert_eq!(kind, "screenshot");
+    }
+
+    /// Plugin error is suppressed: `emit_loot_captured` returns an error, but
+    /// the handler still returns `Ok(None)` and the loot record persists.
+    #[tokio::test]
+    async fn plugin_emit_error_is_suppressed_and_loot_persists() {
+        use crate::{PluginRuntime, SocketRelayManager};
+
+        let (registry, db, events) = setup().await;
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let runtime =
+            PluginRuntime::stub_failing(db.clone(), registry.clone(), events.clone(), sockets);
+
+        let mut rx = events.subscribe();
+        let png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let payload = success_payload(&png);
+
+        let result = handle_screenshot_callback(
+            &registry,
+            &db,
+            &events,
+            Some(&runtime),
+            AGENT_ID,
+            REQUEST_ID,
+            &payload,
+        )
+        .await;
+
+        // Must still succeed despite plugin error.
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+
+        // Drain expected broadcasts.
+        let _msg1 = rx.recv().await.expect("loot-new event");
+        let _msg2 = rx.recv().await.expect("screenshot response");
+
+        // Loot must still be persisted.
+        let loot_records = db.loot().list_for_agent(AGENT_ID).await.expect("loot query");
+        assert_eq!(loot_records.len(), 1);
+        assert_eq!(loot_records[0].kind, "screenshot");
+        assert_eq!(loot_records[0].data.as_deref(), Some(png.as_slice()));
+    }
+
+    /// Failure path (success=0) does NOT invoke the plugin at all.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failure_path_does_not_invoke_plugin() {
+        use crate::{
+            PluginEvent, PluginRuntime, SocketRelayManager, plugins::PLUGIN_RUNTIME_TEST_MUTEX,
+        };
+        use pyo3::prelude::*;
+        use pyo3::types::{PyDict, PyList};
+
+        let _guard = PLUGIN_RUNTIME_TEST_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+
+        let (registry, db, events) = setup().await;
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let runtime =
+            PluginRuntime::initialize(db.clone(), registry.clone(), events.clone(), sockets, None)
+                .await
+                .expect("plugin runtime init");
+
+        let (tracker, callback) = tokio::task::spawn_blocking({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| -> PyResult<(Py<PyList>, Py<PyAny>)> {
+                    runtime.install_api_module_for_test(py)?;
+                    let tracker = PyList::empty(py);
+                    let locals = PyDict::new(py);
+                    locals.set_item("_tracker", tracker.clone())?;
+                    let cb = py.eval(
+                        pyo3::ffi::c_str!(
+                            "(lambda t: lambda event: t.append(event.data['kind']))(_tracker)"
+                        ),
+                        None,
+                        Some(&locals),
+                    )?;
+                    Ok((tracker.unbind(), cb.unbind()))
+                })
+            }
+        })
+        .await
+        .expect("spawn_blocking")
+        .expect("python setup");
+
+        runtime
+            .register_callback_for_test(PluginEvent::LootCaptured, callback)
+            .await
+            .expect("register callback");
+
+        let payload = failure_payload();
+        let result = handle_screenshot_callback(
+            &registry,
+            &db,
+            &events,
+            Some(&runtime),
+            AGENT_ID,
+            REQUEST_ID,
+            &payload,
+        )
+        .await;
+        assert!(result.is_ok());
+
+        // No loot should be stored.
+        let loot_records = db.loot().list_for_agent(AGENT_ID).await.expect("loot query");
+        assert!(loot_records.is_empty());
+
+        // Verify the plugin callback was NOT invoked.
+        let count =
+            tokio::task::spawn_blocking(move || Python::with_gil(|py| tracker.bind(py).len()))
+                .await
+                .expect("spawn_blocking");
+        assert_eq!(count, 0, "plugin must not be invoked on failure path");
+    }
 }

@@ -785,7 +785,13 @@ async fn handle_agent_instance_register(
     Ok(())
 }
 
-/// Handle agent output messages — broadcast console output to operators.
+/// Handle agent output messages — broadcast callback data to operators.
+///
+/// The `Callback` field carries the actual command output from the service
+/// agent.  Previous code discarded this data and only emitted a generic log
+/// line.  We now forward the callback as an `AgentResponse` event so that
+/// connected operators receive the payload, matching the pattern used by
+/// `handle_agent_response`.
 async fn handle_agent_output(message: &Value, events: &EventBus) -> Result<(), ServiceBridgeError> {
     let body =
         message.get("Body").ok_or_else(|| ServiceBridgeError::MissingField("Body".to_owned()))?;
@@ -796,9 +802,32 @@ async fn handle_agent_output(message: &Value, events: &EventBus) -> Result<(), S
 
     debug!(%agent_id, ?callback, "service agent output");
 
-    // Broadcast as a teamserver log for operator visibility.
-    let log_event = service_log_event(&format!("agent output from service agent {agent_id}"));
-    events.broadcast(log_event);
+    // Serialize the Callback value so operators receive the full payload.
+    let output = match callback {
+        Some(v) => match v.as_str() {
+            Some(s) => s.to_owned(),
+            None => serde_json::to_string(v).unwrap_or_default(),
+        },
+        None => String::new(),
+    };
+
+    // Broadcast the callback data as an AgentResponse so operators see output.
+    let response_event = OperatorMessage::AgentResponse(Message {
+        head: MessageHead {
+            event: EventCode::Session,
+            user: "service".to_owned(),
+            timestamp: OffsetDateTime::now_utc().unix_timestamp().to_string(),
+            one_time: String::new(),
+        },
+        info: AgentResponseInfo {
+            demon_id: agent_id.to_owned(),
+            command_id: String::new(),
+            output,
+            command_line: None,
+            extra: Default::default(),
+        },
+    });
+    events.broadcast(response_event);
 
     Ok(())
 }
@@ -2336,7 +2365,7 @@ mod tests {
     // ── handle_agent_output tests ────────────────────────────────────
 
     #[tokio::test]
-    async fn handle_agent_output_broadcasts_log_event() {
+    async fn handle_agent_output_broadcasts_callback_as_agent_response() {
         let events = EventBus::default();
         let mut rx = events.subscribe();
 
@@ -2353,12 +2382,44 @@ mod tests {
 
         let event = rx.recv().await.expect("event should be broadcast");
         match event {
-            OperatorMessage::TeamserverLog(msg) => {
-                assert!(msg.info.text.contains("CAFE0001"));
+            OperatorMessage::AgentResponse(msg) => {
+                assert_eq!(msg.info.demon_id, "CAFE0001");
                 assert_eq!(msg.head.user, "service");
-                assert_eq!(msg.head.event, EventCode::Teamserver);
+                assert_eq!(msg.head.event, EventCode::Session);
+                // Callback was a JSON object — it should be serialized into output.
+                assert!(
+                    msg.info.output.contains("command output here"),
+                    "callback content should be forwarded, got: {}",
+                    msg.info.output
+                );
             }
-            other => panic!("expected TeamserverLog, got: {other:?}"),
+            other => panic!("expected AgentResponse, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_agent_output_string_callback_forwarded_verbatim() {
+        let events = EventBus::default();
+        let mut rx = events.subscribe();
+
+        let message = serde_json::json!({
+            "Head": { "Type": HEAD_AGENT },
+            "Body": {
+                "Type": BODY_AGENT_OUTPUT,
+                "AgentID": "BEEF0002",
+                "Callback": "raw text output",
+            },
+        });
+
+        handle_agent_output(&message, &events).await.expect("agent output should succeed");
+
+        let event = rx.recv().await.expect("event should be broadcast");
+        match event {
+            OperatorMessage::AgentResponse(msg) => {
+                assert_eq!(msg.info.demon_id, "BEEF0002");
+                assert_eq!(msg.info.output, "raw text output");
+            }
+            other => panic!("expected AgentResponse, got: {other:?}"),
         }
     }
 
@@ -2391,10 +2452,11 @@ mod tests {
 
         let event = rx.recv().await.expect("event should be broadcast");
         match event {
-            OperatorMessage::TeamserverLog(msg) => {
-                assert!(msg.info.text.contains("unknown"));
+            OperatorMessage::AgentResponse(msg) => {
+                assert_eq!(msg.info.demon_id, "unknown");
+                assert!(msg.info.output.is_empty(), "no callback means empty output");
             }
-            other => panic!("expected TeamserverLog, got: {other:?}"),
+            other => panic!("expected AgentResponse, got: {other:?}"),
         }
     }
 
@@ -2503,7 +2565,13 @@ mod tests {
             .expect("dispatch to AgentOutput should succeed");
 
         let event = rx.recv().await.expect("event should be broadcast");
-        assert!(matches!(event, OperatorMessage::TeamserverLog(_)));
+        match event {
+            OperatorMessage::AgentResponse(msg) => {
+                assert_eq!(msg.info.demon_id, "OUTPUT01");
+                assert!(msg.info.output.contains("hello"));
+            }
+            other => panic!("expected AgentResponse, got: {other:?}"),
+        }
     }
 
     #[tokio::test]

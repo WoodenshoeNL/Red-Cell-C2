@@ -1674,9 +1674,9 @@ mod tests {
         windows_version_label as checkin_windows_version_label,
     };
     use super::{
-        CommandDispatchError, CommandDispatcher, DownloadState, DownloadTracker,
+        CommandDispatchError, CommandDispatcher, DownloadState, DownloadTracker, LootContext,
         extract_credentials, looks_like_credential_line, looks_like_inline_secret,
-        looks_like_pwdump_hash,
+        looks_like_pwdump_hash, loot_context, non_empty_option,
     };
     use crate::{AgentRegistry, Database, EventBus, Job, SocketRelayManager, TeamserverError};
 
@@ -10509,5 +10509,69 @@ mod tests {
             tracker.max_total_download_bytes,
             super::DOWNLOAD_TRACKER_AGGREGATE_CAP_MULTIPLIER,
         );
+    }
+
+    // ---- non_empty_option tests ----
+
+    #[test]
+    fn non_empty_option_empty_string_returns_none() {
+        assert_eq!(non_empty_option(""), None);
+    }
+
+    #[test]
+    fn non_empty_option_non_empty_returns_some() {
+        assert_eq!(non_empty_option("value"), Some("value".to_owned()));
+    }
+
+    #[test]
+    fn non_empty_option_whitespace_only_returns_some() {
+        // Whitespace-only is not empty — the function checks `.is_empty()`, not `.trim()`.
+        assert_eq!(non_empty_option("  "), Some("  ".to_owned()));
+    }
+
+    #[test]
+    fn non_empty_option_single_char_returns_some() {
+        assert_eq!(non_empty_option("x"), Some("x".to_owned()));
+    }
+
+    // ---- loot_context tests ----
+
+    #[tokio::test]
+    async fn loot_context_unknown_agent_returns_default() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        let registry = AgentRegistry::new(database);
+        let unknown_agent_id = 0xDEAD_0001;
+        let request_id = 42;
+
+        let ctx = loot_context(&registry, unknown_agent_id, request_id).await;
+
+        assert_eq!(ctx, LootContext::default());
+        assert!(ctx.operator.is_empty());
+        assert!(ctx.command_line.is_empty());
+        assert!(ctx.task_id.is_empty());
+        assert!(ctx.queued_at.is_empty());
+    }
+
+    #[tokio::test]
+    async fn loot_context_known_agent_unknown_request_id_returns_default() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        let registry = AgentRegistry::new(database);
+
+        // Register an agent so the agent_id is known.
+        let agent_id = 0x1234_5678;
+        let key = test_key(0xAA);
+        let iv = test_iv(0xBB);
+        let info = sample_agent_info(agent_id, key, iv);
+        registry.insert(info).await.expect("agent should register");
+
+        // Use a request_id that was never enqueued.
+        let unknown_request_id = 0xFFFF;
+        let ctx = loot_context(&registry, agent_id, unknown_request_id).await;
+
+        assert_eq!(ctx, LootContext::default());
+        assert!(ctx.operator.is_empty());
+        assert!(ctx.command_line.is_empty());
+        assert!(ctx.task_id.is_empty());
+        assert!(ctx.queued_at.is_empty());
     }
 }

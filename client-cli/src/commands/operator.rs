@@ -47,13 +47,6 @@ struct RawCreateResponse {
     role: String,
 }
 
-/// Opaque server acknowledgement returned by delete / set-role.
-#[derive(Debug, Deserialize)]
-struct RawOk {
-    #[allow(dead_code)]
-    ok: bool,
-}
-
 // ── public output types ───────────────────────────────────────────────────────
 
 /// Summary row returned by `operator list`.
@@ -143,8 +136,8 @@ pub async fn run(client: &ApiClient, fmt: &OutputFormat, action: OperatorCommand
             }
         },
 
-        OperatorCommands::Create { username, role } => {
-            match create(client, &username, &role).await {
+        OperatorCommands::Create { username, password, role } => {
+            match create(client, &username, &password, &role).await {
                 Ok(result) => {
                     print_success(fmt, &result);
                     EXIT_SUCCESS
@@ -196,21 +189,23 @@ async fn list(client: &ApiClient) -> Result<Vec<OperatorRow>, CliError> {
     Ok(raw.into_iter().map(operator_row_from_raw).collect())
 }
 
-/// `operator create <username> --role <role>` — create a new operator.
-///
-/// Returns the username and one-time API token.  The token cannot be recovered
-/// after this call.
+/// `operator create <username> --password <password> --role <role>` — create a new operator.
 ///
 /// # Examples
 /// ```text
-/// red-cell-cli operator create alice --role operator
-/// red-cell-cli operator create bob   --role admin
+/// red-cell-cli operator create alice --role operator --password s3cr3t!
+/// red-cell-cli operator create bob   --role admin    --password hunter2
 /// ```
-#[instrument(skip(client))]
-async fn create(client: &ApiClient, username: &str, role: &str) -> Result<CreateResult, CliError> {
+#[instrument(skip(client, password))]
+async fn create(
+    client: &ApiClient,
+    username: &str,
+    password: &str,
+    role: &str,
+) -> Result<CreateResult, CliError> {
     validate_role(role)?;
 
-    let body = serde_json::json!({ "username": username, "role": role });
+    let body = serde_json::json!({ "username": username, "password": password, "role": role });
     let raw: RawCreateResponse = client.post("/operators", &body).await?;
 
     Ok(CreateResult { username: raw.username, role: raw.role })
@@ -244,9 +239,9 @@ async fn set_role(
     validate_role(role)?;
 
     let body = serde_json::json!({ "role": role });
-    let _: RawOk = client.put(&format!("/operators/{username}/role"), &body).await?;
+    let raw: RawOperatorSummary = client.put(&format!("/operators/{username}/role"), &body).await?;
 
-    Ok(SetRoleResult { username: username.to_owned(), role: role.to_owned() })
+    Ok(SetRoleResult { username: raw.username, role: raw.role })
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

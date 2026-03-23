@@ -464,13 +464,16 @@ pub enum OperatorCommands {
     /// Create a new operator account.
     ///
     /// Examples:
-    ///   red-cell-cli operator create alice --role operator
-    ///   red-cell-cli operator create bob   --role admin
+    ///   red-cell-cli operator create alice --role operator --password s3cr3t!
+    ///   red-cell-cli operator create bob   --role admin    --password hunter2
     #[command(verbatim_doc_comment)]
     Create {
         /// Operator username
         username: String,
-        /// Role (admin, operator, viewer)
+        /// Initial password for the new operator account
+        #[arg(long)]
+        password: String,
+        /// Role (admin, operator, analyst)
         #[arg(long, default_value = "operator")]
         role: String,
     },

@@ -1079,7 +1079,6 @@ async fn dns_listener_pipeline_registered_agent_downloads_task_after_enqueue()
     // 2. Download and consume the init ACK.
     let ack_payload = dns_download_response(&client, agent_id, domain, 0xB100).await?;
     assert!(!ack_payload.is_empty());
-    let ctr_offset = red_cell_common::crypto::ctr_blocks_for_len(ack_payload.len());
 
     // 3. Verify "wait" before enqueuing any task.
     let qname = dns_download_qname(agent_id, 0, domain);
@@ -1109,24 +1108,22 @@ async fn dns_listener_pipeline_registered_agent_downloads_task_after_enqueue()
         )
         .await?;
 
-    // 5. Send a COMMAND_CHECKIN callback — this triggers the dispatcher to
+    // 5. Send a COMMAND_GET_JOB callback — this triggers the dispatcher to
     //    dequeue jobs and build an encrypted response for the agent.
+    //    Legacy Demon agents reset AES-CTR to block 0 for every packet, so the
+    //    callback must be encrypted at offset 0 regardless of prior traffic.
     let callback_body = common::valid_demon_callback_body(
         agent_id,
         key,
         iv,
-        ctr_offset,
-        u32::from(DemonCommand::CommandCheckin),
+        0,
+        u32::from(DemonCommand::CommandGetJob),
         8,
         &[],
     );
     let callback_result =
         dns_upload_demon_packet(&client, agent_id, &callback_body, domain, 0xB300).await?;
-    assert_eq!(callback_result, "ack", "COMMAND_CHECKIN callback must be acknowledged");
-
-    // Drain AgentUpdate event.
-    let event = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
-    assert!(matches!(event, Some(OperatorMessage::AgentUpdate(_))));
+    assert_eq!(callback_result, "ack", "COMMAND_GET_JOB callback must be acknowledged");
 
     // 6. Download the task response — must NOT be "wait" since a job was queued.
     let task_payload = dns_download_response(&client, agent_id, domain, 0xB400).await?;

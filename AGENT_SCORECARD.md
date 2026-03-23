@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 718 | 220 | 31 |
+| Tasks closed | 722 | 221 | 31 |
 | Bugs filed against | 80 | 34 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
 | Quality score | 89% | 85% | 71% |
 
-*Bug rates: Claude 80/718=0.11, Codex 34/220=0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 80/722=0.11, Codex 34/221=0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-23 — f8009753..682bcb66
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 4 | 0 | Bug fix: service bridge u64→u32 saturation (f1ir2); E2E phantom integration test (6k9dt); TLS classify_tls_failure_kind tests (9kvfd); CTR offset decrypt-after-reload test (gd77k) |
+| Codex | 1 | 0 | Deserialization rejection tests: Elevated=2 bool, port_bind overflow (42dp2) |
+| Cursor | 0 | 0 | No activity |
+
+Build: passed (cargo check + clippy clean, 0 warnings)
+Tests: 1959 passed, 1 pre-existing failure (agent_reconnects_after_listener_restart — already tracked by 4 open bugs)
+Issues found: 0 new bugs — all changes are clean
 
 ### QA Review — 2026-03-23 — 1e8050e0..9e57edcb
 

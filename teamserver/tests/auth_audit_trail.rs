@@ -121,6 +121,127 @@ async fn successful_login_produces_audit_entry_with_success_status()
     );
     assert!(params.get("connection_id").is_some(), "login parameters must include a connection_id");
 
+    // --- Security: audit entries must NEVER contain raw session tokens ---
+    assert_no_credential_leakage(details);
+
+    Ok(())
+}
+
+/// Assert that an audit `details` JSON object does not contain any keys or
+/// values that look like session credentials.  This prevents bearer tokens
+/// from leaking into the audit log where lower-privileged operators could
+/// read them.
+fn assert_no_credential_leakage(details: &serde_json::Value) {
+    /// Forbidden substrings in map keys (case-insensitive).
+    const FORBIDDEN_KEY_FRAGMENTS: &[&str] = &["token", "bearer", "secret", "session_key"];
+
+    /// Walks the entire JSON tree, collecting every (key, value) pair it
+    /// encounters so we can inspect them all.
+    fn collect_kv_pairs(value: &serde_json::Value, out: &mut Vec<(String, serde_json::Value)>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (k, v) in map {
+                    out.push((k.clone(), v.clone()));
+                    collect_kv_pairs(v, out);
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                for v in arr {
+                    collect_kv_pairs(v, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut pairs = Vec::new();
+    collect_kv_pairs(details, &mut pairs);
+
+    // 1. No key should contain forbidden substrings.
+    for (key, _) in &pairs {
+        let lower = key.to_ascii_lowercase();
+        for &frag in FORBIDDEN_KEY_FRAGMENTS {
+            assert!(
+                !lower.contains(frag),
+                "audit details key \"{key}\" contains forbidden fragment \"{frag}\" — \
+                 raw credentials must never appear in audit log entries"
+            );
+        }
+    }
+
+    // 2. No string value should look like a session token.
+    //    Heuristic: a hex or alphanumeric string ≥ 20 chars that is NOT a
+    //    known safe field (like connection_id which is a UUID identifying the
+    //    socket, not a bearer credential).
+    const SAFE_KEYS: &[&str] = &["connection_id", "username", "command", "result_status"];
+
+    for (key, val) in &pairs {
+        if SAFE_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        if let Some(s) = val.as_str() {
+            let looks_like_token =
+                s.len() >= 20 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+            assert!(
+                !looks_like_token,
+                "audit details value for key \"{key}\" looks like a session token (\"{s}\") — \
+                 raw credentials must never appear in audit log entries"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn successful_login_audit_entry_contains_no_credentials()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+
+    let (response, mut socket) = attempt_login(server.addr, "operator", "password1234").await?;
+    assert!(
+        matches!(response, OperatorMessage::InitConnectionSuccess(_)),
+        "expected InitConnectionSuccess, got {response:?}"
+    );
+
+    let _ = common::read_operator_snapshot(&mut socket).await;
+    socket.close(None).await?;
+
+    let entries = poll_audit_entries(&server.database, 1, Duration::from_secs(5)).await;
+    let logins = login_audit_entries(&entries);
+    assert!(!logins.is_empty(), "audit log must contain at least one operator.login entry");
+
+    let entry = logins[0];
+    let details = entry.details.as_ref().expect("login audit entry must have details");
+
+    // The full details object (including nested parameters) must be free of
+    // any credential-shaped keys or values.
+    assert_no_credential_leakage(details);
+
+    // Also verify the parameters sub-map specifically.
+    if let Some(params) = details.get("parameters") {
+        assert_no_credential_leakage(params);
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_login_audit_entry_contains_no_credentials() -> Result<(), Box<dyn std::error::Error>>
+{
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+
+    let (response, _socket) = attempt_login(server.addr, "operator", "wrong-password").await?;
+    assert!(
+        matches!(response, OperatorMessage::InitConnectionError(_)),
+        "expected InitConnectionError, got {response:?}"
+    );
+
+    let entries = poll_audit_entries(&server.database, 1, Duration::from_secs(5)).await;
+    let logins = login_audit_entries(&entries);
+    assert!(!logins.is_empty(), "audit log must contain a login failure entry");
+
+    let details = logins[0].details.as_ref().expect("failure audit entry must have details");
+    assert_no_credential_leakage(details);
+
     Ok(())
 }
 

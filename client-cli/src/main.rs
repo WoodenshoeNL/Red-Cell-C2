@@ -551,8 +551,7 @@ fn handle_help(command: Option<&str>) -> i32 {
                 println!();
                 EXIT_SUCCESS
             } else {
-                eprintln!("error: unknown command '{name}'");
-                eprintln!();
+                output::print_error(&CliError::InvalidArgs(format!("unknown command '{name}'")));
                 root.print_help().ok();
                 println!();
                 EXIT_GENERAL
@@ -589,7 +588,7 @@ fn main() {
     let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(rt) => rt,
         Err(e) => {
-            eprintln!("fatal: failed to build async runtime: {e}");
+            output::print_error(&CliError::General(format!("failed to build async runtime: {e}")));
             std::process::exit(error::EXIT_GENERAL);
         }
     };
@@ -666,6 +665,7 @@ mod tests {
     use clap::{CommandFactory, Parser};
 
     use super::*;
+    use crate::error;
 
     // ── top-level help content ───────────────────────────────────────────────
 
@@ -803,6 +803,37 @@ mod tests {
     fn handle_help_unknown_returns_exit_general() {
         let code = handle_help(Some("totally-unknown-command"));
         assert_eq!(code, EXIT_GENERAL);
+    }
+
+    /// Unknown-command error uses INVALID_ARGS code so parsers see structured JSON.
+    #[test]
+    fn unknown_command_error_uses_invalid_args_code() {
+        let err = CliError::InvalidArgs("unknown command 'bogus'".to_owned());
+        assert_eq!(err.error_code(), error::ERROR_CODE_INVALID_ARGS);
+        let envelope = serde_json::json!({
+            "ok": false,
+            "error": err.error_code(),
+            "message": err.to_string(),
+        });
+        assert_eq!(envelope["ok"], false);
+        assert_eq!(envelope["error"], "INVALID_ARGS");
+        assert!(envelope["message"].as_str().unwrap_or("").contains("unknown command"));
+    }
+
+    /// Runtime-build error uses ERROR code so parsers see structured JSON.
+    #[test]
+    fn runtime_build_error_uses_general_code() {
+        let err =
+            CliError::General("failed to build async runtime: out of file descriptors".to_owned());
+        assert_eq!(err.error_code(), error::ERROR_CODE_GENERAL);
+        let envelope = serde_json::json!({
+            "ok": false,
+            "error": err.error_code(),
+            "message": err.to_string(),
+        });
+        assert_eq!(envelope["ok"], false);
+        assert_eq!(envelope["error"], "ERROR");
+        assert!(envelope["message"].as_str().unwrap_or("").contains("async runtime"));
     }
 
     #[test]

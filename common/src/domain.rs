@@ -665,7 +665,7 @@ mod tests {
         AgentEncryptionInfo, AgentRecord, BASE64_STANDARD, DnsListenerConfig,
         ExternalListenerConfig, HttpListenerConfig, HttpListenerProxyConfig,
         HttpListenerResponseConfig, ListenerConfig, ListenerProtocol, ListenerTlsConfig,
-        OperatorInfo, SmbListenerConfig,
+        OperatorInfo, SmbListenerConfig, parse_agent_id,
     };
     use crate::error::CommonError;
 
@@ -1471,6 +1471,49 @@ mod tests {
                 "unexpected error message for value {overflow_value}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn parse_agent_id_accepts_lowercase_0x_prefix() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(parse_agent_id("0xABCD1234")?, 0xABCD_1234);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_agent_id_accepts_uppercase_0x_prefix() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(parse_agent_id("0XABCD1234")?, 0xABCD_1234);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_agent_id_accepts_lowercase_hex_without_prefix()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(parse_agent_id("abcd1234")?, 0xABCD_1234);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_agent_id_rejects_empty_string() {
+        assert_eq!(
+            parse_agent_id("").expect_err("empty agent id must be rejected"),
+            CommonError::InvalidAgentId { value: String::new() }
+        );
+    }
+
+    #[test]
+    fn parse_agent_id_rejects_non_hex_string() {
+        assert_eq!(
+            parse_agent_id("not-hex").expect_err("non-hex agent id must be rejected"),
+            CommonError::InvalidAgentId { value: "not-hex".to_string() }
+        );
+    }
+
+    #[test]
+    fn parse_agent_id_rejects_invalid_hex_after_prefix() {
+        assert_eq!(
+            parse_agent_id("0xGGGGGGGG").expect_err("invalid hex digits must be rejected"),
+            CommonError::InvalidAgentId { value: "0xGGGGGGGG".to_string() }
+        );
     }
 
     #[test]

@@ -23,8 +23,8 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 5 | 0 | 0 |
 | Missing tests / stale tests | 34 | 13 | 5 |
 | Clippy warnings | 4 | 0 | 1 |
-| Protocol errors | 12 | 27 | 3 |
-| Security issues | 33 | 38 | 0 |
+| Protocol errors | 13 | 27 | 3 |
+| Security issues | 34 | 38 | 0 |
 | Architecture drift | 6 | 21 | 0 |
 | Memory / resource leaks | 5 | 10 | 1 |
 | Startup / lifecycle regressions | 1 | 8 | 0 |
@@ -40,6 +40,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-23 15:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 2 | protocol (1), security (1) | qic8d (P1 — legacy_ctr commit breaks agent callback decryption; test helper encrypts at non-zero CTR offset while server resets to 0), 3295a (P3 — LoginState::password stored as bare String without Zeroize in client UI) |
+| Codex | 0 | — | No findings this pass |
+| Cursor | 0 | — | No findings this pass |
+
+Overall codebase health: on track
+Biggest blindspot: Commit 13dda463 introduced per-agent legacy_ctr=true for Demon/Archon compatibility but broke the test helper valid_demon_callback_body which still encrypts callbacks at the advancing CTR offset. The integration test active_agent_survives_liveness_sweep_that_kills_stale_peer fails deterministically. Other integration tests pass because they don't send callbacks after init, or the server silently handles the mismatched decryption.
 
 ### QA Review — 2026-03-23 16:00 — fbfad687..8eb88e7a
 

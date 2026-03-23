@@ -11,8 +11,13 @@ description = "Rust rewrite of the Demon agent — full protocol and feature par
 name = "specter"
 path = "src/main.rs"
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"
 
 [dependencies]
 red-cell-common = { path = "../../common" }

@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 723 | 222 | 31 |
-| Bugs filed against | 80 | 34 | 9 |
+| Tasks closed | 725 | 223 | 31 |
+| Bugs filed against | 81 | 34 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
 | Quality score | 89% | 85% | 71% |
 
-*Bug rates: Claude 80/723=0.11, Codex 34/222=0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 81/725=0.11, Codex 34/223=0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 6 | 21 | 0 |
 | Memory / resource leaks | 5 | 10 | 1 |
 | Startup / lifecycle regressions | 1 | 8 | 0 |
-| Test infrastructure / flakiness | 12 | 0 | 0 |
+| Test infrastructure / flakiness | 13 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
 | Correctness / pagination | 31 | 7 | 1 |
@@ -40,6 +40,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-23 15:15 — 137e825a..7d1d3928
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 1 | Closed gdklb (credential loot tests), n1fmi (audit log credential leak tests); 1 pre-existing flaky test bug filed (ef4gw — payload_builder concurrency race) |
+| Codex | 1 | 0 | Closed ow66u (redact sensitive config debug output); expanded operator numeric code tests |
+| Cursor | 0 | 0 | No activity |
+
+Build: passed (cargo check + clippy clean, 0 warnings)
+Tests: 1814 passed, 1 failed (payload_builder::concurrent_put_and_get_does_not_panic — flaky race condition, now tracked as red-cell-c2-ef4gw)
+Issues found: 1 new bug (red-cell-c2-ef4gw) attributed to Claude from prior commit f5cb31a3
 
 ### QA Review — 2026-03-23 15:00 — 531ba016..137e825a
 

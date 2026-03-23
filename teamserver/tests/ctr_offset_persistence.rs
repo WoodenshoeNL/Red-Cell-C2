@@ -618,6 +618,51 @@ async fn decrypt_from_agent_uses_persisted_ctr_offset_after_reload()
     Ok(())
 }
 
+/// Calling `ctr_offset`, `encrypt_for_agent`, or `decrypt_from_agent` with an agent ID
+/// that does not exist in the registry must return `Err(AgentNotFound)` — not `Ok` with
+/// a default offset and not a panic. In the real protocol, a replay or late packet from
+/// a dead/deleted agent could trigger a decryption call for an unknown ID; silently
+/// returning offset 0 would produce garbage, and panicking would crash the teamserver.
+#[tokio::test]
+async fn ctr_operations_reject_unknown_agent_id() -> Result<(), Box<dyn std::error::Error>> {
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database);
+
+    let unknown_id: u32 = 0xDEAD_BEEF;
+
+    // ctr_offset must return AgentNotFound.
+    let result = registry.ctr_offset(unknown_id).await;
+    assert!(
+        matches!(
+            &result,
+            Err(TeamserverError::AgentNotFound { agent_id }) if *agent_id == unknown_id
+        ),
+        "ctr_offset on unknown agent must return AgentNotFound, got {result:?}"
+    );
+
+    // encrypt_for_agent must return AgentNotFound.
+    let result = registry.encrypt_for_agent(unknown_id, b"data").await;
+    assert!(
+        matches!(
+            &result,
+            Err(TeamserverError::AgentNotFound { agent_id }) if *agent_id == unknown_id
+        ),
+        "encrypt_for_agent on unknown agent must return AgentNotFound, got {result:?}"
+    );
+
+    // decrypt_from_agent must return AgentNotFound.
+    let result = registry.decrypt_from_agent(unknown_id, &[0u8; 16]).await;
+    assert!(
+        matches!(
+            &result,
+            Err(TeamserverError::AgentNotFound { agent_id }) if *agent_id == unknown_id
+        ),
+        "decrypt_from_agent on unknown agent must return AgentNotFound, got {result:?}"
+    );
+
+    Ok(())
+}
+
 /// If SQLite contains a negative `ctr_block_offset` (e.g., from DB corruption or a
 /// botched migration), `AgentRegistry::load()` must return an explicit
 /// `InvalidPersistedValue` error rather than silently converting the negative i64 to a

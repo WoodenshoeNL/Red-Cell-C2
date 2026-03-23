@@ -23,12 +23,12 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 5 | 0 | 0 |
 | Missing tests / stale tests | 35 | 13 | 5 |
 | Clippy warnings | 4 | 0 | 1 |
-| Protocol errors | 14 | 27 | 3 |
-| Security issues | 37 | 38 | 0 |
-| Architecture drift | 14 | 21 | 0 |
+| Protocol errors | 16 | 27 | 3 |
+| Security issues | 38 | 38 | 0 |
+| Architecture drift | 15 | 21 | 0 |
 | Memory / resource leaks | 5 | 10 | 1 |
 | Startup / lifecycle regressions | 2 | 9 | 0 |
-| Test infrastructure / flakiness | 13 | 0 | 0 |
+| Test infrastructure / flakiness | 14 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 1 | 5 | 0 |
 | Correctness / pagination | 32 | 7 | 1 |
@@ -3566,3 +3566,14 @@ Biggest blindspot: authorization and transport hardening still diverge at the ed
 Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`)
 Tests: failed (`cargo test --workspace`: `active_agent_survives_liveness_sweep_that_kills_stale_peer` returned HTTP 404; this failure was already tracked in the open issue set before this review)
 Issues found: `red-cell-c2-19dao` (Claude), `red-cell-c2-31xuj` (Claude)
+
+### Arch Review — 2026-03-23 20:05
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 5 | security (1), architecture drift (1), protocol (2), test infrastructure (1) | 3m0cc (P1 — External listener bypasses DEMON_INIT throttling and shutdown tracking), 2tyd7 (P2 — External listener body cap/camouflage diverges from the shared transport contract), 1yh1b (P2 — service bridge and operator WebSocket share one login rate limiter), 2qqds (P2 — unsupported agent command IDs are accepted with empty payloads), h76st (P2 — integration harness serves the wrong router, leaving `cargo test --workspace` red). |
+| Codex | 0 | — | No findings this pass. |
+| Cursor | 0 | — | No findings this pass. |
+
+Overall codebase health: drifting
+Biggest blindspot: transport hardening and contract validation still diverge at the edges. The External listener and task-submission paths are close to the intended design, but they do not consistently enforce the same pre-auth protections, message sizing, or command validation as the main listener surfaces, and the current integration harness is not catching that drift before it lands.

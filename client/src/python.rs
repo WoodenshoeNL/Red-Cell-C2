@@ -4823,4 +4823,138 @@ red_cell.register_command('boom', boom)\n";
             "expected ThreadUnavailable, got: {result:?}"
         );
     }
+
+    #[test]
+    fn script_output_returns_empty_before_any_output() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let runtime = PythonRuntime::new_zombie_for_test();
+        assert!(
+            runtime.script_output().is_empty(),
+            "script_output should be empty before any script emits"
+        );
+    }
+
+    #[test]
+    fn script_output_captures_correct_stream_and_text() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        write_script(
+            &temp_dir.path().join("streams.py"),
+            "import sys\nprint('out-marker')\nprint('err-marker', file=sys.stderr)\n",
+        );
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        assert!(wait_for_output(&runtime, "out-marker"), "stdout entry should appear");
+        assert!(wait_for_output(&runtime, "err-marker"), "stderr entry should appear");
+
+        let entries = runtime.script_output();
+        let stdout_entry =
+            entries.iter().find(|e| e.text.contains("out-marker")).expect("stdout entry missing");
+        assert_eq!(stdout_entry.stream, ScriptOutputStream::Stdout);
+        assert_eq!(stdout_entry.script_name, "streams");
+
+        let stderr_entry =
+            entries.iter().find(|e| e.text.contains("err-marker")).expect("stderr entry missing");
+        assert_eq!(stderr_entry.stream, ScriptOutputStream::Stderr);
+        assert_eq!(stderr_entry.script_name, "streams");
+    }
+
+    #[test]
+    fn script_tabs_returns_empty_before_any_createtab_call() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let runtime = PythonRuntime::new_zombie_for_test();
+        assert!(
+            runtime.script_tabs().is_empty(),
+            "script_tabs should be empty before any CreateTab"
+        );
+    }
+
+    #[test]
+    fn script_tabs_is_empty_after_unloading_registering_script() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        write_script(
+            &temp_dir.path().join("tabscript.py"),
+            "import havocui\ndef render(): pass\nhavocui.CreateTab('Panel', render)\n",
+        );
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        assert_eq!(
+            runtime.script_tabs(),
+            vec![ScriptTabDescriptor {
+                title: "Panel".to_owned(),
+                script_name: "tabscript".to_owned(),
+                layout: String::new(),
+                has_callback: true,
+            }],
+            "tab should be present after script load"
+        );
+
+        runtime
+            .unload_script("tabscript")
+            .unwrap_or_else(|error| panic!("unload should succeed: {error}"));
+
+        assert!(
+            runtime.script_tabs().is_empty(),
+            "script_tabs should be empty after unloading the registering script"
+        );
+    }
+
+    #[test]
+    fn script_output_collects_from_two_concurrent_scripts() {
+        let _guard = lock_mutex(&TEST_GUARD);
+        let temp_dir =
+            TempDir::new().unwrap_or_else(|error| panic!("tempdir should succeed: {error}"));
+        write_script(
+            &temp_dir.path().join("alpha.py"),
+            "import red_cell\ndef on_checkin(agent):\n    print('alpha:' + agent.id)\nred_cell.on_agent_checkin(on_checkin)\n",
+        );
+        write_script(
+            &temp_dir.path().join("beta.py"),
+            "import red_cell\ndef on_checkin(agent):\n    print('beta:' + agent.id)\nred_cell.on_agent_checkin(on_checkin)\n",
+        );
+        let app_state =
+            Arc::new(Mutex::new(AppState::new("wss://127.0.0.1:40056/havoc/".to_owned())));
+        {
+            let mut state = lock_app_state(&app_state);
+            state.agents.push(sample_agent("00ABCDEF"));
+        }
+
+        let runtime = PythonRuntime::initialize(app_state, temp_dir.path().to_path_buf())
+            .unwrap_or_else(|error| panic!("python runtime should initialize: {error}"));
+
+        // Fire two checkin events from separate threads to exercise concurrent output writes.
+        let r1 = runtime.clone();
+        let r2 = runtime.clone();
+        let t1 = thread::spawn(move || {
+            r1.emit_agent_checkin("00ABCDEF".to_owned())
+                .unwrap_or_else(|error| panic!("checkin dispatch should succeed: {error}"));
+        });
+        let t2 = thread::spawn(move || {
+            r2.emit_agent_checkin("00ABCDEF".to_owned())
+                .unwrap_or_else(|error| panic!("checkin dispatch should succeed: {error}"));
+        });
+        t1.join().unwrap_or_else(|_| panic!("thread 1 should not panic"));
+        t2.join().unwrap_or_else(|_| panic!("thread 2 should not panic"));
+
+        // Each script fires once per emit call, and we fired two; expect at least one from each.
+        assert!(
+            wait_for_output_occurrences(&runtime, "alpha:00ABCDEF", 1),
+            "alpha script output should appear"
+        );
+        assert!(
+            wait_for_output_occurrences(&runtime, "beta:00ABCDEF", 1),
+            "beta script output should appear"
+        );
+    }
 }

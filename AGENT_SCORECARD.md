@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 679 | 213 | 31 |
+| Tasks closed | 716 | 220 | 31 |
 | Bugs filed against | 80 | 34 | 9 |
-| Bug rate (bugs/task) | 0.12 | 0.16 | 0.29 |
-| Quality score | 88% | 84% | 71% |
+| Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
+| Quality score | 89% | 85% | 71% |
 
-*Bug rates: Claude 80/679=0.12, Codex 34/213=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 80/716=0.11, Codex 34/220=0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-23 — 1e8050e0..9e57edcb
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 37 | 0 | Bulk client-cli test coverage + fixes (blocking I/O, JSON output, config tests, session tests); specter crypto fix (expect→?) |
+| Codex | 7 | 0 | Phantom agent features (scaffold, callbacks, socket relay, memfile, SOCKS, working-hours, config); specter init callback test |
+| Cursor | 0 | 0 | No activity |
+
+Build: passed (cargo check + clippy clean)
+Tests: 1 pre-existing failure (agent_reconnects_after_listener_restart — 4 bugs already filed)
+Issues found: 0 new bugs — code quality is clean across all changed files
 
 ### Arch Review — 2026-03-22 (pass 3)
 

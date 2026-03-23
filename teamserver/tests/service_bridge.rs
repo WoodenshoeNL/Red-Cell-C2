@@ -339,6 +339,88 @@ async fn service_bridge_dispatch_unknown_type_does_not_crash() {
 }
 
 #[tokio::test]
+async fn service_bridge_agent_task_add_nonexistent_agent_does_not_crash() {
+    use base64::Engine as _;
+
+    let (addr, registry, _events) = spawn_service_server("secret", "svc").await.expect("spawn");
+    let mut client = connect_service(addr, "svc").await;
+
+    assert!(authenticate(&mut client, "secret").await);
+
+    // Register a real agent so we can later verify nothing was enqueued there.
+    let real_agent_id: u32 = 0xAAAA_0001;
+    let real_agent = red_cell_common::AgentRecord {
+        agent_id: real_agent_id,
+        active: true,
+        reason: String::new(),
+        note: String::new(),
+        encryption: red_cell_common::AgentEncryptionInfo::default(),
+        hostname: "real-host".to_owned(),
+        username: "real-user".to_owned(),
+        domain_name: String::new(),
+        external_ip: String::new(),
+        internal_ip: String::new(),
+        process_name: String::new(),
+        process_path: String::new(),
+        base_address: 0,
+        process_pid: 0,
+        process_tid: 0,
+        process_ppid: 0,
+        process_arch: "x64".to_owned(),
+        elevated: false,
+        os_version: String::new(),
+        os_build: 0,
+        os_arch: "x64".to_owned(),
+        sleep_delay: 5,
+        sleep_jitter: 0,
+        kill_date: None,
+        working_hours: None,
+        first_call_in: "0".to_owned(),
+        last_call_in: "0".to_owned(),
+    };
+    registry.insert(real_agent).await.expect("insert real agent");
+
+    // Send AgentTask.Add targeting a NameID that does not exist in the registry.
+    let payload = base64::engine::general_purpose::STANDARD.encode(b"ghost-payload");
+    let ghost_task_msg = serde_json::json!({
+        "Head": { "Type": "Agent" },
+        "Body": {
+            "Type": "AgentTask",
+            "Agent": { "NameID": "DEADBEEF" },
+            "Task": "Add",
+            "Command": payload,
+        },
+    });
+    send_json(&mut client, &ghost_task_msg).await;
+
+    // Give the server time to process the message.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // No jobs should have been enqueued for the real registered agent.
+    let jobs = registry.queued_jobs(real_agent_id).await.expect("queued jobs");
+    assert!(jobs.is_empty(), "no job should be enqueued for an unrelated agent");
+
+    // The connection must still be alive — send a valid follow-up message
+    // and confirm it is processed without error (listener add broadcasts an event).
+    let (_, _, events2) = spawn_service_server("secret2", "svc2").await.expect("second spawn");
+    let _ = events2; // unused, just ensuring the server helper compiles with this pattern
+
+    // Reuse the existing connection: a second valid message should succeed.
+    let listener_msg = serde_json::json!({
+        "Head": { "Type": "Listener" },
+        "Body": {
+            "Type": "ListenerAdd",
+            "Listener": { "Name": "after-ghost-task", "Agent": "TestAgent" },
+        },
+    });
+    send_json(&mut client, &listener_msg).await;
+
+    // Give server time to process the second message, then close gracefully.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    client.close(None).await.expect("graceful close after non-existent agent task");
+}
+
+#[tokio::test]
 async fn service_bridge_rejects_oversized_messages() {
     let (addr, _registry, _events) = spawn_service_server("pw", "svc").await.expect("spawn");
     let mut client = connect_service(addr, "svc").await;

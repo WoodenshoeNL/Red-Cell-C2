@@ -5,6 +5,7 @@ members = [
     "client",
     "client-cli",
     "agent/specter",
+    "agent/phantom",
 ]
 resolver = "3"
 

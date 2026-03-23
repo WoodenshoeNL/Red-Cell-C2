@@ -7,8 +7,6 @@ repository = "https://github.com/michel/Red-Cell-C2"
 rust-version = "1.85"
 description = "Rust Linux agent scaffold for Red Cell C2 with Demon-compatible transport primitives"
 
-[workspace]
-
 [[bin]]
 name = "phantom"
 path = "src/main.rs"

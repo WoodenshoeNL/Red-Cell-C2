@@ -585,7 +585,11 @@ async fn handle_authentication(
             return Err(());
         }
         Err(
-            AuthError::DuplicateUser { .. } | AuthError::EmptyUsername | AuthError::EmptyPassword,
+            AuthError::DuplicateUser { .. }
+            | AuthError::EmptyUsername
+            | AuthError::EmptyPassword
+            | AuthError::OperatorNotFound { .. }
+            | AuthError::ProfileOperator { .. },
         ) => {
             tokio::time::sleep(FAILED_LOGIN_DELAY).await;
             rate_limiter.record_failure(client_ip).await;

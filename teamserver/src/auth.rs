@@ -40,6 +40,18 @@ pub enum AuthError {
     /// The submitted password was blank.
     #[error("operator password must not be empty")]
     EmptyPassword,
+    /// The requested operator does not exist.
+    #[error("operator `{username}` not found")]
+    OperatorNotFound {
+        /// Missing operator username.
+        username: String,
+    },
+    /// The operator was loaded from the profile and cannot be modified at runtime.
+    #[error("operator `{username}` is profile-configured and cannot be modified at runtime")]
+    ProfileOperator {
+        /// Profile-configured operator username.
+        username: String,
+    },
     /// Password verifier generation failed.
     #[error("password verifier error: {0}")]
     PasswordVerifier(String),
@@ -57,6 +69,14 @@ impl PartialEq for AuthError {
             (Self::DuplicateUser { username: left }, Self::DuplicateUser { username: right }) => {
                 left == right
             }
+            (
+                Self::OperatorNotFound { username: left },
+                Self::OperatorNotFound { username: right },
+            ) => left == right,
+            (
+                Self::ProfileOperator { username: left },
+                Self::ProfileOperator { username: right },
+            ) => left == right,
             (Self::InvalidMessageJson(left), Self::InvalidMessageJson(right)) => left == right,
             (Self::PasswordVerifier(left), Self::PasswordVerifier(right)) => left == right,
             (Self::Persistence(left), Self::Persistence(right)) => {
@@ -282,6 +302,72 @@ impl AuthService {
         }
 
         credentials.insert(username.to_owned(), OperatorAccount { password_verifier, role });
+        Ok(())
+    }
+
+    /// Delete a runtime-created operator account.
+    ///
+    /// Profile-configured operators cannot be deleted at runtime.
+    /// Returns an error if the operator does not exist or was loaded from the profile.
+    pub async fn delete_operator(&self, username: &str) -> Result<(), AuthError> {
+        let username = username.trim();
+        if username.is_empty() {
+            return Err(AuthError::EmptyUsername);
+        }
+
+        let mut credentials = self.credentials.write().await;
+        if !credentials.contains_key(username) {
+            return Err(AuthError::OperatorNotFound { username: username.to_owned() });
+        }
+
+        // Only runtime operators (those persisted in the database) can be deleted.
+        let Some(runtime_operators) = &self.runtime_operators else {
+            return Err(AuthError::ProfileOperator { username: username.to_owned() });
+        };
+
+        let deleted = runtime_operators.delete(username).await?;
+        if !deleted {
+            // The operator exists in credentials but not in the runtime database,
+            // meaning it was loaded from the profile configuration.
+            return Err(AuthError::ProfileOperator { username: username.to_owned() });
+        }
+
+        credentials.remove(username);
+        Ok(())
+    }
+
+    /// Update the RBAC role for a runtime-created operator account.
+    ///
+    /// Profile-configured operators cannot be modified at runtime.
+    /// Returns an error if the operator does not exist or was loaded from the profile.
+    pub async fn update_operator_role(
+        &self,
+        username: &str,
+        role: OperatorRole,
+    ) -> Result<(), AuthError> {
+        let username = username.trim();
+        if username.is_empty() {
+            return Err(AuthError::EmptyUsername);
+        }
+
+        let mut credentials = self.credentials.write().await;
+        if !credentials.contains_key(username) {
+            return Err(AuthError::OperatorNotFound { username: username.to_owned() });
+        }
+
+        let Some(runtime_operators) = &self.runtime_operators else {
+            return Err(AuthError::ProfileOperator { username: username.to_owned() });
+        };
+
+        let updated = runtime_operators.update_role(username, role).await?;
+        if !updated {
+            return Err(AuthError::ProfileOperator { username: username.to_owned() });
+        }
+
+        if let Some(account) = credentials.get_mut(username) {
+            account.role = role;
+        }
+
         Ok(())
     }
 
@@ -1901,5 +1987,119 @@ mod tests {
     #[test]
     fn is_legacy_sha3_digest_rejects_empty_string() {
         assert!(!super::is_legacy_sha3_digest(""));
+    }
+
+    // ---- AuthService::delete_operator tests ----
+
+    #[tokio::test]
+    async fn delete_operator_removes_runtime_created_account() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let auth =
+            AuthService::from_profile_with_database(&profile(), &database).await.expect("auth");
+
+        auth.create_operator("runtime_user", "pass1234", OperatorRole::Operator)
+            .await
+            .expect("create should succeed");
+
+        auth.delete_operator("runtime_user").await.expect("delete should succeed");
+
+        let inventory = auth.operator_inventory().await;
+        assert!(
+            !inventory.iter().any(|op| op.username == "runtime_user"),
+            "deleted operator should not appear in inventory"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_operator_rejects_profile_configured_user() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let auth =
+            AuthService::from_profile_with_database(&profile(), &database).await.expect("auth");
+
+        let result = auth.delete_operator("operator").await;
+        assert!(
+            matches!(result, Err(AuthError::ProfileOperator { .. })),
+            "expected ProfileOperator error, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_operator_returns_not_found_for_unknown_user() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let auth =
+            AuthService::from_profile_with_database(&profile(), &database).await.expect("auth");
+
+        let result = auth.delete_operator("nonexistent").await;
+        assert!(
+            matches!(result, Err(AuthError::OperatorNotFound { .. })),
+            "expected OperatorNotFound error, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_operator_rejects_empty_username() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let auth =
+            AuthService::from_profile_with_database(&profile(), &database).await.expect("auth");
+
+        let result = auth.delete_operator("").await;
+        assert_eq!(result, Err(AuthError::EmptyUsername));
+    }
+
+    // ---- AuthService::update_operator_role tests ----
+
+    #[tokio::test]
+    async fn update_operator_role_changes_runtime_account() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let auth =
+            AuthService::from_profile_with_database(&profile(), &database).await.expect("auth");
+
+        auth.create_operator("roleuser", "pass1234", OperatorRole::Analyst)
+            .await
+            .expect("create should succeed");
+
+        auth.update_operator_role("roleuser", OperatorRole::Admin)
+            .await
+            .expect("update should succeed");
+
+        let inventory = auth.operator_inventory().await;
+        let op = inventory.iter().find(|op| op.username == "roleuser").expect("should exist");
+        assert_eq!(op.role, OperatorRole::Admin);
+    }
+
+    #[tokio::test]
+    async fn update_operator_role_rejects_profile_configured_user() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let auth =
+            AuthService::from_profile_with_database(&profile(), &database).await.expect("auth");
+
+        let result = auth.update_operator_role("operator", OperatorRole::Analyst).await;
+        assert!(
+            matches!(result, Err(AuthError::ProfileOperator { .. })),
+            "expected ProfileOperator error, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_operator_role_returns_not_found_for_unknown_user() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let auth =
+            AuthService::from_profile_with_database(&profile(), &database).await.expect("auth");
+
+        let result = auth.update_operator_role("nonexistent", OperatorRole::Admin).await;
+        assert!(
+            matches!(result, Err(AuthError::OperatorNotFound { .. })),
+            "expected OperatorNotFound error, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_operator_role_rejects_empty_username() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let auth =
+            AuthService::from_profile_with_database(&profile(), &database).await.expect("auth");
+
+        let result = auth.update_operator_role("  ", OperatorRole::Admin).await;
+        assert_eq!(result, Err(AuthError::EmptyUsername));
     }
 }

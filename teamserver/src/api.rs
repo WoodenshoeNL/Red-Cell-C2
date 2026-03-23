@@ -15,7 +15,7 @@ use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{HeaderMap, StatusCode, request::Parts};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use hmac::{Hmac, Mac};
 use red_cell_common::config::{OperatorRole, Profile};
@@ -651,6 +651,11 @@ struct CreatedOperatorResponse {
     role: OperatorRole,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, ToSchema)]
+struct UpdateOperatorRoleRequest {
+    role: OperatorRole,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 struct LootPage {
     total: usize,
@@ -924,6 +929,12 @@ impl IntoResponse for OperatorApiError {
             Self::Auth(AuthError::EmptyUsername | AuthError::EmptyPassword) => {
                 (StatusCode::BAD_REQUEST, "invalid_operator")
             }
+            Self::Auth(AuthError::OperatorNotFound { .. }) => {
+                (StatusCode::NOT_FOUND, "operator_not_found")
+            }
+            Self::Auth(AuthError::ProfileOperator { .. }) => {
+                (StatusCode::NOT_FOUND, "operator_not_found")
+            }
             Self::Auth(_) => (StatusCode::INTERNAL_SERVER_ERROR, "operator_api_error"),
         };
 
@@ -952,6 +963,8 @@ pub fn api_routes(api: ApiRuntime) -> Router<TeamserverState> {
         .route("/loot", get(list_loot))
         .route("/loot/{id}", get(get_loot))
         .route("/operators", get(list_operators).post(create_operator))
+        .route("/operators/{username}", delete(delete_operator))
+        .route("/operators/{username}/role", put(update_operator_role))
         .route("/listeners", get(list_listeners).post(create_listener))
         .route("/listeners/{name}", get(get_listener).put(update_listener).delete(delete_listener))
         .route("/listeners/{name}/start", put(start_listener))
@@ -1024,6 +1037,8 @@ struct ApiInfoResponse {
         get_loot,
         list_operators,
         create_operator,
+        delete_operator,
+        update_operator_role,
         list_listeners,
         create_listener,
         get_listener,
@@ -1055,6 +1070,7 @@ struct ApiInfoResponse {
             OperatorSummary,
             CreateOperatorRequest,
             CreatedOperatorResponse,
+            UpdateOperatorRoleRequest,
             crate::AuditRecord,
             crate::AuditResultStatus,
             crate::SessionActivityRecord,
@@ -1800,6 +1816,163 @@ async fn create_operator(
                     AuditResultStatus::Failure,
                     None,
                     Some("create"),
+                    Some(parameter_object([
+                        ("username", Value::String(username)),
+                        ("role", Value::String(format!("{:?}", request.role))),
+                        ("error", Value::String(error.to_string())),
+                    ])),
+                ),
+            )
+            .await;
+            Err(error.into())
+        }
+    }
+}
+
+#[utoipa::path(
+    delete,
+    path = "/operators/{username}",
+    context_path = "/api/v1",
+    tag = "operators",
+    security(("api_key" = [])),
+    params(
+        ("username" = String, Path, description = "Operator username to delete")
+    ),
+    responses(
+        (status = 204, description = "Operator deleted"),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
+        (status = 404, description = "Operator not found or profile-configured", body = ApiErrorBody),
+        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody)
+    )
+)]
+async fn delete_operator(
+    State(state): State<TeamserverState>,
+    identity: AdminApiAccess,
+    Path(username): Path<String>,
+) -> Result<StatusCode, OperatorApiError> {
+    match state.auth.delete_operator(&username).await {
+        Ok(()) => {
+            record_audit_entry(
+                &state.database,
+                &state.webhooks,
+                &identity.key_id,
+                "operator.delete",
+                "operator",
+                Some(username.clone()),
+                audit_details(
+                    AuditResultStatus::Success,
+                    None,
+                    Some("delete"),
+                    Some(parameter_object([("username", Value::String(username))])),
+                ),
+            )
+            .await;
+
+            Ok(StatusCode::NO_CONTENT)
+        }
+        Err(error) => {
+            record_audit_entry(
+                &state.database,
+                &state.webhooks,
+                &identity.key_id,
+                "operator.delete",
+                "operator",
+                Some(username.clone()),
+                audit_details(
+                    AuditResultStatus::Failure,
+                    None,
+                    Some("delete"),
+                    Some(parameter_object([
+                        ("username", Value::String(username)),
+                        ("error", Value::String(error.to_string())),
+                    ])),
+                ),
+            )
+            .await;
+            Err(error.into())
+        }
+    }
+}
+
+#[utoipa::path(
+    put,
+    path = "/operators/{username}/role",
+    context_path = "/api/v1",
+    tag = "operators",
+    security(("api_key" = [])),
+    params(
+        ("username" = String, Path, description = "Operator username")
+    ),
+    request_body = UpdateOperatorRoleRequest,
+    responses(
+        (status = 200, description = "Operator role updated", body = OperatorSummary),
+        (status = 400, description = "Invalid role", body = ApiErrorBody),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
+        (status = 404, description = "Operator not found or profile-configured", body = ApiErrorBody),
+        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody)
+    )
+)]
+async fn update_operator_role(
+    State(state): State<TeamserverState>,
+    identity: AdminApiAccess,
+    Path(username): Path<String>,
+    Json(request): Json<UpdateOperatorRoleRequest>,
+) -> Result<Json<OperatorSummary>, OperatorApiError> {
+    match state.auth.update_operator_role(&username, request.role).await {
+        Ok(()) => {
+            record_audit_entry(
+                &state.database,
+                &state.webhooks,
+                &identity.key_id,
+                "operator.update_role",
+                "operator",
+                Some(username.clone()),
+                audit_details(
+                    AuditResultStatus::Success,
+                    None,
+                    Some("update_role"),
+                    Some(parameter_object([
+                        ("username", Value::String(username.clone())),
+                        ("role", Value::String(format!("{:?}", request.role))),
+                    ])),
+                ),
+            )
+            .await;
+
+            // Fetch updated presence info for the response.
+            let operators = state.auth.operator_inventory().await;
+            let summary = operators
+                .into_iter()
+                .find(|op| op.username == username)
+                .map(|op| OperatorSummary {
+                    username: op.username,
+                    role: op.role,
+                    online: op.online,
+                    last_seen: op.last_seen,
+                })
+                .unwrap_or(OperatorSummary {
+                    username,
+                    role: request.role,
+                    online: false,
+                    last_seen: None,
+                });
+
+            Ok(Json(summary))
+        }
+        Err(error) => {
+            record_audit_entry(
+                &state.database,
+                &state.webhooks,
+                &identity.key_id,
+                "operator.update_role",
+                "operator",
+                Some(username.clone()),
+                audit_details(
+                    AuditResultStatus::Failure,
+                    None,
+                    Some("update_role"),
                     Some(parameter_object([
                         ("username", Value::String(username)),
                         ("role", Value::String(format!("{:?}", request.role))),
@@ -7508,5 +7681,300 @@ mod tests {
 
         let body = read_json(response).await;
         assert_eq!(body["error"]["code"], "api_disabled");
+    }
+
+    // ---- DELETE /operators/{username} tests ----
+
+    /// Helper: create a runtime operator via POST /operators.
+    async fn create_runtime_operator(
+        app: &Router,
+        api_key: &str,
+        username: &str,
+        password: &str,
+        role: &str,
+    ) -> Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/operators")
+                    .header(API_KEY_HEADER, api_key)
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"username":"{username}","password":"{password}","role":"{role}"}}"#
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response")
+    }
+
+    #[tokio::test]
+    async fn delete_operator_removes_runtime_created_account() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let create_resp =
+            create_runtime_operator(&app, "secret-admin", "tempuser", "pass1234", "Operator").await;
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+
+        let delete_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/operators/tempuser")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(delete_resp.status(), StatusCode::NO_CONTENT);
+
+        // Verify the operator is gone from the listing.
+        let list_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/operators")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        let body = read_json(list_resp).await;
+        let usernames: Vec<&str> = body
+            .as_array()
+            .expect("array")
+            .iter()
+            .filter_map(|op| op["username"].as_str())
+            .collect();
+        assert!(!usernames.contains(&"tempuser"), "deleted operator should not appear in listing");
+    }
+
+    #[tokio::test]
+    async fn delete_operator_returns_not_found_for_unknown_user() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/operators/nonexistent")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "operator_not_found");
+    }
+
+    #[tokio::test]
+    async fn delete_operator_returns_not_found_for_profile_configured_user() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        // "Neo" is defined in the test profile — cannot be deleted at runtime.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/operators/Neo")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "operator_not_found");
+    }
+
+    #[tokio::test]
+    async fn delete_operator_creates_audit_record() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let (app, _, _) = test_router_with_database(
+            database.clone(),
+            Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)),
+        )
+        .await;
+
+        create_runtime_operator(&app, "secret-admin", "audituser", "pass1234", "Analyst").await;
+
+        let _delete_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/operators/audituser")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        let page = crate::query_audit_log(
+            &database,
+            &crate::AuditQuery {
+                action: Some("operator.delete".to_owned()),
+                ..crate::AuditQuery::default()
+            },
+        )
+        .await
+        .expect("audit query should succeed");
+
+        assert_eq!(page.total, 1, "one operator.delete audit record expected");
+        let record = &page.items[0];
+        assert_eq!(record.action, "operator.delete");
+        assert_eq!(record.result_status, crate::AuditResultStatus::Success);
+    }
+
+    // ---- PUT /operators/{username}/role tests ----
+
+    #[tokio::test]
+    async fn update_operator_role_changes_runtime_account_role() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let create_resp =
+            create_runtime_operator(&app, "secret-admin", "roleuser", "pass1234", "Operator").await;
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+
+        let update_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/operators/roleuser/role")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"role":"Admin"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(update_resp.status(), StatusCode::OK);
+        let body = read_json(update_resp).await;
+        assert_eq!(body["username"], "roleuser");
+        assert_eq!(body["role"], "Admin");
+    }
+
+    #[tokio::test]
+    async fn update_operator_role_returns_not_found_for_unknown_user() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/operators/nonexistent/role")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"role":"Admin"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "operator_not_found");
+    }
+
+    #[tokio::test]
+    async fn update_operator_role_returns_not_found_for_profile_configured_user() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/operators/Neo/role")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"role":"Analyst"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "operator_not_found");
+    }
+
+    #[tokio::test]
+    async fn update_operator_role_returns_bad_request_for_invalid_role() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        create_runtime_operator(&app, "secret-admin", "badroleuser", "pass1234", "Operator").await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/operators/badroleuser/role")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"role":"SuperAdmin"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        // Invalid JSON deserialization returns 422 (Unprocessable Entity) from Axum.
+        assert!(
+            response.status() == StatusCode::BAD_REQUEST
+                || response.status() == StatusCode::UNPROCESSABLE_ENTITY,
+            "expected 400 or 422 for invalid role, got {}",
+            response.status()
+        );
+    }
+
+    #[tokio::test]
+    async fn update_operator_role_creates_audit_record() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let (app, _, _) = test_router_with_database(
+            database.clone(),
+            Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)),
+        )
+        .await;
+
+        create_runtime_operator(&app, "secret-admin", "auditrole", "pass1234", "Operator").await;
+
+        let _update_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/operators/auditrole/role")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"role":"Admin"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        let page = crate::query_audit_log(
+            &database,
+            &crate::AuditQuery {
+                action: Some("operator.update_role".to_owned()),
+                ..crate::AuditQuery::default()
+            },
+        )
+        .await
+        .expect("audit query should succeed");
+
+        assert_eq!(page.total, 1, "one operator.update_role audit record expected");
+        let record = &page.items[0];
+        assert_eq!(record.action, "operator.update_role");
+        assert_eq!(record.result_status, crate::AuditResultStatus::Success);
     }
 }

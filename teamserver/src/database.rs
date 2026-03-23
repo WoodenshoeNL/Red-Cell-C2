@@ -640,6 +640,35 @@ impl OperatorRepository {
 
         Ok(())
     }
+
+    /// Delete a runtime operator by username.
+    ///
+    /// Returns `true` if a row was deleted, `false` if no matching row existed.
+    pub async fn delete(&self, username: &str) -> Result<bool, TeamserverError> {
+        let result = sqlx::query("DELETE FROM ts_runtime_operators WHERE username = ?")
+            .bind(username)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Update the role of a runtime operator.
+    ///
+    /// Returns `true` if a row was updated, `false` if no matching row existed.
+    pub async fn update_role(
+        &self,
+        username: &str,
+        role: OperatorRole,
+    ) -> Result<bool, TeamserverError> {
+        let result = sqlx::query("UPDATE ts_runtime_operators SET role = ? WHERE username = ?")
+            .bind(operator_role_label(role))
+            .bind(username)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 impl ListenerRepository {
@@ -2644,5 +2673,57 @@ mod tests {
         assert!(parse_operator_role("root").is_err());
         assert!(parse_operator_role("viewer").is_err());
         assert!(parse_operator_role(" admin").is_err());
+    }
+
+    #[tokio::test]
+    async fn operator_repository_delete_removes_existing_row() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let repo = db.operators();
+        let operator = PersistedOperator {
+            username: "delme".to_owned(),
+            password_verifier: "v".to_owned(),
+            role: OperatorRole::Operator,
+        };
+        repo.create(&operator).await.expect("create");
+        assert!(repo.delete("delme").await.expect("delete"), "should delete existing row");
+        assert!(repo.get("delme").await.expect("get").is_none(), "row should be gone");
+    }
+
+    #[tokio::test]
+    async fn operator_repository_delete_returns_false_for_missing_user() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let repo = db.operators();
+        assert!(
+            !repo.delete("ghost").await.expect("delete"),
+            "should return false for missing user"
+        );
+    }
+
+    #[tokio::test]
+    async fn operator_repository_update_role_changes_stored_role() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let repo = db.operators();
+        let operator = PersistedOperator {
+            username: "rolechange".to_owned(),
+            password_verifier: "v".to_owned(),
+            role: OperatorRole::Analyst,
+        };
+        repo.create(&operator).await.expect("create");
+        assert!(
+            repo.update_role("rolechange", OperatorRole::Admin).await.expect("update"),
+            "should update existing row"
+        );
+        let updated = repo.get("rolechange").await.expect("get").expect("should exist");
+        assert_eq!(updated.role, OperatorRole::Admin);
+    }
+
+    #[tokio::test]
+    async fn operator_repository_update_role_returns_false_for_missing_user() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let repo = db.operators();
+        assert!(
+            !repo.update_role("ghost", OperatorRole::Admin).await.expect("update"),
+            "should return false for missing user"
+        );
     }
 }

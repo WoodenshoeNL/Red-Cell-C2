@@ -735,6 +735,20 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[tokio::test]
+    async fn connect_failure_calls_finish_connect_with_false() {
+        let mut rest = Vec::new();
+        add_u32(&mut rest, 0); // success = 0 (connection refused)
+        add_u32(&mut rest, 0x0000_5678); // socket_id
+        add_u32(&mut rest, 10061); // error_code (WSAECONNREFUSED)
+        let payload = socket_payload(DemonSocketCommand::Connect, &rest);
+        // finish_connect will error with ClientNotFound (logged as warn), but
+        // the handler must not panic or return Err on a refused-connection payload.
+        let (result, _msg) = call_and_recv(&payload).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
     // ── SocksProxyAdd ──────────────────────────────────────────────────────
 
     #[tokio::test]

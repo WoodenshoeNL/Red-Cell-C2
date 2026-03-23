@@ -4,9 +4,9 @@
 //!
 //! | Command | API call | Notes |
 //! |---|---|---|
-//! | `log list [filters]` | `GET /audit/log?...` | newest-first, filterable |
-//! | `log tail` | `GET /audit/log?limit=20` | last 20 entries |
-//! | `log tail --follow` | poll `GET /audit/log?since=<ts>` | stream JSON lines |
+//! | `log list [filters]` | `GET /api/v1/audit?...` | newest-first, filterable |
+//! | `log tail` | `GET /api/v1/audit?limit=20` | last 20 entries |
+//! | `log tail --follow` | poll `GET /api/v1/audit?since=<ts>` | stream JSON lines |
 
 use std::time::Duration;
 
@@ -26,13 +26,33 @@ const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 // ── raw API response shapes ───────────────────────────────────────────────────
 
+/// Mirrors `teamserver::audit::AuditRecord` exactly.
 #[derive(Debug, Deserialize)]
-struct RawAuditEntry {
-    ts: String,
-    operator: String,
+struct RawAuditRecord {
+    #[allow(dead_code)]
+    id: i64,
+    actor: String,
     action: String,
+    target_kind: String,
+    target_id: Option<String>,
     agent_id: Option<String>,
-    detail: Option<String>,
+    command: Option<String>,
+    #[allow(dead_code)]
+    parameters: Option<serde_json::Value>,
+    result_status: String,
+    occurred_at: String,
+}
+
+/// Mirrors `teamserver::audit::AuditPage` exactly.
+#[derive(Debug, Deserialize)]
+struct RawAuditPage {
+    #[allow(dead_code)]
+    total: usize,
+    #[allow(dead_code)]
+    limit: usize,
+    #[allow(dead_code)]
+    offset: usize,
+    items: Vec<RawAuditRecord>,
 }
 
 // ── public output types ───────────────────────────────────────────────────────
@@ -42,19 +62,21 @@ struct RawAuditEntry {
 pub struct AuditEntry {
     /// ISO 8601 UTC timestamp of the event.
     pub ts: String,
-    /// Operator username who performed the action.
+    /// Operator / API-key actor who performed the action.
     pub operator: String,
-    /// Action type (e.g. `"exec"`, `"kill"`, `"login"`).
+    /// Action type (e.g. `"agent.task"`, `"operator.login"`).
     pub action: String,
     /// Agent ID the action was performed on, if applicable.
     pub agent_id: Option<String>,
-    /// Human-readable detail about the action.
+    /// Sub-action label or target reference for this event.
     pub detail: Option<String>,
+    /// Outcome: `"success"` or `"failure"`.
+    pub result_status: String,
 }
 
 impl TextRow for AuditEntry {
     fn headers() -> Vec<&'static str> {
-        vec!["Timestamp", "Operator", "Action", "Agent ID", "Detail"]
+        vec!["Timestamp", "Operator", "Action", "Agent ID", "Detail", "Result"]
     }
 
     fn row(&self) -> Vec<String> {
@@ -64,6 +86,7 @@ impl TextRow for AuditEntry {
             self.action.clone(),
             self.agent_id.clone().unwrap_or_default(),
             self.detail.clone().unwrap_or_default(),
+            self.result_status.clone(),
         ]
     }
 }
@@ -150,16 +173,16 @@ async fn list(
         params.push(format!("action={}", percent_encode(act)));
     }
 
-    let path = format!("/audit/log?{}", params.join("&"));
-    let raw: Vec<RawAuditEntry> = client.get(&path).await?;
-    Ok(raw.into_iter().map(audit_entry_from_raw).collect())
+    let path = format!("/audit?{}", params.join("&"));
+    let page: RawAuditPage = client.get(&path).await?;
+    Ok(page.items.into_iter().map(audit_entry_from_raw).collect())
 }
 
 /// `log tail --follow` — print the last 20 entries then stream new ones as
 /// JSON lines until Ctrl-C.
 ///
-/// Uses the timestamp of the most recent entry as a cursor for incremental
-/// polling so that each entry is emitted exactly once.
+/// Uses the `occurred_at` timestamp of the most recent entry as a cursor for
+/// incremental polling so that each entry is emitted exactly once.
 ///
 /// # Examples
 /// ```text
@@ -221,11 +244,12 @@ fn print_entry_line(fmt: &OutputFormat, entry: &AuditEntry) {
     match fmt {
         OutputFormat::Json => {
             let line = serde_json::json!({
-                "ts":       entry.ts,
-                "operator": entry.operator,
-                "action":   entry.action,
-                "agent_id": entry.agent_id,
-                "detail":   entry.detail,
+                "ts":           entry.ts,
+                "operator":     entry.operator,
+                "action":       entry.action,
+                "agent_id":     entry.agent_id,
+                "detail":       entry.detail,
+                "result_status": entry.result_status,
             });
             match serde_json::to_string(&line) {
                 Ok(s) => println!("{s}"),
@@ -236,8 +260,8 @@ fn print_entry_line(fmt: &OutputFormat, entry: &AuditEntry) {
             let agent = entry.agent_id.as_deref().unwrap_or("-");
             let detail = entry.detail.as_deref().unwrap_or("");
             println!(
-                "[{}]  {:20}  {:16}  agent={}  {}",
-                entry.ts, entry.operator, entry.action, agent, detail
+                "[{}]  {:20}  {:16}  agent={}  {}  [{}]",
+                entry.ts, entry.operator, entry.action, agent, detail, entry.result_status
             );
         }
     }
@@ -245,13 +269,30 @@ fn print_entry_line(fmt: &OutputFormat, entry: &AuditEntry) {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-fn audit_entry_from_raw(raw: RawAuditEntry) -> AuditEntry {
+/// Map a raw `AuditRecord` from the server into a display-friendly
+/// [`AuditEntry`].
+///
+/// Field mapping:
+/// - `ts`           ← `occurred_at`
+/// - `operator`     ← `actor`
+/// - `action`       ← `action`
+/// - `agent_id`     ← `agent_id`
+/// - `detail`       ← `command` if present, otherwise `target_kind`:`target_id`
+/// - `result_status`← `result_status`
+fn audit_entry_from_raw(raw: RawAuditRecord) -> AuditEntry {
+    let detail = raw.command.clone().or_else(|| {
+        raw.target_id.as_deref().map(|tid| format!("{}:{}", raw.target_kind, tid)).or_else(|| {
+            if raw.target_kind.is_empty() { None } else { Some(raw.target_kind.clone()) }
+        })
+    });
+
     AuditEntry {
-        ts: raw.ts,
-        operator: raw.operator,
+        ts: raw.occurred_at,
+        operator: raw.actor,
         action: raw.action,
         agent_id: raw.agent_id,
-        detail: raw.detail,
+        detail,
+        result_status: raw.result_status,
     }
 }
 
@@ -284,37 +325,132 @@ mod tests {
     use super::*;
     use crate::output::TextRender as _;
 
+    fn sample_raw_record(
+        actor: &str,
+        action: &str,
+        target_kind: &str,
+        target_id: Option<&str>,
+        agent_id: Option<&str>,
+        command: Option<&str>,
+        result_status: &str,
+        occurred_at: &str,
+    ) -> RawAuditRecord {
+        RawAuditRecord {
+            id: 1,
+            actor: actor.to_owned(),
+            action: action.to_owned(),
+            target_kind: target_kind.to_owned(),
+            target_id: target_id.map(ToOwned::to_owned),
+            agent_id: agent_id.map(ToOwned::to_owned),
+            command: command.map(ToOwned::to_owned),
+            parameters: None,
+            result_status: result_status.to_owned(),
+            occurred_at: occurred_at.to_owned(),
+        }
+    }
+
     // ── audit_entry_from_raw ──────────────────────────────────────────────────
 
     #[test]
     fn audit_entry_from_raw_maps_all_fields() {
-        let raw = RawAuditEntry {
-            ts: "2026-03-21T12:00:00Z".to_owned(),
-            operator: "alice".to_owned(),
-            action: "exec".to_owned(),
-            agent_id: Some("abc123".to_owned()),
-            detail: Some("whoami".to_owned()),
-        };
+        let raw = sample_raw_record(
+            "alice",
+            "agent.task",
+            "agent",
+            Some("CAFE0001"),
+            Some("abc123"),
+            Some("whoami"),
+            "success",
+            "2026-03-21T12:00:00Z",
+        );
         let entry = audit_entry_from_raw(raw);
         assert_eq!(entry.ts, "2026-03-21T12:00:00Z");
         assert_eq!(entry.operator, "alice");
-        assert_eq!(entry.action, "exec");
+        assert_eq!(entry.action, "agent.task");
         assert_eq!(entry.agent_id.as_deref(), Some("abc123"));
         assert_eq!(entry.detail.as_deref(), Some("whoami"));
+        assert_eq!(entry.result_status, "success");
     }
 
     #[test]
-    fn audit_entry_from_raw_handles_none_fields() {
-        let raw = RawAuditEntry {
-            ts: "2026-03-21T00:00:00Z".to_owned(),
-            operator: "bob".to_owned(),
-            action: "login".to_owned(),
-            agent_id: None,
-            detail: None,
-        };
+    fn audit_entry_from_raw_detail_falls_back_to_target_kind_and_id() {
+        let raw = sample_raw_record(
+            "bob",
+            "operator.create",
+            "operator",
+            Some("charlie"),
+            None,
+            None, // no command
+            "success",
+            "2026-03-21T00:00:00Z",
+        );
+        let entry = audit_entry_from_raw(raw);
+        // Without a command, detail is built from target_kind:target_id.
+        assert_eq!(entry.detail.as_deref(), Some("operator:charlie"));
+    }
+
+    #[test]
+    fn audit_entry_from_raw_detail_falls_back_to_target_kind_only() {
+        let raw = sample_raw_record(
+            "admin",
+            "config.reload",
+            "config",
+            None, // no target_id
+            None,
+            None,
+            "success",
+            "2026-03-21T00:00:00Z",
+        );
+        let entry = audit_entry_from_raw(raw);
+        assert_eq!(entry.detail.as_deref(), Some("config"));
+    }
+
+    #[test]
+    fn audit_entry_from_raw_detail_none_when_target_kind_empty_and_no_command() {
+        let raw = sample_raw_record(
+            "admin",
+            "system.ping",
+            "", // empty target_kind
+            None,
+            None,
+            None,
+            "success",
+            "2026-03-21T00:00:00Z",
+        );
+        let entry = audit_entry_from_raw(raw);
+        assert!(entry.detail.is_none());
+    }
+
+    #[test]
+    fn audit_entry_from_raw_handles_none_agent_id() {
+        let raw = sample_raw_record(
+            "bob",
+            "operator.login",
+            "session",
+            None,
+            None,
+            None,
+            "success",
+            "2026-03-21T00:00:00Z",
+        );
         let entry = audit_entry_from_raw(raw);
         assert!(entry.agent_id.is_none());
-        assert!(entry.detail.is_none());
+    }
+
+    #[test]
+    fn audit_entry_from_raw_failure_result_status() {
+        let raw = sample_raw_record(
+            "eve",
+            "operator.login",
+            "session",
+            None,
+            None,
+            None,
+            "failure",
+            "2026-03-21T09:00:00Z",
+        );
+        let entry = audit_entry_from_raw(raw);
+        assert_eq!(entry.result_status, "failure");
     }
 
     // ── AuditEntry / TextRow ──────────────────────────────────────────────────
@@ -324,21 +460,23 @@ mod tests {
         let entry = AuditEntry {
             ts: "2026-03-21T12:00:00Z".to_owned(),
             operator: "alice".to_owned(),
-            action: "exec".to_owned(),
+            action: "agent.task".to_owned(),
             agent_id: Some("abc123".to_owned()),
             detail: Some("whoami".to_owned()),
+            result_status: "success".to_owned(),
         };
         assert_eq!(AuditEntry::headers().len(), entry.row().len());
     }
 
     #[test]
-    fn audit_entry_row_uses_empty_string_for_none_agent_id() {
+    fn audit_entry_row_uses_empty_string_for_none_fields() {
         let entry = AuditEntry {
             ts: "2026-03-21T12:00:00Z".to_owned(),
             operator: "alice".to_owned(),
-            action: "login".to_owned(),
+            action: "operator.login".to_owned(),
             agent_id: None,
             detail: None,
+            result_status: "success".to_owned(),
         };
         let row = entry.row();
         assert_eq!(row[3], ""); // agent_id column
@@ -350,16 +488,18 @@ mod tests {
         let entry = AuditEntry {
             ts: "2026-03-21T12:00:00Z".to_owned(),
             operator: "carol".to_owned(),
-            action: "kill".to_owned(),
+            action: "agent.kill".to_owned(),
             agent_id: Some("xyz789".to_owned()),
             detail: Some("SIGTERM".to_owned()),
+            result_status: "success".to_owned(),
         };
         let v = serde_json::to_value(&entry).expect("serialise");
         assert_eq!(v["ts"], "2026-03-21T12:00:00Z");
         assert_eq!(v["operator"], "carol");
-        assert_eq!(v["action"], "kill");
+        assert_eq!(v["action"], "agent.kill");
         assert_eq!(v["agent_id"], "xyz789");
         assert_eq!(v["detail"], "SIGTERM");
+        assert_eq!(v["result_status"], "success");
     }
 
     #[test]
@@ -367,13 +507,14 @@ mod tests {
         let entries = vec![AuditEntry {
             ts: "2026-03-21T12:00:00Z".to_owned(),
             operator: "dave".to_owned(),
-            action: "exec".to_owned(),
+            action: "agent.task".to_owned(),
             agent_id: Some("abc".to_owned()),
             detail: Some("id".to_owned()),
+            result_status: "success".to_owned(),
         }];
         let rendered = entries.render_text();
         assert!(rendered.contains("dave"));
-        assert!(rendered.contains("exec"));
+        assert!(rendered.contains("agent.task"));
         assert!(rendered.contains("abc"));
     }
 

@@ -364,6 +364,34 @@ def extract_text_from_stream(raw_lines: list) -> str:
     return "\n".join(texts)
 
 
+# ── Zone constraint ────────────────────────────────────────────────────────────
+
+def build_zone_block(zones: list) -> str:
+    """Build a zone constraint block for injection into agent prompts."""
+    if not zones:
+        return ""
+    allowed_paths = []
+    for z in zones:
+        allowed_paths.extend(ZONES.get(z, [f"{z}/"]))
+    paths_list = "\n".join(f"- `{p}`" for p in allowed_paths)
+    return f"""
+---
+
+## Zone Constraint
+
+You are operating in zone(s): {', '.join(f'`{z}`' for z in zones)}
+
+**STRICT**: Only modify files inside:
+{paths_list}
+
+If you discover that work in another zone is required to complete this task, do NOT make
+those changes yourself. Instead, create a beads issue for that work:
+  `br create --title="..." --description="..." --type=task --priority=<N>`
+Then add the appropriate zone label:
+  `br update <new-id> --add-label zone:<zone>`
+"""
+
+
 # ── Dev loop helpers ───────────────────────────────────────────────────────────
 
 def issue_status_from_jsonl(task_id: str) -> str:
@@ -781,30 +809,7 @@ def dev_loop(args, log: Logger):
         ready_lines = "\n".join(ready_output.splitlines()[:15])
         in_progress = br(["list", "--status=in_progress"]).stdout.strip() or "None"
 
-        # Build zone constraint block (injected only when zones are restricted)
-        if zones:
-            allowed_paths = []
-            for z in zones:
-                allowed_paths.extend(ZONES.get(z, [f"{z}/"]))
-            paths_list = "\n".join(f"- `{p}`" for p in allowed_paths)
-            zone_block = f"""
----
-
-## Zone Constraint
-
-You are operating in zone(s): {', '.join(f'`{z}`' for z in zones)}
-
-**STRICT**: Only modify files inside:
-{paths_list}
-
-If you discover that work in another zone is required to complete this task, do NOT make
-those changes yourself. Instead, create a beads issue for that work:
-  `br create --title="..." --description="..." --type=task --priority=<N>`
-Then add the appropriate zone label:
-  `br update <new-id> --add-label zone:<zone>`
-"""
-        else:
-            zone_block = ""
+        zone_block = build_zone_block(zones)
 
         runtime_prompt = f"""{dev_prompt}
 
@@ -897,6 +902,7 @@ Start directly with understanding the task and implementing it.
 def review_loop(args, log: Logger):
     loop_type = args.loop
     agent = args.agent
+    zones = args.zone or []
 
     prompt_file = SCRIPT_DIR / REVIEW_PROMPTS[loop_type]
     if not prompt_file.exists():
@@ -917,12 +923,16 @@ def review_loop(args, log: Logger):
     if jitter_secs:
         sleep_desc += f" ±{jitter_secs//60:.0f}m jitter"
 
+    zone_desc = ", ".join(zones) if zones else "all zones"
+    zone_block = build_zone_block(zones)
+
     log.banner([
         f"{agent.title()} {loop_type} loop starting",
         f"Prompt:   {prompt_file.name}",
         f"Log:      {log.log_file.name}",
         f"Sleep:    {sleep_desc}",
         f"Max runs: {'unlimited' if max_iters == 0 else max_iters}",
+        f"Zones:    {zone_desc}",
     ])
 
     while True:
@@ -946,6 +956,8 @@ def review_loop(args, log: Logger):
             log.log(f"Run log: {extra_log.name}")
 
         prompt_content = prompt_file.read_text()
+        if zone_block:
+            prompt_content = f"{prompt_content}\n{zone_block}"
         exit_code, _ = run_agent(agent, args.model, prompt_content, log, extra_log)
 
         if exit_code != 0:
@@ -993,8 +1005,9 @@ examples:
   ./loop.py --agent cursor --loop dev  --zone client-cli client
   ./loop.py --agent claude --loop dev  --sleep 0 --iterations 1
   ./loop.py --agent codex  --loop qa   --sleep 20
+  ./loop.py --agent claude --loop arch --zone teamserver
   ./loop.py --agent claude --loop arch --sleep 120 --jitter 15
-  ./loop.py --agent cursor --loop coverage --sleep 30 --iterations 3
+  ./loop.py --agent cursor --loop coverage --zone common --iterations 3
   ./loop.py --agent claude --loop dev  --pre-sleep 5 --model claude-opus-4-6
 """,
     )
@@ -1047,10 +1060,9 @@ examples:
         choices=list(ZONES.keys()),
         metavar="ZONE",
         help=(
-            "Restrict dev loop to one or more zones: "
+            "Restrict loop to one or more zones: "
             + ", ".join(ZONES.keys())
             + ". Omit to work across all zones. "
-            "Only applies to --loop dev. "
             "Example: --zone client-cli  or  --zone teamserver common"
         ),
     )

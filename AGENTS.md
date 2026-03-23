@@ -169,7 +169,7 @@ br create --title="fix: ..." --type=bug --priority=2
 br update <id> --add-label zone:teamserver
 ```
 
-The QA and arch loops review all zones and are not zone-scoped.
+The QA, arch, quality, and coverage loops review all zones by default, but can be zone-scoped with `--zone`.
 
 ---
 

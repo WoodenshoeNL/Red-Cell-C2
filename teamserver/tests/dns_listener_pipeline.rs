@@ -966,3 +966,175 @@ async fn dns_listener_concurrent_multi_agent_sessions_are_isolated()
     manager.stop("dns-concurrent").await?;
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Registered-agent empty-task-queue tests
+// ---------------------------------------------------------------------------
+
+/// A registered agent with no pending tasks must receive "wait" when polling
+/// the download endpoint — not garbage data or an error.
+#[tokio::test]
+async fn dns_listener_pipeline_download_returns_wait_for_registered_agent_with_no_tasks()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None);
+    let mut event_receiver = events.subscribe();
+
+    let port = free_udp_port();
+    let domain = "c2.example.com";
+    let key: [u8; AGENT_KEY_LENGTH] = [
+        0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE,
+        0xDF, 0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xEB, 0xEC,
+        0xED, 0xEE, 0xEF, 0xF0,
+    ];
+    let iv: [u8; AGENT_IV_LENGTH] = [
+        0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE,
+        0xFF, 0x00,
+    ];
+    let agent_id = 0xFEED_0001_u32;
+
+    manager.create(dns_listener("dns-idle-dl", port, domain)).await?;
+    manager.start("dns-idle-dl").await?;
+    let client = wait_for_dns_listener(port).await?;
+
+    // 1. Register the agent via DEMON_INIT.
+    let init_body = common::valid_demon_init_body(agent_id, key, iv);
+    let init_result =
+        dns_upload_demon_packet(&client, agent_id, &init_body, domain, 0xA000).await?;
+    assert_eq!(init_result, "ack", "DEMON_INIT upload must be acknowledged");
+
+    // Verify registration.
+    assert!(registry.get(agent_id).await.is_some(), "agent must be registered after init");
+
+    // Drain the AgentNew event.
+    let event = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
+    assert!(matches!(event, Some(OperatorMessage::AgentNew(_))));
+
+    // 2. Download the init ACK (consuming the pending response).
+    let ack_payload = dns_download_response(&client, agent_id, domain, 0xA100).await?;
+    assert!(!ack_payload.is_empty(), "init ACK response must be non-empty");
+
+    // 3. Poll download again — no tasks have been queued, so response must be "wait".
+    let qname = dns_download_qname(agent_id, 0, domain);
+    let packet = build_dns_txt_query(0xA200, &qname);
+    client.send(&packet).await?;
+
+    let mut buf = vec![0u8; 4096];
+    let len = timeout(Duration::from_secs(5), client.recv(&mut buf)).await??;
+    buf.truncate(len);
+    let txt = parse_dns_txt_answer(&buf).ok_or("failed to parse TXT answer")?;
+    assert_eq!(
+        txt, "wait",
+        "download for registered agent with no tasks must return 'wait', got '{txt}'"
+    );
+
+    manager.stop("dns-idle-dl").await?;
+    Ok(())
+}
+
+/// After a registered agent consumes its init ACK and then a task is enqueued,
+/// the next checkin callback must deliver the task via the download channel.
+#[tokio::test]
+async fn dns_listener_pipeline_registered_agent_downloads_task_after_enqueue()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None);
+    let mut event_receiver = events.subscribe();
+
+    let port = free_udp_port();
+    let domain = "c2.example.com";
+    let key: [u8; AGENT_KEY_LENGTH] = [
+        0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xCB, 0xCC, 0xCD, 0xCE,
+        0xCF, 0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xDB, 0xDC,
+        0xDD, 0xDE, 0xDF, 0xE0,
+    ];
+    let iv: [u8; AGENT_IV_LENGTH] = [
+        0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xEB, 0xEC, 0xED, 0xEE,
+        0xEF, 0xF0,
+    ];
+    let agent_id = 0xFEED_0002_u32;
+
+    manager.create(dns_listener("dns-task-dl", port, domain)).await?;
+    manager.start("dns-task-dl").await?;
+    let client = wait_for_dns_listener(port).await?;
+
+    // 1. Register via DEMON_INIT.
+    let init_body = common::valid_demon_init_body(agent_id, key, iv);
+    let init_result =
+        dns_upload_demon_packet(&client, agent_id, &init_body, domain, 0xB000).await?;
+    assert_eq!(init_result, "ack");
+
+    assert!(registry.get(agent_id).await.is_some());
+
+    // Drain AgentNew.
+    let event = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
+    assert!(matches!(event, Some(OperatorMessage::AgentNew(_))));
+
+    // 2. Download and consume the init ACK.
+    let ack_payload = dns_download_response(&client, agent_id, domain, 0xB100).await?;
+    assert!(!ack_payload.is_empty());
+    let ctr_offset = red_cell_common::crypto::ctr_blocks_for_len(ack_payload.len());
+
+    // 3. Verify "wait" before enqueuing any task.
+    let qname = dns_download_qname(agent_id, 0, domain);
+    let packet = build_dns_txt_query(0xB200, &qname);
+    client.send(&packet).await?;
+
+    let mut buf = vec![0u8; 4096];
+    let len = timeout(Duration::from_secs(5), client.recv(&mut buf)).await??;
+    buf.truncate(len);
+    let txt = parse_dns_txt_answer(&buf).ok_or("failed to parse TXT answer")?;
+    assert_eq!(txt, "wait", "no tasks queued yet — download must return 'wait'");
+
+    // 4. Enqueue a job for the agent.
+    use red_cell::Job;
+    registry
+        .enqueue_job(
+            agent_id,
+            Job {
+                command: u32::from(DemonCommand::CommandCheckin),
+                request_id: 100,
+                payload: vec![0xDE, 0xAD],
+                command_line: "test-task".to_owned(),
+                task_id: "task-001".to_owned(),
+                created_at: String::new(),
+                operator: String::new(),
+            },
+        )
+        .await?;
+
+    // 5. Send a COMMAND_CHECKIN callback — this triggers the dispatcher to
+    //    dequeue jobs and build an encrypted response for the agent.
+    let callback_body = common::valid_demon_callback_body(
+        agent_id,
+        key,
+        iv,
+        ctr_offset,
+        u32::from(DemonCommand::CommandCheckin),
+        8,
+        &[],
+    );
+    let callback_result =
+        dns_upload_demon_packet(&client, agent_id, &callback_body, domain, 0xB300).await?;
+    assert_eq!(callback_result, "ack", "COMMAND_CHECKIN callback must be acknowledged");
+
+    // Drain AgentUpdate event.
+    let event = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
+    assert!(matches!(event, Some(OperatorMessage::AgentUpdate(_))));
+
+    // 6. Download the task response — must NOT be "wait" since a job was queued.
+    let task_payload = dns_download_response(&client, agent_id, domain, 0xB400).await?;
+    assert!(
+        !task_payload.is_empty(),
+        "download after task enqueue must return actual data, not empty/wait"
+    );
+
+    manager.stop("dns-task-dl").await?;
+    Ok(())
+}

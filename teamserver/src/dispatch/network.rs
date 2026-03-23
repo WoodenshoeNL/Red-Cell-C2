@@ -693,6 +693,91 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn truncated_dclist_name_returns_invalid_callback_payload() {
+        // DcList: valid target, then start a DC name but truncate the last byte
+        let mut rest = encode_utf16("CORP.LOCAL");
+        let mut dc_name = encode_utf16("DC01.corp.local");
+        dc_name.pop(); // remove last byte — truncated UTF-16 payload
+        rest.extend(dc_name);
+        let payload = net_payload(DemonNetCommand::DcList, &rest);
+        let events = EventBus::default();
+        let result = handle_net_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload for truncated DcList name, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn truncated_share_access_returns_invalid_callback_payload() {
+        // Share: valid target + name + path + remark, then truncate the access u32
+        let mut rest = encode_utf16("FILESERV");
+        rest.extend(encode_utf16("ADMIN$")); // name
+        rest.extend(encode_utf16("C:\\Windows")); // path
+        rest.extend(encode_utf16("Remote Admin")); // remark
+        let mut access = encode_u32(0);
+        access.pop(); // remove last byte — truncated u32
+        rest.extend(access);
+        let payload = net_payload(DemonNetCommand::Share, &rest);
+        let events = EventBus::default();
+        let result = handle_net_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload for truncated Share access u32, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn truncated_localgroup_description_returns_invalid_callback_payload() {
+        // LocalGroup: valid target + first UTF-16 (name), then truncate the description UTF-16
+        let mut rest = encode_utf16("WORKSTATION");
+        rest.extend(encode_utf16("Administrators")); // name (complete)
+        let mut desc = encode_utf16("Full control");
+        desc.pop(); // remove last byte — truncated UTF-16 description
+        rest.extend(desc);
+        let payload = net_payload(DemonNetCommand::LocalGroup, &rest);
+        let events = EventBus::default();
+        let result = handle_net_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload for truncated LocalGroup description, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn truncated_group_description_returns_invalid_callback_payload() {
+        // Group: valid target + first UTF-16 (name), then truncate the description UTF-16
+        let mut rest = encode_utf16("DC01");
+        rest.extend(encode_utf16("Domain Admins")); // name (complete)
+        let mut desc = encode_utf16("DA group");
+        desc.pop(); // remove last byte — truncated UTF-16 description
+        rest.extend(desc);
+        let payload = net_payload(DemonNetCommand::Group, &rest);
+        let events = EventBus::default();
+        let result = handle_net_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload for truncated Group description, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn truncated_computer_name_returns_invalid_callback_payload() {
+        // Computer: valid target, then start a computer name but truncate the last byte
+        let mut rest = encode_utf16("CORP.LOCAL");
+        let mut name = encode_utf16("WS01");
+        name.pop(); // remove last byte — truncated UTF-16 name
+        rest.extend(name);
+        let payload = net_payload(DemonNetCommand::Computer, &rest);
+        let events = EventBus::default();
+        let result = handle_net_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload for truncated Computer name, got {result:?}"
+        );
+    }
+
     // ── format_net_sessions ───────────────────────────────────────────────────
 
     #[test]

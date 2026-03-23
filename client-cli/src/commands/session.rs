@@ -33,7 +33,7 @@
 //! | `agent.show` | `id` | — |
 //! | `agent.exec` | `id`, `command` | `wait`, `timeout` |
 //! | `agent.output` | `id` | `since` |
-//! | `agent.kill` | `id` | `wait` |
+//! | `agent.kill` | `id` | `wait`, `timeout` |
 //! | `listener.list` | — | — |
 //! | `listener.show` | `name` | — |
 

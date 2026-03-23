@@ -198,6 +198,12 @@ impl Database {
         OperatorRepository::new(self.pool.clone())
     }
 
+    /// Access payload build job persistence methods.
+    #[must_use]
+    pub fn payload_builds(&self) -> PayloadBuildRepository {
+        PayloadBuildRepository::new(self.pool.clone())
+    }
+
     /// Close the SQLite pool and wait for all checked-out connections to return.
     pub async fn close(&self) {
         self.pool.close().await;
@@ -1738,6 +1744,169 @@ fn i64_from_u64(field: &'static str, value: u64) -> Result<i64, TeamserverError>
 
 fn invalid_value(field: &'static str, message: &str) -> TeamserverError {
     TeamserverError::InvalidPersistedValue { field, message: message.to_owned() }
+}
+
+// ── Payload Build Repository ─────────────────────────────────────────────────
+
+/// Persisted payload build job record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PayloadBuildRecord {
+    /// Unique build identifier (UUID).
+    pub id: String,
+    /// Current build status: `"pending"`, `"running"`, `"done"`, `"error"`.
+    pub status: String,
+    /// Display name for the finished payload.
+    pub name: String,
+    /// Target CPU architecture.
+    pub arch: String,
+    /// Requested output format.
+    pub format: String,
+    /// Listener name embedded in the payload.
+    pub listener: String,
+    /// Optional sleep interval in seconds.
+    pub sleep_secs: Option<i64>,
+    /// Compiled payload bytes (populated when status is `"done"`).
+    pub artifact: Option<Vec<u8>>,
+    /// Artifact size in bytes.
+    pub size_bytes: Option<i64>,
+    /// Error message (populated when status is `"error"`).
+    pub error: Option<String>,
+    /// RFC 3339 creation timestamp.
+    pub created_at: String,
+    /// RFC 3339 last-update timestamp.
+    pub updated_at: String,
+}
+
+/// SQLite row shape for the `ts_payload_builds` table.
+#[derive(Debug, FromRow)]
+struct PayloadBuildRow {
+    id: String,
+    status: String,
+    name: String,
+    arch: String,
+    format: String,
+    listener: String,
+    sleep_secs: Option<i64>,
+    artifact: Option<Vec<u8>>,
+    size_bytes: Option<i64>,
+    error: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+impl From<PayloadBuildRow> for PayloadBuildRecord {
+    fn from(row: PayloadBuildRow) -> Self {
+        Self {
+            id: row.id,
+            status: row.status,
+            name: row.name,
+            arch: row.arch,
+            format: row.format,
+            listener: row.listener,
+            sleep_secs: row.sleep_secs,
+            artifact: row.artifact,
+            size_bytes: row.size_bytes,
+            error: row.error,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
+/// Repository for payload build job persistence.
+#[derive(Clone, Debug)]
+pub struct PayloadBuildRepository {
+    pool: SqlitePool,
+}
+
+impl PayloadBuildRepository {
+    /// Create a new payload build repository from a shared pool.
+    #[must_use]
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+
+    /// Insert a new payload build job record.
+    pub async fn create(&self, record: &PayloadBuildRecord) -> Result<(), TeamserverError> {
+        sqlx::query(
+            r#"
+            INSERT INTO ts_payload_builds (
+                id, status, name, arch, format, listener, sleep_secs,
+                artifact, size_bytes, error, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&record.id)
+        .bind(&record.status)
+        .bind(&record.name)
+        .bind(&record.arch)
+        .bind(&record.format)
+        .bind(&record.listener)
+        .bind(record.sleep_secs)
+        .bind(&record.artifact)
+        .bind(record.size_bytes)
+        .bind(&record.error)
+        .bind(&record.created_at)
+        .bind(&record.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Fetch a single build record by id.
+    pub async fn get(&self, id: &str) -> Result<Option<PayloadBuildRecord>, TeamserverError> {
+        let row =
+            sqlx::query_as::<_, PayloadBuildRow>("SELECT * FROM ts_payload_builds WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(Into::into))
+    }
+
+    /// List all build records, ordered by creation time descending.
+    pub async fn list(&self) -> Result<Vec<PayloadBuildRecord>, TeamserverError> {
+        let rows = sqlx::query_as::<_, PayloadBuildRow>(
+            "SELECT * FROM ts_payload_builds ORDER BY created_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    /// Update the status and optional artifact of a build record.
+    pub async fn update_status(
+        &self,
+        id: &str,
+        status: &str,
+        name: Option<&str>,
+        artifact: Option<&[u8]>,
+        size_bytes: Option<i64>,
+        error: Option<&str>,
+        updated_at: &str,
+    ) -> Result<bool, TeamserverError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE ts_payload_builds
+            SET status = ?,
+                name = COALESCE(?, name),
+                artifact = COALESCE(?, artifact),
+                size_bytes = COALESCE(?, size_bytes),
+                error = COALESCE(?, error),
+                updated_at = ?
+            WHERE id = ?
+            "#,
+        )
+        .bind(status)
+        .bind(name)
+        .bind(artifact)
+        .bind(size_bytes)
+        .bind(error)
+        .bind(updated_at)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 #[cfg(test)]

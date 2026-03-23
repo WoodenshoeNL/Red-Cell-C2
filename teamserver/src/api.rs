@@ -971,6 +971,10 @@ pub fn api_routes(api: ApiRuntime) -> Router<TeamserverState> {
         .route("/listeners/{name}/stop", put(stop_listener))
         .route("/listeners/{name}/mark", post(mark_listener))
         .route("/webhooks/stats", get(get_webhook_stats))
+        .route("/payloads", get(list_payloads))
+        .route("/payloads/build", post(submit_payload_build))
+        .route("/payloads/jobs/{job_id}", get(get_payload_job))
+        .route("/payloads/{id}/download", get(download_payload))
         .route("/payload-cache", post(flush_payload_cache))
         .route_layer(middleware::from_fn_with_state(api, api_auth_middleware));
 
@@ -1048,6 +1052,10 @@ struct ApiInfoResponse {
         stop_listener,
         mark_listener,
         get_webhook_stats,
+        list_payloads,
+        submit_payload_build,
+        get_payload_job,
+        download_payload,
         flush_payload_cache
     ),
     components(
@@ -1058,6 +1066,10 @@ struct ApiInfoResponse {
             WebhookStats,
             DiscordWebhookStats,
             FlushPayloadCacheResponse,
+            PayloadSummary,
+            PayloadBuildRequest,
+            PayloadBuildSubmitResponse,
+            PayloadJobStatus,
             AgentTaskQueuedResponse,
             AuditPage,
             SessionActivityPage,
@@ -1102,6 +1114,7 @@ struct ApiInfoResponse {
         (name = "operators", description = "Administrative operator-management endpoints"),
         (name = "listeners", description = "Listener lifecycle management endpoints"),
         (name = "webhooks", description = "Outbound webhook delivery statistics"),
+        (name = "payloads", description = "Payload build and download endpoints"),
         (name = "payload_cache", description = "Payload build artifact cache management")
     )
 )]
@@ -2825,6 +2838,402 @@ async fn get_webhook_stats(
     };
 
     Json(WebhookStats { discord })
+}
+
+// ── Payload build REST endpoints ──────────────────────────────────────────────
+
+/// Summary returned by `GET /payloads` for each completed build.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+struct PayloadSummary {
+    /// Unique build/payload identifier.
+    id: String,
+    /// Display name of the payload (e.g. `"demon.x64.exe"`).
+    name: String,
+    /// Target CPU architecture.
+    arch: String,
+    /// File format: `"exe"`, `"dll"`, or `"bin"`.
+    format: String,
+    /// RFC 3339 build timestamp.
+    built_at: String,
+    /// Artifact size in bytes, if available.
+    size_bytes: Option<u64>,
+}
+
+/// Request body for `POST /payloads/build`.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+struct PayloadBuildRequest {
+    /// Name of the listener to embed in the payload.
+    listener: String,
+    /// Target CPU architecture (`"x64"` or `"x86"`).
+    arch: String,
+    /// Desired output format: `"exe"`, `"dll"`, or `"bin"`.
+    format: String,
+    /// Optional agent sleep interval in seconds.
+    sleep: Option<u64>,
+}
+
+/// Response returned by `POST /payloads/build`.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+struct PayloadBuildSubmitResponse {
+    /// Server-assigned build job identifier.
+    job_id: String,
+}
+
+/// Response returned by `GET /payloads/jobs/{job_id}`.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+struct PayloadJobStatus {
+    /// Build job identifier.
+    job_id: String,
+    /// Current status: `"pending"`, `"running"`, `"done"`, or `"error"`.
+    status: String,
+    /// Payload identifier (set when status is `"done"`).
+    payload_id: Option<String>,
+    /// Artifact size in bytes (set when status is `"done"`).
+    size_bytes: Option<u64>,
+    /// Error message (set when status is `"error"`).
+    error: Option<String>,
+}
+
+/// Map CLI-style format names to Havoc builder format strings.
+fn cli_format_to_havoc(format: &str) -> Result<&'static str, String> {
+    match format {
+        "exe" => Ok("Windows Exe"),
+        "dll" => Ok("Windows Dll"),
+        "bin" => Ok("Windows Shellcode"),
+        other => Err(format!("unsupported format '{other}': expected exe, dll, or bin")),
+    }
+}
+
+fn now_rfc3339() -> String {
+    OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_else(|_| "unknown".to_owned())
+}
+
+#[utoipa::path(
+    get,
+    path = "/payloads",
+    context_path = "/api/v1",
+    tag = "payloads",
+    security(("api_key" = [])),
+    responses(
+        (status = 200, description = "List of completed payload builds", body = Vec<PayloadSummary>),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody),
+    )
+)]
+async fn list_payloads(State(state): State<TeamserverState>, _identity: ReadApiAccess) -> Response {
+    match state.database.payload_builds().list().await {
+        Ok(records) => {
+            let summaries: Vec<PayloadSummary> = records
+                .into_iter()
+                .filter(|r| r.status == "done")
+                .map(|r| PayloadSummary {
+                    id: r.id,
+                    name: r.name,
+                    arch: r.arch,
+                    format: r.format,
+                    built_at: r.created_at,
+                    size_bytes: r.size_bytes.map(|s| s as u64),
+                })
+                .collect();
+            Json(summaries).into_response()
+        }
+        Err(err) => {
+            tracing::error!(error = %err, "failed to list payload builds");
+            json_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "payload_list_failed",
+                err.to_string(),
+            )
+        }
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/payloads/build",
+    context_path = "/api/v1",
+    tag = "payloads",
+    security(("api_key" = [])),
+    request_body = PayloadBuildRequest,
+    responses(
+        (status = 202, description = "Build job submitted", body = PayloadBuildSubmitResponse),
+        (status = 400, description = "Invalid build request", body = ApiErrorBody),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 404, description = "Listener not found", body = ApiErrorBody),
+        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody),
+    )
+)]
+async fn submit_payload_build(
+    State(state): State<TeamserverState>,
+    identity: TaskAgentApiAccess,
+    Json(request): Json<PayloadBuildRequest>,
+) -> Response {
+    // Validate format.
+    let havoc_format = match cli_format_to_havoc(&request.format) {
+        Ok(f) => f,
+        Err(msg) => {
+            return json_error_response(StatusCode::BAD_REQUEST, "invalid_format", msg);
+        }
+    };
+
+    // Validate architecture.
+    if !matches!(request.arch.as_str(), "x64" | "x86") {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_arch",
+            format!("unsupported architecture '{}': expected x64 or x86", request.arch),
+        );
+    }
+
+    // Look up the listener.
+    let listener_summary = match state.listeners.summary(&request.listener).await {
+        Ok(s) => s,
+        Err(_) => {
+            return json_error_response(
+                StatusCode::NOT_FOUND,
+                "listener_not_found",
+                format!("listener '{}' not found", request.listener),
+            );
+        }
+    };
+
+    let job_id = Uuid::new_v4().to_string();
+    let now = now_rfc3339();
+
+    let record = crate::PayloadBuildRecord {
+        id: job_id.clone(),
+        status: "pending".to_owned(),
+        name: String::new(),
+        arch: request.arch.clone(),
+        format: request.format.clone(),
+        listener: request.listener.clone(),
+        sleep_secs: request.sleep.map(|s| s as i64),
+        artifact: None,
+        size_bytes: None,
+        error: None,
+        created_at: now.clone(),
+        updated_at: now,
+    };
+
+    if let Err(err) = state.database.payload_builds().create(&record).await {
+        tracing::error!(error = %err, "failed to create payload build record");
+        return json_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "payload_build_create_failed",
+            err.to_string(),
+        );
+    }
+
+    // Spawn the background build task.
+    let db = state.database.clone();
+    let payload_builder = state.payload_builder.clone();
+    let webhooks = state.webhooks.clone();
+    let actor = identity.key_id.clone();
+    let listener_config = listener_summary.config.clone();
+    let listener_name = request.listener.clone();
+    let arch = request.arch.clone();
+    let format_cli = request.format.clone();
+    let build_job_id = job_id.clone();
+
+    let build_request = red_cell_common::operator::BuildPayloadRequestInfo {
+        agent_type: "Demon".to_owned(),
+        listener: request.listener.clone(),
+        arch: request.arch.clone(),
+        format: havoc_format.to_owned(),
+        config: request
+            .sleep
+            .map_or_else(String::new, |s| serde_json::json!({"Sleep": s}).to_string()),
+    };
+
+    tokio::spawn(async move {
+        // Mark running.
+        let _ = db
+            .payload_builds()
+            .update_status(&build_job_id, "running", None, None, None, None, &now_rfc3339())
+            .await;
+
+        match payload_builder.build_payload(&listener_config, &build_request, |_progress| {}).await
+        {
+            Ok(artifact) => {
+                let size = artifact.bytes.len() as i64;
+                let _ = db
+                    .payload_builds()
+                    .update_status(
+                        &build_job_id,
+                        "done",
+                        Some(&artifact.file_name),
+                        Some(&artifact.bytes),
+                        Some(size),
+                        None,
+                        &now_rfc3339(),
+                    )
+                    .await;
+
+                record_audit_entry(
+                    &db,
+                    &webhooks,
+                    &actor,
+                    "payload.build",
+                    "payload",
+                    Some(build_job_id),
+                    audit_details(
+                        AuditResultStatus::Success,
+                        None,
+                        None,
+                        Some(parameter_object([
+                            ("listener", Value::String(listener_name)),
+                            ("arch", Value::String(arch)),
+                            ("format", Value::String(format_cli)),
+                        ])),
+                    ),
+                )
+                .await;
+            }
+            Err(err) => {
+                let _ = db
+                    .payload_builds()
+                    .update_status(
+                        &build_job_id,
+                        "error",
+                        None,
+                        None,
+                        None,
+                        Some(&err.to_string()),
+                        &now_rfc3339(),
+                    )
+                    .await;
+
+                record_audit_entry(
+                    &db,
+                    &webhooks,
+                    &actor,
+                    "payload.build",
+                    "payload",
+                    Some(build_job_id),
+                    audit_details(
+                        AuditResultStatus::Failure,
+                        None,
+                        None,
+                        Some(parameter_object([
+                            ("listener", Value::String(listener_name)),
+                            ("arch", Value::String(arch)),
+                            ("format", Value::String(format_cli)),
+                            ("error", Value::String(err.to_string())),
+                        ])),
+                    ),
+                )
+                .await;
+            }
+        }
+    });
+
+    (StatusCode::ACCEPTED, Json(PayloadBuildSubmitResponse { job_id })).into_response()
+}
+
+#[utoipa::path(
+    get,
+    path = "/payloads/jobs/{job_id}",
+    context_path = "/api/v1",
+    tag = "payloads",
+    security(("api_key" = [])),
+    params(
+        ("job_id" = String, Path, description = "Build job identifier")
+    ),
+    responses(
+        (status = 200, description = "Build job status", body = PayloadJobStatus),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 404, description = "Job not found", body = ApiErrorBody),
+        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody),
+    )
+)]
+async fn get_payload_job(
+    State(state): State<TeamserverState>,
+    Path(job_id): Path<String>,
+    _identity: ReadApiAccess,
+) -> Response {
+    match state.database.payload_builds().get(&job_id).await {
+        Ok(Some(record)) => {
+            let payload_id = if record.status == "done" { Some(record.id.clone()) } else { None };
+            Json(PayloadJobStatus {
+                job_id: record.id,
+                status: record.status,
+                payload_id,
+                size_bytes: record.size_bytes.map(|s| s as u64),
+                error: record.error,
+            })
+            .into_response()
+        }
+        Ok(None) => json_error_response(
+            StatusCode::NOT_FOUND,
+            "job_not_found",
+            format!("build job '{job_id}' not found"),
+        ),
+        Err(err) => {
+            tracing::error!(error = %err, "failed to get payload build job");
+            json_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "payload_job_fetch_failed",
+                err.to_string(),
+            )
+        }
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/payloads/{id}/download",
+    context_path = "/api/v1",
+    tag = "payloads",
+    security(("api_key" = [])),
+    params(
+        ("id" = String, Path, description = "Payload build identifier")
+    ),
+    responses(
+        (status = 200, description = "Raw payload binary", content_type = "application/octet-stream"),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 404, description = "Payload not found or not yet built", body = ApiErrorBody),
+        (status = 429, description = "Rate limit exceeded", body = ApiErrorBody),
+    )
+)]
+async fn download_payload(
+    State(state): State<TeamserverState>,
+    Path(id): Path<String>,
+    _identity: ReadApiAccess,
+) -> Response {
+    match state.database.payload_builds().get(&id).await {
+        Ok(Some(record)) if record.status == "done" && record.artifact.is_some() => {
+            let artifact = record.artifact.expect("checked above");
+            let file_name =
+                if record.name.is_empty() { format!("payload-{id}.bin") } else { record.name };
+            (
+                StatusCode::OK,
+                [
+                    (CONTENT_TYPE, "application/octet-stream"),
+                    (CONTENT_DISPOSITION, &format!("attachment; filename=\"{file_name}\"")),
+                ],
+                artifact,
+            )
+                .into_response()
+        }
+        Ok(Some(_)) => json_error_response(
+            StatusCode::NOT_FOUND,
+            "payload_not_ready",
+            format!("payload '{id}' is not yet built or build failed"),
+        ),
+        Ok(None) => json_error_response(
+            StatusCode::NOT_FOUND,
+            "payload_not_found",
+            format!("payload '{id}' not found"),
+        ),
+        Err(err) => {
+            tracing::error!(error = %err, "failed to fetch payload for download");
+            json_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "payload_download_failed",
+                err.to_string(),
+            )
+        }
+    }
 }
 
 /// Response returned after flushing the payload build artifact cache.
@@ -8114,5 +8523,646 @@ mod tests {
         let record = &page.items[0];
         assert_eq!(record.action, "operator.update_role");
         assert_eq!(record.result_status, crate::AuditResultStatus::Success);
+    }
+
+    // ── GET /payloads ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_payloads_returns_empty_initially() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/payloads")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert!(body.as_array().expect("should be array").is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_payloads_returns_completed_builds() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let record = crate::PayloadBuildRecord {
+            id: "build-123".to_owned(),
+            status: "done".to_owned(),
+            name: "demon.x64.exe".to_owned(),
+            arch: "x64".to_owned(),
+            format: "exe".to_owned(),
+            listener: "http1".to_owned(),
+            sleep_secs: None,
+            artifact: Some(vec![0xDE, 0xAD]),
+            size_bytes: Some(2),
+            error: None,
+            created_at: "2026-03-23T10:00:00Z".to_owned(),
+            updated_at: "2026-03-23T10:00:00Z".to_owned(),
+        };
+        database.payload_builds().create(&record).await.expect("create");
+
+        let (app, _, _) = test_router_with_database(
+            database,
+            Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)),
+        )
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/payloads")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        let items = body.as_array().expect("should be array");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["id"], "build-123");
+        assert_eq!(items[0]["name"], "demon.x64.exe");
+        assert_eq!(items[0]["arch"], "x64");
+        assert_eq!(items[0]["format"], "exe");
+        assert_eq!(items[0]["size_bytes"], 2);
+    }
+
+    #[tokio::test]
+    async fn list_payloads_excludes_pending_builds() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let record = crate::PayloadBuildRecord {
+            id: "pending-job".to_owned(),
+            status: "pending".to_owned(),
+            name: String::new(),
+            arch: "x64".to_owned(),
+            format: "exe".to_owned(),
+            listener: "http1".to_owned(),
+            sleep_secs: None,
+            artifact: None,
+            size_bytes: None,
+            error: None,
+            created_at: "2026-03-23T10:00:00Z".to_owned(),
+            updated_at: "2026-03-23T10:00:00Z".to_owned(),
+        };
+        database.payload_builds().create(&record).await.expect("create");
+
+        let (app, _, _) = test_router_with_database(
+            database,
+            Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)),
+        )
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/payloads")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert!(body.as_array().expect("should be array").is_empty());
+    }
+
+    // ── POST /payloads/build ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn submit_payload_build_rejects_invalid_format() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/payloads/build")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"listener":"http1","arch":"x64","format":"elf"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_format");
+    }
+
+    #[tokio::test]
+    async fn submit_payload_build_rejects_invalid_arch() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/payloads/build")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"listener":"http1","arch":"arm64","format":"exe"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_arch");
+    }
+
+    #[tokio::test]
+    async fn submit_payload_build_rejects_missing_listener() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/payloads/build")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"listener":"nonexistent","arch":"x64","format":"exe"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "listener_not_found");
+    }
+
+    #[tokio::test]
+    async fn submit_payload_build_requires_auth() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/payloads/build")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"listener":"http1","arch":"x64","format":"exe"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ── GET /payloads/jobs/{job_id} ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_payload_job_returns_not_found_for_missing_job() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/payloads/jobs/nonexistent")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "job_not_found");
+    }
+
+    #[tokio::test]
+    async fn get_payload_job_returns_status_for_pending_job() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let record = crate::PayloadBuildRecord {
+            id: "job-pending".to_owned(),
+            status: "pending".to_owned(),
+            name: String::new(),
+            arch: "x64".to_owned(),
+            format: "exe".to_owned(),
+            listener: "http1".to_owned(),
+            sleep_secs: None,
+            artifact: None,
+            size_bytes: None,
+            error: None,
+            created_at: "2026-03-23T10:00:00Z".to_owned(),
+            updated_at: "2026-03-23T10:00:00Z".to_owned(),
+        };
+        database.payload_builds().create(&record).await.expect("create");
+
+        let (app, _, _) = test_router_with_database(
+            database,
+            Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)),
+        )
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/payloads/jobs/job-pending")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["job_id"], "job-pending");
+        assert_eq!(body["status"], "pending");
+        assert!(body["payload_id"].is_null());
+    }
+
+    #[tokio::test]
+    async fn get_payload_job_returns_payload_id_for_done_job() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let record = crate::PayloadBuildRecord {
+            id: "job-done".to_owned(),
+            status: "done".to_owned(),
+            name: "demon.x64.exe".to_owned(),
+            arch: "x64".to_owned(),
+            format: "exe".to_owned(),
+            listener: "http1".to_owned(),
+            sleep_secs: None,
+            artifact: Some(vec![0xCA, 0xFE]),
+            size_bytes: Some(2),
+            error: None,
+            created_at: "2026-03-23T10:00:00Z".to_owned(),
+            updated_at: "2026-03-23T10:01:00Z".to_owned(),
+        };
+        database.payload_builds().create(&record).await.expect("create");
+
+        let (app, _, _) = test_router_with_database(
+            database,
+            Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)),
+        )
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/payloads/jobs/job-done")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["job_id"], "job-done");
+        assert_eq!(body["status"], "done");
+        assert_eq!(body["payload_id"], "job-done");
+        assert_eq!(body["size_bytes"], 2);
+    }
+
+    #[tokio::test]
+    async fn get_payload_job_returns_error_for_failed_job() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let record = crate::PayloadBuildRecord {
+            id: "job-err".to_owned(),
+            status: "error".to_owned(),
+            name: String::new(),
+            arch: "x64".to_owned(),
+            format: "exe".to_owned(),
+            listener: "http1".to_owned(),
+            sleep_secs: None,
+            artifact: None,
+            size_bytes: None,
+            error: Some("compiler not found".to_owned()),
+            created_at: "2026-03-23T10:00:00Z".to_owned(),
+            updated_at: "2026-03-23T10:01:00Z".to_owned(),
+        };
+        database.payload_builds().create(&record).await.expect("create");
+
+        let (app, _, _) = test_router_with_database(
+            database,
+            Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)),
+        )
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/payloads/jobs/job-err")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["status"], "error");
+        assert_eq!(body["error"], "compiler not found");
+    }
+
+    // ── GET /payloads/{id}/download ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn download_payload_returns_artifact_bytes() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let artifact = vec![0x4D, 0x5A, 0x90, 0x00]; // MZ header stub
+        let record = crate::PayloadBuildRecord {
+            id: "dl-test".to_owned(),
+            status: "done".to_owned(),
+            name: "demon.x64.exe".to_owned(),
+            arch: "x64".to_owned(),
+            format: "exe".to_owned(),
+            listener: "http1".to_owned(),
+            sleep_secs: None,
+            artifact: Some(artifact.clone()),
+            size_bytes: Some(artifact.len() as i64),
+            error: None,
+            created_at: "2026-03-23T10:00:00Z".to_owned(),
+            updated_at: "2026-03-23T10:01:00Z".to_owned(),
+        };
+        database.payload_builds().create(&record).await.expect("create");
+
+        let (app, _, _) = test_router_with_database(
+            database,
+            Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)),
+        )
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/payloads/dl-test/download")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("content-type").and_then(|v| v.to_str().ok()),
+            Some("application/octet-stream")
+        );
+        assert!(
+            response
+                .headers()
+                .get("content-disposition")
+                .and_then(|v| v.to_str().ok())
+                .expect("content-disposition header")
+                .contains("demon.x64.exe")
+        );
+
+        let body_bytes = to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        assert_eq!(body_bytes.as_ref(), &artifact);
+    }
+
+    #[tokio::test]
+    async fn download_payload_returns_not_found_for_pending_build() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let record = crate::PayloadBuildRecord {
+            id: "dl-pending".to_owned(),
+            status: "pending".to_owned(),
+            name: String::new(),
+            arch: "x64".to_owned(),
+            format: "exe".to_owned(),
+            listener: "http1".to_owned(),
+            sleep_secs: None,
+            artifact: None,
+            size_bytes: None,
+            error: None,
+            created_at: "2026-03-23T10:00:00Z".to_owned(),
+            updated_at: "2026-03-23T10:00:00Z".to_owned(),
+        };
+        database.payload_builds().create(&record).await.expect("create");
+
+        let (app, _, _) = test_router_with_database(
+            database,
+            Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)),
+        )
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/payloads/dl-pending/download")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "payload_not_ready");
+    }
+
+    #[tokio::test]
+    async fn download_payload_returns_not_found_for_missing_id() {
+        let app = test_router(Some((60, "rest-admin", "secret-admin", OperatorRole::Admin))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/payloads/no-such-id/download")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "payload_not_found");
+    }
+
+    // ── RBAC: analyst can read payloads but not build ───────────────────
+
+    #[tokio::test]
+    async fn analyst_can_list_payloads() {
+        let app =
+            test_router(Some((60, "rest-analyst", "secret-analyst", OperatorRole::Analyst))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/payloads")
+                    .header(API_KEY_HEADER, "secret-analyst")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn analyst_cannot_submit_payload_build() {
+        let app =
+            test_router(Some((60, "rest-analyst", "secret-analyst", OperatorRole::Analyst))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/payloads/build")
+                    .header(API_KEY_HEADER, "secret-analyst")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"listener":"http1","arch":"x64","format":"exe"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    // ── cli_format_to_havoc unit tests ──────────────────────────────────
+
+    #[test]
+    fn cli_format_to_havoc_maps_valid_formats() {
+        assert_eq!(cli_format_to_havoc("exe"), Ok("Windows Exe"));
+        assert_eq!(cli_format_to_havoc("dll"), Ok("Windows Dll"));
+        assert_eq!(cli_format_to_havoc("bin"), Ok("Windows Shellcode"));
+    }
+
+    #[test]
+    fn cli_format_to_havoc_rejects_unknown_formats() {
+        assert!(cli_format_to_havoc("elf").is_err());
+        assert!(cli_format_to_havoc("").is_err());
+    }
+
+    // ── PayloadBuildRepository unit tests ────────────────────────────────
+
+    #[tokio::test]
+    async fn payload_build_repository_create_and_get() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let repo = db.payload_builds();
+
+        let record = crate::PayloadBuildRecord {
+            id: "test-1".to_owned(),
+            status: "pending".to_owned(),
+            name: String::new(),
+            arch: "x64".to_owned(),
+            format: "exe".to_owned(),
+            listener: "http1".to_owned(),
+            sleep_secs: Some(10),
+            artifact: None,
+            size_bytes: None,
+            error: None,
+            created_at: "2026-03-23T10:00:00Z".to_owned(),
+            updated_at: "2026-03-23T10:00:00Z".to_owned(),
+        };
+
+        repo.create(&record).await.expect("create");
+        let fetched = repo.get("test-1").await.expect("get").expect("should exist");
+        assert_eq!(fetched.id, "test-1");
+        assert_eq!(fetched.status, "pending");
+        assert_eq!(fetched.arch, "x64");
+        assert_eq!(fetched.sleep_secs, Some(10));
+    }
+
+    #[tokio::test]
+    async fn payload_build_repository_get_missing_returns_none() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let result = db.payload_builds().get("nonexistent").await.expect("get");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn payload_build_repository_list_returns_all() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let repo = db.payload_builds();
+
+        for i in 0..3 {
+            let record = crate::PayloadBuildRecord {
+                id: format!("list-{i}"),
+                status: "done".to_owned(),
+                name: format!("payload-{i}.exe"),
+                arch: "x64".to_owned(),
+                format: "exe".to_owned(),
+                listener: "http1".to_owned(),
+                sleep_secs: None,
+                artifact: Some(vec![0xDE, 0xAD]),
+                size_bytes: Some(2),
+                error: None,
+                created_at: format!("2026-03-23T10:0{i}:00Z"),
+                updated_at: format!("2026-03-23T10:0{i}:00Z"),
+            };
+            repo.create(&record).await.expect("create");
+        }
+
+        let all = repo.list().await.expect("list");
+        assert_eq!(all.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn payload_build_repository_update_status() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let repo = db.payload_builds();
+
+        let record = crate::PayloadBuildRecord {
+            id: "upd-1".to_owned(),
+            status: "pending".to_owned(),
+            name: String::new(),
+            arch: "x64".to_owned(),
+            format: "exe".to_owned(),
+            listener: "http1".to_owned(),
+            sleep_secs: None,
+            artifact: None,
+            size_bytes: None,
+            error: None,
+            created_at: "2026-03-23T10:00:00Z".to_owned(),
+            updated_at: "2026-03-23T10:00:00Z".to_owned(),
+        };
+        repo.create(&record).await.expect("create");
+
+        let updated = repo
+            .update_status(
+                "upd-1",
+                "done",
+                Some("demon.x64.exe"),
+                Some(&[0xCA, 0xFE]),
+                Some(2),
+                None,
+                "2026-03-23T10:01:00Z",
+            )
+            .await
+            .expect("update");
+        assert!(updated);
+
+        let fetched = repo.get("upd-1").await.expect("get").expect("exists");
+        assert_eq!(fetched.status, "done");
+        assert_eq!(fetched.name, "demon.x64.exe");
+        assert_eq!(fetched.artifact, Some(vec![0xCA, 0xFE]));
+        assert_eq!(fetched.size_bytes, Some(2));
+        assert_eq!(fetched.updated_at, "2026-03-23T10:01:00Z");
+    }
+
+    #[tokio::test]
+    async fn payload_build_repository_update_missing_returns_false() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let result = db
+            .payload_builds()
+            .update_status("ghost", "done", None, None, None, None, "2026-03-23T10:00:00Z")
+            .await
+            .expect("update");
+        assert!(!result);
     }
 }

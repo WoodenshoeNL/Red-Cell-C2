@@ -87,6 +87,217 @@ pub async fn run(client: &ApiClient) -> Result<StatusData, CliError> {
 mod tests {
     use super::*;
 
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    fn mock_cfg(server_uri: &str) -> crate::config::ResolvedConfig {
+        crate::config::ResolvedConfig {
+            server: server_uri.to_owned(),
+            token: "test-token".to_owned(),
+            timeout: 5,
+        }
+    }
+
+    // ── run() error-path tests ───────────────────────────────────────────────
+
+    /// When the server is unreachable (port 1 is never open), `run()` must
+    /// return `CliError::ServerUnreachable` on the very first call (`GET /`).
+    #[tokio::test]
+    async fn run_server_unreachable_on_get_root() {
+        let cfg = mock_cfg("https://127.0.0.1:1");
+        let client = ApiClient::new(&cfg).unwrap();
+        let result = run(&client).await;
+        assert!(
+            matches!(result, Err(CliError::ServerUnreachable(_))),
+            "expected ServerUnreachable, got: {result:?}",
+        );
+    }
+
+    /// When `GET /agents` returns 401 (bad token), `run()` must propagate
+    /// `CliError::AuthFailure`.  The root endpoint succeeds first to confirm
+    /// that only the auth step is failing.
+    #[tokio::test]
+    async fn run_auth_failure_on_get_agents() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"version": "v1"})),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/agents"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let cfg = mock_cfg(&server.uri());
+        let client = ApiClient::new(&cfg).unwrap();
+        let result = run(&client).await;
+        assert!(
+            matches!(result, Err(CliError::AuthFailure(_))),
+            "expected AuthFailure, got: {result:?}",
+        );
+    }
+
+    /// When `GET /agents` returns 403, `run()` must also propagate
+    /// `CliError::AuthFailure` (forbidden, not just unauthorised).
+    #[tokio::test]
+    async fn run_auth_failure_on_get_agents_403() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"version": "v1"})),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/agents"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+
+        let cfg = mock_cfg(&server.uri());
+        let client = ApiClient::new(&cfg).unwrap();
+        let result = run(&client).await;
+        assert!(
+            matches!(result, Err(CliError::AuthFailure(_))),
+            "expected AuthFailure on 403, got: {result:?}",
+        );
+    }
+
+    /// Partial-failure path: `GET /` and `GET /agents` both succeed, but
+    /// `GET /listeners` returns 500.  `run()` must return `CliError::ServerError`.
+    #[tokio::test]
+    async fn run_server_error_on_get_listeners() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"version": "v1"})),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/agents"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/listeners"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
+            .mount(&server)
+            .await;
+
+        let cfg = mock_cfg(&server.uri());
+        let client = ApiClient::new(&cfg).unwrap();
+        let result = run(&client).await;
+        assert!(
+            matches!(result, Err(CliError::ServerError(_))),
+            "expected ServerError on listeners 500, got: {result:?}",
+        );
+    }
+
+    /// Partial-failure path: `GET /listeners` returns 401 after both earlier
+    /// calls succeed.  `run()` must return `CliError::AuthFailure`.
+    #[tokio::test]
+    async fn run_auth_failure_on_get_listeners() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"version": "v1"})),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/agents"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/listeners"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let cfg = mock_cfg(&server.uri());
+        let client = ApiClient::new(&cfg).unwrap();
+        let result = run(&client).await;
+        assert!(
+            matches!(result, Err(CliError::AuthFailure(_))),
+            "expected AuthFailure on listeners 401, got: {result:?}",
+        );
+    }
+
+    /// Happy-path smoke test: all three endpoints succeed and `run()` returns
+    /// the correct counts.
+    #[tokio::test]
+    async fn run_success_returns_correct_counts() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"version": "v2"})),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/agents"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!([{"id": "a1"}, {"id": "a2"}])),
+            )
+            .mount(&server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/listeners"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([{"name": "http1"}])),
+            )
+            .mount(&server)
+            .await;
+
+        let cfg = mock_cfg(&server.uri());
+        let client = ApiClient::new(&cfg).unwrap();
+        let result = run(&client).await.unwrap();
+        assert_eq!(result.version, "v2");
+        assert_eq!(result.agents, 2);
+        assert_eq!(result.listeners, 1);
+        assert!(result.uptime_secs.is_none());
+    }
+
+    // ── StatusData serialisation ─────────────────────────────────────────────
+
     #[test]
     fn status_data_serialises_with_null_uptime() {
         let data =

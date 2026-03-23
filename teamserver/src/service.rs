@@ -728,7 +728,11 @@ async fn handle_agent_instance_register(
             .unwrap_or_default()
             .to_owned(),
         base_address: 0,
-        process_pid: register_info.get("ProcessPID").and_then(Value::as_u64).unwrap_or(0) as u32,
+        process_pid: register_info
+            .get("ProcessPID")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .min(u32::MAX as u64) as u32,
         process_tid: 0,
         process_ppid: 0,
         process_arch: register_info
@@ -744,8 +748,16 @@ async fn handle_agent_instance_register(
             .to_owned(),
         os_build: 0,
         os_arch: register_info.get("OSArch").and_then(Value::as_str).unwrap_or_default().to_owned(),
-        sleep_delay: register_info.get("SleepDelay").and_then(Value::as_u64).unwrap_or(0) as u32,
-        sleep_jitter: register_info.get("SleepJitter").and_then(Value::as_u64).unwrap_or(0) as u32,
+        sleep_delay: register_info
+            .get("SleepDelay")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .min(u32::MAX as u64) as u32,
+        sleep_jitter: register_info
+            .get("SleepJitter")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .min(u32::MAX as u64) as u32,
         kill_date: None,
         working_hours: None,
         first_call_in: now.clone(),
@@ -1777,6 +1789,42 @@ mod tests {
             .await
             .expect_err("should fail with invalid hex");
         assert!(matches!(err, ServiceBridgeError::MissingField(_)));
+    }
+
+    #[tokio::test]
+    async fn handle_agent_instance_register_saturates_u32_fields() {
+        let (db, wh) = test_audit_deps().await;
+        let registry = test_registry().await;
+        let events = EventBus::default();
+
+        let over_u32_max: u64 = u32::MAX as u64 + 1;
+        let message = serde_json::json!({
+            "Head": { "Type": HEAD_AGENT },
+            "Body": {
+                "Type": BODY_AGENT_REGISTER,
+                "AgentHeader": {
+                    "Size": "0",
+                    "MagicValue": "0",
+                    "AgentID": "DEAD0001",
+                },
+                "RegisterInfo": {
+                    "Hostname": "H1",
+                    "Username": "u1",
+                    "ProcessPID": over_u32_max,
+                    "SleepDelay": over_u32_max,
+                    "SleepJitter": over_u32_max,
+                },
+            },
+        });
+
+        handle_agent_instance_register(&message, &events, &registry, &db, &wh)
+            .await
+            .expect("registration should succeed");
+
+        let agent = registry.get(0xDEAD_0001).await.expect("agent should exist");
+        assert_eq!(agent.process_pid, u32::MAX, "ProcessPID should saturate at u32::MAX");
+        assert_eq!(agent.sleep_delay, u32::MAX, "SleepDelay should saturate at u32::MAX");
+        assert_eq!(agent.sleep_jitter, u32::MAX, "SleepJitter should saturate at u32::MAX");
     }
 
     // ── ListenerStart handler tests ─────────────────────────────────

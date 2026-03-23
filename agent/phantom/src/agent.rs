@@ -2,11 +2,13 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use red_cell_common::crypto::{
     AgentCryptoMaterial, derive_session_keys, generate_agent_crypto_material,
 };
 use red_cell_common::demon::DemonCommand;
+use time::{OffsetDateTime, Time};
 use tracing::{info, warn};
 
 use crate::command::{PendingCallback, PhantomState, execute};
@@ -167,7 +169,7 @@ impl PhantomAgent {
                 break;
             }
 
-            tokio::time::sleep(std::time::Duration::from_millis(self.compute_sleep_delay())).await;
+            tokio::time::sleep(Duration::from_millis(self.compute_sleep_delay())).await;
             if self.checkin().await? {
                 break;
             }
@@ -178,6 +180,14 @@ impl PhantomAgent {
 
     fn compute_sleep_delay(&self) -> u64 {
         let base = u64::from(self.config.sleep_delay_ms);
+        let now = current_local_time();
+        if let Some(working_hours) = self.config.working_hours
+            && !is_within_working_hours_at(working_hours, now)
+            && base > 0
+        {
+            return sleep_until_working_hours(working_hours, now);
+        }
+
         if self.config.sleep_jitter == 0 || base == 0 {
             return base;
         }
@@ -225,6 +235,55 @@ impl PhantomAgent {
     }
 }
 
+fn current_local_time() -> OffsetDateTime {
+    OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc())
+}
+
+fn is_within_working_hours_at(working_hours: i32, now: OffsetDateTime) -> bool {
+    let working_hours = working_hours as u32;
+    if (working_hours >> 22) & 1 == 0 {
+        return true;
+    }
+
+    let start = unpack_working_hours_time(working_hours, 17, 11);
+    let end = unpack_working_hours_time(working_hours, 6, 0);
+    let current = now.time();
+
+    if current.hour() < start.hour() || current.hour() > end.hour() {
+        return false;
+    }
+    if current.hour() == start.hour() && current.minute() < start.minute() {
+        return false;
+    }
+    if current.hour() == end.hour() && current.minute() > end.minute() {
+        return false;
+    }
+
+    true
+}
+
+fn sleep_until_working_hours(working_hours: i32, now: OffsetDateTime) -> u64 {
+    let working_hours = working_hours as u32;
+    let start = unpack_working_hours_time(working_hours, 17, 11);
+    let end = unpack_working_hours_time(working_hours, 6, 0);
+    let current_minutes = u64::from(now.hour()) * 60 + u64::from(now.minute());
+    let start_minutes = u64::from(start.hour()) * 60 + u64::from(start.minute());
+    let end_minutes = u64::from(end.hour()) * 60 + u64::from(end.minute());
+
+    let minutes_until_start = if current_minutes > end_minutes {
+        ((24 * 60) - current_minutes) + start_minutes
+    } else {
+        start_minutes.saturating_sub(current_minutes)
+    };
+    minutes_until_start.saturating_mul(60_000)
+}
+
+fn unpack_working_hours_time(working_hours: u32, hour_shift: u32, minute_shift: u32) -> Time {
+    let hour = ((working_hours >> hour_shift) & 0b01_1111) as u8;
+    let minute = ((working_hours >> minute_shift) & 0b11_1111) as u8;
+    Time::from_hms(hour.min(23), minute.min(59), 0).unwrap_or(Time::MIDNIGHT)
+}
+
 fn read_trimmed(path: impl Into<PathBuf>) -> Option<String> {
     let path = path.into();
     fs::read_to_string(path).ok().map(|value| value.trim().to_string())
@@ -258,6 +317,7 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::mpsc;
     use std::thread;
+    use time::{Date, Month, OffsetDateTime, PrimitiveDateTime, Time};
 
     use red_cell_common::crypto::{
         ctr_blocks_for_len, decrypt_agent_data_at_offset, encrypt_agent_data,
@@ -265,8 +325,8 @@ mod tests {
     };
     use red_cell_common::demon::{DemonCommand, DemonEnvelope, DemonMessage, DemonPackage};
 
-    use super::PhantomAgent;
     use super::callback_ctr_blocks;
+    use super::{PhantomAgent, is_within_working_hours_at, sleep_until_working_hours};
     use crate::config::PhantomConfig;
 
     #[test]
@@ -307,6 +367,30 @@ mod tests {
 
         assert_eq!(agent.compute_sleep_delay(), 1_337);
         Ok(())
+    }
+
+    #[test]
+    fn compute_sleep_delay_waits_until_working_hours_resume() -> Result<(), Box<dyn Error>> {
+        let config = PhantomConfig {
+            sleep_delay_ms: 5_000,
+            working_hours: Some(encode_working_hours(9, 0, 17, 0)),
+            ..PhantomConfig::default()
+        };
+        let agent = PhantomAgent::new(config)?;
+        let now = local_time(18, 30);
+
+        assert!(!is_within_working_hours_at(agent.config.working_hours.unwrap_or_default(), now));
+        assert_eq!(
+            sleep_until_working_hours(agent.config.working_hours.unwrap_or_default(), now),
+            52_200_000
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn working_hours_allows_callback_during_window() {
+        let now = local_time(9, 30);
+        assert!(is_within_working_hours_at(encode_working_hours(9, 0, 17, 0), now));
     }
 
     #[tokio::test]
@@ -484,5 +568,26 @@ mod tests {
         )?;
         stream.write_all(body)?;
         Ok(())
+    }
+
+    fn encode_working_hours(
+        start_hour: u32,
+        start_minute: u32,
+        end_hour: u32,
+        end_minute: u32,
+    ) -> i32 {
+        ((1_u32 << 22)
+            | ((start_hour & 0b01_1111) << 17)
+            | ((start_minute & 0b11_1111) << 11)
+            | ((end_hour & 0b01_1111) << 6)
+            | (end_minute & 0b11_1111)) as i32
+    }
+
+    fn local_time(hour: u8, minute: u8) -> OffsetDateTime {
+        PrimitiveDateTime::new(
+            Date::from_calendar_date(2026, Month::March, 23).unwrap_or(Date::MIN),
+            Time::from_hms(hour, minute, 0).unwrap_or(Time::MIDNIGHT),
+        )
+        .assume_utc()
     }
 }

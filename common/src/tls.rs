@@ -141,6 +141,19 @@ pub fn load_tls_identity(cert_pem: &[u8], key_pem: &[u8]) -> Result<TlsIdentity,
         rustls_pemfile::certs(&mut cert_reader).collect::<Result<Vec<_>, std::io::Error>>()?;
 
     if certificate_chain.is_empty() {
+        if !cert_pem.is_empty() {
+            let mut cert_item_reader = BufReader::new(cert_pem);
+            match rustls_pemfile::read_one(&mut cert_item_reader)? {
+                Some(_) => {}
+                None => {
+                    return Err(TlsError::Pem(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "certificate PEM did not contain any valid PEM sections",
+                    )));
+                }
+            }
+        }
+
         return Err(TlsError::MissingCertificates);
     }
 
@@ -311,8 +324,15 @@ mod tests {
     }
 
     #[test]
-    fn load_tls_identity_rejects_missing_certificates() {
-        let error = load_tls_identity(b"", b"").expect_err("missing certs must be rejected");
+    fn load_tls_identity_rejects_pem_without_certificate_blocks() {
+        let identity = generate_self_signed_tls_identity(
+            &["localhost".to_owned()],
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("identity generation should succeed");
+
+        let error = load_tls_identity(identity.private_key_pem(), identity.private_key_pem())
+            .expect_err("key-only PEM input must be rejected as missing certificates");
 
         assert!(matches!(error, TlsError::MissingCertificates));
     }
@@ -332,12 +352,9 @@ mod tests {
     }
 
     #[test]
-    fn load_tls_identity_rejects_corrupt_pem() {
-        let error = load_tls_identity(
-            b"-----BEGIN CERTIFICATE-----\n%%%invalid-base64%%%\n-----END CERTIFICATE-----\n",
-            b"-----BEGIN PRIVATE KEY-----\n%%%invalid-base64%%%\n-----END PRIVATE KEY-----\n",
-        )
-        .expect_err("corrupt PEM input must be rejected");
+    fn load_tls_identity_rejects_non_pem_input() {
+        let error =
+            load_tls_identity(b"garbage", b"garbage").expect_err("non-PEM input must be rejected");
 
         assert!(matches!(error, TlsError::Pem(_)));
     }

@@ -316,7 +316,7 @@ fn inner_demon_command_id(bytes: &[u8]) -> Result<u32, DemonProtocolError> {
 
 #[cfg(test)]
 mod tests {
-    use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
+    use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, encrypt_agent_data};
     use red_cell_common::demon::{
         DEMON_MAGIC_VALUE, DemonCommand, DemonEnvelope, DemonProtocolError, MIN_ENVELOPE_SIZE,
     };
@@ -1211,6 +1211,200 @@ mod tests {
         assert!(
             message.contains("Failed to connect"),
             "error message must mention failure, got: {message}"
+        );
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Helpers for full DEMON_INIT packet construction (new-agent path)
+    // -----------------------------------------------------------------------
+
+    /// Build init metadata in the format expected by `parse_init_agent`.
+    /// All length-prefixed fields use BE length prefix; UTF-16 content is LE.
+    fn build_init_metadata(agent_id: u32) -> Vec<u8> {
+        fn add_str_be(buf: &mut Vec<u8>, value: &str) {
+            buf.extend_from_slice(&(value.len() as u32).to_be_bytes());
+            buf.extend_from_slice(value.as_bytes());
+        }
+        fn add_utf16_be(buf: &mut Vec<u8>, value: &str) {
+            let utf16: Vec<u8> = value.encode_utf16().flat_map(u16::to_le_bytes).collect();
+            buf.extend_from_slice(&(utf16.len() as u32).to_be_bytes());
+            buf.extend_from_slice(&utf16);
+        }
+
+        let mut m = Vec::new();
+        m.extend_from_slice(&agent_id.to_be_bytes()); // agent_id
+        add_str_be(&mut m, "pivot-host"); // hostname
+        add_str_be(&mut m, "operator"); // username
+        add_str_be(&mut m, "PIVOTLAB"); // domain
+        add_str_be(&mut m, "10.0.0.99"); // internal_ip
+        add_utf16_be(&mut m, "C:\\Windows\\svchost.exe"); // process_path
+        m.extend_from_slice(&1234_u32.to_be_bytes()); // pid
+        m.extend_from_slice(&5678_u32.to_be_bytes()); // tid
+        m.extend_from_slice(&512_u32.to_be_bytes()); // ppid
+        m.extend_from_slice(&2_u32.to_be_bytes()); // arch (x64)
+        m.extend_from_slice(&1_u32.to_be_bytes()); // elevated
+        m.extend_from_slice(&0x401000_u64.to_be_bytes()); // base_address
+        m.extend_from_slice(&10_u32.to_be_bytes()); // os_major
+        m.extend_from_slice(&0_u32.to_be_bytes()); // os_minor
+        m.extend_from_slice(&1_u32.to_be_bytes()); // os_product_type
+        m.extend_from_slice(&0_u32.to_be_bytes()); // os_service_pack
+        m.extend_from_slice(&22000_u32.to_be_bytes()); // os_build
+        m.extend_from_slice(&9_u32.to_be_bytes()); // os_arch
+        m.extend_from_slice(&15_u32.to_be_bytes()); // sleep_delay
+        m.extend_from_slice(&20_u32.to_be_bytes()); // sleep_jitter
+        m.extend_from_slice(&1_893_456_000_u64.to_be_bytes()); // kill_date
+        m.extend_from_slice(&0b101010_i32.to_be_bytes()); // working_hours
+        m
+    }
+
+    /// Build a complete DEMON_INIT wire packet for a brand-new agent (full metadata).
+    fn build_full_init_packet(
+        agent_id: u32,
+        key: [u8; AGENT_KEY_LENGTH],
+        iv: [u8; AGENT_IV_LENGTH],
+    ) -> Vec<u8> {
+        let metadata = build_init_metadata(agent_id);
+        let encrypted =
+            encrypt_agent_data(&key, &iv, &metadata).expect("metadata encryption should succeed");
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u32::from(DemonCommand::DemonInit).to_be_bytes());
+        payload.extend_from_slice(&7_u32.to_be_bytes()); // request_id
+        payload.extend_from_slice(&key);
+        payload.extend_from_slice(&iv);
+        payload.extend_from_slice(&encrypted);
+
+        DemonEnvelope::new(agent_id, payload)
+            .expect("init envelope construction must succeed")
+            .to_bytes()
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests for handle_pivot_connect_callback — new agent path
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn pivot_connect_new_agent_registers_child_and_emits_agent_new()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_database, registry, events, _sockets, _downloads) = setup_dispatch_context().await;
+        let mut rx = events.subscribe();
+
+        let parent_id: u32 = 0xAA00_0001;
+        let child_id: u32 = 0xAA00_0002;
+        let child_key = test_key(0xF0);
+        let child_iv = test_iv(0xF1);
+
+        // Register ONLY the parent — child is brand new.
+        registry.insert(sample_agent_info(parent_id, test_key(0xE0), test_iv(0xE1))).await?;
+
+        // Child must NOT be in the registry before the call.
+        assert!(registry.get(child_id).await.is_none(), "child must not be pre-registered");
+
+        // Build a full init packet for the child agent.
+        let inner_envelope = build_full_init_packet(child_id, child_key, child_iv);
+        let payload = connect_payload(1, &inner_envelope);
+        let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandPivot));
+
+        let result =
+            handle_pivot_connect_callback(&registry, &events, parent_id, REQUEST_ID, &mut parser)
+                .await;
+        assert!(result.is_ok(), "new-agent pivot connect must succeed: {result:?}");
+        assert!(matches!(result, Ok(None)), "handler should return Ok(None)");
+
+        // 1. Child agent must now exist in the registry.
+        let child_agent =
+            registry.get(child_id).await.expect("child must be registered after connect");
+        assert!(child_agent.active, "new child agent must be active");
+        assert_eq!(child_agent.hostname, "pivot-host", "child hostname must match init metadata");
+
+        // 2. Pivot link must be established (child's parent is parent_id).
+        let parent = registry.parent_of(child_id).await;
+        assert_eq!(parent, Some(parent_id), "pivot link must set parent_id as child's parent");
+
+        // 3. First event: AgentNew (NOT AgentUpdate).
+        let new_event = rx.recv().await.expect("should receive AgentNew event");
+        assert!(
+            matches!(&new_event, OperatorMessage::AgentNew(_)),
+            "new-agent path must emit AgentNew, not AgentUpdate; got {new_event:?}"
+        );
+
+        // 4. Second event: AgentResponse confirming the pivot connection.
+        let resp_event = rx.recv().await.expect("should receive AgentResponse event");
+        let OperatorMessage::AgentResponse(resp) = &resp_event else {
+            panic!("expected AgentResponse, got {resp_event:?}");
+        };
+        let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            message.contains("[SMB] Connected to pivot agent"),
+            "response must confirm pivot connection, got: {message}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pivot_connect_new_agent_uses_parent_listener_name()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_database, registry, events, _sockets, _downloads) = setup_dispatch_context().await;
+        let _rx = events.subscribe();
+
+        let parent_id: u32 = 0xBB00_0001;
+        let child_id: u32 = 0xBB00_0002;
+        let child_key = test_key(0xF2);
+        let child_iv = test_iv(0xF3);
+
+        // Register parent (no explicit listener name — fallback is "smb").
+        registry.insert(sample_agent_info(parent_id, test_key(0xE2), test_iv(0xE3))).await?;
+
+        let inner_envelope = build_full_init_packet(child_id, child_key, child_iv);
+        let payload = connect_payload(1, &inner_envelope);
+        let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandPivot));
+
+        let result =
+            handle_pivot_connect_callback(&registry, &events, parent_id, REQUEST_ID, &mut parser)
+                .await;
+        assert!(result.is_ok(), "new-agent connect must succeed: {result:?}");
+
+        // Child must be registered with a listener name.
+        let child_listener = registry.listener_name(child_id).await;
+        assert!(child_listener.is_some(), "child must have a listener name after registration");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pivot_connect_new_agent_with_invalid_init_returns_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_database, registry, events, _sockets, _downloads) = setup_dispatch_context().await;
+
+        let parent_id: u32 = 0xCC00_0001;
+        let child_id: u32 = 0xCC00_0002;
+
+        registry.insert(sample_agent_info(parent_id, test_key(0xE4), test_iv(0xE5))).await?;
+
+        // Build an envelope with DEMON_INIT command ID but truncated metadata
+        // that parse_for_listener will reject (no key/iv/metadata present).
+        let inner_envelope = valid_init_envelope_bytes(child_id);
+        let payload = connect_payload(1, &inner_envelope);
+        let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandPivot));
+
+        let result =
+            handle_pivot_connect_callback(&registry, &events, parent_id, REQUEST_ID, &mut parser)
+                .await;
+        assert!(result.is_err(), "invalid init metadata must return an error");
+
+        let error = result.unwrap_err();
+        assert!(
+            matches!(error, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {error:?}"
+        );
+
+        // Child must NOT have been registered.
+        assert!(
+            registry.get(child_id).await.is_none(),
+            "child must not be registered when init parsing fails"
         );
 
         Ok(())

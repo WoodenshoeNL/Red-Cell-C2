@@ -1506,6 +1506,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn deserialize_bool_from_any_rejects_integer_outside_zero_one_for_elevated() {
+        let payload = json!({
+            "AgentID": "ABCD1234",
+            "Active": true,
+            "Hostname": "wkstn-1",
+            "Username": "operator",
+            "DomainName": "LAB",
+            "ExternalIP": "203.0.113.10",
+            "InternalIP": "10.0.0.10",
+            "ProcessName": "explorer.exe",
+            "BaseAddress": 1,
+            "ProcessPID": 1,
+            "ProcessTID": 1,
+            "ProcessPPID": 1,
+            "ProcessArch": "x64",
+            "Elevated": 2,
+            "OSVersion": "Windows 10",
+            "OSArch": "x64",
+            "SleepDelay": 5,
+            "SleepJitter": 10,
+            "FirstCallIn": "09/03/2026 19:04:00",
+            "LastCallIn": "09/03/2026 19:05:00"
+        });
+
+        let error = serde_json::from_value::<AgentRecord>(payload)
+            .expect_err("integer 2 for Elevated must be rejected");
+        assert!(
+            error.to_string().contains("invalid boolean number"),
+            "unexpected error message: {error}"
+        );
+    }
+
     /// Helper: builds a minimal valid `HttpListenerConfig` JSON, then applies overrides.
     fn http_listener_json(overrides: serde_json::Value) -> serde_json::Value {
         let mut base = json!({
@@ -1532,6 +1565,17 @@ mod tests {
         let payload = http_listener_json(json!({ "port_bind": "70000" }));
         let error = serde_json::from_value::<HttpListenerConfig>(payload)
             .expect_err("string port_bind \"70000\" must be rejected");
+        assert!(
+            error.to_string().contains("does not fit in u16"),
+            "unexpected error message: {error}"
+        );
+    }
+
+    #[test]
+    fn port_bind_rejects_value_99999_above_u16_max() {
+        let payload = http_listener_json(json!({ "port_bind": 99999 }));
+        let error = serde_json::from_value::<HttpListenerConfig>(payload)
+            .expect_err("port_bind 99999 must be rejected");
         assert!(
             error.to_string().contains("does not fit in u16"),
             "unexpected error message: {error}"

@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 722 | 221 | 31 |
+| Tasks closed | 723 | 222 | 31 |
 | Bugs filed against | 80 | 34 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
 | Quality score | 89% | 85% | 71% |
 
-*Bug rates: Claude 80/722=0.11, Codex 34/221=0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 80/723=0.11, Codex 34/222=0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-23 15:00 — 531ba016..137e825a
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed k4hco (DNS listener havoc-compat cross-validation test); arch review pass (filed 2 issues: jrcig, won3p); 2 claims |
+| Codex | 1 | 0 | Closed mk8so (parse_agent_id edge case tests); 2 claims |
+| Cursor | 0 | 0 | No activity |
+
+Build: passed (cargo check + clippy clean, 0 warnings)
+Tests: 1895 passed, 1 pre-existing failure (agent_reconnects_after_listener_restart — already tracked by 4 open bugs)
+Issues found: 0 new bugs — code quality is clean across all changed files
 
 ### QA Review — 2026-03-23 — f8009753..682bcb66
 

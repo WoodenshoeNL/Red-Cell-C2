@@ -10,17 +10,17 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 755 | 228 | 31 |
-| Bugs filed against | 86 | 34 | 9 |
+| Bugs filed against | 88 | 34 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
 | Quality score | 89% | 85% | 71% |
 
-*Bug rates: Claude 86/755=0.11, Codex 34/228=0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 88/755=0.12, Codex 34/228=0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
-| unwrap / expect in production | 6 | 0 | 0 |
+| unwrap / expect in production | 7 | 0 | 0 |
 | Missing tests / stale tests | 35 | 13 | 5 |
 | Clippy warnings | 4 | 0 | 1 |
 | Protocol errors | 16 | 27 | 3 |
@@ -30,7 +30,7 @@ Each loop run updates the running totals and appends a review entry.
 | Startup / lifecycle regressions | 2 | 9 | 0 |
 | Test infrastructure / flakiness | 14 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
-| Availability / timeout regressions | 1 | 5 | 0 |
+| Availability / timeout regressions | 2 | 5 | 0 |
 | Correctness / pagination | 33 | 7 | 1 |
 | Workflow / close-hygiene | 18 | 0 | 0 |
 | Code reuse / duplication | 7 | 0 | 0 |
@@ -3601,3 +3601,14 @@ Issues found: `red-cell-c2-3nx5u` (Claude), `red-cell-c2-ytyoq` (Claude), `red-c
 Build: mixed (`cargo check --workspace` and `cargo clippy --workspace -- -D warnings` passed on `e089441`; after a fast-forward during review, `cargo clippy -p red-cell --tests -- -D warnings` fails on pre-existing `clippy::octal_escapes` at `teamserver/src/listeners.rs:3697`, outside this review range)
 Tests: failed (`cargo test --workspace`: the previously failing liveness test now passes, but `assembly_dispatch` still returns HTTP 404 on 20 callbacks; already tracked as `red-cell-c2-h76st`)
 Issues found: 0 new bugs filed
+
+### Arch Review — 2026-03-23 22:17
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 2 | availability / timeout regressions (1), unwrap / expect in production (1) | 3087t (P1 — service bridge leaves unauthenticated sockets parked indefinitely with no first-frame timeout), 2vx2y (P3 — auth setup still uses `expect()` in production Argon2 parameter construction). |
+| Codex | 0 | — | No new findings this pass |
+| Cursor | 0 | — | No new findings this pass |
+
+Overall codebase health: drifting
+Biggest blindspot: pre-auth hardening is still inconsistent across ingress paths; the service bridge accepts idle unauthenticated sockets indefinitely even though the main operator WebSocket already enforces a first-frame timeout.

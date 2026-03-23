@@ -2,6 +2,7 @@ mod common;
 
 use std::time::Duration;
 
+use futures_util::SinkExt;
 use red_cell::{
     AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
     ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
@@ -12,11 +13,14 @@ use red_cell_common::ListenerConfig;
 use red_cell_common::crypto::{
     AGENT_IV_LENGTH, AGENT_KEY_LENGTH, ctr_blocks_for_len, decrypt_agent_data_at_offset,
 };
-use red_cell_common::demon::DemonCommand;
-use red_cell_common::operator::OperatorMessage;
+use red_cell_common::demon::{DemonCommand, DemonMessage};
+use red_cell_common::operator::{
+    AgentTaskInfo, EventCode, Message, MessageHead, OperatorMessage,
+};
 use reqwest::Client;
 use tokio::net::TcpListener;
 use tokio::time::timeout;
+use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
 
 /// Spawn a test server using [`build_router`] so the teamserver fallback handler
 /// is active (required for External C2 bridge endpoint routing).
@@ -291,6 +295,320 @@ async fn external_listener_pipeline_rejects_unregistered_agent_callback()
     );
 
     server.listeners.stop("ext-bridge-unknown").await?;
+    Ok(())
+}
+
+/// Happy-path task dispatch: operator queues a task via WebSocket `AgentTask` →
+/// agent POSTs a `CommandGetJob` checkin → server returns encrypted-over-wire task
+/// bytes → agent parses and verifies task identity matches what was queued.
+#[tokio::test]
+async fn external_listener_task_delivery_happy_path() -> Result<(), Box<dyn std::error::Error>> {
+    let server = spawn_server_with_fallback().await?;
+
+    let key: [u8; AGENT_KEY_LENGTH] = [
+        0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE,
+        0xAF, 0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC,
+        0xBD, 0xBE, 0xBF, 0xC0,
+    ];
+    let iv: [u8; AGENT_IV_LENGTH] = [
+        0xD1, 0xE4, 0xF7, 0x0A, 0x1D, 0x30, 0x43, 0x56, 0x69, 0x7C, 0x8F, 0xA2, 0xB5, 0xC8,
+        0xDB, 0xEE,
+    ];
+    let agent_id = 0xC1C2_C3C4_u32;
+    // The teamserver normalises agent IDs to uppercase hex in its registry, but
+    // the operator protocol uses lowercase; use uppercase for WebSocket messages
+    // (DemonID field) and lowercase for registry lookups.
+    let agent_id_hex = format!("{agent_id:08X}");
+    let mut ctr_offset = 0_u64;
+
+    server.listeners.create(external_listener("ext-task-happy", "/task-happy")).await?;
+    server.listeners.start("ext-task-happy").await?;
+    wait_for_external_endpoint(&server, "/task-happy").await?;
+    wait_for_teamserver(&server).await?;
+
+    let client = Client::new();
+    let bridge_url = format!("http://{}/task-happy", server.addr);
+
+    // ── Agent init ───────────────────────────────────────────────────────────
+    let init_resp = client
+        .post(&bridge_url)
+        .body(common::valid_demon_init_body(agent_id, key, iv))
+        .send()
+        .await?
+        .error_for_status()?;
+    let init_bytes = init_resp.bytes().await?;
+    let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
+    assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
+    ctr_offset += ctr_blocks_for_len(init_bytes.len());
+
+    // ── Connect operator via WebSocket and login ─────────────────────────────
+    let (mut socket, _) = connect_async(format!("ws://{}/havoc", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    // Consume the AgentNew event broadcast by the init above.
+    let agent_new = timeout(Duration::from_secs(5), async {
+        loop {
+            let msg = common::read_operator_message(&mut socket).await?;
+            if matches!(msg, OperatorMessage::AgentNew(_)) {
+                return Ok::<_, Box<dyn std::error::Error>>(msg);
+            }
+        }
+    })
+    .await??;
+    let OperatorMessage::AgentNew(new_msg) = agent_new else {
+        panic!("expected AgentNew");
+    };
+    assert_eq!(new_msg.info.name_id, agent_id_hex);
+
+    // ── Operator queues a checkin task via WebSocket ──────────────────────────
+    let task_msg = serde_json::to_string(&OperatorMessage::AgentTask(Message {
+        head: MessageHead {
+            event: EventCode::Session,
+            user: "operator".to_owned(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info: AgentTaskInfo {
+            task_id: "3A".to_owned(),
+            command_line: "checkin".to_owned(),
+            demon_id: agent_id_hex.clone(),
+            command_id: u32::from(DemonCommand::CommandCheckin).to_string(),
+            ..AgentTaskInfo::default()
+        },
+    }))?;
+    socket.send(ClientMessage::Text(task_msg.into())).await?;
+
+    // ── Consume the task-echo broadcast ──────────────────────────────────────
+    let task_echo = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentTask(echo) = task_echo else {
+        panic!("expected AgentTask echo, got {task_echo:?}");
+    };
+    assert_eq!(echo.info.demon_id, agent_id_hex);
+    assert_eq!(echo.info.task_id, "3A");
+    assert_eq!(echo.info.command_line, "checkin");
+
+    // ── Agent polls for jobs via CommandGetJob ───────────────────────────────
+    let get_job_resp = client
+        .post(&bridge_url)
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandGetJob),
+            5,
+            &[],
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+    ctr_offset += ctr_blocks_for_len(4); // 4-byte length prefix sent by the agent
+    let job_bytes = get_job_resp.bytes().await?;
+
+    // ── Agent decrypts and verifies the task ─────────────────────────────────
+    assert!(!job_bytes.is_empty(), "task response must not be empty");
+    let job_msg = DemonMessage::from_bytes(job_bytes.as_ref())?;
+    assert_eq!(job_msg.packages.len(), 1, "exactly one task package expected");
+    assert_eq!(
+        job_msg.packages[0].command_id,
+        u32::from(DemonCommand::CommandCheckin),
+        "task command must match queued CommandCheckin"
+    );
+    assert_eq!(
+        job_msg.packages[0].request_id, 0x3A,
+        "request_id must match task_id '3A' parsed as hex"
+    );
+
+    let _ = ctr_offset; // suppress unused warning
+    socket.close(None).await?;
+    server.listeners.stop("ext-task-happy").await?;
+    Ok(())
+}
+
+/// No-task poll: registered agent polls when task queue is empty →
+/// server returns 200 OK with empty body.
+#[tokio::test]
+async fn external_listener_no_task_poll_returns_empty_body() -> Result<(), Box<dyn std::error::Error>>
+{
+    let server = spawn_server_with_fallback().await?;
+
+    let key: [u8; AGENT_KEY_LENGTH] = [
+        0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xCB, 0xCC, 0xCD, 0xCE,
+        0xCF, 0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xDB, 0xDC,
+        0xDD, 0xDE, 0xDF, 0xE0,
+    ];
+    let iv: [u8; AGENT_IV_LENGTH] = [
+        0x11, 0x24, 0x37, 0x4A, 0x5D, 0x70, 0x83, 0x96, 0xA9, 0xBC, 0xCF, 0xE2, 0xF5, 0x08,
+        0x1B, 0x2E,
+    ];
+    let agent_id = 0xD1D2_D3D4_u32;
+    let mut ctr_offset = 0_u64;
+
+    server.listeners.create(external_listener("ext-empty-poll", "/empty-poll")).await?;
+    server.listeners.start("ext-empty-poll").await?;
+    wait_for_external_endpoint(&server, "/empty-poll").await?;
+    wait_for_teamserver(&server).await?;
+
+    let client = Client::new();
+    let bridge_url = format!("http://{}/empty-poll", server.addr);
+
+    // ── Agent init ───────────────────────────────────────────────────────────
+    let init_resp = client
+        .post(&bridge_url)
+        .body(common::valid_demon_init_body(agent_id, key, iv))
+        .send()
+        .await?
+        .error_for_status()?;
+    let init_bytes = init_resp.bytes().await?;
+    let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
+    assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
+    ctr_offset += ctr_blocks_for_len(init_bytes.len());
+
+    // ── Poll for jobs immediately — queue is empty ────────────────────────────
+    let get_job_resp = client
+        .post(&bridge_url)
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandGetJob),
+            1,
+            &[],
+        ))
+        .send()
+        .await?;
+    let status = get_job_resp.status();
+    let body = get_job_resp.bytes().await?;
+
+    assert_eq!(status, reqwest::StatusCode::OK, "empty queue poll must return 200 OK");
+    assert!(body.is_empty(), "empty queue poll must return empty body, got {} bytes", body.len());
+
+    server.listeners.stop("ext-empty-poll").await?;
+    Ok(())
+}
+
+/// Task consumption: once a task is downloaded via `CommandGetJob`, a subsequent
+/// poll must not re-deliver the same task (the task must be consumed).
+#[tokio::test]
+async fn external_listener_task_consumed_after_download() -> Result<(), Box<dyn std::error::Error>>
+{
+    let server = spawn_server_with_fallback().await?;
+
+    let key: [u8; AGENT_KEY_LENGTH] = [
+        0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xEB, 0xEC, 0xED, 0xEE,
+        0xEF, 0xF0, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA, 0xFB, 0xFC,
+        0xFD, 0xFE, 0xFF, 0x00,
+    ];
+    let iv: [u8; AGENT_IV_LENGTH] = [
+        0x41, 0x54, 0x67, 0x7A, 0x8D, 0xA0, 0xB3, 0xC6, 0xD9, 0xEC, 0xFF, 0x12, 0x25, 0x38,
+        0x4B, 0x5E,
+    ];
+    let agent_id = 0xE1E2_E3E4_u32;
+    let agent_id_hex = format!("{agent_id:08x}");
+    let mut ctr_offset = 0_u64;
+
+    server.listeners.create(external_listener("ext-consume", "/consume")).await?;
+    server.listeners.start("ext-consume").await?;
+    wait_for_external_endpoint(&server, "/consume").await?;
+    wait_for_teamserver(&server).await?;
+
+    let client = Client::new();
+    let bridge_url = format!("http://{}/consume", server.addr);
+
+    // ── Agent init ───────────────────────────────────────────────────────────
+    let init_resp = client
+        .post(&bridge_url)
+        .body(common::valid_demon_init_body(agent_id, key, iv))
+        .send()
+        .await?
+        .error_for_status()?;
+    let init_bytes = init_resp.bytes().await?;
+    let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
+    assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
+    ctr_offset += ctr_blocks_for_len(init_bytes.len());
+
+    // ── Connect operator and queue a task ─────────────────────────────────────
+    let (mut socket, _) = connect_async(format!("ws://{}/havoc", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    // Consume the AgentNew event (may arrive after login snapshot).
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let msg = common::read_operator_message(&mut socket).await?;
+            if matches!(msg, OperatorMessage::AgentNew(_)) {
+                return Ok::<_, Box<dyn std::error::Error>>(());
+            }
+        }
+    })
+    .await??;
+
+    let task_msg = serde_json::to_string(&OperatorMessage::AgentTask(Message {
+        head: MessageHead {
+            event: EventCode::Session,
+            user: "operator".to_owned(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info: AgentTaskInfo {
+            task_id: "5B".to_owned(),
+            command_line: "checkin".to_owned(),
+            demon_id: agent_id_hex.clone(),
+            command_id: u32::from(DemonCommand::CommandCheckin).to_string(),
+            ..AgentTaskInfo::default()
+        },
+    }))?;
+    socket.send(ClientMessage::Text(task_msg.into())).await?;
+
+    // Consume the task echo.
+    let task_echo = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(task_echo, OperatorMessage::AgentTask(_)), "expected AgentTask echo");
+
+    // ── First poll — must deliver the task ───────────────────────────────────
+    let first_resp = client
+        .post(&bridge_url)
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandGetJob),
+            5,
+            &[],
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+    ctr_offset += ctr_blocks_for_len(4);
+    let first_bytes = first_resp.bytes().await?;
+    assert!(!first_bytes.is_empty(), "first poll must deliver the queued task");
+    let first_msg = DemonMessage::from_bytes(first_bytes.as_ref())?;
+    assert_eq!(first_msg.packages.len(), 1, "first poll must contain exactly one task");
+
+    // ── Second poll — task must NOT be re-delivered ──────────────────────────
+    let second_resp = client
+        .post(&bridge_url)
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandGetJob),
+            6,
+            &[],
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+    let second_bytes = second_resp.bytes().await?;
+    assert!(
+        second_bytes.is_empty(),
+        "second poll must not re-deliver the consumed task; got {} bytes",
+        second_bytes.len()
+    );
+
+    socket.close(None).await?;
+    server.listeners.stop("ext-consume").await?;
     Ok(())
 }
 

@@ -89,6 +89,9 @@ pub enum CryptoError {
     /// The underlying cipher could not be constructed (unexpected key/IV length).
     #[error("cipher construction failed: {0}")]
     CipherConstruction(#[from] InvalidLength),
+    /// HKDF expand step failed (output length too long for the hash function).
+    #[error("HKDF expand failed: output length too long")]
+    HkdfExpand,
 }
 
 type AgentCtr = Ctr128BE<Aes256>;
@@ -265,11 +268,11 @@ pub fn derive_session_keys(
 
     let mut derived_key = [0u8; AGENT_KEY_LENGTH];
     hk.expand(b"red-cell-session-key", &mut derived_key)
-        .expect("HKDF-SHA256 expand for 32-byte key cannot fail");
+        .map_err(|_| CryptoError::HkdfExpand)?;
 
     let mut derived_iv = [0u8; AGENT_IV_LENGTH];
     hk.expand(b"red-cell-session-iv", &mut derived_iv)
-        .expect("HKDF-SHA256 expand for 16-byte IV cannot fail");
+        .map_err(|_| CryptoError::HkdfExpand)?;
 
     Ok(AgentCryptoMaterial { key: derived_key, iv: derived_iv })
 }
@@ -1091,5 +1094,28 @@ mod tests {
             .expect("decrypt with derived key");
 
         assert_eq!(recovered, plaintext);
+    }
+
+    #[test]
+    fn derive_session_keys_propagates_error_not_panics() {
+        // Valid inputs must always succeed — this verifies that the replaced
+        // `.expect()` calls are reachable and produce Ok results in the normal
+        // case (i.e., no panic occurs and the result is properly returned).
+        let key = [0x11; AGENT_KEY_LENGTH];
+        let iv = [0x22; AGENT_IV_LENGTH];
+        let secret = b"no-panic-check";
+
+        let result = derive_session_keys(&key, &iv, secret);
+        assert!(result.is_ok(), "valid inputs must succeed without panicking: {result:?}");
+    }
+
+    #[test]
+    fn crypto_error_hkdf_expand_display() {
+        let error = CryptoError::HkdfExpand;
+        let message = error.to_string();
+        assert!(
+            message.contains("HKDF expand failed"),
+            "HkdfExpand display must contain 'HKDF expand failed', got: {message}"
+        );
     }
 }

@@ -3453,6 +3453,96 @@ mod tests {
         assert_eq!(body["error"]["code"], "agent_not_found");
     }
 
+    #[tokio::test]
+    async fn kill_agent_records_audit_entry_on_success() {
+        let (app, registry, _) = test_router_with_registry(Some((
+            60,
+            "rest-admin",
+            "secret-admin",
+            OperatorRole::Admin,
+        )))
+        .await;
+        registry.insert(sample_agent(0xDEAD_BEEF)).await.expect("agent should insert");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/agents/DEADBEEF")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let audit_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/audit?action=agent.task&agent_id=DEADBEEF&limit=10")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(audit_response.status(), StatusCode::OK);
+        let body = read_json(audit_response).await;
+        let items = body["items"].as_array().expect("items array");
+        assert!(!items.is_empty(), "expected at least one agent.task audit entry");
+        let entry = &items[0];
+        assert_eq!(entry["action"], "agent.task");
+        assert_eq!(entry["agent_id"], "DEADBEEF");
+        assert_eq!(entry["result_status"], "success");
+        assert_eq!(entry["command"], "kill");
+    }
+
+    #[tokio::test]
+    async fn kill_agent_records_audit_entry_on_failure() {
+        let (app, _, _) = test_router_with_registry(Some((
+            60,
+            "rest-admin",
+            "secret-admin",
+            OperatorRole::Admin,
+        )))
+        .await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/agents/DEADBEEF")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let audit_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/audit?action=agent.task&agent_id=DEADBEEF&limit=10")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(audit_response.status(), StatusCode::OK);
+        let body = read_json(audit_response).await;
+        let items = body["items"].as_array().expect("items array");
+        assert!(!items.is_empty(), "expected at least one agent.task audit entry for failure");
+        let entry = &items[0];
+        assert_eq!(entry["action"], "agent.task");
+        assert_eq!(entry["agent_id"], "DEADBEEF");
+        assert_eq!(entry["result_status"], "failure");
+    }
+
     /// Sends a GET request to `/agents/{id}` with the given malformed ID and asserts
     /// a 400 Bad Request with error code `"invalid_agent_task"`.
     async fn assert_get_agent_bad_request(malformed_id: &str) {

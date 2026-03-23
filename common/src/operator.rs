@@ -1463,11 +1463,33 @@ mod tests {
     }
 
     #[test]
-    fn numeric_codes_reject_unknown_values() {
-        let error = serde_json::from_value::<EventCode>(json!(0xff))
-            .expect_err("unknown event code must fail");
+    fn numeric_codes_reject_unknown_values_during_deserialization() {
+        let cases = [
+            (
+                serde_json::from_value::<EventCode>(json!(0xffff_u32))
+                    .expect_err("unknown EventCode must fail"),
+                "EventCode",
+            ),
+            (
+                serde_json::from_value::<InitConnectionCode>(json!(0xffff_u32))
+                    .expect_err("unknown InitConnectionCode must fail"),
+                "InitConnectionCode",
+            ),
+            (
+                serde_json::from_value::<SessionCode>(json!(0xffff_u32))
+                    .expect_err("unknown SessionCode must fail"),
+                "SessionCode",
+            ),
+            (
+                serde_json::from_value::<ListenerCode>(json!(0xffff_u32))
+                    .expect_err("unknown ListenerCode must fail"),
+                "ListenerCode",
+            ),
+        ];
 
-        assert!(error.to_string().contains("unsupported EventCode code"));
+        for (error, enum_name) in cases {
+            assert!(error.to_string().contains(&format!("unsupported {enum_name} code")));
+        }
     }
 
     #[test]

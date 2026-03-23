@@ -226,7 +226,7 @@ mod tests {
     use zeroize::Zeroizing;
 
     use super::*;
-    use crate::{AgentRegistry, Database, EventBus};
+    use crate::{AgentRegistry, AuditQuery, Database, EventBus, query_audit_log};
 
     /// Generate a non-degenerate test key from a seed byte.
     fn test_key(seed: u8) -> [u8; AGENT_KEY_LENGTH] {
@@ -882,6 +882,122 @@ mod tests {
             }
             other => panic!("expected AgentUpdate, got: {other:?}"),
         }
+
+        Ok(())
+    }
+
+    // -- plugin branch (emit_agent_checkin) tests --
+
+    /// Happy path: `handle_checkin` with `plugins = Some(stub_succeeding)` still
+    /// returns `Ok(None)` and completes without error.
+    #[tokio::test]
+    async fn handle_checkin_with_succeeding_plugin_runtime_returns_ok()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::{PluginRuntime, SocketRelayManager};
+
+        let key = test_key(0xAA);
+        let iv = test_iv(0xBB);
+        let agent_id = 0xDEAD_0020;
+
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+
+        registry.insert(sample_agent(agent_id, key, iv)).await?;
+
+        let runtime = PluginRuntime::stub_succeeding(
+            database.clone(),
+            registry.clone(),
+            events.clone(),
+            sockets,
+        );
+
+        let result =
+            handle_checkin(&registry, &events, &database, Some(&runtime), agent_id, &[]).await?;
+        assert_eq!(result, None, "handle_checkin must return Ok(None) with succeeding plugins");
+
+        Ok(())
+    }
+
+    /// Error path: `handle_checkin` with `plugins = Some(stub_failing)` still
+    /// returns `Ok(None)` — plugin errors are non-fatal.
+    #[tokio::test]
+    async fn handle_checkin_with_failing_plugin_runtime_returns_ok()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::{PluginRuntime, SocketRelayManager};
+
+        let key = test_key(0xAA);
+        let iv = test_iv(0xBB);
+        let agent_id = 0xDEAD_0021;
+
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+
+        registry.insert(sample_agent(agent_id, key, iv)).await?;
+
+        let runtime = PluginRuntime::stub_failing(
+            database.clone(),
+            registry.clone(),
+            events.clone(),
+            sockets,
+        );
+
+        let result =
+            handle_checkin(&registry, &events, &database, Some(&runtime), agent_id, &[]).await?;
+        assert_eq!(result, None, "handle_checkin must return Ok(None) even when plugin emit fails");
+
+        Ok(())
+    }
+
+    /// The audit entry for `agent.checkin` must still be written when the plugin
+    /// emit fails — the spawned audit task is independent of the plugin branch.
+    #[tokio::test]
+    async fn handle_checkin_audit_entry_written_despite_plugin_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::{PluginRuntime, SocketRelayManager};
+
+        let key = test_key(0xAA);
+        let iv = test_iv(0xBB);
+        let agent_id = 0xDEAD_0022;
+
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+
+        registry.insert(sample_agent(agent_id, key, iv)).await?;
+
+        let runtime = PluginRuntime::stub_failing(
+            database.clone(),
+            registry.clone(),
+            events.clone(),
+            sockets,
+        );
+
+        handle_checkin(&registry, &events, &database, Some(&runtime), agent_id, &[]).await?;
+
+        // The audit write is spawned as a background task — yield to let it complete.
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let page = query_audit_log(
+            &database,
+            &AuditQuery {
+                action: Some("agent.checkin".to_owned()),
+                target_id: Some(format!("{agent_id:08X}")),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+        assert!(
+            !page.items.is_empty(),
+            "agent.checkin audit entry must be written even when plugin emit fails"
+        );
+        assert_eq!(page.items[0].action, "agent.checkin");
 
         Ok(())
     }

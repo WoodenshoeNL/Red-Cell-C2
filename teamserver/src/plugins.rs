@@ -411,6 +411,33 @@ impl PluginRuntime {
         Ok(std::mem::replace(&mut *guard, runtime))
     }
 
+    /// Create a `PluginRuntime` whose `emit_*` methods succeed (no-op).
+    ///
+    /// This avoids Python initialization entirely — useful for testing the
+    /// `plugins = Some(runtime)` happy path in callers like `handle_checkin`.
+    #[cfg(test)]
+    pub(crate) fn stub_succeeding(
+        database: Database,
+        agents: AgentRegistry,
+        events: EventBus,
+        sockets: SocketRelayManager,
+    ) -> Self {
+        Self {
+            inner: Arc::new(PluginRuntimeInner {
+                database,
+                agents,
+                events,
+                _sockets: sockets,
+                plugins_dir: None,
+                runtime_handle: Handle::current(),
+                listeners: RwLock::new(None),
+                callbacks: RwLock::new(BTreeMap::new()),
+                commands: RwLock::new(BTreeMap::new()),
+                force_emit_failure: std::sync::atomic::AtomicBool::new(false),
+            }),
+        }
+    }
+
     /// Create a `PluginRuntime` whose `emit_*` methods always return `Err`.
     ///
     /// This avoids Python initialization entirely — useful for testing error

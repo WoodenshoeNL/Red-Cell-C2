@@ -72,6 +72,26 @@ fn pivot_connect_malformed_inner_payload() -> Vec<u8> {
     payload
 }
 
+/// Build a `CommandPivot/SmbDisconnect` callback payload with `success=1`
+/// and the given `child_agent_id`.
+fn pivot_disconnect_success_payload(child_agent_id: u32) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&u32::from(DemonPivotCommand::SmbDisconnect).to_le_bytes());
+    payload.extend_from_slice(&1_u32.to_le_bytes()); // success = 1
+    payload.extend_from_slice(&child_agent_id.to_le_bytes());
+    payload
+}
+
+/// Build a `CommandPivot/SmbDisconnect` callback payload with `success=0`
+/// (failure) and the given `child_agent_id`.
+fn pivot_disconnect_failure_payload(child_agent_id: u32) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&u32::from(DemonPivotCommand::SmbDisconnect).to_le_bytes());
+    payload.extend_from_slice(&0_u32.to_le_bytes()); // success = 0
+    payload.extend_from_slice(&child_agent_id.to_le_bytes());
+    payload
+}
+
 // ---------------------------------------------------------------------------
 // Helper: spawn server, listener, register parent agent, return handles
 // ---------------------------------------------------------------------------
@@ -411,6 +431,283 @@ async fn pivot_connect_malformed_inner_envelope_is_rejected()
 
     // No AgentNew event should have been broadcast, and no child registered.
     common::assert_no_operator_message(&mut h.socket, std::time::Duration::from_millis(500)).await;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// SmbDisconnect tests
+// ---------------------------------------------------------------------------
+
+/// Happy path: disconnect a previously connected pivot child.
+///
+/// 1. Establish a pivot link via SmbConnect.
+/// 2. Send an SmbDisconnect callback for that child.
+/// 3. Assert: the child is marked dead, the pivot link is removed, an
+///    `AgentUpdate` (mark) is broadcast for the child, and an `AgentResponse`
+///    with Type "Info" confirms the disconnection.
+#[tokio::test]
+async fn pivot_disconnect_removes_link_and_marks_child_dead()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut h = setup_pivot_test("pivot-disconnect-ok").await?;
+
+    // -- Step 1: connect a child via SmbConnect --
+    let child_agent_id = 0xDD00_0001_u32;
+    let child_key: [u8; AGENT_KEY_LENGTH] = [
+        0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x6B, 0x6C, 0x6D, 0x6E, 0x6F,
+        0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x7B, 0x7C, 0x7D, 0x7E,
+        0x7F, 0x80,
+    ];
+    let child_iv: [u8; AGENT_IV_LENGTH] = [
+        0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF,
+        0xB0,
+    ];
+
+    let connect_payload = pivot_connect_success_payload(child_agent_id, child_key, child_iv);
+
+    h.client
+        .post(format!("http://127.0.0.1:{}/", h.listener_port))
+        .body(common::valid_demon_callback_body(
+            h.parent_agent_id,
+            h.parent_key,
+            h.parent_iv,
+            h.parent_ctr_offset,
+            u32::from(DemonCommand::CommandPivot),
+            0x01,
+            &connect_payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // Consume the AgentNew for the child.
+    let child_new = common::read_operator_message(&mut h.socket).await?;
+    assert!(
+        matches!(child_new, OperatorMessage::AgentNew(_)),
+        "expected AgentNew for child, got {child_new:?}"
+    );
+
+    // Consume the AgentResponse (Good) for the SmbConnect.
+    let connect_resp = common::read_operator_message(&mut h.socket).await?;
+    assert!(
+        matches!(connect_resp, OperatorMessage::AgentResponse(_)),
+        "expected AgentResponse for connect, got {connect_resp:?}"
+    );
+
+    // Verify pivot link exists before disconnect.
+    let pivots_before = h.server.agent_registry.pivots(child_agent_id).await;
+    assert_eq!(pivots_before.parent, Some(h.parent_agent_id), "child must be linked to parent");
+
+    // -- Step 2: disconnect the child via SmbDisconnect --
+    // The first callback consumed ctr_offset; calculate the next offset.
+    let connect_body_len = connect_payload.len() + 4 + 4; // payload + command_id + request_id
+    let blocks_used = (connect_body_len as u64 + 15) / 16;
+    let next_ctr_offset = h.parent_ctr_offset + blocks_used;
+
+    let disconnect_payload = pivot_disconnect_success_payload(child_agent_id);
+
+    h.client
+        .post(format!("http://127.0.0.1:{}/", h.listener_port))
+        .body(common::valid_demon_callback_body(
+            h.parent_agent_id,
+            h.parent_key,
+            h.parent_iv,
+            next_ctr_offset,
+            u32::from(DemonCommand::CommandPivot),
+            0x02,
+            &disconnect_payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // Expect AgentUpdate (mark) for the child being marked dead.
+    let mark_event = common::read_operator_message(&mut h.socket).await?;
+    let OperatorMessage::AgentUpdate(update) = &mark_event else {
+        panic!("expected AgentUpdate for disconnected child, got {mark_event:?}");
+    };
+    assert_eq!(
+        update.info.agent_id,
+        format!("{child_agent_id:08X}"),
+        "mark event must reference the child agent"
+    );
+    assert_eq!(update.info.marked, "Dead", "disconnected child must be marked Dead");
+
+    // Expect AgentResponse (Info) confirming disconnection.
+    let resp_event = common::read_operator_message(&mut h.socket).await?;
+    let OperatorMessage::AgentResponse(resp) = &resp_event else {
+        panic!("expected AgentResponse (Info), got {resp_event:?}");
+    };
+    assert_eq!(
+        resp.info.extra.get("Type").and_then(Value::as_str),
+        Some("Info"),
+        "disconnect response must have Type=Info"
+    );
+    let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+    assert!(
+        message.contains("[SMB] Agent disconnected"),
+        "expected disconnect message, got {message:?}"
+    );
+
+    // Verify pivot link is removed.
+    let pivots_after = h.server.agent_registry.pivots(child_agent_id).await;
+    assert_eq!(pivots_after.parent, None, "child must no longer have a parent after disconnect");
+
+    let parent_children = h.server.agent_registry.children_of(h.parent_agent_id).await;
+    assert!(
+        !parent_children.contains(&child_agent_id),
+        "parent must no longer list child after disconnect"
+    );
+
+    Ok(())
+}
+
+/// Error path: SmbDisconnect with `success=0` must broadcast an error
+/// `AgentResponse` and must NOT modify the pivot link or agent status.
+#[tokio::test]
+async fn pivot_disconnect_failure_broadcasts_error_without_modifying_registry()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut h = setup_pivot_test("pivot-disconnect-fail").await?;
+
+    // -- Establish a pivot link first --
+    let child_agent_id = 0xDD00_0002_u32;
+    let child_key: [u8; AGENT_KEY_LENGTH] = [
+        0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8A, 0x8B, 0x8C, 0x8D, 0x8E, 0x8F,
+        0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9A, 0x9B, 0x9C, 0x9D, 0x9E,
+        0x9F, 0xA0,
+    ];
+    let child_iv: [u8; AGENT_IV_LENGTH] = [
+        0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xCB, 0xCC, 0xCD, 0xCE, 0xCF,
+        0xD0,
+    ];
+
+    let connect_payload = pivot_connect_success_payload(child_agent_id, child_key, child_iv);
+
+    h.client
+        .post(format!("http://127.0.0.1:{}/", h.listener_port))
+        .body(common::valid_demon_callback_body(
+            h.parent_agent_id,
+            h.parent_key,
+            h.parent_iv,
+            h.parent_ctr_offset,
+            u32::from(DemonCommand::CommandPivot),
+            0x01,
+            &connect_payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // Consume AgentNew + AgentResponse for the connect.
+    let _child_new = common::read_operator_message(&mut h.socket).await?;
+    let _connect_resp = common::read_operator_message(&mut h.socket).await?;
+
+    // -- Send SmbDisconnect with success=0 --
+    let connect_body_len = connect_payload.len() + 4 + 4;
+    let blocks_used = (connect_body_len as u64 + 15) / 16;
+    let next_ctr_offset = h.parent_ctr_offset + blocks_used;
+
+    let disconnect_payload = pivot_disconnect_failure_payload(child_agent_id);
+
+    h.client
+        .post(format!("http://127.0.0.1:{}/", h.listener_port))
+        .body(common::valid_demon_callback_body(
+            h.parent_agent_id,
+            h.parent_key,
+            h.parent_iv,
+            next_ctr_offset,
+            u32::from(DemonCommand::CommandPivot),
+            0x03,
+            &disconnect_payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // Expect AgentResponse with Type "Error".
+    let resp_event = common::read_operator_message(&mut h.socket).await?;
+    let OperatorMessage::AgentResponse(resp) = &resp_event else {
+        panic!("expected AgentResponse (Error), got {resp_event:?}");
+    };
+    assert_eq!(
+        resp.info.extra.get("Type").and_then(Value::as_str),
+        Some("Error"),
+        "failed disconnect must have Type=Error"
+    );
+    let message = resp.info.extra.get("Message").and_then(Value::as_str).unwrap_or("");
+    assert!(
+        message.contains("[SMB] Failed to disconnect agent"),
+        "expected failure message, got {message:?}"
+    );
+    assert!(
+        message.contains(&format!("{child_agent_id:08X}")),
+        "error message must include child agent ID"
+    );
+
+    // Pivot link must still exist — failure does not modify the registry.
+    let pivots = h.server.agent_registry.pivots(child_agent_id).await;
+    assert_eq!(
+        pivots.parent,
+        Some(h.parent_agent_id),
+        "pivot link must remain after failed disconnect"
+    );
+
+    Ok(())
+}
+
+/// Edge case: SmbDisconnect for a child that was never connected must not
+/// crash, must not register a phantom agent, and must still broadcast the
+/// confirmation `AgentResponse`.
+#[tokio::test]
+async fn pivot_disconnect_no_existing_link_does_not_panic_or_corrupt_registry()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut h = setup_pivot_test("pivot-disconnect-no-link").await?;
+
+    // Use a child ID that was never connected via pivot.
+    let phantom_child_id = 0xDD00_FFFF_u32;
+
+    let disconnect_payload = pivot_disconnect_success_payload(phantom_child_id);
+
+    h.client
+        .post(format!("http://127.0.0.1:{}/", h.listener_port))
+        .body(common::valid_demon_callback_body(
+            h.parent_agent_id,
+            h.parent_key,
+            h.parent_iv,
+            h.parent_ctr_offset,
+            u32::from(DemonCommand::CommandPivot),
+            0x01,
+            &disconnect_payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // The handler calls disconnect_link which returns empty affected list when
+    // the link doesn't exist, but still broadcasts the AgentResponse (Info).
+    let resp_event = common::read_operator_message(&mut h.socket).await?;
+    let OperatorMessage::AgentResponse(resp) = &resp_event else {
+        panic!("expected AgentResponse (Info), got {resp_event:?}");
+    };
+    assert_eq!(
+        resp.info.extra.get("Type").and_then(Value::as_str),
+        Some("Info"),
+        "disconnect of nonexistent link must still produce Type=Info"
+    );
+
+    // The phantom child must NOT appear in the registry.
+    let phantom_record = h.server.agent_registry.get(phantom_child_id).await;
+    assert!(
+        phantom_record.is_none(),
+        "disconnecting a never-connected child must not register a phantom agent"
+    );
+
+    // Parent must have no children.
+    let parent_children = h.server.agent_registry.children_of(h.parent_agent_id).await;
+    assert!(
+        parent_children.is_empty(),
+        "parent must have no children after disconnecting a nonexistent link"
+    );
 
     Ok(())
 }

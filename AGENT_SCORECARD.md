@@ -41,11 +41,11 @@ Each loop run updates the running totals and appends a review entry.
 
 <!-- QA and arch loops append entries below this line -->
 
-### QA Review — 2026-03-23 17:15 — aceb1e2e..162155cf
+### QA Review — 2026-03-23 17:15 — aceb1e2e..62285c3f
 
 | Agent | Tasks closed | Bugs filed | Notes |
 |-------|-------------|------------|-------|
-| Claude | 10 | 0 | Closed 7fhg5 (legacy CTR mode), rfdmy (external listener oversized-body rejection), 3295a (client password zeroization), r22xz, sz6vi, lozxr, 3rm6r, 5hryt, 80tvo, p93i7. One already-tracked regression remains open: qic8d. |
+| Claude | 10 | 0 | Closed 7fhg5 (legacy CTR mode), rfdmy (external listener oversized-body rejection), 3295a (client password zeroization), r22xz, sz6vi, lozxr, 3rm6r, 5hryt, 80tvo, p93i7. Also claimed follow-up work on qic8d/uru8k/0wzmo and related issues. One already-tracked regression remains open: qic8d. |
 | Codex | 1 | 0 | Closed 1332s (empty PEM / missing-certificate TLS test coverage). |
 | Cursor | 0 | 0 | No activity. |
 

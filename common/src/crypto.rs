@@ -267,12 +267,10 @@ pub fn derive_session_keys(
     let hk = Hkdf::<Sha256>::new(Some(server_secret), &ikm);
 
     let mut derived_key = [0u8; AGENT_KEY_LENGTH];
-    hk.expand(b"red-cell-session-key", &mut derived_key)
-        .map_err(|_| CryptoError::HkdfExpand)?;
+    hk.expand(b"red-cell-session-key", &mut derived_key).map_err(|_| CryptoError::HkdfExpand)?;
 
     let mut derived_iv = [0u8; AGENT_IV_LENGTH];
-    hk.expand(b"red-cell-session-iv", &mut derived_iv)
-        .map_err(|_| CryptoError::HkdfExpand)?;
+    hk.expand(b"red-cell-session-iv", &mut derived_iv).map_err(|_| CryptoError::HkdfExpand)?;
 
     Ok(AgentCryptoMaterial { key: derived_key, iv: derived_iv })
 }

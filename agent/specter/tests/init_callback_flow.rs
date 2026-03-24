@@ -34,7 +34,7 @@ async fn spawn_server_with_http_listener(
 ) -> Result<DemonTestHarness, Box<dyn std::error::Error>> {
     let server = common::spawn_test_server(demon_test_profile()).await?;
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
-    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    let (mut socket, _) = connect_async(server.ws_url()).await?;
     common::login(&mut socket).await?;
 
     server
@@ -92,9 +92,11 @@ async fn specter_agent_init_checkin_and_get_job_stay_ctr_synchronised()
         SpecterAgent::new(SpecterConfig { callback_url, sleep_delay_ms: 1, ..Default::default() })?;
 
     agent.init_handshake().await?;
-    assert_eq!(agent.send_ctr_offset(), 1);
-    assert_eq!(agent.recv_ctr_offset(), 1);
-    assert_eq!(harness.server.agent_registry.ctr_offset(agent.agent_id()).await?, 1);
+    // Legacy CTR mode: server resets AES-CTR to block 0 for every packet; both
+    // agent and registry offsets stay at 0 after init.
+    assert_eq!(agent.send_ctr_offset(), 0);
+    assert_eq!(agent.recv_ctr_offset(), 0);
+    assert_eq!(harness.server.agent_registry.ctr_offset(agent.agent_id()).await?, 0);
 
     let agent_new = common::read_operator_message(&mut harness.socket).await?;
     let red_cell_common::operator::OperatorMessage::AgentNew(message) = agent_new else {
@@ -106,9 +108,9 @@ async fn specter_agent_init_checkin_and_get_job_stay_ctr_synchronised()
 
     let checkin_response = agent.checkin().await?;
     assert!(checkin_response.is_empty());
-    assert_eq!(agent.send_ctr_offset(), 2);
-    assert_eq!(agent.recv_ctr_offset(), 2);
-    assert_eq!(harness.server.agent_registry.ctr_offset(agent.agent_id()).await?, 2);
+    assert_eq!(agent.send_ctr_offset(), 0);
+    assert_eq!(agent.recv_ctr_offset(), 0);
+    assert_eq!(harness.server.agent_registry.ctr_offset(agent.agent_id()).await?, 0);
 
     harness
         .server
@@ -132,9 +134,9 @@ async fn specter_agent_init_checkin_and_get_job_stay_ctr_synchronised()
     assert_eq!(tasking.packages[0].command_id, u32::from(DemonCommand::CommandSleep));
     assert_eq!(tasking.packages[0].request_id, 0x2A);
     assert_eq!(tasking.packages[0].payload, vec![0x05, 0x00, 0x00, 0x00]);
-    assert_eq!(agent.send_ctr_offset(), 4);
-    assert_eq!(agent.recv_ctr_offset(), 4);
-    assert_eq!(harness.server.agent_registry.ctr_offset(agent.agent_id()).await?, 4);
+    assert_eq!(agent.send_ctr_offset(), 0);
+    assert_eq!(agent.recv_ctr_offset(), 0);
+    assert_eq!(harness.server.agent_registry.ctr_offset(agent.agent_id()).await?, 0);
 
     harness.shutdown().await?;
     Ok(())

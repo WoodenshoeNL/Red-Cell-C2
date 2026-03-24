@@ -3106,6 +3106,21 @@ fn is_past_kill_date(kill_date: Option<&str>) -> bool {
 /// format.  If the value is absent or malformed, the check is silently skipped
 /// (returns `false`).
 fn is_outside_working_hours(working_hours: Option<&str>) -> bool {
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let utc_hour = ((now_secs % 86400) / 3600) as u8;
+    let utc_minute = ((now_secs % 3600) / 60) as u8;
+    is_outside_working_hours_at(working_hours, utc_hour, utc_minute)
+}
+
+/// Returns `true` when `utc_hour:utc_minute` falls outside the window
+/// encoded in `working_hours` (format `"HH:MM-HH:MM"`).
+///
+/// The window is interpreted as `[start, end)` in UTC minutes-since-midnight.
+/// Returns `false` (i.e. "not outside") for `None`, empty, or malformed input.
+fn is_outside_working_hours_at(working_hours: Option<&str>, utc_hour: u8, utc_minute: u8) -> bool {
     let Some(value) = working_hours.map(str::trim).filter(|v| !v.is_empty()) else {
         return false;
     };
@@ -3118,13 +3133,6 @@ fn is_outside_working_hours(working_hours: Option<&str>) -> bool {
     let Some((end_h, end_m)) = parse_hhmm(end) else {
         return false;
     };
-
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let utc_hour = ((now_secs % 86400) / 3600) as u8;
-    let utc_minute = ((now_secs % 3600) / 60) as u8;
 
     let now_minutes = u16::from(utc_hour) * 60 + u16::from(utc_minute);
     let start_minutes = u16::from(start_h) * 60 + u16::from(start_m);
@@ -3544,12 +3552,12 @@ mod tests {
         UNKNOWN_CALLBACK_PROBE_AUDIT_WINDOW_DURATION, UnknownCallbackProbeAuditLimiter,
         action_from_mark, base32hex_decode, base32hex_encode, build_dns_txt_response,
         chunk_response_to_b32hex, collect_body_with_magic_precheck, dns_allowed_query_types,
-        extract_external_ip, is_outside_working_hours, is_past_kill_date,
-        listener_config_from_operator, listener_error_event, listener_event_for_action,
-        listener_removed_event, operator_protocol_name, operator_requests_start,
-        parse_dns_c2_query, parse_dns_query, parse_trusted_proxy_peer, profile_listener_configs,
-        read_smb_frame, smb_local_socket_name, spawn_dns_listener_runtime,
-        spawn_managed_listener_task, spawn_smb_listener_runtime,
+        extract_external_ip, is_outside_working_hours, is_outside_working_hours_at,
+        is_past_kill_date, listener_config_from_operator, listener_error_event,
+        listener_event_for_action, listener_removed_event, operator_protocol_name,
+        operator_requests_start, parse_dns_c2_query, parse_dns_query, parse_trusted_proxy_peer,
+        profile_listener_configs, read_smb_frame, smb_local_socket_name,
+        spawn_dns_listener_runtime, spawn_managed_listener_task, spawn_smb_listener_runtime,
     };
     use crate::{
         AgentRegistry, AuditQuery, AuditResultStatus, Database, EventBus, Job,
@@ -7883,8 +7891,12 @@ mod tests {
 
     #[test]
     fn is_outside_working_hours_returns_false_for_full_day_window() {
-        // 00:00-23:59 should include every possible current time.
-        assert!(!is_outside_working_hours(Some("00:00-23:59")));
+        // 00:00-23:59 covers [0, 1439) — every minute except 23:59 itself.
+        assert!(!is_outside_working_hours_at(Some("00:00-23:59"), 0, 0));
+        assert!(!is_outside_working_hours_at(Some("00:00-23:59"), 12, 30));
+        assert!(!is_outside_working_hours_at(Some("00:00-23:59"), 23, 58));
+        // 23:59 is at the boundary (end-exclusive), so it counts as outside.
+        assert!(is_outside_working_hours_at(Some("00:00-23:59"), 23, 59));
     }
 
     #[test]
@@ -7895,39 +7907,26 @@ mod tests {
     }
 
     #[test]
-    fn is_outside_working_hours_detects_narrow_window_excluding_now() {
-        // Build a 1-minute window 12 hours away from now — it should always
-        // exclude the current UTC time.
-        let now_secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        let utc_hour = ((now_secs % 86400) / 3600) as u8;
-        let far_hour = (utc_hour + 12) % 24;
-        let next_hour = (far_hour + 1) % 24;
-        if next_hour > far_hour {
-            let window = format!("{far_hour:02}:00-{next_hour:02}:00");
-            assert!(
-                is_outside_working_hours(Some(&window)),
-                "current UTC hour {utc_hour} should be outside {window}"
-            );
-        }
-        // If next_hour < far_hour (wraps midnight), skip — the helper does
-        // not support wrap-around windows, so the test is not meaningful.
+    fn is_outside_working_hours_detects_outside_window() {
+        // 10:00 is outside [14:00, 18:00)
+        assert!(is_outside_working_hours_at(Some("14:00-18:00"), 10, 0));
+        // 18:00 is at the end-exclusive boundary — outside
+        assert!(is_outside_working_hours_at(Some("14:00-18:00"), 18, 0));
+        // 23:30 is outside [08:00, 17:00)
+        assert!(is_outside_working_hours_at(Some("08:00-17:00"), 23, 30));
     }
 
     #[test]
     fn is_outside_working_hours_accepts_when_inside_window() {
-        // Build a wide window that includes the current UTC time.
-        let now_secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        let utc_hour = ((now_secs % 86400) / 3600) as u8;
-        let start = if utc_hour == 0 { 0 } else { utc_hour - 1 };
-        let window = if utc_hour >= 22 {
-            format!("{start:02}:00-23:59")
-        } else {
-            let end = utc_hour + 2;
-            format!("{start:02}:00-{end:02}:00")
-        };
-        assert!(
-            !is_outside_working_hours(Some(&window)),
-            "current UTC hour {utc_hour} should be inside {window}"
-        );
+        // 15:00 is inside [14:00, 18:00)
+        assert!(!is_outside_working_hours_at(Some("14:00-18:00"), 15, 0));
+        // 14:00 is at the start-inclusive boundary — inside
+        assert!(!is_outside_working_hours_at(Some("14:00-18:00"), 14, 0));
+        // 17:59 is the last minute inside [14:00, 18:00)
+        assert!(!is_outside_working_hours_at(Some("14:00-18:00"), 17, 59));
+        // 22:30 is inside [22:00, 23:30)
+        assert!(!is_outside_working_hours_at(Some("22:00-23:30"), 22, 30));
+        // 23:00 is inside [22:00, 23:30)
+        assert!(!is_outside_working_hours_at(Some("22:00-23:30"), 23, 0));
     }
 }

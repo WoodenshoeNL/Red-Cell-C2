@@ -366,6 +366,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clone_shares_recent_teamserver_logs() {
+        let bus = EventBus::new(4);
+        let clone = bus.clone();
+
+        // Broadcasting on the clone should appear in the original's history.
+        clone.broadcast(log_message("from-clone"));
+
+        let logs = bus.recent_teamserver_logs();
+        assert_eq!(logs, vec![log_message("from-clone")]);
+
+        // Broadcasting on the original should appear in the clone's history.
+        bus.broadcast(log_message("from-original"));
+
+        let logs = clone.recent_teamserver_logs();
+        assert_eq!(logs, vec![log_message("from-clone"), log_message("from-original")]);
+    }
+
+    #[tokio::test]
+    async fn clone_subscribers_receive_broadcasts_from_original() {
+        let bus = EventBus::new(4);
+        let clone = bus.clone();
+
+        let mut sub_on_original = bus.subscribe();
+        let mut sub_on_clone = clone.subscribe();
+
+        // Broadcast on the original — both subscribers should receive it.
+        bus.broadcast(log_message("from-original"));
+        assert_eq!(sub_on_original.recv().await, Some(log_message("from-original")));
+        assert_eq!(sub_on_clone.recv().await, Some(log_message("from-original")));
+
+        // Broadcast on the clone — both subscribers should receive it.
+        clone.broadcast(log_message("from-clone"));
+        assert_eq!(sub_on_original.recv().await, Some(log_message("from-clone")));
+        assert_eq!(sub_on_clone.recv().await, Some(log_message("from-clone")));
+    }
+
+    #[tokio::test]
+    async fn clone_and_original_share_subscriber_count() {
+        let bus = EventBus::new(4);
+        let clone = bus.clone();
+
+        let _sub = bus.subscribe();
+
+        // Broadcasting from either side should see the same subscriber.
+        assert_eq!(bus.broadcast(log_message("a")), 1);
+        assert_eq!(clone.broadcast(log_message("b")), 1);
+    }
+
+    #[tokio::test]
     async fn wraparound_preserves_chronological_order() {
         let bus = EventBus::new(3);
 

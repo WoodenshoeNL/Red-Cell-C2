@@ -1808,13 +1808,38 @@ mod tests {
     }
 
     /// Helper: a minimal JSON object that deserialises as [`RawAgent`].
-    fn raw_agent_json(status: &str) -> serde_json::Value {
+    /// Build a minimal `ApiAgentInfo`-shaped JSON value (PascalCase fields).
+    ///
+    /// `active` should be `false` to simulate a dead agent (status="dead")
+    /// and `true` for a live agent (status="alive").
+    fn raw_agent_json(active: bool) -> serde_json::Value {
         serde_json::json!({
-            "id": "agent1",
-            "hostname": "host1",
-            "os": "linux",
-            "last_seen": "2026-01-01T00:00:00Z",
-            "status": status
+            "AgentID": 1,
+            "Hostname": "host1",
+            "Username": "user1",
+            "DomainName": "LAB",
+            "ExternalIP": "1.2.3.4",
+            "InternalIP": "10.0.0.1",
+            "ProcessName": "demon.exe",
+            "ProcessPath": "C:\\demon.exe",
+            "BaseAddress": 0,
+            "ProcessPID": 1000,
+            "ProcessTID": 1001,
+            "ProcessPPID": 500,
+            "ProcessArch": "x64",
+            "Elevated": false,
+            "OSVersion": "Linux",
+            "OSBuild": 0,
+            "OSArch": "x64",
+            "SleepDelay": 5,
+            "SleepJitter": 10,
+            "KillDate": null,
+            "WorkingHours": null,
+            "FirstCallIn": "2026-01-01T00:00:00Z",
+            "LastCallIn": "2026-01-01T00:00:00Z",
+            "Active": active,
+            "Reason": "http",
+            "Note": ""
         })
     }
 
@@ -1961,7 +1986,7 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/api/v1/agents/agent1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(raw_agent_json("dead")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(raw_agent_json(false)))
             .expect(1)
             .mount(&server)
             .await;

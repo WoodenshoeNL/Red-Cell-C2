@@ -32,14 +32,64 @@ const POLL_INTERVAL: Duration = Duration::from_millis(1_000);
 
 // ── raw API response shapes ───────────────────────────────────────────────────
 
+/// Wire format returned by `GET /agents` and `GET /agents/{id}`.
+///
+/// The teamserver serialises agent records as `ApiAgentInfo` which uses
+/// PascalCase field names (e.g. `AgentID`, `Hostname`, `LastCallIn`).  This
+/// intermediate struct captures those names so that `RawAgent` can be
+/// populated via the `From` conversion below.
+#[derive(Debug, Deserialize)]
+struct ApiAgentWire {
+    #[serde(rename = "AgentID")]
+    agent_id: u32,
+    #[serde(rename = "Hostname")]
+    hostname: String,
+    #[serde(rename = "Username")]
+    username: String,
+    #[serde(rename = "DomainName")]
+    domain_name: String,
+    #[serde(rename = "InternalIP")]
+    internal_ip: String,
+    #[serde(rename = "ProcessName")]
+    process_name: String,
+    #[serde(rename = "ProcessPID")]
+    process_pid: u32,
+    #[serde(rename = "ProcessArch")]
+    process_arch: String,
+    #[serde(rename = "OSVersion")]
+    os_version: String,
+    #[serde(rename = "OSArch")]
+    os_arch: String,
+    #[serde(rename = "SleepDelay")]
+    sleep_delay: u32,
+    #[serde(rename = "SleepJitter")]
+    sleep_jitter: u32,
+    #[serde(rename = "LastCallIn")]
+    last_call_in: String,
+    #[serde(rename = "Active")]
+    active: bool,
+}
+
+/// Normalised agent record used throughout the CLI.
+///
+/// The teamserver returns agent data as `ApiAgentInfo` (PascalCase fields).
+/// `RawAgent` is populated from the wire format via `#[serde(from =
+/// "ApiAgentWire")]` — all deserialization goes through `ApiAgentWire` and
+/// the `From` impl below converts PascalCase fields and derives computed
+/// values (`id` as hex string, `os` as combined version+arch, `status` from
+/// the `Active` boolean).
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(from = "ApiAgentWire")]
 pub(crate) struct RawAgent {
+    /// Agent identifier as an uppercase hex string, e.g. `"DEADBEEF"`.
     pub(crate) id: String,
     pub(crate) hostname: String,
+    /// Combined OS string, e.g. `"Windows 11 x64"`.
     pub(crate) os: String,
+    /// RFC 3339 timestamp of the agent's last check-in (`LastCallIn`).
     pub(crate) last_seen: String,
+    /// `"alive"` when `Active == true`, `"dead"` otherwise.
     pub(crate) status: String,
-    // Detail-only fields — absent on the list endpoint.
     pub(crate) arch: Option<String>,
     pub(crate) username: Option<String>,
     pub(crate) domain: Option<String>,
@@ -48,6 +98,26 @@ pub(crate) struct RawAgent {
     pub(crate) pid: Option<u64>,
     pub(crate) sleep_interval: Option<u64>,
     pub(crate) jitter: Option<u64>,
+}
+
+impl From<ApiAgentWire> for RawAgent {
+    fn from(w: ApiAgentWire) -> Self {
+        Self {
+            id: format!("{:08X}", w.agent_id),
+            hostname: w.hostname,
+            os: format!("{} {}", w.os_version, w.os_arch),
+            last_seen: w.last_call_in,
+            status: if w.active { "alive".to_owned() } else { "dead".to_owned() },
+            arch: Some(w.process_arch),
+            username: Some(w.username),
+            domain: Some(w.domain_name),
+            internal_ip: Some(w.internal_ip),
+            process_name: Some(w.process_name),
+            pid: Some(w.process_pid as u64),
+            sleep_interval: Some(w.sleep_delay as u64),
+            jitter: Some(w.sleep_jitter as u64),
+        }
+    }
 }
 
 /// Response from `POST /agents/{id}/task` and `DELETE /agents/{id}`.

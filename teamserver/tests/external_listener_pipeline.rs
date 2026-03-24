@@ -926,10 +926,7 @@ async fn external_listener_unknown_reconnect_probe_returns_404()
 -> Result<(), Box<dyn std::error::Error>> {
     let server = spawn_server_with_fallback().await?;
 
-    server
-        .listeners
-        .create(external_listener("ext-reconnect-probe", "/reconnect-probe"))
-        .await?;
+    server.listeners.create(external_listener("ext-reconnect-probe", "/reconnect-probe")).await?;
     server.listeners.start("ext-reconnect-probe").await?;
     wait_for_external_endpoint(&server, "/reconnect-probe").await?;
     wait_for_teamserver(&server).await?;
@@ -966,10 +963,7 @@ async fn external_listener_unknown_callback_probe_returns_404()
 -> Result<(), Box<dyn std::error::Error>> {
     let server = spawn_server_with_fallback().await?;
 
-    server
-        .listeners
-        .create(external_listener("ext-callback-probe", "/callback-probe"))
-        .await?;
+    server.listeners.create(external_listener("ext-callback-probe", "/callback-probe")).await?;
     server.listeners.start("ext-callback-probe").await?;
     wait_for_external_endpoint(&server, "/callback-probe").await?;
     wait_for_teamserver(&server).await?;

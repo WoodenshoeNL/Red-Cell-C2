@@ -1410,6 +1410,58 @@ mod tests {
         Ok(())
     }
 
+    /// Build a Demon envelope whose payload starts with an arbitrary command ID
+    /// (not `DemonInit`). Used to test the non-DEMON_INIT error guard.
+    fn non_init_envelope_bytes(agent_id: u32, command: DemonCommand) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u32::from(command).to_be_bytes());
+        payload.extend_from_slice(&0_u32.to_be_bytes()); // request_id
+        DemonEnvelope::new(agent_id, payload)
+            .expect("non-init envelope construction must succeed")
+            .to_bytes()
+    }
+
+    #[tokio::test]
+    async fn pivot_connect_non_demon_init_inner_command_returns_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_database, registry, events, _sockets, _downloads) = setup_dispatch_context().await;
+        let mut rx = events.subscribe();
+
+        let parent_id: u32 = 0xAA00_0001;
+        let child_id: u32 = 0xAA00_0002;
+
+        registry.insert(sample_agent_info(parent_id, test_key(0xF0), test_iv(0xF1))).await?;
+
+        // Build a connect payload (success=1) where the inner envelope carries
+        // CommandOutput instead of DemonInit — this must be rejected.
+        let inner_envelope = non_init_envelope_bytes(child_id, DemonCommand::CommandOutput);
+        let payload = connect_payload(1, &inner_envelope);
+        let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandPivot));
+
+        let result =
+            handle_pivot_connect_callback(&registry, &events, parent_id, REQUEST_ID, &mut parser)
+                .await;
+        assert!(result.is_err(), "non-DemonInit inner command must be rejected");
+
+        let error = result.unwrap_err();
+        assert!(
+            matches!(error, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {error:?}"
+        );
+
+        // No child agent should have been registered.
+        assert!(
+            registry.get(child_id).await.is_none(),
+            "child must not be registered when inner command is not DemonInit"
+        );
+
+        // No events should have been broadcast.
+        let no_event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
+        assert!(no_event.is_err(), "no event should be broadcast when inner command is rejected");
+
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Tests for handle_pivot_callback — error paths
     // -----------------------------------------------------------------------

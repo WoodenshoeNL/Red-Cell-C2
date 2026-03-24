@@ -946,9 +946,9 @@ pub struct ExternalListenerState {
     parser: DemonPacketParser,
     events: EventBus,
     dispatcher: CommandDispatcher,
-    /// Kept for future per-init rate limiting; currently init limiting is
-    /// performed inside [`process_demon_transport`] via the audit limiter.
-    _demon_init_rate_limiter: DemonInitRateLimiter,
+    /// Per-IP rate limiter for `DEMON_INIT` requests — same gate used by
+    /// HTTP, SMB, and DNS listeners.
+    demon_init_rate_limiter: DemonInitRateLimiter,
     unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
     shutdown: ShutdownController,
 }
@@ -1939,7 +1939,7 @@ fn spawn_external_listener_runtime(
         database: database.clone(),
         parser: DemonPacketParser::with_init_secret(registry.clone(), init_secret),
         events: events.clone(),
-        _demon_init_rate_limiter: demon_init_rate_limiter,
+        demon_init_rate_limiter,
         unknown_callback_probe_audit_limiter,
         shutdown,
         dispatcher: CommandDispatcher::with_builtin_handlers_and_downloads(
@@ -1983,6 +1983,25 @@ pub async fn handle_external_request(
     peer: SocketAddr,
     body: &[u8],
 ) -> Result<Vec<u8>, StatusCode> {
+    if !is_valid_demon_callback_request(body) {
+        debug!(
+            listener = %state.config.name,
+            peer = %peer,
+            "ignoring invalid external demon frame"
+        );
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let Some(_callback_guard) = state.shutdown.try_track_callback() else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+
+    if !allow_demon_init_for_ip(&state.config.name, &state.demon_init_rate_limiter, peer.ip(), body)
+        .await
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
     let result = process_demon_transport(
         &state.config.name,
         &state.registry,

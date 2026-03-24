@@ -845,6 +845,74 @@ async fn external_listener_pipeline_rejects_duplicate_endpoint_path()
     Ok(())
 }
 
+/// The sixth `DEMON_INIT` from the same source IP must be rejected (rate limited),
+/// matching the behaviour enforced by HTTP, SMB, and DNS listeners.
+#[tokio::test]
+async fn external_listener_pipeline_rejects_sixth_demon_init_from_same_ip()
+-> Result<(), Box<dyn std::error::Error>> {
+    // The per-IP limit is 5 inits per 60-second window (same as other transports).
+    const MAX_INITS: u32 = 5;
+
+    let server = spawn_server_with_fallback().await?;
+
+    server.listeners.create(external_listener("ext-rate-limit", "/rate-limit")).await?;
+    server.listeners.start("ext-rate-limit").await?;
+    wait_for_external_endpoint(&server, "/rate-limit").await?;
+    wait_for_teamserver(&server).await?;
+
+    let client = Client::new();
+    let bridge_url = format!("http://{}/rate-limit", server.addr);
+
+    let key: [u8; AGENT_KEY_LENGTH] = [
+        0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF,
+        0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE,
+        0xBF, 0xC0,
+    ];
+    let iv: [u8; AGENT_IV_LENGTH] = [
+        0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF,
+        0xE0,
+    ];
+
+    // Send MAX_INITS successful DEMON_INIT requests (each with a unique agent_id).
+    for attempt in 0..MAX_INITS {
+        let agent_id = 0xAA00_0000 + attempt;
+        let response = client
+            .post(&bridge_url)
+            .body(common::valid_demon_init_body(agent_id, key, iv))
+            .send()
+            .await?;
+        assert!(
+            response.status().is_success(),
+            "init attempt {attempt} should succeed, got {}",
+            response.status()
+        );
+        assert!(
+            server.agent_registry.get(agent_id).await.is_some(),
+            "agent {agent_id:#010X} must be registered after init"
+        );
+    }
+
+    // The sixth DEMON_INIT from the same IP must be rejected.
+    let blocked_agent_id = 0xAA00_00FF_u32;
+    let blocked = client
+        .post(&bridge_url)
+        .body(common::valid_demon_init_body(blocked_agent_id, key, iv))
+        .send()
+        .await?;
+    assert_eq!(
+        blocked.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "sixth DEMON_INIT from same IP must be rate-limited"
+    );
+    assert!(
+        server.agent_registry.get(blocked_agent_id).await.is_none(),
+        "blocked agent must not be registered"
+    );
+
+    server.listeners.stop("ext-rate-limit").await?;
+    Ok(())
+}
+
 fn external_listener(name: &str, endpoint: &str) -> ListenerConfig {
     ListenerConfig::from(ExternalListenerConfig {
         name: name.to_owned(),

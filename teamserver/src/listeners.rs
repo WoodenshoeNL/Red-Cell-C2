@@ -2031,6 +2031,9 @@ pub async fn handle_external_request(
     .await;
 
     match result {
+        Ok(response) if response.http_disposition == DemonHttpDisposition::Fake404 => {
+            Err(StatusCode::NOT_FOUND)
+        }
         Ok(response) => Ok(response.payload),
         Err(error) => {
             debug!(

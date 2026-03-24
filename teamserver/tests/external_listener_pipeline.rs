@@ -264,7 +264,7 @@ async fn external_listener_pipeline_rejects_unregistered_agent_callback()
         0x4F, 0x62, 0x75, 0x88, 0x9B, 0xAE, 0xC1, 0xD4, 0xE7, 0xFA, 0x0D, 0x20, 0x33, 0x46, 0x59,
         0x6C,
     ];
-    let _response = client
+    let response = client
         .post(format!("http://{}/unknown-cb", server.addr))
         .body(common::valid_demon_callback_body(
             0xBAD0_CAFE,
@@ -278,9 +278,11 @@ async fn external_listener_pipeline_rejects_unregistered_agent_callback()
         .send()
         .await?;
 
-    // The external listener may return 200 with a fake response body (the callback
-    // goes through process_demon_transport which may return a fake-404 HTML payload
-    // as an Ok result).  The critical invariant is that the agent must NOT be registered.
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "unknown agent callback probe must return 404, not 200"
+    );
     assert!(
         server.agent_registry.get(0xBAD0_CAFE).await.is_none(),
         "callback from unregistered agent must not create registry state"
@@ -910,6 +912,105 @@ async fn external_listener_pipeline_rejects_sixth_demon_init_from_same_ip()
     );
 
     server.listeners.stop("ext-rate-limit").await?;
+    Ok(())
+}
+
+/// Unknown reconnect probes (DEMON_INIT with empty payload from an agent-ID that is not
+/// registered) must receive a camouflage 404, not a 200.
+///
+/// This regression test guards against the bug where `handle_external_request` discarded
+/// `ProcessedDemonResponse::http_disposition` and blindly returned `Ok(payload)`, causing
+/// the Axum fallback to emit HTTP 200 for every `Fake404`-tagged response.
+#[tokio::test]
+async fn external_listener_unknown_reconnect_probe_returns_404()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = spawn_server_with_fallback().await?;
+
+    server
+        .listeners
+        .create(external_listener("ext-reconnect-probe", "/reconnect-probe"))
+        .await?;
+    server.listeners.start("ext-reconnect-probe").await?;
+    wait_for_external_endpoint(&server, "/reconnect-probe").await?;
+    wait_for_teamserver(&server).await?;
+
+    let client = Client::new();
+
+    // Send a reconnect probe for an agent that was never registered.
+    let response = client
+        .post(format!("http://{}/reconnect-probe", server.addr))
+        .body(common::valid_demon_reconnect_body(0xDEAD_1234))
+        .send()
+        .await?;
+
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "unknown reconnect probe must return 404 (Fake404 disposition), not 200"
+    );
+    assert!(
+        server.agent_registry.get(0xDEAD_1234).await.is_none(),
+        "reconnect probe from unknown agent must not create registry state"
+    );
+
+    server.listeners.stop("ext-reconnect-probe").await?;
+    Ok(())
+}
+
+/// Unknown callback probes (callback from an agent-ID that is not registered) must receive
+/// a camouflage 404, not a 200.
+///
+/// This is the callback-probe counterpart to `external_listener_unknown_reconnect_probe_returns_404`.
+#[tokio::test]
+async fn external_listener_unknown_callback_probe_returns_404()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = spawn_server_with_fallback().await?;
+
+    server
+        .listeners
+        .create(external_listener("ext-callback-probe", "/callback-probe"))
+        .await?;
+    server.listeners.start("ext-callback-probe").await?;
+    wait_for_external_endpoint(&server, "/callback-probe").await?;
+    wait_for_teamserver(&server).await?;
+
+    let client = Client::new();
+    let key: [u8; AGENT_KEY_LENGTH] = [
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E,
+        0x1F, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D,
+        0x2E, 0x2F,
+    ];
+    let iv: [u8; AGENT_IV_LENGTH] = [
+        0x30, 0x43, 0x56, 0x69, 0x7C, 0x8F, 0xA2, 0xB5, 0xC8, 0xDB, 0xEE, 0x01, 0x14, 0x27, 0x3A,
+        0x4D,
+    ];
+
+    // Send a callback for an agent that was never registered.
+    let response = client
+        .post(format!("http://{}/callback-probe", server.addr))
+        .body(common::valid_demon_callback_body(
+            0xDEAD_5678,
+            key,
+            iv,
+            0,
+            u32::from(DemonCommand::CommandCheckin),
+            6,
+            &[],
+        ))
+        .send()
+        .await?;
+
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "unknown callback probe must return 404 (Fake404 disposition), not 200"
+    );
+    assert!(
+        server.agent_registry.get(0xDEAD_5678).await.is_none(),
+        "callback probe from unknown agent must not create registry state"
+    );
+
+    server.listeners.stop("ext-callback-probe").await?;
     Ok(())
 }
 

@@ -209,6 +209,72 @@ async fn bearer_prefix_is_accepted() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
+/// Build a profile with NO `Api { ... }` section — the REST API runtime should
+/// report itself as disabled.
+fn profile_without_api_keys() -> Profile {
+    Profile::parse(
+        r#"
+        Teamserver {
+          Host = "127.0.0.1"
+          Port = 0
+        }
+
+        Operators {
+          user "operator" {
+            Password = "password1234"
+            Role = "Operator"
+          }
+        }
+
+        Demon {}
+        "#,
+    )
+    .expect("test profile should parse")
+}
+
+#[tokio::test]
+async fn api_disabled_profile_returns_503() {
+    let base = spawn_api_server(profile_without_api_keys()).await;
+    let client = Client::new();
+
+    let resp = get_agents(&client, &base, None).await;
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let body: serde_json::Value = resp.json().await.expect("json body");
+    assert_eq!(body["error"]["code"], "api_disabled");
+}
+
+#[tokio::test]
+async fn api_disabled_profile_rejects_with_key_present() {
+    let base = spawn_api_server(profile_without_api_keys()).await;
+    let client = Client::new();
+
+    // Even when a key header is provided, the response should be 503 api_disabled
+    // (not 401 invalid_api_key) because the API is entirely disabled.
+    let resp = get_agents(&client, &base, Some("any-key-value")).await;
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let body: serde_json::Value = resp.json().await.expect("json body");
+    assert_eq!(body["error"]["code"], "api_disabled");
+}
+
+#[tokio::test]
+async fn bearer_prefix_with_wrong_key_returns_invalid_api_key() {
+    let base = spawn_api_server(profile_with_api_keys()).await;
+    let client = Client::new();
+
+    let resp = client
+        .get(format!("{base}/api/v1/agents"))
+        .header("authorization", "Bearer totally-wrong-key")
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let body: serde_json::Value = resp.json().await.expect("json body");
+    assert_eq!(body["error"]["code"], "invalid_api_key");
+}
+
 #[tokio::test]
 async fn unprotected_root_accessible_without_key() {
     let base = spawn_api_server(profile_with_api_keys()).await;

@@ -34,8 +34,6 @@
 //! | `agent.exec` | `id`, `command` | `wait`, `timeout` |
 //! | `agent.output` | `id` | `since` |
 //! | `agent.kill` | `id` | `wait`, `timeout` |
-//! | `agent.upload` | `id` | — |
-//! | `agent.download` | `id` | — |
 //! | `listener.list` | — | — |
 //! | `listener.show` | `name` | — |
 //! | `listener.create` | `name`, `type` | `port`, `host`, `domain`, `pipe_name`, `endpoint`, `secure`, `config_json` |
@@ -390,24 +388,6 @@ async fn dispatch(
             let wait = msg.wait.unwrap_or(false);
             let timeout_secs = msg.timeout.unwrap_or(DEFAULT_EXEC_TIMEOUT_SECS);
             kill(client, id, wait, timeout_secs).await
-        }
-
-        "agent.upload" => {
-            // File upload is not available via the REST API.
-            Err(CliError::General(
-                "agent file upload is not available via the REST API; \
-                 use the WebSocket client (red-cell-client) to transfer files"
-                    .to_owned(),
-            ))
-        }
-
-        "agent.download" => {
-            // File download is not available via the REST API.
-            Err(CliError::General(
-                "agent file download is not available via the REST API; \
-                 use the WebSocket client (red-cell-client) to transfer files"
-                    .to_owned(),
-            ))
         }
 
         // ── listener ──────────────────────────────────────────────────────────
@@ -1221,10 +1201,14 @@ mod tests {
         );
     }
 
-    // ── dispatch: agent.upload / agent.download ────────────────────────────────
+    // ── dispatch: agent.upload / agent.download — not yet implemented ─────────
+    // These commands were removed from the advertised session surface because
+    // they require a long-lived WebSocket transport that does not yet exist.
+    // Until that transport is implemented they must return an InvalidArgs error
+    // (unknown command), not a misleading "not available via REST" message.
 
     #[tokio::test]
-    async fn dispatch_agent_upload_returns_general_error() {
+    async fn dispatch_agent_upload_is_unknown_command() {
         use crate::config::ResolvedConfig;
         let cfg = ResolvedConfig {
             server: "https://127.0.0.1:1".to_owned(),
@@ -1237,13 +1221,13 @@ mod tests {
             serde_json::from_str(r#"{"cmd":"agent.upload","id":"agent1"}"#).expect("parse");
         let result = dispatch(&client, &msg, None).await;
         assert!(
-            matches!(result, Err(CliError::General(_))),
-            "expected General error (upload not available via REST API), got {result:?}"
+            matches!(result, Err(CliError::InvalidArgs(_))),
+            "agent.upload must be an unknown command until WebSocket transport exists, got {result:?}"
         );
     }
 
     #[tokio::test]
-    async fn dispatch_agent_download_returns_general_error() {
+    async fn dispatch_agent_download_is_unknown_command() {
         use crate::config::ResolvedConfig;
         let cfg = ResolvedConfig {
             server: "https://127.0.0.1:1".to_owned(),
@@ -1256,8 +1240,8 @@ mod tests {
             serde_json::from_str(r#"{"cmd":"agent.download","id":"agent1"}"#).expect("parse");
         let result = dispatch(&client, &msg, None).await;
         assert!(
-            matches!(result, Err(CliError::General(_))),
-            "expected General error (download not available via REST API), got {result:?}"
+            matches!(result, Err(CliError::InvalidArgs(_))),
+            "agent.download must be an unknown command until WebSocket transport exists, got {result:?}"
         );
     }
 

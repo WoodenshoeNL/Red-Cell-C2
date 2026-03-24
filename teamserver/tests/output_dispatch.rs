@@ -195,6 +195,161 @@ async fn exit_callback_marks_agent_dead_and_broadcasts_update()
     Ok(())
 }
 
+/// `handle_exit_callback` with `exit_method=2` must mark the agent dead and broadcast a
+/// response containing "exit process" to distinguish it from thread exit.
+#[tokio::test]
+async fn exit_callback_process_exit_broadcasts_correct_message()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    server.listeners.create(common::http_listener_config("out-exit-proc", listener_port)).await?;
+    drop(listener_guard);
+    server.listeners.start("out-exit-proc").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0002_u32;
+    let key: [u8; AGENT_KEY_LENGTH] = [
+        0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F,
+        0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E,
+        0x3F, 0x40,
+    ];
+    let iv: [u8; AGENT_IV_LENGTH] = [
+        0xA0, 0xB3, 0xC6, 0xD9, 0xEC, 0xFF, 0x12, 0x25, 0x38, 0x4B, 0x5E, 0x71, 0x84, 0x97, 0xAA,
+        0xBD,
+    ];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    // Consume the AgentNew broadcast from registration.
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(
+        matches!(agent_new, OperatorMessage::AgentNew(_)),
+        "expected AgentNew, got {agent_new:?}"
+    );
+
+    // Send a CommandExit callback (exit_method=2 → process exit).
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandExit),
+            0x01,
+            &exit_payload(2),
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // First broadcast: AgentUpdate with Marked="Dead".
+    let update_event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentUpdate(update_msg) = update_event else {
+        panic!("expected AgentUpdate after exit callback, got {update_event:?}");
+    };
+    assert_eq!(update_msg.info.marked, "Dead", "agent should be marked Dead after process exit");
+
+    // Second broadcast: AgentResponse carrying the process exit message.
+    let response_event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(response_msg) = response_event else {
+        panic!("expected AgentResponse after exit callback, got {response_event:?}");
+    };
+    assert_eq!(response_msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+    let message = response_msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        message.contains("exit process"),
+        "exit_method=2 message should mention 'exit process', got: {message:?}"
+    );
+
+    socket.close(None).await?;
+    server.listeners.stop("out-exit-proc").await?;
+    Ok(())
+}
+
+/// `handle_exit_callback` with an unknown `exit_method` (e.g. 99) must mark the agent dead
+/// and broadcast the generic fallback message "Agent exited".
+#[tokio::test]
+async fn exit_callback_unknown_method_broadcasts_fallback_message()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    common::login(&mut socket).await?;
+
+    server.listeners.create(common::http_listener_config("out-exit-unk", listener_port)).await?;
+    drop(listener_guard);
+    server.listeners.start("out-exit-unk").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_0003_u32;
+    let key: [u8; AGENT_KEY_LENGTH] = [
+        0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F,
+        0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x5B, 0x5C, 0x5D, 0x5E,
+        0x5F, 0x60,
+    ];
+    let iv: [u8; AGENT_IV_LENGTH] = [
+        0x90, 0xA3, 0xB6, 0xC9, 0xDC, 0xEF, 0x02, 0x15, 0x28, 0x3B, 0x4E, 0x61, 0x74, 0x87, 0x9A,
+        0xAD,
+    ];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    // Consume the AgentNew broadcast from registration.
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(
+        matches!(agent_new, OperatorMessage::AgentNew(_)),
+        "expected AgentNew, got {agent_new:?}"
+    );
+
+    // Send a CommandExit callback (exit_method=99 → unknown/default).
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandExit),
+            0x01,
+            &exit_payload(99),
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // First broadcast: AgentUpdate with Marked="Dead".
+    let update_event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentUpdate(update_msg) = update_event else {
+        panic!("expected AgentUpdate after exit callback, got {update_event:?}");
+    };
+    assert_eq!(
+        update_msg.info.marked, "Dead",
+        "agent should be marked Dead for unknown exit method"
+    );
+
+    // Second broadcast: AgentResponse with the generic fallback.
+    let response_event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(response_msg) = response_event else {
+        panic!("expected AgentResponse after exit callback, got {response_event:?}");
+    };
+    assert_eq!(response_msg.info.extra.get("Type").and_then(|v| v.as_str()), Some("Good"));
+    let message = response_msg.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+    assert_eq!(
+        message, "Agent exited",
+        "unknown exit_method should produce fallback 'Agent exited', got: {message:?}"
+    );
+
+    socket.close(None).await?;
+    server.listeners.stop("out-exit-unk").await?;
+    Ok(())
+}
+
 /// `handle_demon_info_callback` with a `MemAlloc` payload must broadcast an `AgentResponse`
 /// containing the pointer, size, and memory protection to the operator.
 #[tokio::test]

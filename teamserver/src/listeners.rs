@@ -2141,6 +2141,13 @@ const DNS_MAX_UPLOADS_PER_IP: usize = 10;
 /// Maximum response chunk size in bytes (encoded as base32hex in a TXT string).
 /// 200 base32hex chars × 5 bits ÷ 8 = 125 bytes.
 const DNS_RESPONSE_CHUNK_BYTES: usize = 125;
+/// Maximum number of download chunks that fit in a u16 sequence counter.
+///
+/// The DNS download protocol uses a u16 `seq` field, so responses that would
+/// require more than 65 535 chunks cannot be delivered without silent truncation.
+/// Payloads exceeding `DNS_MAX_DOWNLOAD_CHUNKS * DNS_RESPONSE_CHUNK_BYTES`
+/// (~7.8 MB) are rejected at queue time.
+const DNS_MAX_DOWNLOAD_CHUNKS: usize = u16::MAX as usize;
 /// Base32hex alphabet (RFC 4648 §7): 0-9 followed by A-V.
 const BASE32HEX_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHIJKLMNOPQRSTUV";
 
@@ -2361,6 +2368,18 @@ impl DnsListenerState {
             Ok(response) => {
                 if !response.payload.is_empty() {
                     let chunks = chunk_response_to_b32hex(&response.payload);
+                    if chunks.len() > DNS_MAX_DOWNLOAD_CHUNKS {
+                        warn!(
+                            listener = %self.config.name,
+                            agent_id = format_args!("{agent_id:08X}"),
+                            payload_bytes = response.payload.len(),
+                            chunk_count = chunks.len(),
+                            max_chunks = DNS_MAX_DOWNLOAD_CHUNKS,
+                            "dns response exceeds u16 seq limit — dropping to prevent \
+                             silent truncation"
+                        );
+                        return "err";
+                    }
                     self.responses.lock().await.insert(
                         agent_id,
                         DnsPendingResponse { chunks, received_at: Instant::now() },
@@ -3561,10 +3580,11 @@ mod tests {
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     use super::{
-        DEMON_INIT_WINDOW_DURATION, DNS_HEADER_LEN, DNS_MAX_PENDING_UPLOADS, DNS_MAX_UPLOAD_CHUNKS,
-        DNS_MAX_UPLOADS_PER_IP, DNS_TYPE_A, DNS_TYPE_CNAME, DNS_TYPE_TXT, DNS_UPLOAD_TIMEOUT_SECS,
-        DemonInitRateLimiter, DnsListenerState, DnsPendingResponse, DnsPendingUpload,
-        DnsUploadAssembly, DownloadTracker, ListenerEventAction, ListenerManager,
+        DEMON_INIT_WINDOW_DURATION, DNS_HEADER_LEN, DNS_MAX_DOWNLOAD_CHUNKS,
+        DNS_MAX_PENDING_UPLOADS, DNS_MAX_UPLOAD_CHUNKS, DNS_MAX_UPLOADS_PER_IP,
+        DNS_RESPONSE_CHUNK_BYTES, DNS_TYPE_A, DNS_TYPE_CNAME, DNS_TYPE_TXT,
+        DNS_UPLOAD_TIMEOUT_SECS, DemonInitRateLimiter, DnsListenerState, DnsPendingResponse,
+        DnsPendingUpload, DnsUploadAssembly, DownloadTracker, ListenerEventAction, ListenerManager,
         ListenerManagerError, ListenerStatus, ListenerSummary, MAX_AGENT_MESSAGE_LEN,
         MAX_DEMON_INIT_ATTEMPT_WINDOWS, MAX_DEMON_INIT_ATTEMPTS_PER_IP, MAX_SMB_FRAME_PAYLOAD_LEN,
         MAX_UNKNOWN_CALLBACK_PROBE_AUDITS_PER_SOURCE, TrustedProxyPeer,
@@ -6506,6 +6526,35 @@ mod tests {
             reassembled.extend_from_slice(&decoded);
         }
         assert_eq!(reassembled, payload);
+    }
+
+    #[test]
+    fn dns_max_download_chunks_matches_u16_max() {
+        // Verify the constant is exactly u16::MAX so the seq field can address
+        // every chunk without overflow.
+        assert_eq!(DNS_MAX_DOWNLOAD_CHUNKS, u16::MAX as usize);
+        assert_eq!(DNS_MAX_DOWNLOAD_CHUNKS, 65_535);
+    }
+
+    #[test]
+    fn chunk_response_at_u16_boundary_is_within_limit() {
+        // Exactly u16::MAX chunks — should be accepted.
+        let payload_size = DNS_MAX_DOWNLOAD_CHUNKS * DNS_RESPONSE_CHUNK_BYTES;
+        let chunks = chunk_response_to_b32hex(&vec![0xBB; payload_size]);
+        assert_eq!(chunks.len(), DNS_MAX_DOWNLOAD_CHUNKS);
+    }
+
+    #[test]
+    fn chunk_response_exceeding_u16_limit_produces_too_many_chunks() {
+        // One byte over the limit produces chunk count > u16::MAX.
+        let payload_size = DNS_MAX_DOWNLOAD_CHUNKS * DNS_RESPONSE_CHUNK_BYTES + 1;
+        let chunks = chunk_response_to_b32hex(&vec![0xCC; payload_size]);
+        assert!(
+            chunks.len() > DNS_MAX_DOWNLOAD_CHUNKS,
+            "expected more than {} chunks, got {}",
+            DNS_MAX_DOWNLOAD_CHUNKS,
+            chunks.len()
+        );
     }
 
     #[tokio::test]

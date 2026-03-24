@@ -3202,8 +3202,15 @@ async fn download_payload(
     _identity: ReadApiAccess,
 ) -> Response {
     match state.database.payload_builds().get(&id).await {
-        Ok(Some(record)) if record.status == "done" && record.artifact.is_some() => {
-            let artifact = record.artifact.expect("checked above");
+        Ok(Some(mut record)) if record.status == "done" && record.artifact.is_some() => {
+            // SAFETY: guard above checks is_some(); use take() to avoid expect()/unwrap()
+            let Some(artifact) = record.artifact.take() else {
+                return json_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "artifact unexpectedly missing".to_string(),
+                );
+            };
             let file_name =
                 if record.name.is_empty() { format!("payload-{id}.bin") } else { record.name };
             (

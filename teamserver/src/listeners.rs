@@ -2153,6 +2153,11 @@ const DNS_MAX_UPLOAD_CHUNKS: u16 = 256;
 const DNS_MAX_PENDING_UPLOADS: usize = 1000;
 /// Maximum number of concurrent DNS upload sessions allowed per source IP.
 const DNS_MAX_UPLOADS_PER_IP: usize = 10;
+/// Maximum number of pending DNS download responses retained in memory.
+const DNS_MAX_PENDING_RESPONSES: usize = 1000;
+/// Maximum total size (in bytes) of all pending DNS download response chunks combined.
+/// Limits memory consumption when many agents have large queued responses.
+const DNS_MAX_PENDING_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 /// Maximum response chunk size in bytes (encoded as base32hex in a TXT string).
 /// 200 base32hex chars × 5 bits ÷ 8 = 125 bytes.
 const DNS_RESPONSE_CHUNK_BYTES: usize = 125;
@@ -2395,10 +2400,18 @@ impl DnsListenerState {
                         );
                         return "err";
                     }
-                    self.responses.lock().await.insert(
+                    let mut responses = self.responses.lock().await;
+                    Self::enforce_response_caps(
+                        &mut responses,
+                        agent_id,
+                        &chunks,
+                        &self.config.name,
+                    );
+                    responses.insert(
                         agent_id,
                         DnsPendingResponse { chunks, received_at: Instant::now() },
                     );
+                    drop(responses);
                 }
                 "ack"
             }
@@ -2412,6 +2425,77 @@ impl DnsListenerState {
                 "err"
             }
         }
+    }
+
+    /// Compute the total buffered bytes across all pending responses.
+    fn pending_response_bytes(responses: &HashMap<u32, DnsPendingResponse>) -> usize {
+        responses.values().map(|r| r.chunks.iter().map(|c| c.len()).sum::<usize>()).sum()
+    }
+
+    /// Enforce count and byte caps on the pending response map.
+    ///
+    /// If inserting a new response for `incoming_agent_id` would exceed either
+    /// `DNS_MAX_PENDING_RESPONSES` (count) or `DNS_MAX_PENDING_RESPONSE_BYTES`
+    /// (total memory), the oldest entries are evicted until there is room.
+    /// If the incoming entry itself already exists, it will be replaced in-place
+    /// and does not count toward the limit.
+    fn enforce_response_caps(
+        responses: &mut HashMap<u32, DnsPendingResponse>,
+        incoming_agent_id: u32,
+        incoming_chunks: &[String],
+        listener_name: &str,
+    ) {
+        // If this is a replacement for an existing agent, remove the old entry
+        // first so it doesn't count against the caps.
+        let replaced = responses.remove(&incoming_agent_id);
+
+        let incoming_bytes: usize = incoming_chunks.iter().map(|c| c.len()).sum();
+
+        // --- count cap ---
+        while responses.len() >= DNS_MAX_PENDING_RESPONSES {
+            let oldest_id = responses.iter().min_by_key(|(_, r)| r.received_at).map(|(&id, _)| id);
+            let Some(evict_id) = oldest_id else { break };
+            warn!(
+                listener = %listener_name,
+                evicted_agent_id = format_args!("{evict_id:08X}"),
+                pending_count = responses.len(),
+                max = DNS_MAX_PENDING_RESPONSES,
+                "evicting oldest pending DNS response — count cap reached"
+            );
+            responses.remove(&evict_id);
+        }
+
+        // --- byte cap ---
+        let mut total_bytes = Self::pending_response_bytes(responses);
+        while total_bytes + incoming_bytes > DNS_MAX_PENDING_RESPONSE_BYTES && !responses.is_empty()
+        {
+            let oldest_id = responses.iter().min_by_key(|(_, r)| r.received_at).map(|(&id, _)| id);
+            let Some(evict_id) = oldest_id else { break };
+            let evicted_bytes: usize = responses
+                .get(&evict_id)
+                .map(|r| r.chunks.iter().map(|c| c.len()).sum())
+                .unwrap_or(0);
+            warn!(
+                listener = %listener_name,
+                evicted_agent_id = format_args!("{evict_id:08X}"),
+                total_bytes,
+                incoming_bytes,
+                max_bytes = DNS_MAX_PENDING_RESPONSE_BYTES,
+                "evicting oldest pending DNS response — byte cap reached"
+            );
+            responses.remove(&evict_id);
+            total_bytes -= evicted_bytes;
+        }
+
+        // If eviction freed enough space, we're done.  If we couldn't free
+        // enough (the incoming response alone exceeds the byte cap while the
+        // map is empty), we still allow the insert — the chunk-count limit
+        // (DNS_MAX_DOWNLOAD_CHUNKS) already bounds single-response size.
+
+        // Re-insert the replaced entry if nothing was evicted and we had one —
+        // but actually we don't: we've already removed it above, and the caller
+        // will insert the new value.  We just need to NOT restore the old entry.
+        let _ = replaced;
     }
 
     async fn cleanup_expired_uploads(&self) {
@@ -3596,12 +3680,13 @@ mod tests {
 
     use super::{
         DEMON_INIT_WINDOW_DURATION, DNS_HEADER_LEN, DNS_MAX_DOWNLOAD_CHUNKS,
-        DNS_MAX_PENDING_UPLOADS, DNS_MAX_UPLOAD_CHUNKS, DNS_MAX_UPLOADS_PER_IP,
-        DNS_RESPONSE_CHUNK_BYTES, DNS_TYPE_A, DNS_TYPE_CNAME, DNS_TYPE_TXT,
-        DNS_UPLOAD_TIMEOUT_SECS, DemonInitRateLimiter, DnsListenerState, DnsPendingResponse,
-        DnsPendingUpload, DnsUploadAssembly, DownloadTracker, ListenerEventAction, ListenerManager,
-        ListenerManagerError, ListenerStatus, ListenerSummary, MAX_AGENT_MESSAGE_LEN,
-        MAX_DEMON_INIT_ATTEMPT_WINDOWS, MAX_DEMON_INIT_ATTEMPTS_PER_IP, MAX_SMB_FRAME_PAYLOAD_LEN,
+        DNS_MAX_PENDING_RESPONSE_BYTES, DNS_MAX_PENDING_RESPONSES, DNS_MAX_PENDING_UPLOADS,
+        DNS_MAX_UPLOAD_CHUNKS, DNS_MAX_UPLOADS_PER_IP, DNS_RESPONSE_CHUNK_BYTES, DNS_TYPE_A,
+        DNS_TYPE_CNAME, DNS_TYPE_TXT, DNS_UPLOAD_TIMEOUT_SECS, DemonInitRateLimiter,
+        DnsListenerState, DnsPendingResponse, DnsPendingUpload, DnsUploadAssembly, DownloadTracker,
+        ListenerEventAction, ListenerManager, ListenerManagerError, ListenerStatus,
+        ListenerSummary, MAX_AGENT_MESSAGE_LEN, MAX_DEMON_INIT_ATTEMPT_WINDOWS,
+        MAX_DEMON_INIT_ATTEMPTS_PER_IP, MAX_SMB_FRAME_PAYLOAD_LEN,
         MAX_UNKNOWN_CALLBACK_PROBE_AUDITS_PER_SOURCE, TrustedProxyPeer,
         UNKNOWN_CALLBACK_PROBE_AUDIT_WINDOW_DURATION, UnknownCallbackProbeAuditLimiter,
         action_from_mark, base32hex_decode, base32hex_encode, build_dns_txt_response,
@@ -7226,6 +7311,140 @@ mod tests {
         let responses = state.responses.lock().await;
         assert!(!responses.contains_key(&3));
         assert!(responses.contains_key(&4));
+    }
+
+    #[tokio::test]
+    async fn dns_response_cap_evicts_oldest_when_count_exceeded() {
+        let state = dns_state("dns-resp-count-cap").await;
+
+        {
+            let mut responses = state.responses.lock().await;
+            for i in 0..DNS_MAX_PENDING_RESPONSES {
+                responses.insert(
+                    i as u32,
+                    DnsPendingResponse {
+                        chunks: vec!["A".to_owned()],
+                        // Stagger timestamps so eviction order is deterministic.
+                        received_at: Instant::now()
+                            - Duration::from_secs((DNS_MAX_PENDING_RESPONSES - i) as u64),
+                    },
+                );
+            }
+            assert_eq!(responses.len(), DNS_MAX_PENDING_RESPONSES);
+        }
+
+        // Insert one more via enforce_response_caps — should evict agent 0 (oldest).
+        let new_chunks = vec!["NEW".to_owned()];
+        {
+            let mut responses = state.responses.lock().await;
+            DnsListenerState::enforce_response_caps(
+                &mut responses,
+                0xFFFF_FFFF,
+                &new_chunks,
+                "test",
+            );
+            responses.insert(
+                0xFFFF_FFFF,
+                DnsPendingResponse { chunks: new_chunks, received_at: Instant::now() },
+            );
+
+            assert_eq!(responses.len(), DNS_MAX_PENDING_RESPONSES);
+            assert!(!responses.contains_key(&0), "oldest entry (agent 0) should have been evicted");
+            assert!(responses.contains_key(&0xFFFF_FFFF), "new entry should be present");
+        }
+    }
+
+    #[tokio::test]
+    async fn dns_response_cap_evicts_oldest_when_byte_limit_exceeded() {
+        let state = dns_state("dns-resp-byte-cap").await;
+
+        // Each chunk is 1 MB of data — insert 7 entries (7 MB total, under 8 MB cap).
+        let big_chunk = "X".repeat(1024 * 1024);
+        {
+            let mut responses = state.responses.lock().await;
+            for i in 0..7u32 {
+                responses.insert(
+                    i,
+                    DnsPendingResponse {
+                        chunks: vec![big_chunk.clone()],
+                        received_at: Instant::now() - Duration::from_secs((7 - i) as u64),
+                    },
+                );
+            }
+            assert_eq!(responses.len(), 7);
+        }
+
+        // Inserting a 2 MB response should push total to 9 MB, evicting the oldest.
+        let new_chunks = vec![big_chunk.clone(), big_chunk.clone()];
+        {
+            let mut responses = state.responses.lock().await;
+            DnsListenerState::enforce_response_caps(&mut responses, 100, &new_chunks, "test");
+            responses.insert(
+                100,
+                DnsPendingResponse { chunks: new_chunks, received_at: Instant::now() },
+            );
+
+            // Agent 0 (oldest, 1 MB) evicted → 6 old + 1 new = 7 entries, 8 MB total.
+            assert!(!responses.contains_key(&0), "oldest entry should have been evicted");
+            assert!(responses.contains_key(&100), "new entry should be present");
+            let total = DnsListenerState::pending_response_bytes(&responses);
+            assert!(
+                total <= DNS_MAX_PENDING_RESPONSE_BYTES,
+                "total bytes {total} exceeds cap {DNS_MAX_PENDING_RESPONSE_BYTES}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dns_response_cap_replacement_does_not_evict() {
+        let state = dns_state("dns-resp-replace").await;
+
+        {
+            let mut responses = state.responses.lock().await;
+            for i in 0..DNS_MAX_PENDING_RESPONSES {
+                responses.insert(
+                    i as u32,
+                    DnsPendingResponse {
+                        chunks: vec!["OLD".to_owned()],
+                        received_at: Instant::now(),
+                    },
+                );
+            }
+        }
+
+        // Replacing agent 0's response (same agent_id) should not evict any other entry.
+        let new_chunks = vec!["REPLACED".to_owned()];
+        {
+            let mut responses = state.responses.lock().await;
+            DnsListenerState::enforce_response_caps(&mut responses, 0, &new_chunks, "test");
+            responses
+                .insert(0, DnsPendingResponse { chunks: new_chunks, received_at: Instant::now() });
+
+            assert_eq!(responses.len(), DNS_MAX_PENDING_RESPONSES);
+            assert_eq!(responses.get(&0).expect("agent 0").chunks[0], "REPLACED");
+            // All other entries still present.
+            for i in 1..DNS_MAX_PENDING_RESPONSES {
+                assert!(responses.contains_key(&(i as u32)), "agent {i} must still exist");
+            }
+        }
+    }
+
+    #[test]
+    fn dns_pending_response_bytes_computes_correctly() {
+        let mut map = HashMap::new();
+        map.insert(
+            1,
+            DnsPendingResponse {
+                chunks: vec!["ABC".to_owned(), "DE".to_owned()],
+                received_at: Instant::now(),
+            },
+        );
+        map.insert(
+            2,
+            DnsPendingResponse { chunks: vec!["FGHIJ".to_owned()], received_at: Instant::now() },
+        );
+        // "ABC" (3) + "DE" (2) + "FGHIJ" (5) = 10
+        assert_eq!(DnsListenerState::pending_response_bytes(&map), 10);
     }
 
     // --- listener lifecycle event payload helpers ---

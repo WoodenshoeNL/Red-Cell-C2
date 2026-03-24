@@ -684,6 +684,111 @@ async fn external_listener_rejects_oversized_body() -> Result<(), Box<dyn std::e
     Ok(())
 }
 
+/// A duplicate DEMON_INIT for an already-registered agent must not overwrite
+/// the original AES key/IV — prevents MITM re-keying attacks.
+#[tokio::test]
+async fn external_listener_pipeline_rejects_duplicate_init_preserves_original_key()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = spawn_server_with_fallback().await?;
+    let mut event_receiver = server.events.subscribe();
+
+    let agent_id = 0xDEAD_0001_u32;
+    let original_key: [u8; AGENT_KEY_LENGTH] = [
+        0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F,
+        0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x5B, 0x5C, 0x5D, 0x5E,
+        0x5F, 0x60,
+    ];
+    let original_iv: [u8; AGENT_IV_LENGTH] = [
+        0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F, 0x30, 0x31, 0x32,
+        0x33,
+    ];
+    let hijack_key: [u8; AGENT_KEY_LENGTH] = [
+        0xBB, 0xBC, 0xBD, 0xBE, 0xBF, 0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9,
+        0xCA, 0xCB, 0xCC, 0xCD, 0xCE, 0xCF, 0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8,
+        0xD9, 0xDA,
+    ];
+    let hijack_iv: [u8; AGENT_IV_LENGTH] = [
+        0xCC, 0xCD, 0xCE, 0xCF, 0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA,
+        0xDB,
+    ];
+
+    server.listeners.create(external_listener("ext-bridge-dup-init", "/dup-init")).await?;
+    server.listeners.start("ext-bridge-dup-init").await?;
+    wait_for_external_endpoint(&server, "/dup-init").await?;
+    wait_for_teamserver(&server).await?;
+
+    let client = Client::new();
+    let bridge_url = format!("http://{}/dup-init", server.addr);
+
+    // ── First DEMON_INIT — must succeed ──────────────────────────────────────
+    let first_resp = client
+        .post(&bridge_url)
+        .body(common::valid_demon_init_body(agent_id, original_key, original_iv))
+        .send()
+        .await?
+        .error_for_status()?;
+    let first_ack = first_resp.bytes().await?;
+    assert!(!first_ack.is_empty(), "first init must return an ACK");
+
+    let stored_after_first = server
+        .agent_registry
+        .get(agent_id)
+        .await
+        .ok_or("agent should be registered after first init")?;
+    assert_eq!(stored_after_first.encryption.aes_key.as_slice(), &original_key);
+    assert_eq!(stored_after_first.encryption.aes_iv.as_slice(), &original_iv);
+
+    // Consume the AgentNew event from the first init.
+    let event = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
+    assert!(
+        matches!(event, Some(OperatorMessage::AgentNew(_))),
+        "expected AgentNew event for first init, got {event:?}"
+    );
+
+    // ── Second DEMON_INIT — same agent_id, different key material ────────────
+    let replay_response = client
+        .post(&bridge_url)
+        .body(common::valid_demon_init_body(agent_id, hijack_key, hijack_iv))
+        .send()
+        .await?;
+
+    assert_eq!(
+        replay_response.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "duplicate DEMON_INIT must be rejected with 404"
+    );
+
+    // ── Verify original key/IV are preserved ─────────────────────────────────
+    let stored_after_replay = server
+        .agent_registry
+        .get(agent_id)
+        .await
+        .ok_or("agent should still be registered after rejected replay")?;
+    assert_eq!(
+        stored_after_replay.encryption.aes_key.as_slice(),
+        &original_key,
+        "original AES key must not be overwritten by duplicate init"
+    );
+    assert_eq!(
+        stored_after_replay.encryption.aes_iv.as_slice(),
+        &original_iv,
+        "original AES IV must not be overwritten by duplicate init"
+    );
+
+    // ── No duplicate registration ────────────────────────────────────────────
+    let active = server.agent_registry.list_active().await;
+    assert_eq!(active.len(), 1, "duplicate DEMON_INIT must not create a second registry entry");
+    assert_eq!(active[0].agent_id, agent_id);
+
+    // ── No second AgentNew event ─────────────────────────────────────────────
+    // Give a brief window for any spurious event to arrive, then assert none did.
+    let spurious = timeout(Duration::from_millis(250), event_receiver.recv()).await;
+    assert!(spurious.is_err(), "duplicate DEMON_INIT must not broadcast a second AgentNew event");
+
+    server.listeners.stop("ext-bridge-dup-init").await?;
+    Ok(())
+}
+
 /// Registering two external listeners on the same endpoint path must fail —
 /// the second `create()` call should return a `DuplicateEndpoint` error.
 #[tokio::test]

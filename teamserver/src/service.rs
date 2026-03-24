@@ -7,8 +7,8 @@
 //! ## Authentication
 //!
 //! Clients connect via WebSocket and send a JSON `Register` message containing
-//! the service password. The password is verified using constant-time SHA3-256
-//! comparison via [`subtle::ConstantTimeEq`].
+//! the service password. The password is verified using Argon2id — the same
+//! [`password_hashes_match`](crate::auth::password_hashes_match) used by operator auth.
 //!
 //! ## Protocol
 //!
@@ -38,7 +38,6 @@ use red_cell_common::operator::{
     TeamserverLogInfo,
 };
 use serde_json::Value;
-use subtle::ConstantTimeEq;
 use thiserror::Error;
 use time::OffsetDateTime;
 use tokio::sync::RwLock;
@@ -47,6 +46,7 @@ use uuid::Uuid;
 
 use crate::agent_events::agent_new_event;
 use crate::audit::{AuditDetails, AuditResultStatus, audit_details};
+use crate::auth::{AuthError, password_hashes_match, password_verifier_for_sha3};
 use crate::database::TeamserverError;
 use crate::{
     AgentRegistry, AuditWebhookNotifier, Database, EventBus, LoginRateLimiter, PivotInfo,
@@ -133,8 +133,10 @@ pub enum ServiceBridgeError {
 #[derive(Debug, Clone)]
 pub struct ServiceBridge {
     endpoint: String,
-    /// Pre-computed SHA3-256 hash of the service password (plaintext is dropped).
-    password_hash: String,
+    /// Argon2id verifier derived from the SHA3-256 hash of the service password.
+    ///
+    /// The plaintext password is dropped at construction time.
+    password_verifier: String,
     inner: Arc<RwLock<ServiceBridgeInner>>,
     /// Independent login rate limiter for service bridge authentication.
     ///
@@ -156,17 +158,20 @@ struct ServiceBridgeInner {
 impl ServiceBridge {
     /// Create a new service bridge from the profile configuration.
     ///
-    /// The SHA3-256 hash of the password is computed once at construction time
-    /// and the plaintext password is dropped immediately.
-    #[must_use]
-    pub fn new(config: ServiceConfig) -> Self {
-        let password_hash = hash_password_sha3(&config.password);
-        Self {
+    /// The password is hashed with SHA3-256 then wrapped in Argon2id at
+    /// construction time. The plaintext password is dropped immediately.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError`] if the Argon2 hasher cannot be initialised.
+    pub fn new(config: ServiceConfig) -> Result<Self, AuthError> {
+        let password_verifier = password_verifier_for_sha3(&hash_password_sha3(&config.password))?;
+        Ok(Self {
             endpoint: config.endpoint,
-            password_hash,
+            password_verifier,
             inner: Arc::new(RwLock::new(ServiceBridgeInner::default())),
             login_rate_limiter: LoginRateLimiter::new(),
-        }
+        })
     }
 
     /// Return the configured endpoint path (without leading slash).
@@ -220,7 +225,14 @@ impl ServiceBridge {
 impl FromRef<crate::TeamserverState> for ServiceBridge {
     fn from_ref(input: &crate::TeamserverState) -> Self {
         input.service_bridge.clone().unwrap_or_else(|| {
-            ServiceBridge::new(ServiceConfig { endpoint: String::new(), password: String::new() })
+            // Fallback bridge when no service is configured — auth will always reject
+            // because the verifier is not a valid Argon2 PHC string.
+            Self {
+                endpoint: String::new(),
+                password_verifier: String::new(),
+                inner: Arc::new(RwLock::new(ServiceBridgeInner::default())),
+                login_rate_limiter: LoginRateLimiter::new(),
+            }
         })
     }
 }
@@ -271,7 +283,7 @@ async fn handle_service_socket(
 
     // Authenticate the client (with rate limiting).
     let client_id =
-        match authenticate(&mut socket, &bridge.password_hash, rate_limiter, client_ip).await {
+        match authenticate(&mut socket, &bridge.password_verifier, rate_limiter, client_ip).await {
             Ok(id) => id,
             Err(e) => {
                 warn!(%e, %client_ip, "service client authentication failed");
@@ -362,16 +374,16 @@ async fn handle_service_socket(
 
 // ── Authentication ───────────────────────────────────────────────────
 
-/// Authenticate a service client using the SHA3-256 password protocol.
+/// Authenticate a service client using Argon2id-wrapped SHA3-256 verification.
 ///
 /// Expects a JSON message: `{"Head":{"Type":"Register"},"Body":{"Password":"..."}}`
 /// Responds with: `{"Head":{"Type":"Register"},"Body":{"Success":true/false}}`
 ///
-/// `server_hash` is the pre-computed SHA3-256 hex digest of the server password.
+/// `server_verifier` is the Argon2id PHC string derived from `SHA3-256(password)`.
 /// Rate limiting is enforced per source IP using the shared [`LoginRateLimiter`].
 async fn authenticate(
     socket: &mut WebSocket,
-    server_hash: &str,
+    server_verifier: &str,
     rate_limiter: &LoginRateLimiter,
     client_ip: IpAddr,
 ) -> Result<Uuid, ServiceBridgeError> {
@@ -407,7 +419,7 @@ async fn authenticate(
         .unwrap_or_default();
 
     let client_hash = hash_password_sha3(client_password);
-    let success: bool = client_hash.as_bytes().ct_eq(server_hash.as_bytes()).into();
+    let success = password_hashes_match(&client_hash, server_verifier);
 
     let response = serde_json::json!({
         "Head": { "Type": HEAD_REGISTER },
@@ -1137,11 +1149,17 @@ mod tests {
         (database, webhooks)
     }
 
+    /// Create an Argon2id verifier from a plaintext password (for test use).
+    fn test_verifier(password: &str) -> String {
+        password_verifier_for_sha3(&hash_password_sha3(password))
+            .expect("test verifier should be generated")
+    }
+
     #[test]
     fn service_bridge_creates_with_config() {
         let config =
             ServiceConfig { endpoint: "svc-endpoint".to_owned(), password: "secret".to_owned() };
-        let bridge = ServiceBridge::new(config);
+        let bridge = ServiceBridge::new(config).expect("service bridge");
         assert_eq!(bridge.endpoint(), "svc-endpoint");
     }
 
@@ -1150,7 +1168,8 @@ mod tests {
         let bridge = ServiceBridge::new(ServiceConfig {
             endpoint: "test".to_owned(),
             password: "pw".to_owned(),
-        });
+        })
+        .expect("service bridge");
 
         let id = Uuid::new_v4();
         bridge.add_client(id).await;
@@ -1165,7 +1184,8 @@ mod tests {
         let bridge = ServiceBridge::new(ServiceConfig {
             endpoint: "test".to_owned(),
             password: "pw".to_owned(),
-        });
+        })
+        .expect("service bridge");
 
         bridge
             .register_agent("custom-agent".to_owned())
@@ -1183,7 +1203,8 @@ mod tests {
         let bridge = ServiceBridge::new(ServiceConfig {
             endpoint: "test".to_owned(),
             password: "pw".to_owned(),
-        });
+        })
+        .expect("service bridge");
 
         bridge.register_listener("my-listener".to_owned()).await;
         // Registering same name again is idempotent.
@@ -1198,7 +1219,8 @@ mod tests {
         let bridge = ServiceBridge::new(ServiceConfig {
             endpoint: "test".to_owned(),
             password: "pw".to_owned(),
-        });
+        })
+        .expect("service bridge");
 
         let client_id = Uuid::new_v4();
         bridge.add_client(client_id).await;
@@ -1246,7 +1268,8 @@ mod tests {
         let bridge = ServiceBridge::new(ServiceConfig {
             endpoint: "test".to_owned(),
             password: "pw".to_owned(),
-        });
+        })
+        .expect("service bridge");
         let events = EventBus::default();
         let (db, wh) = test_audit_deps().await;
         let mut client_listeners = Vec::new();
@@ -1269,7 +1292,8 @@ mod tests {
         let bridge = ServiceBridge::new(ServiceConfig {
             endpoint: "test".to_owned(),
             password: "pw".to_owned(),
-        });
+        })
+        .expect("service bridge");
         let events = EventBus::default();
         let mut rx = events.subscribe();
         let mut client_agents = Vec::new();
@@ -1307,7 +1331,8 @@ mod tests {
         let bridge = ServiceBridge::new(ServiceConfig {
             endpoint: "test".to_owned(),
             password: "pw".to_owned(),
-        });
+        })
+        .expect("service bridge");
         let events = EventBus::default();
         let mut rx = events.subscribe();
         let mut client_listeners = Vec::new();
@@ -1344,7 +1369,8 @@ mod tests {
         let bridge = ServiceBridge::new(ServiceConfig {
             endpoint: "test".to_owned(),
             password: "pw".to_owned(),
-        });
+        })
+        .expect("service bridge");
         let events = EventBus::default();
         let mut client_agents = Vec::new();
 
@@ -1376,7 +1402,8 @@ mod tests {
         let bridge = ServiceBridge::new(ServiceConfig {
             endpoint: "test".to_owned(),
             password: "pw".to_owned(),
-        });
+        })
+        .expect("service bridge");
         let events = EventBus::default();
         let mut client_agents = Vec::new();
 
@@ -2032,7 +2059,8 @@ mod tests {
         let bridge = ServiceBridge::new(ServiceConfig {
             endpoint: "test".to_owned(),
             password: "pw".to_owned(),
-        });
+        })
+        .expect("service bridge");
         let events = EventBus::default();
         let mut rx = events.subscribe();
         let mut client_listeners = Vec::new();
@@ -2058,7 +2086,8 @@ mod tests {
         let bridge = ServiceBridge::new(ServiceConfig {
             endpoint: "test".to_owned(),
             password: "pw".to_owned(),
-        });
+        })
+        .expect("service bridge");
         let events = EventBus::default();
         let mut client_agents = Vec::new();
 
@@ -2088,7 +2117,8 @@ mod tests {
         let bridge = ServiceBridge::new(ServiceConfig {
             endpoint: "test".to_owned(),
             password: "pw".to_owned(),
-        });
+        })
+        .expect("service bridge");
         let events = EventBus::default();
         let mut client_listeners = Vec::new();
 
@@ -2221,14 +2251,14 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_correct_password_succeeds() {
-        let server_hash = hash_password_sha3("correct-pw");
+        let server_verifier = test_verifier("correct-pw");
 
         let (mut server_ws, mut client_ws) = ws_pair().await;
 
         let auth_handle = tokio::spawn(async move {
             let rl = LoginRateLimiter::new();
             let ip: IpAddr = "127.0.0.1".parse().expect("valid IP");
-            authenticate(&mut server_ws, &server_hash, &rl, ip).await
+            authenticate(&mut server_ws, &server_verifier, &rl, ip).await
         });
 
         let register_msg = serde_json::json!({
@@ -2247,14 +2277,14 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_wrong_password_fails() {
-        let server_hash = hash_password_sha3("correct-pw");
+        let server_verifier = test_verifier("correct-pw");
 
         let (mut server_ws, mut client_ws) = ws_pair().await;
 
         let auth_handle = tokio::spawn(async move {
             let rl = LoginRateLimiter::new();
             let ip: IpAddr = "127.0.0.1".parse().expect("valid IP");
-            authenticate(&mut server_ws, &server_hash, &rl, ip).await
+            authenticate(&mut server_ws, &server_verifier, &rl, ip).await
         });
 
         let register_msg = serde_json::json!({
@@ -2280,14 +2310,14 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_malformed_json_fails() {
-        let server_hash = hash_password_sha3("pw");
+        let server_verifier = test_verifier("pw");
 
         let (mut server_ws, mut client_ws) = ws_pair().await;
 
         let auth_handle = tokio::spawn(async move {
             let rl = LoginRateLimiter::new();
             let ip: IpAddr = "127.0.0.1".parse().expect("valid IP");
-            authenticate(&mut server_ws, &server_hash, &rl, ip).await
+            authenticate(&mut server_ws, &server_verifier, &rl, ip).await
         });
 
         client_send(&mut client_ws, "this is not json!!!").await;
@@ -2302,14 +2332,14 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_non_register_head_type_fails() {
-        let server_hash = hash_password_sha3("pw");
+        let server_verifier = test_verifier("pw");
 
         let (mut server_ws, mut client_ws) = ws_pair().await;
 
         let auth_handle = tokio::spawn(async move {
             let rl = LoginRateLimiter::new();
             let ip: IpAddr = "127.0.0.1".parse().expect("valid IP");
-            authenticate(&mut server_ws, &server_hash, &rl, ip).await
+            authenticate(&mut server_ws, &server_verifier, &rl, ip).await
         });
 
         let message = serde_json::json!({
@@ -2328,14 +2358,14 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_missing_password_field_fails() {
-        let server_hash = hash_password_sha3("secret");
+        let server_verifier = test_verifier("secret");
 
         let (mut server_ws, mut client_ws) = ws_pair().await;
 
         let auth_handle = tokio::spawn(async move {
             let rl = LoginRateLimiter::new();
             let ip: IpAddr = "127.0.0.1".parse().expect("valid IP");
-            authenticate(&mut server_ws, &server_hash, &rl, ip).await
+            authenticate(&mut server_ws, &server_verifier, &rl, ip).await
         });
 
         let message = serde_json::json!({
@@ -2358,14 +2388,14 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_empty_password_matches_empty_config() {
-        let server_hash = hash_password_sha3("");
+        let server_verifier = test_verifier("");
 
         let (mut server_ws, mut client_ws) = ws_pair().await;
 
         let auth_handle = tokio::spawn(async move {
             let rl = LoginRateLimiter::new();
             let ip: IpAddr = "127.0.0.1".parse().expect("valid IP");
-            authenticate(&mut server_ws, &server_hash, &rl, ip).await
+            authenticate(&mut server_ws, &server_verifier, &rl, ip).await
         });
 
         let message = serde_json::json!({
@@ -2488,7 +2518,8 @@ mod tests {
         let bridge = ServiceBridge::new(ServiceConfig {
             endpoint: "test".to_owned(),
             password: "pw".to_owned(),
-        });
+        })
+        .expect("service bridge");
         let events = EventBus::default();
         let mut rx = events.subscribe();
         let registry = test_registry().await;
@@ -2527,7 +2558,8 @@ mod tests {
         let bridge = ServiceBridge::new(ServiceConfig {
             endpoint: "test".to_owned(),
             password: "pw".to_owned(),
-        });
+        })
+        .expect("service bridge");
         let events = EventBus::default();
         let mut rx = events.subscribe();
         let registry = test_registry().await;
@@ -2564,7 +2596,8 @@ mod tests {
         let bridge = ServiceBridge::new(ServiceConfig {
             endpoint: "test".to_owned(),
             password: "pw".to_owned(),
-        });
+        })
+        .expect("service bridge");
         let events = EventBus::default();
         let mut rx = events.subscribe();
         let registry = test_registry().await;
@@ -2600,7 +2633,8 @@ mod tests {
         let bridge = ServiceBridge::new(ServiceConfig {
             endpoint: "test".to_owned(),
             password: "pw".to_owned(),
-        });
+        })
+        .expect("service bridge");
         let events = EventBus::default();
         let registry = test_registry().await;
 
@@ -2621,7 +2655,7 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_rate_limits_after_max_failures() {
-        let server_hash = hash_password_sha3("correct-pw");
+        let server_verifier = test_verifier("correct-pw");
         let rate_limiter = LoginRateLimiter::new();
         let ip: IpAddr = "10.0.0.99".parse().expect("valid IP");
 
@@ -2632,7 +2666,7 @@ mod tests {
 
         // The next attempt should be rate-limited without even reading a message.
         let (mut server_ws, _client_ws) = ws_pair().await;
-        let result = authenticate(&mut server_ws, &server_hash, &rate_limiter, ip).await;
+        let result = authenticate(&mut server_ws, &server_verifier, &rate_limiter, ip).await;
         assert!(result.is_err(), "should be rate limited");
         assert!(
             matches!(result.unwrap_err(), ServiceBridgeError::RateLimited),
@@ -2642,7 +2676,7 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_allows_different_ip_when_one_is_limited() {
-        let server_hash = hash_password_sha3("correct-pw");
+        let server_verifier = test_verifier("correct-pw");
         let rate_limiter = LoginRateLimiter::new();
         let blocked_ip: IpAddr = "10.0.0.100".parse().expect("valid IP");
         let allowed_ip: IpAddr = "10.0.0.101".parse().expect("valid IP");
@@ -2654,13 +2688,14 @@ mod tests {
 
         // blocked_ip should be rejected.
         let (mut server_ws, _client_ws) = ws_pair().await;
-        let result = authenticate(&mut server_ws, &server_hash, &rate_limiter, blocked_ip).await;
+        let result =
+            authenticate(&mut server_ws, &server_verifier, &rate_limiter, blocked_ip).await;
         assert!(matches!(result.unwrap_err(), ServiceBridgeError::RateLimited));
 
         // allowed_ip should still work (correct password).
         let (mut server_ws2, mut client_ws2) = ws_pair().await;
         let rl = rate_limiter.clone();
-        let hash = server_hash.clone();
+        let hash = server_verifier.clone();
         let auth_handle =
             tokio::spawn(
                 async move { authenticate(&mut server_ws2, &hash, &rl, allowed_ip).await },
@@ -2679,7 +2714,7 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_times_out_when_no_frame_sent() {
-        let server_hash = hash_password_sha3("correct-pw");
+        let server_verifier = test_verifier("correct-pw");
         let rate_limiter = LoginRateLimiter::new();
         let ip: IpAddr = "127.0.0.1".parse().expect("valid IP");
 
@@ -2688,7 +2723,7 @@ mod tests {
         // Hold `_client_ws` open but never send anything — the server side
         // should time out after SERVICE_AUTH_FRAME_TIMEOUT.
         let start = tokio::time::Instant::now();
-        let result = authenticate(&mut server_ws, &server_hash, &rate_limiter, ip).await;
+        let result = authenticate(&mut server_ws, &server_verifier, &rate_limiter, ip).await;
         let elapsed = start.elapsed();
 
         assert!(

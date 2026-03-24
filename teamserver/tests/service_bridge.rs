@@ -44,7 +44,7 @@ async fn spawn_service_server(
     let bridge = ServiceBridge::new(ServiceConfig {
         endpoint: service_endpoint.to_owned(),
         password: service_password.to_owned(),
-    });
+    })?;
 
     let state = TeamserverState {
         profile: profile.clone(),

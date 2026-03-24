@@ -111,7 +111,11 @@ async fn main() -> Result<()> {
         webhooks: AuditWebhookNotifier::from_profile(&profile),
         login_rate_limiter: LoginRateLimiter::new(),
         shutdown: shutdown.clone(),
-        service_bridge: profile.service.as_ref().map(|sc| red_cell::ServiceBridge::new(sc.clone())),
+        service_bridge: profile
+            .service
+            .as_ref()
+            .map(|sc| red_cell::ServiceBridge::new(sc.clone()))
+            .transpose()?,
     };
     let router = build_router(state.clone());
     let handle = Handle::new();

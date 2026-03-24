@@ -565,7 +565,8 @@ mod tests {
         let bridge = crate::ServiceBridge::new(ServiceConfig {
             endpoint: "service-ws".to_owned(),
             password: "test-password".to_owned(),
-        });
+        })
+        .expect("service bridge");
         state.service_bridge = Some(bridge);
 
         let response = build_router(state)

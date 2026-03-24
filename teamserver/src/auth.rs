@@ -664,7 +664,7 @@ fn argon2_hasher() -> Result<Argon2<'static>, AuthError> {
     Ok(Argon2::new(Algorithm::Argon2id, Version::V0x13, params))
 }
 
-fn password_hashes_match(submitted: &str, expected: &str) -> bool {
+pub(crate) fn password_hashes_match(submitted: &str, expected: &str) -> bool {
     #[cfg(test)]
     return password_hashes_match_cached(submitted, expected);
     #[cfg(not(test))]

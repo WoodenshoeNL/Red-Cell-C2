@@ -10,8 +10,8 @@ mod common;
 use std::time::Duration;
 
 use red_cell::{AgentRegistry, Database, EventBus, ListenerManager, SocketRelayManager};
-use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
-use red_cell_common::demon::DemonCommand;
+use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH, decrypt_agent_data_at_offset};
+use red_cell_common::demon::{DemonCommand, DemonMessage};
 use red_cell_common::operator::OperatorMessage;
 use red_cell_common::{DnsListenerConfig, ListenerConfig};
 use tokio::net::UdpSocket;
@@ -1134,5 +1134,207 @@ async fn dns_listener_pipeline_registered_agent_downloads_task_after_enqueue()
     );
 
     manager.stop("dns-task-dl").await?;
+    Ok(())
+}
+
+/// Happy path: agent registers → operator queues task → agent downloads via DNS
+/// → decrypted DemonMessage contains the correct command_id and request_id.
+#[tokio::test]
+async fn dns_task_delivery_happy_path_decrypts_correctly() -> Result<(), Box<dyn std::error::Error>>
+{
+    use red_cell::Job;
+
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None);
+    let mut event_receiver = events.subscribe();
+
+    let port = free_udp_port();
+    let domain = "c2.example.com";
+    let key: [u8; AGENT_KEY_LENGTH] = [
+        0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF,
+        0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE,
+        0xBF, 0xC0,
+    ];
+    let iv: [u8; AGENT_IV_LENGTH] = [
+        0xD1, 0xE4, 0xF7, 0x0A, 0x1D, 0x30, 0x43, 0x56, 0x69, 0x7C, 0x8F, 0xA2, 0xB5, 0xC8, 0xDB,
+        0xEE,
+    ];
+    let agent_id = 0xFEED_1001_u32;
+
+    manager.create(dns_listener("dns-happy", port, domain)).await?;
+    manager.start("dns-happy").await?;
+    let client = wait_for_dns_listener(port).await?;
+
+    // 1. Register via DEMON_INIT.
+    let init_body = common::valid_demon_init_body(agent_id, key, iv);
+    let init_result =
+        dns_upload_demon_packet(&client, agent_id, &init_body, domain, 0xC000).await?;
+    assert_eq!(init_result, "ack");
+    assert!(registry.get(agent_id).await.is_some());
+
+    // Drain AgentNew event.
+    let event = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
+    assert!(matches!(event, Some(OperatorMessage::AgentNew(_))));
+
+    // 2. Consume the init ACK.
+    let ack_payload = dns_download_response(&client, agent_id, domain, 0xC100).await?;
+    assert!(!ack_payload.is_empty());
+
+    // 3. Enqueue a task for the agent.
+    let task_payload = vec![0xDE, 0xAD, 0xBE, 0xEF];
+    registry
+        .enqueue_job(
+            agent_id,
+            Job {
+                command: u32::from(DemonCommand::CommandCheckin),
+                request_id: 0x3A,
+                payload: task_payload.clone(),
+                command_line: "checkin".to_owned(),
+                task_id: "task-happy-1".to_owned(),
+                created_at: String::new(),
+                operator: String::new(),
+            },
+        )
+        .await?;
+
+    // 4. Agent sends CommandGetJob to trigger task dispatch.
+    let callback_body = common::valid_demon_callback_body(
+        agent_id,
+        key,
+        iv,
+        0,
+        u32::from(DemonCommand::CommandGetJob),
+        9,
+        &[],
+    );
+    let callback_result =
+        dns_upload_demon_packet(&client, agent_id, &callback_body, domain, 0xC200).await?;
+    assert_eq!(callback_result, "ack");
+
+    // 5. Download the task response.
+    let response_bytes = dns_download_response(&client, agent_id, domain, 0xC300).await?;
+    assert!(!response_bytes.is_empty(), "task response must not be empty");
+
+    // 6. Parse DemonMessage and verify structure.
+    let msg = DemonMessage::from_bytes(&response_bytes)?;
+    assert_eq!(msg.packages.len(), 1, "exactly one task package expected");
+    assert_eq!(
+        msg.packages[0].command_id,
+        u32::from(DemonCommand::CommandCheckin),
+        "task command must match queued CommandCheckin"
+    );
+    assert_eq!(msg.packages[0].request_id, 0x3A, "request_id must match queued value");
+
+    // 7. Decrypt the payload and verify it matches the original task data.
+    //    Legacy CTR mode: server encrypts at offset 0.
+    let decrypted = decrypt_agent_data_at_offset(&key, &iv, 0, &msg.packages[0].payload)?;
+    assert_eq!(decrypted, task_payload, "decrypted task payload must match original");
+
+    manager.stop("dns-happy").await?;
+    Ok(())
+}
+
+/// Multi-chunk delivery: queue a task large enough to require more than one DNS
+/// TXT chunk and verify reassembly + decryption are correct.
+#[tokio::test]
+async fn dns_task_delivery_multi_chunk() -> Result<(), Box<dyn std::error::Error>> {
+    use red_cell::Job;
+
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None);
+    let mut event_receiver = events.subscribe();
+
+    let port = free_udp_port();
+    let domain = "c2.example.com";
+    let key: [u8; AGENT_KEY_LENGTH] = [
+        0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x5B, 0x5C, 0x5D, 0x5E, 0x5F,
+        0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x6B, 0x6C, 0x6D, 0x6E,
+        0x6F, 0x70,
+    ];
+    let iv: [u8; AGENT_IV_LENGTH] = [
+        0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x7B, 0x7C, 0x7D, 0x7E, 0x7F,
+        0x80,
+    ];
+    let agent_id = 0xFEED_2002_u32;
+
+    manager.create(dns_listener("dns-multichunk", port, domain)).await?;
+    manager.start("dns-multichunk").await?;
+    let client = wait_for_dns_listener(port).await?;
+
+    // 1. Register via DEMON_INIT.
+    let init_body = common::valid_demon_init_body(agent_id, key, iv);
+    let init_result =
+        dns_upload_demon_packet(&client, agent_id, &init_body, domain, 0xD000).await?;
+    assert_eq!(init_result, "ack");
+    assert!(registry.get(agent_id).await.is_some());
+
+    // Drain AgentNew event.
+    let event = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
+    assert!(matches!(event, Some(OperatorMessage::AgentNew(_))));
+
+    // 2. Consume the init ACK.
+    let ack_payload = dns_download_response(&client, agent_id, domain, 0xD100).await?;
+    assert!(!ack_payload.is_empty());
+
+    // 3. Build a large task payload that will require multiple DNS TXT chunks.
+    //    DNS TXT records have a ~255 byte limit; base32hex encoding expands data
+    //    by 8/5, so a 500-byte payload will definitely span multiple chunks.
+    let large_payload: Vec<u8> = (0..500).map(|i| (i % 256) as u8).collect();
+
+    registry
+        .enqueue_job(
+            agent_id,
+            Job {
+                command: u32::from(DemonCommand::CommandCheckin),
+                request_id: 0x7B,
+                payload: large_payload.clone(),
+                command_line: "large-task".to_owned(),
+                task_id: "task-multi-1".to_owned(),
+                created_at: String::new(),
+                operator: String::new(),
+            },
+        )
+        .await?;
+
+    // 4. Agent sends CommandGetJob.
+    let callback_body = common::valid_demon_callback_body(
+        agent_id,
+        key,
+        iv,
+        0,
+        u32::from(DemonCommand::CommandGetJob),
+        10,
+        &[],
+    );
+    let callback_result =
+        dns_upload_demon_packet(&client, agent_id, &callback_body, domain, 0xD200).await?;
+    assert_eq!(callback_result, "ack");
+
+    // 5. Download the multi-chunk response.
+    let response_bytes = dns_download_response(&client, agent_id, domain, 0xD300).await?;
+    assert!(!response_bytes.is_empty(), "multi-chunk task response must not be empty");
+
+    // 6. Parse and verify DemonMessage structure.
+    let msg = DemonMessage::from_bytes(&response_bytes)?;
+    assert_eq!(msg.packages.len(), 1);
+    assert_eq!(msg.packages[0].command_id, u32::from(DemonCommand::CommandCheckin));
+    assert_eq!(msg.packages[0].request_id, 0x7B);
+
+    // 7. Decrypt and verify the payload matches byte-for-byte.
+    let decrypted = decrypt_agent_data_at_offset(&key, &iv, 0, &msg.packages[0].payload)?;
+    assert_eq!(
+        decrypted,
+        large_payload,
+        "multi-chunk decrypted payload must match original ({} bytes)",
+        large_payload.len()
+    );
+
+    manager.stop("dns-multichunk").await?;
     Ok(())
 }

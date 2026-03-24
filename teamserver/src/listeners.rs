@@ -3694,11 +3694,11 @@ mod tests {
         UNKNOWN_CALLBACK_PROBE_AUDIT_WINDOW_DURATION, UnknownCallbackProbeAuditLimiter,
         action_from_mark, base32hex_decode, base32hex_encode, build_dns_txt_response,
         chunk_response_to_b32hex, collect_body_with_magic_precheck, dns_allowed_query_types,
-        extract_external_ip, is_outside_working_hours, is_outside_working_hours_at,
-        is_past_kill_date, listener_config_from_operator, listener_error_event,
-        listener_event_for_action, listener_removed_event, operator_protocol_name,
-        operator_requests_start, parse_dns_c2_query, parse_dns_query, parse_trusted_proxy_peer,
-        profile_listener_configs, read_smb_frame, smb_local_socket_name,
+        extract_external_ip, handle_external_request, is_outside_working_hours,
+        is_outside_working_hours_at, is_past_kill_date, listener_config_from_operator,
+        listener_error_event, listener_event_for_action, listener_removed_event,
+        operator_protocol_name, operator_requests_start, parse_dns_c2_query, parse_dns_query,
+        parse_trusted_proxy_peer, profile_listener_configs, read_smb_frame, smb_local_socket_name,
         spawn_dns_listener_runtime, spawn_managed_listener_task, spawn_smb_listener_runtime,
     };
     use crate::{
@@ -8079,6 +8079,77 @@ mod tests {
             .update(external_listener_config("ext-b", "/gamma"))
             .await
             .expect("update to unique endpoint should succeed");
+    }
+
+    // ── External listener preflight guard tests ──────────────────────────────
+
+    /// Verify that `handle_external_request` enforces the per-IP DEMON_INIT
+    /// rate limit in the same way as the HTTP listener.
+    #[tokio::test]
+    async fn handle_external_request_rate_limits_demon_init_per_source_ip() {
+        let database = Database::connect_in_memory().await.expect("db");
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+
+        manager.create(external_listener_config("ext-rate", "/rate")).await.expect("create");
+        manager.start("ext-rate").await.expect("start");
+
+        let state =
+            manager.external_state_for_path("/rate").await.expect("state must be registered");
+
+        let peer: SocketAddr = "10.0.0.1:5000".parse().unwrap();
+
+        // Exhaust the allowed DEMON_INIT budget for this IP.
+        for attempt in 0..MAX_DEMON_INIT_ATTEMPTS_PER_IP {
+            let agent_id = 0xEE00_0000 + attempt;
+            let body = valid_demon_init_body(agent_id, test_key(0x11), test_iv(0x22));
+            let result: Result<Vec<u8>, StatusCode> =
+                handle_external_request(&state, peer, &body).await;
+            assert!(result.is_ok(), "attempt {attempt} should be allowed, got {result:?}");
+        }
+
+        // The next DEMON_INIT from the same IP must be blocked (404).
+        let blocked_id = 0xEE00_00FF;
+        let blocked_body = valid_demon_init_body(blocked_id, test_key(0x11), test_iv(0x22));
+        let blocked = handle_external_request(&state, peer, &blocked_body).await;
+        assert_eq!(blocked, Err(StatusCode::NOT_FOUND), "over-limit init must return 404");
+        assert!(registry.get(blocked_id).await.is_none(), "blocked agent must not be registered");
+
+        manager.stop("ext-rate").await.expect("stop");
+    }
+
+    /// Verify that `handle_external_request` returns 503 when shutdown is in
+    /// progress (matching the behaviour of the HTTP and DNS listener paths).
+    #[tokio::test]
+    async fn handle_external_request_rejects_new_callbacks_during_shutdown() {
+        let database = Database::connect_in_memory().await.expect("db");
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::new(database, registry, events, sockets, None);
+
+        manager
+            .create(external_listener_config("ext-shutdown", "/shutdown"))
+            .await
+            .expect("create");
+        manager.start("ext-shutdown").await.expect("start");
+
+        let state =
+            manager.external_state_for_path("/shutdown").await.expect("state must be registered");
+
+        // Initiate shutdown before issuing a request.
+        manager.shutdown_controller().initiate();
+
+        let peer: SocketAddr = "10.0.0.2:6000".parse().unwrap();
+        let body = valid_demon_init_body(0xDEAD_0001, test_key(0x33), test_iv(0x44));
+        let result = handle_external_request(&state, peer, &body).await;
+        assert_eq!(
+            result,
+            Err(StatusCode::SERVICE_UNAVAILABLE),
+            "request during shutdown must return 503"
+        );
     }
 
     // ── HTTP required-field rejection tests ──────────────────────────────────

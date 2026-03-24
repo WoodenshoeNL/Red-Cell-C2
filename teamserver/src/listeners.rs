@@ -638,6 +638,21 @@ impl ListenerManager {
             ListenerManagerError::ListenerNotFound { name: config.name().to_owned() }
         })?;
 
+        // Reject external listeners whose endpoint path is already claimed by
+        // another listener (same check as create_locked, excluding self).
+        if let ListenerConfig::External(ref ext) = config {
+            for other_stored in repository.list().await? {
+                if let ListenerConfig::External(ref other) = other_stored.config {
+                    if other.endpoint == ext.endpoint && other.name != ext.name {
+                        return Err(ListenerManagerError::DuplicateEndpoint {
+                            endpoint: ext.endpoint.clone(),
+                            existing_listener: other.name.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
         let was_running = existing.state.status == ListenerStatus::Running;
         if was_running {
             self.stop_locked(config.name()).await?;
@@ -7810,6 +7825,38 @@ mod tests {
             }
             other => panic!("expected External, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn update_external_listener_rejects_duplicate_endpoint() {
+        let database = Database::connect_in_memory().await.expect("db");
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::new(database, registry, events, sockets, None);
+
+        // Create two external listeners with distinct endpoints.
+        manager.create(external_listener_config("ext-a", "/alpha")).await.expect("create ext-a");
+        manager.create(external_listener_config("ext-b", "/beta")).await.expect("create ext-b");
+
+        // Updating ext-b to use ext-a's endpoint must fail.
+        let conflict = manager.update(external_listener_config("ext-b", "/alpha")).await;
+        assert!(
+            matches!(conflict, Err(ListenerManagerError::DuplicateEndpoint { .. })),
+            "expected DuplicateEndpoint, got {conflict:?}"
+        );
+
+        // Updating ext-a to its own endpoint must succeed (no self-conflict).
+        manager
+            .update(external_listener_config("ext-a", "/alpha"))
+            .await
+            .expect("self-update should succeed");
+
+        // Updating ext-b to a new unique endpoint must succeed.
+        manager
+            .update(external_listener_config("ext-b", "/gamma"))
+            .await
+            .expect("update to unique endpoint should succeed");
     }
 
     // ── HTTP required-field rejection tests ──────────────────────────────────

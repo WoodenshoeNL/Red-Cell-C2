@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 755 | 228 | 31 |
-| Bugs filed against | 88 | 34 | 9 |
+| Tasks closed | 802 | 228 | 31 |
+| Bugs filed against | 90 | 34 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
 | Quality score | 89% | 85% | 71% |
 
-*Bug rates: Claude 88/755=0.12, Codex 34/228=0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 90/802=0.11, Codex 34/228=0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -25,13 +25,13 @@ Each loop run updates the running totals and appends a review entry.
 | Clippy warnings | 4 | 0 | 1 |
 | Protocol errors | 16 | 27 | 3 |
 | Security issues | 38 | 38 | 0 |
-| Architecture drift | 15 | 21 | 0 |
+| Architecture drift | 16 | 21 | 0 |
 | Memory / resource leaks | 6 | 10 | 1 |
 | Startup / lifecycle regressions | 2 | 9 | 0 |
 | Test infrastructure / flakiness | 14 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
-| Correctness / pagination | 33 | 7 | 1 |
+| Correctness / pagination | 34 | 7 | 1 |
 | Workflow / close-hygiene | 18 | 0 | 0 |
 | Code reuse / duplication | 7 | 0 | 0 |
 
@@ -52,6 +52,18 @@ Each loop run updates the running totals and appends a review entry.
 Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`)
 Tests: failed (`cargo test --workspace`: `active_agent_survives_liveness_sweep_that_kills_stale_peer` returned HTTP 404; already tracked as `red-cell-c2-2tgqn`)
 Issues found: 0 new bugs filed
+
+### QA Review — 2026-03-24 09:18 — 3d9e2e83..ae8ee978
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 47 | 2 | Large Claude-heavy range across teamserver, client-cli, and specter. Filed `red-cell-c2-3ushj` for overnight `working_hours` handling and `red-cell-c2-6qv0i` for session-mode contract drift on `agent.upload`/`agent.download`. |
+| Codex | 0 | 0 | No close commits or attributable product-code changes in this range. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`)
+Tests: passed (`cargo test --workspace`)
+Issues found: 2 new bugs filed (`red-cell-c2-3ushj`, `red-cell-c2-6qv0i`)
 
 ### Arch Review — 2026-03-23 17:35
 

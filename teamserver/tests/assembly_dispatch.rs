@@ -3,7 +3,7 @@ mod common;
 use red_cell::{
     AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
     ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
-    SocketRelayManager, TeamserverState, websocket_routes,
+    SocketRelayManager, TeamserverState, build_router,
 };
 use red_cell_common::config::Profile;
 use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
@@ -174,7 +174,7 @@ async fn start_server()
     let tcp = TcpListener::bind("127.0.0.1:0").await?;
     let addr = tcp.local_addr()?;
     tokio::spawn(async move {
-        let app = websocket_routes().with_state(state);
+        let app = build_router(state);
         let _ = axum::serve(tcp, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await;
     });
@@ -213,7 +213,7 @@ async fn bof_output_callback_broadcasts_output_to_operator()
     let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/havoc")).await?;
     common::login(&mut socket).await?;
 
     listeners.create(common::http_listener_config("asm-test-bof-out", listener_port)).await?;
@@ -281,7 +281,7 @@ async fn bof_output_empty_payload_broadcasts_output_without_panic()
     let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/havoc")).await?;
     common::login(&mut socket).await?;
 
     listeners.create(common::http_listener_config("asm-test-bof-empty", listener_port)).await?;
@@ -349,7 +349,7 @@ async fn bof_ran_ok_callback_broadcasts_completion() -> Result<(), Box<dyn std::
     let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/havoc")).await?;
     common::login(&mut socket).await?;
 
     listeners.create(common::http_listener_config("asm-test-bof-ok", listener_port)).await?;
@@ -413,7 +413,7 @@ async fn assembly_list_versions_broadcasts_formatted_list() -> Result<(), Box<dy
     let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/havoc")).await?;
     common::login(&mut socket).await?;
 
     listeners.create(common::http_listener_config("asm-test-list-ver", listener_port)).await?;
@@ -486,7 +486,7 @@ async fn assembly_list_versions_empty_payload_broadcasts_gracefully()
     let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/havoc")).await?;
     common::login(&mut socket).await?;
 
     listeners
@@ -558,7 +558,7 @@ async fn assembly_inline_execute_clr_version_broadcast() -> Result<(), Box<dyn s
     let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/havoc")).await?;
     common::login(&mut socket).await?;
 
     listeners.create(common::http_listener_config("asm-test-clr-ver", listener_port)).await?;
@@ -629,7 +629,7 @@ async fn bof_exception_callback_broadcasts_error_with_details()
     let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/havoc")).await?;
     common::login(&mut socket).await?;
 
     listeners.create(common::http_listener_config("asm-test-bof-exc", listener_port)).await?;
@@ -698,7 +698,7 @@ async fn bof_symbol_not_found_callback_broadcasts_error_with_symbol()
     let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/havoc")).await?;
     common::login(&mut socket).await?;
 
     listeners.create(common::http_listener_config("asm-test-bof-sym", listener_port)).await?;
@@ -764,7 +764,7 @@ async fn bof_could_not_run_callback_broadcasts_error() -> Result<(), Box<dyn std
     let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/havoc")).await?;
     common::login(&mut socket).await?;
 
     listeners.create(common::http_listener_config("asm-test-bof-cnr", listener_port)).await?;
@@ -828,7 +828,7 @@ async fn bof_callback_error_broadcasts_error_with_text() -> Result<(), Box<dyn s
     let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/havoc")).await?;
     common::login(&mut socket).await?;
 
     listeners.create(common::http_listener_config("asm-test-bof-err", listener_port)).await?;
@@ -891,7 +891,7 @@ async fn bof_unknown_subtype_succeeds_without_operator_broadcast()
     let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/havoc")).await?;
     common::login(&mut socket).await?;
 
     listeners.create(common::http_listener_config("asm-test-bof-unk", listener_port)).await?;
@@ -947,7 +947,7 @@ async fn assembly_inline_execute_patched_broadcasts_info() -> Result<(), Box<dyn
     let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/havoc")).await?;
     common::login(&mut socket).await?;
 
     listeners.create(common::http_listener_config("asm-test-patched", listener_port)).await?;
@@ -1016,7 +1016,7 @@ async fn assembly_inline_execute_entrypoint_executed_broadcasts_thread_id()
     let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/havoc")).await?;
     common::login(&mut socket).await?;
 
     listeners.create(common::http_listener_config("asm-test-entry", listener_port)).await?;
@@ -1084,7 +1084,7 @@ async fn assembly_inline_execute_finished_broadcasts_good() -> Result<(), Box<dy
     let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/havoc")).await?;
     common::login(&mut socket).await?;
 
     listeners.create(common::http_listener_config("asm-test-finished", listener_port)).await?;
@@ -1150,7 +1150,7 @@ async fn assembly_inline_execute_failed_broadcasts_error() -> Result<(), Box<dyn
     let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/havoc")).await?;
     common::login(&mut socket).await?;
 
     listeners.create(common::http_listener_config("asm-test-failed", listener_port)).await?;
@@ -1216,7 +1216,7 @@ async fn assembly_inline_execute_unknown_info_id_no_broadcast()
     let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/havoc")).await?;
     common::login(&mut socket).await?;
 
     listeners.create(common::http_listener_config("asm-test-unk-id", listener_port)).await?;
@@ -1279,7 +1279,7 @@ async fn bof_payload_shorter_than_subtype_header_does_not_crash()
     let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/havoc")).await?;
     common::login(&mut socket).await?;
 
     listeners.create(common::http_listener_config("asm-trunc-hdr", listener_port)).await?;
@@ -1366,7 +1366,7 @@ async fn bof_output_truncated_string_does_not_crash() -> Result<(), Box<dyn std:
     let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/havoc")).await?;
     common::login(&mut socket).await?;
 
     listeners.create(common::http_listener_config("asm-trunc-str", listener_port)).await?;
@@ -1456,7 +1456,7 @@ async fn bof_exception_missing_address_does_not_crash() -> Result<(), Box<dyn st
     let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/havoc")).await?;
     common::login(&mut socket).await?;
 
     listeners.create(common::http_listener_config("asm-trunc-exc", listener_port)).await?;
@@ -1547,7 +1547,7 @@ async fn bof_unknown_subtype_0xff_does_not_crash() -> Result<(), Box<dyn std::er
     let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/havoc")).await?;
     common::login(&mut socket).await?;
 
     listeners.create(common::http_listener_config("asm-unk-0xff", listener_port)).await?;
@@ -1619,7 +1619,7 @@ async fn ps_import_callback_empty_output_broadcasts_success_message()
     let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/havoc")).await?;
     common::login(&mut socket).await?;
 
     listeners.create(common::http_listener_config("asm-psimp-empty", listener_port)).await?;
@@ -1689,7 +1689,7 @@ async fn ps_import_callback_with_output_broadcasts_the_output()
     let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/havoc")).await?;
     common::login(&mut socket).await?;
 
     listeners.create(common::http_listener_config("asm-psimp-out", listener_port)).await?;
@@ -1757,7 +1757,7 @@ async fn ps_import_callback_truncated_payload_does_not_crash()
     let (listener_port, listener_guard) = common::available_port_excluding(server_addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{server_addr}/")).await?;
+    let (mut socket, _) = connect_async(format!("ws://{server_addr}/havoc")).await?;
     common::login(&mut socket).await?;
 
     listeners.create(common::http_listener_config("asm-psimp-trunc", listener_port)).await?;

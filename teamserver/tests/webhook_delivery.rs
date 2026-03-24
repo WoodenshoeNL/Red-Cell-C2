@@ -118,7 +118,7 @@ async fn ws_login(
     username: &str,
     password: &str,
 ) -> Result<common::WsClient, Box<dyn std::error::Error>> {
-    let url = format!("ws://{addr}/");
+    let url = format!("ws://{addr}/havoc");
     let (mut socket, _) = tokio_tungstenite::connect_async(&url).await?;
 
     let payload = serde_json::to_string(&OperatorMessage::Login(Message {
@@ -201,7 +201,7 @@ async fn failed_login_delivers_webhook_with_failure_status()
     let server = common::spawn_test_server(profile).await?;
 
     // Attempt login with wrong password.
-    let url = format!("ws://{}/", server.addr);
+    let url = server.ws_url();
     let (mut socket, _) = tokio_tungstenite::connect_async(&url).await?;
     let payload = serde_json::to_string(&OperatorMessage::Login(Message {
         head: MessageHead {

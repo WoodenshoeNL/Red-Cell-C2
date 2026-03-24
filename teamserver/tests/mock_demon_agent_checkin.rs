@@ -39,7 +39,7 @@ async fn spawn_server_with_http_listener(
     let server = common::spawn_test_server(demon_test_profile()).await?;
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
-    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    let (mut socket, _) = connect_async(server.ws_url()).await?;
     common::login(&mut socket).await?;
 
     server
@@ -709,7 +709,7 @@ async fn unauthenticated_operator_cannot_inject_agent_task()
     // Legacy CTR mode: offset stays at 0.
 
     // --- Open a second (unauthenticated) WebSocket client -------------------------
-    let (mut unauth_socket, _) = connect_async(format!("ws://{}/", harness.server.addr)).await?;
+    let (mut unauth_socket, _) = connect_async(harness.server.ws_url()).await?;
 
     // Send an AgentTask as the very first frame — no login attempt at all.
     let task =
@@ -789,7 +789,7 @@ async fn failed_login_operator_cannot_inject_agent_task() -> Result<(), Box<dyn 
     // Legacy CTR mode: offset stays at 0.
 
     // --- Attempt login with wrong password ----------------------------------------
-    let (mut bad_socket, _) = connect_async(format!("ws://{}/", harness.server.addr)).await?;
+    let (mut bad_socket, _) = connect_async(harness.server.ws_url()).await?;
     let login_payload =
         serde_json::to_string(&OperatorMessage::Login(red_cell_common::operator::Message {
             head: MessageHead {
@@ -1695,7 +1695,7 @@ async fn malformed_operator_message_closes_connection_without_breaking_dispatch(
     );
 
     // Open a second operator connection for the "bad" client.
-    let (mut bad_socket, _) = connect_async(format!("ws://{}/", harness.server.addr)).await?;
+    let (mut bad_socket, _) = connect_async(harness.server.ws_url()).await?;
     common::login(&mut bad_socket).await?;
 
     // The second socket receives snapshot events (listeners, agents, etc.).

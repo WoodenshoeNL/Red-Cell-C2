@@ -10,7 +10,7 @@ use futures_util::{SinkExt, StreamExt};
 use red_cell::{
     AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
     ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
-    SocketRelayManager, TeamserverState, websocket_routes,
+    SocketRelayManager, TeamserverState, build_router,
 };
 use red_cell_common::HttpListenerConfig;
 use red_cell_common::OperatorInfo;
@@ -40,6 +40,13 @@ pub struct TestServer {
     pub events: EventBus,
     pub sockets: SocketRelayManager,
     pub webhooks: AuditWebhookNotifier,
+}
+
+impl TestServer {
+    /// Return the WebSocket URL that matches the production `/havoc` endpoint.
+    pub fn ws_url(&self) -> String {
+        format!("ws://{}/havoc", self.addr)
+    }
 }
 
 /// Bind a free TCP port, start a teamserver from `profile`, and return a
@@ -77,7 +84,7 @@ pub async fn spawn_test_server(profile: Profile) -> Result<TestServer, Box<dyn s
     let tcp = TcpListener::bind("127.0.0.1:0").await?;
     let addr = tcp.local_addr()?;
     tokio::spawn(async move {
-        let app = websocket_routes().with_state(state);
+        let app = build_router(state);
         let _ = axum::serve(tcp, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await;
     });

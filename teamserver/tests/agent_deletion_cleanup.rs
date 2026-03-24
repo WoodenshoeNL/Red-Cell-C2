@@ -112,7 +112,7 @@ async fn agent_remove_cleans_up_all_state() -> Result<(), Box<dyn std::error::Er
     common::wait_for_listener(listener_port).await?;
 
     // --- Connect operator WebSocket ---
-    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    let (mut socket, _) = connect_async(server.ws_url()).await?;
     common::login(&mut socket).await?;
 
     // --- Register agent via Demon init ---
@@ -248,7 +248,7 @@ async fn agent_remove_nonexistent_id_does_not_broadcast() -> Result<(), Box<dyn 
     let server = common::spawn_test_server(admin_profile()).await?;
 
     // --- Connect operator WebSocket ---
-    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    let (mut socket, _) = connect_async(server.ws_url()).await?;
     common::login(&mut socket).await?;
 
     // --- Send AgentRemove for an ID that was never registered ---

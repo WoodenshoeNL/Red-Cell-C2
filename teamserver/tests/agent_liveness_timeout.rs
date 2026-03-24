@@ -74,7 +74,7 @@ async fn agent_marked_dead_after_liveness_timeout_expires() -> Result<(), Box<dy
     common::wait_for_listener(listener_port).await?;
 
     // --- Connect operator WebSocket ---
-    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    let (mut socket, _) = connect_async(server.ws_url()).await?;
     common::login(&mut socket).await?;
 
     // --- Register agent via Demon init ---
@@ -189,7 +189,7 @@ async fn active_agent_survives_liveness_sweep_that_kills_stale_peer()
     common::wait_for_listener(listener_port).await?;
 
     // --- Connect operator WebSocket ---
-    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    let (mut socket, _) = connect_async(server.ws_url()).await?;
     common::login(&mut socket).await?;
 
     let client = reqwest::Client::new();

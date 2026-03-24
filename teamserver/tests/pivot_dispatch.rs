@@ -114,7 +114,7 @@ async fn setup_pivot_test(
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    let (mut socket, _) = connect_async(server.ws_url()).await?;
     common::login(&mut socket).await?;
 
     server.listeners.create(common::http_listener_config(listener_name, listener_port)).await?;
@@ -816,7 +816,7 @@ async fn pivot_connect_from_unregistered_parent_returns_404()
     let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
     let client = reqwest::Client::new();
 
-    let (mut socket, _) = connect_async(format!("ws://{}/", server.addr)).await?;
+    let (mut socket, _) = connect_async(server.ws_url()).await?;
     common::login(&mut socket).await?;
 
     server

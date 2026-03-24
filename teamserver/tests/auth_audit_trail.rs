@@ -24,7 +24,7 @@ async fn attempt_login(
     username: &str,
     password: &str,
 ) -> Result<(OperatorMessage, common::WsClient), Box<dyn std::error::Error>> {
-    let url = format!("ws://{addr}/");
+    let url = format!("ws://{addr}/havoc");
     let (mut socket, _) = tokio_tungstenite::connect_async(&url).await?;
 
     let payload = serde_json::to_string(&OperatorMessage::Login(Message {

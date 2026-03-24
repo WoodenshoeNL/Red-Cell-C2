@@ -520,6 +520,26 @@ mod tests {
     }
 
     #[test]
+    fn operator_agent_info_some_kill_date_and_working_hours_produce_numeric_values() {
+        let agent = sample_agent(0x1112_1314);
+        // sample_agent sets kill_date = Some(1_893_456_000), working_hours = Some(0b101010)
+        let pivots = PivotInfo { parent: None, children: vec![] };
+
+        let info = operator_agent_info("http", 0xDEAD_BEEF, &agent, &pivots);
+
+        assert_eq!(
+            info.kill_date,
+            serde_json::Value::from(1_893_456_000_i64),
+            "kill_date must be the numeric epoch value when Some"
+        );
+        assert_eq!(
+            info.working_hours,
+            serde_json::Value::from(0b101010),
+            "working_hours must be the numeric bitmask value when Some"
+        );
+    }
+
+    #[test]
     fn operator_agent_info_none_kill_date_and_working_hours_emit_null() {
         let mut agent = sample_agent(0x1112_1314);
         agent.kill_date = None;

@@ -6369,6 +6369,73 @@ mod tests {
     }
 
     #[test]
+    fn parse_dns_c2_query_rejects_upload_ctrl_too_few_parts() {
+        // Only 2 dash-separated parts instead of 3 → None
+        let labels: Vec<String> = ["CPNMU", "0-deadbeef", "up", "c2", "example", "com"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(parse_dns_c2_query(&labels, "c2.example.com").is_none());
+    }
+
+    #[test]
+    fn parse_dns_c2_query_rejects_upload_ctrl_too_many_parts() {
+        // 4 dash-separated parts instead of 3 → None
+        let labels: Vec<String> = ["CPNMU", "0-1-2-3", "up", "c2", "example", "com"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(parse_dns_c2_query(&labels, "c2.example.com").is_none());
+    }
+
+    #[test]
+    fn parse_dns_c2_query_rejects_upload_non_hex_seq() {
+        // "zzz" is not valid hex → from_str_radix fails → None
+        let labels: Vec<String> = ["CPNMU", "zzz-1-deadbeef", "up", "c2", "example", "com"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(parse_dns_c2_query(&labels, "c2.example.com").is_none());
+    }
+
+    #[test]
+    fn parse_dns_c2_query_rejects_upload_non_hex_agent_id() {
+        let labels: Vec<String> = ["CPNMU", "0-1-GGGGGGGG", "up", "c2", "example", "com"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(parse_dns_c2_query(&labels, "c2.example.com").is_none());
+    }
+
+    #[test]
+    fn parse_dns_c2_query_rejects_upload_invalid_base32hex() {
+        // 'Z' is outside the base32hex alphabet (0-9, A-V) → None
+        let labels: Vec<String> = ["ZZZZ", "0-1-deadbeef", "up", "c2", "example", "com"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(parse_dns_c2_query(&labels, "c2.example.com").is_none());
+    }
+
+    #[test]
+    fn parse_dns_c2_query_rejects_download_ctrl_no_dash() {
+        // Single part with no dash → parts.len() == 1 → None
+        let labels: Vec<String> =
+            ["deadbeef", "dn", "c2", "example", "com"].iter().map(|s| s.to_string()).collect();
+        assert!(parse_dns_c2_query(&labels, "c2.example.com").is_none());
+    }
+
+    #[test]
+    fn parse_dns_c2_query_rejects_unknown_direction() {
+        // "fwd" is neither "up" nor "dn" → falls through to _ => None
+        let labels: Vec<String> = ["CPNMU", "0-1-deadbeef", "fwd", "c2", "example", "com"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(parse_dns_c2_query(&labels, "c2.example.com").is_none());
+    }
+
+    #[test]
     fn build_dns_txt_response_produces_parseable_answer() {
         let packet = build_dns_query(0xABCD, "test.c2.example.com", DNS_TYPE_A);
         let parsed = parse_dns_query(&packet).expect("parse failed");

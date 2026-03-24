@@ -325,9 +325,9 @@ mod tests {
     use zeroize::Zeroizing;
 
     use super::{
-        CallbackParser, CommandDispatchError, DemonCallbackPackage, handle_pivot_command_callback,
-        handle_pivot_connect_callback, handle_pivot_disconnect_callback,
-        handle_pivot_list_callback, inner_demon_agent_id,
+        CallbackParser, CommandDispatchError, DemonCallbackPackage, handle_pivot_callback,
+        handle_pivot_command_callback, handle_pivot_connect_callback,
+        handle_pivot_disconnect_callback, handle_pivot_list_callback, inner_demon_agent_id,
     };
     use crate::dispatch::pivot::dispatch_builtin_packages;
     use crate::dispatch::{BuiltinDispatchContext, DownloadTracker};
@@ -1408,5 +1408,75 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests for handle_pivot_callback — error paths
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn pivot_callback_unknown_subcommand_returns_invalid_callback_payload() {
+        let (database, registry, events, sockets, downloads) = setup_dispatch_context().await;
+
+        // Use a subcommand value that does not map to any DemonPivotCommand variant.
+        let payload = 0xFFFF_FFFFu32.to_le_bytes().to_vec();
+
+        let context = BuiltinDispatchContext {
+            registry: &registry,
+            events: &events,
+            database: &database,
+            sockets: &sockets,
+            downloads: &downloads,
+            plugins: None,
+        };
+
+        let result = handle_pivot_callback(context, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload for unknown subcommand, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pivot_callback_empty_payload_returns_invalid_callback_payload() {
+        let (database, registry, events, sockets, downloads) = setup_dispatch_context().await;
+
+        let context = BuiltinDispatchContext {
+            registry: &registry,
+            events: &events,
+            database: &database,
+            sockets: &sockets,
+            downloads: &downloads,
+            plugins: None,
+        };
+
+        let result = handle_pivot_callback(context, AGENT_ID, REQUEST_ID, &[]).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload for empty payload, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pivot_callback_unknown_subcommand_does_not_broadcast_event() {
+        let (database, registry, events, sockets, downloads) = setup_dispatch_context().await;
+        let mut rx = events.subscribe();
+
+        let payload = 0xFFFF_FFFFu32.to_le_bytes().to_vec();
+
+        let context = BuiltinDispatchContext {
+            registry: &registry,
+            events: &events,
+            database: &database,
+            sockets: &sockets,
+            downloads: &downloads,
+            plugins: None,
+        };
+
+        let _result = handle_pivot_callback(context, AGENT_ID, REQUEST_ID, &payload).await;
+
+        // The EventBus should have no messages — recv with a short timeout must expire.
+        let no_event = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
+        assert!(no_event.is_err(), "no event should be broadcast for an unknown pivot subcommand");
     }
 }

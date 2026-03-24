@@ -209,6 +209,91 @@ async fn bearer_prefix_is_accepted() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
+/// Send a GET /api/v1/agents with a raw `Authorization` header value.
+async fn get_agents_with_authorization(
+    client: &Client,
+    base: &str,
+    auth_value: &str,
+) -> reqwest::Response {
+    client
+        .get(format!("{base}/api/v1/agents"))
+        .header("authorization", auth_value)
+        .send()
+        .await
+        .expect("request should succeed")
+}
+
+#[tokio::test]
+async fn bearer_no_space_no_token_returns_invalid_authorization_header() {
+    let base = spawn_api_server(profile_with_api_keys()).await;
+    let client = Client::new();
+
+    // "Bearer" without trailing space — strip_prefix("Bearer ") fails.
+    let resp = get_agents_with_authorization(&client, &base, "Bearer").await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let body: serde_json::Value = resp.json().await.expect("json body");
+    assert_eq!(body["error"]["code"], "invalid_authorization_header");
+}
+
+#[tokio::test]
+async fn bearer_empty_token_returns_401() {
+    let base = spawn_api_server(profile_with_api_keys()).await;
+    let client = Client::new();
+
+    // "Bearer " with nothing after the prefix — the HTTP layer trims trailing
+    // whitespace from header values, so this becomes "Bearer" which fails the
+    // "Bearer " prefix match → invalid_authorization_header.
+    let resp = get_agents_with_authorization(&client, &base, "Bearer ").await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let body: serde_json::Value = resp.json().await.expect("json body");
+    assert_eq!(body["error"]["code"], "invalid_authorization_header");
+}
+
+#[tokio::test]
+async fn bearer_whitespace_only_token_returns_401() {
+    let base = spawn_api_server(profile_with_api_keys()).await;
+    let client = Client::new();
+
+    // "Bearer   " — the HTTP layer trims trailing whitespace, reducing this to
+    // "Bearer" which fails the "Bearer " prefix match.
+    let resp = get_agents_with_authorization(&client, &base, "Bearer   ").await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let body: serde_json::Value = resp.json().await.expect("json body");
+    assert_eq!(body["error"]["code"], "invalid_authorization_header");
+}
+
+#[tokio::test]
+async fn bearer_extra_tokens_returns_401() {
+    let base = spawn_api_server(profile_with_api_keys()).await;
+    let client = Client::new();
+
+    // "Bearer token1 token2" — the extracted key is "token1 token2" which won't
+    // match any configured key, so it should be rejected.
+    let resp =
+        get_agents_with_authorization(&client, &base, "Bearer secret-admin-value extra").await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let body: serde_json::Value = resp.json().await.expect("json body");
+    assert_eq!(body["error"]["code"], "invalid_api_key");
+}
+
+#[tokio::test]
+async fn bearer_lowercase_returns_invalid_authorization_header() {
+    let base = spawn_api_server(profile_with_api_keys()).await;
+    let client = Client::new();
+
+    // RFC 7235 says scheme names are case-insensitive, but the current parser
+    // uses a case-sensitive prefix match. Lowercase "bearer" should be rejected.
+    let resp = get_agents_with_authorization(&client, &base, "bearer secret-admin-value").await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let body: serde_json::Value = resp.json().await.expect("json body");
+    assert_eq!(body["error"]["code"], "invalid_authorization_header");
+}
+
 /// Build a profile with NO `Api { ... }` section — the REST API runtime should
 /// report itself as disabled.
 fn profile_without_api_keys() -> Profile {

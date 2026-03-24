@@ -70,6 +70,11 @@ fn login_audit_entries(entries: &[red_cell::AuditLogEntry]) -> Vec<&red_cell::Au
     entries.iter().filter(|e| e.action == "operator.login").collect()
 }
 
+/// Filter audit entries to only `operator.disconnect` actions.
+fn disconnect_audit_entries(entries: &[red_cell::AuditLogEntry]) -> Vec<&red_cell::AuditLogEntry> {
+    entries.iter().filter(|e| e.action == "operator.disconnect").collect()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -434,6 +439,136 @@ async fn multiple_failed_logins_each_produce_separate_audit_entries()
         let details = entry.details.as_ref().expect("failure audit entries must have details");
         assert_eq!(details.get("result_status").and_then(|v| v.as_str()), Some("failure"));
     }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Disconnect audit trail tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn clean_disconnect_produces_audit_entry_with_clean_close_kind()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+
+    let (response, mut socket) = attempt_login(server.addr, "operator", "password1234").await?;
+    assert!(
+        matches!(response, OperatorMessage::InitConnectionSuccess(_)),
+        "expected InitConnectionSuccess, got {response:?}"
+    );
+
+    // Drain the snapshot frame so the server finishes its handler.
+    let _ = common::read_operator_snapshot(&mut socket).await;
+
+    // Clean disconnect: client sends a close frame.
+    socket.close(None).await?;
+
+    // Wait for login + connect + disconnect audit entries.
+    let entries = poll_audit_entries(&server.database, 3, Duration::from_secs(5)).await;
+
+    let disconnects = disconnect_audit_entries(&entries);
+    assert!(
+        !disconnects.is_empty(),
+        "audit log must contain an operator.disconnect entry after clean close (entries: {entries:?})"
+    );
+
+    let entry = disconnects[0];
+    assert_eq!(entry.actor, "operator", "disconnect actor must be the operator username");
+    assert_eq!(entry.action, "operator.disconnect");
+    assert_eq!(entry.target_kind, "operator");
+
+    let details = entry.details.as_ref().expect("disconnect audit entry must have details");
+    assert_eq!(
+        details.get("result_status").and_then(|v| v.as_str()),
+        Some("success"),
+        "disconnect audit entry must have result_status=success"
+    );
+    assert_eq!(
+        details.get("command").and_then(|v| v.as_str()),
+        Some("disconnect"),
+        "disconnect audit entry must have command=disconnect"
+    );
+
+    let params = details.get("parameters").expect("disconnect details must include parameters");
+    assert_eq!(
+        params.get("kind").and_then(|v| v.as_str()),
+        Some("clean_close"),
+        "clean disconnect must have kind=clean_close"
+    );
+    assert!(
+        params.get("connection_id").is_some(),
+        "disconnect parameters must include a connection_id"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn abrupt_disconnect_produces_audit_entry_with_error_kind()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+
+    let (response, mut socket) = attempt_login(server.addr, "operator", "password1234").await?;
+    assert!(
+        matches!(response, OperatorMessage::InitConnectionSuccess(_)),
+        "expected InitConnectionSuccess, got {response:?}"
+    );
+
+    // Drain the snapshot frame.
+    let _ = common::read_operator_snapshot(&mut socket).await;
+
+    // Simulate an abrupt disconnect by dropping the socket without sending a
+    // close frame. This forces the server to detect the broken connection.
+    drop(socket);
+
+    // Wait for login + connect + disconnect audit entries.
+    let entries = poll_audit_entries(&server.database, 3, Duration::from_secs(10)).await;
+
+    let disconnects = disconnect_audit_entries(&entries);
+    assert!(
+        !disconnects.is_empty(),
+        "audit log must contain an operator.disconnect entry after abrupt drop (entries: {entries:?})"
+    );
+
+    let entry = disconnects[0];
+    assert_eq!(entry.actor, "operator", "disconnect actor must be the operator username");
+    assert_eq!(entry.action, "operator.disconnect");
+
+    let details = entry.details.as_ref().expect("disconnect audit entry must have details");
+    let params = details.get("parameters").expect("disconnect details must include parameters");
+    let kind = params.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(
+        kind == "error" || kind == "clean_close",
+        "abrupt disconnect kind must be 'error' or 'clean_close', got '{kind}'"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn disconnect_audit_entry_contains_no_credentials() -> Result<(), Box<dyn std::error::Error>>
+{
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+
+    let (response, mut socket) = attempt_login(server.addr, "operator", "password1234").await?;
+    assert!(
+        matches!(response, OperatorMessage::InitConnectionSuccess(_)),
+        "expected InitConnectionSuccess, got {response:?}"
+    );
+
+    let _ = common::read_operator_snapshot(&mut socket).await;
+    socket.close(None).await?;
+
+    // Wait for login + connect + disconnect audit entries.
+    let entries = poll_audit_entries(&server.database, 3, Duration::from_secs(5)).await;
+
+    let disconnects = disconnect_audit_entries(&entries);
+    assert!(!disconnects.is_empty(), "audit log must contain an operator.disconnect entry");
+
+    let details =
+        disconnects[0].details.as_ref().expect("disconnect audit entry must have details");
+    assert_no_credential_leakage(details);
 
     Ok(())
 }

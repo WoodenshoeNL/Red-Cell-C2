@@ -1813,6 +1813,69 @@ impl From<PayloadBuildRow> for PayloadBuildRecord {
     }
 }
 
+/// Lightweight payload build metadata without the artifact blob.
+///
+/// Used by list/status endpoints to avoid loading compiled payload bytes into memory.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PayloadBuildSummary {
+    /// Unique build identifier (UUID).
+    pub id: String,
+    /// Current build status: `"pending"`, `"running"`, `"done"`, `"error"`.
+    pub status: String,
+    /// Display name for the finished payload.
+    pub name: String,
+    /// Target CPU architecture.
+    pub arch: String,
+    /// Requested output format.
+    pub format: String,
+    /// Listener name embedded in the payload.
+    pub listener: String,
+    /// Optional sleep interval in seconds.
+    pub sleep_secs: Option<i64>,
+    /// Artifact size in bytes.
+    pub size_bytes: Option<i64>,
+    /// Error message (populated when status is `"error"`).
+    pub error: Option<String>,
+    /// RFC 3339 creation timestamp.
+    pub created_at: String,
+    /// RFC 3339 last-update timestamp.
+    pub updated_at: String,
+}
+
+/// SQLite row shape for summary projections (no artifact column).
+#[derive(Debug, FromRow)]
+struct PayloadBuildSummaryRow {
+    id: String,
+    status: String,
+    name: String,
+    arch: String,
+    format: String,
+    listener: String,
+    sleep_secs: Option<i64>,
+    size_bytes: Option<i64>,
+    error: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+impl From<PayloadBuildSummaryRow> for PayloadBuildSummary {
+    fn from(row: PayloadBuildSummaryRow) -> Self {
+        Self {
+            id: row.id,
+            status: row.status,
+            name: row.name,
+            arch: row.arch,
+            format: row.format,
+            listener: row.listener,
+            sleep_secs: row.sleep_secs,
+            size_bytes: row.size_bytes,
+            error: row.error,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
 /// Repository for payload build job persistence.
 #[derive(Clone, Debug)]
 pub struct PayloadBuildRepository {
@@ -1870,6 +1933,32 @@ impl PayloadBuildRepository {
         )
         .fetch_all(&self.pool)
         .await?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    /// Fetch metadata for a single build record by id, excluding the artifact blob.
+    pub async fn get_summary(
+        &self,
+        id: &str,
+    ) -> Result<Option<PayloadBuildSummary>, TeamserverError> {
+        const QUERY: &str = "\
+            SELECT id, status, name, arch, format, listener, sleep_secs, \
+                   size_bytes, error, created_at, updated_at \
+            FROM ts_payload_builds WHERE id = ?";
+        let row = sqlx::query_as::<_, PayloadBuildSummaryRow>(QUERY)
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(Into::into))
+    }
+
+    /// List all build records as summaries (no artifact), ordered by creation time descending.
+    pub async fn list_summaries(&self) -> Result<Vec<PayloadBuildSummary>, TeamserverError> {
+        const QUERY: &str = "\
+            SELECT id, status, name, arch, format, listener, sleep_secs, \
+                   size_bytes, error, created_at, updated_at \
+            FROM ts_payload_builds ORDER BY created_at DESC";
+        let rows = sqlx::query_as::<_, PayloadBuildSummaryRow>(QUERY).fetch_all(&self.pool).await?;
         Ok(rows.into_iter().map(Into::into).collect())
     }
 

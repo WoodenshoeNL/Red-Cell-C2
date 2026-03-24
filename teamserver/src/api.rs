@@ -2927,7 +2927,7 @@ fn now_rfc3339() -> String {
     )
 )]
 async fn list_payloads(State(state): State<TeamserverState>, _identity: ReadApiAccess) -> Response {
-    match state.database.payload_builds().list().await {
+    match state.database.payload_builds().list_summaries().await {
         Ok(records) => {
             let summaries: Vec<PayloadSummary> = records
                 .into_iter()
@@ -3157,7 +3157,7 @@ async fn get_payload_job(
     Path(job_id): Path<String>,
     _identity: ReadApiAccess,
 ) -> Response {
-    match state.database.payload_builds().get(&job_id).await {
+    match state.database.payload_builds().get_summary(&job_id).await {
         Ok(Some(record)) => {
             let payload_id = if record.status == "done" { Some(record.id.clone()) } else { None };
             Json(PayloadJobStatus {
@@ -9276,5 +9276,81 @@ mod tests {
             .await
             .expect("update");
         assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn payload_build_get_summary_excludes_artifact() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let repo = db.payload_builds();
+
+        let record = crate::PayloadBuildRecord {
+            id: "sum-1".to_owned(),
+            status: "done".to_owned(),
+            name: "payload.exe".to_owned(),
+            arch: "x64".to_owned(),
+            format: "exe".to_owned(),
+            listener: "http1".to_owned(),
+            sleep_secs: Some(5),
+            artifact: Some(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+            size_bytes: Some(4),
+            error: None,
+            created_at: "2026-03-23T10:00:00Z".to_owned(),
+            updated_at: "2026-03-23T10:00:00Z".to_owned(),
+        };
+        repo.create(&record).await.expect("create");
+
+        let summary = repo.get_summary("sum-1").await.expect("get_summary").expect("exists");
+        assert_eq!(summary.id, "sum-1");
+        assert_eq!(summary.status, "done");
+        assert_eq!(summary.name, "payload.exe");
+        assert_eq!(summary.arch, "x64");
+        assert_eq!(summary.size_bytes, Some(4));
+
+        // Verify the full get() still returns the artifact
+        let full = repo.get("sum-1").await.expect("get").expect("exists");
+        assert_eq!(full.artifact, Some(vec![0xDE, 0xAD, 0xBE, 0xEF]));
+    }
+
+    #[tokio::test]
+    async fn payload_build_get_summary_missing_returns_none() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let result = db.payload_builds().get_summary("nonexistent").await.expect("get_summary");
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn payload_build_list_summaries_excludes_artifact() {
+        let db = Database::connect_in_memory().await.expect("db");
+        let repo = db.payload_builds();
+
+        for i in 0..3 {
+            let record = crate::PayloadBuildRecord {
+                id: format!("lsum-{i}"),
+                status: "done".to_owned(),
+                name: format!("payload-{i}.exe"),
+                arch: "x64".to_owned(),
+                format: "exe".to_owned(),
+                listener: "http1".to_owned(),
+                sleep_secs: None,
+                artifact: Some(vec![0xCA; 1024]),
+                size_bytes: Some(1024),
+                error: None,
+                created_at: format!("2026-03-23T10:0{i}:00Z"),
+                updated_at: format!("2026-03-23T10:0{i}:00Z"),
+            };
+            repo.create(&record).await.expect("create");
+        }
+
+        let summaries = repo.list_summaries().await.expect("list_summaries");
+        assert_eq!(summaries.len(), 3);
+        // Summaries are ordered by created_at DESC
+        assert_eq!(summaries[0].id, "lsum-2");
+        assert_eq!(summaries[1].id, "lsum-1");
+        assert_eq!(summaries[2].id, "lsum-0");
+        // All have metadata
+        for s in &summaries {
+            assert_eq!(s.size_bytes, Some(1024));
+            assert_eq!(s.format, "exe");
+        }
     }
 }

@@ -597,23 +597,71 @@ fn configured_credentials(
 ///
 /// Uses Argon2id with m_cost=65536 (64 MiB), t_cost=3, p_cost=4 — the
 /// recommended configuration from the OWASP Password Storage Cheat Sheet.
+///
+/// In test builds, minimal Argon2 parameters are used instead to keep tests
+/// fast. The production-strength parameters are only needed for brute-force
+/// resistance; the hashing/verification code paths exercised in tests are
+/// identical regardless of cost parameters.
 fn argon2_hasher() -> Argon2<'static> {
+    #[cfg(not(test))]
     let params = ParamsBuilder::new()
         .m_cost(65536)
         .t_cost(3)
         .p_cost(4)
         .build()
         .expect("hardcoded Argon2 params are valid");
+    #[cfg(test)]
+    let params = ParamsBuilder::new()
+        .m_cost(256)
+        .t_cost(1)
+        .p_cost(1)
+        .build()
+        .expect("hardcoded Argon2 params are valid");
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
 }
 
 fn password_hashes_match(submitted: &str, expected: &str) -> bool {
+    #[cfg(test)]
+    return password_hashes_match_cached(submitted, expected);
+    #[cfg(not(test))]
+    return password_hashes_match_impl(submitted, expected);
+}
+
+fn password_hashes_match_impl(submitted: &str, expected: &str) -> bool {
     let submitted = submitted.to_ascii_lowercase();
     let Ok(parsed_hash) = PasswordHash::new(expected) else {
         return false;
     };
 
     argon2_hasher().verify_password(submitted.as_bytes(), &parsed_hash).is_ok()
+}
+
+/// Test-only cached wrapper around [`password_hashes_match_impl`].
+///
+/// Argon2 verification is intentionally slow (~1-2 s per call with production
+/// parameters). Tests that create many sessions (e.g. the global session cap
+/// test with 64+ verifications) become pathologically slow without caching.
+/// The cache key is `(submitted_lowercase, expected_verifier)` and values are
+/// append-only, so mutex poisoning is safe to recover from.
+#[cfg(test)]
+fn password_hashes_match_cached(submitted: &str, expected: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static CACHE: OnceLock<Mutex<HashMap<(String, String), bool>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    let key = (submitted.to_ascii_lowercase(), expected.to_owned());
+    {
+        let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(&cached) = guard.get(&key) {
+            return cached;
+        }
+    }
+
+    let result = password_hashes_match_impl(submitted, expected);
+    cache.lock().unwrap_or_else(|e| e.into_inner()).insert(key, result);
+    result
 }
 
 pub(crate) fn password_verifier_for_sha3(password_hash: &str) -> Result<String, AuthError> {

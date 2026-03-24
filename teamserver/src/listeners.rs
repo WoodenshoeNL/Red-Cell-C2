@@ -2982,7 +2982,7 @@ fn http_listener_subject_alt_names(config: &HttpListenerConfig) -> Vec<String> {
 ///
 /// Returns `None` if the body exceeds `max_len`, contains a read error, or
 /// does not carry the correct Demon magic value.
-async fn collect_body_with_magic_precheck(body: Body, max_len: usize) -> Option<Bytes> {
+pub(crate) async fn collect_body_with_magic_precheck(body: Body, max_len: usize) -> Option<Bytes> {
     use http_body_util::BodyExt as _;
 
     let mut body = body;

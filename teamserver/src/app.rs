@@ -16,7 +16,7 @@ use crate::{
     AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
     ListenerManager, LoginRateLimiter, MAX_AGENT_MESSAGE_LEN, OperatorConnectionManager,
     PayloadBuilderService, ServiceBridge, ShutdownController, SocketRelayManager, api_routes,
-    handle_external_request, service_routes,
+    handle_external_request, listeners::collect_body_with_magic_precheck, service_routes,
 };
 
 /// Shared state injected into Axum routes and middleware.
@@ -152,10 +152,15 @@ async fn teamserver_fallback(
             .get::<ConnectInfo<SocketAddr>>()
             .map_or_else(|| SocketAddr::from(([127, 0, 0, 1], 0)), |info| info.0);
 
-        let body = match axum::body::to_bytes(request.into_body(), MAX_AGENT_MESSAGE_LEN).await {
-            Ok(bytes) => bytes,
-            // Return a camouflage 404 — do not expose the size limit as a 400.
-            Err(_) => return StatusCode::NOT_FOUND.into_response(),
+        let body = match collect_body_with_magic_precheck(
+            request.into_body(),
+            MAX_AGENT_MESSAGE_LEN,
+        )
+        .await
+        {
+            Some(bytes) => bytes,
+            // Return a camouflage 404 — do not expose the size limit or bad magic as a 400.
+            None => return StatusCode::NOT_FOUND.into_response(),
         };
 
         match handle_external_request(&ext_state, peer, &body).await {
@@ -633,6 +638,51 @@ mod tests {
             response.status(),
             StatusCode::NOT_FOUND,
             "body exceeding MAX_AGENT_MESSAGE_LEN should return camouflage 404, not 400 BAD_REQUEST"
+        );
+    }
+
+    /// A request body with an incorrect Demon magic value on an external
+    /// listener path must be silently rejected with a camouflage 404.
+    /// This verifies the early magic precheck is applied to the external
+    /// listener path, matching the behavior of HTTP listeners.
+    #[tokio::test]
+    async fn fallback_rejects_wrong_magic_body_for_external_listener() {
+        use red_cell_common::ExternalListenerConfig;
+
+        let state = build_test_state().await;
+
+        let config = red_cell_common::ListenerConfig::from(ExternalListenerConfig {
+            name: "ext-magic".to_owned(),
+            endpoint: "/magic-check".to_owned(),
+        });
+        state.listeners.create(config).await.expect("create should succeed");
+        state.listeners.start("ext-magic").await.expect("start should succeed");
+
+        assert!(
+            state.listeners.external_state_for_path("/magic-check").await.is_some(),
+            "external endpoint should be registered"
+        );
+
+        // Build a body with valid length but wrong magic (0x00000000 instead of 0xDEADBEEF).
+        let mut bad_magic_body = vec![0u8; 20];
+        // bytes 0..4 = size, bytes 4..8 = magic — leave magic as all zeros.
+        bad_magic_body[0..4].copy_from_slice(&20_u32.to_be_bytes());
+
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/magic-check")
+                    .body(Body::from(bad_magic_body))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "body with wrong Demon magic should return camouflage 404"
         );
     }
 }

@@ -822,6 +822,10 @@ impl IntoResponse for AgentApiError {
             Self::Task(AgentCommandError::Teamserver(crate::TeamserverError::AgentNotFound {
                 ..
             })) => (StatusCode::NOT_FOUND, "agent_not_found"),
+            Self::Teamserver(crate::TeamserverError::QueueFull { .. })
+            | Self::Task(AgentCommandError::Teamserver(crate::TeamserverError::QueueFull {
+                ..
+            })) => (StatusCode::TOO_MANY_REQUESTS, "queue_full"),
             Self::Teamserver(_) | Self::Task(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "agent_api_error")
             }
@@ -1317,7 +1321,8 @@ async fn kill_agent(
         (status = 400, description = "Invalid task payload", body = ApiErrorBody),
         (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
         (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
-        (status = 404, description = "Agent not found", body = ApiErrorBody)
+        (status = 404, description = "Agent not found", body = ApiErrorBody),
+        (status = 429, description = "Agent task queue full", body = ApiErrorBody)
     )
 )]
 async fn queue_agent_task(
@@ -3761,6 +3766,105 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let body = read_json(response).await;
         assert_eq!(body["error"]["code"], "agent_not_found");
+    }
+
+    #[tokio::test]
+    async fn queue_agent_task_returns_429_when_queue_is_full() {
+        let (app, registry, _) = test_router_with_registry(Some((
+            60,
+            "rest-admin",
+            "secret-admin",
+            OperatorRole::Admin,
+        )))
+        .await;
+        registry.insert(sample_agent(0xDEAD_BEEF)).await.expect("agent should insert");
+
+        // Fill the queue to capacity.
+        for i in 0..crate::agents::MAX_JOB_QUEUE_DEPTH {
+            registry
+                .enqueue_job(0xDEAD_BEEF, sample_job(i as u32, i as u32, "Neo"))
+                .await
+                .expect("enqueue should succeed");
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/agents/DEADBEEF/task")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"TaskID":"FF","CommandLine":"checkin","DemonID":"DEADBEEF","CommandID":"100"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "QueueFull must map to 429, not 500"
+        );
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "queue_full");
+    }
+
+    #[tokio::test]
+    async fn queue_agent_task_queue_full_audit_records_failure() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let (app, registry, _) = test_router_with_database(
+            database.clone(),
+            Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)),
+        )
+        .await;
+        registry.insert(sample_agent(0xDEAD_BEEF)).await.expect("agent should insert");
+
+        // Fill the queue to capacity.
+        for i in 0..crate::agents::MAX_JOB_QUEUE_DEPTH {
+            registry
+                .enqueue_job(0xDEAD_BEEF, sample_job(i as u32, i as u32, "Neo"))
+                .await
+                .expect("enqueue should succeed");
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/agents/DEADBEEF/task")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"TaskID":"FF","CommandLine":"checkin","DemonID":"DEADBEEF","CommandID":"100"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // Verify the audit trail recorded a failure entry.
+        let audit_page = crate::audit::query_audit_log(
+            &database,
+            &crate::AuditQuery {
+                action: Some("agent.task".to_owned()),
+                agent_id: Some("DEADBEEF".to_owned()),
+                limit: Some(10),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("audit query");
+        assert!(!audit_page.items.is_empty(), "audit should have at least one entry");
+        let last = &audit_page.items[0];
+        assert_eq!(
+            last.result_status,
+            crate::AuditResultStatus::Failure,
+            "audit entry must record failure for QueueFull"
+        );
     }
 
     #[tokio::test]

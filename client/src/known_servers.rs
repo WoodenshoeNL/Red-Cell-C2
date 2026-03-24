@@ -12,6 +12,28 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// Errors that can occur when persisting the known-servers store.
+#[derive(Debug, thiserror::Error)]
+pub enum SaveError {
+    /// Failed to create the parent config directory.
+    #[error("failed to create config directory '{path}': {source}")]
+    CreateDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// Failed to serialize the store to TOML.
+    #[error("failed to serialize known-servers store: {0}")]
+    Serialize(#[from] toml::ser::Error),
+    /// Failed to write the store file.
+    #[error("failed to write known-servers file '{path}': {source}")]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
 const KNOWN_SERVERS_FILE: &str = "known_servers.toml";
 const APP_DIR_NAME: &str = "red-cell-client";
 
@@ -79,22 +101,27 @@ impl KnownServersStore {
 
     /// Persist the store to the platform config directory.
     ///
-    /// Silently ignores write failures (non-critical persistence).
-    pub fn save(&self) {
-        self.save_with_path(store_file_path());
+    /// Returns an error if the config directory cannot be created or the file
+    /// cannot be written. Callers should surface this to the operator so that
+    /// a TOFU decision that cannot be persisted is not silently lost.
+    pub fn save(&self) -> Result<(), SaveError> {
+        self.save_with_path(store_file_path())
     }
 
     /// Persist the store to a specific path.
     ///
-    /// Creates parent directories as needed. Silently ignores write failures.
+    /// Creates parent directories as needed. Returns an error if the directory
+    /// cannot be created, serialization fails, or the file write fails.
     /// On Unix the file is created with mode 0600 (owner-only read/write).
-    pub fn save_to(&self, path: &std::path::Path) {
+    pub fn save_to(&self, path: &std::path::Path) -> Result<(), SaveError> {
         if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
+            fs::create_dir_all(parent)
+                .map_err(|source| SaveError::CreateDir { path: parent.to_owned(), source })?;
         }
-        if let Ok(contents) = toml::to_string_pretty(self) {
-            let _ = write_store_file(path, contents.as_bytes());
-        }
+        let contents = toml::to_string_pretty(self)?;
+        write_store_file(path, contents.as_bytes())
+            .map_err(|source| SaveError::Write { path: path.to_owned(), source })?;
+        Ok(())
     }
 
     /// Look up a server by `host:port`.
@@ -153,11 +180,11 @@ impl KnownServersStore {
         Self::load_from(&path)
     }
 
-    fn save_with_path(&self, path: Option<PathBuf>) {
+    fn save_with_path(&self, path: Option<PathBuf>) -> Result<(), SaveError> {
         let Some(path) = path else {
-            return;
+            return Ok(());
         };
-        self.save_to(&path);
+        self.save_to(&path)
     }
 }
 
@@ -323,7 +350,7 @@ mod tests {
         store.trust("10.0.0.1:40056", &"a".repeat(64), Some("test"));
         store.trust("192.168.1.1:9999", &"b".repeat(64), None);
 
-        store.save_to(&path);
+        store.save_to(&path).unwrap_or_else(|e| panic!("save should succeed: {e}"));
         let loaded = KnownServersStore::load_from(&path);
 
         assert_eq!(loaded, store);
@@ -426,7 +453,7 @@ mod tests {
 
         let mut store = KnownServersStore::default();
         store.trust("10.0.0.1:40056", &"a".repeat(64), None);
-        store.save_to(&path);
+        store.save_to(&path).unwrap_or_else(|e| panic!("save should succeed: {e}"));
 
         let mode = fs::metadata(&path)
             .unwrap_or_else(|e| panic!("metadata should succeed: {e}"))
@@ -445,5 +472,39 @@ mod tests {
         assert!(toml_str.contains("[\"10.0.0.1:40056\"]") || toml_str.contains("[10.0.0.1:40056]"));
         assert!(toml_str.contains("fingerprint"));
         assert!(toml_str.contains("first_seen"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_to_returns_error_when_parent_dir_is_unwritable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir =
+            tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir creation should succeed: {e}"));
+
+        // Make the directory unwritable so create_dir_all / open will fail.
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555))
+            .unwrap_or_else(|e| panic!("chmod should succeed: {e}"));
+
+        let path = dir.path().join("subdir").join("known_servers.toml");
+        let store = KnownServersStore::default();
+        let result = store.save_to(&path);
+
+        // Restore permissions so tempdir cleanup can remove the directory.
+        let _ = fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755));
+
+        assert!(result.is_err(), "expected Err for unwritable parent, got Ok");
+    }
+
+    #[test]
+    fn save_to_returns_ok_on_success() {
+        let dir =
+            tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir creation should succeed: {e}"));
+        let path = dir.path().join("known_servers.toml");
+
+        let mut store = KnownServersStore::default();
+        store.trust("127.0.0.1:40056", &"cc".repeat(32), None);
+
+        assert!(store.save_to(&path).is_ok(), "save_to should succeed");
     }
 }

@@ -1104,7 +1104,13 @@ impl ClientApp {
         };
         if let Some(host_port) = host_port_from_url(&server_url) {
             self.known_servers.trust(&host_port, &fingerprint, None);
-            self.known_servers.save();
+            if let Err(error) = self.known_servers.save() {
+                tracing::warn!(
+                    %error,
+                    "failed to persist certificate trust — \
+                     TOFU decision will be lost on next launch",
+                );
+            }
         }
         // Also keep the legacy global fingerprint for backwards compat.
         self.local_config.cert_fingerprint = Some(fingerprint.clone());
@@ -5091,7 +5097,7 @@ fn main() -> Result<()> {
     if let Some(host_port) = &cli.purge_known_server {
         let mut store = KnownServersStore::load();
         if store.remove(host_port) {
-            store.save();
+            store.save().map_err(|e| anyhow::anyhow!("failed to save known-servers: {e}"))?;
             println!("Removed {host_port} from known servers.");
         } else {
             println!("No entry found for {host_port} in known servers.");

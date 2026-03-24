@@ -646,22 +646,22 @@ fn configured_credentials(
 /// fast. The production-strength parameters are only needed for brute-force
 /// resistance; the hashing/verification code paths exercised in tests are
 /// identical regardless of cost parameters.
-fn argon2_hasher() -> Argon2<'static> {
+fn argon2_hasher() -> Result<Argon2<'static>, AuthError> {
     #[cfg(not(test))]
     let params = ParamsBuilder::new()
         .m_cost(65536)
         .t_cost(3)
         .p_cost(4)
         .build()
-        .expect("hardcoded Argon2 params are valid");
+        .map_err(|e| AuthError::PasswordVerifier(format!("Argon2 parameter error: {e}")))?;
     #[cfg(test)]
     let params = ParamsBuilder::new()
         .m_cost(256)
         .t_cost(1)
         .p_cost(1)
         .build()
-        .expect("hardcoded Argon2 params are valid");
-    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+        .map_err(|e| AuthError::PasswordVerifier(format!("Argon2 parameter error: {e}")))?;
+    Ok(Argon2::new(Algorithm::Argon2id, Version::V0x13, params))
 }
 
 fn password_hashes_match(submitted: &str, expected: &str) -> bool {
@@ -676,8 +676,11 @@ fn password_hashes_match_impl(submitted: &str, expected: &str) -> bool {
     let Ok(parsed_hash) = PasswordHash::new(expected) else {
         return false;
     };
+    let Ok(hasher) = argon2_hasher() else {
+        return false;
+    };
 
-    argon2_hasher().verify_password(submitted.as_bytes(), &parsed_hash).is_ok()
+    hasher.verify_password(submitted.as_bytes(), &parsed_hash).is_ok()
 }
 
 /// Test-only cached wrapper around [`password_hashes_match_impl`].
@@ -716,7 +719,7 @@ pub(crate) fn password_verifier_for_sha3(password_hash: &str) -> Result<String, 
 }
 
 fn password_verifier_for_sha3_impl(password_hash: &str) -> Result<String, AuthError> {
-    argon2_hasher()
+    argon2_hasher()?
         .hash_password(password_hash.to_ascii_lowercase().as_bytes())
         .map(|hash| hash.to_string())
         .map_err(|error| AuthError::PasswordVerifier(error.to_string()))
@@ -812,7 +815,7 @@ fn generate_dummy_verifier() -> Result<String, AuthError> {
 
 fn generate_dummy_verifier_impl() -> Result<String, AuthError> {
     let random_bytes = Uuid::new_v4();
-    argon2_hasher()
+    argon2_hasher()?
         .hash_password(random_bytes.as_bytes())
         .map(|h| h.to_string())
         .map_err(|e| AuthError::PasswordVerifier(e.to_string()))
@@ -893,6 +896,23 @@ mod tests {
         assert_eq!(
             hash_password_sha3("password1234"),
             "2f7d3e77d0786c5d305c0afadd4c1a2a6869a3210956c963ad2420c52e797022"
+        );
+    }
+
+    /// `argon2_hasher` must return `Ok` with the configured test parameters and must
+    /// never panic — parameter construction failures are mapped to `AuthError`.
+    #[test]
+    fn argon2_hasher_returns_ok_and_maps_errors_to_auth_error() {
+        use super::argon2_hasher;
+
+        let hasher = argon2_hasher();
+        assert!(hasher.is_ok(), "argon2_hasher() should succeed with valid parameters");
+
+        // Verify the error variant used for parameter failures is PasswordVerifier.
+        let err = AuthError::PasswordVerifier("Argon2 parameter error: test".to_owned());
+        assert!(
+            matches!(err, AuthError::PasswordVerifier(ref msg) if msg.contains("Argon2 parameter")),
+            "Argon2 parameter errors should map to AuthError::PasswordVerifier"
         );
     }
 

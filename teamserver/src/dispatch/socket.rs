@@ -870,6 +870,25 @@ mod tests {
         assert_eq!(data_lines.len(), 2, "expected 2 data rows, got {data_lines:?}");
     }
 
+    #[tokio::test]
+    async fn socks_proxy_list_truncated_second_entry_returns_error() {
+        let mut rest = Vec::new();
+        // complete first entry (3 × u32 = 12 bytes)
+        add_u32(&mut rest, 0xBBCC_0001); // socket_id
+        add_u32(&mut rest, 0x0100_007F); // bind_addr = 127.0.0.1
+        add_u32(&mut rest, 1080); // bind_port
+        // truncated second entry: only socket_id, missing bind_addr and bind_port
+        add_u32(&mut rest, 0xBBCC_0002); // socket_id only
+        let payload = socket_payload(DemonSocketCommand::SocksProxyList, &rest);
+        let (events, sockets) = test_deps().await;
+        let result =
+            handle_socket_callback(&events, &sockets, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload for truncated socks proxy list entry, got {result:?}"
+        );
+    }
+
     // ── SocksProxyRemove ───────────────────────────────────────────────────
 
     #[tokio::test]

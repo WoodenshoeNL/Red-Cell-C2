@@ -342,3 +342,114 @@ async fn server_addr_binding_not_required_for_oneshot() {
     let addr: SocketAddr = "127.0.0.1:0".parse().expect("parse addr");
     assert_eq!(addr.port(), 0);
 }
+
+// ── CLI↔teamserver schema contract for GET /agents and GET /agents/{id} ──────
+//
+// These tests verify that the JSON the teamserver serialises from ApiAgentInfo
+// contains every field the CLI's ApiAgentWire struct expects (PascalCase keys).
+// They exercise the full round-trip: AgentRecord → teamserver serialisation →
+// JSON bytes → CLI deserialization schema check.
+
+/// `GET /api/v1/agents` returns 200 OK with a JSON array whose objects contain
+/// the PascalCase fields that `ApiAgentWire` (the CLI wire struct) requires.
+///
+/// This is the end-to-end schema contract for the `agent list` command.
+#[tokio::test]
+async fn get_agents_list_returns_api_agent_info_schema() {
+    let (state, registry) = build_test_state().await;
+    registry.insert(sample_agent(AGENT_ID_U32)).await.expect("insert agent");
+
+    let response = call(state, "GET", "/api/v1/agents", API_KEY, None).await;
+
+    assert_eq!(response.status(), StatusCode::OK, "GET /agents must return 200 OK");
+
+    let json = read_json(response).await;
+    let agents = json.as_array().expect("response must be a JSON array");
+    assert_eq!(agents.len(), 1, "one agent inserted → one agent in list");
+
+    let a = &agents[0];
+
+    // Verify all PascalCase keys the CLI's ApiAgentWire expects are present.
+    assert_eq!(a["AgentID"], AGENT_ID_U32, "AgentID must be the numeric agent id");
+    assert_eq!(a["Active"], true, "Active must match the inserted record");
+    assert!(!a["Reason"].is_null(), "Reason must be present");
+    assert!(!a["Note"].is_null(), "Note must be present");
+    assert_eq!(a["Hostname"], "workstation");
+    assert_eq!(a["Username"], "operator");
+    assert_eq!(a["DomainName"], "LAB");
+    assert_eq!(a["ExternalIP"], "203.0.113.10");
+    assert_eq!(a["InternalIP"], "10.0.0.10");
+    assert_eq!(a["ProcessName"], "demon.exe");
+    assert!(!a["BaseAddress"].is_null(), "BaseAddress must be present");
+    assert_eq!(a["ProcessPID"], 4444u32);
+    assert!(!a["ProcessTID"].is_null(), "ProcessTID must be present");
+    assert!(!a["ProcessPPID"].is_null(), "ProcessPPID must be present");
+    assert_eq!(a["ProcessArch"], "x64");
+    assert_eq!(a["Elevated"], true);
+    assert_eq!(a["OSVersion"], "Windows 11");
+    assert!(!a["OSBuild"].is_null(), "OSBuild must be present");
+    assert_eq!(a["OSArch"], "x64");
+    assert_eq!(a["SleepDelay"], 5u32);
+    assert_eq!(a["SleepJitter"], 10u32);
+    // KillDate and WorkingHours are Option<_> — null is the correct value here.
+    assert!(a["KillDate"].is_null(), "KillDate must be null when not set");
+    assert!(a["WorkingHours"].is_null(), "WorkingHours must be null when not set");
+    assert_eq!(a["FirstCallIn"], "2026-03-01T00:00:00Z");
+    assert_eq!(a["LastCallIn"], "2026-03-01T00:05:00Z");
+}
+
+/// `GET /api/v1/agents/{id}` returns 200 OK with a single `ApiAgentInfo`
+/// JSON object whose PascalCase fields match the CLI's `ApiAgentWire` schema.
+///
+/// This is the end-to-end schema contract for the `agent show` command.
+#[tokio::test]
+async fn get_agent_by_id_returns_api_agent_info_schema() {
+    let (state, registry) = build_test_state().await;
+    registry.insert(sample_agent(AGENT_ID_U32)).await.expect("insert agent");
+
+    let response =
+        call(state, "GET", &format!("/api/v1/agents/{AGENT_ID_HEX}"), API_KEY, None).await;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "GET /agents/{{id}} must return 200 OK when the agent exists"
+    );
+
+    let a = read_json(response).await;
+
+    // Required fields for ApiAgentWire deserialization.
+    assert_eq!(a["AgentID"], AGENT_ID_U32, "AgentID must match");
+    assert_eq!(a["Active"], true);
+    assert_eq!(a["Hostname"], "workstation");
+    assert_eq!(a["Username"], "operator");
+    assert_eq!(a["DomainName"], "LAB");
+    assert_eq!(a["ExternalIP"], "203.0.113.10");
+    assert_eq!(a["InternalIP"], "10.0.0.10");
+    assert_eq!(a["ProcessName"], "demon.exe");
+    assert_eq!(a["ProcessPID"], 4444u32);
+    assert_eq!(a["ProcessArch"], "x64");
+    assert_eq!(a["Elevated"], true);
+    assert_eq!(a["OSVersion"], "Windows 11");
+    assert_eq!(a["OSBuild"], 22000u32);
+    assert_eq!(a["OSArch"], "x64");
+    assert_eq!(a["SleepDelay"], 5u32);
+    assert_eq!(a["SleepJitter"], 10u32);
+    assert_eq!(a["FirstCallIn"], "2026-03-01T00:00:00Z");
+    assert_eq!(a["LastCallIn"], "2026-03-01T00:05:00Z");
+}
+
+/// `GET /api/v1/agents/{id}` returns 404 when the agent does not exist.
+#[tokio::test]
+async fn get_agent_by_id_returns_404_for_unknown_agent() {
+    let (state, _registry) = build_test_state().await;
+
+    let response =
+        call(state, "GET", &format!("/api/v1/agents/{AGENT_ID_HEX}"), API_KEY, None).await;
+
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "GET /agents/{{id}} must return 404 for an unknown agent"
+    );
+}

@@ -34,40 +34,67 @@ const POLL_INTERVAL: Duration = Duration::from_millis(1_000);
 
 /// Wire format returned by `GET /agents` and `GET /agents/{id}`.
 ///
-/// The teamserver serialises agent records as `ApiAgentInfo` which uses
-/// PascalCase field names (e.g. `AgentID`, `Hostname`, `LastCallIn`).  This
-/// intermediate struct captures those names so that `RawAgent` can be
-/// populated via the `From` conversion below.
+/// Field names and types mirror `ApiAgentInfo` in the teamserver
+/// (`teamserver/src/api.rs`) exactly so that serde can deserialise the
+/// server response without loss of data.  All PascalCase renames match
+/// the `#[serde(rename = "…")]` attributes on `ApiAgentInfo`.
+///
+/// Some fields are captured here for schema completeness but are not
+/// forwarded to `RawAgent` — they are required by serde for a
+/// successful deserialisation and are intentionally unused afterwards.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ApiAgentWire {
     #[serde(rename = "AgentID")]
     agent_id: u32,
+    #[serde(rename = "Active")]
+    active: bool,
+    #[serde(rename = "Reason")]
+    reason: String,
+    #[serde(rename = "Note")]
+    note: String,
     #[serde(rename = "Hostname")]
     hostname: String,
     #[serde(rename = "Username")]
     username: String,
     #[serde(rename = "DomainName")]
     domain_name: String,
+    #[serde(rename = "ExternalIP")]
+    external_ip: String,
     #[serde(rename = "InternalIP")]
     internal_ip: String,
     #[serde(rename = "ProcessName")]
     process_name: String,
+    #[serde(rename = "BaseAddress")]
+    base_address: u64,
     #[serde(rename = "ProcessPID")]
     process_pid: u32,
+    #[serde(rename = "ProcessTID")]
+    process_tid: u32,
+    #[serde(rename = "ProcessPPID")]
+    process_ppid: u32,
     #[serde(rename = "ProcessArch")]
     process_arch: String,
+    #[serde(rename = "Elevated")]
+    elevated: bool,
     #[serde(rename = "OSVersion")]
     os_version: String,
+    #[serde(rename = "OSBuild")]
+    os_build: u32,
     #[serde(rename = "OSArch")]
     os_arch: String,
     #[serde(rename = "SleepDelay")]
     sleep_delay: u32,
     #[serde(rename = "SleepJitter")]
     sleep_jitter: u32,
+    #[serde(rename = "KillDate")]
+    kill_date: Option<i64>,
+    #[serde(rename = "WorkingHours")]
+    working_hours: Option<i32>,
+    #[serde(rename = "FirstCallIn")]
+    first_call_in: String,
     #[serde(rename = "LastCallIn")]
     last_call_in: String,
-    #[serde(rename = "Active")]
-    active: bool,
 }
 
 /// Normalised agent record used throughout the CLI.
@@ -88,14 +115,18 @@ pub(crate) struct RawAgent {
     pub(crate) os: String,
     /// RFC 3339 timestamp of the agent's last check-in (`LastCallIn`).
     pub(crate) last_seen: String,
+    /// RFC 3339 timestamp of the agent's first check-in (`FirstCallIn`).
+    pub(crate) first_seen: String,
     /// `"alive"` when `Active == true`, `"dead"` otherwise.
     pub(crate) status: String,
     pub(crate) arch: Option<String>,
     pub(crate) username: Option<String>,
     pub(crate) domain: Option<String>,
+    pub(crate) external_ip: Option<String>,
     pub(crate) internal_ip: Option<String>,
     pub(crate) process_name: Option<String>,
     pub(crate) pid: Option<u64>,
+    pub(crate) elevated: Option<bool>,
     pub(crate) sleep_interval: Option<u64>,
     pub(crate) jitter: Option<u64>,
 }
@@ -107,13 +138,16 @@ impl From<ApiAgentWire> for RawAgent {
             hostname: w.hostname,
             os: format!("{} {}", w.os_version, w.os_arch),
             last_seen: w.last_call_in,
+            first_seen: w.first_call_in,
             status: if w.active { "alive".to_owned() } else { "dead".to_owned() },
             arch: Some(w.process_arch),
             username: Some(w.username),
             domain: Some(w.domain_name),
+            external_ip: Some(w.external_ip),
             internal_ip: Some(w.internal_ip),
             process_name: Some(w.process_name),
             pid: Some(w.process_pid as u64),
+            elevated: Some(w.elevated),
             sleep_interval: Some(w.sleep_delay as u64),
             jitter: Some(w.sleep_jitter as u64),
         }
@@ -174,9 +208,12 @@ pub struct AgentDetail {
     pub arch: Option<String>,
     pub username: Option<String>,
     pub domain: Option<String>,
+    pub external_ip: Option<String>,
     pub internal_ip: Option<String>,
     pub process_name: Option<String>,
     pub pid: Option<u64>,
+    pub elevated: Option<bool>,
+    pub first_seen: String,
     pub last_seen: String,
     pub status: String,
     pub sleep_interval: Option<u64>,
@@ -196,9 +233,12 @@ impl TextRender for AgentDetail {
             ("arch", self.arch.clone().unwrap_or_default()),
             ("username", self.username.clone().unwrap_or_default()),
             ("domain", self.domain.clone().unwrap_or_default()),
+            ("external_ip", self.external_ip.clone().unwrap_or_default()),
             ("internal_ip", self.internal_ip.clone().unwrap_or_default()),
             ("process_name", self.process_name.clone().unwrap_or_default()),
             ("pid", self.pid.map_or_else(String::new, |p| p.to_string())),
+            ("elevated", self.elevated.map_or_else(String::new, |e| e.to_string())),
+            ("first_seen", self.first_seen.clone()),
             ("last_seen", self.last_seen.clone()),
             ("status", self.status.clone()),
             ("sleep_interval", self.sleep_interval.map_or_else(String::new, |s| s.to_string())),
@@ -727,9 +767,12 @@ fn agent_detail_from_raw(r: RawAgent) -> AgentDetail {
         arch: r.arch,
         username: r.username,
         domain: r.domain,
+        external_ip: r.external_ip,
         internal_ip: r.internal_ip,
         process_name: r.process_name,
         pid: r.pid,
+        elevated: r.elevated,
+        first_seen: r.first_seen,
         last_seen: r.last_seen,
         status: r.status,
         sleep_interval: r.sleep_interval,
@@ -798,9 +841,12 @@ mod tests {
             arch: None,
             username: None,
             domain: None,
+            external_ip: None,
             internal_ip: None,
             process_name: None,
             pid: None,
+            elevated: None,
+            first_seen: "t0".to_owned(),
             last_seen: "t".to_owned(),
             status: "alive".to_owned(),
             sleep_interval: None,
@@ -809,6 +855,8 @@ mod tests {
         let v = serde_json::to_value(&d).expect("serialise");
         assert!(v["arch"].is_null());
         assert!(v["pid"].is_null());
+        assert!(v["external_ip"].is_null());
+        assert!(v["elevated"].is_null());
     }
 
     #[test]
@@ -820,10 +868,13 @@ mod tests {
             arch: Some("x86_64".to_owned()),
             username: Some("DOMAIN\\alice".to_owned()),
             domain: Some("CORP".to_owned()),
+            external_ip: Some("203.0.113.1".to_owned()),
             internal_ip: Some("10.0.0.1".to_owned()),
             process_name: Some("svchost.exe".to_owned()),
             pid: Some(1234),
-            last_seen: "2026-01-01T00:00:00Z".to_owned(),
+            elevated: Some(true),
+            first_seen: "2026-01-01T00:00:00Z".to_owned(),
+            last_seen: "2026-01-02T00:00:00Z".to_owned(),
             status: "alive".to_owned(),
             sleep_interval: Some(60),
             jitter: Some(10),
@@ -833,6 +884,8 @@ mod tests {
         assert!(rendered.contains("myhost"));
         assert!(rendered.contains("x86_64"));
         assert!(rendered.contains("1234"));
+        assert!(rendered.contains("203.0.113.1"));
+        assert!(rendered.contains("true"));
     }
 
     // ── JobSubmitted ──────────────────────────────────────────────────────────
@@ -992,13 +1045,16 @@ mod tests {
             hostname: "host".to_owned(),
             os: "linux".to_owned(),
             last_seen: "ts".to_owned(),
+            first_seen: "ts0".to_owned(),
             status: "alive".to_owned(),
             arch: None,
             username: None,
             domain: None,
+            external_ip: None,
             internal_ip: None,
             process_name: None,
             pid: None,
+            elevated: None,
             sleep_interval: None,
             jitter: None,
         };
@@ -1015,13 +1071,16 @@ mod tests {
             hostname: "h".to_owned(),
             os: "win".to_owned(),
             last_seen: "t".to_owned(),
+            first_seen: "t0".to_owned(),
             status: "dead".to_owned(),
             arch: Some("x86".to_owned()),
             username: Some("user".to_owned()),
             domain: None,
+            external_ip: Some("1.2.3.4".to_owned()),
             internal_ip: None,
             process_name: None,
             pid: Some(42),
+            elevated: Some(false),
             sleep_interval: Some(30),
             jitter: None,
         };
@@ -1029,6 +1088,138 @@ mod tests {
         assert_eq!(d.arch, Some("x86".to_owned()));
         assert_eq!(d.pid, Some(42));
         assert_eq!(d.domain, None);
+        assert_eq!(d.external_ip, Some("1.2.3.4".to_owned()));
+        assert_eq!(d.elevated, Some(false));
+    }
+
+    // ── ApiAgentWire deserialization (matches real ApiAgentInfo schema) ───────
+
+    /// Full `ApiAgentInfo`-shaped JSON (as the teamserver serialises it)
+    /// deserialized into `RawAgent` via `ApiAgentWire`.  Field names are
+    /// PascalCase to match `ApiAgentInfo`'s `#[serde(rename)]` attributes.
+    #[test]
+    fn api_agent_wire_deserialises_full_api_agent_info_payload() {
+        let json = serde_json::json!({
+            "AgentID":      3735928559u32,  // 0xDEADBEEF
+            "Active":       true,
+            "Reason":       "http",
+            "Note":         "",
+            "Hostname":     "WORKSTATION01",
+            "Username":     "CORP\\alice",
+            "DomainName":   "CORP",
+            "ExternalIP":   "203.0.113.10",
+            "InternalIP":   "10.0.0.10",
+            "ProcessName":  "demon.exe",
+            "BaseAddress":  0x1400_0000u64,
+            "ProcessPID":   4444u32,
+            "ProcessTID":   4445u32,
+            "ProcessPPID":  1000u32,
+            "ProcessArch":  "x64",
+            "Elevated":     true,
+            "OSVersion":    "Windows 11",
+            "OSBuild":      22000u32,
+            "OSArch":       "x64",
+            "SleepDelay":   5u32,
+            "SleepJitter":  10u32,
+            "KillDate":     null,
+            "WorkingHours": null,
+            "FirstCallIn":  "2026-03-01T00:00:00Z",
+            "LastCallIn":   "2026-03-01T00:05:00Z"
+        });
+
+        let raw: RawAgent = serde_json::from_value(json).expect("deserialise RawAgent");
+
+        assert_eq!(raw.id, "DEADBEEF");
+        assert_eq!(raw.hostname, "WORKSTATION01");
+        assert_eq!(raw.os, "Windows 11 x64");
+        assert_eq!(raw.last_seen, "2026-03-01T00:05:00Z");
+        assert_eq!(raw.first_seen, "2026-03-01T00:00:00Z");
+        assert_eq!(raw.status, "alive");
+        assert_eq!(raw.username, Some("CORP\\alice".to_owned()));
+        assert_eq!(raw.domain, Some("CORP".to_owned()));
+        assert_eq!(raw.external_ip, Some("203.0.113.10".to_owned()));
+        assert_eq!(raw.internal_ip, Some("10.0.0.10".to_owned()));
+        assert_eq!(raw.process_name, Some("demon.exe".to_owned()));
+        assert_eq!(raw.pid, Some(4444));
+        assert_eq!(raw.elevated, Some(true));
+        assert_eq!(raw.sleep_interval, Some(5));
+        assert_eq!(raw.jitter, Some(10));
+    }
+
+    /// Inactive agent (`Active = false`) maps to `status = "dead"`.
+    #[test]
+    fn api_agent_wire_inactive_agent_maps_status_to_dead() {
+        let json = serde_json::json!({
+            "AgentID":      1u32,
+            "Active":       false,
+            "Reason":       "killed",
+            "Note":         "",
+            "Hostname":     "HOST",
+            "Username":     "user",
+            "DomainName":   ".",
+            "ExternalIP":   "1.2.3.4",
+            "InternalIP":   "10.0.0.1",
+            "ProcessName":  "a.exe",
+            "BaseAddress":  0u64,
+            "ProcessPID":   100u32,
+            "ProcessTID":   101u32,
+            "ProcessPPID":  1u32,
+            "ProcessArch":  "x86",
+            "Elevated":     false,
+            "OSVersion":    "Windows 10",
+            "OSBuild":      19045u32,
+            "OSArch":       "x64",
+            "SleepDelay":   60u32,
+            "SleepJitter":  0u32,
+            "KillDate":     null,
+            "WorkingHours": null,
+            "FirstCallIn":  "2026-01-01T00:00:00Z",
+            "LastCallIn":   "2026-01-02T00:00:00Z"
+        });
+
+        let raw: RawAgent = serde_json::from_value(json).expect("deserialise");
+        assert_eq!(raw.status, "dead");
+        assert_eq!(raw.id, "00000001");
+        assert_eq!(raw.os, "Windows 10 x64");
+    }
+
+    /// `Vec<RawAgent>` (the list-endpoint shape) deserializes from a JSON
+    /// array of `ApiAgentInfo` objects.
+    #[test]
+    fn api_agent_wire_vec_deserialises_list_endpoint_shape() {
+        let json = serde_json::json!([{
+            "AgentID":      1u32,
+            "Active":       true,
+            "Reason":       "http",
+            "Note":         "",
+            "Hostname":     "HOST-A",
+            "Username":     "admin",
+            "DomainName":   "LAB",
+            "ExternalIP":   "5.6.7.8",
+            "InternalIP":   "192.168.1.1",
+            "ProcessName":  "b.exe",
+            "BaseAddress":  0u64,
+            "ProcessPID":   200u32,
+            "ProcessTID":   201u32,
+            "ProcessPPID":  2u32,
+            "ProcessArch":  "x64",
+            "Elevated":     false,
+            "OSVersion":    "Windows Server 2022",
+            "OSBuild":      20348u32,
+            "OSArch":       "x64",
+            "SleepDelay":   30u32,
+            "SleepJitter":  5u32,
+            "KillDate":     null,
+            "WorkingHours": null,
+            "FirstCallIn":  "2026-02-01T00:00:00Z",
+            "LastCallIn":   "2026-02-01T00:01:00Z"
+        }]);
+
+        let agents: Vec<RawAgent> = serde_json::from_value(json).expect("deserialise list");
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].hostname, "HOST-A");
+        assert_eq!(agents[0].status, "alive");
+        assert_eq!(agents[0].os, "Windows Server 2022 x64");
     }
 
     // ── exec_wait / fetch_output / watch_output (using wiremock) ─────────────

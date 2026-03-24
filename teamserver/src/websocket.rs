@@ -1302,6 +1302,10 @@ pub(crate) enum AgentCommandError {
     UnsupportedInjectionWay { way: String },
     #[error("unsupported injection technique `{technique}`")]
     UnsupportedInjectionTechnique { technique: String },
+    #[error(
+        "unsupported command id {command_id}: not a recognized Demon command and no raw payload provided"
+    )]
+    UnsupportedCommandId { command_id: u32 },
     #[error("unsupported process architecture `{arch}`")]
     UnsupportedArchitecture { arch: String },
     #[error("invalid process create arguments: expected `state;verbose;piped;program;base64_args`")]
@@ -1611,6 +1615,14 @@ fn task_payload(
 
     if command == u32::from(DemonCommand::CommandSpawnDll) {
         return encode_spawn_dll_payload(info);
+    }
+
+    // Allow known Demon commands to proceed with an empty payload (they may
+    // legitimately require none), but reject unrecognised numeric command IDs
+    // that also lack an explicit raw payload — those are protocol validation
+    // errors that should not be silently enqueued.
+    if DemonCommand::try_from(command).is_err() {
+        return Err(AgentCommandError::UnsupportedCommandId { command_id: command });
     }
 
     Ok(Vec::new())
@@ -4146,6 +4158,69 @@ mod tests {
         })
         .expect("valid hex task_id should succeed");
         assert_eq!(job.request_id, 0xFF);
+    }
+
+    #[test]
+    fn build_jobs_rejects_unknown_command_id_without_raw_payload() {
+        // An unrecognised numeric command ID with no raw payload must be rejected.
+        let result = build_jobs(
+            &AgentTaskInfo {
+                task_id: "01".to_owned(),
+                command_line: "bogus".to_owned(),
+                demon_id: "DEADBEEF".to_owned(),
+                command_id: "99999".to_owned(),
+                ..AgentTaskInfo::default()
+            },
+            "op",
+        );
+        match result {
+            Err(AgentCommandError::UnsupportedCommandId { command_id }) => {
+                assert_eq!(command_id, 99999);
+            }
+            other => panic!("expected UnsupportedCommandId, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_jobs_accepts_unknown_command_id_with_raw_payload() {
+        // An unrecognised command ID should still be accepted when the caller
+        // provides an explicit raw payload.
+        let mut extra = BTreeMap::new();
+        extra.insert("Payload".to_owned(), serde_json::Value::String("hello".to_owned()));
+        let jobs = build_jobs(
+            &AgentTaskInfo {
+                task_id: "01".to_owned(),
+                command_line: "custom".to_owned(),
+                demon_id: "DEADBEEF".to_owned(),
+                command_id: "99999".to_owned(),
+                extra,
+                ..AgentTaskInfo::default()
+            },
+            "op",
+        )
+        .expect("unknown command with raw payload should succeed");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].command, 99999);
+        assert_eq!(jobs[0].payload, b"hello");
+    }
+
+    #[test]
+    fn build_jobs_accepts_known_command_without_explicit_payload() {
+        // A recognised Demon command that does not have a specialised encoder
+        // should succeed with an empty payload.
+        let jobs = build_jobs(
+            &AgentTaskInfo {
+                task_id: "0A".to_owned(),
+                command_line: "checkin".to_owned(),
+                demon_id: "DEADBEEF".to_owned(),
+                command_id: u32::from(DemonCommand::CommandCheckin).to_string(),
+                ..AgentTaskInfo::default()
+            },
+            "op",
+        )
+        .expect("known command without payload should succeed");
+        assert_eq!(jobs.len(), 1);
+        assert!(jobs[0].payload.is_empty());
     }
 
     #[tokio::test]

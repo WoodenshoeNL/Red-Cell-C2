@@ -816,7 +816,8 @@ impl IntoResponse for AgentApiError {
                 | AgentCommandError::UnsupportedInjectionTechnique { .. }
                 | AgentCommandError::UnsupportedArchitecture { .. }
                 | AgentCommandError::InvalidProcessCreateArguments
-                | AgentCommandError::InvalidRemovePayload,
+                | AgentCommandError::InvalidRemovePayload
+                | AgentCommandError::UnsupportedCommandId { .. },
             ) => (StatusCode::BAD_REQUEST, "invalid_agent_task"),
             Self::Task(AgentCommandError::Teamserver(crate::TeamserverError::AgentNotFound {
                 ..

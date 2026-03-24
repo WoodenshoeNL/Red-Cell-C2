@@ -333,6 +333,18 @@ impl AuthService {
         }
 
         credentials.remove(username);
+
+        // Revoke all active sessions so the deleted operator cannot continue using
+        // previously issued tokens.
+        let revoked = self.sessions.write().await.remove_by_username(username);
+        if !revoked.is_empty() {
+            tracing::info!(
+                username,
+                count = revoked.len(),
+                "revoked active sessions for deleted operator"
+            );
+        }
+
         Ok(())
     }
 
@@ -367,6 +379,10 @@ impl AuthService {
         if let Some(account) = credentials.get_mut(username) {
             account.role = role;
         }
+
+        // Update the role on all active sessions so subsequent authorization checks
+        // observe the new role immediately rather than using the stale login-time copy.
+        self.sessions.write().await.update_role_by_username(username, role);
 
         Ok(())
     }
@@ -542,6 +558,34 @@ impl SessionRegistry {
 
     fn list(&self) -> Vec<OperatorSession> {
         self.by_token.values().cloned().collect()
+    }
+
+    /// Remove all sessions belonging to `username`, returning the removed sessions.
+    fn remove_by_username(&mut self, username: &str) -> Vec<OperatorSession> {
+        let tokens_to_remove: Vec<String> = self
+            .by_token
+            .iter()
+            .filter(|(_, session)| session.username == username)
+            .map(|(token, _)| token.clone())
+            .collect();
+
+        let mut removed = Vec::with_capacity(tokens_to_remove.len());
+        for token in tokens_to_remove {
+            if let Some(session) = self.by_token.remove(&token) {
+                self.token_by_connection.remove(&session.connection_id);
+                removed.push(session);
+            }
+        }
+        removed
+    }
+
+    /// Update the role on all sessions belonging to `username`.
+    fn update_role_by_username(&mut self, username: &str, role: OperatorRole) {
+        for session in self.by_token.values_mut() {
+            if session.username == username {
+                session.role = role;
+            }
+        }
     }
 }
 
@@ -2094,6 +2138,88 @@ mod tests {
         assert_eq!(result, Err(AuthError::EmptyUsername));
     }
 
+    #[tokio::test]
+    async fn delete_operator_revokes_active_sessions() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let auth =
+            AuthService::from_profile_with_database(&profile(), &database).await.expect("auth");
+
+        auth.create_operator("victim", "pass1234", OperatorRole::Admin)
+            .await
+            .expect("create should succeed");
+
+        // Authenticate to obtain a session token.
+        let connection_id = Uuid::new_v4();
+        let result = auth
+            .authenticate_login(
+                connection_id,
+                &LoginInfo { user: "victim".to_owned(), password: hash_password_sha3("pass1234") },
+            )
+            .await;
+        let AuthenticationResult::Success(success) = result else {
+            panic!("expected successful authentication");
+        };
+
+        // Session exists before deletion.
+        assert!(auth.session_for_token(&success.token).await.is_some());
+
+        // Delete the operator.
+        auth.delete_operator("victim").await.expect("delete should succeed");
+
+        // Session must be revoked.
+        assert!(
+            auth.session_for_token(&success.token).await.is_none(),
+            "session should be revoked after operator deletion"
+        );
+        assert!(
+            auth.session_for_connection(connection_id).await.is_none(),
+            "connection should be revoked after operator deletion"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_operator_revokes_multiple_sessions() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let auth =
+            AuthService::from_profile_with_database(&profile(), &database).await.expect("auth");
+
+        auth.create_operator("multi", "pass1234", OperatorRole::Operator)
+            .await
+            .expect("create should succeed");
+
+        // Create two sessions for the same operator.
+        let mut tokens = Vec::new();
+        for _ in 0..2 {
+            let cid = Uuid::new_v4();
+            let result = auth
+                .authenticate_login(
+                    cid,
+                    &LoginInfo {
+                        user: "multi".to_owned(),
+                        password: hash_password_sha3("pass1234"),
+                    },
+                )
+                .await;
+            let AuthenticationResult::Success(success) = result else {
+                panic!("expected successful authentication");
+            };
+            tokens.push(success.token);
+        }
+
+        let count_before = auth.session_count().await;
+
+        auth.delete_operator("multi").await.expect("delete should succeed");
+
+        // Both sessions must be gone.
+        for token in &tokens {
+            assert!(
+                auth.session_for_token(token).await.is_none(),
+                "session {token} should be revoked"
+            );
+        }
+        assert_eq!(auth.session_count().await, count_before - 2);
+    }
+
     // ---- AuthService::update_operator_role tests ----
 
     #[tokio::test]
@@ -2149,5 +2275,152 @@ mod tests {
 
         let result = auth.update_operator_role("  ", OperatorRole::Admin).await;
         assert_eq!(result, Err(AuthError::EmptyUsername));
+    }
+
+    #[tokio::test]
+    async fn update_operator_role_updates_active_session_role() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let auth =
+            AuthService::from_profile_with_database(&profile(), &database).await.expect("auth");
+
+        auth.create_operator("rbac_user", "pass1234", OperatorRole::Admin)
+            .await
+            .expect("create should succeed");
+
+        // Login to get a session with Admin role.
+        let connection_id = Uuid::new_v4();
+        let result = auth
+            .authenticate_login(
+                connection_id,
+                &LoginInfo {
+                    user: "rbac_user".to_owned(),
+                    password: hash_password_sha3("pass1234"),
+                },
+            )
+            .await;
+        let AuthenticationResult::Success(success) = result else {
+            panic!("expected successful authentication");
+        };
+
+        // Verify initial role is Admin.
+        let session = auth.session_for_token(&success.token).await.expect("session should exist");
+        assert_eq!(session.role, OperatorRole::Admin);
+
+        // Downgrade to Analyst.
+        auth.update_operator_role("rbac_user", OperatorRole::Analyst)
+            .await
+            .expect("update should succeed");
+
+        // Session must now reflect the new role.
+        let session =
+            auth.session_for_token(&success.token).await.expect("session should still exist");
+        assert_eq!(
+            session.role,
+            OperatorRole::Analyst,
+            "session role should be updated to Analyst after downgrade"
+        );
+
+        // Also verify via connection lookup.
+        let session = auth
+            .session_for_connection(connection_id)
+            .await
+            .expect("session should still exist by connection");
+        assert_eq!(session.role, OperatorRole::Analyst);
+    }
+
+    #[tokio::test]
+    async fn update_operator_role_updates_multiple_sessions() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let auth =
+            AuthService::from_profile_with_database(&profile(), &database).await.expect("auth");
+
+        auth.create_operator("multi_role", "pass1234", OperatorRole::Admin)
+            .await
+            .expect("create should succeed");
+
+        // Create two sessions.
+        let mut tokens = Vec::new();
+        for _ in 0..2 {
+            let cid = Uuid::new_v4();
+            let result = auth
+                .authenticate_login(
+                    cid,
+                    &LoginInfo {
+                        user: "multi_role".to_owned(),
+                        password: hash_password_sha3("pass1234"),
+                    },
+                )
+                .await;
+            let AuthenticationResult::Success(success) = result else {
+                panic!("expected successful authentication");
+            };
+            tokens.push(success.token);
+        }
+
+        // Downgrade to Analyst.
+        auth.update_operator_role("multi_role", OperatorRole::Analyst)
+            .await
+            .expect("update should succeed");
+
+        // Both sessions must reflect the new role.
+        for token in &tokens {
+            let session = auth.session_for_token(token).await.expect("session should exist");
+            assert_eq!(
+                session.role,
+                OperatorRole::Analyst,
+                "all sessions should reflect the updated role"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn update_operator_role_does_not_affect_other_operator_sessions() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let auth =
+            AuthService::from_profile_with_database(&profile(), &database).await.expect("auth");
+
+        auth.create_operator("target", "pass1234", OperatorRole::Admin)
+            .await
+            .expect("create target");
+        auth.create_operator("bystander", "pass1234", OperatorRole::Admin)
+            .await
+            .expect("create bystander");
+
+        // Login both.
+        let _target_result = auth
+            .authenticate_login(
+                Uuid::new_v4(),
+                &LoginInfo { user: "target".to_owned(), password: hash_password_sha3("pass1234") },
+            )
+            .await;
+        let bystander_result = auth
+            .authenticate_login(
+                Uuid::new_v4(),
+                &LoginInfo {
+                    user: "bystander".to_owned(),
+                    password: hash_password_sha3("pass1234"),
+                },
+            )
+            .await;
+
+        let AuthenticationResult::Success(bystander_success) = bystander_result else {
+            panic!("expected bystander auth success");
+        };
+
+        // Downgrade target only.
+        auth.update_operator_role("target", OperatorRole::Analyst)
+            .await
+            .expect("update should succeed");
+
+        // Bystander should still be Admin.
+        let bystander_session = auth
+            .session_for_token(&bystander_success.token)
+            .await
+            .expect("bystander session should exist");
+        assert_eq!(
+            bystander_session.role,
+            OperatorRole::Admin,
+            "bystander session role should be unaffected"
+        );
     }
 }

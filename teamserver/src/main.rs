@@ -330,6 +330,7 @@ fn profile_listener_names(profile: &Profile) -> Vec<String> {
     names.extend(profile.listeners.http.iter().map(|listener| listener.name.clone()));
     names.extend(profile.listeners.smb.iter().map(|listener| listener.name.clone()));
     names.extend(profile.listeners.dns.iter().map(|listener| listener.name.clone()));
+    names.extend(profile.listeners.external.iter().map(|listener| listener.name.clone()));
     names
 }
 
@@ -693,6 +694,10 @@ mod tests {
                 Domain = "c2.example.com"
                 RecordTypes = ["TXT"]
               }]
+              External = [{
+                Name = "bridge"
+                Endpoint = "/svc"
+              }]
             }
 
             Demon {}
@@ -700,7 +705,7 @@ mod tests {
         )
         .expect("profile should parse");
 
-        assert_eq!(profile_listener_names(&profile), vec!["http", "smb", "dns"]);
+        assert_eq!(profile_listener_names(&profile), vec!["http", "smb", "dns", "bridge"]);
     }
 
     #[tokio::test]

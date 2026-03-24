@@ -1502,4 +1502,113 @@ mod tests {
         // Plain text passes through unchanged.
         assert_eq!(sanitize_discord_text("hello world"), "hello world");
     }
+
+    // --- simulate_stuck_delivery tests (require the test-helpers feature) --------
+
+    /// Happy path: `shutdown` must block while a `StuckDeliveryGuard` is alive and
+    /// complete successfully once the guard is dropped.
+    #[cfg(feature = "test-helpers")]
+    #[tokio::test]
+    async fn simulate_stuck_delivery_blocks_shutdown_until_guard_dropped() {
+        let notifier = AuditWebhookNotifier::default();
+
+        let guard = notifier.simulate_stuck_delivery();
+
+        // shutdown should not resolve while the guard is still alive.
+        let blocked = tokio::time::timeout(
+            Duration::from_millis(50),
+            notifier.shutdown(Duration::from_secs(5)),
+        )
+        .await;
+        assert!(blocked.is_err(), "shutdown must not complete while guard is alive");
+
+        // Dropping the guard decrements pending and wakes the shutdown waiter.
+        drop(guard);
+
+        // A fresh shutdown call must now resolve immediately (closing is already
+        // true; pending == 0).
+        let drained = tokio::time::timeout(
+            Duration::from_millis(100),
+            notifier.shutdown(Duration::from_secs(5)),
+        )
+        .await
+        .expect("shutdown should complete promptly after guard is dropped");
+        assert!(drained, "shutdown must return true once pending reaches zero");
+    }
+
+    /// Drop semantics: verify that the `pending` counter returns to zero when the
+    /// guard is dropped, so subsequent `shutdown` calls drain without waiting.
+    #[cfg(feature = "test-helpers")]
+    #[tokio::test]
+    async fn simulate_stuck_delivery_guard_drop_resets_pending_counter() {
+        let notifier = AuditWebhookNotifier::default();
+
+        let guard = notifier.simulate_stuck_delivery();
+        assert_eq!(
+            notifier.delivery_state.pending.load(Ordering::SeqCst),
+            1,
+            "pending must be 1 while guard is alive"
+        );
+
+        drop(guard);
+        assert_eq!(
+            notifier.delivery_state.pending.load(Ordering::SeqCst),
+            0,
+            "pending must return to zero after guard is dropped"
+        );
+
+        // Shutdown must now drain immediately since pending is zero.
+        let drained = tokio::time::timeout(
+            Duration::from_millis(100),
+            notifier.shutdown(Duration::from_secs(1)),
+        )
+        .await
+        .expect("shutdown should complete immediately with pending=0");
+        assert!(drained, "shutdown must return true when no deliveries are pending");
+    }
+
+    /// Multiple guards: `shutdown` must continue to block after the first guard is
+    /// dropped and only complete once every guard has been dropped.
+    #[cfg(feature = "test-helpers")]
+    #[tokio::test]
+    async fn simulate_stuck_delivery_multiple_guards_all_must_drop_before_shutdown() {
+        let notifier = AuditWebhookNotifier::default();
+
+        let guard1 = notifier.simulate_stuck_delivery();
+        let guard2 = notifier.simulate_stuck_delivery();
+        assert_eq!(
+            notifier.delivery_state.pending.load(Ordering::SeqCst),
+            2,
+            "pending must be 2 with two guards alive"
+        );
+
+        // Drop guard1 — pending falls to 1, shutdown must still block.
+        drop(guard1);
+        assert_eq!(
+            notifier.delivery_state.pending.load(Ordering::SeqCst),
+            1,
+            "pending must be 1 after first guard is dropped"
+        );
+
+        let still_blocked = tokio::time::timeout(
+            Duration::from_millis(50),
+            notifier.shutdown(Duration::from_secs(5)),
+        )
+        .await;
+        assert!(
+            still_blocked.is_err(),
+            "shutdown must still block after dropping only one of two guards"
+        );
+
+        // Drop guard2 — pending falls to 0, shutdown must now complete.
+        drop(guard2);
+
+        let drained = tokio::time::timeout(
+            Duration::from_millis(100),
+            notifier.shutdown(Duration::from_secs(5)),
+        )
+        .await
+        .expect("shutdown should complete after all guards are dropped");
+        assert!(drained, "shutdown must return true after all guards are dropped");
+    }
 }

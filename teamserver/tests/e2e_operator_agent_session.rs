@@ -342,6 +342,143 @@ async fn reconnect_probe_does_not_duplicate_agent_new_and_resumes_callbacks()
     Ok(())
 }
 
+/// E2E test: two simultaneous operators both receive agent events.
+///
+/// Sequence:
+/// 1. Spawn server with two operator accounts; connect both via WebSocket.
+/// 2. Create an HTTP listener via operator-1.
+/// 3. Register a mock agent via `DEMON_INIT`.
+/// 4. Assert **both** WebSocket connections independently receive `AgentNew`.
+/// 5. Operator-1 sends an `AgentTask` — assert **both** receive the task echo.
+#[tokio::test]
+async fn two_operators_both_receive_agent_events() -> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(two_operator_profile()).await?;
+
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    // Connect operator-1.
+    let (mut op1, _) = connect_async(server.ws_url()).await?;
+    common::login_as(&mut op1, "op_alpha", "alpha_pw").await?;
+    common::assert_no_operator_message(&mut op1, Duration::from_millis(200)).await;
+
+    // Connect operator-2.
+    let (mut op2, _) = connect_async(server.ws_url()).await?;
+    common::login_as(&mut op2, "op_beta", "beta_pw").await?;
+    common::assert_no_operator_message(&mut op2, Duration::from_millis(200)).await;
+
+    // Operator-1 creates an HTTP listener.
+    drop(listener_guard);
+    op1.send(ClientMessage::Text(listener_new_message("op_alpha", listener_port).into())).await?;
+
+    // Wait for the listener to be registered by consuming its creation events on op1.
+    let _listener_created =
+        read_until_operator_message(&mut op1, |m| matches!(m, OperatorMessage::ListenerNew(_)))
+            .await?;
+    let _listener_started =
+        read_until_operator_message(&mut op1, |m| matches!(m, OperatorMessage::ListenerMark(_)))
+            .await?;
+
+    server.listeners.update(http_listener_config(listener_port)).await?;
+    common::wait_for_listener(listener_port).await?;
+
+    // Register a mock agent.
+    let agent_id = 0xCAFE_BABE_u32;
+    let key: [u8; AGENT_KEY_LENGTH] = [
+        0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF,
+        0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE,
+        0xBF, 0xC0,
+    ];
+    let iv: [u8; AGENT_IV_LENGTH] = [
+        0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF,
+        0xE0,
+    ];
+
+    let init_response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_init_body(agent_id, key, iv))
+        .send()
+        .await?
+        .error_for_status()?;
+    let init_bytes = init_response.bytes().await?;
+    let init_ack =
+        red_cell_common::crypto::decrypt_agent_data_at_offset(&key, &iv, 0, &init_bytes)?;
+    assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
+
+    // Both operators must independently receive AgentNew.
+    let agent_new_1 =
+        read_until_operator_message(&mut op1, |m| matches!(m, OperatorMessage::AgentNew(_)))
+            .await?;
+    let OperatorMessage::AgentNew(msg1) = agent_new_1 else {
+        unreachable!();
+    };
+    assert_eq!(msg1.info.name_id, "CAFEBABE");
+    assert_eq!(msg1.info.listener, "edge-http");
+
+    let agent_new_2 =
+        read_until_operator_message(&mut op2, |m| matches!(m, OperatorMessage::AgentNew(_)))
+            .await?;
+    let OperatorMessage::AgentNew(msg2) = agent_new_2 else {
+        unreachable!();
+    };
+    assert_eq!(msg2.info.name_id, "CAFEBABE");
+    assert_eq!(msg2.info.listener, "edge-http");
+
+    // Operator-1 sends an AgentTask — both must see the echo.
+    op1.send(ClientMessage::Text(agent_task_message_for("5F", "CAFEBABE").into())).await?;
+
+    let task_echo_1 =
+        read_until_operator_message(&mut op1, |m| matches!(m, OperatorMessage::AgentTask(_)))
+            .await?;
+    let OperatorMessage::AgentTask(t1) = task_echo_1 else {
+        unreachable!();
+    };
+    assert_eq!(t1.info.demon_id, "CAFEBABE");
+    assert_eq!(t1.info.task_id, "5F");
+    assert_eq!(t1.info.command_line, "checkin");
+
+    let task_echo_2 =
+        read_until_operator_message(&mut op2, |m| matches!(m, OperatorMessage::AgentTask(_)))
+            .await?;
+    let OperatorMessage::AgentTask(t2) = task_echo_2 else {
+        unreachable!();
+    };
+    assert_eq!(t2.info.demon_id, "CAFEBABE");
+    assert_eq!(t2.info.task_id, "5F");
+    assert_eq!(t2.info.command_line, "checkin");
+
+    op1.close(None).await?;
+    op2.close(None).await?;
+    server.listeners.stop("edge-http").await?;
+    Ok(())
+}
+
+/// Profile with two Operator-role users for fan-out broadcast testing.
+fn two_operator_profile() -> Profile {
+    Profile::parse(
+        r#"
+        Teamserver {
+          Host = "127.0.0.1"
+          Port = 0
+        }
+
+        Operators {
+          user "op_alpha" {
+            Password = "alpha_pw"
+            Role = "Operator"
+          }
+          user "op_beta" {
+            Password = "beta_pw"
+            Role = "Operator"
+          }
+        }
+
+        Demon {}
+        "#,
+    )
+    .expect("two-operator profile should parse")
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn operator_session_smb_listener_and_mock_demon_round_trip()

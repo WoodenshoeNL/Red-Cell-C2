@@ -578,6 +578,25 @@ mod tests {
         assert!(msg.is_none(), "should not broadcast for non-ReversePortForward type");
     }
 
+    #[tokio::test]
+    async fn rportfwd_remove_truncated_returns_error() {
+        let mut rest = Vec::new();
+        add_u32(&mut rest, 0x0000_0042); // socket_id only, missing 5 remaining fields
+        let payload = socket_payload(DemonSocketCommand::ReversePortForwardRemove, &rest);
+        let (events, sockets) = test_deps().await;
+        let mut rx = events.subscribe();
+        let result =
+            handle_socket_callback(&events, &sockets, AGENT_ID, REQUEST_ID, &payload).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload for truncated payload, got {result:?}"
+        );
+        drop(events);
+        drop(sockets);
+        let msg = rx.recv().await;
+        assert!(msg.is_none(), "should not broadcast on truncated payload");
+    }
+
     // ── ReversePortForwardClear ─────────────────────────────────────────────
 
     #[tokio::test]

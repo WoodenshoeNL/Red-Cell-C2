@@ -136,6 +136,11 @@ pub struct ServiceBridge {
     /// Pre-computed SHA3-256 hash of the service password (plaintext is dropped).
     password_hash: String,
     inner: Arc<RwLock<ServiceBridgeInner>>,
+    /// Independent login rate limiter for service bridge authentication.
+    ///
+    /// Separate from the operator WebSocket rate limiter so that failed auth
+    /// attempts on one surface cannot deny the other.
+    login_rate_limiter: LoginRateLimiter,
 }
 
 #[derive(Debug, Default)]
@@ -160,6 +165,7 @@ impl ServiceBridge {
             endpoint: config.endpoint,
             password_hash,
             inner: Arc::new(RwLock::new(ServiceBridgeInner::default())),
+            login_rate_limiter: LoginRateLimiter::new(),
         }
     }
 
@@ -261,7 +267,7 @@ async fn handle_service_socket(
         return;
     }
 
-    let rate_limiter = &state.login_rate_limiter;
+    let rate_limiter = &bridge.login_rate_limiter;
 
     // Authenticate the client (with rate limiting).
     let client_id =

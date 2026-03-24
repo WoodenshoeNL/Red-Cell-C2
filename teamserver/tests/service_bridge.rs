@@ -14,6 +14,10 @@ use red_cell::{
     ServiceBridge, ShutdownController, SocketRelayManager, TeamserverState, build_router,
 };
 use red_cell_common::config::ServiceConfig;
+use red_cell_common::crypto::hash_password_sha3;
+use red_cell_common::operator::{
+    EventCode, LoginInfo, Message, MessageHead, OperatorMessage as OpMsg,
+};
 use serde_json::Value;
 use tokio::net::TcpListener;
 use tokio::time::timeout;
@@ -418,6 +422,74 @@ async fn service_bridge_agent_task_add_nonexistent_agent_does_not_crash() {
     // Give server time to process the second message, then close gracefully.
     tokio::time::sleep(Duration::from_millis(100)).await;
     client.close(None).await.expect("graceful close after non-existent agent task");
+}
+
+/// Exhausting the service bridge rate limiter must NOT block operator WebSocket
+/// logins — the two surfaces use independent rate limiters.
+#[tokio::test]
+async fn service_bridge_rate_limiter_is_independent_from_operator_ws() {
+    let (addr, _registry, _events) = spawn_service_server("pw", "svc").await.expect("spawn");
+
+    // Exhaust the service bridge rate limiter with 6 failed login attempts
+    // (threshold is 5). Each sends a wrong password and gets disconnected.
+    for _ in 0..6 {
+        let mut client = connect_service(addr, "svc").await;
+        let bad_auth = serde_json::json!({
+            "Head": {
+                "One": "wrong-password"
+            },
+            "Body": {}
+        });
+        client.send(ClientMessage::Text(bad_auth.to_string().into())).await.expect("send bad auth");
+
+        // Drain until the server closes the connection.
+        while let Ok(Some(Ok(_))) = timeout(Duration::from_secs(3), client.next()).await {}
+    }
+
+    // Now try an operator WebSocket login — it should NOT be rate-limited.
+    let url = format!("ws://127.0.0.1:{}/havoc", addr.port());
+    let (mut operator, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("operator ws connect should succeed even after service bridge lockout");
+
+    // Send a properly formatted operator login message.
+    let login_payload = serde_json::to_string(&OpMsg::Login(Message {
+        head: MessageHead {
+            event: EventCode::InitConnection,
+            user: "operator".to_owned(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info: LoginInfo {
+            user: "operator".to_owned(),
+            password: hash_password_sha3("password1234"),
+        },
+    }))
+    .expect("serialize login message");
+    operator.send(ClientMessage::Text(login_payload.into())).await.expect("send operator login");
+
+    // The server should respond (not silently drop due to rate limiting).
+    let frame = timeout(Duration::from_secs(5), operator.next())
+        .await
+        .expect("operator should receive a response within 5s")
+        .expect("operator connection should not be closed");
+
+    // A successful login returns a JSON body with "Body.Info.MemberID".
+    // An IP-rate-limited rejection would return an error with
+    // "InvalidCredentials" without even checking the password.
+    let msg = frame.expect("frame should be ok");
+    let text = match msg {
+        ClientMessage::Text(t) => t.to_string(),
+        other => panic!("expected text frame from operator ws, got: {other:?}"),
+    };
+    let json: Value = serde_json::from_str(&text).expect("operator response should be valid JSON");
+
+    // SubEvent 1 = success, SubEvent 2 = failure.
+    assert_eq!(
+        json.pointer("/Body/SubEvent"),
+        Some(&Value::Number(1.into())),
+        "operator login should succeed (not be rate-limited by service bridge failures). Response: {json}"
+    );
 }
 
 #[tokio::test]

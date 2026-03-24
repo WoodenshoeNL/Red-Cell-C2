@@ -14,9 +14,9 @@ use red_cell_common::config::Profile;
 
 use crate::{
     AgentRegistry, ApiRuntime, AuditWebhookNotifier, AuthService, Database, EventBus,
-    ListenerManager, LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService,
-    ServiceBridge, ShutdownController, SocketRelayManager, api_routes, handle_external_request,
-    service_routes,
+    ListenerManager, LoginRateLimiter, MAX_AGENT_MESSAGE_LEN, OperatorConnectionManager,
+    PayloadBuilderService, ServiceBridge, ShutdownController, SocketRelayManager, api_routes,
+    handle_external_request, service_routes,
 };
 
 /// Shared state injected into Axum routes and middleware.
@@ -152,9 +152,10 @@ async fn teamserver_fallback(
             .get::<ConnectInfo<SocketAddr>>()
             .map_or_else(|| SocketAddr::from(([127, 0, 0, 1], 0)), |info| info.0);
 
-        let body = match axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024).await {
+        let body = match axum::body::to_bytes(request.into_body(), MAX_AGENT_MESSAGE_LEN).await {
             Ok(bytes) => bytes,
-            Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+            // Return a camouflage 404 — do not expose the size limit as a 400.
+            Err(_) => return StatusCode::NOT_FOUND.into_response(),
         };
 
         match handle_external_request(&ext_state, peer, &body).await {
@@ -179,8 +180,8 @@ mod tests {
 
     use crate::{
         AgentRegistry, AuditWebhookNotifier, AuthService, Database, EventBus, ListenerManager,
-        LoginRateLimiter, OperatorConnectionManager, PayloadBuilderService, ShutdownController,
-        SocketRelayManager,
+        LoginRateLimiter, MAX_AGENT_MESSAGE_LEN, OperatorConnectionManager, PayloadBuilderService,
+        ShutdownController, SocketRelayManager,
     };
 
     async fn build_test_state() -> TeamserverState {
@@ -587,9 +588,10 @@ mod tests {
         );
     }
 
-    /// The 10 MiB body size limit in `teamserver_fallback` must return 400
-    /// BAD_REQUEST when a request body exceeds the limit.  Without this guard
-    /// an attacker could exhaust server memory via the external listener path.
+    /// An oversized request body on an external listener path must be silently
+    /// rejected with a camouflage 404 — not a 400 BAD_REQUEST that would
+    /// fingerprint the endpoint as a C2 bridge.  The limit is aligned with
+    /// `MAX_AGENT_MESSAGE_LEN` (30 MiB) used by every other listener path.
     #[tokio::test]
     async fn fallback_rejects_oversized_body_for_external_listener() {
         use red_cell_common::ExternalListenerConfig;
@@ -612,8 +614,8 @@ mod tests {
             "external endpoint should be registered"
         );
 
-        // Send a body that exceeds 10 MiB.
-        let oversized = vec![0x41_u8; 10 * 1024 * 1024 + 1];
+        // Send a body that exceeds MAX_AGENT_MESSAGE_LEN (30 MiB).
+        let oversized = vec![0x41_u8; MAX_AGENT_MESSAGE_LEN + 1];
 
         let response = build_router(state)
             .oneshot(
@@ -628,8 +630,8 @@ mod tests {
 
         assert_eq!(
             response.status(),
-            StatusCode::BAD_REQUEST,
-            "body exceeding 10 MiB should be rejected with 400 BAD_REQUEST"
+            StatusCode::NOT_FOUND,
+            "body exceeding MAX_AGENT_MESSAGE_LEN should return camouflage 404, not 400 BAD_REQUEST"
         );
     }
 }

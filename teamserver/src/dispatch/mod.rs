@@ -8064,6 +8064,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_job_list_unknown_type_and_state_shows_unknown_label()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::new(16);
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let agent = sample_agent_info(0xAABB_CCDD, test_key(0x21), test_iv(0x43));
+        registry.insert(agent).await?;
+
+        let dispatcher = CommandDispatcher::with_builtin_handlers(
+            registry,
+            events.clone(),
+            database,
+            sockets,
+            None,
+        );
+        let mut receiver = events.subscribe();
+
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonJobCommand::List));
+        // Entry with out-of-range type=99 and state=0 → both should render as "Unknown"
+        add_u32(&mut payload, 7);
+        add_u32(&mut payload, 99);
+        add_u32(&mut payload, 0);
+
+        dispatcher.dispatch(0xAABB_CCDD, u32::from(DemonCommand::CommandJob), 42, &payload).await?;
+
+        let event = receiver.recv().await.ok_or("job list response missing")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            panic!("expected agent response event");
+        };
+        let output = &message.info.output;
+        assert!(output.contains("7"), "output should contain job_id 7");
+        // "Unknown" must appear at least twice: once for type, once for state
+        let unknown_count = output.matches("Unknown").count();
+        assert!(
+            unknown_count >= 2,
+            "expected at least 2 occurrences of 'Unknown' (type and state), found {unknown_count} in: {output}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn handle_job_list_truncated_mid_row_returns_invalid_payload()
     -> Result<(), Box<dyn std::error::Error>> {
         let database = Database::connect_in_memory().await?;

@@ -3289,7 +3289,15 @@ fn is_outside_working_hours_at(working_hours: Option<&str>, utc_hour: u8, utc_mi
     let end_minutes = u16::from(end_h) * 60 + u16::from(end_m);
 
     // The window is [start, end) in UTC minutes-since-midnight.
-    now_minutes < start_minutes || now_minutes >= end_minutes
+    // When end <= start the window wraps past midnight (e.g. 22:00-06:00).
+    if end_minutes > start_minutes {
+        // Same-day window: outside when before start or at/after end.
+        now_minutes < start_minutes || now_minutes >= end_minutes
+    } else {
+        // Overnight window: inside when now >= start OR now < end.
+        // Outside is the complement: now < start AND now >= end.
+        now_minutes < start_minutes && now_minutes >= end_minutes
+    }
 }
 
 /// Parse `"HH:MM"` into `(hour, minute)`, returning `None` on any error.
@@ -8346,5 +8354,29 @@ mod tests {
         assert!(!is_outside_working_hours_at(Some("22:00-23:30"), 22, 30));
         // 23:00 is inside [22:00, 23:30)
         assert!(!is_outside_working_hours_at(Some("22:00-23:30"), 23, 0));
+    }
+
+    #[test]
+    fn is_outside_working_hours_handles_overnight_window() {
+        // Overnight window 22:00-06:00 wraps past midnight.
+        // Inside the window: 22:00 (start-inclusive), 23:30, 00:00, 03:00, 05:59
+        assert!(!is_outside_working_hours_at(Some("22:00-06:00"), 22, 0));
+        assert!(!is_outside_working_hours_at(Some("22:00-06:00"), 23, 30));
+        assert!(!is_outside_working_hours_at(Some("22:00-06:00"), 0, 0));
+        assert!(!is_outside_working_hours_at(Some("22:00-06:00"), 3, 0));
+        assert!(!is_outside_working_hours_at(Some("22:00-06:00"), 5, 59));
+        // Outside the window: 06:00 (end-exclusive), 12:00, 21:59
+        assert!(is_outside_working_hours_at(Some("22:00-06:00"), 6, 0));
+        assert!(is_outside_working_hours_at(Some("22:00-06:00"), 12, 0));
+        assert!(is_outside_working_hours_at(Some("22:00-06:00"), 21, 59));
+    }
+
+    #[test]
+    fn is_outside_working_hours_equal_start_end_allows_all() {
+        // When start == end the wrap-around logic covers the full day —
+        // nothing is outside.
+        assert!(!is_outside_working_hours_at(Some("12:00-12:00"), 12, 0));
+        assert!(!is_outside_working_hours_at(Some("12:00-12:00"), 0, 0));
+        assert!(!is_outside_working_hours_at(Some("12:00-12:00"), 23, 59));
     }
 }

@@ -297,7 +297,7 @@ pub(super) fn inner_demon_agent_id(bytes: &[u8]) -> Result<u32, DemonProtocolErr
 }
 
 /// Extract the top-level command ID from a raw Demon envelope payload.
-fn inner_demon_command_id(bytes: &[u8]) -> Result<u32, DemonProtocolError> {
+pub(super) fn inner_demon_command_id(bytes: &[u8]) -> Result<u32, DemonProtocolError> {
     let envelope = red_cell_common::demon::DemonEnvelope::from_bytes(bytes)?;
     if envelope.payload.len() < 4 {
         return Err(DemonProtocolError::BufferTooShort {
@@ -328,6 +328,7 @@ mod tests {
         CallbackParser, CommandDispatchError, DemonCallbackPackage, handle_pivot_callback,
         handle_pivot_command_callback, handle_pivot_connect_callback,
         handle_pivot_disconnect_callback, handle_pivot_list_callback, inner_demon_agent_id,
+        inner_demon_command_id,
     };
     use crate::dispatch::pivot::dispatch_builtin_packages;
     use crate::dispatch::{BuiltinDispatchContext, DownloadTracker};
@@ -420,6 +421,62 @@ mod tests {
         assert_eq!(
             error,
             DemonProtocolError::InvalidMagic { expected: DEMON_MAGIC_VALUE, actual: 0xDEAD_BEEE }
+        );
+    }
+
+    // ── inner_demon_command_id tests ──────────────────────────────────────
+
+    #[test]
+    fn command_id_happy_path_returns_correct_id() {
+        let command_id: u32 = 0x0000_0063; // arbitrary command ID
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&command_id.to_be_bytes());
+        let bytes = DemonEnvelope::new(0xCAFE_BABE, payload)
+            .expect("envelope construction must succeed")
+            .to_bytes();
+
+        let result =
+            inner_demon_command_id(&bytes).expect("valid envelope must parse successfully");
+
+        assert_eq!(result, command_id);
+    }
+
+    #[test]
+    fn command_id_short_payload_returns_buffer_too_short() {
+        // Payload of 3 bytes — one byte short of the required 4.
+        let bytes = DemonEnvelope::new(0xCAFE_BABE, vec![0xAA, 0xBB, 0xCC])
+            .expect("envelope construction must succeed")
+            .to_bytes();
+
+        let error = inner_demon_command_id(&bytes)
+            .expect_err("short payload must return an error, not panic");
+
+        assert_eq!(
+            error,
+            DemonProtocolError::BufferTooShort {
+                context: "inner command id",
+                expected: 4,
+                actual: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn command_id_empty_payload_returns_buffer_too_short() {
+        let bytes = DemonEnvelope::new(0xCAFE_BABE, Vec::new())
+            .expect("envelope construction must succeed")
+            .to_bytes();
+
+        let error = inner_demon_command_id(&bytes)
+            .expect_err("empty payload must return an error, not panic");
+
+        assert_eq!(
+            error,
+            DemonProtocolError::BufferTooShort {
+                context: "inner command id",
+                expected: 4,
+                actual: 0,
+            }
         );
     }
 

@@ -56,33 +56,30 @@ pub(super) async fn handle_checkin(
         registry.set_last_call_in(agent_id, timestamp).await?
     };
     events.broadcast(agent_mark_event(&agent));
-    // Spawn the audit write as a background task so the DB write does not
-    // delay the checkin response back to the agent.  At scale (many agents
-    // checking in concurrently) SQLite serialises writes; keeping this off
-    // the hot path prevents the audit write from becoming a throughput
-    // bottleneck.  Mirrors the same pattern used for agent.dead in
-    // agent_liveness.rs.
-    let db = database.clone();
-    let external_ip = agent.external_ip.clone();
-    tokio::spawn(async move {
-        if let Err(error) = record_operator_action(
-            &db,
-            "teamserver",
-            "agent.checkin",
-            "agent",
-            Some(format!("{agent_id:08X}")),
-            audit_details(
-                AuditResultStatus::Success,
-                Some(agent_id),
-                Some("checkin"),
-                Some(parameter_object([("external_ip", serde_json::Value::String(external_ip))])),
-            ),
-        )
-        .await
-        {
-            warn!(agent_id = format_args!("{agent_id:08X}"), %error, "failed to persist agent.checkin audit entry");
-        }
-    });
+    // Write the audit entry inline so that SQLite write serialisation provides
+    // natural backpressure.  A previous version spawned a detached task per
+    // callback, which allowed unbounded task accumulation under aggressive
+    // check-in rates (see red-cell-c2-3abpv).
+    if let Err(error) = record_operator_action(
+        database,
+        "teamserver",
+        "agent.checkin",
+        "agent",
+        Some(format!("{agent_id:08X}")),
+        audit_details(
+            AuditResultStatus::Success,
+            Some(agent_id),
+            Some("checkin"),
+            Some(parameter_object([(
+                "external_ip",
+                serde_json::Value::String(agent.external_ip.clone()),
+            )])),
+        ),
+    )
+    .await
+    {
+        warn!(agent_id = format_args!("{agent_id:08X}"), %error, "failed to persist agent.checkin audit entry");
+    }
     if let Some(plugins) = plugins
         && let Err(error) = plugins.emit_agent_checkin(agent_id).await
     {

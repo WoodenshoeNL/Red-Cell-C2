@@ -155,34 +155,31 @@ async fn mark_stale_agent_if_unchanged(
     if let Some(agent) = registry.get(stale_agent.agent_id).await {
         events.broadcast(agent_mark_event(&agent));
 
-        // Spawn the audit write as a background task so we don't introduce an
-        // additional await point between the event broadcast and the socket
-        // pruning that follows in sweep_dead_agents_at.
+        // Write the audit entry inline so that SQLite write serialisation
+        // provides natural backpressure.  A previous version spawned a detached
+        // task per dead-agent event, which allowed unbounded task accumulation
+        // (same class of bug as red-cell-c2-3abpv in checkin.rs).
         let agent_id = stale_agent.agent_id;
-        let db = database.clone();
-        let external_ip = agent.external_ip.clone();
-        tokio::spawn(async move {
-            if let Err(error) = record_operator_action(
-                &db,
-                "teamserver",
-                "agent.dead",
-                "agent",
-                Some(format!("{agent_id:08X}")),
-                audit_details(
-                    AuditResultStatus::Success,
-                    Some(agent_id),
-                    Some("dead"),
-                    Some(parameter_object([
-                        ("reason", serde_json::Value::String(reason)),
-                        ("external_ip", serde_json::Value::String(external_ip)),
-                    ])),
-                ),
-            )
-            .await
-            {
-                warn!(agent_id = format_args!("{agent_id:08X}"), %error, "failed to persist agent.dead audit entry");
-            }
-        });
+        if let Err(error) = record_operator_action(
+            database,
+            "teamserver",
+            "agent.dead",
+            "agent",
+            Some(format!("{agent_id:08X}")),
+            audit_details(
+                AuditResultStatus::Success,
+                Some(agent_id),
+                Some("dead"),
+                Some(parameter_object([
+                    ("reason", serde_json::Value::String(reason)),
+                    ("external_ip", serde_json::Value::String(agent.external_ip.clone())),
+                ])),
+            ),
+        )
+        .await
+        {
+            warn!(agent_id = format_args!("{agent_id:08X}"), %error, "failed to persist agent.dead audit entry");
+        }
     }
 
     if let Ok(Some(plugins)) = PluginRuntime::current() {
@@ -391,14 +388,6 @@ mod tests {
             message: "missing dead-agent event".to_owned(),
         })?;
 
-        let stored = registry
-            .get(agent.agent_id)
-            .await
-            .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?;
-        assert!(!stored.active);
-        assert_eq!(stored.reason, "agent timed out after 15 seconds without callback");
-        assert_eq!(sockets.list_socks_servers(agent.agent_id).await, "No active SOCKS5 servers");
-
         let OperatorMessage::AgentUpdate(message) = event else {
             return Err(TeamserverError::InvalidPersistedValue {
                 field: "operator_event",
@@ -407,6 +396,18 @@ mod tests {
         };
         assert_eq!(message.info.agent_id, "C0DECAFE");
         assert_eq!(message.info.marked, "Dead");
+
+        // The sweep writes audit entries inline before pruning sockets, so we
+        // must let the sweep task finish after it broadcasts the agent event.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let stored = registry
+            .get(agent.agent_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: agent.agent_id })?;
+        assert!(!stored.active);
+        assert_eq!(stored.reason, "agent timed out after 15 seconds without callback");
+        assert_eq!(sockets.list_socks_servers(agent.agent_id).await, "No active SOCKS5 servers");
 
         shutdown_monitor(monitor).await;
         Ok(())

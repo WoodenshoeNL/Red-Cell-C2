@@ -153,6 +153,10 @@ async fn agent_marked_dead_after_liveness_timeout_expires() -> Result<(), Box<dy
         stored.reason
     );
 
+    // The sweep writes audit entries inline before pruning sockets, so we
+    // must let the sweep task finish after it broadcasts the agent event.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
     // --- Verify SOCKS relay cleanup ---
     assert_eq!(
         server.sockets.list_socks_servers(agent_id).await,

@@ -3,7 +3,7 @@ mod common;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use futures_util::SinkExt;
+use futures_util::{SinkExt, StreamExt};
 use red_cell::Job;
 use red_cell_common::config::Profile;
 use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
@@ -233,6 +233,157 @@ async fn agent_remove_cleans_up_all_state() -> Result<(), Box<dyn std::error::Er
     );
 
     socket.close(None).await?;
+    server.listeners.stop(listener_name).await?;
+    Ok(())
+}
+
+/// Build a profile with an admin operator (for agent registration) and a
+/// non-admin operator (for RBAC rejection testing).
+fn multi_role_profile(non_admin_role: &str) -> Profile {
+    Profile::parse(&format!(
+        r#"
+        Teamserver {{
+          Host = "127.0.0.1"
+          Port = 0
+        }}
+
+        Operators {{
+          user "admin" {{
+            Password = "adminpass"
+            Role = "Admin"
+          }}
+          user "lowpriv" {{
+            Password = "lowprivpass"
+            Role = "{non_admin_role}"
+          }}
+        }}
+
+        Demon {{}}
+        "#,
+    ))
+    .expect("multi-role profile should parse")
+}
+
+/// An Operator-role user sending `AgentRemove` must be rejected: the server
+/// should close the WebSocket connection without broadcasting an `AgentRemove`
+/// event, and the agent must remain in the registry.
+#[tokio::test]
+async fn agent_remove_rejected_for_operator_role() -> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(multi_role_profile("Operator")).await?;
+
+    // --- Start HTTP listener and register an agent ---
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let listener_name = "rbac-http";
+    server.listeners.create(common::http_listener_config(listener_name, listener_port)).await?;
+    drop(listener_guard);
+    server.listeners.start(listener_name).await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id: u32 = 0xCAFE_0001;
+    let key: [u8; AGENT_KEY_LENGTH] = [
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E,
+        0x1F, 0x20,
+    ];
+    let iv: [u8; AGENT_IV_LENGTH] = [
+        0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18, 0x29, 0x3A, 0x4B, 0x5C, 0x6D, 0x7E, 0x8F,
+        0x90,
+    ];
+    let client = reqwest::Client::new();
+    let _ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    // --- Connect as the Operator-role user ---
+    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    common::login_as(&mut socket, "lowpriv", "lowprivpass").await?;
+
+    // --- Send AgentRemove (should be rejected) ---
+    socket.send(ClientMessage::Text(agent_remove_payload("CAFE0001").into())).await?;
+
+    // The server should close the connection on RBAC failure. Collect any
+    // remaining frames — none of them should be an AgentRemove broadcast.
+    let messages = collect_messages_within(&mut socket, Duration::from_secs(2), 10).await;
+    for msg in &messages {
+        assert!(
+            !matches!(msg, OperatorMessage::AgentRemove(_)),
+            "Operator-role user must not receive AgentRemove broadcast, got: {msg:?}"
+        );
+    }
+
+    // The WebSocket should be closed (or closing) after the RBAC rejection.
+    // Verify by trying to read one more frame — it should fail or be a Close.
+    let frame = timeout(Duration::from_secs(1), socket.next()).await;
+    match frame {
+        Ok(Some(Ok(ClientMessage::Close(_)))) | Ok(None) | Err(_) => { /* expected */ }
+        other => panic!("expected socket closure after RBAC rejection, got: {other:?}"),
+    }
+
+    // --- Verify the agent was NOT removed ---
+    assert!(
+        server.agent_registry.get(agent_id).await.is_some(),
+        "agent must still exist in registry after RBAC-rejected AgentRemove"
+    );
+    assert!(
+        server.database.agents().get(agent_id).await?.is_some(),
+        "agent must still exist in DB after RBAC-rejected AgentRemove"
+    );
+
+    server.listeners.stop(listener_name).await?;
+    Ok(())
+}
+
+/// An Analyst-role user sending `AgentRemove` must be rejected identically
+/// to the Operator-role case.
+#[tokio::test]
+async fn agent_remove_rejected_for_analyst_role() -> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(multi_role_profile("Analyst")).await?;
+
+    // --- Start HTTP listener and register an agent ---
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let listener_name = "rbac-analyst-http";
+    server.listeners.create(common::http_listener_config(listener_name, listener_port)).await?;
+    drop(listener_guard);
+    server.listeners.start(listener_name).await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id: u32 = 0xCAFE_0002;
+    let key: [u8; AGENT_KEY_LENGTH] = [
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E,
+        0x1F, 0x20,
+    ];
+    let iv: [u8; AGENT_IV_LENGTH] = [
+        0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18, 0x29, 0x3A, 0x4B, 0x5C, 0x6D, 0x7E, 0x8F,
+        0x90,
+    ];
+    let client = reqwest::Client::new();
+    let _ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    // --- Connect as the Analyst-role user ---
+    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    common::login_as(&mut socket, "lowpriv", "lowprivpass").await?;
+
+    // --- Send AgentRemove (should be rejected) ---
+    socket.send(ClientMessage::Text(agent_remove_payload("CAFE0002").into())).await?;
+
+    // Collect remaining frames — none should be an AgentRemove broadcast.
+    let messages = collect_messages_within(&mut socket, Duration::from_secs(2), 10).await;
+    for msg in &messages {
+        assert!(
+            !matches!(msg, OperatorMessage::AgentRemove(_)),
+            "Analyst-role user must not receive AgentRemove broadcast, got: {msg:?}"
+        );
+    }
+
+    // --- Verify the agent was NOT removed ---
+    assert!(
+        server.agent_registry.get(agent_id).await.is_some(),
+        "agent must still exist in registry after Analyst RBAC-rejected AgentRemove"
+    );
+    assert!(
+        server.database.agents().get(agent_id).await?.is_some(),
+        "agent must still exist in DB after Analyst RBAC-rejected AgentRemove"
+    );
+
     server.listeners.stop(listener_name).await?;
     Ok(())
 }

@@ -32,6 +32,7 @@ use axum::{
 };
 use red_cell_common::config::ServiceConfig;
 use red_cell_common::crypto::hash_password_sha3;
+use red_cell_common::demon::DEMON_MAGIC_VALUE;
 use red_cell_common::operator::{
     AgentResponseInfo, EventCode, ListenerErrorInfo, ListenerMarkInfo, Message, MessageHead,
     OperatorMessage, ServiceAgentRegistrationInfo, ServiceListenerRegistrationInfo,
@@ -125,6 +126,10 @@ pub enum ServiceBridgeError {
     /// Base64 decoding failure.
     #[error("base64 decode error: {0}")]
     Base64Decode(String),
+
+    /// Magic value does not match the expected Demon protocol constant.
+    #[error("invalid magic value: expected 0x{expected:08X}, got 0x{actual:08X}")]
+    InvalidMagicValue { expected: u32, actual: u32 },
 }
 
 // ── Service bridge state ─────────────────────────────────────────────
@@ -712,9 +717,23 @@ async fn handle_agent_instance_register(
         ))
     })?;
 
-    let magic_value_str = agent_header.get("MagicValue").and_then(Value::as_str).unwrap_or("0");
+    let magic_value_str =
+        agent_header.get("MagicValue").and_then(Value::as_str).ok_or_else(|| {
+            ServiceBridgeError::MissingField("Body.AgentHeader.MagicValue".to_owned())
+        })?;
 
-    let magic_value = u32::from_str_radix(magic_value_str, 16).unwrap_or(0);
+    let magic_value = u32::from_str_radix(magic_value_str, 16).map_err(|_| {
+        ServiceBridgeError::MissingField(format!(
+            "Body.AgentHeader.MagicValue: invalid hex '{magic_value_str}'"
+        ))
+    })?;
+
+    if magic_value != DEMON_MAGIC_VALUE {
+        return Err(ServiceBridgeError::InvalidMagicValue {
+            expected: DEMON_MAGIC_VALUE,
+            actual: magic_value,
+        });
+    }
 
     let now = OffsetDateTime::now_utc().unix_timestamp().to_string();
 
@@ -1762,7 +1781,7 @@ mod tests {
                 "Type": BODY_AGENT_REGISTER,
                 "AgentHeader": {
                     "Size": "0",
-                    "MagicValue": "0",
+                    "MagicValue": "DEADBEEF",
                     "AgentID": "11223344",
                 },
                 "RegisterInfo": {
@@ -1898,6 +1917,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_agent_instance_register_rejects_wrong_magic_value() {
+        let (db, wh) = test_audit_deps().await;
+        let registry = test_registry().await;
+        let events = EventBus::default();
+
+        let message = serde_json::json!({
+            "Head": { "Type": HEAD_AGENT },
+            "Body": {
+                "Type": BODY_AGENT_REGISTER,
+                "AgentHeader": {
+                    "AgentID": "AABB0011",
+                    "MagicValue": "CAFEBABE",
+                },
+                "RegisterInfo": { "Hostname": "H1" },
+            },
+        });
+
+        let err = handle_agent_instance_register(&message, &events, &registry, &db, &wh)
+            .await
+            .expect_err("should fail with wrong magic value");
+        assert!(
+            matches!(
+                err,
+                ServiceBridgeError::InvalidMagicValue {
+                    expected: 0xDEAD_BEEF,
+                    actual: 0xCAFE_BABE
+                }
+            ),
+            "expected InvalidMagicValue, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_agent_instance_register_rejects_missing_magic_value() {
+        let (db, wh) = test_audit_deps().await;
+        let registry = test_registry().await;
+        let events = EventBus::default();
+
+        let message = serde_json::json!({
+            "Head": { "Type": HEAD_AGENT },
+            "Body": {
+                "Type": BODY_AGENT_REGISTER,
+                "AgentHeader": {
+                    "AgentID": "AABB0011",
+                },
+                "RegisterInfo": { "Hostname": "H1" },
+            },
+        });
+
+        let err = handle_agent_instance_register(&message, &events, &registry, &db, &wh)
+            .await
+            .expect_err("should fail with missing magic value");
+        assert!(
+            matches!(err, ServiceBridgeError::MissingField(ref f) if f.contains("MagicValue")),
+            "expected MissingField for MagicValue, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn handle_agent_instance_register_clamps_overflowing_u32_fields_to_zero() {
         let (db, wh) = test_audit_deps().await;
         let registry = test_registry().await;
@@ -1910,7 +1988,7 @@ mod tests {
                 "Type": BODY_AGENT_REGISTER,
                 "AgentHeader": {
                     "Size": "0",
-                    "MagicValue": "0",
+                    "MagicValue": "DEADBEEF",
                     "AgentID": "DEAD0001",
                 },
                 "RegisterInfo": {
@@ -1945,7 +2023,7 @@ mod tests {
                 "Type": BODY_AGENT_REGISTER,
                 "AgentHeader": {
                     "Size": "0",
-                    "MagicValue": "0",
+                    "MagicValue": "DEADBEEF",
                     "AgentID": "DEAD0002",
                 },
                 "RegisterInfo": {
@@ -2595,7 +2673,7 @@ mod tests {
                 "Type": BODY_AGENT_REGISTER,
                 "AgentHeader": {
                     "AgentID": "FF001122",
-                    "MagicValue": "0",
+                    "MagicValue": "DEADBEEF",
                 },
                 "RegisterInfo": {
                     "Hostname": "DISPATCH-TEST",

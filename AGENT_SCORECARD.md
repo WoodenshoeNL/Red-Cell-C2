@@ -31,7 +31,7 @@ Each loop run updates the running totals and appends a review entry.
 | Test infrastructure / flakiness | 14 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
-| Correctness / pagination | 34 | 7 | 1 |
+| Correctness / pagination | 35 | 7 | 1 |
 | Workflow / close-hygiene | 18 | 0 | 0 |
 | Code reuse / duplication | 7 | 0 | 0 |
 
@@ -3660,3 +3660,15 @@ Issues found: 0 new bugs filed
 Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`)
 Tests: passed (`cargo test --workspace`; suite emitted pre-existing rustc warnings in test code, but no failures)
 Issues found: 0 new bugs filed
+
+### Arch Review — 2026-03-25 12:35
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 1 | correctness / pagination (1) | Reconfirmed `red-cell-c2-e30fn`: `cargo test --workspace` still fails in `plugins::tests::invoke_registered_command_broadcast_task_id_matches_queued_job`, so plugin command execution can return without leaving a queued job behind. |
+| Codex | 0 | — | No attributable findings this pass. |
+| Cursor | 0 | — | No attributable findings this pass. |
+
+Overall codebase health: drifting
+Biggest blindspot: the workspace is no longer a trustworthy release gate because `cargo test --workspace` is red in core teamserver code and still emits baseline test-compile warnings, so new regressions can hide inside expected noise.
+Additional unattributed issues filed this pass: `red-cell-c2-cwn21` (payload_builder outdated GCC gate test red), `red-cell-c2-biqh8` (teamserver test-compile warnings).

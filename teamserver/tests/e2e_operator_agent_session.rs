@@ -77,7 +77,7 @@ async fn operator_session_listener_and_mock_demon_round_trip()
         0xB0, 0xC3, 0xD6, 0xE9, 0xFC, 0x0F, 0x22, 0x35, 0x48, 0x5B, 0x6E, 0x81, 0x94, 0xA7, 0xBA,
         0xCD,
     ];
-    let mut ctr_offset = 0_u64;
+    let ctr_offset = 0_u64;
 
     let init_response = client
         .post(format!("http://127.0.0.1:{listener_port}/"))
@@ -249,7 +249,7 @@ async fn reconnect_probe_does_not_duplicate_agent_new_and_resumes_callbacks()
         0xE5, 0xF8, 0x0B, 0x1E, 0x31, 0x44, 0x57, 0x6A, 0x7D, 0x90, 0xA3, 0xB6, 0xC9, 0xDC, 0xEF,
         0x02,
     ];
-    let mut ctr_offset = 0_u64;
+    let ctr_offset = 0_u64;
 
     // --- Step 1: full DEMON_INIT registration ---
     let init_response = client
@@ -534,7 +534,7 @@ async fn operator_session_smb_listener_and_mock_demon_round_trip()
         0x1A, 0x2D, 0x40, 0x53, 0x66, 0x79, 0x8C, 0x9F, 0xB2, 0xC5, 0xD8, 0xEB, 0xFE, 0x11, 0x24,
         0x37,
     ];
-    let mut ctr_offset = 0_u64;
+    let ctr_offset = 0_u64;
 
     let mut init_stream = connect_smb(&pipe_name).await?;
     write_smb_frame(&mut init_stream, agent_id, &common::valid_demon_init_body(agent_id, key, iv))

@@ -152,7 +152,7 @@ async fn mock_demon_checkin_get_job_and_output_flow() -> Result<(), Box<dyn std:
         0xB0, 0xC3, 0xD6, 0xE9, 0xFC, 0x0F, 0x22, 0x35, 0x48, 0x5B, 0x6E, 0x81, 0x94, 0xA7, 0xBA,
         0xCD,
     ];
-    let mut ctr_offset = 0_u64;
+    let ctr_offset = 0_u64;
 
     let init_response = harness
         .client
@@ -255,7 +255,7 @@ async fn mock_demon_checkin_streams_multiple_output_events_for_one_task()
         0xE5, 0xF8, 0x0B, 0x1E, 0x31, 0x44, 0x57, 0x6A, 0x7D, 0x90, 0xA3, 0xB6, 0xC9, 0xDC, 0xEF,
         0x02,
     ];
-    let mut ctr_offset = 0_u64;
+    let ctr_offset = 0_u64;
 
     let init_response = harness
         .client
@@ -352,7 +352,7 @@ async fn mock_demon_checkin_interleaved_output_keeps_task_attribution()
         0x1A, 0x2D, 0x40, 0x53, 0x66, 0x79, 0x8C, 0x9F, 0xB2, 0xC5, 0xD8, 0xEB, 0xFE, 0x11, 0x24,
         0x37,
     ];
-    let mut ctr_offset = 0_u64;
+    let ctr_offset = 0_u64;
 
     let init_response = harness
         .client
@@ -483,7 +483,7 @@ async fn reconnect_then_subsequent_callback_remains_synchronised()
 
     // --- Step 1: full init --------------------------------------------------------
     // The agent tracks its own CTR offset mirror to simulate what a real agent does.
-    let mut agent_ctr_offset = 0_u64;
+    let agent_ctr_offset = 0_u64;
 
     let init_bytes = harness
         .client
@@ -588,7 +588,7 @@ async fn get_job_with_empty_task_queue_returns_empty_response()
         0x84, 0x97, 0xAA, 0xBD, 0xD0, 0xE3, 0xF6, 0x09, 0x1C, 0x2F, 0x42, 0x55, 0x68, 0x7B, 0x8E,
         0xA1,
     ];
-    let mut ctr_offset = 0_u64;
+    let ctr_offset = 0_u64;
 
     // --- DEMON_INIT handshake ----------------------------------------------------
     let init_response = harness
@@ -694,7 +694,7 @@ async fn unauthenticated_operator_cannot_inject_agent_task()
         0xB9, 0xCC, 0xDF, 0xF2, 0x05, 0x18, 0x2B, 0x3E, 0x51, 0x64, 0x77, 0x8A, 0x9D, 0xB0, 0xC3,
         0xD6,
     ];
-    let mut ctr_offset = 0_u64;
+    let ctr_offset = 0_u64;
 
     let init_response = harness
         .client
@@ -774,7 +774,7 @@ async fn failed_login_operator_cannot_inject_agent_task() -> Result<(), Box<dyn 
         0xEE, 0x01, 0x14, 0x27, 0x3A, 0x4D, 0x60, 0x73, 0x86, 0x99, 0xAC, 0xBF, 0xD2, 0xE5, 0xF8,
         0x0B,
     ];
-    let mut ctr_offset = 0_u64;
+    let ctr_offset = 0_u64;
 
     let init_response = harness
         .client
@@ -860,7 +860,7 @@ async fn wrong_key_callback_returns_404_and_preserves_ctr_offset()
         0x23, 0x36, 0x49, 0x5C, 0x6F, 0x82, 0x95, 0xA8, 0xBB, 0xCE, 0xE1, 0xF4, 0x07, 0x1A, 0x2D,
         0x40,
     ];
-    let mut ctr_offset = 0_u64;
+    let ctr_offset = 0_u64;
 
     // --- Register the agent normally ------------------------------------------------
     let init_response = harness
@@ -963,7 +963,7 @@ async fn duplicate_demon_init_rejected_preserves_original_agent()
         0x8D, 0xA0, 0xB3, 0xC6, 0xD9, 0xEC, 0xFF, 0x12, 0x25, 0x38, 0x4B, 0x5E, 0x71, 0x84, 0x97,
         0xAA,
     ];
-    let mut ctr_offset = 0_u64;
+    let ctr_offset = 0_u64;
 
     // --- First (legitimate) init ----------------------------------------------------
     let init_response = harness
@@ -1356,7 +1356,7 @@ async fn concurrent_reconnect_probes_preserve_ctr_offset() -> Result<(), Box<dyn
         .bytes()
         .await?;
 
-    let mut agent_ctr_offset = 0_u64;
+    let agent_ctr_offset = 0_u64;
     let init_ack = decrypt_agent_data_at_offset(&key, &iv, agent_ctr_offset, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
     // Legacy CTR mode: offset stays at 0.
@@ -1462,7 +1462,7 @@ async fn reconnect_probe_interleaved_with_callbacks_preserves_sync()
         .bytes()
         .await?;
 
-    let mut agent_ctr_offset = 0_u64;
+    let agent_ctr_offset = 0_u64;
     let init_ack = decrypt_agent_data_at_offset(&key, &iv, agent_ctr_offset, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
     // Legacy CTR mode: offset stays at 0.
@@ -1503,7 +1503,7 @@ async fn reconnect_probe_interleaved_with_callbacks_preserves_sync()
 
         // The callback carries an encrypted 4-byte inner length prefix (empty payload).
         // `valid_demon_callback_body` with `&[]` produces a 4-byte plaintext (the BE length 0).
-        let callback_encrypted_len = 4; // BE u32 length prefix
+        let _callback_encrypted_len = 4; // BE u32 length prefix
         // Legacy CTR mode: offset stays at 0.
 
         // Verify the server offset matches what the agent expects after the callback.
@@ -1568,7 +1568,7 @@ async fn rapid_reconnect_callback_cycles_no_counter_drift() -> Result<(), Box<dy
         .bytes()
         .await?;
 
-    let mut agent_ctr_offset = 0_u64;
+    let agent_ctr_offset = 0_u64;
     let init_ack = decrypt_agent_data_at_offset(&key, &iv, agent_ctr_offset, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
     // Legacy CTR mode: offset stays at 0.

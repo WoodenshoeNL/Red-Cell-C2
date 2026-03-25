@@ -89,7 +89,7 @@ async fn external_listener_pipeline_registers_agent_and_broadcasts_checkin()
         0xCD,
     ];
     let agent_id = 0xE1E2_E3E4_u32;
-    let mut ctr_offset = 0_u64;
+    let ctr_offset = 0_u64;
 
     server.listeners.create(external_listener("ext-bridge-pipeline", "/bridge")).await?;
     server.listeners.start("ext-bridge-pipeline").await?;
@@ -317,7 +317,7 @@ async fn external_listener_task_delivery_happy_path() -> Result<(), Box<dyn std:
     // the operator protocol uses lowercase; use uppercase for WebSocket messages
     // (DemonID field) and lowercase for registry lookups.
     let agent_id_hex = format!("{agent_id:08X}");
-    let mut ctr_offset = 0_u64;
+    let ctr_offset = 0_u64;
 
     server.listeners.create(external_listener("ext-task-happy", "/task-happy")).await?;
     server.listeners.start("ext-task-happy").await?;
@@ -440,7 +440,7 @@ async fn external_listener_no_task_poll_returns_empty_body()
         0x2E,
     ];
     let agent_id = 0xD1D2_D3D4_u32;
-    let mut ctr_offset = 0_u64;
+    let ctr_offset = 0_u64;
 
     server.listeners.create(external_listener("ext-empty-poll", "/empty-poll")).await?;
     server.listeners.start("ext-empty-poll").await?;
@@ -504,7 +504,7 @@ async fn external_listener_task_consumed_after_download() -> Result<(), Box<dyn 
     ];
     let agent_id = 0xE1E2_E3E4_u32;
     let agent_id_hex = format!("{agent_id:08x}");
-    let mut ctr_offset = 0_u64;
+    let ctr_offset = 0_u64;
 
     server.listeners.create(external_listener("ext-consume", "/consume")).await?;
     server.listeners.start("ext-consume").await?;

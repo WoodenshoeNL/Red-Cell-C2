@@ -1550,4 +1550,65 @@ mod tests {
         assert!(shutdown.is_shutting_down());
         assert!(pool.is_closed(), "database should be closed even with an active listener");
     }
+
+    /// Regression test: an in-flight External-listener request that has acquired
+    /// a callback guard (as the teamserver fallback handler now does) must delay
+    /// database closure during `run_shutdown_sequence`, just like HTTP/SMB/DNS
+    /// callbacks do.
+    #[tokio::test]
+    async fn shutdown_sequence_waits_for_external_listener_callback_guard() {
+        let (state, shutdown) = build_shutdown_test_state().await;
+
+        // Create and start an External listener so we can grab its state.
+        use red_cell_common::{ExternalListenerConfig, ListenerConfig};
+        let ext_config = ListenerConfig::from(ExternalListenerConfig {
+            name: "ext-drain-test".to_owned(),
+            endpoint: "/drain-test".to_owned(),
+        });
+        state.listeners.create(ext_config).await.expect("create");
+        state.listeners.start("ext-drain-test").await.expect("start");
+
+        let ext_state = state
+            .listeners
+            .external_state_for_path("/drain-test")
+            .await
+            .expect("endpoint should be registered");
+
+        // Simulate what the teamserver fallback handler does: acquire a callback
+        // guard via ExternalListenerState::try_track_callback() *before* body
+        // collection.  This guard must keep the callback drain open.
+        let guard = ext_state.try_track_callback().expect("guard must succeed before shutdown");
+
+        let pool = state.database.pool().clone();
+        let handle: Handle<SocketAddr> = Handle::new();
+
+        // Launch shutdown in the background with a generous timeout.
+        let shutdown_handle = tokio::spawn({
+            let shutdown = shutdown.clone();
+            async move { run_shutdown_sequence(handle, shutdown, state, Duration::from_secs(5)).await }
+        });
+
+        // Give the shutdown sequence a moment to initiate and start draining.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        assert!(shutdown.is_shutting_down(), "shutdown should have been initiated");
+        assert!(
+            !pool.is_closed(),
+            "database must NOT be closed while external callback guard is held"
+        );
+
+        // Release the guard — this should allow the drain to complete and the
+        // database to close.
+        drop(guard);
+
+        shutdown_handle
+            .await
+            .expect("shutdown task should not panic")
+            .expect("shutdown sequence should succeed");
+
+        assert!(
+            pool.is_closed(),
+            "database should be closed after external callback guard is dropped"
+        );
+    }
 }

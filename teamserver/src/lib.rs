@@ -81,7 +81,7 @@ pub use rbac::{
 };
 pub use red_cell_common::crypto::hash_password_sha3;
 pub use service::{ServiceBridge, ServiceBridgeError, service_routes};
-pub use shutdown::ShutdownController;
+pub use shutdown::{ActiveCallbackGuard, ShutdownController};
 pub use sockets::{SocketRelayError, SocketRelayManager};
 pub use webhook::AuditWebhookNotifier;
 #[cfg(feature = "test-helpers")]

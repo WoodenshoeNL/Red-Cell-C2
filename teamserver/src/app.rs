@@ -147,6 +147,15 @@ async fn teamserver_fallback(
 
     // Check if an active External listener owns this path.
     if let Some(ext_state) = state.listeners.external_state_for_path(&path).await {
+        // Acquire the shutdown callback guard *before* body collection so this
+        // request is tracked for the full duration of the external bridge path.
+        // Without this, `run_shutdown_sequence` could decide the callback drain
+        // is complete while body I/O is still in progress, closing the database
+        // underneath the subsequent `handle_external_request` call.
+        let Some(_fallback_guard) = ext_state.try_track_callback() else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+
         let peer = request
             .extensions()
             .get::<ConnectInfo<SocketAddr>>()

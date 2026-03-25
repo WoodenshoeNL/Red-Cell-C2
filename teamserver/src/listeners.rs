@@ -58,6 +58,7 @@ use crate::{
     rate_limiter::AttemptWindow,
     rate_limiter::{evict_oldest_windows, prune_expired_windows},
     record_operator_action,
+    shutdown::ActiveCallbackGuard,
 };
 
 use crate::DEFAULT_MAX_DOWNLOAD_BYTES;
@@ -979,6 +980,15 @@ impl ExternalListenerState {
     #[must_use]
     pub fn listener_name(&self) -> &str {
         &self.config.name
+    }
+
+    /// Acquire a shutdown callback guard so the in-flight request is tracked
+    /// during graceful shutdown drain.
+    ///
+    /// Returns `None` once shutdown has been initiated — callers should reject
+    /// the request immediately.
+    pub fn try_track_callback(&self) -> Option<ActiveCallbackGuard> {
+        self.shutdown.try_track_callback()
     }
 }
 

@@ -7,12 +7,12 @@
 //! | `agent list` | `GET /agents` | table of all agents |
 //! | `agent show <id>` | `GET /agents/{id}` | full agent record |
 //! | `agent exec <id> --cmd <cmd>` | `POST /agents/{id}/task` | submit task |
-//! | `agent exec --wait` | submit then poll `GET /jobs?agent_id={id}&task_id={tid}` until dequeued | block until agent picks up job |
-//! | `agent output <id>` | not available via REST API | use WebSocket client |
+//! | `agent exec --wait` | **unsupported** — REST API lacks output endpoint | returns exit 6 |
+//! | `agent output <id>` | **unsupported** — REST API lacks output endpoint | returns exit 6 |
 //! | `agent kill <id>` | `DELETE /agents/{id}` | terminate |
 //! | `agent kill --wait` | kill then poll `GET /agents/{id}` until dead | block |
-//! | `agent upload <id>` | not yet available via REST API | use WebSocket client |
-//! | `agent download <id>` | not yet available via REST API | use WebSocket client |
+//! | `agent upload <id>` | **unsupported** — REST API lacks endpoint | returns exit 6 |
+//! | `agent download <id>` | **unsupported** — REST API lacks endpoint | returns exit 6 |
 
 use std::time::{Duration, Instant};
 
@@ -161,7 +161,11 @@ pub(crate) struct TaskQueuedResponse {
 }
 
 /// Minimal projection of the `GET /jobs` paged response used for polling.
+///
+/// Currently unused because `exec_wait` returns `Unsupported`, but retained
+/// for when the teamserver adds a command-output REST endpoint.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub(crate) struct JobPageResponse {
     pub(crate) total: usize,
 }
@@ -518,59 +522,37 @@ async fn exec_submit(client: &ApiClient, id: &str, cmd: &str) -> Result<JobSubmi
     Ok(JobSubmitted { job_id: resp.task_id })
 }
 
-/// `agent exec <id> --cmd <cmd> --wait` — submit task and poll until the agent
-/// dequeues it.
+/// `agent exec <id> --cmd <cmd> --wait` — not yet supported.
 ///
-/// Polls `GET /jobs?agent_id={id}&task_id={tid}` every second until the job
-/// disappears from the queue (i.e. the agent has picked it up) or until
-/// `timeout_secs` elapse (exit code 5).
+/// The `--wait` flag promises to block until the agent completes the command
+/// and return the output with an exit code.  The current REST API does not
+/// expose a command-output endpoint, so this contract cannot be fulfilled.
+/// Rather than returning a misleading success with `exit_code: null` and a
+/// placeholder message, we return [`CliError::Unsupported`] so the caller
+/// knows the feature is not yet available.
 ///
-/// **Note:** the current REST API does not expose command output.  The returned
-/// `ExecResult.output` will contain an explanatory message directing the
-/// operator to the WebSocket client.  Use `red-cell-client` for interactive
-/// sessions with live output.
+/// Use `agent exec` without `--wait` to submit the task, and
+/// `red-cell-client` (the WebSocket GUI) to observe command output.
 ///
-/// # Examples
-/// ```text
-/// red-cell-cli agent exec abc123 --cmd "whoami" --wait --timeout 30
-/// ```
-#[instrument(skip(client))]
+/// # Errors
+///
+/// Always returns [`CliError::Unsupported`].
+#[instrument(skip(_client))]
 async fn exec_wait(
-    client: &ApiClient,
-    id: &str,
-    cmd: &str,
-    timeout_secs: u64,
+    _client: &ApiClient,
+    _id: &str,
+    _cmd: &str,
+    _timeout_secs: u64,
 ) -> Result<ExecResult, CliError> {
-    let submitted = exec_submit(client, id, cmd).await?;
-    let task_id = submitted.job_id.clone();
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-    let poll_path = format!("/jobs?agent_id={id}&task_id={task_id}");
-
-    loop {
-        if Instant::now() >= deadline {
-            return Err(CliError::Timeout(format!(
-                "timed out waiting for job {task_id} to be picked up after {timeout_secs}s"
-            )));
-        }
-
-        let page: JobPageResponse = client.get(&poll_path).await?;
-
-        if page.total == 0 {
-            // The agent dequeued the job.  REST does not surface output.
-            return Ok(ExecResult {
-                job_id: task_id,
-                output: "output is not available via the REST API; \
-                         use the WebSocket client (red-cell-client) to receive command output"
-                    .to_owned(),
-                exit_code: None,
-            });
-        }
-
-        sleep(POLL_INTERVAL).await;
-    }
+    Err(CliError::Unsupported(
+        "exec --wait requires command-output retrieval which is not yet available via \
+         the REST API; submit without --wait and use the WebSocket client (red-cell-client) \
+         to observe output"
+            .to_owned(),
+    ))
 }
 
-/// `agent output <id>` — not available via the REST API.
+/// `agent output <id>` — not yet supported via the REST API.
 ///
 /// The teamserver does not expose a REST endpoint for agent callback output.
 /// Connect with the WebSocket client (`red-cell-client`) to receive live
@@ -578,16 +560,15 @@ async fn exec_wait(
 ///
 /// # Errors
 ///
-/// Always returns [`CliError::General`] explaining that the endpoint does not
-/// exist in the current REST API.
+/// Always returns [`CliError::Unsupported`].
 #[instrument(skip(_client))]
 async fn fetch_output(
     _client: &ApiClient,
     _id: &str,
     _since: Option<&str>,
 ) -> Result<Vec<OutputEntry>, CliError> {
-    Err(CliError::General(
-        "agent output is not available via the REST API; \
+    Err(CliError::Unsupported(
+        "agent output is not yet available via the REST API; \
          use the WebSocket client (red-cell-client) to receive command output"
             .to_owned(),
     ))
@@ -699,7 +680,7 @@ async fn kill(client: &ApiClient, id: &str, wait: bool) -> Result<KillResult, Cl
     }
 }
 
-/// `agent upload <id> --src <local> --dst <remote>` — not yet available via
+/// `agent upload <id> --src <local> --dst <remote>` — not yet supported via
 /// the REST API.
 ///
 /// File upload to an agent is not exposed as a REST endpoint in the current
@@ -708,7 +689,7 @@ async fn kill(client: &ApiClient, id: &str, wait: bool) -> Result<KillResult, Cl
 ///
 /// # Errors
 ///
-/// Always returns [`CliError::General`].
+/// Always returns [`CliError::Unsupported`].
 #[instrument(skip(_client))]
 async fn upload(
     _client: &ApiClient,
@@ -716,14 +697,14 @@ async fn upload(
     _src: &str,
     _dst: &str,
 ) -> Result<TransferResult, CliError> {
-    Err(CliError::General(
+    Err(CliError::Unsupported(
         "file upload is not yet supported via the REST API; \
          use the WebSocket client (red-cell-client) for file transfers"
             .to_owned(),
     ))
 }
 
-/// `agent download <id> --src <remote> --dst <local>` — not yet available via
+/// `agent download <id> --src <remote> --dst <local>` — not yet supported via
 /// the REST API.
 ///
 /// File download from an agent is not exposed as a REST endpoint in the current
@@ -732,7 +713,7 @@ async fn upload(
 ///
 /// # Errors
 ///
-/// Always returns [`CliError::General`].
+/// Always returns [`CliError::Unsupported`].
 #[instrument(skip(_client))]
 async fn download(
     _client: &ApiClient,
@@ -740,7 +721,7 @@ async fn download(
     _src: &str,
     _dst: &str,
 ) -> Result<TransferResult, CliError> {
-    Err(CliError::General(
+    Err(CliError::Unsupported(
         "file download is not yet supported via the REST API; \
          use the WebSocket client (red-cell-client) for file transfers"
             .to_owned(),
@@ -1222,7 +1203,7 @@ mod tests {
         assert_eq!(agents[0].os, "Windows Server 2022 x64");
     }
 
-    // ── exec_wait / fetch_output / watch_output (using wiremock) ─────────────
+    // ── exec_wait / fetch_output / watch_output ────────────────────────────────
 
     /// Build a `ResolvedConfig` pointing at the given mock server URI.
     fn mock_cfg(server_uri: &str) -> crate::config::ResolvedConfig {
@@ -1234,140 +1215,58 @@ mod tests {
         }
     }
 
-    /// `exec_wait`: mock returns `total=1` (job still queued) on the first poll,
-    /// then `total=0` (agent dequeued it) on the second → function waits
-    /// through the sleep and returns an `ExecResult` with the task_id.
-    ///
-    /// This test takes ~1 s of real time because `exec_wait` calls
-    /// `sleep(POLL_INTERVAL)` after the "still queued" response.
+    /// `exec_wait` always returns `CliError::Unsupported` because command
+    /// output retrieval is not available via the REST API.
     #[tokio::test]
-    async fn exec_wait_pending_then_dequeued_returns_task_id() {
-        use wiremock::matchers::{method, path, query_param};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-
-        // POST /agents/{id}/task → task_id
-        Mock::given(method("POST"))
-            .and(path("/api/v1/agents/agent1/task"))
-            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
-                "agent_id": "AGENT1",
-                "task_id": "TASK001",
-                "queued_jobs": 1
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        // First GET /jobs?... → still queued (fires once, then exhausted)
-        Mock::given(method("GET"))
-            .and(path("/api/v1/jobs"))
-            .and(query_param("agent_id", "agent1"))
-            .and(query_param("task_id", "TASK001"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "total": 1,
-                "limit": 50,
-                "offset": 0,
-                "items": []
-            })))
-            .up_to_n_times(1)
-            .mount(&server)
-            .await;
-
-        // Subsequent GET /jobs?... → empty (agent dequeued the job)
-        Mock::given(method("GET"))
-            .and(path("/api/v1/jobs"))
-            .and(query_param("agent_id", "agent1"))
-            .and(query_param("task_id", "TASK001"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "total": 0,
-                "limit": 50,
-                "offset": 0,
-                "items": []
-            })))
-            .mount(&server)
-            .await;
-
-        let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
-
-        let result =
-            exec_wait(&client, "agent1", "whoami", 30).await.expect("exec_wait must succeed");
-        assert_eq!(result.job_id, "TASK001");
-        // REST API does not provide output; the string communicates this to the user.
+    async fn exec_wait_returns_unsupported() {
+        let cfg = mock_cfg("http://127.0.0.1:1");
+        let client = crate::client::ApiClient::new(&cfg).expect("build client");
+        let result = exec_wait(&client, "agent1", "whoami", 30).await;
         assert!(
-            result.output.contains("WebSocket client"),
-            "output message must mention WebSocket client, got: {:?}",
-            result.output
-        );
-        assert_eq!(result.exit_code, None);
-    }
-
-    /// `exec_wait`: with `timeout_secs=0` the deadline is already expired when
-    /// the loop first checks it → returns `CliError::Timeout`.
-    #[tokio::test]
-    async fn exec_wait_timeout_zero_returns_cli_timeout() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/api/v1/agents/agent1/task"))
-            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
-                "agent_id": "AGENT1",
-                "task_id": "TASK-TIMEOUT",
-                "queued_jobs": 1
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let client = crate::client::ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
-        let result = exec_wait(&client, "agent1", "whoami", 0).await;
-
-        assert!(
-            matches!(result, Err(crate::error::CliError::Timeout(_))),
-            "expected CliError::Timeout with timeout_secs=0, got {result:?}"
+            matches!(result, Err(crate::error::CliError::Unsupported(_))),
+            "exec_wait must return CliError::Unsupported; got: {result:?}"
         );
     }
 
-    /// `fetch_output` always returns a `CliError::General` because the REST
+    /// `fetch_output` always returns a `CliError::Unsupported` because the REST
     /// API does not expose an agent output endpoint.
     #[tokio::test]
-    async fn fetch_output_returns_not_supported_error() {
-        // No mock server needed — the function returns early without any HTTP call.
+    async fn fetch_output_returns_unsupported_error() {
         let cfg = mock_cfg("http://127.0.0.1:1");
         let client = crate::client::ApiClient::new(&cfg).expect("build client");
         let result = fetch_output(&client, "agent1", None).await;
         assert!(
-            matches!(result, Err(crate::error::CliError::General(_))),
-            "fetch_output must return CliError::General; got: {result:?}"
+            matches!(result, Err(crate::error::CliError::Unsupported(_))),
+            "fetch_output must return CliError::Unsupported; got: {result:?}"
         );
     }
 
-    /// `fetch_output` with a `since` cursor also returns `CliError::General` —
+    /// `fetch_output` with a `since` cursor also returns `CliError::Unsupported` —
     /// the cursor value makes no difference when the endpoint does not exist.
     #[tokio::test]
-    async fn fetch_output_with_since_cursor_also_returns_error() {
+    async fn fetch_output_with_since_cursor_also_returns_unsupported() {
         let cfg = mock_cfg("http://127.0.0.1:1");
         let client = crate::client::ApiClient::new(&cfg).expect("build client");
         let result = fetch_output(&client, "agent1", Some("cursor-job")).await;
         assert!(
-            matches!(result, Err(crate::error::CliError::General(_))),
-            "fetch_output with cursor must still return CliError::General; got: {result:?}"
+            matches!(result, Err(crate::error::CliError::Unsupported(_))),
+            "fetch_output with cursor must still return CliError::Unsupported; got: {result:?}"
         );
     }
 
     /// `watch_output` exits immediately with a non-zero code because the first
-    /// call to `fetch_output` returns a `CliError::General`.
+    /// call to `fetch_output` returns a `CliError::Unsupported`.
     #[tokio::test]
     async fn watch_output_exits_immediately_with_error() {
-        // No mock server: fetch_output never makes an HTTP request.
         let cfg = mock_cfg("http://127.0.0.1:1");
         let client = crate::client::ApiClient::new(&cfg).expect("build client");
 
         let exit_code =
             watch_output(&client, &crate::output::OutputFormat::Json, "agent1", None).await;
-        assert_ne!(exit_code, crate::error::EXIT_SUCCESS, "watch_output must exit non-zero");
+        assert_eq!(
+            exit_code,
+            crate::error::EXIT_UNSUPPORTED,
+            "watch_output must exit with EXIT_UNSUPPORTED"
+        );
     }
 }

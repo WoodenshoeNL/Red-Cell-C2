@@ -10,6 +10,7 @@
 //! | 3    | Auth failure (bad token, insufficient role) |
 //! | 4    | Server unreachable |
 //! | 5    | Timeout |
+//! | 6    | Unsupported (feature not yet available) |
 
 use thiserror::Error;
 
@@ -25,6 +26,8 @@ pub const EXIT_AUTH_FAILURE: i32 = 3;
 pub const EXIT_SERVER_UNREACHABLE: i32 = 4;
 /// Process exit code: request timed out.
 pub const EXIT_TIMEOUT: i32 = 5;
+/// Process exit code: feature not yet supported by the server.
+pub const EXIT_UNSUPPORTED: i32 = 6;
 
 /// Machine-readable error codes emitted on stderr.
 pub const ERROR_CODE_GENERAL: &str = "ERROR";
@@ -40,6 +43,8 @@ pub const ERROR_CODE_TIMEOUT: &str = "TIMEOUT";
 pub const ERROR_CODE_INVALID_ARGS: &str = "INVALID_ARGS";
 /// Machine-readable error code for unexpected server-side errors.
 pub const ERROR_CODE_SERVER_ERROR: &str = "SERVER_ERROR";
+/// Machine-readable error code for features not yet available.
+pub const ERROR_CODE_UNSUPPORTED: &str = "UNSUPPORTED";
 
 /// All errors that a CLI command can produce.
 #[derive(Debug, Error)]
@@ -75,6 +80,14 @@ pub enum CliError {
     #[error("configuration error: {0}")]
     Config(#[from] crate::config::ConfigError),
 
+    /// The requested feature is not yet supported by the teamserver.
+    ///
+    /// Used for commands that are part of the documented CLI surface but
+    /// cannot be fulfilled because the teamserver does not expose the
+    /// necessary endpoint (e.g. agent output retrieval, file transfer).
+    #[error("unsupported: {0}")]
+    Unsupported(String),
+
     /// Any other error not covered above.
     #[error("{0}")]
     General(String),
@@ -91,6 +104,7 @@ impl CliError {
             CliError::Timeout(_) => EXIT_TIMEOUT,
             CliError::InvalidArgs(_) => EXIT_GENERAL,
             CliError::ServerError(_) => EXIT_GENERAL,
+            CliError::Unsupported(_) => EXIT_UNSUPPORTED,
             CliError::Config(crate::config::ConfigError::MissingToken) => EXIT_AUTH_FAILURE,
             CliError::Config(_) => EXIT_GENERAL,
             CliError::General(_) => EXIT_GENERAL,
@@ -107,6 +121,7 @@ impl CliError {
             CliError::Timeout(_) => ERROR_CODE_TIMEOUT,
             CliError::InvalidArgs(_) => ERROR_CODE_INVALID_ARGS,
             CliError::ServerError(_) => ERROR_CODE_SERVER_ERROR,
+            CliError::Unsupported(_) => ERROR_CODE_UNSUPPORTED,
             CliError::Config(crate::config::ConfigError::MissingToken) => ERROR_CODE_AUTH_FAILURE,
             CliError::Config(_) => ERROR_CODE_GENERAL,
             CliError::General(_) => ERROR_CODE_GENERAL,
@@ -158,6 +173,13 @@ mod tests {
         let err = CliError::Timeout("30s".to_owned());
         assert_eq!(err.exit_code(), EXIT_TIMEOUT);
         assert_eq!(err.error_code(), ERROR_CODE_TIMEOUT);
+    }
+
+    #[test]
+    fn unsupported_has_correct_exit_code() {
+        let err = CliError::Unsupported("agent output not available via REST".to_owned());
+        assert_eq!(err.exit_code(), EXIT_UNSUPPORTED);
+        assert_eq!(err.error_code(), ERROR_CODE_UNSUPPORTED);
     }
 
     #[test]

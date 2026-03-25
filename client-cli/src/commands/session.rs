@@ -58,7 +58,7 @@ use tokio::io::AsyncBufReadExt as _;
 use tokio::time::sleep;
 use tracing::instrument;
 
-use super::agent::{JobPageResponse, RawAgent, TaskQueuedResponse};
+use super::agent::{RawAgent, TaskQueuedResponse};
 use super::listener::{RawListenerSummary, build_create_body};
 use super::operator::validate_role;
 use crate::client::ApiClient;
@@ -376,8 +376,8 @@ async fn dispatch(
         "agent.output" => {
             // The teamserver does not expose a REST output endpoint.
             // Operators should use the WebSocket client for live output.
-            Err(CliError::General(
-                "agent output is not available via the REST API; \
+            Err(CliError::Unsupported(
+                "agent output is not yet available via the REST API; \
                  use the WebSocket client (red-cell-client) to receive command output"
                     .to_owned(),
             ))
@@ -558,17 +558,29 @@ async fn dispatch(
 /// Execute a shell command on an agent, optionally waiting for completion.
 ///
 /// Submits the command via `POST /agents/{id}/task` using the Demon
-/// `AgentTaskInfo` wire format.  With `wait=true`, polls
-/// `GET /jobs?agent_id={id}&task_id={tid}` until the job is dequeued by the
-/// agent or `timeout_secs` elapse.  Output is not available via REST.
+/// `AgentTaskInfo` wire format.
+///
+/// With `wait=true`, returns [`CliError::Unsupported`] because the REST API
+/// does not expose a command-output endpoint; the documented session contract
+/// (`agent.exec` with `wait: true` returning `output` and `exit_code`) cannot
+/// be fulfilled without it.
 #[instrument(skip(client))]
 async fn exec(
     client: &ApiClient,
     agent_id: &str,
     command: &str,
     wait: bool,
-    timeout_secs: u64,
+    _timeout_secs: u64,
 ) -> Result<serde_json::Value, CliError> {
+    if wait {
+        return Err(CliError::Unsupported(
+            "agent.exec with wait=true requires command-output retrieval which is not yet \
+             available via the REST API; submit without wait and use the WebSocket client \
+             (red-cell-client) to observe output"
+                .to_owned(),
+        ));
+    }
+
     #[derive(Serialize)]
     struct Body<'a> {
         #[serde(rename = "CommandLine")]
@@ -587,36 +599,8 @@ async fn exec(
             &Body { command_line: command, command_id: "21", demon_id: agent_id, task_id: "" },
         )
         .await?;
-    let task_id = resp.task_id;
 
-    if !wait {
-        return Ok(serde_json::json!({"job_id": task_id}));
-    }
-
-    // Poll until the agent dequeues the job or the deadline is reached.
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-    let poll_path = format!("/jobs?agent_id={agent_id}&task_id={task_id}");
-
-    loop {
-        if Instant::now() >= deadline {
-            return Err(CliError::Timeout(format!(
-                "timed out waiting for job {task_id} to be picked up after {timeout_secs}s"
-            )));
-        }
-
-        let page: JobPageResponse = client.get(&poll_path).await?;
-
-        if page.total == 0 {
-            return Ok(serde_json::json!({
-                "job_id": task_id,
-                "output": "output is not available via the REST API; \
-                           use the WebSocket client (red-cell-client) to receive command output",
-                "exit_code": null,
-            }));
-        }
-
-        sleep(POLL_INTERVAL).await;
-    }
+    Ok(serde_json::json!({"job_id": resp.task_id}))
 }
 
 /// Send a kill command to an agent, optionally waiting until it is dead.
@@ -1122,6 +1106,29 @@ mod tests {
         );
     }
 
+    // ── dispatch: agent.exec with wait=true returns Unsupported ────────────────
+
+    #[tokio::test]
+    async fn dispatch_agent_exec_wait_returns_unsupported() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let msg: SessionCmd = serde_json::from_str(
+            r#"{"cmd":"agent.exec","id":"abc","command":"whoami","wait":true}"#,
+        )
+        .expect("parse");
+        let result = dispatch(&client, &msg, None).await;
+        assert!(
+            matches!(result, Err(CliError::Unsupported(_))),
+            "expected Unsupported for agent.exec with wait=true, got {result:?}"
+        );
+    }
+
     // ── dispatch: network commands return ServerUnreachable (port 1 is closed) ─
 
     #[tokio::test]
@@ -1163,7 +1170,7 @@ mod tests {
     // ── dispatch: agent.output ────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn dispatch_agent_output_without_since_returns_general_error() {
+    async fn dispatch_agent_output_without_since_returns_unsupported() {
         use crate::config::ResolvedConfig;
         let cfg = ResolvedConfig {
             server: "https://127.0.0.1:1".to_owned(),
@@ -1176,13 +1183,13 @@ mod tests {
             serde_json::from_str(r#"{"cmd":"agent.output","id":"agent1"}"#).expect("parse");
         let result = dispatch(&client, &msg, None).await;
         assert!(
-            matches!(result, Err(CliError::General(_))),
-            "expected General error (output not available via REST API), got {result:?}"
+            matches!(result, Err(CliError::Unsupported(_))),
+            "expected Unsupported error (output not available via REST API), got {result:?}"
         );
     }
 
     #[tokio::test]
-    async fn dispatch_agent_output_with_since_returns_general_error() {
+    async fn dispatch_agent_output_with_since_returns_unsupported() {
         use crate::config::ResolvedConfig;
         let cfg = ResolvedConfig {
             server: "https://127.0.0.1:1".to_owned(),
@@ -1196,8 +1203,8 @@ mod tests {
                 .expect("parse");
         let result = dispatch(&client, &msg, None).await;
         assert!(
-            matches!(result, Err(CliError::General(_))),
-            "expected General error (output not available via REST API), got {result:?}"
+            matches!(result, Err(CliError::Unsupported(_))),
+            "expected Unsupported error (output not available via REST API), got {result:?}"
         );
     }
 
@@ -1851,76 +1858,23 @@ mod tests {
         assert_eq!(result["job_id"], "TASK-ABC");
     }
 
-    /// `exec wait=true` — poll until agent dequeues the job.  REST does not
-    /// provide output, but the function must succeed with the task_id.
+    /// `exec wait=true` — returns `CliError::Unsupported` because the REST API
+    /// does not provide command output retrieval.
     #[tokio::test]
-    async fn exec_wait_true_returns_task_id_when_job_dequeued() {
-        use wiremock::matchers::{method, path, query_param};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/api/v1/agents/agent1/task"))
-            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
-                "agent_id": "AGENT1",
-                "task_id": "TASK-XYZ",
-                "queued_jobs": 1
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        // Immediate dequeue (total=0) so no sleep is needed.
-        Mock::given(method("GET"))
-            .and(path("/api/v1/jobs"))
-            .and(query_param("agent_id", "agent1"))
-            .and(query_param("task_id", "TASK-XYZ"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "total": 0,
-                "limit": 50,
-                "offset": 0,
-                "items": []
-            })))
-            .mount(&server)
-            .await;
-
-        let client = ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
-        let result =
-            exec(&client, "agent1", "whoami", true, 60).await.expect("exec wait=true must succeed");
-
-        assert_eq!(result["job_id"], "TASK-XYZ");
-        // REST API does not provide output.
-        assert!(
-            result["output"].as_str().is_some_and(|s| s.contains("WebSocket client")),
-            "output message must mention WebSocket client"
-        );
-    }
-
-    /// `exec wait=true, timeout=0` — deadline is already expired on first loop
-    /// iteration → returns `CliError::Timeout` without polling.
-    #[tokio::test]
-    async fn exec_wait_true_timeout_zero_returns_cli_timeout() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/api/v1/agents/agent1/task"))
-            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
-                "agent_id": "AGENT1",
-                "task_id": "TASK-TIMEOUT",
-                "queued_jobs": 1
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let client = ApiClient::new(&mock_cfg(&server.uri())).expect("build client");
-        let result = exec(&client, "agent1", "whoami", true, 0).await;
+    async fn exec_wait_true_returns_unsupported() {
+        use crate::config::ResolvedConfig;
+        let cfg = ResolvedConfig {
+            server: "https://127.0.0.1:1".to_owned(),
+            token: "tok".to_owned(),
+            timeout: 1,
+            tls_mode: crate::config::TlsMode::SystemRoots,
+        };
+        let client = ApiClient::new(&cfg).expect("build client");
+        let result = exec(&client, "agent1", "whoami", true, 60).await;
 
         assert!(
-            matches!(result, Err(CliError::Timeout(_))),
-            "expected Timeout with timeout_secs=0, got {result:?}"
+            matches!(result, Err(CliError::Unsupported(_))),
+            "exec wait=true must return Unsupported, got {result:?}"
         );
     }
 

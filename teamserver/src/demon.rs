@@ -1171,20 +1171,51 @@ mod tests {
         assert_eq!(pt1, msg);
     }
 
+    /// Build an init packet where the outer envelope carries `outer_id` but the encrypted
+    /// inner metadata carries `inner_id`, exercising the outer/inner agent_id mismatch check.
+    fn build_mismatched_init_packet(
+        outer_id: u32,
+        inner_id: u32,
+        key: [u8; AGENT_KEY_LENGTH],
+        iv: [u8; AGENT_IV_LENGTH],
+    ) -> Vec<u8> {
+        let metadata = build_init_metadata(inner_id);
+        let encrypted =
+            encrypt_agent_data(&key, &iv, &metadata).expect("metadata encryption should succeed");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u32_be(u32::from(DemonCommand::DemonInit)));
+        payload.extend_from_slice(&u32_be(7));
+        payload.extend_from_slice(&key);
+        payload.extend_from_slice(&iv);
+        payload.extend_from_slice(&encrypted);
+
+        DemonEnvelope::new(outer_id, payload).expect("init envelope should be valid").to_bytes()
+    }
+
     #[tokio::test]
     async fn parse_rejects_init_with_mismatched_agent_id() {
+        let outer_id = 0x9999_AAAA;
+        let inner_id = 0x1111_2222;
         let registry = test_registry().await;
-        let parser = DemonPacketParser::new(registry);
-        let mut packet = build_init_packet(0x9999_AAAA, test_key(0x41), test_iv(0x24));
-        let start = 12 + 8 + AGENT_KEY_LENGTH + AGENT_IV_LENGTH;
-        packet[start..start + 4].copy_from_slice(&u32_be(0x1111_2222));
+        let parser = DemonPacketParser::new(registry.clone());
+        let packet =
+            build_mismatched_init_packet(outer_id, inner_id, test_key(0x41), test_iv(0x24));
 
         let error = parser
             .parse_at(&packet, "203.0.113.1".to_owned(), datetime!(2026-03-09 19:35:00 UTC))
             .await
-            .expect_err("mismatched init should fail");
+            .expect_err("mismatched outer/inner agent_id should fail");
 
-        assert!(matches!(error, DemonParserError::Crypto(_) | DemonParserError::InvalidInit(_)));
+        assert!(
+            matches!(
+                error,
+                DemonParserError::InvalidInit("decrypted agent id does not match header")
+            ),
+            "expected outer/inner agent_id mismatch rejection, got: {error}"
+        );
+        // Neither the outer nor the inner agent_id should be registered.
+        assert!(registry.get(outer_id).await.is_none(), "outer id must not be registered");
+        assert!(registry.get(inner_id).await.is_none(), "inner id must not be registered");
     }
 
     #[tokio::test]

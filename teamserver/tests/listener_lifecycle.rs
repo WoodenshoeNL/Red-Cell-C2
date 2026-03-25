@@ -1140,41 +1140,32 @@ async fn listener_with_future_kill_date_accepts_demon_init()
     Ok(())
 }
 
+/// WorkingHours is enforced agent-side (victim's local clock), not server-side.
+/// Verify that a listener with working_hours configured still accepts callbacks
+/// regardless of the server's current time.
 #[tokio::test]
-async fn listener_outside_working_hours_rejects_demon_init()
--> Result<(), Box<dyn std::error::Error>> {
+async fn listener_working_hours_does_not_gate_server_side() -> Result<(), Box<dyn std::error::Error>>
+{
     use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
 
     let manager = test_manager().await?;
     let (port, guard) = common::available_port()?;
 
-    // Build a working_hours window that definitely excludes the current UTC time.
-    // We pick a 1-minute window 12 hours away from now.
+    // Pick a working_hours window that definitely excludes the current UTC time.
+    // The server must still accept the callback because enforcement is agent-side.
     let now_secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
     let utc_hour = ((now_secs % 86400) / 3600) as u8;
     let excluded_start = (utc_hour + 12) % 24;
     let excluded_end = (excluded_start + 1) % 24;
-    // Ensure end > start for the format (avoid wrapping midnight edge case).
-    let (start, end) = if excluded_end > excluded_start {
-        (excluded_start, excluded_end)
-    } else {
-        // Wraps midnight — pick a safe window that still excludes current time.
-        let safe_start = (utc_hour + 6) % 24;
-        let safe_end = (safe_start + 1) % 24;
-        if safe_end > safe_start {
-            (safe_start, safe_end)
-        } else {
-            // Current hour is 17 or 18; use 05:00-06:00.
-            (5_u8, 6_u8)
-        }
-    };
+    let (start, end) =
+        if excluded_end > excluded_start { (excluded_start, excluded_end) } else { (5_u8, 6_u8) };
     let working_hours = format!("{start:02}:00-{end:02}:00");
 
     manager
-        .create(http_config_with_time("lc-wh-outside", port, None, Some(&working_hours)))
+        .create(http_config_with_time("lc-wh-no-gate", port, None, Some(&working_hours)))
         .await?;
     drop(guard);
-    manager.start("lc-wh-outside").await?;
+    manager.start("lc-wh-no-gate").await?;
     timeout(Duration::from_secs(2), common::wait_for_listener(port)).await??;
 
     let client = reqwest::Client::new();
@@ -1193,61 +1184,13 @@ async fn listener_outside_working_hours_rejects_demon_init()
 
     assert_eq!(
         resp.status(),
-        reqwest::StatusCode::NOT_FOUND,
-        "DEMON_INIT must be rejected when outside working hours ({working_hours}, UTC hour {utc_hour})"
-    );
-
-    manager.stop("lc-wh-outside").await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn listener_within_working_hours_accepts_demon_init() -> Result<(), Box<dyn std::error::Error>>
-{
-    use red_cell_common::crypto::{AGENT_IV_LENGTH, AGENT_KEY_LENGTH};
-
-    let manager = test_manager().await?;
-    let (port, guard) = common::available_port()?;
-
-    // Build a working_hours window that includes the current UTC time.
-    let now_secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
-    let utc_hour = ((now_secs % 86400) / 3600) as u8;
-    let start = if utc_hour == 0 { 0 } else { utc_hour - 1 };
-    let working_hours = if utc_hour >= 22 {
-        format!("{start:02}:00-23:59")
-    } else {
-        let end = utc_hour + 2;
-        format!("{start:02}:00-{end:02}:00")
-    };
-
-    manager.create(http_config_with_time("lc-wh-inside", port, None, Some(&working_hours))).await?;
-    drop(guard);
-    manager.start("lc-wh-inside").await?;
-    timeout(Duration::from_secs(2), common::wait_for_listener(port)).await??;
-
-    let client = reqwest::Client::new();
-    let agent_id: u32 = 0xDEAD_2002;
-    let key: [u8; AGENT_KEY_LENGTH] = [
-        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
-        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E,
-        0x1F, 0x20,
-    ];
-    let iv: [u8; AGENT_IV_LENGTH] = [
-        0xB0, 0xC3, 0xD6, 0xE9, 0xFC, 0x0F, 0x22, 0x35, 0x48, 0x5B, 0x6E, 0x81, 0x94, 0xA7, 0xBA,
-        0xCD,
-    ];
-    let body = common::valid_demon_init_body(agent_id, key, iv);
-    let resp = client.post(format!("http://127.0.0.1:{port}/")).body(body).send().await?;
-
-    assert_eq!(
-        resp.status(),
         reqwest::StatusCode::OK,
-        "DEMON_INIT must succeed when within working hours ({working_hours}, UTC hour {utc_hour})"
+        "DEMON_INIT must succeed even outside working hours ({working_hours}, UTC hour {utc_hour}) — enforcement is agent-side"
     );
     let resp_body = resp.bytes().await?;
     assert!(!resp_body.is_empty(), "init ACK must have a non-empty body");
 
-    manager.stop("lc-wh-inside").await?;
+    manager.stop("lc-wh-no-gate").await?;
     Ok(())
 }
 

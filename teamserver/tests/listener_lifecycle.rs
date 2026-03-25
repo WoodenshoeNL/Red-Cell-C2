@@ -12,7 +12,10 @@ use red_cell::{
     AgentRegistry, Database, EventBus, ListenerManager, ListenerManagerError, ListenerStatus,
     SocketRelayManager,
 };
-use red_cell_common::{HttpListenerConfig, ListenerConfig};
+use red_cell_common::{
+    DnsListenerConfig, ExternalListenerConfig, HttpListenerConfig, ListenerConfig,
+    SmbListenerConfig,
+};
 use tokio::time::timeout;
 
 // ---------------------------------------------------------------------------
@@ -61,6 +64,110 @@ fn http_config_with_time(
         response: None,
         proxy: None,
     })
+}
+
+/// Build a minimal SMB listener config with the given `pipe_name`.
+fn smb_config(name: &str, pipe_name: &str) -> ListenerConfig {
+    ListenerConfig::from(SmbListenerConfig {
+        name: name.to_owned(),
+        pipe_name: pipe_name.to_owned(),
+        kill_date: None,
+        working_hours: None,
+    })
+}
+
+/// Compute a unique pipe name for each test to avoid collisions.
+fn unique_pipe_name(suffix: &str) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or_default();
+    format!("red-cell-lc-test-{suffix}-{ts}")
+}
+
+/// Build a minimal DNS listener config bound to `port`.
+fn dns_config(name: &str, port: u16) -> ListenerConfig {
+    ListenerConfig::from(DnsListenerConfig {
+        name: name.to_owned(),
+        host_bind: "127.0.0.1".to_owned(),
+        port_bind: port,
+        domain: "test.c2.local".to_owned(),
+        record_types: vec!["TXT".to_owned()],
+        kill_date: None,
+        working_hours: None,
+    })
+}
+
+/// Build a minimal External listener config with the given `endpoint`.
+fn external_config(name: &str, endpoint: &str) -> ListenerConfig {
+    ListenerConfig::from(ExternalListenerConfig {
+        name: name.to_owned(),
+        endpoint: endpoint.to_owned(),
+    })
+}
+
+/// Build a minimal DNS query packet for probing listener readiness.
+fn build_dns_probe_query() -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&0xFFFF_u16.to_be_bytes()); // ID
+    buf.extend_from_slice(&0x0100_u16.to_be_bytes()); // flags: QR=0, RD=1
+    buf.extend_from_slice(&1_u16.to_be_bytes()); // qdcount
+    buf.extend_from_slice(&0_u16.to_be_bytes()); // ancount
+    buf.extend_from_slice(&0_u16.to_be_bytes()); // nscount
+    buf.extend_from_slice(&0_u16.to_be_bytes()); // arcount
+    for label in "probe.other.domain.com".split('.') {
+        buf.push(label.len() as u8);
+        buf.extend_from_slice(label.as_bytes());
+    }
+    buf.push(0); // zero terminator
+    buf.extend_from_slice(&16_u16.to_be_bytes()); // QTYPE TXT
+    buf.extend_from_slice(&1_u16.to_be_bytes()); // QCLASS IN
+    buf
+}
+
+/// Poll until the DNS listener on `port` is ready to accept queries.
+async fn wait_for_dns_listener(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    use tokio::net::UdpSocket;
+    use tokio::time::sleep;
+
+    let client = UdpSocket::bind("127.0.0.1:0").await?;
+    client.connect(format!("127.0.0.1:{port}")).await?;
+    let probe = build_dns_probe_query();
+
+    for _ in 0..40 {
+        let _ = client.send(&probe).await;
+        let mut buf = vec![0u8; 512];
+        if timeout(Duration::from_millis(50), client.recv(&mut buf)).await.is_ok() {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+    Err(format!("DNS listener on port {port} did not become ready").into())
+}
+
+/// Poll until the SMB listener's named pipe is ready to accept connections.
+#[cfg(unix)]
+async fn wait_for_smb_listener(pipe_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use interprocess::local_socket::ToNsName as _;
+    use interprocess::local_socket::tokio::Stream as LocalSocketStream;
+    use interprocess::local_socket::traits::tokio::Stream as _;
+    use interprocess::os::unix::local_socket::AbstractNsUdSocket;
+    use tokio::time::sleep;
+
+    let smb_prefix = r"\\.\pipe\";
+    let trimmed = pipe_name.trim();
+    let full = if trimmed.starts_with('/') || trimmed.starts_with(r"\\") {
+        trimmed.to_owned()
+    } else {
+        format!("{smb_prefix}{trimmed}")
+    };
+    let socket_name = full.to_ns_name::<AbstractNsUdSocket>()?.into_owned();
+
+    for _ in 0..40 {
+        if LocalSocketStream::connect(socket_name.clone()).await.is_ok() {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+    Err(format!("SMB listener on pipe `{pipe_name}` did not become ready within 1 s").into())
 }
 
 // ---------------------------------------------------------------------------
@@ -1141,5 +1248,319 @@ async fn listener_within_working_hours_accepts_demon_init() -> Result<(), Box<dy
     assert!(!resp_body.is_empty(), "init ACK must have a non-empty body");
 
     manager.stop("lc-wh-inside").await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// SMB listener lifecycle tests
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[tokio::test]
+async fn smb_listener_create_start_stop_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
+    let manager = test_manager().await?;
+    let pipe = unique_pipe_name("lifecycle");
+
+    // Create — persisted in Created state.
+    manager.create(smb_config("lc-smb-lifecycle", &pipe)).await?;
+    let summary = manager.summary("lc-smb-lifecycle").await?;
+    assert_eq!(summary.state.status, ListenerStatus::Created);
+
+    // Start — transitions to Running.
+    let started = manager.start("lc-smb-lifecycle").await?;
+    assert_eq!(started.state.status, ListenerStatus::Running);
+
+    // Verify the pipe is actually accepting connections.
+    timeout(Duration::from_secs(2), wait_for_smb_listener(&pipe)).await??;
+
+    // DB state must be consistent.
+    let db_summary = manager.summary("lc-smb-lifecycle").await?;
+    assert_eq!(db_summary.state.status, ListenerStatus::Running);
+
+    // Stop — transitions to Stopped.
+    let stopped = manager.stop("lc-smb-lifecycle").await?;
+    assert_eq!(stopped.state.status, ListenerStatus::Stopped);
+
+    let db_summary = manager.summary("lc-smb-lifecycle").await?;
+    assert_eq!(db_summary.state.status, ListenerStatus::Stopped);
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn smb_listener_restart_after_stop_rebinds_pipe() -> Result<(), Box<dyn std::error::Error>> {
+    let manager = test_manager().await?;
+    let pipe = unique_pipe_name("restart");
+
+    manager.create(smb_config("lc-smb-restart", &pipe)).await?;
+    manager.start("lc-smb-restart").await?;
+
+    // Verify the pipe is reachable.
+    timeout(Duration::from_secs(2), wait_for_smb_listener(&pipe)).await??;
+
+    // Stop — pipe should be cleaned up.
+    manager.stop("lc-smb-restart").await?;
+
+    // Restart — pipe must be re-created and accepting connections again.
+    let restarted = manager.start("lc-smb-restart").await?;
+    assert_eq!(restarted.state.status, ListenerStatus::Running);
+
+    timeout(Duration::from_secs(2), wait_for_smb_listener(&pipe)).await??;
+
+    // DB state must be consistent.
+    let db_summary = manager.summary("lc-smb-restart").await?;
+    assert_eq!(db_summary.state.status, ListenerStatus::Running);
+    assert!(db_summary.state.last_error.is_none(), "no error after successful restart");
+
+    manager.stop("lc-smb-restart").await?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn smb_listener_multiple_restart_cycles_succeed() -> Result<(), Box<dyn std::error::Error>> {
+    let manager = test_manager().await?;
+    let pipe = unique_pipe_name("multi-restart");
+
+    manager.create(smb_config("lc-smb-multi-restart", &pipe)).await?;
+
+    for cycle in 0..3 {
+        let started = manager.start("lc-smb-multi-restart").await?;
+        assert_eq!(
+            started.state.status,
+            ListenerStatus::Running,
+            "cycle {cycle}: listener must be Running after start"
+        );
+
+        timeout(Duration::from_secs(2), wait_for_smb_listener(&pipe)).await??;
+
+        let stopped = manager.stop("lc-smb-multi-restart").await?;
+        assert_eq!(
+            stopped.state.status,
+            ListenerStatus::Stopped,
+            "cycle {cycle}: listener must be Stopped after stop"
+        );
+    }
+
+    let db_summary = manager.summary("lc-smb-multi-restart").await?;
+    assert_eq!(db_summary.state.status, ListenerStatus::Stopped);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// DNS listener lifecycle tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn dns_listener_create_start_stop_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
+    let manager = test_manager().await?;
+    let (port, guard) = common::available_port()?;
+
+    // Create — persisted in Created state.
+    manager.create(dns_config("lc-dns-lifecycle", port)).await?;
+    let summary = manager.summary("lc-dns-lifecycle").await?;
+    assert_eq!(summary.state.status, ListenerStatus::Created);
+
+    // Start — transitions to Running.
+    drop(guard);
+    let started = manager.start("lc-dns-lifecycle").await?;
+    assert_eq!(started.state.status, ListenerStatus::Running);
+
+    // Verify the UDP socket is accepting queries.
+    timeout(Duration::from_secs(2), wait_for_dns_listener(port)).await??;
+
+    // DB state must be consistent.
+    let db_summary = manager.summary("lc-dns-lifecycle").await?;
+    assert_eq!(db_summary.state.status, ListenerStatus::Running);
+
+    // Stop — transitions to Stopped.
+    let stopped = manager.stop("lc-dns-lifecycle").await?;
+    assert_eq!(stopped.state.status, ListenerStatus::Stopped);
+
+    let db_summary = manager.summary("lc-dns-lifecycle").await?;
+    assert_eq!(db_summary.state.status, ListenerStatus::Stopped);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn dns_listener_restart_after_stop_rebinds_port() -> Result<(), Box<dyn std::error::Error>> {
+    let manager = test_manager().await?;
+    let (port, guard) = common::available_port()?;
+
+    manager.create(dns_config("lc-dns-restart", port)).await?;
+    drop(guard);
+    manager.start("lc-dns-restart").await?;
+    timeout(Duration::from_secs(2), wait_for_dns_listener(port)).await??;
+
+    manager.stop("lc-dns-restart").await?;
+
+    // Restart — UDP port must be re-bound.
+    let restarted = manager.start("lc-dns-restart").await?;
+    assert_eq!(restarted.state.status, ListenerStatus::Running);
+
+    timeout(Duration::from_secs(2), wait_for_dns_listener(port)).await??;
+
+    let db_summary = manager.summary("lc-dns-restart").await?;
+    assert_eq!(db_summary.state.status, ListenerStatus::Running);
+    assert!(db_summary.state.last_error.is_none(), "no error after successful restart");
+
+    manager.stop("lc-dns-restart").await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn restore_running_restarts_persisted_dns_listener() -> Result<(), Box<dyn std::error::Error>>
+{
+    let database = Database::connect_in_memory().await?;
+    let (port, guard) = common::available_port()?;
+
+    // Simulate a teamserver crash: create the DNS listener in the DB and manually
+    // set its state to Running without actually spawning a runtime task.
+    {
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::new(database.clone(), registry, events, sockets, None);
+        manager.create(dns_config("lc-dns-restore", port)).await?;
+        manager.repository().set_state("lc-dns-restore", ListenerStatus::Running, None).await?;
+        let summary = manager.summary("lc-dns-restore").await?;
+        assert_eq!(summary.state.status, ListenerStatus::Running);
+        // manager is dropped — no live runtime task, DB still says Running.
+    }
+
+    // A new manager over the same DB should call restore_running and actually start it.
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let restored = ListenerManager::new(database, registry, events, sockets, None);
+
+    // Release the port reservation so restore_running() can bind it.
+    drop(guard);
+    restored.restore_running().await?;
+
+    let summary = restored.summary("lc-dns-restore").await?;
+    assert_eq!(
+        summary.state.status,
+        ListenerStatus::Running,
+        "restore_running must transition the DNS listener back to Running"
+    );
+
+    // Verify the runtime is actually accepting queries.
+    timeout(Duration::from_secs(2), wait_for_dns_listener(port)).await??;
+
+    restored.stop("lc-dns-restore").await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// SMB crash recovery tests
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[tokio::test]
+async fn restore_running_restarts_persisted_smb_listener() -> Result<(), Box<dyn std::error::Error>>
+{
+    let database = Database::connect_in_memory().await?;
+    let pipe = unique_pipe_name("restore");
+
+    // Simulate a teamserver crash with a stale Running SMB listener.
+    {
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::new(database.clone(), registry, events, sockets, None);
+        manager.create(smb_config("lc-smb-restore", &pipe)).await?;
+        manager.repository().set_state("lc-smb-restore", ListenerStatus::Running, None).await?;
+    }
+
+    // A new manager should restore the SMB listener.
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let restored = ListenerManager::new(database, registry, events, sockets, None);
+
+    restored.restore_running().await?;
+
+    let summary = restored.summary("lc-smb-restore").await?;
+    assert_eq!(
+        summary.state.status,
+        ListenerStatus::Running,
+        "restore_running must transition the SMB listener back to Running"
+    );
+
+    // Verify the pipe is actually accepting connections.
+    timeout(Duration::from_secs(2), wait_for_smb_listener(&pipe)).await??;
+
+    restored.stop("lc-smb-restore").await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// External listener lifecycle tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn external_listener_create_start_stop_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
+    let manager = test_manager().await?;
+
+    // Create — persisted in Created state.
+    manager.create(external_config("lc-ext-lifecycle", "/bridge-lc")).await?;
+    let summary = manager.summary("lc-ext-lifecycle").await?;
+    assert_eq!(summary.state.status, ListenerStatus::Created);
+
+    // Start — transitions to Running (no socket owned, just registration).
+    let started = manager.start("lc-ext-lifecycle").await?;
+    assert_eq!(started.state.status, ListenerStatus::Running);
+
+    let db_summary = manager.summary("lc-ext-lifecycle").await?;
+    assert_eq!(db_summary.state.status, ListenerStatus::Running);
+
+    // Stop — transitions to Stopped.
+    let stopped = manager.stop("lc-ext-lifecycle").await?;
+    assert_eq!(stopped.state.status, ListenerStatus::Stopped);
+
+    let db_summary = manager.summary("lc-ext-lifecycle").await?;
+    assert_eq!(db_summary.state.status, ListenerStatus::Stopped);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_listener_restart_after_stop() -> Result<(), Box<dyn std::error::Error>> {
+    let manager = test_manager().await?;
+
+    manager.create(external_config("lc-ext-restart", "/bridge-restart")).await?;
+    manager.start("lc-ext-restart").await?;
+    manager.stop("lc-ext-restart").await?;
+
+    // Restart — should succeed (external listeners have no socket to rebind).
+    let restarted = manager.start("lc-ext-restart").await?;
+    assert_eq!(restarted.state.status, ListenerStatus::Running);
+
+    let db_summary = manager.summary("lc-ext-restart").await?;
+    assert_eq!(db_summary.state.status, ListenerStatus::Running);
+    assert!(db_summary.state.last_error.is_none(), "no error after successful restart");
+
+    manager.stop("lc-ext-restart").await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_listener_delete_while_running() -> Result<(), Box<dyn std::error::Error>> {
+    let manager = test_manager().await?;
+
+    manager.create(external_config("lc-ext-delete", "/bridge-delete")).await?;
+    manager.start("lc-ext-delete").await?;
+
+    // Delete should stop and remove.
+    manager.delete("lc-ext-delete").await?;
+
+    let result = manager.summary("lc-ext-delete").await;
+    assert!(result.is_err(), "deleted external listener must not be found");
+
+    // The endpoint should be freed — a new listener can claim it.
+    manager.create(external_config("lc-ext-delete-2", "/bridge-delete")).await?;
     Ok(())
 }

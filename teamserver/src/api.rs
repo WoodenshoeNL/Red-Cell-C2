@@ -2967,6 +2967,7 @@ async fn list_payloads(State(state): State<TeamserverState>, _identity: ReadApiA
         (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
         (status = 404, description = "Listener not found", body = ApiErrorBody),
         (status = 429, description = "Rate limit exceeded", body = ApiErrorBody),
+        (status = 500, description = "Internal server error during listener lookup or build", body = ApiErrorBody),
     )
 )]
 async fn submit_payload_build(
@@ -2994,11 +2995,19 @@ async fn submit_payload_build(
     // Look up the listener.
     let listener_summary = match state.listeners.summary(&request.listener).await {
         Ok(s) => s,
-        Err(_) => {
+        Err(ListenerManagerError::ListenerNotFound { .. }) => {
             return json_error_response(
                 StatusCode::NOT_FOUND,
                 "listener_not_found",
                 format!("listener '{}' not found", request.listener),
+            );
+        }
+        Err(err) => {
+            tracing::error!(listener = %request.listener, error = %err, "listener lookup failed during payload build");
+            return json_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "payload_build_listener_lookup_failed",
+                format!("failed to look up listener '{}': {err}", request.listener),
             );
         }
     };

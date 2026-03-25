@@ -21,7 +21,7 @@ Rewrite of the [Havoc C2 framework](./src/Havoc) in Rust — teamserver and oper
 | **Binaries** | `red-cell` (teamserver), `red-cell-client` (operator GUI), `red-cell-cli` (AI-agent CLI) |
 | **Rust edition** | 2024, latest stable |
 | **Teamserver framework** | Axum + Tokio |
-| **Database** | SQLite via sqlx |
+| **Database** | SQLite via sqlx — runtime-checked `sqlx::query()` with parameterized `.bind()` calls; `QueryBuilder` for dynamic filters. Compile-time `sqlx::query!()` macros are not used. |
 | **Config format** | HCL/YAOTL (same as Havoc `.yaotl` profiles) |
 | **Operator protocol** | JSON over WebSocket (same structure as Havoc) |
 | **Agent protocol** | Demon binary protocol — unchanged (0xDEADBEEF magic, AES-256-CTR, per-agent keys) |

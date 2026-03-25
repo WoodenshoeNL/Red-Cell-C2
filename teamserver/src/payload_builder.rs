@@ -106,6 +106,9 @@ impl PayloadCache {
     }
 
     /// Persist bytes in the cache. Errors are logged but not propagated.
+    ///
+    /// Uses atomic write (write to temporary file, then rename) so that
+    /// concurrent readers never observe a partially-written or truncated file.
     async fn put(&self, key: &CacheKey, bytes: &[u8]) {
         if let Err(err) = tokio::fs::create_dir_all(&self.cache_dir).await {
             tracing::warn!(
@@ -116,16 +119,37 @@ impl PayloadCache {
             return;
         }
         let path = self.artifact_path(key);
-        match tokio::fs::write(&path, bytes).await {
-            Ok(()) => tracing::debug!(
+        let dir = self.cache_dir.clone();
+        let num_bytes = bytes.len();
+        let bytes = bytes.to_vec();
+        let dest = path.clone();
+
+        // Perform the blocking tempfile + write + persist on the blocking pool
+        // so we get atomic rename semantics without blocking the async runtime.
+        let result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            use std::io::Write;
+            let mut tmp = tempfile::NamedTempFile::new_in(&dir)?;
+            tmp.write_all(&bytes)?;
+            tmp.persist(&dest)?;
+            Ok(())
+        })
+        .await;
+
+        match result {
+            Ok(Ok(())) => tracing::debug!(
                 path = %path.display(),
-                bytes = bytes.len(),
+                bytes = num_bytes,
                 "payload artifact cached"
+            ),
+            Ok(Err(err)) => tracing::warn!(
+                path = %path.display(),
+                error = %err,
+                "failed to write payload cache entry"
             ),
             Err(err) => tracing::warn!(
                 path = %path.display(),
                 error = %err,
-                "failed to write payload cache entry"
+                "payload cache write task panicked"
             ),
         }
     }

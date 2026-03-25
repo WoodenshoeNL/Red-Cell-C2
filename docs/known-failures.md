@@ -24,24 +24,6 @@ br dep add <existing-issue-id> <your-current-issue-id>
 
 ## Active Known Failures
 
-### listener_lifecycle — agent_reconnects_after_listener_restart
-
-**Test**: `teamserver/tests/listener_lifecycle.rs::agent_reconnects_after_listener_restart`
-
-**Symptom**: HTTP 404 from the listener URL after restart — the listener route is not
-available again after a stop/restart cycle.
-
-**Repro**:
-```bash
-cargo test -p red-cell --test listener_lifecycle agent_reconnects_after_listener_restart -- --exact --nocapture
-```
-
-**Tracking**: red-cell-c2-4wg1w (canonical), duplicates: red-cell-c2-rc51m, red-cell-c2-loti5, red-cell-c2-9ncol, red-cell-c2-rtk8g, red-cell-c2-1djk4, red-cell-c2-17v44
-
-**Zone**: teamserver
-
----
-
 ### http_listener_pipeline — rejects_duplicate_init_preserves_original_key
 
 **Test**: `teamserver/tests/http_listener_pipeline.rs::http_listener_pipeline_rejects_duplicate_init_preserves_original_key`
@@ -96,6 +78,15 @@ cargo test --workspace  # stalls at auth test after Specter tests complete
 ---
 
 ## Resolved (keep for 7 days, then remove)
+
+### listener_lifecycle — agent_reconnects_after_listener_restart
+
+**Fixed**: 2026-03-25 — root cause was degenerate key/IV rejection (fixed in e22fa417).
+Test now passes consistently (41/41 passes across 10 full-suite runs with 8 threads).
+
+**Was tracked as**: red-cell-c2-4wg1w (canonical), duplicates: red-cell-c2-rc51m, red-cell-c2-loti5, red-cell-c2-9ncol, red-cell-c2-rtk8g, red-cell-c2-1djk4, red-cell-c2-17v44
+
+---
 
 ### smb_listener — 6 of 9 tests timing out
 

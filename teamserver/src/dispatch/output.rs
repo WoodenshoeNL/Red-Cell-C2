@@ -1699,6 +1699,61 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn demon_info_proc_create_truncated_after_class_returns_error() {
+        let (_registry, events) = setup().await;
+        // Only info class tag, no path length or any other field.
+        let mut payload = Vec::new();
+        push_u32(&mut payload, u32::from(DemonInfoClass::ProcCreate));
+
+        let result = handle_demon_info_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        let err = result.expect_err("truncated ProcCreate payload (no path) must fail");
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn demon_info_proc_create_truncated_mid_path_returns_error() {
+        let (_registry, events) = setup().await;
+        // Class tag + path length that claims 20 bytes, but only 4 bytes of path data.
+        let mut payload = Vec::new();
+        push_u32(&mut payload, u32::from(DemonInfoClass::ProcCreate));
+        push_u32(&mut payload, 20_u32); // path length: 20 bytes
+        payload.extend_from_slice(&[0x41, 0x00, 0x42, 0x00]); // only 4 bytes of UTF-16
+
+        let result = handle_demon_info_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        let err = result.expect_err("truncated ProcCreate payload (mid-path) must fail");
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn demon_info_proc_create_truncated_after_path_returns_error() {
+        let (_registry, events) = setup().await;
+        // Class tag + complete path, but missing pid/success/piped/verbose.
+        let mut payload = Vec::new();
+        push_u32(&mut payload, u32::from(DemonInfoClass::ProcCreate));
+        let path = "C:\\a";
+        let utf16: Vec<u16> = path.encode_utf16().collect();
+        let byte_len = utf16.len() * 2;
+        push_u32(&mut payload, byte_len as u32);
+        for code_unit in &utf16 {
+            payload.extend_from_slice(&code_unit.to_le_bytes());
+        }
+        // No pid, success, piped, or verbose fields.
+
+        let result = handle_demon_info_callback(&events, AGENT_ID, REQUEST_ID, &payload).await;
+        let err = result.expect_err("truncated ProcCreate payload (after path) must fail");
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+    }
+
     // -- ProcCreate branch tests ────────────────────────────────────────────
 
     /// Build a ProcCreate payload with given (path, pid, success, piped, verbose).

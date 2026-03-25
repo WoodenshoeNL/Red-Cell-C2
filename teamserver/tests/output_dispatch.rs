@@ -4323,6 +4323,75 @@ async fn command_output_length_exceeds_payload_returns_error_no_broadcast()
     Ok(())
 }
 
+/// `handle_command_output_callback` with a u32::MAX length prefix (0xFFFF_FFFF)
+/// and only 5 bytes of actual data must return a non-2xx HTTP status and must
+/// not broadcast any `AgentResponse`.  This extreme value could trigger
+/// arithmetic overflow or allocation failure in a naïve bounds check.
+#[tokio::test]
+async fn command_output_u32_max_length_prefix_returns_error_no_broadcast()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    common::login(&mut socket).await?;
+
+    server
+        .listeners
+        .create(common::http_listener_config("out-cmdout-maxlen", listener_port))
+        .await?;
+    drop(listener_guard);
+    server.listeners.start("out-cmdout-maxlen").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDEAD_00A3_u32;
+    let key: [u8; AGENT_KEY_LENGTH] = [
+        0xCA, 0xCB, 0xCC, 0xCD, 0xCE, 0xCF, 0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8,
+        0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF, 0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7,
+        0xE8, 0xE9,
+    ];
+    let iv: [u8; AGENT_IV_LENGTH] = [
+        0xDE, 0xF1, 0x04, 0x17, 0x2A, 0x3D, 0x50, 0x63, 0x76, 0x89, 0x9C, 0xAF, 0xC2, 0xD5, 0xE8,
+        0xFB,
+    ];
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, key, iv).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
+
+    // Length prefix says 0xFFFF_FFFF (4 GiB) but only 5 bytes follow.
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&0xFFFF_FFFF_u32.to_le_bytes());
+    payload.extend_from_slice(&[0x48, 0x65, 0x6C, 0x6C, 0x6F]); // "Hello"
+
+    let response = client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            ctr_offset,
+            u32::from(DemonCommand::CommandOutput),
+            0xD3,
+            &payload,
+        ))
+        .send()
+        .await?;
+
+    assert!(
+        !response.status().is_success(),
+        "CommandOutput with u32::MAX length prefix must not return 2xx, got {}",
+        response.status()
+    );
+
+    common::assert_no_operator_message(&mut socket, std::time::Duration::from_millis(200)).await;
+
+    socket.close(None).await?;
+    server.listeners.stop("out-cmdout-maxlen").await?;
+    Ok(())
+}
+
 // ── handle_command_error_callback truncated body tests ──────────────────────
 
 /// `handle_command_error_callback` with a valid Win32 error class but no error code

@@ -1123,4 +1123,70 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn timeout_for_agent_with_zero_sleep_delay_and_no_profile_default() {
+        // Profile with Sleep = 0 → default_sleep_secs is filtered to None.
+        // Agent with sleep_delay = 0 → timeout_for must floor at MIN_SWEEP_INTERVAL_SECS (1) * 3 = 3,
+        // never returning zero (which would mark agents dead immediately).
+        let profile = sample_profile(None, 0);
+        let config = AgentLivenessConfig::from_profile(&profile);
+
+        assert!(config.default_sleep_secs.is_none());
+        assert!(config.timeout_override_secs.is_none());
+
+        let mut agent = sample_agent(0x0000_0010);
+        agent.sleep_delay = 0;
+
+        let timeout = config.timeout_for(&agent);
+        assert_eq!(
+            timeout, 3,
+            "sleep_delay=0 with no profile default must produce timeout=3 (MIN_SWEEP * 3), got {timeout}",
+        );
+    }
+
+    #[test]
+    fn timeout_for_agent_with_u32_max_sleep_delay_saturates_correctly() {
+        // Agent with sleep_delay = u32::MAX → u64::from(u32::MAX) = 4_294_967_295.
+        // saturating_mul(3) = 12_884_901_885, which fits in u64 — no saturation needed,
+        // but crucially no overflow either (would panic in debug or wrap in release).
+        let profile = sample_profile(None, 5);
+        let config = AgentLivenessConfig::from_profile(&profile);
+
+        let mut agent = sample_agent(0x0000_0020);
+        agent.sleep_delay = u32::MAX;
+
+        let timeout = config.timeout_for(&agent);
+        let expected = u64::from(u32::MAX).saturating_mul(3);
+        assert_eq!(
+            timeout, expected,
+            "sleep_delay=u32::MAX must produce timeout={expected} via saturating_mul, got {timeout}",
+        );
+        assert!(timeout > 0, "timeout must never be zero");
+    }
+
+    #[test]
+    fn timeout_override_zero_produces_valid_sweep_interval() {
+        // Profile with AgentTimeoutSecs = 0 → timeout_override_secs = Some(0).
+        // sweep_secs = (0 / 3).clamp(1, 30) = 1 → sweep_interval must be 1 s (non-zero).
+        // timeout_for must return 0 (the raw override), which means agents are immediately
+        // considered stale — that is the operator's explicit choice.
+        let profile = sample_profile(Some(0), 5);
+        let config = AgentLivenessConfig::from_profile(&profile);
+
+        assert_eq!(config.timeout_override_secs, Some(0));
+        assert_eq!(
+            config.sweep_interval,
+            Duration::from_secs(1),
+            "zero override must clamp sweep_interval to MIN_SWEEP_INTERVAL_SECS (1 s), got {:?}",
+            config.sweep_interval,
+        );
+
+        let agent = sample_agent(0x0000_0030);
+        let timeout = config.timeout_for(&agent);
+        assert_eq!(
+            timeout, 0,
+            "timeout_override_secs=0 must propagate as timeout=0, got {timeout}",
+        );
+    }
 }

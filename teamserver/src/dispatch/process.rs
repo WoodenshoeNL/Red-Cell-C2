@@ -1554,6 +1554,47 @@ mod tests {
         assert!(message.contains("Failed"), "expected failure message, got: {message}");
     }
 
+    // ── handle_process_command_callback — Kill branch (truncated payloads) ─
+
+    #[tokio::test]
+    async fn process_kill_empty_payload_returns_error() {
+        let events = EventBus::default();
+        // Payload: only the subcommand u32 (Kill), no success or pid fields.
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonProcessCommand::Kill));
+
+        let result = handle_process_command_callback(&events, 0xA3, 12, &payload).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload for empty kill body, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_kill_truncated_pid_returns_error() {
+        let events = EventBus::default();
+        // Payload: subcommand u32 (Kill) + success u32, but NO pid field.
+        let mut payload = Vec::new();
+        add_u32(&mut payload, u32::from(DemonProcessCommand::Kill));
+        add_u32(&mut payload, 1); // success field only
+
+        let result = handle_process_command_callback(&events, 0xA4, 13, &payload).await;
+        assert!(
+            matches!(result, Err(CommandDispatchError::InvalidCallbackPayload { .. })),
+            "expected InvalidCallbackPayload for truncated kill pid, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_kill_full_payload_success_returns_ok() {
+        // Regression guard: a well-formed 8-byte body (success=1, pid) must still succeed.
+        let events = EventBus::default();
+        let payload = build_process_kill_payload(1, 9999);
+
+        let result = handle_process_command_callback(&events, 0xA5, 14, &payload).await;
+        assert!(result.is_ok(), "expected Ok for full kill payload, got: {result:?}");
+    }
+
     // ── handle_process_command_callback — Modules branch ────────────────────
 
     fn add_string(buf: &mut Vec<u8>, value: &str) {

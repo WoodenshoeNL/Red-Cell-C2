@@ -760,11 +760,21 @@ async fn handle_agent_instance_register(
             .unwrap_or_default()
             .to_owned(),
         base_address: 0,
-        process_pid: register_info
-            .get("ProcessPID")
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-            .min(u32::MAX as u64) as u32,
+        process_pid: {
+            let v = register_info.get("ProcessPID").and_then(Value::as_u64).unwrap_or(0);
+            match u32::try_from(v) {
+                Ok(n) => n,
+                Err(_) => {
+                    warn!(
+                        agent_id,
+                        field = "ProcessPID",
+                        value = v,
+                        "service bridge: u64 value exceeds u32::MAX, clamping to 0"
+                    );
+                    0
+                }
+            }
+        },
         process_tid: 0,
         process_ppid: 0,
         process_arch: register_info
@@ -780,16 +790,36 @@ async fn handle_agent_instance_register(
             .to_owned(),
         os_build: 0,
         os_arch: register_info.get("OSArch").and_then(Value::as_str).unwrap_or_default().to_owned(),
-        sleep_delay: register_info
-            .get("SleepDelay")
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-            .min(u32::MAX as u64) as u32,
-        sleep_jitter: register_info
-            .get("SleepJitter")
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-            .min(u32::MAX as u64) as u32,
+        sleep_delay: {
+            let v = register_info.get("SleepDelay").and_then(Value::as_u64).unwrap_or(0);
+            match u32::try_from(v) {
+                Ok(n) => n,
+                Err(_) => {
+                    warn!(
+                        agent_id,
+                        field = "SleepDelay",
+                        value = v,
+                        "service bridge: u64 value exceeds u32::MAX, clamping to 0"
+                    );
+                    0
+                }
+            }
+        },
+        sleep_jitter: {
+            let v = register_info.get("SleepJitter").and_then(Value::as_u64).unwrap_or(0);
+            match u32::try_from(v) {
+                Ok(n) => n,
+                Err(_) => {
+                    warn!(
+                        agent_id,
+                        field = "SleepJitter",
+                        value = v,
+                        "service bridge: u64 value exceeds u32::MAX, clamping to 0"
+                    );
+                    0
+                }
+            }
+        },
         kill_date: None,
         working_hours: None,
         first_call_in: now.clone(),
@@ -1868,7 +1898,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_agent_instance_register_saturates_u32_fields() {
+    async fn handle_agent_instance_register_clamps_overflowing_u32_fields_to_zero() {
         let (db, wh) = test_audit_deps().await;
         let registry = test_registry().await;
         let events = EventBus::default();
@@ -1898,9 +1928,44 @@ mod tests {
             .expect("registration should succeed");
 
         let agent = registry.get(0xDEAD_0001).await.expect("agent should exist");
-        assert_eq!(agent.process_pid, u32::MAX, "ProcessPID should saturate at u32::MAX");
-        assert_eq!(agent.sleep_delay, u32::MAX, "SleepDelay should saturate at u32::MAX");
-        assert_eq!(agent.sleep_jitter, u32::MAX, "SleepJitter should saturate at u32::MAX");
+        assert_eq!(agent.process_pid, 0, "ProcessPID should clamp to 0 on overflow");
+        assert_eq!(agent.sleep_delay, 0, "SleepDelay should clamp to 0 on overflow");
+        assert_eq!(agent.sleep_jitter, 0, "SleepJitter should clamp to 0 on overflow");
+    }
+
+    #[tokio::test]
+    async fn handle_agent_instance_register_accepts_u32_max_values() {
+        let (db, wh) = test_audit_deps().await;
+        let registry = test_registry().await;
+        let events = EventBus::default();
+
+        let message = serde_json::json!({
+            "Head": { "Type": HEAD_AGENT },
+            "Body": {
+                "Type": BODY_AGENT_REGISTER,
+                "AgentHeader": {
+                    "Size": "0",
+                    "MagicValue": "0",
+                    "AgentID": "DEAD0002",
+                },
+                "RegisterInfo": {
+                    "Hostname": "H2",
+                    "Username": "u2",
+                    "ProcessPID": u32::MAX as u64,
+                    "SleepDelay": u32::MAX as u64,
+                    "SleepJitter": u32::MAX as u64,
+                },
+            },
+        });
+
+        handle_agent_instance_register(&message, &events, &registry, &db, &wh)
+            .await
+            .expect("registration should succeed");
+
+        let agent = registry.get(0xDEAD_0002).await.expect("agent should exist");
+        assert_eq!(agent.process_pid, u32::MAX, "ProcessPID at u32::MAX should be accepted");
+        assert_eq!(agent.sleep_delay, u32::MAX, "SleepDelay at u32::MAX should be accepted");
+        assert_eq!(agent.sleep_jitter, u32::MAX, "SleepJitter at u32::MAX should be accepted");
     }
 
     // ── ListenerStart handler tests ─────────────────────────────────

@@ -33,7 +33,7 @@ async fn http_listener_pipeline_registers_agent_and_broadcasts_checkin()
         0x90,
     ];
     let agent_id = 0x1234_5678;
-    let mut ctr_offset = 0_u64;
+    let ctr_offset = 0_u64;
 
     manager.create(http_listener("edge-http-pipeline", port)).await?;
     drop(guard);

@@ -294,6 +294,37 @@ async fn bearer_lowercase_returns_invalid_authorization_header() {
     assert_eq!(body["error"]["code"], "invalid_authorization_header");
 }
 
+/// Build a profile with a very low rate limit for testing enforcement.
+fn profile_with_low_rate_limit() -> Profile {
+    Profile::parse(
+        r#"
+        Teamserver {
+          Host = "127.0.0.1"
+          Port = 0
+        }
+
+        Operators {
+          user "operator" {
+            Password = "password1234"
+            Role = "Operator"
+          }
+        }
+
+        Api {
+          RateLimitPerMinute = 3
+
+          key "test-key" {
+            Value = "rate-limit-test-value"
+            Role  = "Admin"
+          }
+        }
+
+        Demon {}
+        "#,
+    )
+    .expect("test profile should parse")
+}
+
 /// Build a profile with NO `Api { ... }` section — the REST API runtime should
 /// report itself as disabled.
 fn profile_without_api_keys() -> Profile {
@@ -372,4 +403,36 @@ async fn unprotected_root_accessible_without_key() {
     let body: serde_json::Value = resp.json().await.expect("json body");
     assert_eq!(body["enabled"], true);
     assert_eq!(body["authentication_header"], "x-api-key");
+}
+
+#[tokio::test]
+async fn rate_limit_enforced_after_exceeding_limit() {
+    let base = spawn_api_server(profile_with_low_rate_limit()).await;
+    let client = Client::new();
+
+    // Profile sets RateLimitPerMinute = 3.  Requests 1–3 should succeed;
+    // request 4 must be rejected with 429.
+    for i in 1..=3 {
+        let resp = get_agents(&client, &base, Some("rate-limit-test-value")).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "request {i} of 3 should succeed within the rate limit"
+        );
+    }
+
+    // The 4th request exceeds the limit.
+    let resp = get_agents(&client, &base, Some("rate-limit-test-value")).await;
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    let retry_after = resp
+        .headers()
+        .get("retry-after")
+        .expect("Retry-After header should be present")
+        .to_str()
+        .expect("Retry-After should be a valid string");
+    assert_eq!(retry_after, "60");
+
+    let body: serde_json::Value = resp.json().await.expect("json body");
+    assert_eq!(body["error"]["code"], "rate_limited");
 }

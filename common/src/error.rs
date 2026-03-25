@@ -11,6 +11,10 @@ pub enum CommonError {
     /// An agent identifier could not be parsed from a decimal or hex string.
     #[error("invalid agent identifier `{value}`")]
     InvalidAgentId { value: String },
+    /// A KillDate value could not be parsed as a unix timestamp or
+    /// `YYYY-MM-DD HH:MM:SS` datetime string.
+    #[error("invalid KillDate `{value}`: expected a unix timestamp or `YYYY-MM-DD HH:MM:SS`")]
+    InvalidKillDate { value: String },
 }
 
 #[cfg(test)]
@@ -22,9 +26,14 @@ mod tests {
         let unsupported_protocol =
             CommonError::UnsupportedListenerProtocol { protocol: "smtp".to_string() };
         let invalid_agent_id = CommonError::InvalidAgentId { value: "0xnothex".to_string() };
+        let invalid_kill_date = CommonError::InvalidKillDate { value: "garbage".to_string() };
 
         assert_eq!(unsupported_protocol.to_string(), "unsupported listener protocol `smtp`");
         assert_eq!(invalid_agent_id.to_string(), "invalid agent identifier `0xnothex`");
+        assert_eq!(
+            invalid_kill_date.to_string(),
+            "invalid KillDate `garbage`: expected a unix timestamp or `YYYY-MM-DD HH:MM:SS`"
+        );
     }
 
     #[test]
@@ -40,18 +49,14 @@ mod tests {
             CommonError::UnsupportedListenerProtocol { protocol: actual } => {
                 assert_eq!(actual, protocol);
             }
-            CommonError::InvalidAgentId { .. } => {
-                panic!("expected unsupported listener protocol variant")
-            }
+            other => panic!("expected unsupported listener protocol variant, got {other:?}"),
         }
 
         match invalid_agent_id {
             CommonError::InvalidAgentId { value } => {
                 assert_eq!(value, invalid_value);
             }
-            CommonError::UnsupportedListenerProtocol { .. } => {
-                panic!("expected invalid agent identifier variant")
-            }
+            other => panic!("expected invalid agent identifier variant, got {other:?}"),
         }
     }
 

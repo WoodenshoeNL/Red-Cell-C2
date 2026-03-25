@@ -1990,18 +1990,14 @@ fn amsi_patch_value(value: Option<&str>) -> u32 {
 }
 
 fn parse_kill_date(value: Option<&str>) -> Result<u64, PayloadBuildError> {
-    match value.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(value) => {
-            let timestamp =
-                value.parse::<i64>().map_err(|_| PayloadBuildError::InvalidRequest {
-                    message: format!("KillDate `{value}` must be a unix timestamp"),
-                })?;
-            u64::try_from(timestamp).map_err(|_| PayloadBuildError::InvalidRequest {
-                message: format!("KillDate `{value}` must be a non-negative unix timestamp"),
-            })
-        }
-        None => Ok(0),
-    }
+    let Some(raw) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(0);
+    };
+    let epoch = red_cell_common::parse_kill_date_to_epoch(raw)
+        .map_err(|err| PayloadBuildError::InvalidRequest { message: err.to_string() })?;
+    u64::try_from(epoch).map_err(|_| PayloadBuildError::InvalidRequest {
+        message: format!("KillDate `{raw}` must be a non-negative unix timestamp"),
+    })
 }
 
 fn parse_working_hours(value: Option<&str>) -> Result<i32, PayloadBuildError> {

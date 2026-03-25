@@ -61,7 +61,7 @@ fn crate_root_exports_surface_common_error_variants() {
 
     match error {
         CommonError::UnsupportedListenerProtocol { protocol } => assert_eq!(protocol, "quic"),
-        CommonError::InvalidAgentId { .. } => panic!("expected unsupported listener protocol"),
+        other => panic!("expected unsupported listener protocol, got {other:?}"),
     }
 }
 

@@ -725,7 +725,7 @@ impl ListenerManager {
     pub async fn sync_profile(&self, profile: &Profile) -> Result<(), ListenerManagerError> {
         let _guard = self.operations.lock().await;
         let repository = self.repository();
-        let profile_listeners = profile_listener_configs(profile)
+        let profile_listeners = profile_listener_configs(profile)?
             .into_iter()
             .map(|config| (config.name().to_owned(), config))
             .collect::<BTreeMap<_, _>>();
@@ -1137,6 +1137,13 @@ impl SmbListenerState {
     }
 }
 
+/// Validate and normalise an optional KillDate string from operator input,
+/// converting it from the raw extra-field value into a unix-timestamp string.
+fn validated_kill_date(raw: Option<String>) -> Result<Option<String>, ListenerManagerError> {
+    red_cell_common::validate_kill_date(raw.as_deref())
+        .map_err(|err| ListenerManagerError::InvalidConfig { message: err.to_string() })
+}
+
 /// Convert a Havoc operator listener payload into a shared listener config.
 pub fn listener_config_from_operator(
     info: &ListenerInfo,
@@ -1147,7 +1154,7 @@ pub fn listener_config_from_operator(
     match ListenerProtocol::try_from_str(protocol) {
         Ok(ListenerProtocol::Http) => Ok(ListenerConfig::from(HttpListenerConfig {
             name: name.to_owned(),
-            kill_date: optional_extra_string(info, EXTRA_KILL_DATE),
+            kill_date: validated_kill_date(optional_extra_string(info, EXTRA_KILL_DATE))?,
             working_hours: optional_extra_string(info, EXTRA_WORKING_HOURS),
             hosts: split_csv(info.hosts.as_deref()),
             host_bind: required_field("HostBind", info.host_bind.as_deref())?.to_owned(),
@@ -1174,7 +1181,7 @@ pub fn listener_config_from_operator(
         Ok(ListenerProtocol::Smb) => Ok(ListenerConfig::from(SmbListenerConfig {
             name: name.to_owned(),
             pipe_name: required_extra_string(info, "PipeName")?,
-            kill_date: optional_extra_string(info, EXTRA_KILL_DATE),
+            kill_date: validated_kill_date(optional_extra_string(info, EXTRA_KILL_DATE))?,
             working_hours: optional_extra_string(info, EXTRA_WORKING_HOURS),
         })),
         Ok(ListenerProtocol::Dns) => Ok(ListenerConfig::from(DnsListenerConfig {
@@ -1189,7 +1196,7 @@ pub fn listener_config_from_operator(
             record_types: split_csv(
                 info.extra.get("RecordTypes").and_then(serde_json::Value::as_str),
             ),
-            kill_date: optional_extra_string(info, EXTRA_KILL_DATE),
+            kill_date: validated_kill_date(optional_extra_string(info, EXTRA_KILL_DATE))?,
             working_hours: optional_extra_string(info, EXTRA_WORKING_HOURS),
         })),
         Ok(ListenerProtocol::External) => Ok(ListenerConfig::from(ExternalListenerConfig {
@@ -1313,12 +1320,14 @@ fn operator_protocol_name(config: &ListenerConfig) -> String {
     }
 }
 
-fn profile_listener_configs(profile: &Profile) -> Vec<ListenerConfig> {
+fn profile_listener_configs(
+    profile: &Profile,
+) -> Result<Vec<ListenerConfig>, ListenerManagerError> {
     let mut listeners = Vec::new();
-    listeners.extend(profile.listeners.http.iter().cloned().map(|config| {
-        ListenerConfig::from(HttpListenerConfig {
+    for config in profile.listeners.http.iter().cloned() {
+        listeners.push(ListenerConfig::from(HttpListenerConfig {
             name: config.name,
-            kill_date: config.kill_date,
+            kill_date: validated_kill_date(config.kill_date)?,
             working_hours: config.working_hours,
             hosts: config.hosts,
             host_bind: config.host_bind,
@@ -1338,34 +1347,34 @@ fn profile_listener_configs(profile: &Profile) -> Vec<ListenerConfig> {
                 .map(|cert| red_cell_common::ListenerTlsConfig { cert: cert.cert, key: cert.key }),
             response: config.response.map(Into::into),
             proxy: config.proxy.map(Into::into),
-        })
-    }));
-    listeners.extend(profile.listeners.smb.iter().cloned().map(|config| {
-        ListenerConfig::from(SmbListenerConfig {
+        }));
+    }
+    for config in profile.listeners.smb.iter().cloned() {
+        listeners.push(ListenerConfig::from(SmbListenerConfig {
             name: config.name,
             pipe_name: config.pipe_name,
-            kill_date: config.kill_date,
+            kill_date: validated_kill_date(config.kill_date)?,
             working_hours: config.working_hours,
-        })
-    }));
-    listeners.extend(profile.listeners.dns.iter().cloned().map(|config| {
-        ListenerConfig::from(DnsListenerConfig {
+        }));
+    }
+    for config in profile.listeners.dns.iter().cloned() {
+        listeners.push(ListenerConfig::from(DnsListenerConfig {
             name: config.name,
             host_bind: config.host_bind,
             port_bind: config.port_bind,
             domain: config.domain,
             record_types: config.record_types,
-            kill_date: config.kill_date,
+            kill_date: validated_kill_date(config.kill_date)?,
             working_hours: config.working_hours,
-        })
-    }));
+        }));
+    }
     listeners.extend(profile.listeners.external.iter().cloned().map(|config| {
         ListenerConfig::from(ExternalListenerConfig {
             name: config.name,
             endpoint: config.endpoint,
         })
     }));
-    listeners
+    Ok(listeners)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3230,15 +3239,22 @@ fn headers_match(expected_headers: &[ExpectedHeader], headers: &HeaderMap) -> bo
 }
 
 /// Return `true` when `kill_date` is set and the current wall-clock time has
-/// passed it.  The value is expected to be a unix timestamp (seconds since
-/// epoch) encoded as a decimal string.  If the value is absent or cannot be
-/// parsed, the check is silently skipped (returns `false`).
+/// passed it.  The value is parsed through [`red_cell_common::parse_kill_date_to_epoch`],
+/// which accepts both a plain unix timestamp and `YYYY-MM-DD HH:MM:SS` (UTC).
+///
+/// If the value is absent or empty, returns `false` (no kill-date set).
+/// If the value is present but malformed, logs a warning and returns `true`
+/// (fail-closed: reject traffic rather than silently disabling enforcement).
 fn is_past_kill_date(kill_date: Option<&str>) -> bool {
     let Some(value) = kill_date.map(str::trim).filter(|v| !v.is_empty()) else {
         return false;
     };
-    let Ok(timestamp) = value.parse::<i64>() else {
-        return false;
+    let timestamp = match red_cell_common::parse_kill_date_to_epoch(value) {
+        Ok(ts) => ts,
+        Err(err) => {
+            tracing::warn!(%err, "malformed kill_date — treating as expired (fail-closed)");
+            return true;
+        }
     };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -5618,7 +5634,7 @@ mod tests {
     -> Result<(), ListenerManagerError> {
         let original = ListenerConfig::from(HttpListenerConfig {
             name: "edge".to_owned(),
-            kill_date: Some("2026-03-09 20:00:00".to_owned()),
+            kill_date: Some("1773086400".to_owned()),
             working_hours: Some("08:00-17:00".to_owned()),
             hosts: vec!["a.example".to_owned(), "b.example".to_owned()],
             host_bind: "0.0.0.0".to_owned(),
@@ -5741,7 +5757,7 @@ mod tests {
         )
         .expect("profile should parse");
 
-        let listeners = profile_listener_configs(&profile);
+        let listeners = profile_listener_configs(&profile).expect("configs should be valid");
 
         assert_eq!(listeners.len(), 1);
         let ListenerConfig::Http(config) = &listeners[0] else {
@@ -5758,7 +5774,7 @@ mod tests {
         let smb = ListenerConfig::from(SmbListenerConfig {
             name: "pivot".to_owned(),
             pipe_name: r"pivot-01".to_owned(),
-            kill_date: Some("2026-03-09 20:00:00".to_owned()),
+            kill_date: Some("1773086400".to_owned()),
             working_hours: Some("08:00-17:00".to_owned()),
         });
         let dns = ListenerConfig::from(DnsListenerConfig {
@@ -5767,7 +5783,7 @@ mod tests {
             port_bind: 53,
             domain: "c2.example".to_owned(),
             record_types: vec!["A".to_owned(), "TXT".to_owned()],
-            kill_date: Some("2026-03-09 20:00:00".to_owned()),
+            kill_date: Some("1773086400".to_owned()),
             working_hours: Some("08:00-17:00".to_owned()),
         });
 
@@ -7967,7 +7983,7 @@ mod tests {
         )
         .expect("profile should parse");
 
-        let configs = profile_listener_configs(&profile);
+        let configs = profile_listener_configs(&profile).expect("configs should be valid");
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].name(), "bridge");
         assert_eq!(configs[0].protocol(), ListenerProtocol::External);
@@ -8243,8 +8259,16 @@ mod tests {
     }
 
     #[test]
-    fn is_past_kill_date_returns_false_for_non_numeric_string() {
-        assert!(!is_past_kill_date(Some("not-a-number")));
-        assert!(!is_past_kill_date(Some("2026-03-09 20:00:00")));
+    fn is_past_kill_date_returns_true_for_malformed_string() {
+        // Malformed values are treated as expired (fail-closed).
+        assert!(is_past_kill_date(Some("not-a-number")));
+    }
+
+    #[test]
+    fn is_past_kill_date_accepts_human_readable_datetime() {
+        // "2020-01-01 00:00:00" is in the past.
+        assert!(is_past_kill_date(Some("2020-01-01 00:00:00")));
+        // Far-future datetime should not be past.
+        assert!(!is_past_kill_date(Some("2099-12-31 23:59:59")));
     }
 }

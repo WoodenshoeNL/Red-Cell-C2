@@ -11,6 +11,7 @@ pub mod tls;
 pub use domain::{
     AgentEncryptionInfo, AgentRecord, DnsListenerConfig, ExternalListenerConfig,
     HttpListenerConfig, HttpListenerProxyConfig, HttpListenerResponseConfig, ListenerConfig,
-    ListenerProtocol, ListenerTlsConfig, OperatorInfo, SmbListenerConfig,
+    ListenerProtocol, ListenerTlsConfig, OperatorInfo, SmbListenerConfig, parse_kill_date_to_epoch,
+    validate_kill_date,
 };
 pub use error::CommonError;

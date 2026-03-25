@@ -57,6 +57,49 @@ impl fmt::Display for ListenerProtocol {
     }
 }
 
+/// Parse a KillDate string into a unix epoch (seconds).
+///
+/// Accepts two representations:
+/// 1. A plain decimal integer (unix timestamp).
+/// 2. A human-readable datetime `"YYYY-MM-DD HH:MM:SS"` (interpreted as UTC).
+///
+/// Returns [`CommonError::InvalidKillDate`] for any other format.
+pub fn parse_kill_date_to_epoch(value: &str) -> Result<i64, CommonError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(CommonError::InvalidKillDate { value: value.to_string() });
+    }
+
+    // Try plain integer first (fast path).
+    if let Ok(ts) = value.parse::<i64>() {
+        return Ok(ts);
+    }
+
+    // Try human-readable datetime "YYYY-MM-DD HH:MM:SS" (UTC).
+    let format = time::format_description::parse("[year]-[month]-[day] [hour]:[minute]:[second]")
+        .map_err(|_| CommonError::InvalidKillDate { value: value.to_string() })?;
+    let dt = time::PrimitiveDateTime::parse(value, &format)
+        .map_err(|_| CommonError::InvalidKillDate { value: value.to_string() })?;
+    Ok(dt.assume_utc().unix_timestamp())
+}
+
+/// Validate and normalise an optional KillDate value.
+///
+/// If the input is `None` or an empty/whitespace-only string, returns `Ok(None)`.
+/// Otherwise parses the value (accepting both formats described in
+/// [`parse_kill_date_to_epoch`]) and returns the normalised unix-timestamp string.
+///
+/// This should be called at config ingress (profile parsing and operator
+/// requests) so that downstream consumers always receive a numeric timestamp
+/// string.
+pub fn validate_kill_date(value: Option<&str>) -> Result<Option<String>, CommonError> {
+    let Some(raw) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    let epoch = parse_kill_date_to_epoch(raw)?;
+    Ok(Some(epoch.to_string()))
+}
+
 /// TLS certificate and key file paths for an HTTP listener.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ListenerTlsConfig {
@@ -665,7 +708,8 @@ mod tests {
         AgentEncryptionInfo, AgentRecord, BASE64_STANDARD, DnsListenerConfig,
         ExternalListenerConfig, HttpListenerConfig, HttpListenerProxyConfig,
         HttpListenerResponseConfig, ListenerConfig, ListenerProtocol, ListenerTlsConfig,
-        OperatorInfo, SmbListenerConfig, parse_agent_id,
+        OperatorInfo, SmbListenerConfig, parse_agent_id, parse_kill_date_to_epoch,
+        validate_kill_date,
     };
     use crate::error::CommonError;
 
@@ -763,7 +807,7 @@ mod tests {
         let original = ListenerConfig::from(SmbListenerConfig {
             name: "pivot".to_string(),
             pipe_name: r"\\.\pipe\pivot".to_string(),
-            kill_date: Some("2026-03-09 20:00:00".to_string()),
+            kill_date: Some("1773086400".to_string()),
             working_hours: Some("08:00-17:00".to_string()),
         });
 
@@ -1269,7 +1313,7 @@ mod tests {
             port_bind: 53,
             domain: "c2.example.com".to_string(),
             record_types: vec!["TXT".to_string(), "A".to_string()],
-            kill_date: Some("2026-12-31 23:59:59".to_string()),
+            kill_date: Some("1798761599".to_string()),
             working_hours: Some("08:00-18:00".to_string()),
         });
 
@@ -1903,5 +1947,75 @@ mod tests {
 
         let result: Result<AgentRecord, _> = serde_json::from_value(serde_json::Value::Object(map));
         assert!(result.is_err(), "malformed base64 in AESIv must fail deserialization");
+    }
+
+    // ── parse_kill_date_to_epoch tests ──────────────────────────────────────
+
+    #[test]
+    fn parse_kill_date_to_epoch_accepts_unix_timestamp() {
+        assert_eq!(parse_kill_date_to_epoch("1773086400").unwrap(), 1773086400);
+    }
+
+    #[test]
+    fn parse_kill_date_to_epoch_accepts_zero() {
+        assert_eq!(parse_kill_date_to_epoch("0").unwrap(), 0);
+    }
+
+    #[test]
+    fn parse_kill_date_to_epoch_accepts_negative() {
+        assert_eq!(parse_kill_date_to_epoch("-1").unwrap(), -1);
+    }
+
+    #[test]
+    fn parse_kill_date_to_epoch_accepts_human_readable_datetime() {
+        // "2026-03-09 20:00:00" UTC
+        assert_eq!(parse_kill_date_to_epoch("2026-03-09 20:00:00").unwrap(), 1773086400);
+    }
+
+    #[test]
+    fn parse_kill_date_to_epoch_rejects_empty() {
+        assert!(parse_kill_date_to_epoch("").is_err());
+        assert!(parse_kill_date_to_epoch("   ").is_err());
+    }
+
+    #[test]
+    fn parse_kill_date_to_epoch_rejects_garbage() {
+        let err = parse_kill_date_to_epoch("not-a-date");
+        assert!(matches!(err, Err(CommonError::InvalidKillDate { .. })));
+    }
+
+    #[test]
+    fn parse_kill_date_to_epoch_rejects_wrong_datetime_format() {
+        // Missing seconds
+        assert!(parse_kill_date_to_epoch("2026-03-09 20:00").is_err());
+        // ISO 8601 with T separator
+        assert!(parse_kill_date_to_epoch("2026-03-09T20:00:00").is_err());
+    }
+
+    // ── validate_kill_date tests ────────────────────────────────────────────
+
+    #[test]
+    fn validate_kill_date_returns_none_for_absent() {
+        assert_eq!(validate_kill_date(None).unwrap(), None);
+    }
+
+    #[test]
+    fn validate_kill_date_returns_none_for_empty() {
+        assert_eq!(validate_kill_date(Some("")).unwrap(), None);
+        assert_eq!(validate_kill_date(Some("   ")).unwrap(), None);
+    }
+
+    #[test]
+    fn validate_kill_date_normalises_to_timestamp_string() {
+        assert_eq!(
+            validate_kill_date(Some("2026-03-09 20:00:00")).unwrap(),
+            Some("1773086400".to_string())
+        );
+        assert_eq!(validate_kill_date(Some("1773086400")).unwrap(), Some("1773086400".to_string()));
+    }
+
+    #[test]
+    fn validate_kill_date_rejects_garbage() {
+        assert!(validate_kill_date(Some("garbage")).is_err());
     }
 }

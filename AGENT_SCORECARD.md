@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 841 | 231 | 31 |
+| Tasks closed | 845 | 231 | 31 |
 | Bugs filed against | 91 | 35 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
 | Quality score | 89% | 85% | 71% |
 
-*Bug rates: Claude 91/841=0.11, Codex 35/231=0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 91/845=0.11, Codex 35/231=0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-26 15:01 — f97730d1..1b459414
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 4 | 0 | Closed `red-cell-c2-yhjgx`, `red-cell-c2-scp2n`, `red-cell-c2-vs8mi`, and `red-cell-c2-jnu16`. The range fixes prior client-cli contract issues and adds real Axum-backed end-to-end coverage. |
+| Codex | 0 | 0 | No close commits or attributable product-code changes in this range. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`)
+Tests: passed (`cargo test --workspace`)
+Issues found: 0 new bugs filed
 
 ### QA Review — 2026-03-26 13:04 — 738417f3..f97730d1
 

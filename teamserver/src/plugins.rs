@@ -3640,4 +3640,884 @@ havoc.RegisterCommand("scan", "second scan", run_scan)
         assert_eq!(kind, "download");
         Ok(())
     }
+
+    // ---- match_registered_command edge cases ----
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn match_registered_command_returns_none_when_no_commands_registered()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-match-no-commands").await?;
+
+        let result = runtime
+            .match_registered_command(&AgentTaskInfo {
+                command_line: "anything here".to_owned(),
+                ..AgentTaskInfo::default()
+            })
+            .await;
+        assert_eq!(result, None, "should return None when no commands are registered");
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn match_registered_command_returns_none_for_empty_command_line()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-match-empty-cmdline").await?;
+
+        // Register a command so the map is non-empty.
+        let handle = std::thread::spawn({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| -> PyResult<()> {
+                    runtime.install_api_module(py)?;
+                    let module = py.import("red_cell")?;
+                    let noop =
+                        py.eval(pyo3::ffi::c_str!("lambda agent, args: None"), None, None)?;
+                    module.call_method1("register_command", ("test_cmd", "desc", &noop))?;
+                    Ok(())
+                })
+            }
+        });
+        handle.join().map_err(|_| "python test thread panicked")??;
+
+        let result = runtime
+            .match_registered_command(&AgentTaskInfo {
+                command_line: String::new(),
+                ..AgentTaskInfo::default()
+            })
+            .await;
+        assert_eq!(result, None, "empty command_line should not match anything");
+
+        let result = runtime
+            .match_registered_command(&AgentTaskInfo {
+                command_line: "   ".to_owned(),
+                ..AgentTaskInfo::default()
+            })
+            .await;
+        assert_eq!(result, None, "whitespace-only command_line should not match");
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn match_registered_command_returns_none_for_unrecognized_command()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-match-unrecognized").await?;
+
+        let handle = std::thread::spawn({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| -> PyResult<()> {
+                    runtime.install_api_module(py)?;
+                    let module = py.import("red_cell")?;
+                    let noop =
+                        py.eval(pyo3::ffi::c_str!("lambda agent, args: None"), None, None)?;
+                    module.call_method1("register_command", ("known_cmd", "desc", &noop))?;
+                    Ok(())
+                })
+            }
+        });
+        handle.join().map_err(|_| "python test thread panicked")??;
+
+        let result = runtime
+            .match_registered_command(&AgentTaskInfo {
+                command_line: "unknown_cmd arg1".to_owned(),
+                ..AgentTaskInfo::default()
+            })
+            .await;
+        assert_eq!(result, None, "unrecognized command should not match");
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn match_registered_command_prefers_explicit_command_field()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-match-explicit-field").await?;
+
+        let handle = std::thread::spawn({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| -> PyResult<()> {
+                    runtime.install_api_module(py)?;
+                    let module = py.import("red_cell")?;
+                    let noop =
+                        py.eval(pyo3::ffi::c_str!("lambda agent, args: None"), None, None)?;
+                    module.call_method1("register_command", ("cmd_a", "desc a", &noop))?;
+                    module.call_method1("register_command", ("cmd_b", "desc b", &noop))?;
+                    Ok(())
+                })
+            }
+        });
+        handle.join().map_err(|_| "python test thread panicked")??;
+
+        // When info.command is set and matches, it should be used regardless of command_line.
+        let result = runtime
+            .match_registered_command(&AgentTaskInfo {
+                command: Some("cmd_a".to_owned()),
+                arguments: Some("arg1 arg2".to_owned()),
+                command_line: "cmd_b something_else".to_owned(),
+                ..AgentTaskInfo::default()
+            })
+            .await;
+        assert_eq!(
+            result,
+            Some(("cmd_a".to_owned(), vec!["arg1".to_owned(), "arg2".to_owned()])),
+            "explicit command field should take priority over command_line",
+        );
+        Ok(())
+    }
+
+    // ---- invoke_registered_command edge cases ----
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn invoke_registered_command_returns_false_for_unknown_command()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let (_database, registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-invoke-unknown-cmd").await?;
+        registry.insert(sample_agent(0x00AB_CDEF)).await?;
+
+        let result = runtime
+            .invoke_registered_command(
+                "nonexistent_command",
+                "operator",
+                OperatorRole::Admin,
+                0x00AB_CDEF,
+                vec![],
+            )
+            .await?;
+        assert!(!result, "should return false for unregistered command name");
+        Ok(())
+    }
+
+    // ---- stub_succeeding / stub_failing tests ----
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stub_succeeding_emit_methods_return_ok() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let database = Database::connect(unique_test_dir("plugins-stub-ok")).await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry.insert(sample_agent(0x00AB_CDEF)).await?;
+
+        let runtime = PluginRuntime::stub_succeeding(database, registry, events, sockets);
+
+        // All emit_* methods should succeed silently (no Python initialization).
+        assert!(runtime.emit_agent_checkin(0x00AB_CDEF).await.is_ok());
+        assert!(runtime.emit_agent_registered(0x00AB_CDEF).await.is_ok());
+        assert!(runtime.emit_agent_dead(0x00AB_CDEF).await.is_ok());
+        assert!(runtime.emit_command_output(0x00AB_CDEF, 1, 1, "out").await.is_ok());
+        assert!(
+            runtime
+                .emit_task_created(
+                    0x00AB_CDEF,
+                    &Job {
+                        command: 1,
+                        request_id: 1,
+                        payload: vec![],
+                        command_line: "test".to_owned(),
+                        task_id: "001".to_owned(),
+                        created_at: "now".to_owned(),
+                        operator: "op".to_owned(),
+                    },
+                )
+                .await
+                .is_ok()
+        );
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stub_failing_emit_methods_return_err() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let database = Database::connect(unique_test_dir("plugins-stub-fail")).await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        registry.insert(sample_agent(0x00AB_CDEF)).await?;
+
+        let runtime = PluginRuntime::stub_failing(database, registry, events, sockets);
+
+        assert!(runtime.emit_agent_checkin(0x00AB_CDEF).await.is_err());
+        assert!(runtime.emit_agent_registered(0x00AB_CDEF).await.is_err());
+        assert!(runtime.emit_agent_dead(0x00AB_CDEF).await.is_err());
+        assert!(runtime.emit_command_output(0x00AB_CDEF, 1, 1, "out").await.is_err());
+        assert!(
+            runtime
+                .emit_task_created(
+                    0x00AB_CDEF,
+                    &Job {
+                        command: 1,
+                        request_id: 1,
+                        payload: vec![],
+                        command_line: "test".to_owned(),
+                        task_id: "001".to_owned(),
+                        created_at: "now".to_owned(),
+                        operator: "op".to_owned(),
+                    },
+                )
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+
+    // ---- PyAgent construction tests via Python API ----
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn py_agent_new_parses_hex_formats() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-agent-parse").await?;
+
+        let handle = std::thread::spawn({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| -> PyResult<Vec<String>> {
+                    runtime.install_api_module(py)?;
+                    let module = py.import("havoc")?;
+                    let mut ids = Vec::new();
+                    // Plain hex
+                    let agent = module.getattr("Agent")?.call1(("00ABCDEF",))?;
+                    ids.push(agent.getattr("id")?.extract::<String>()?);
+                    // 0x prefix
+                    let agent = module.getattr("Agent")?.call1(("0x00ABCDEF",))?;
+                    ids.push(agent.getattr("id")?.extract::<String>()?);
+                    // 0X prefix
+                    let agent = module.getattr("Agent")?.call1(("0X00ABCDEF",))?;
+                    ids.push(agent.getattr("id")?.extract::<String>()?);
+                    // Lowercase
+                    let agent = module.getattr("Agent")?.call1(("00abcdef",))?;
+                    ids.push(agent.getattr("id")?.extract::<String>()?);
+                    // With whitespace
+                    let agent = module.getattr("Agent")?.call1((" 00ABCDEF ",))?;
+                    ids.push(agent.getattr("id")?.extract::<String>()?);
+                    Ok(ids)
+                })
+            }
+        });
+        let ids = handle.join().map_err(|_| "python test thread panicked")??;
+        for id in &ids {
+            assert_eq!(id, "00ABCDEF", "all formats should parse to the same agent id");
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn py_agent_new_rejects_invalid_hex() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-agent-invalid").await?;
+
+        let handle = std::thread::spawn({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| -> PyResult<Vec<String>> {
+                    runtime.install_api_module(py)?;
+                    let module = py.import("havoc")?;
+                    let mut errors = Vec::new();
+                    for bad_input in ["not_hex", "ZZZZZZZZ", "", "0xGGGG"] {
+                        match module.getattr("Agent")?.call1((bad_input,)) {
+                            Err(err) => errors.push(err.to_string()),
+                            Ok(_) => errors.push(format!("unexpected success for `{bad_input}`")),
+                        }
+                    }
+                    Ok(errors)
+                })
+            }
+        });
+        let errors = handle.join().map_err(|_| "python test thread panicked")??;
+        for error in &errors {
+            assert!(
+                error.contains("invalid agent id"),
+                "expected 'invalid agent id' error, got: {error}",
+            );
+        }
+        Ok(())
+    }
+
+    // ---- register_callback/register_command error cases via Python API ----
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn register_callback_rejects_invalid_event_type() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let _guard = lock_test_guard();
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-register-cb-invalid-event").await?;
+
+        let handle = std::thread::spawn({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| -> PyResult<String> {
+                    runtime.install_api_module(py)?;
+                    let module = py.import("havoc")?;
+                    let noop = py.eval(pyo3::ffi::c_str!("lambda event: None"), None, None)?;
+                    match module.call_method1("RegisterCallback", ("bogus_event_type", &noop)) {
+                        Err(err) => Ok(err.to_string()),
+                        Ok(_) => Ok("unexpected success".to_owned()),
+                    }
+                })
+            }
+        });
+        let error = handle.join().map_err(|_| "python test thread panicked")??;
+        assert!(
+            error.contains("unsupported event type"),
+            "expected unsupported event type error, got: {error}",
+        );
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn register_callback_rejects_non_callable() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-register-cb-non-callable").await?;
+
+        let handle = std::thread::spawn({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| -> PyResult<String> {
+                    runtime.install_api_module(py)?;
+                    let module = py.import("havoc")?;
+                    let not_callable = py.eval(pyo3::ffi::c_str!("42"), None, None)?;
+                    match module.call_method1("RegisterCallback", ("agent_checkin", &not_callable))
+                    {
+                        Err(err) => Ok(err.to_string()),
+                        Ok(_) => Ok("unexpected success".to_owned()),
+                    }
+                })
+            }
+        });
+        let error = handle.join().map_err(|_| "python test thread panicked")??;
+        assert!(
+            error.contains("callback must be callable"),
+            "expected 'callback must be callable' error, got: {error}",
+        );
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn register_command_rejects_non_callable() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-register-cmd-non-callable").await?;
+
+        let handle = std::thread::spawn({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| -> PyResult<String> {
+                    runtime.install_api_module(py)?;
+                    let module = py.import("red_cell")?;
+                    let not_callable = py.eval(pyo3::ffi::c_str!("42"), None, None)?;
+                    match module.call_method1("register_command", ("cmd", "desc", &not_callable)) {
+                        Err(err) => Ok(err.to_string()),
+                        Ok(_) => Ok("unexpected success".to_owned()),
+                    }
+                })
+            }
+        });
+        let error = handle.join().map_err(|_| "python test thread panicked")??;
+        assert!(
+            error.contains("callback must be callable"),
+            "expected 'callback must be callable' error, got: {error}",
+        );
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn register_command_rejects_missing_arguments() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let _guard = lock_test_guard();
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-register-cmd-missing-args").await?;
+
+        let handle = std::thread::spawn({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| -> PyResult<Vec<String>> {
+                    runtime.install_api_module(py)?;
+                    let module = py.import("red_cell")?;
+                    let mut errors = Vec::new();
+                    // No arguments at all
+                    match module.call_method0("register_command") {
+                        Err(err) => errors.push(err.to_string()),
+                        Ok(_) => errors.push("unexpected success with no args".to_owned()),
+                    }
+                    // Only name (missing description and callback)
+                    match module.call_method1("register_command", ("cmd",)) {
+                        Err(err) => errors.push(err.to_string()),
+                        Ok(_) => errors.push("unexpected success with one arg".to_owned()),
+                    }
+                    Ok(errors)
+                })
+            }
+        });
+        let errors = handle.join().map_err(|_| "python test thread panicked")??;
+        assert!(errors.len() >= 2, "expected at least 2 errors");
+        for error in &errors {
+            assert!(
+                error.contains("requires") || error.contains("argument"),
+                "expected a missing argument error, got: {error}",
+            );
+        }
+        Ok(())
+    }
+
+    // ---- Empty directory and multiple callbacks ----
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn load_plugins_returns_empty_for_empty_directory()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let temp_dir = TempDir::new()?;
+        // Directory exists but contains no files.
+
+        let database = Database::connect(unique_test_dir("plugins-empty-dir")).await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let runtime = PluginRuntime::initialize(
+            database,
+            registry,
+            events,
+            sockets,
+            Some(temp_dir.path().to_path_buf()),
+        )
+        .await?;
+
+        let loaded = runtime.load_plugins().await?;
+        assert!(loaded.is_empty(), "empty directory should produce no loaded plugins");
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn multiple_callbacks_same_event_all_fire() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let (_database, registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-multi-cb").await?;
+        registry.insert(sample_agent(0x00AB_CDEF)).await?;
+
+        let (tracker, cb1, cb2, cb3) = tokio::task::spawn_blocking({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| -> PyResult<(Py<PyList>, Py<PyAny>, Py<PyAny>, Py<PyAny>)> {
+                    runtime.install_api_module(py)?;
+                    let tracker = PyList::empty(py);
+                    let locals = PyDict::new(py);
+                    locals.set_item("_tracker", tracker.clone())?;
+
+                    let cb1 = py.eval(
+                        pyo3::ffi::c_str!("(lambda t: lambda event: t.append('cb1'))(_tracker)"),
+                        None,
+                        Some(&locals),
+                    )?;
+                    let cb2 = py.eval(
+                        pyo3::ffi::c_str!("(lambda t: lambda event: t.append('cb2'))(_tracker)"),
+                        None,
+                        Some(&locals),
+                    )?;
+                    let cb3 = py.eval(
+                        pyo3::ffi::c_str!("(lambda t: lambda event: t.append('cb3'))(_tracker)"),
+                        None,
+                        Some(&locals),
+                    )?;
+                    Ok((tracker.unbind(), cb1.unbind(), cb2.unbind(), cb3.unbind()))
+                })
+            }
+        })
+        .await??;
+
+        runtime.register_callback(PluginEvent::AgentCheckin, cb1).await?;
+        runtime.register_callback(PluginEvent::AgentCheckin, cb2).await?;
+        runtime.register_callback(PluginEvent::AgentCheckin, cb3).await?;
+        runtime.emit_agent_checkin(0x00AB_CDEF).await?;
+
+        let items = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<Vec<String>> {
+                let list = tracker.bind(py);
+                (0..list.len())
+                    .map(|i| list.get_item(i).and_then(|item| item.extract::<String>()))
+                    .collect()
+            })
+        })
+        .await??;
+        assert_eq!(items, vec!["cb1", "cb2", "cb3"], "all 3 callbacks should fire in order");
+        Ok(())
+    }
+
+    // ---- Python API module aliases ----
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn python_api_module_exposes_pascal_case_aliases()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-api-aliases").await?;
+
+        let handle = std::thread::spawn({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| -> PyResult<Vec<String>> {
+                    runtime.install_api_module(py)?;
+                    let mut found = Vec::new();
+                    for module_name in ["red_cell", "havoc"] {
+                        let module = py.import(module_name)?;
+                        // Check PascalCase aliases exist and are callable.
+                        for alias in [
+                            "GetAgent",
+                            "GetAgents",
+                            "GetListener",
+                            "GetListeners",
+                            "RegisterCallback",
+                            "RegisterCommand",
+                        ] {
+                            let attr = module.getattr(alias)?;
+                            if attr.is_callable() {
+                                found.push(format!("{module_name}.{alias}"));
+                            }
+                        }
+                        // Check snake_case functions exist.
+                        for func in [
+                            "get_agent",
+                            "list_agents",
+                            "get_listener",
+                            "list_listeners",
+                            "register_callback",
+                            "register_command",
+                        ] {
+                            let attr = module.getattr(func)?;
+                            if attr.is_callable() {
+                                found.push(format!("{module_name}.{func}"));
+                            }
+                        }
+                        // Check classes exist.
+                        for class in ["Agent", "Listener", "Event"] {
+                            let _ = module.getattr(class)?;
+                            found.push(format!("{module_name}.{class}"));
+                        }
+                    }
+                    Ok(found)
+                })
+            }
+        });
+        let found = handle.join().map_err(|_| "python test thread panicked")??;
+        // 6 aliases + 6 functions + 3 classes = 15 per module, 2 modules = 30
+        assert_eq!(found.len(), 30, "expected 30 API entries across both modules, got: {found:?}");
+        Ok(())
+    }
+
+    // ---- next_request_id monotonic increment ----
+
+    #[test]
+    fn next_request_id_is_monotonically_increasing() {
+        let a = next_request_id();
+        let b = next_request_id();
+        let c = next_request_id();
+        assert!(b > a, "second request_id ({b}) should be greater than first ({a})");
+        assert!(c > b, "third request_id ({c}) should be greater than second ({b})");
+    }
+
+    // ---- PyAgent.task argument types ----
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn py_agent_task_accepts_none_and_string_and_bytes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let (_database, registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-task-arg-types").await?;
+        registry.insert(sample_agent(0x00AB_CDEF)).await?;
+
+        let handle = std::thread::spawn({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| -> PyResult<()> {
+                    runtime.install_api_module(py)?;
+                    let module = py.import("havoc")?;
+                    let agent = module.getattr("Agent")?.call1(("00ABCDEF",))?;
+
+                    // task with None args — should produce empty payload
+                    agent.call_method1("task", (1u32, py.None()))?;
+                    // task with no args at all
+                    agent.call_method1("task", (2u32,))?;
+                    // task with string args
+                    agent.call_method1("task", (3u32, "hello"))?;
+                    // task with bytes args
+                    agent.call_method1("task", (4u32, pyo3::types::PyBytes::new(py, b"binary")))?;
+                    Ok(())
+                })
+            }
+        });
+        handle.join().map_err(|_| "python test thread panicked")??;
+
+        let jobs = registry.dequeue_jobs(0x00AB_CDEF).await?;
+        assert_eq!(jobs.len(), 4, "expected 4 queued jobs");
+        assert!(jobs[0].payload.is_empty(), "None args → empty payload");
+        assert!(jobs[1].payload.is_empty(), "no args → empty payload");
+        assert_eq!(jobs[2].payload, b"hello", "string args → string bytes");
+        assert_eq!(jobs[3].payload, b"binary", "bytes args → raw bytes");
+        Ok(())
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn py_agent_task_rejects_invalid_arg_type() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let (_database, registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-task-invalid-arg").await?;
+        registry.insert(sample_agent(0x00AB_CDEF)).await?;
+
+        let handle = std::thread::spawn({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| -> PyResult<String> {
+                    runtime.install_api_module(py)?;
+                    let module = py.import("havoc")?;
+                    let agent = module.getattr("Agent")?.call1(("00ABCDEF",))?;
+                    // Pass a dict as args — should be rejected.
+                    let dict = PyDict::new(py);
+                    match agent.call_method1("task", (1u32, dict)) {
+                        Err(err) => Ok(err.to_string()),
+                        Ok(_) => Ok("unexpected success".to_owned()),
+                    }
+                })
+            }
+        });
+        let error = handle.join().map_err(|_| "python test thread panicked")??;
+        assert!(
+            error.contains("args must be bytes, bytearray, str, or None"),
+            "expected type error, got: {error}",
+        );
+        Ok(())
+    }
+
+    // ---- PluginEvent Display / Debug coverage ----
+
+    #[test]
+    fn plugin_event_as_str_covers_all_variants() {
+        // Ensure as_str does not return duplicates and covers every variant.
+        let variants = [
+            PluginEvent::AgentCheckin,
+            PluginEvent::AgentRegistered,
+            PluginEvent::AgentDead,
+            PluginEvent::CommandOutput,
+            PluginEvent::LootCaptured,
+            PluginEvent::TaskCreated,
+        ];
+        let strings: Vec<&str> = variants.iter().map(|v| v.as_str()).collect();
+        let unique: std::collections::HashSet<&str> = strings.iter().copied().collect();
+        assert_eq!(
+            strings.len(),
+            unique.len(),
+            "each variant must have a unique string representation"
+        );
+    }
+
+    // ---- PluginError variants Display ----
+
+    #[test]
+    fn plugin_error_display_messages_are_meaningful() {
+        let err = PluginError::InvalidPluginDirectory { path: PathBuf::from("/tmp/missing") };
+        let msg = err.to_string();
+        assert!(msg.contains("/tmp/missing"), "error should contain the path");
+
+        let err = PluginError::InvalidCStringPath { path: "bad\0path".to_owned() };
+        let msg = err.to_string();
+        assert!(msg.contains("bad\0path"), "error should contain the path");
+
+        let err = PluginError::ListenerManagerUnavailable;
+        let msg = err.to_string();
+        assert!(msg.contains("listener manager"), "error should mention listener manager");
+
+        let err = PluginError::MutexPoisoned;
+        let msg = err.to_string();
+        assert!(msg.contains("mutex poisoned"), "error should mention mutex poisoned");
+
+        let err = PluginError::AgentCommand { message: "task failed".to_owned() };
+        assert_eq!(err.to_string(), "task failed");
+
+        let err = PluginError::PermissionDenied {
+            role: OperatorRole::Analyst,
+            permission: "task_agents",
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("Analyst"), "error should contain the role");
+        assert!(msg.contains("task_agents"), "error should contain the permission");
+    }
+
+    // ---- swap_active test-only helper ----
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn swap_active_replaces_and_returns_previous() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let _reset = ActiveRuntimeReset::clear()?;
+
+        assert!(PluginRuntime::current()?.is_none(), "should start with None");
+
+        let (_database, _registry, _events, _sockets, _runtime) =
+            runtime_fixture("plugins-swap-active").await?;
+
+        // After initialize, current should be Some.
+        let previous = PluginRuntime::swap_active(None)?;
+        assert!(previous.is_some(), "swap_active should return the previously installed runtime");
+        assert!(PluginRuntime::current()?.is_none(), "after swap to None, current should be None");
+
+        // Restore it.
+        let none = PluginRuntime::swap_active(previous)?;
+        assert!(none.is_none(), "second swap should return None");
+        assert!(PluginRuntime::current()?.is_some(), "after restore, current should be Some");
+
+        Ok(())
+    }
+
+    // ---- Havoc-style RegisterCommand positional-argument format ----
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn register_command_havoc_positional_format() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-havoc-positional").await?;
+
+        let handle = std::thread::spawn({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| -> PyResult<()> {
+                    runtime.install_api_module(py)?;
+                    // Havoc positional: RegisterCommand(function, module, command, description)
+                    let helper = PyModule::from_code(
+                        py,
+                        pyo3::ffi::c_str!(
+                            "import havoc\n\
+                             def my_func(agent, args): pass\n\
+                             havoc.RegisterCommand(my_func, 'lateral_movement', 'psexec', 'run psexec')\n"
+                        ),
+                        pyo3::ffi::c_str!("test_havoc_pos.py"),
+                        pyo3::ffi::c_str!("test_havoc_pos"),
+                    )?;
+                    let _ = helper;
+                    Ok(())
+                })
+            }
+        });
+        handle.join().map_err(|_| "python test thread panicked")??;
+
+        assert_eq!(runtime.command_names().await, vec!["lateral_movement psexec".to_owned()],);
+        assert_eq!(
+            runtime.command_descriptions().await.get("lateral_movement psexec"),
+            Some(&"run psexec".to_owned()),
+        );
+        Ok(())
+    }
+
+    // ---- Havoc-style RegisterCommand with empty module name ----
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn register_command_havoc_empty_module_uses_command_only()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-havoc-empty-module").await?;
+
+        let handle = std::thread::spawn({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| -> PyResult<()> {
+                    runtime.install_api_module(py)?;
+                    let helper = PyModule::from_code(
+                        py,
+                        pyo3::ffi::c_str!(
+                            "import havoc\n\
+                             def my_func(agent, args): pass\n\
+                             havoc.RegisterCommand(my_func, '', 'standalone', 'standalone cmd')\n"
+                        ),
+                        pyo3::ffi::c_str!("test_havoc_empty_mod.py"),
+                        pyo3::ffi::c_str!("test_havoc_empty_mod"),
+                    )?;
+                    let _ = helper;
+                    Ok(())
+                })
+            }
+        });
+        handle.join().map_err(|_| "python test thread panicked")??;
+
+        assert_eq!(
+            runtime.command_names().await,
+            vec!["standalone".to_owned()],
+            "empty module should result in command name without prefix",
+        );
+        Ok(())
+    }
+
+    // ---- on_* shorthand registration functions via Python ----
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn on_shorthand_functions_register_callbacks() -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = lock_test_guard();
+        let (_database, _registry, _events, _sockets, runtime) =
+            runtime_fixture("plugins-on-shorthands").await?;
+
+        let handle = std::thread::spawn({
+            let runtime = runtime.clone();
+            move || {
+                Python::with_gil(|py| -> PyResult<()> {
+                    runtime.install_api_module(py)?;
+                    let module = py.import("havoc")?;
+                    let noop = py.eval(pyo3::ffi::c_str!("lambda event: None"), None, None)?;
+                    // Each on_* function should succeed.
+                    module.call_method1("on_agent_checkin", (&noop,))?;
+                    module.call_method1("on_agent_registered", (&noop,))?;
+                    module.call_method1("on_agent_dead", (&noop,))?;
+                    module.call_method1("on_command_output", (&noop,))?;
+                    module.call_method1("on_loot_captured", (&noop,))?;
+                    module.call_method1("on_task_created", (&noop,))?;
+                    Ok(())
+                })
+            }
+        });
+        handle.join().map_err(|_| "python test thread panicked")??;
+
+        // Verify callbacks were registered for each event type.
+        let callbacks = runtime.inner.callbacks.read().await;
+        for event_str in [
+            "agent_checkin",
+            "agent_registered",
+            "agent_dead",
+            "command_output",
+            "loot_captured",
+            "task_created",
+        ] {
+            assert!(
+                callbacks.get(event_str).is_some_and(|cbs| !cbs.is_empty()),
+                "expected at least 1 callback for {event_str}",
+            );
+        }
+        Ok(())
+    }
 }

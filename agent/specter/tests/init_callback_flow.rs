@@ -92,11 +92,15 @@ async fn specter_agent_init_checkin_and_get_job_stay_ctr_synchronised()
         SpecterAgent::new(SpecterConfig { callback_url, sleep_delay_ms: 1, ..Default::default() })?;
 
     agent.init_handshake().await?;
-    // Legacy CTR mode: server resets AES-CTR to block 0 for every packet; both
-    // agent and registry offsets stay at 0 after init.
-    assert_eq!(agent.send_ctr_offset(), 0);
-    assert_eq!(agent.recv_ctr_offset(), 0);
-    assert_eq!(harness.server.agent_registry.ctr_offset(agent.agent_id()).await?, 0);
+    // Monotonic CTR mode (Specter sends INIT_EXT_MONOTONIC_CTR): the init ACK advances
+    // the shared CTR by 1 block on both server and agent.
+    let ctr_after_init = agent.ctr_offset();
+    assert_eq!(ctr_after_init, 1, "shared CTR must be 1 after init ACK");
+    assert_eq!(
+        harness.server.agent_registry.ctr_offset(agent.agent_id()).await?,
+        ctr_after_init,
+        "server and agent CTR must agree after init"
+    );
 
     let agent_new = common::read_operator_message(&mut harness.socket).await?;
     let red_cell_common::operator::OperatorMessage::AgentNew(message) = agent_new else {
@@ -106,11 +110,13 @@ async fn specter_agent_init_checkin_and_get_job_stay_ctr_synchronised()
     assert_eq!(message.info.listener, "specter-http");
     assert!(!message.info.hostname.is_empty());
 
+    let ctr_before_checkin = agent.ctr_offset();
     let checkin_response = agent.checkin().await?;
     assert!(checkin_response.is_empty());
-    assert_eq!(agent.send_ctr_offset(), 0);
-    assert_eq!(agent.recv_ctr_offset(), 0);
-    assert_eq!(harness.server.agent_registry.ctr_offset(agent.agent_id()).await?, 0);
+    // Monotonic CTR: shared offset advances after both the callback send and response decrypt.
+    assert!(agent.ctr_offset() > ctr_before_checkin, "CTR must advance after checkin");
+
+    let ctr_before_job = agent.ctr_offset();
 
     harness
         .server
@@ -134,9 +140,8 @@ async fn specter_agent_init_checkin_and_get_job_stay_ctr_synchronised()
     assert_eq!(tasking.packages[0].command_id, u32::from(DemonCommand::CommandSleep));
     assert_eq!(tasking.packages[0].request_id, 0x2A);
     assert_eq!(tasking.packages[0].payload, vec![0x05, 0x00, 0x00, 0x00]);
-    assert_eq!(agent.send_ctr_offset(), 0);
-    assert_eq!(agent.recv_ctr_offset(), 0);
-    assert_eq!(harness.server.agent_registry.ctr_offset(agent.agent_id()).await?, 0);
+    // CTR offset must have advanced after the job round-trip.
+    assert!(agent.ctr_offset() > ctr_before_job, "CTR must advance after get_job");
 
     harness.shutdown().await?;
     Ok(())

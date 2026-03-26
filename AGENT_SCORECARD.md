@@ -21,7 +21,7 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 7 | 0 | 0 |
-| Missing tests / stale tests | 36 | 13 | 5 |
+| Missing tests / stale tests | 38 | 13 | 5 |
 | Clippy warnings | 4 | 0 | 1 |
 | Protocol errors | 16 | 27 | 3 |
 | Security issues | 38 | 38 | 0 |
@@ -40,6 +40,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-26 19:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 2 | missing tests | plugins.rs (3643 LOC, ~2 tests) and no malformed demon packet integration tests |
+| Codex | 0 | — | No issues found |
+| Cursor | 0 | — | No issues found |
+
+Overall codebase health: on track
+Biggest blindspot: Plugin system (plugins.rs) has the lowest test-to-LOC ratio in the codebase — 3643 lines with only ~2 inline tests. No integration tests for adversarial protocol input.
 
 ### QA Review — 2026-03-26 17:15 — 1b459414..193a9f06
 

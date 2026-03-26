@@ -34,6 +34,8 @@
 //! | `agent.exec` | `id`, `command` | `wait`, `timeout` |
 //! | `agent.output` | `id` | `since` |
 //! | `agent.kill` | `id` | `wait`, `timeout` |
+//! | `agent.upload` | `id` | — | **unsupported** — REST API lacks endpoint |
+//! | `agent.download` | `id` | — | **unsupported** — REST API lacks endpoint |
 //! | `listener.list` | — | — |
 //! | `listener.show` | `name` | — |
 //! | `listener.create` | `name`, `type` | `port`, `host`, `domain`, `pipe_name`, `endpoint`, `secure`, `config_json` |
@@ -389,6 +391,18 @@ async fn dispatch(
             let timeout_secs = msg.timeout.unwrap_or(DEFAULT_EXEC_TIMEOUT_SECS);
             kill(client, id, wait, timeout_secs).await
         }
+
+        "agent.upload" => Err(CliError::Unsupported(
+            "file upload is not yet supported via the REST API; \
+             use the WebSocket client (red-cell-client) for file transfers"
+                .to_owned(),
+        )),
+
+        "agent.download" => Err(CliError::Unsupported(
+            "file download is not yet supported via the REST API; \
+             use the WebSocket client (red-cell-client) for file transfers"
+                .to_owned(),
+        )),
 
         // ── listener ──────────────────────────────────────────────────────────
         "listener.list" => {
@@ -1208,14 +1222,14 @@ mod tests {
         );
     }
 
-    // ── dispatch: agent.upload / agent.download — not yet implemented ─────────
-    // These commands were removed from the advertised session surface because
-    // they require a long-lived WebSocket transport that does not yet exist.
-    // Until that transport is implemented they must return an InvalidArgs error
-    // (unknown command), not a misleading "not available via REST" message.
+    // ── dispatch: agent.upload / agent.download — unsupported via REST ────────
+    // These commands are recognised but return `Unsupported` because the REST
+    // API does not expose file-transfer endpoints.  This keeps session mode in
+    // contract with the CLI surface (the commands exist, they just can't be
+    // fulfilled yet).
 
     #[tokio::test]
-    async fn dispatch_agent_upload_is_unknown_command() {
+    async fn dispatch_agent_upload_returns_unsupported() {
         use crate::config::ResolvedConfig;
         let cfg = ResolvedConfig {
             server: "https://127.0.0.1:1".to_owned(),
@@ -1228,13 +1242,13 @@ mod tests {
             serde_json::from_str(r#"{"cmd":"agent.upload","id":"agent1"}"#).expect("parse");
         let result = dispatch(&client, &msg, None).await;
         assert!(
-            matches!(result, Err(CliError::InvalidArgs(_))),
-            "agent.upload must be an unknown command until WebSocket transport exists, got {result:?}"
+            matches!(result, Err(CliError::Unsupported(_))),
+            "agent.upload must return Unsupported (not unknown command), got {result:?}"
         );
     }
 
     #[tokio::test]
-    async fn dispatch_agent_download_is_unknown_command() {
+    async fn dispatch_agent_download_returns_unsupported() {
         use crate::config::ResolvedConfig;
         let cfg = ResolvedConfig {
             server: "https://127.0.0.1:1".to_owned(),
@@ -1247,8 +1261,8 @@ mod tests {
             serde_json::from_str(r#"{"cmd":"agent.download","id":"agent1"}"#).expect("parse");
         let result = dispatch(&client, &msg, None).await;
         assert!(
-            matches!(result, Err(CliError::InvalidArgs(_))),
-            "agent.download must be an unknown command until WebSocket transport exists, got {result:?}"
+            matches!(result, Err(CliError::Unsupported(_))),
+            "agent.download must return Unsupported (not unknown command), got {result:?}"
         );
     }
 

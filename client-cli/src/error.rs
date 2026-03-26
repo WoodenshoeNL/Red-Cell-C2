@@ -10,7 +10,6 @@
 //! | 3    | Auth failure (bad token, insufficient role) |
 //! | 4    | Server unreachable |
 //! | 5    | Timeout |
-//! | 6    | Unsupported (feature not yet available) |
 
 use thiserror::Error;
 
@@ -26,8 +25,6 @@ pub const EXIT_AUTH_FAILURE: i32 = 3;
 pub const EXIT_SERVER_UNREACHABLE: i32 = 4;
 /// Process exit code: request timed out.
 pub const EXIT_TIMEOUT: i32 = 5;
-/// Process exit code: feature not yet supported by the server.
-pub const EXIT_UNSUPPORTED: i32 = 6;
 
 /// Machine-readable error codes emitted on stderr.
 pub const ERROR_CODE_GENERAL: &str = "ERROR";
@@ -104,7 +101,7 @@ impl CliError {
             CliError::Timeout(_) => EXIT_TIMEOUT,
             CliError::InvalidArgs(_) => EXIT_GENERAL,
             CliError::ServerError(_) => EXIT_GENERAL,
-            CliError::Unsupported(_) => EXIT_UNSUPPORTED,
+            CliError::Unsupported(_) => EXIT_GENERAL,
             CliError::Config(crate::config::ConfigError::MissingToken) => EXIT_AUTH_FAILURE,
             CliError::Config(_) => EXIT_GENERAL,
             CliError::General(_) => EXIT_GENERAL,
@@ -176,9 +173,9 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_has_correct_exit_code() {
+    fn unsupported_exits_general_with_unsupported_error_code() {
         let err = CliError::Unsupported("agent output not available via REST".to_owned());
-        assert_eq!(err.exit_code(), EXIT_UNSUPPORTED);
+        assert_eq!(err.exit_code(), EXIT_GENERAL);
         assert_eq!(err.error_code(), ERROR_CODE_UNSUPPORTED);
     }
 

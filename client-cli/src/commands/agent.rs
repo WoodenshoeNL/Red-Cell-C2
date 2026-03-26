@@ -1265,8 +1265,8 @@ mod tests {
             watch_output(&client, &crate::output::OutputFormat::Json, "agent1", None).await;
         assert_eq!(
             exit_code,
-            crate::error::EXIT_UNSUPPORTED,
-            "watch_output must exit with EXIT_UNSUPPORTED"
+            crate::error::EXIT_GENERAL,
+            "watch_output must exit with EXIT_GENERAL for unsupported features"
         );
     }
 }

@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 802 | 228 | 31 |
-| Bugs filed against | 90 | 34 | 9 |
+| Tasks closed | 841 | 231 | 31 |
+| Bugs filed against | 91 | 35 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
 | Quality score | 89% | 85% | 71% |
 
-*Bug rates: Claude 90/802=0.11, Codex 34/228=0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 91/841=0.11, Codex 35/231=0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -25,7 +25,7 @@ Each loop run updates the running totals and appends a review entry.
 | Clippy warnings | 4 | 0 | 1 |
 | Protocol errors | 16 | 27 | 3 |
 | Security issues | 38 | 38 | 0 |
-| Architecture drift | 16 | 21 | 0 |
+| Architecture drift | 17 | 22 | 0 |
 | Memory / resource leaks | 6 | 10 | 1 |
 | Startup / lifecycle regressions | 2 | 9 | 0 |
 | Test infrastructure / flakiness | 14 | 0 | 0 |
@@ -40,6 +40,18 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-26 13:04 — 738417f3..f97730d1
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 39 | 1 | Large Claude-heavy range across teamserver, common, specter, and client-cli. Filed `red-cell-c2-jnu16` for introducing undocumented client-cli exit code 6 / `UNSUPPORTED`, which violates the published 0-5 exit-code contract. |
+| Codex | 3 | 1 | Closed `gzw6p`, `2d1jn`, and `2qrdj` in client and client-cli. Filed `red-cell-c2-vs8mi` because session mode no longer accepts `agent.upload` / `agent.download`, despite the documented command surface saying session mirrors the CLI. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`)
+Tests: passed (`cargo test --workspace`)
+Issues found: 2 new bugs filed (`red-cell-c2-jnu16`, `red-cell-c2-vs8mi`)
 
 ### QA Review — 2026-03-23 19:44 — fed1e87b..6fab04a6
 

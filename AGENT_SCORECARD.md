@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 846 | 231 | 31 |
+| Tasks closed | 849 | 231 | 31 |
 | Bugs filed against | 91 | 35 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
 | Quality score | 89% | 85% | 71% |
 
-*Bug rates: Claude 91/846=0.11, Codex 35/231=0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 91/849=0.11, Codex 35/231=0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-27 00:15 — 193a9f06..4a12813f
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 0 | Closed plugin tests (d886t), malformed packet tests (421tf), tls.rs coverage verification (cbwqn). In progress: payload_builder tests (jw8rl). All code clean — no violations. |
+| Codex | 0 | 0 | No activity this period |
+| Cursor | 0 | 0 | No activity this period |
+
+Build: passed | Clippy: passed | Tests: running (build lock contention)
 
 ### Arch Review — 2026-03-26 22:30
 

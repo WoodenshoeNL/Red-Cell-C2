@@ -25,7 +25,7 @@ Each loop run updates the running totals and appends a review entry.
 | Clippy warnings | 4 | 0 | 1 |
 | Protocol errors | 16 | 27 | 3 |
 | Security issues | 38 | 38 | 0 |
-| Architecture drift | 17 | 23 | 0 |
+| Architecture drift | 18 | 23 | 0 |
 | Memory / resource leaks | 6 | 10 | 1 |
 | Startup / lifecycle regressions | 2 | 9 | 0 |
 | Test infrastructure / flakiness | 14 | 0 | 0 |
@@ -40,6 +40,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-26 16:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 1 | architecture drift | Missing `time` crate features in common/Cargo.toml causes standalone client build failure (red-cell-c2-6ily5) |
+| Codex | 0 | — | No issues found |
+| Cursor | 0 | — | No issues found |
+
+Overall codebase health: on track
+Biggest blindspot: Cargo feature unification masks missing crate-level feature declarations — `cargo check -p red-cell-client` fails even though `cargo check --workspace` passes
 
 ### QA Review — 2026-03-26 15:01 — f97730d1..1b459414
 

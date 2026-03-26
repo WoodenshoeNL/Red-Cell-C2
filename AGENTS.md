@@ -186,6 +186,7 @@ Teamserver profiles live in `./profiles/` (`.yaotl` config files + TLS certs). T
 | `agent/demon/` | **Demon** | C/ASM | **Frozen** — pristine copy of the Havoc Demon. Do not modify. Replace with upstream to update. |
 | `agent/archon/` | **Archon** | C/ASM | **Mutable** — enhanced fork of Demon. Changes and improvements welcome. |
 | `agent/specter/` | **Specter** | Rust | **New** — ground-up Rust rewrite targeting full Demon protocol/feature parity. |
+| `agent/phantom/` | **Phantom** | Rust | **Mutable** — Linux agent scaffold with Demon-compatible transport. |
 
 ## Stopping a Dev Loop
 

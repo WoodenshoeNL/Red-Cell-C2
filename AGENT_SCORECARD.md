@@ -21,10 +21,10 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 7 | 0 | 0 |
-| Missing tests / stale tests | 38 | 13 | 5 |
+| Missing tests / stale tests | 40 | 14 | 5 |
 | Clippy warnings | 4 | 0 | 1 |
 | Protocol errors | 16 | 27 | 3 |
-| Security issues | 38 | 38 | 0 |
+| Security issues | 40 | 38 | 0 |
 | Architecture drift | 18 | 23 | 0 |
 | Memory / resource leaks | 6 | 10 | 1 |
 | Startup / lifecycle regressions | 2 | 9 | 0 |
@@ -40,6 +40,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-26 22:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 4 | missing tests (2), security (2) | payload_builder.rs zero test coverage; listeners.rs ~13 untested public helpers; AgentCryptoMaterial lacks Zeroize on drop; client proxy password not Zeroizing |
+| Codex | 1 | missing tests | common/src/tls.rs has 10 public functions with zero test coverage |
+| Cursor | 0 | — | No issues found |
+
+Overall codebase health: on track
+Biggest blindspot: common/src/tls.rs — the TLS certificate generation and loading module has zero test coverage. A bug in self-signed cert generation or PEM loading could silently break all HTTPS listeners.
 
 ### Arch Review — 2026-03-26 19:00
 

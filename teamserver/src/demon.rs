@@ -19,6 +19,17 @@ use crate::dispatch::util::{
 };
 use crate::{AgentRegistry, TeamserverError};
 
+/// Extension flags appended after the standard DEMON_INIT metadata fields.
+///
+/// When an agent appends a trailing `u32` (big-endian) after the `working_hours` field
+/// in the encrypted init metadata, it is interpreted as a bitmask of extension flags.
+/// Legacy Demon agents omit this field entirely, and the parser defaults to legacy mode.
+///
+/// Bit 0: request monotonic (non-legacy) AES-CTR mode.  When set, the teamserver
+/// registers the agent with `legacy_ctr = false`, meaning the CTR block offset
+/// advances across packets rather than resetting to 0 for each message.
+pub const INIT_EXT_MONOTONIC_CTR: u32 = 1 << 0;
+
 /// A decrypted Demon callback package parsed from an agent request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DemonCallbackPackage {
@@ -192,15 +203,14 @@ impl DemonPacketParser {
                 ));
             }
 
-            let agent = parse_init_agent(
+            let (agent, legacy_ctr) = parse_init_agent(
                 envelope.header.agent_id,
                 remaining,
                 &external_ip,
                 now,
                 self.init_secret.as_deref(),
             )?;
-            // Legacy Demon agents reset AES-CTR to block 0 for every packet.
-            self.registry.insert_full(agent.clone(), listener_name, 0, true).await?;
+            self.registry.insert_full(agent.clone(), listener_name, 0, legacy_ctr).await?;
 
             return Ok(ParsedDemonPacket::Init(Box::new(ParsedDemonInit {
                 header: envelope.header,
@@ -318,13 +328,18 @@ fn parse_callback_packages(
     Ok(packages)
 }
 
+/// Parse a DEMON_INIT payload into an `AgentRecord` and a `legacy_ctr` flag.
+///
+/// Returns `(agent, legacy_ctr)`.  When the decrypted metadata contains trailing
+/// extension flags with [`INIT_EXT_MONOTONIC_CTR`] set, `legacy_ctr` is `false`;
+/// otherwise it defaults to `true` (legacy Demon behaviour).
 fn parse_init_agent(
     agent_id: u32,
     payload: &[u8],
     external_ip: &str,
     now: OffsetDateTime,
     init_secret: Option<&[u8]>,
-) -> Result<AgentRecord, DemonParserError> {
+) -> Result<(AgentRecord, bool), DemonParserError> {
     let mut offset = 0_usize;
     let key = read_fixed::<AGENT_KEY_LENGTH>(payload, &mut offset, "init AES key")?;
     let iv = read_fixed::<AGENT_IV_LENGTH>(payload, &mut offset, "init AES IV")?;
@@ -379,6 +394,25 @@ fn parse_init_agent(
     let kill_date = read_u64_be(&decrypted, &mut decrypted_offset, "kill date")?;
     let working_hours =
         i32::from_be_bytes(read_fixed::<4>(&decrypted, &mut decrypted_offset, "working hours")?);
+
+    // Optional extension flags — appended by Specter (and future) agents after the
+    // standard metadata fields.  Legacy Demon agents omit this, so an absent field
+    // means legacy CTR mode.
+    let legacy_ctr = if decrypted.len() - decrypted_offset >= 4 {
+        let ext_flags = read_u32_be(&decrypted, &mut decrypted_offset, "init extension flags")?;
+        let monotonic = ext_flags & INIT_EXT_MONOTONIC_CTR != 0;
+        if monotonic {
+            tracing::info!(
+                agent_id = format_args!("0x{agent_id:08X}"),
+                ext_flags,
+                "agent requested monotonic CTR mode via init extension flags"
+            );
+        }
+        !monotonic
+    } else {
+        true
+    };
+
     let timestamp =
         now.format(&Rfc3339).map_err(|_| DemonParserError::InvalidInit("invalid timestamp"))?;
     let kill_date = parse_kill_date(kill_date)?;
@@ -407,41 +441,44 @@ fn parse_init_agent(
         }
     };
 
-    Ok(AgentRecord {
-        agent_id: parsed_agent_id,
-        active: true,
-        reason: String::new(),
-        note: String::new(),
-        encryption,
-        hostname,
-        username,
-        domain_name,
-        external_ip: external_ip.to_owned(),
-        internal_ip,
-        process_name: basename(&process_path),
-        process_path,
-        base_address,
-        process_pid,
-        process_tid,
-        process_ppid,
-        process_arch: process_arch_label(process_arch).to_owned(),
-        elevated,
-        os_version: windows_version_label(
-            os_major,
-            os_minor,
-            os_product_type,
-            os_service_pack,
+    Ok((
+        AgentRecord {
+            agent_id: parsed_agent_id,
+            active: true,
+            reason: String::new(),
+            note: String::new(),
+            encryption,
+            hostname,
+            username,
+            domain_name,
+            external_ip: external_ip.to_owned(),
+            internal_ip,
+            process_name: basename(&process_path),
+            process_path,
+            base_address,
+            process_pid,
+            process_tid,
+            process_ppid,
+            process_arch: process_arch_label(process_arch).to_owned(),
+            elevated,
+            os_version: windows_version_label(
+                os_major,
+                os_minor,
+                os_product_type,
+                os_service_pack,
+                os_build,
+            ),
             os_build,
-        ),
-        os_build,
-        os_arch: windows_arch_label(os_arch).to_owned(),
-        sleep_delay,
-        sleep_jitter,
-        kill_date,
-        working_hours: (working_hours != 0).then_some(working_hours),
-        first_call_in: timestamp.clone(),
-        last_call_in: timestamp,
-    })
+            os_arch: windows_arch_label(os_arch).to_owned(),
+            sleep_delay,
+            sleep_jitter,
+            kill_date,
+            working_hours: (working_hours != 0).then_some(working_hours),
+            first_call_in: timestamp.clone(),
+            last_call_in: timestamp,
+        },
+        legacy_ctr,
+    ))
 }
 
 fn parse_kill_date(kill_date: u64) -> Result<Option<i64>, DemonParserError> {
@@ -552,8 +589,8 @@ mod tests {
     use zeroize::Zeroizing;
 
     use super::{
-        DemonCallbackPackage, DemonPacketParser, DemonParserError, ParsedDemonPacket,
-        build_init_ack, build_reconnect_ack,
+        DemonCallbackPackage, DemonPacketParser, DemonParserError, INIT_EXT_MONOTONIC_CTR,
+        ParsedDemonPacket, build_init_ack, build_reconnect_ack,
     };
     use crate::{AgentRegistry, Database};
 
@@ -603,6 +640,13 @@ mod tests {
         build_init_metadata_with_kill_date_and_working_hours(agent_id, 1_893_456_000, 0b101010)
     }
 
+    /// Build init metadata with trailing extension flags (Specter-style).
+    fn build_init_metadata_with_ext_flags(agent_id: u32, ext_flags: u32) -> Vec<u8> {
+        let mut metadata = build_init_metadata(agent_id);
+        metadata.extend_from_slice(&u32_be(ext_flags));
+        metadata
+    }
+
     fn build_init_metadata_with_working_hours(agent_id: u32, working_hours: i32) -> Vec<u8> {
         build_init_metadata_with_kill_date_and_working_hours(agent_id, 1_893_456_000, working_hours)
     }
@@ -644,6 +688,26 @@ mod tests {
         iv: [u8; AGENT_IV_LENGTH],
     ) -> Vec<u8> {
         build_init_packet_with_working_hours(agent_id, key, iv, 0b101010)
+    }
+
+    /// Build an init packet with trailing extension flags (Specter-style).
+    fn build_init_packet_with_ext_flags(
+        agent_id: u32,
+        key: [u8; AGENT_KEY_LENGTH],
+        iv: [u8; AGENT_IV_LENGTH],
+        ext_flags: u32,
+    ) -> Vec<u8> {
+        let metadata = build_init_metadata_with_ext_flags(agent_id, ext_flags);
+        let encrypted =
+            encrypt_agent_data(&key, &iv, &metadata).expect("metadata encryption should succeed");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u32_be(u32::from(DemonCommand::DemonInit)));
+        payload.extend_from_slice(&u32_be(7));
+        payload.extend_from_slice(&key);
+        payload.extend_from_slice(&iv);
+        payload.extend_from_slice(&encrypted);
+
+        DemonEnvelope::new(agent_id, payload).expect("init envelope should be valid").to_bytes()
     }
 
     fn build_init_packet_with_working_hours(
@@ -2254,6 +2318,159 @@ mod tests {
             init.agent.encryption.aes_iv.as_slice(),
             &iv,
             "session IV must equal raw agent IV when no init_secret"
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_legacy_init_without_ext_flags_registers_legacy_ctr() {
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry.clone());
+        let agent_id = 0xAAAA_1111;
+        let key = test_key(0xC1);
+        let iv = test_iv(0xD2);
+        let packet = build_init_packet(agent_id, key, iv);
+
+        let parsed = parser
+            .parse_at(&packet, "10.0.0.50".to_owned(), datetime!(2026-03-20 12:00:00 UTC))
+            .await
+            .expect("legacy init should succeed");
+
+        let ParsedDemonPacket::Init(init) = parsed else {
+            panic!("expected init packet");
+        };
+        assert_eq!(init.agent.agent_id, agent_id);
+
+        assert!(
+            registry.legacy_ctr(agent_id).await.expect("legacy_ctr should be queryable"),
+            "legacy Demon init (no ext flags) must register with legacy_ctr = true"
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_specter_init_with_monotonic_ctr_flag_registers_non_legacy() {
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry.clone());
+        let agent_id = 0xBBBB_2222;
+        let key = test_key(0xE3);
+        let iv = test_iv(0xF4);
+        let packet = build_init_packet_with_ext_flags(agent_id, key, iv, INIT_EXT_MONOTONIC_CTR);
+
+        let parsed = parser
+            .parse_at(&packet, "10.0.0.51".to_owned(), datetime!(2026-03-20 12:01:00 UTC))
+            .await
+            .expect("Specter init with monotonic CTR flag should succeed");
+
+        let ParsedDemonPacket::Init(init) = parsed else {
+            panic!("expected init packet");
+        };
+        assert_eq!(init.agent.agent_id, agent_id);
+
+        assert!(
+            !registry.legacy_ctr(agent_id).await.expect("legacy_ctr should be queryable"),
+            "Specter init with INIT_EXT_MONOTONIC_CTR must register with legacy_ctr = false"
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_init_with_zero_ext_flags_registers_legacy_ctr() {
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry.clone());
+        let agent_id = 0xCCCC_3333;
+        let key = test_key(0xA5);
+        let iv = test_iv(0xB6);
+        // Extension flags present but all zero — no monotonic CTR requested.
+        let packet = build_init_packet_with_ext_flags(agent_id, key, iv, 0);
+
+        let parsed = parser
+            .parse_at(&packet, "10.0.0.52".to_owned(), datetime!(2026-03-20 12:02:00 UTC))
+            .await
+            .expect("init with zero ext flags should succeed");
+
+        let ParsedDemonPacket::Init(init) = parsed else {
+            panic!("expected init packet");
+        };
+        assert_eq!(init.agent.agent_id, agent_id);
+
+        assert!(
+            registry.legacy_ctr(agent_id).await.expect("legacy_ctr should be queryable"),
+            "init with ext_flags=0 must register with legacy_ctr = true"
+        );
+    }
+
+    #[tokio::test]
+    async fn specter_init_ctr_advances_on_callback() {
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry.clone());
+        let agent_id = 0xDDDD_4444;
+        let key = test_key(0x71);
+        let iv = test_iv(0x82);
+        let packet = build_init_packet_with_ext_flags(agent_id, key, iv, INIT_EXT_MONOTONIC_CTR);
+
+        parser
+            .parse_at(&packet, "10.0.0.53".to_owned(), datetime!(2026-03-20 12:03:00 UTC))
+            .await
+            .expect("Specter init should succeed");
+
+        assert!(
+            !registry.legacy_ctr(agent_id).await.expect("legacy_ctr"),
+            "agent should be non-legacy"
+        );
+
+        // Build init ack — advances the CTR offset.
+        let _ack = build_init_ack(&registry, agent_id).await.expect("ack should build");
+        let offset_after_ack = registry.ctr_offset(agent_id).await.expect("offset");
+        assert_eq!(offset_after_ack, 1, "CTR should advance by 1 block after init ack");
+
+        // A callback at the correct offset should parse and advance CTR.
+        let callback_packet = build_callback_packet(agent_id, key, iv, offset_after_ack);
+        let parsed = parser
+            .parse_at(&callback_packet, "10.0.0.53".to_owned(), datetime!(2026-03-20 12:04:00 UTC))
+            .await
+            .expect("callback at correct offset should succeed");
+
+        let ParsedDemonPacket::Callback { packages, .. } = parsed else {
+            panic!("expected callback packet");
+        };
+        assert_eq!(packages[0].command_id, u32::from(DemonCommand::CommandCheckin));
+
+        let offset_after_callback = registry.ctr_offset(agent_id).await.expect("offset");
+        assert!(
+            offset_after_callback > offset_after_ack,
+            "monotonic CTR must advance after callback (was {offset_after_ack}, now {offset_after_callback})"
+        );
+    }
+
+    #[tokio::test]
+    async fn specter_init_with_init_secret_registers_non_legacy_with_derived_keys() {
+        let registry = test_registry().await;
+        let init_secret = b"test-server-secret".to_vec();
+        let parser = DemonPacketParser::with_init_secret(registry.clone(), Some(init_secret));
+        let agent_id = 0xEEEE_5555;
+        let key = test_key(0x91);
+        let iv = test_iv(0xA2);
+        let packet = build_init_packet_with_ext_flags(agent_id, key, iv, INIT_EXT_MONOTONIC_CTR);
+
+        let parsed = parser
+            .parse_at(&packet, "10.0.0.54".to_owned(), datetime!(2026-03-20 12:05:00 UTC))
+            .await
+            .expect("Specter init with init_secret should succeed");
+
+        let ParsedDemonPacket::Init(init) = parsed else {
+            panic!("expected init packet");
+        };
+        assert_eq!(init.agent.agent_id, agent_id);
+
+        // Non-legacy CTR must be set.
+        assert!(
+            !registry.legacy_ctr(agent_id).await.expect("legacy_ctr"),
+            "Specter init with init_secret must register non-legacy CTR"
+        );
+
+        // Session keys must be derived (not raw agent keys).
+        assert_ne!(
+            init.agent.encryption.aes_key.as_slice(),
+            &key,
+            "with init_secret, session key must differ from raw agent key"
         );
     }
 }

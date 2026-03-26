@@ -218,7 +218,18 @@ pub fn parse_tasking_response(
     })
 }
 
+/// Extension flag: request monotonic (non-legacy) AES-CTR mode from the teamserver.
+///
+/// When set in the trailing extension flags `u32`, the teamserver registers the agent
+/// with `legacy_ctr = false`, advancing the CTR block offset across packets instead of
+/// resetting to 0 for each message.
+const INIT_EXT_MONOTONIC_CTR: u32 = 1 << 0;
+
 /// Serialize the init metadata fields to a big-endian byte buffer for encryption.
+///
+/// Specter appends a trailing `u32` extension flags field after the standard metadata,
+/// requesting monotonic CTR mode.  Legacy Demon agents omit this field; the teamserver
+/// defaults to legacy mode when it is absent.
 fn serialize_init_metadata(agent_id: u32, m: &AgentMetadata) -> Vec<u8> {
     let mut buf = Vec::with_capacity(256);
 
@@ -251,6 +262,9 @@ fn serialize_init_metadata(agent_id: u32, m: &AgentMetadata) -> Vec<u8> {
     buf.extend_from_slice(&m.sleep_jitter.to_be_bytes());
     buf.extend_from_slice(&m.kill_date.to_be_bytes());
     buf.extend_from_slice(&m.working_hours.to_be_bytes());
+
+    // Specter extension: request monotonic CTR mode.
+    buf.extend_from_slice(&INIT_EXT_MONOTONIC_CTR.to_be_bytes());
 
     buf
 }

@@ -2423,12 +2423,15 @@ impl DnsListenerState {
                         return "err";
                     }
                     let mut responses = self.responses.lock().await;
-                    Self::enforce_response_caps(
+                    let accepted = Self::enforce_response_caps(
                         &mut responses,
                         agent_id,
                         &chunks,
                         &self.config.name,
                     );
+                    if !accepted {
+                        return "err";
+                    }
                     responses.insert(
                         agent_id,
                         DnsPendingResponse { chunks, received_at: Instant::now() },
@@ -2461,12 +2464,15 @@ impl DnsListenerState {
     /// (total memory), the oldest entries are evicted until there is room.
     /// If the incoming entry itself already exists, it will be replaced in-place
     /// and does not count toward the limit.
+    ///
+    /// Returns `true` if the caller should proceed with the insert, or `false`
+    /// if the incoming response alone exceeds the byte cap and must be rejected.
     fn enforce_response_caps(
         responses: &mut HashMap<u32, DnsPendingResponse>,
         incoming_agent_id: u32,
         incoming_chunks: &[String],
         listener_name: &str,
-    ) {
+    ) -> bool {
         // If this is a replacement for an existing agent, remove the old entry
         // first so it doesn't count against the caps.
         let replaced = responses.remove(&incoming_agent_id);
@@ -2509,15 +2515,28 @@ impl DnsListenerState {
             total_bytes -= evicted_bytes;
         }
 
-        // If eviction freed enough space, we're done.  If we couldn't free
-        // enough (the incoming response alone exceeds the byte cap while the
-        // map is empty), we still allow the insert — the chunk-count limit
-        // (DNS_MAX_DOWNLOAD_CHUNKS) already bounds single-response size.
+        // If the incoming response alone exceeds the byte cap, reject it.
+        if incoming_bytes > DNS_MAX_PENDING_RESPONSE_BYTES {
+            warn!(
+                listener = %listener_name,
+                agent_id = format_args!("{incoming_agent_id:08X}"),
+                incoming_bytes,
+                max_bytes = DNS_MAX_PENDING_RESPONSE_BYTES,
+                "rejecting oversized DNS response — single entry exceeds byte cap"
+            );
+            // Restore the replaced entry if we had one, since we're rejecting
+            // the new response.
+            if let Some(old) = replaced {
+                responses.insert(incoming_agent_id, old);
+            }
+            return false;
+        }
 
         // Re-insert the replaced entry if nothing was evicted and we had one —
         // but actually we don't: we've already removed it above, and the caller
         // will insert the new value.  We just need to NOT restore the old entry.
         let _ = replaced;
+        true
     }
 
     async fn cleanup_expired_uploads(&self) {
@@ -7317,12 +7336,13 @@ mod tests {
         let new_chunks = vec!["NEW".to_owned()];
         {
             let mut responses = state.responses.lock().await;
-            DnsListenerState::enforce_response_caps(
+            let accepted = DnsListenerState::enforce_response_caps(
                 &mut responses,
                 0xFFFF_FFFF,
                 &new_chunks,
                 "test",
             );
+            assert!(accepted, "small response should be accepted");
             responses.insert(
                 0xFFFF_FFFF,
                 DnsPendingResponse { chunks: new_chunks, received_at: Instant::now() },
@@ -7358,7 +7378,9 @@ mod tests {
         let new_chunks = vec![big_chunk.clone(), big_chunk.clone()];
         {
             let mut responses = state.responses.lock().await;
-            DnsListenerState::enforce_response_caps(&mut responses, 100, &new_chunks, "test");
+            let accepted =
+                DnsListenerState::enforce_response_caps(&mut responses, 100, &new_chunks, "test");
+            assert!(accepted, "response fitting within cap should be accepted");
             responses.insert(
                 100,
                 DnsPendingResponse { chunks: new_chunks, received_at: Instant::now() },
@@ -7396,7 +7418,9 @@ mod tests {
         let new_chunks = vec!["REPLACED".to_owned()];
         {
             let mut responses = state.responses.lock().await;
-            DnsListenerState::enforce_response_caps(&mut responses, 0, &new_chunks, "test");
+            let accepted =
+                DnsListenerState::enforce_response_caps(&mut responses, 0, &new_chunks, "test");
+            assert!(accepted, "replacement response should be accepted");
             responses
                 .insert(0, DnsPendingResponse { chunks: new_chunks, received_at: Instant::now() });
 
@@ -7406,6 +7430,67 @@ mod tests {
             for i in 1..DNS_MAX_PENDING_RESPONSES {
                 assert!(responses.contains_key(&(i as u32)), "agent {i} must still exist");
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn dns_response_cap_rejects_oversized_single_response() {
+        let state = dns_state("dns-resp-oversize").await;
+
+        // Build a single response that exceeds DNS_MAX_PENDING_RESPONSE_BYTES (8 MiB).
+        // Use (8 MiB + 1) bytes spread across two chunks.
+        let half = DNS_MAX_PENDING_RESPONSE_BYTES / 2;
+        let oversized_chunks = vec!["X".repeat(half), "X".repeat(half + 1)];
+        let total: usize = oversized_chunks.iter().map(|c| c.len()).sum();
+        assert!(total > DNS_MAX_PENDING_RESPONSE_BYTES);
+
+        {
+            let mut responses = state.responses.lock().await;
+            let accepted = DnsListenerState::enforce_response_caps(
+                &mut responses,
+                42,
+                &oversized_chunks,
+                "test",
+            );
+            assert!(!accepted, "oversized single response must be rejected");
+            assert!(responses.is_empty(), "map should remain empty after rejection");
+        }
+    }
+
+    #[tokio::test]
+    async fn dns_response_cap_rejects_oversized_and_restores_replaced() {
+        let state = dns_state("dns-resp-oversize-replace").await;
+
+        // Pre-populate an entry for agent 42.
+        let original_chunks = vec!["ORIGINAL".to_owned()];
+        {
+            let mut responses = state.responses.lock().await;
+            responses.insert(
+                42,
+                DnsPendingResponse { chunks: original_chunks, received_at: Instant::now() },
+            );
+        }
+
+        // Try to replace agent 42's entry with an oversized response.
+        let half = DNS_MAX_PENDING_RESPONSE_BYTES / 2;
+        let oversized_chunks = vec!["X".repeat(half), "X".repeat(half + 1)];
+
+        {
+            let mut responses = state.responses.lock().await;
+            let accepted = DnsListenerState::enforce_response_caps(
+                &mut responses,
+                42,
+                &oversized_chunks,
+                "test",
+            );
+            assert!(!accepted, "oversized replacement must be rejected");
+            // The original entry should be restored.
+            assert!(responses.contains_key(&42), "original entry must be restored");
+            assert_eq!(
+                responses.get(&42).expect("agent 42").chunks[0],
+                "ORIGINAL",
+                "restored entry must have original data"
+            );
         }
     }
 

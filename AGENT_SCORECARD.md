@@ -10,11 +10,11 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 849 | 231 | 31 |
-| Bugs filed against | 91 | 35 | 9 |
+| Bugs filed against | 92 | 35 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
 | Quality score | 89% | 85% | 71% |
 
-*Bug rates: Claude 91/849=0.11, Codex 35/231=0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 92/849=0.11, Codex 35/231=0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 18 | 23 | 0 |
 | Memory / resource leaks | 6 | 10 | 1 |
 | Startup / lifecycle regressions | 2 | 9 | 0 |
-| Test infrastructure / flakiness | 14 | 0 | 0 |
+| Test infrastructure / flakiness | 15 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
 | Correctness / pagination | 35 | 7 | 1 |
@@ -49,7 +49,7 @@ Each loop run updates the running totals and appends a review entry.
 | Codex | 0 | 0 | No activity this period |
 | Cursor | 0 | 0 | No activity this period |
 
-Build: passed | Clippy: passed | Tests: running (build lock contention)
+Build: passed | Clippy: passed | Tests: 2 flaky failures (pre-existing, filed red-cell-c2-xk66a)
 
 ### Arch Review — 2026-03-26 22:30
 

@@ -21,11 +21,11 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 7 | 0 | 0 |
-| Missing tests / stale tests | 40 | 14 | 5 |
+| Missing tests / stale tests | 44 | 14 | 5 |
 | Clippy warnings | 4 | 0 | 1 |
 | Protocol errors | 16 | 27 | 3 |
-| Security issues | 40 | 38 | 0 |
-| Architecture drift | 18 | 23 | 0 |
+| Security issues | 41 | 38 | 0 |
+| Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 6 | 10 | 1 |
 | Startup / lifecycle regressions | 2 | 9 | 0 |
 | Test infrastructure / flakiness | 15 | 0 | 0 |
@@ -40,6 +40,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-27 03:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 6 | missing tests (4), security (1), architecture drift (1) | CommandNet 10 untested subcommands; CommandToken 8 untested subcommands; MemFile/PackageDropped no tests; agents.rs pivot functions untested; client-cli config missing 0o600 file perms for tokens; phantom Cargo.toml inconsistent workspace config |
+| Codex | 0 | — | No issues found |
+| Cursor | 0 | — | No issues found |
+
+Overall codebase health: on track
+Biggest blindspot: dispatch/network.rs and dispatch/token.rs — security-critical token and network enumeration handlers have zero integration test coverage across 18 combined subcommands
 
 ### QA Review — 2026-03-27 00:15 — 193a9f06..4a12813f
 

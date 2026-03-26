@@ -25,7 +25,7 @@ rustls-pemfile = "2.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
-time = "0.3"
+time = { version = "0.3", features = ["formatting", "parsing"] }
 tokio-rustls = "0.26.4"
 tracing = "0.1"
 utoipa = "5.4"

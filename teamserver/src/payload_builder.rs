@@ -5269,4 +5269,776 @@ mod tests {
         }
         // If read_result is None, the file was briefly absent during the write — also acceptable.
     }
+
+    // ── replace_all byte replacement tests ────────────────────────────────
+
+    #[test]
+    fn replace_all_replaces_single_occurrence() {
+        let haystack = b"hello world".to_vec();
+        let result = replace_all(haystack, b"world", b"earth");
+        assert_eq!(result, b"hello earth");
+    }
+
+    #[test]
+    fn replace_all_replaces_multiple_occurrences() {
+        let haystack = b"aXaXa".to_vec();
+        let result = replace_all(haystack, b"X", b"Y");
+        assert_eq!(result, b"aYaYa");
+    }
+
+    #[test]
+    fn replace_all_no_match_returns_unchanged() {
+        let haystack = b"hello world".to_vec();
+        let result = replace_all(haystack.clone(), b"xyz", b"abc");
+        assert_eq!(result, haystack);
+    }
+
+    #[test]
+    fn replace_all_empty_needle_returns_unchanged() {
+        let haystack = b"hello".to_vec();
+        let result = replace_all(haystack.clone(), b"", b"x");
+        assert_eq!(result, haystack);
+    }
+
+    #[test]
+    fn replace_all_same_length_replacement() {
+        let haystack = b"AAAA".to_vec();
+        let result = replace_all(haystack, b"AA", b"BB");
+        assert_eq!(result, b"BBBB");
+    }
+
+    #[test]
+    fn replace_all_with_null_padded_replacement() {
+        // Simulates the PE string replacement where replacement is
+        // null-padded to match the original string length.
+        let haystack = b"old_string_here".to_vec();
+        let mut replacement = b"new".to_vec();
+        replacement.resize(b"old_string_here".len(), 0);
+        let result = replace_all(haystack, b"old_string_here", &replacement);
+        assert_eq!(&result[..3], b"new");
+        assert!(result[3..].iter().all(|&b| b == 0));
+    }
+
+    // ── sleep/proxy/amsi value mapping tests ──────────────────────────────
+
+    #[test]
+    fn sleep_obfuscation_value_maps_known_techniques() {
+        assert_eq!(sleep_obfuscation_value("Foliage"), 3);
+        assert_eq!(sleep_obfuscation_value("Ekko"), 1);
+        assert_eq!(sleep_obfuscation_value("Zilean"), 2);
+    }
+
+    #[test]
+    fn sleep_obfuscation_value_returns_zero_for_unknown() {
+        assert_eq!(sleep_obfuscation_value("WaitForSingleObjectEx"), 0);
+        assert_eq!(sleep_obfuscation_value("Unknown"), 0);
+        assert_eq!(sleep_obfuscation_value(""), 0);
+    }
+
+    #[test]
+    fn sleep_jump_bypass_returns_zero_when_obfuscation_disabled() {
+        assert_eq!(sleep_jump_bypass(0, Some("jmp rax")).unwrap(), 0);
+        assert_eq!(sleep_jump_bypass(0, Some("jmp rbx")).unwrap(), 0);
+        assert_eq!(sleep_jump_bypass(0, None).unwrap(), 0);
+    }
+
+    #[test]
+    fn sleep_jump_bypass_maps_gadgets_when_obfuscation_enabled() {
+        assert_eq!(sleep_jump_bypass(1, Some("jmp rax")).unwrap(), 1);
+        assert_eq!(sleep_jump_bypass(1, Some("jmp rbx")).unwrap(), 2);
+        assert_eq!(sleep_jump_bypass(1, None).unwrap(), 0);
+        assert_eq!(sleep_jump_bypass(1, Some("unknown")).unwrap(), 0);
+    }
+
+    #[test]
+    fn proxy_loading_value_maps_known_methods() {
+        assert_eq!(proxy_loading_value(Some("RtlRegisterWait")), 1);
+        assert_eq!(proxy_loading_value(Some("RtlCreateTimer")), 2);
+        assert_eq!(proxy_loading_value(Some("RtlQueueWorkItem")), 3);
+    }
+
+    #[test]
+    fn proxy_loading_value_defaults_to_zero() {
+        assert_eq!(proxy_loading_value(None), 0);
+        assert_eq!(proxy_loading_value(Some("None (LdrLoadDll)")), 0);
+        assert_eq!(proxy_loading_value(Some("unknown")), 0);
+    }
+
+    #[test]
+    fn amsi_patch_value_maps_known_methods() {
+        assert_eq!(amsi_patch_value(Some("Hardware breakpoints")), 1);
+        assert_eq!(amsi_patch_value(Some("Memory")), 2);
+    }
+
+    #[test]
+    fn amsi_patch_value_defaults_to_zero() {
+        assert_eq!(amsi_patch_value(None), 0);
+        assert_eq!(amsi_patch_value(Some("")), 0);
+        assert_eq!(amsi_patch_value(Some("unknown")), 0);
+    }
+
+    // ── injection_mode tests ──────────────────────────────────────────────
+
+    #[test]
+    fn injection_mode_maps_known_values() -> Result<(), PayloadBuildError> {
+        let config = serde_json::from_value::<Map<String, Value>>(json!({
+            "Alloc": "Win32",
+            "Execute": "Native/Syscall"
+        }))
+        .unwrap();
+        assert_eq!(injection_mode(&config, "Alloc")?, 1);
+        assert_eq!(injection_mode(&config, "Execute")?, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn injection_mode_returns_zero_for_unknown() -> Result<(), PayloadBuildError> {
+        let config = serde_json::from_value::<Map<String, Value>>(json!({
+            "Alloc": "Unknown"
+        }))
+        .unwrap();
+        assert_eq!(injection_mode(&config, "Alloc")?, 0);
+        Ok(())
+    }
+
+    // ── Architecture::parse tests ─────────────────────────────────────────
+
+    #[test]
+    fn architecture_parse_accepts_x64_case_insensitive() {
+        assert_eq!(Architecture::parse("x64").unwrap(), Architecture::X64);
+        assert_eq!(Architecture::parse("X64").unwrap(), Architecture::X64);
+        assert_eq!(Architecture::parse(" x64 ").unwrap(), Architecture::X64);
+    }
+
+    #[test]
+    fn architecture_parse_accepts_x86_case_insensitive() {
+        assert_eq!(Architecture::parse("x86").unwrap(), Architecture::X86);
+        assert_eq!(Architecture::parse("X86").unwrap(), Architecture::X86);
+    }
+
+    #[test]
+    fn architecture_parse_rejects_unknown() {
+        let err = Architecture::parse("arm64").expect_err("arm64 should be rejected");
+        assert!(matches!(err, PayloadBuildError::InvalidRequest { message }
+            if message.contains("arm64")));
+    }
+
+    #[test]
+    fn architecture_suffix_and_nasm_format() {
+        assert_eq!(Architecture::X64.suffix(), ".x64");
+        assert_eq!(Architecture::X86.suffix(), ".x86");
+        assert_eq!(Architecture::X64.nasm_format(), "win64");
+        assert_eq!(Architecture::X86.nasm_format(), "win32");
+    }
+
+    // ── OutputFormat::parse comprehensive tests ───────────────────────────
+
+    #[test]
+    fn output_format_parses_all_known_formats() {
+        let cases = [
+            ("Windows Exe", OutputFormat::Exe, ".exe"),
+            ("Windows Service Exe", OutputFormat::ServiceExe, ".exe"),
+            ("Windows Dll", OutputFormat::Dll, ".dll"),
+            ("Windows Reflective Dll", OutputFormat::ReflectiveDll, ".dll"),
+            ("Windows Shellcode", OutputFormat::Shellcode, ".bin"),
+            ("Windows Shellcode Staged", OutputFormat::StagedShellcode, ".exe"),
+            ("Windows Raw Shellcode", OutputFormat::RawShellcode, ".bin"),
+        ];
+        for (input, expected_variant, expected_ext) in cases {
+            let parsed =
+                OutputFormat::parse(input).unwrap_or_else(|_| panic!("should parse `{input}`"));
+            assert_eq!(parsed, expected_variant, "variant mismatch for `{input}`");
+            assert_eq!(parsed.file_extension(), expected_ext, "extension mismatch for `{input}`");
+        }
+    }
+
+    #[test]
+    fn output_format_cache_tags_are_all_unique() {
+        use std::collections::HashSet;
+        let tags: Vec<&str> = vec![
+            OutputFormat::Exe.cache_tag(),
+            OutputFormat::ServiceExe.cache_tag(),
+            OutputFormat::Dll.cache_tag(),
+            OutputFormat::ReflectiveDll.cache_tag(),
+            OutputFormat::Shellcode.cache_tag(),
+            OutputFormat::StagedShellcode.cache_tag(),
+            OutputFormat::RawShellcode.cache_tag(),
+        ];
+        let unique: HashSet<&str> = tags.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            tags.len(),
+            "all cache tags must be unique to prevent cache collisions"
+        );
+    }
+
+    // ── pack_config validation edge cases ─────────────────────────────────
+
+    #[test]
+    fn pack_config_rejects_jitter_above_100() {
+        let config = serde_json::from_value::<Map<String, Value>>(json!({
+            "Sleep": "5",
+            "Jitter": "101",
+            "Sleep Technique": "WaitForSingleObjectEx",
+            "Injection": {
+                "Alloc": "Win32",
+                "Execute": "Win32",
+                "Spawn64": "a",
+                "Spawn32": "b"
+            }
+        }))
+        .unwrap();
+        let listener = http_listener_with_method(None);
+        let err = pack_config(&listener, &config).expect_err("jitter > 100 should be rejected");
+        assert!(matches!(
+            err,
+            PayloadBuildError::InvalidRequest { message }
+                if message.contains("Jitter") && message.contains("100")
+        ));
+    }
+
+    #[test]
+    fn pack_config_accepts_jitter_at_boundary_100() -> Result<(), Box<dyn std::error::Error>> {
+        let config = serde_json::from_value::<Map<String, Value>>(json!({
+            "Sleep": "5",
+            "Jitter": "100",
+            "Sleep Technique": "WaitForSingleObjectEx",
+            "Injection": {
+                "Alloc": "Win32",
+                "Execute": "Win32",
+                "Spawn64": "a",
+                "Spawn32": "b"
+            }
+        }))?;
+        let listener = http_listener_with_method(None);
+        pack_config(&listener, &config)?;
+        Ok(())
+    }
+
+    #[test]
+    fn pack_config_accepts_jitter_at_boundary_0() -> Result<(), Box<dyn std::error::Error>> {
+        let config = serde_json::from_value::<Map<String, Value>>(json!({
+            "Sleep": "5",
+            "Jitter": "0",
+            "Sleep Technique": "WaitForSingleObjectEx",
+            "Injection": {
+                "Alloc": "Win32",
+                "Execute": "Win32",
+                "Spawn64": "a",
+                "Spawn32": "b"
+            }
+        }))?;
+        let listener = http_listener_with_method(None);
+        pack_config(&listener, &config)?;
+        Ok(())
+    }
+
+    // ── merged_request_config override tests ──────────────────────────────
+
+    #[test]
+    fn merged_request_config_request_overrides_profile_defaults()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config = merged_request_config(
+            r#"{"Sleep":"20","Jitter":"50","Injection":{"Alloc":"Win32","Execute":"Win32"}}"#,
+            &DemonConfig {
+                sleep: Some(5),
+                jitter: Some(10),
+                indirect_syscall: false,
+                stack_duplication: false,
+                sleep_technique: None,
+                proxy_loading: None,
+                amsi_etw_patching: None,
+                injection: None,
+                dotnet_name_pipe: None,
+                binary: None,
+                init_secret: None,
+                trust_x_forwarded_for: false,
+                trusted_proxy_peers: Vec::new(),
+            },
+        )?;
+        // Request values should override profile defaults.
+        assert_eq!(config.get("Sleep"), Some(&Value::String("20".to_owned())));
+        assert_eq!(config.get("Jitter"), Some(&Value::String("50".to_owned())));
+        Ok(())
+    }
+
+    #[test]
+    fn merged_request_config_injection_spawn_overrides_profile()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config = merged_request_config(
+            r#"{"Injection":{"Alloc":"Win32","Execute":"Win32","Spawn64":"custom64.exe","Spawn32":"custom32.exe"}}"#,
+            &DemonConfig {
+                sleep: None,
+                jitter: None,
+                indirect_syscall: false,
+                stack_duplication: false,
+                sleep_technique: None,
+                proxy_loading: None,
+                amsi_etw_patching: None,
+                injection: Some(red_cell_common::config::ProcessInjectionConfig {
+                    spawn64: Some("default64.exe".to_owned()),
+                    spawn32: Some("default32.exe".to_owned()),
+                }),
+                dotnet_name_pipe: None,
+                binary: None,
+                init_secret: None,
+                trust_x_forwarded_for: false,
+                trusted_proxy_peers: Vec::new(),
+            },
+        )?;
+        assert_eq!(config["Injection"]["Spawn64"], Value::String("custom64.exe".to_owned()));
+        assert_eq!(config["Injection"]["Spawn32"], Value::String("custom32.exe".to_owned()));
+        Ok(())
+    }
+
+    #[test]
+    fn merged_request_config_rejects_non_object_input() {
+        let err = merged_request_config(
+            r#""just a string""#,
+            &DemonConfig {
+                sleep: None,
+                jitter: None,
+                indirect_syscall: false,
+                stack_duplication: false,
+                sleep_technique: None,
+                proxy_loading: None,
+                amsi_etw_patching: None,
+                injection: None,
+                dotnet_name_pipe: None,
+                binary: None,
+                init_secret: None,
+                trust_x_forwarded_for: false,
+                trusted_proxy_peers: Vec::new(),
+            },
+        )
+        .expect_err("non-object JSON should be rejected");
+        assert!(matches!(err, PayloadBuildError::InvalidRequest { message }
+            if message.contains("JSON object")));
+    }
+
+    // ── format_config_bytes tests ─────────────────────────────────────────
+
+    #[test]
+    fn format_config_bytes_formats_correctly() {
+        assert_eq!(format_config_bytes(&[0x00, 0xFF, 0x42]), r"0x00\,0xff\,0x42");
+    }
+
+    #[test]
+    fn format_config_bytes_empty_input() {
+        assert_eq!(format_config_bytes(&[]), "");
+    }
+
+    #[test]
+    fn format_config_bytes_single_byte() {
+        assert_eq!(format_config_bytes(&[0xAB]), "0xab");
+    }
+
+    // ── proxy_url tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn proxy_url_formats_with_default_scheme() {
+        let proxy = DomainHttpListenerProxyConfig {
+            enabled: true,
+            proxy_type: None,
+            host: "proxy.local".to_owned(),
+            port: 8080,
+            username: None,
+            password: None,
+        };
+        assert_eq!(proxy_url(&proxy), "http://proxy.local:8080");
+    }
+
+    #[test]
+    fn proxy_url_uses_configured_scheme() {
+        let proxy = DomainHttpListenerProxyConfig {
+            enabled: true,
+            proxy_type: Some("socks5".to_owned()),
+            host: "socks.local".to_owned(),
+            port: 1080,
+            username: None,
+            password: None,
+        };
+        assert_eq!(proxy_url(&proxy), "socks5://socks.local:1080");
+    }
+
+    // ── parse_version_triple tests ────────────────────────────────────────
+
+    #[test]
+    fn parse_version_triple_full() {
+        assert_eq!(parse_version_triple("12.2.0"), Some((12, 2, 0)));
+    }
+
+    #[test]
+    fn parse_version_triple_major_only() {
+        assert_eq!(parse_version_triple("10"), Some((10, 0, 0)));
+    }
+
+    #[test]
+    fn parse_version_triple_major_minor_only() {
+        assert_eq!(parse_version_triple("2.16"), Some((2, 16, 0)));
+    }
+
+    #[test]
+    fn parse_version_triple_rejects_empty() {
+        assert_eq!(parse_version_triple(""), None);
+    }
+
+    #[test]
+    fn parse_version_triple_rejects_non_numeric() {
+        assert_eq!(parse_version_triple("abc"), None);
+    }
+
+    // ── parse_header_u32_field tests ──────────────────────────────────────
+
+    #[test]
+    fn parse_header_u32_field_decimal() -> Result<(), PayloadBuildError> {
+        assert_eq!(parse_header_u32_field("CompileTime", "42")?, 42);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_header_u32_field_hex_lowercase() -> Result<(), PayloadBuildError> {
+        assert_eq!(parse_header_u32_field("CompileTime", "0x1a2b")?, 0x1a2b);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_header_u32_field_hex_uppercase_prefix() -> Result<(), PayloadBuildError> {
+        assert_eq!(parse_header_u32_field("CompileTime", "0X1A2B")?, 0x1a2b);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_header_u32_field_trims_whitespace() -> Result<(), PayloadBuildError> {
+        assert_eq!(parse_header_u32_field("CompileTime", "  100  ")?, 100);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_header_u32_field_rejects_non_numeric() {
+        let err = parse_header_u32_field("CompileTime", "not-a-number")
+            .expect_err("non-numeric should be rejected");
+        assert!(matches!(err, PayloadBuildError::InvalidRequest { .. }));
+    }
+
+    // ── stager_cache_bytes tests ──────────────────────────────────────────
+
+    #[test]
+    fn stager_cache_bytes_includes_host_port_uri_secure() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let listener = ListenerConfig::Http(Box::new(HttpListenerConfig {
+            name: "http".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["c2.local".to_owned()],
+            host_bind: "0.0.0.0".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: 80,
+            port_conn: Some(443),
+            method: None,
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: vec!["/stage".to_owned()],
+            host_header: None,
+            secure: true,
+            cert: None,
+            response: None,
+            proxy: None,
+        }));
+
+        let bytes = stager_cache_bytes(&listener)?;
+        // Should contain the host string, null separator, port bytes, uri, null, secure flag.
+        assert!(bytes.starts_with(b"c2.local\0"));
+        // Port 443 in LE bytes: 0xBB, 0x01
+        let port_offset = b"c2.local\0".len();
+        assert_eq!(u16::from_le_bytes([bytes[port_offset], bytes[port_offset + 1]]), 443);
+        assert!(bytes.ends_with(&[1])); // secure=true
+        Ok(())
+    }
+
+    #[test]
+    fn stager_cache_bytes_rejects_non_http_listener() {
+        let listener = ListenerConfig::Smb(red_cell_common::SmbListenerConfig {
+            name: "smb".to_owned(),
+            pipe_name: "pivot".to_owned(),
+            kill_date: None,
+            working_hours: None,
+        });
+        let err = stager_cache_bytes(&listener).expect_err("non-HTTP listener should be rejected");
+        assert!(matches!(
+            err,
+            PayloadBuildError::InvalidRequest { message }
+                if message.contains("HTTP listener")
+        ));
+    }
+
+    #[test]
+    fn stager_cache_bytes_differs_when_inputs_differ() -> Result<(), Box<dyn std::error::Error>> {
+        let make_listener = |host: &str, port: u16, secure: bool| {
+            ListenerConfig::Http(Box::new(HttpListenerConfig {
+                name: "http".to_owned(),
+                kill_date: None,
+                working_hours: None,
+                hosts: vec![host.to_owned()],
+                host_bind: "0.0.0.0".to_owned(),
+                host_rotation: "round-robin".to_owned(),
+                port_bind: port,
+                port_conn: None,
+                method: None,
+                behind_redirector: false,
+                trusted_proxy_peers: Vec::new(),
+                user_agent: None,
+                headers: Vec::new(),
+                uris: Vec::new(),
+                host_header: None,
+                secure,
+                cert: None,
+                response: None,
+                proxy: None,
+            }))
+        };
+
+        let a = stager_cache_bytes(&make_listener("host-a", 80, false))?;
+        let b = stager_cache_bytes(&make_listener("host-b", 80, false))?;
+        let c = stager_cache_bytes(&make_listener("host-a", 8080, false))?;
+        let d = stager_cache_bytes(&make_listener("host-a", 80, true))?;
+
+        assert_ne!(a, b, "different hosts must produce different cache bytes");
+        assert_ne!(a, c, "different ports must produce different cache bytes");
+        assert_ne!(a, d, "different secure flags must produce different cache bytes");
+        Ok(())
+    }
+
+    // ── disabled_for_tests structural tests ───────────────────────────────
+
+    #[test]
+    fn disabled_for_tests_creates_valid_service() {
+        let svc = PayloadBuilderService::disabled_for_tests();
+        // Should not panic and should have sensible defaults.
+        assert_eq!(svc.inner.toolchain.compiler_x64, PathBuf::from("/nonexistent/x64-gcc"));
+        assert_eq!(svc.inner.toolchain.compiler_x86, PathBuf::from("/nonexistent/x86-gcc"));
+        assert_eq!(svc.inner.toolchain.nasm, PathBuf::from("/nonexistent/nasm"));
+        assert_eq!(svc.inner.toolchain.compiler_x64_version.major, 0);
+        assert_eq!(svc.inner.default_demon.sleep, None);
+        assert!(!svc.inner.default_demon.indirect_syscall);
+        assert!(svc.inner.binary_patch.is_none());
+    }
+
+    #[test]
+    fn disabled_for_tests_is_cloneable() {
+        let svc1 = PayloadBuilderService::disabled_for_tests();
+        let svc2 = svc1.clone();
+        // Both should share the same inner Arc.
+        assert!(Arc::ptr_eq(&svc1.inner, &svc2.inner));
+    }
+
+    // ── required_u32 parsing tests ────────────────────────────────────────
+
+    #[test]
+    fn required_u32_parses_string_value() -> Result<(), PayloadBuildError> {
+        let config = serde_json::from_value::<Map<String, Value>>(json!({"val": "42"})).unwrap();
+        assert_eq!(required_u32(&config, "val")?, 42);
+        Ok(())
+    }
+
+    #[test]
+    fn required_u32_parses_number_value() -> Result<(), PayloadBuildError> {
+        let config = serde_json::from_value::<Map<String, Value>>(json!({"val": 42})).unwrap();
+        assert_eq!(required_u32(&config, "val")?, 42);
+        Ok(())
+    }
+
+    #[test]
+    fn required_u32_rejects_missing_key() {
+        let config = serde_json::from_value::<Map<String, Value>>(json!({})).unwrap();
+        let err = required_u32(&config, "missing").expect_err("missing key should fail");
+        assert!(matches!(err, PayloadBuildError::InvalidRequest { message }
+            if message.contains("missing")));
+    }
+
+    #[test]
+    fn required_u32_rejects_non_numeric_string() {
+        let config = serde_json::from_value::<Map<String, Value>>(json!({"val": "abc"})).unwrap();
+        let err = required_u32(&config, "val").expect_err("non-numeric should fail");
+        assert!(matches!(err, PayloadBuildError::InvalidRequest { .. }));
+    }
+
+    // ── build_defines tests ───────────────────────────────────────────────
+
+    #[test]
+    fn build_defines_includes_transport_and_config_for_http()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = http_listener_with_method(None);
+        let config_bytes = &[0x01, 0x02, 0x03];
+        let defines = build_defines(&listener, config_bytes, false)?;
+        assert!(defines.iter().any(|d| d == "TRANSPORT_HTTP"), "TRANSPORT_HTTP missing");
+        assert!(defines.iter().any(|d| d.starts_with("CONFIG_BYTES=")), "CONFIG_BYTES missing");
+        assert_eq!(defines.len(), 2, "should have exactly config + transport defines");
+        Ok(())
+    }
+
+    #[test]
+    fn build_defines_includes_shellcode_define_when_requested()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = http_listener_with_method(None);
+        let defines = build_defines(&listener, &[0x01], true)?;
+        assert!(defines.iter().any(|d| d == "SHELLCODE"), "SHELLCODE define missing");
+        assert_eq!(defines.len(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn build_defines_uses_transport_smb_for_smb_listener() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let listener = ListenerConfig::Smb(red_cell_common::SmbListenerConfig {
+            name: "smb".to_owned(),
+            pipe_name: "pivot".to_owned(),
+            kill_date: None,
+            working_hours: None,
+        });
+        let defines = build_defines(&listener, &[0x01], false)?;
+        assert!(defines.iter().any(|d| d == "TRANSPORT_SMB"), "TRANSPORT_SMB missing");
+        Ok(())
+    }
+
+    #[test]
+    fn build_defines_rejects_dns_listener() {
+        let listener = ListenerConfig::Dns(red_cell_common::DnsListenerConfig {
+            name: "dns".to_owned(),
+            host_bind: "0.0.0.0".to_owned(),
+            port_bind: 53,
+            domain: "c2.local".to_owned(),
+            record_types: vec!["TXT".to_owned()],
+            kill_date: None,
+            working_hours: None,
+        });
+        let err =
+            build_defines(&listener, &[0x01], false).expect_err("DNS listener should be rejected");
+        assert!(matches!(err, PayloadBuildError::InvalidRequest { .. }));
+    }
+
+    // ── main_args tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn main_args_exe_includes_main_threaded_and_entry_point() {
+        let args = main_args(Architecture::X64, OutputFormat::Exe);
+        assert!(args.contains(&"MAIN_THREADED"));
+        assert!(args.contains(&"WinMain"));
+        assert!(args.contains(&"src/main/MainExe.c"));
+    }
+
+    #[test]
+    fn main_args_exe_x86_uses_underscore_prefix() {
+        let args = main_args(Architecture::X86, OutputFormat::Exe);
+        assert!(args.contains(&"_WinMain"));
+    }
+
+    #[test]
+    fn main_args_service_exe_includes_svc_flag() {
+        let args = main_args(Architecture::X64, OutputFormat::ServiceExe);
+        assert!(args.contains(&"SVC_EXE"));
+        assert!(args.contains(&"src/main/MainSvc.c"));
+    }
+
+    #[test]
+    fn main_args_dll_uses_shared_and_dllmain() {
+        let args = main_args(Architecture::X64, OutputFormat::Dll);
+        assert!(args.contains(&"-shared"));
+        assert!(args.contains(&"DllMain"));
+        assert!(args.contains(&"src/main/MainDll.c"));
+    }
+
+    #[test]
+    fn main_args_shellcode_returns_empty() {
+        assert!(main_args(Architecture::X64, OutputFormat::Shellcode).is_empty());
+        assert!(main_args(Architecture::X64, OutputFormat::RawShellcode).is_empty());
+        assert!(main_args(Architecture::X64, OutputFormat::StagedShellcode).is_empty());
+    }
+
+    // ── default_compiler_flags tests ──────────────────────────────────────
+
+    #[test]
+    fn default_compiler_flags_always_includes_pic_and_optimization() {
+        for format in [OutputFormat::Exe, OutputFormat::Dll, OutputFormat::ServiceExe] {
+            let flags = default_compiler_flags(format);
+            assert!(flags.contains(&"-Os"), "missing -Os for {format:?}");
+            assert!(flags.contains(&"-fPIC"), "missing -fPIC for {format:?}");
+            assert!(flags.contains(&"-mwindows"), "missing -mwindows for {format:?}");
+        }
+    }
+
+    #[test]
+    fn default_compiler_flags_service_exe_links_advapi32() {
+        let flags = default_compiler_flags(OutputFormat::ServiceExe);
+        assert!(flags.contains(&"-ladvapi32"));
+        assert!(!flags.contains(&"-nostdlib"), "service exe should not use -nostdlib");
+    }
+
+    #[test]
+    fn default_compiler_flags_non_service_uses_nostdlib() {
+        for format in [OutputFormat::Exe, OutputFormat::Dll, OutputFormat::ReflectiveDll] {
+            let flags = default_compiler_flags(format);
+            assert!(flags.contains(&"-nostdlib"), "missing -nostdlib for {format:?}");
+        }
+    }
+
+    // ── VersionRequirement tests ──────────────────────────────────────────
+
+    #[test]
+    fn version_requirement_satisfied_by_exact_match() {
+        let req = VersionRequirement { major: 10, minor: 0 };
+        let ver = ToolchainVersion { major: 10, minor: 0, patch: 0, raw: "10.0.0".to_owned() };
+        assert!(req.is_satisfied_by(&ver));
+    }
+
+    #[test]
+    fn version_requirement_satisfied_by_higher_version() {
+        let req = VersionRequirement { major: 10, minor: 0 };
+        let ver = ToolchainVersion { major: 12, minor: 2, patch: 0, raw: "12.2.0".to_owned() };
+        assert!(req.is_satisfied_by(&ver));
+    }
+
+    #[test]
+    fn version_requirement_not_satisfied_by_lower_version() {
+        let req = VersionRequirement { major: 10, minor: 0 };
+        let ver = ToolchainVersion { major: 9, minor: 99, patch: 0, raw: "9.99.0".to_owned() };
+        assert!(!req.is_satisfied_by(&ver));
+    }
+
+    // ── BuildProgress and PayloadArtifact derive tests ────────────────────
+
+    #[test]
+    fn build_progress_clone_and_eq() {
+        let a = BuildProgress { level: "Info".to_owned(), message: "test".to_owned() };
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn payload_artifact_clone_and_eq() {
+        let a = PayloadArtifact {
+            bytes: vec![1, 2, 3],
+            file_name: "test.exe".to_owned(),
+            format: "Windows Exe".to_owned(),
+        };
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    // ── PayloadBuildError display tests ────────────────────────────────────
+
+    #[test]
+    fn payload_build_error_display_messages() {
+        let err = PayloadBuildError::ToolchainUnavailable { message: "nasm missing".to_owned() };
+        assert!(err.to_string().contains("nasm missing"));
+
+        let err = PayloadBuildError::InvalidRequest { message: "bad arch".to_owned() };
+        assert!(err.to_string().contains("bad arch"));
+
+        let err =
+            PayloadBuildError::CommandFailed { command: "gcc".to_owned(), diagnostics: vec![] };
+        assert!(err.to_string().contains("gcc"));
+    }
 }

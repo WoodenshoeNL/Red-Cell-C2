@@ -21,11 +21,11 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 7 | 0 | 0 |
-| Missing tests / stale tests | 35 | 13 | 5 |
+| Missing tests / stale tests | 36 | 13 | 5 |
 | Clippy warnings | 4 | 0 | 1 |
 | Protocol errors | 16 | 27 | 3 |
 | Security issues | 38 | 38 | 0 |
-| Architecture drift | 17 | 22 | 0 |
+| Architecture drift | 17 | 23 | 0 |
 | Memory / resource leaks | 6 | 10 | 1 |
 | Startup / lifecycle regressions | 2 | 9 | 0 |
 | Test infrastructure / flakiness | 14 | 0 | 0 |
@@ -3684,3 +3684,17 @@ Issues found: 0 new bugs filed
 Overall codebase health: drifting
 Biggest blindspot: the workspace is no longer a trustworthy release gate because `cargo test --workspace` is red in core teamserver code and still emits baseline test-compile warnings, so new regressions can hide inside expected noise.
 Additional unattributed issues filed this pass: `red-cell-c2-cwn21` (payload_builder outdated GCC gate test red), `red-cell-c2-biqh8` (teamserver test-compile warnings).
+
+### Arch Review — 2026-03-26 16:45
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 1 | missing tests (1) | `red-cell-c2-yhjgx`: client-cli has zero integration tests against the real Axum server — all tests use wiremock, so schema/route drift can ship green. Primarily authored by Claude Sonnet. |
+| Codex | 1 | architecture drift (1) | `red-cell-c2-scp2n`: agent/phantom/ is a workspace member but is missing from the AGENTS.md agent variants table. Introduced by Codex, integrated by Claude Opus. |
+| Cursor | 0 | — | No attributable findings this pass. |
+
+Overall codebase health: on track
+Biggest blindspot: client-cli wiremock-only testing — the REST client can pass all tests while being incompatible with the real server if routes or schemas change.
+Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`)
+Tests: passed (`cargo test --workspace`)
+Security posture: strong — AES-256-CTR with monotonic CTR offsets, HKDF session derivation, constant-time auth, Argon2id passwords, rate limiting on all auth surfaces, body size caps, agent/job/pivot depth limits. No production unwrap/expect, no todo!/unimplemented!, no println. Zero findings.

@@ -816,30 +816,28 @@ impl PluginRuntime {
         })
         .await??;
 
-        let task_id = captured_task_id
-            .lock()
-            .map_err(|_| PluginError::MutexPoisoned)?
-            .clone()
-            .unwrap_or_else(|| format!("{:08X}", next_request_id()));
+        let task_id = captured_task_id.lock().map_err(|_| PluginError::MutexPoisoned)?.clone();
 
-        self.inner.events.broadcast(OperatorMessage::AgentTask(Message {
-            head: MessageHead {
-                event: EventCode::Session,
-                user: actor.to_owned(),
-                timestamp: String::new(),
-                one_time: String::new(),
-            },
-            info: AgentTaskInfo {
-                task_id,
-                command_line: format!("{name} {joined_args}").trim().to_owned(),
-                demon_id: format!("{agent_id:08X}"),
-                command_id: "Python".to_owned(),
-                command: Some(name.to_owned()),
-                arguments: Some(joined_args),
-                task_message: Some("python plugin command executed".to_owned()),
-                ..AgentTaskInfo::default()
-            },
-        }));
+        if let Some(task_id) = task_id {
+            self.inner.events.broadcast(OperatorMessage::AgentTask(Message {
+                head: MessageHead {
+                    event: EventCode::Session,
+                    user: actor.to_owned(),
+                    timestamp: String::new(),
+                    one_time: String::new(),
+                },
+                info: AgentTaskInfo {
+                    task_id,
+                    command_line: format!("{name} {joined_args}").trim().to_owned(),
+                    demon_id: format!("{agent_id:08X}"),
+                    command_id: "Python".to_owned(),
+                    command: Some(name.to_owned()),
+                    arguments: Some(joined_args),
+                    task_message: Some("python plugin command executed".to_owned()),
+                    ..AgentTaskInfo::default()
+                },
+            }));
+        }
         Ok(true)
     }
 
@@ -1070,9 +1068,14 @@ impl PyAgent {
                 runtime.block_on(runtime.queue_raw_agent_task(agent_id, command, payload))
             })
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-        if let Ok(mut guard) = self.last_task_id.lock() {
-            *guard = Some(task_id);
-        }
+        self.last_task_id
+            .lock()
+            .map_err(|_| {
+                PyRuntimeError::new_err(
+                    "last_task_id mutex poisoned: task was queued but id not captured",
+                )
+            })?
+            .replace(task_id);
         Ok(())
     }
 }

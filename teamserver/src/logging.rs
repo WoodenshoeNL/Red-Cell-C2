@@ -250,6 +250,82 @@ mod tests {
                     panic!("file logging init should succeed: {error}");
                 }
             }
+            "json_file_format" => {
+                let log_dir = match env::var(SUBPROCESS_LOG_DIR_ENV) {
+                    Ok(path) => path,
+                    Err(error) => panic!("log directory should be set: {error}"),
+                };
+                let profile = parse_profile(&format!(
+                    r#"
+                    Teamserver {{
+                      Host = "127.0.0.1"
+                      Port = 40056
+                      Logging {{
+                        Level = "info"
+                        Format = "Json"
+                        File {{
+                          Directory = "{log_dir}"
+                          Prefix = "teamserver.log"
+                          Rotation = "Never"
+                        }}
+                      }}
+                    }}
+
+                    Operators {{
+                      user "neo" {{
+                        Password = "password1234"
+                      }}
+                    }}
+
+                    Demon {{}}
+                    "#
+                ));
+
+                let guard = match init_tracing(Some(&profile), false) {
+                    Ok(guard) => guard,
+                    Err(error) => panic!("json file logging init should succeed: {error}"),
+                };
+                tracing::info!(marker = "json_file_format_test", "hello from json test");
+                drop(guard);
+            }
+            "pretty_file_format" => {
+                let log_dir = match env::var(SUBPROCESS_LOG_DIR_ENV) {
+                    Ok(path) => path,
+                    Err(error) => panic!("log directory should be set: {error}"),
+                };
+                let profile = parse_profile(&format!(
+                    r#"
+                    Teamserver {{
+                      Host = "127.0.0.1"
+                      Port = 40056
+                      Logging {{
+                        Level = "info"
+                        Format = "Pretty"
+                        File {{
+                          Directory = "{log_dir}"
+                          Prefix = "teamserver.log"
+                          Rotation = "Never"
+                        }}
+                      }}
+                    }}
+
+                    Operators {{
+                      user "neo" {{
+                        Password = "password1234"
+                      }}
+                    }}
+
+                    Demon {{}}
+                    "#
+                ));
+
+                let guard = match init_tracing(Some(&profile), false) {
+                    Ok(guard) => guard,
+                    Err(error) => panic!("pretty file logging init should succeed: {error}"),
+                };
+                tracing::info!(marker = "pretty_file_format_test", "hello from pretty test");
+                drop(guard);
+            }
             "invalid_filter" => {
                 let filter = match env::var(SUBPROCESS_FILTER_ENV) {
                     Ok(filter) => filter,
@@ -668,5 +744,123 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    /// Read all log file contents from a log directory, concatenated.
+    fn read_log_contents(log_dir: &std::path::Path) -> String {
+        let mut contents = String::new();
+        let entries = match std::fs::read_dir(log_dir) {
+            Ok(entries) => entries,
+            Err(error) => panic!("log directory should be readable: {error}"),
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => panic!("directory entry should be readable: {error}"),
+            };
+            match std::fs::read_to_string(entry.path()) {
+                Ok(text) => contents.push_str(&text),
+                Err(error) => panic!("log file should be readable: {error}"),
+            }
+        }
+        contents
+    }
+
+    #[test]
+    fn init_tracing_writes_json_records_to_log_file() {
+        let temp_dir = match TempDir::new() {
+            Ok(dir) => dir,
+            Err(error) => panic!("tempdir should be created: {error}"),
+        };
+        let log_dir = temp_dir.path().join("logs");
+        let log_dir_str = log_dir.to_string_lossy().into_owned();
+
+        let output = run_init_tracing_subprocess(
+            "json_file_format",
+            &[(SUBPROCESS_LOG_DIR_ENV, log_dir_str.as_str())],
+        );
+
+        assert!(
+            output.status.success(),
+            "subprocess should succeed, stdout: {}, stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let contents = read_log_contents(&log_dir);
+        assert!(!contents.is_empty(), "log file should not be empty");
+
+        // Each non-empty line should be a valid JSON object.
+        let mut found_marker = false;
+        for line in contents.lines().filter(|l| !l.trim().is_empty()) {
+            let parsed: serde_json::Value = match serde_json::from_str(line) {
+                Ok(value) => value,
+                Err(error) => panic!(
+                    "every log line should be valid JSON, but got parse error: {error}\nline: {line}"
+                ),
+            };
+            let obj = parsed.as_object().expect("JSON log line should be an object");
+            // tracing JSON output includes standard fields.
+            assert!(obj.contains_key("timestamp"), "JSON record should have 'timestamp' field");
+            assert!(obj.contains_key("level"), "JSON record should have 'level' field");
+            assert!(obj.contains_key("fields"), "JSON record should have 'fields' field");
+            if let Some(fields) = obj.get("fields").and_then(|f| f.as_object()) {
+                if fields.get("marker").and_then(|m| m.as_str()) == Some("json_file_format_test") {
+                    found_marker = true;
+                    let message = fields.get("message").and_then(|m| m.as_str());
+                    assert_eq!(
+                        message,
+                        Some("hello from json test"),
+                        "JSON record should contain the emitted message"
+                    );
+                }
+            }
+        }
+        assert!(found_marker, "log file should contain the marker record");
+    }
+
+    #[test]
+    fn init_tracing_writes_pretty_records_to_log_file() {
+        let temp_dir = match TempDir::new() {
+            Ok(dir) => dir,
+            Err(error) => panic!("tempdir should be created: {error}"),
+        };
+        let log_dir = temp_dir.path().join("logs");
+        let log_dir_str = log_dir.to_string_lossy().into_owned();
+
+        let output = run_init_tracing_subprocess(
+            "pretty_file_format",
+            &[(SUBPROCESS_LOG_DIR_ENV, log_dir_str.as_str())],
+        );
+
+        assert!(
+            output.status.success(),
+            "subprocess should succeed, stdout: {}, stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let contents = read_log_contents(&log_dir);
+        assert!(!contents.is_empty(), "log file should not be empty");
+
+        // Pretty format should contain the message as human-readable text, not JSON.
+        assert!(
+            contents.contains("hello from pretty test"),
+            "pretty log file should contain the emitted message, got: {contents}"
+        );
+        assert!(
+            contents.contains("pretty_file_format_test"),
+            "pretty log file should contain the marker field, got: {contents}"
+        );
+
+        // The pretty output must NOT be valid JSON on any single line containing the marker.
+        for line in contents.lines() {
+            if line.contains("pretty_file_format_test") {
+                assert!(
+                    serde_json::from_str::<serde_json::Value>(line).is_err(),
+                    "pretty log lines should not be valid JSON, got: {line}"
+                );
+            }
+        }
     }
 }

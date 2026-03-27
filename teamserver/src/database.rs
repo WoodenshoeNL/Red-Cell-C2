@@ -3318,4 +3318,104 @@ mod tests {
         let summaries = repo.list_summaries().await.unwrap();
         assert!(summaries.is_empty());
     }
+
+    // ── payload_builds update_status tests ──────────────────────────────
+
+    #[tokio::test]
+    async fn update_status_happy_path_persists_all_fields() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.payload_builds();
+
+        let record = stub_payload_build("upd-001");
+        repo.create(&record).await.unwrap();
+
+        let artifact_bytes: &[u8] = &[0xCA, 0xFE, 0xBA, 0xBE];
+        let updated = repo
+            .update_status(
+                "upd-001",
+                "done",
+                Some("final-payload.exe"),
+                Some(artifact_bytes),
+                Some(4),
+                None,
+                "2026-03-27T12:00:00Z",
+            )
+            .await
+            .unwrap();
+        assert!(updated, "update_status should return true for existing row");
+
+        let fetched = repo.get("upd-001").await.unwrap().expect("row should exist");
+        assert_eq!(fetched.status, "done");
+        assert_eq!(fetched.name, "final-payload.exe");
+        assert_eq!(fetched.artifact, Some(artifact_bytes.to_vec()));
+        assert_eq!(fetched.size_bytes, Some(4));
+        assert!(fetched.error.is_none());
+        assert_eq!(fetched.updated_at, "2026-03-27T12:00:00Z");
+        // Immutable fields should be unchanged.
+        assert_eq!(fetched.arch, "x64");
+        assert_eq!(fetched.format, "exe");
+        assert_eq!(fetched.listener, "http-default");
+        assert_eq!(fetched.created_at, "2026-03-27T00:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn update_status_missing_id_returns_false() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.payload_builds();
+
+        let updated = repo
+            .update_status(
+                "nonexistent-id",
+                "done",
+                Some("payload.bin"),
+                Some(&[0xFF]),
+                Some(1),
+                None,
+                "2026-03-27T12:00:00Z",
+            )
+            .await
+            .unwrap();
+        assert!(!updated, "update_status should return false for missing row");
+
+        // Verify no row was created as a side-effect.
+        let fetched = repo.get("nonexistent-id").await.unwrap();
+        assert!(fetched.is_none());
+    }
+
+    #[tokio::test]
+    async fn update_status_partial_fields_preserves_existing_values() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.payload_builds();
+
+        // Seed a record with some optional fields populated.
+        let mut record = stub_payload_build("upd-partial");
+        record.name = "original-name.exe".to_owned();
+        record.artifact = Some(vec![0x01, 0x02]);
+        record.size_bytes = Some(2);
+        repo.create(&record).await.unwrap();
+
+        // Update only status and error, leaving name/artifact/size_bytes as None.
+        let updated = repo
+            .update_status(
+                "upd-partial",
+                "error",
+                None, // name unchanged
+                None, // artifact unchanged
+                None, // size_bytes unchanged
+                Some("build timed out"),
+                "2026-03-27T13:00:00Z",
+            )
+            .await
+            .unwrap();
+        assert!(updated);
+
+        let fetched = repo.get("upd-partial").await.unwrap().expect("row should exist");
+        assert_eq!(fetched.status, "error");
+        assert_eq!(fetched.error, Some("build timed out".to_owned()));
+        assert_eq!(fetched.updated_at, "2026-03-27T13:00:00Z");
+        // These columns should be preserved by the COALESCE logic.
+        assert_eq!(fetched.name, "original-name.exe");
+        assert_eq!(fetched.artifact, Some(vec![0x01, 0x02]));
+        assert_eq!(fetched.size_bytes, Some(2));
+    }
 }

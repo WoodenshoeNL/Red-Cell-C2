@@ -389,12 +389,16 @@ impl AgentRepository {
         active: bool,
         reason: &str,
     ) -> Result<(), TeamserverError> {
-        sqlx::query("UPDATE ts_agents SET active = ?, reason = ? WHERE agent_id = ?")
+        let result = sqlx::query("UPDATE ts_agents SET active = ?, reason = ? WHERE agent_id = ?")
             .bind(bool_to_i64(active))
             .bind(reason)
             .bind(i64::from(agent_id))
             .execute(&self.pool)
             .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(TeamserverError::AgentNotFound { agent_id });
+        }
 
         Ok(())
     }
@@ -3227,6 +3231,44 @@ mod tests {
         assert_eq!(persisted.ctr_block_offset, 99);
         assert_eq!(persisted.info.agent_id, 0xBB);
         assert_eq!(persisted.info.active, true);
+    }
+
+    // ── set_status tests ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn set_status_persists_active_and_reason() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.agents();
+        let agent = stub_agent(0xCC);
+
+        repo.create_full(&agent, "https-listener", 0, false).await.unwrap();
+
+        // Mark agent as inactive with a reason.
+        repo.set_status(0xCC, false, "timed out").await.unwrap();
+
+        let persisted = repo.get_persisted(0xCC).await.unwrap().expect("agent should exist");
+        assert!(!persisted.info.active, "active should be false after set_status");
+        assert_eq!(persisted.info.reason, "timed out");
+        // Other fields must be unchanged.
+        assert_eq!(persisted.listener_name, "https-listener");
+        assert_eq!(persisted.ctr_block_offset, 0);
+        assert_eq!(persisted.info.agent_id, 0xCC);
+    }
+
+    #[tokio::test]
+    async fn set_status_on_missing_agent_returns_agent_not_found() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.agents();
+
+        let err = repo.set_status(0xDEAD, false, "gone").await.unwrap_err();
+        assert!(
+            matches!(err, super::TeamserverError::AgentNotFound { agent_id } if agent_id == 0xDEAD),
+            "expected AgentNotFound, got: {err:?}",
+        );
+
+        // Verify no row was created as a side-effect.
+        let fetched = repo.get_persisted(0xDEAD).await.unwrap();
+        assert!(fetched.is_none());
     }
 
     // ── payload_builds CRUD round-trip tests ──────────────────────────────

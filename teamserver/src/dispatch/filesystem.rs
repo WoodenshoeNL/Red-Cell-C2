@@ -61,7 +61,14 @@ pub(super) async fn handle_filesystem_callback(
                         lines.push(String::new());
                     }
 
-                    let item_count = file_count + dir_count;
+                    let item_count = file_count.checked_add(dir_count).ok_or(
+                        CommandDispatchError::InvalidCallbackPayload {
+                            command_id: u32::from(DemonCommand::CommandFs),
+                            message: format!(
+                                "filesystem dir item count overflow: file_count={file_count}, dir_count={dir_count}"
+                            ),
+                        },
+                    )?;
                     for _ in 0..item_count {
                         let name = parser.read_utf16("filesystem dir item name")?;
                         if list_only {
@@ -2598,6 +2605,34 @@ mod tests {
             downloads.buffered_bytes().await,
             0,
             "buffered bytes should be freed after download removed due to limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn dir_item_count_overflow_returns_error() {
+        let (registry, db, events, downloads) = dir_test_deps().await;
+
+        // Build a payload with file_count + dir_count that would overflow u32.
+        let mut buf = Vec::new();
+        add_u32_le(&mut buf, u32::from(DemonFilesystemCommand::Dir));
+        add_bool_le(&mut buf, false); // explorer
+        add_bool_le(&mut buf, false); // list_only
+        add_utf16_le(&mut buf, "C:\\"); // root_path
+        add_bool_le(&mut buf, true); // success
+        // First directory entry
+        add_utf16_le(&mut buf, "C:\\*"); // path
+        add_u32_le(&mut buf, 0xFFFF_FFFF); // file_count
+        add_u32_le(&mut buf, 1); // dir_count — sum wraps to 0
+        add_u64_le(&mut buf, 0); // total_size (not list_only)
+
+        let err =
+            handle_filesystem_callback(&registry, &db, &events, &downloads, None, 0xBB, 1, &buf)
+                .await
+                .expect_err("should fail on item count overflow");
+
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {err:?}"
         );
     }
 }

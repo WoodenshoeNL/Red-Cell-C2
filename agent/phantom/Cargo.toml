@@ -1,10 +1,10 @@
 [package]
 name = "phantom"
-version = "0.1.0"
-edition = "2024"
-license = "AGPL-3.0-only"
-repository = "https://github.com/michel/Red-Cell-C2"
-rust-version = "1.85"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 description = "Rust Linux agent scaffold for Red Cell C2 with Demon-compatible transport primitives"
 
 [features]

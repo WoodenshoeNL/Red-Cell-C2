@@ -2023,7 +2023,7 @@ impl PayloadBuildRepository {
 mod tests {
     use super::{
         AgentResponseRecord, AuditLogEntry, AuditLogFilter, Database, LinkRecord, ListenerStatus,
-        LootFilter, LootRecord, PersistedOperator, bool_from_i64, i64_from_u64,
+        LootFilter, LootRecord, PayloadBuildRecord, PersistedOperator, bool_from_i64, i64_from_u64,
         parse_operator_role, u32_from_i64, u64_from_i64,
     };
     use red_cell_common::config::OperatorRole;
@@ -3119,5 +3119,60 @@ mod tests {
 
         let empty = repo.list_for_agent_since(101, Some(id1 + 100)).await.expect("query");
         assert!(empty.is_empty());
+    }
+
+    // ── payload_builds factory tests ─────────────────────────────────────
+
+    /// Helper to create a minimal `PayloadBuildRecord` for tests.
+    fn stub_payload_build(id: &str) -> PayloadBuildRecord {
+        PayloadBuildRecord {
+            id: id.to_owned(),
+            status: "pending".to_owned(),
+            name: "test-payload".to_owned(),
+            arch: "x64".to_owned(),
+            format: "exe".to_owned(),
+            listener: "http-default".to_owned(),
+            sleep_secs: Some(10),
+            artifact: None,
+            size_bytes: None,
+            error: None,
+            created_at: "2026-03-27T00:00:00Z".to_owned(),
+            updated_at: "2026-03-27T00:00:00Z".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn payload_builds_factory_insert_and_read_back() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.payload_builds();
+
+        let record = stub_payload_build("build-001");
+        repo.create(&record).await.unwrap();
+
+        let fetched = repo.get("build-001").await.unwrap();
+        assert_eq!(fetched, Some(record));
+    }
+
+    #[tokio::test]
+    async fn payload_builds_factory_errors_after_close() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.payload_builds();
+        db.close().await;
+
+        let result = repo.create(&stub_payload_build("build-closed")).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn payload_builds_factory_two_handles_see_same_row() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo_a = db.payload_builds();
+        let repo_b = db.payload_builds();
+
+        let record = stub_payload_build("build-shared");
+        repo_a.create(&record).await.unwrap();
+
+        let fetched = repo_b.get("build-shared").await.unwrap();
+        assert_eq!(fetched, Some(record));
     }
 }

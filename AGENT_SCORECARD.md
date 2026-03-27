@@ -10,11 +10,11 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 849 | 231 | 31 |
-| Bugs filed against | 92 | 35 | 9 |
+| Bugs filed against | 94 | 35 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
 | Quality score | 89% | 85% | 71% |
 
-*Bug rates: Claude 92/849=0.11, Codex 35/231=0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 94/849=0.11, Codex 35/231=0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -26,20 +26,32 @@ Each loop run updates the running totals and appends a review entry.
 | Protocol errors | 16 | 27 | 3 |
 | Security issues | 41 | 38 | 0 |
 | Architecture drift | 19 | 23 | 0 |
-| Memory / resource leaks | 6 | 10 | 1 |
+| Memory / resource leaks | 7 | 10 | 1 |
 | Startup / lifecycle regressions | 2 | 9 | 0 |
 | Test infrastructure / flakiness | 16 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
 | Correctness / pagination | 38 | 7 | 1 |
 | Workflow / close-hygiene | 18 | 0 | 0 |
-| Code reuse / duplication | 7 | 0 | 0 |
+| Code reuse / duplication | 8 | 0 | 0 |
 
 ---
 
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-27 15:30 — 517ef27a..89891cbc
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 2 | 3 housekeeping commits (QA checkpoint, arch review, test review). Stashed in-progress work for 9qejf has 2 issues: blocking std::fs::read in async upload(), duplicate OutputPage/OutputWireEntry structs across agent.rs and session.rs |
+| Codex | 0 | 0 | 1 housekeeping commit (test-coverage scan). No dev code changes. |
+| Cursor | 0 | 0 | No activity this period |
+
+Build: passed | Clippy: passed (zero warnings) | Tests: build lock contention prevented full test run (multiple cargo processes)
+New issues: red-cell-c2-seggw (blocking IO in upload, P2), red-cell-c2-zcths (struct duplication, P3)
+Note: red-cell-c2-9qejf still in_progress with substantial stashed work (~1100 lines). Implementation looks solid overall — good test coverage for new endpoints, proper audit logging, cursor-based pagination. The two bugs filed are preventive catches before commit.
 
 ### Arch Review — 2026-03-27 12:00
 

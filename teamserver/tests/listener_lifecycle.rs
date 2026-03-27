@@ -1490,6 +1490,61 @@ async fn external_listener_restart_after_stop() -> Result<(), Box<dyn std::error
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// External crash recovery tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn restore_running_restarts_persisted_external_listener()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = Database::connect_in_memory().await?;
+
+    // Simulate a teamserver crash: create the External listener in the DB and manually
+    // set its state to Running without actually spawning a runtime task.
+    {
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::new(database.clone(), registry, events, sockets, None);
+        manager.create(external_config("lc-ext-restore", "/bridge-restore")).await?;
+        manager.repository().set_state("lc-ext-restore", ListenerStatus::Running, None).await?;
+        let summary = manager.summary("lc-ext-restore").await?;
+        assert_eq!(summary.state.status, ListenerStatus::Running);
+        // manager is dropped — no live runtime task, DB still says Running,
+        // but external_endpoints map is empty (simulates crash).
+    }
+
+    // A new manager over the same DB should call restore_running and re-register
+    // the external listener endpoint.
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let restored = ListenerManager::new(database, registry, events, sockets, None);
+
+    restored.restore_running().await?;
+
+    let summary = restored.summary("lc-ext-restore").await?;
+    assert_eq!(
+        summary.state.status,
+        ListenerStatus::Running,
+        "restore_running must transition the external listener back to Running"
+    );
+
+    // Yield to let the spawned task register the endpoint in external_endpoints.
+    tokio::task::yield_now().await;
+
+    // The key assertion: the endpoint map must be repopulated so the Axum
+    // fallback handler can route bridge requests to this listener.
+    let state = restored.external_state_for_path("/bridge-restore").await.expect(
+        "restore_running must re-register external listener endpoint in external_endpoints",
+    );
+    assert_eq!(state.listener_name(), "lc-ext-restore");
+    assert_eq!(state.endpoint(), "/bridge-restore");
+
+    restored.stop("lc-ext-restore").await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn external_listener_delete_while_running() -> Result<(), Box<dyn std::error::Error>> {
     let manager = test_manager().await?;

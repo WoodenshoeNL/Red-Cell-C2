@@ -63,9 +63,6 @@ pub enum CliError {
     Timeout(String),
 
     /// Invalid combination of flags or arguments supplied by the caller.
-    ///
-    /// Used by downstream command modules — not yet constructed in this crate.
-    #[allow(dead_code)]
     #[error("invalid arguments: {0}")]
     InvalidArgs(String),
 
@@ -78,12 +75,8 @@ pub enum CliError {
     Config(#[from] crate::config::ConfigError),
 
     /// The requested feature is not yet supported by the teamserver.
-    ///
-    /// Used for commands that are part of the documented CLI surface but
-    /// cannot be fulfilled because the teamserver does not expose the
-    /// necessary endpoint (e.g. agent output retrieval, file transfer).
     #[error("unsupported: {0}")]
-    #[allow(dead_code)] // Part of the public error API for future commands.
+    #[expect(dead_code, reason = "reserved for commands against unimplemented endpoints")]
     Unsupported(String),
 
     /// Any other error not covered above.

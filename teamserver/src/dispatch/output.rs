@@ -101,7 +101,15 @@ pub(super) async fn handle_command_error_callback(
         Ok(DemonCallbackError::Coffee) => {
             return Ok(None);
         }
-        Err(_) => return Ok(None),
+        Err(unknown) => {
+            warn!(
+                agent_id,
+                request_id,
+                error = %unknown,
+                "unknown DemonCallbackError variant — callback silently dropped"
+            );
+            return Ok(None);
+        }
     };
 
     events.broadcast(agent_response_event(
@@ -246,7 +254,15 @@ pub(super) async fn handle_demon_info_callback(
                 format!("Process started without output pipe: Path:[{path}] ProcessID:[{pid}]")
             }
         }
-        Err(_) => return Ok(None),
+        Err(unknown) => {
+            warn!(
+                agent_id,
+                request_id,
+                error = %unknown,
+                "unknown DemonInfoClass variant — callback silently dropped"
+            );
+            return Ok(None);
+        }
     };
 
     events.broadcast(agent_response_event(

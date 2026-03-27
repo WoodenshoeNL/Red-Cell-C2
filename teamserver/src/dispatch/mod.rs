@@ -822,6 +822,12 @@ impl CommandDispatcher {
         payload: &[u8],
     ) -> Result<Option<Vec<u8>>, CommandDispatchError> {
         let Some(handler) = self.handlers.get(&command_id).cloned() else {
+            warn!(
+                agent_id,
+                command_id,
+                request_id,
+                "no handler registered for command_id — callback silently dropped"
+            );
             return Ok(None);
         };
 

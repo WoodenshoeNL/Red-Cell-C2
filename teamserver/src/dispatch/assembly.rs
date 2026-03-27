@@ -1,4 +1,5 @@
 use red_cell_common::demon::DemonCommand;
+use tracing::warn;
 
 use crate::EventBus;
 
@@ -62,7 +63,13 @@ pub(super) async fn handle_inline_execute_callback(
         }
         BOF_RAN_OK => ("Good", "BOF execution completed".to_owned()),
         BOF_COULD_NOT_RUN => ("Error", "Failed to execute object file".to_owned()),
-        _ => return Ok(None),
+        unknown => {
+            warn!(
+                agent_id,
+                request_id, unknown, "unknown BOF callback type — callback silently dropped"
+            );
+            return Ok(None);
+        }
     };
 
     events.broadcast(agent_response_event(
@@ -104,7 +111,13 @@ pub(super) async fn handle_assembly_inline_execute_callback(
         DOTNET_INFO_FAILED => {
             ("Error", "Failed to execute assembly or initialize the clr".to_owned())
         }
-        _ => return Ok(None),
+        unknown => {
+            warn!(
+                agent_id,
+                request_id, unknown, "unknown .NET assembly info ID — callback silently dropped"
+            );
+            return Ok(None);
+        }
     };
 
     events.broadcast(agent_response_event(

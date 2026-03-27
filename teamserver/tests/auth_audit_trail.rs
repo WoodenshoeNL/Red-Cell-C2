@@ -536,11 +536,27 @@ async fn abrupt_disconnect_produces_audit_entry_with_error_kind()
     assert_eq!(entry.action, "operator.disconnect");
 
     let details = entry.details.as_ref().expect("disconnect audit entry must have details");
+    assert_eq!(
+        details.get("result_status").and_then(|v| v.as_str()),
+        Some("success"),
+        "disconnect audit entry must have result_status=success"
+    );
+    assert_eq!(
+        details.get("command").and_then(|v| v.as_str()),
+        Some("disconnect"),
+        "disconnect audit entry must have command=disconnect"
+    );
+
     let params = details.get("parameters").expect("disconnect details must include parameters");
-    let kind = params.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+    assert_eq!(
+        params.get("kind").and_then(|v| v.as_str()),
+        Some("error"),
+        "abrupt disconnect (socket drop without close frame) must have kind=error, \
+         not clean_close — misclassifying abrupt drops hides connection failures in audit"
+    );
     assert!(
-        kind == "error" || kind == "clean_close",
-        "abrupt disconnect kind must be 'error' or 'clean_close', got '{kind}'"
+        params.get("connection_id").is_some(),
+        "disconnect parameters must include a connection_id"
     );
 
     Ok(())

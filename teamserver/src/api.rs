@@ -3436,7 +3436,7 @@ async fn submit_payload_build(
         match payload_builder.build_payload(&listener_config, &build_request, |_progress| {}).await
         {
             Ok(artifact) => {
-                let size = artifact.bytes.len() as i64;
+                let size = i64::try_from(artifact.bytes.len()).unwrap_or(i64::MAX);
                 let _ = db
                     .payload_builds()
                     .update_status(
@@ -9375,7 +9375,7 @@ mod tests {
             listener: "http1".to_owned(),
             sleep_secs: None,
             artifact: Some(artifact.clone()),
-            size_bytes: Some(artifact.len() as i64),
+            size_bytes: Some(i64::try_from(artifact.len()).unwrap_or(i64::MAX)),
             error: None,
             created_at: "2026-03-23T10:00:00Z".to_owned(),
             updated_at: "2026-03-23T10:01:00Z".to_owned(),

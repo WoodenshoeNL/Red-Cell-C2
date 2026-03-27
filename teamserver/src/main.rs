@@ -1256,6 +1256,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn build_tls_config_advertises_http11_only_alpn() {
+        let temp_dir = tempfile::TempDir::new().expect("temporary directory should be created");
+        let profile_path = temp_dir.path().join("teamserver.yaotl");
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "Neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        red_cell_common::tls::install_default_crypto_provider();
+        let config = build_tls_config(&profile, &profile_path)
+            .await
+            .expect("build_tls_config should succeed");
+
+        let server_config = config.get_inner();
+        assert_eq!(
+            server_config.alpn_protocols,
+            vec![b"http/1.1".to_vec()],
+            "ALPN must advertise only http/1.1 — h2 would break WebSocket upgrades"
+        );
+    }
+
+    #[tokio::test]
     async fn build_tls_config_uses_configured_cert_paths_from_profile() {
         let temp_dir = tempfile::TempDir::new().expect("temporary directory should be created");
         let profile_path = temp_dir.path().join("teamserver.yaotl");

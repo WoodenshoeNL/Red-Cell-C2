@@ -1121,6 +1121,23 @@ mod tests {
         assert_eq!(details["result_status"], "success");
         assert_eq!(details["command"], "dead");
 
+        // Verify the structured parameters include the timeout reason and external_ip.
+        // A regression that drops or renames these fields would leave operators and
+        // downstream audit/webhook consumers without context distinguishing a timeout
+        // from other death paths.
+        let params = details.get("parameters").ok_or(TeamserverError::InvalidPersistedValue {
+            field: "parameters",
+            message: "agent.dead audit entry must include parameters".to_owned(),
+        })?;
+        assert_eq!(
+            params["reason"], "agent timed out after 15 seconds without callback",
+            "parameters.reason must contain the timeout message",
+        );
+        assert_eq!(
+            params["external_ip"], "203.0.113.10",
+            "parameters.external_ip must match the agent's external_ip",
+        );
+
         Ok(())
     }
 

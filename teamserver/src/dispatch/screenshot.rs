@@ -75,7 +75,7 @@ pub(super) async fn handle_screenshot_callback(
             kind: "screenshot".to_owned(),
             name: name.clone(),
             file_path: None,
-            size_bytes: Some(bytes.len() as i64),
+            size_bytes: Some(i64::try_from(bytes.len()).unwrap_or(i64::MAX)),
             captured_at: captured_at.clone(),
             data: Some(bytes.clone()),
             metadata: Some(metadata_with_context(

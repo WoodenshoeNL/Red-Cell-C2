@@ -441,7 +441,7 @@ pub(super) async fn persist_download(
             kind: "download".to_owned(),
             name,
             file_path: Some(state.remote_path.clone()),
-            size_bytes: Some(state.data.len() as i64),
+            size_bytes: Some(i64::try_from(state.data.len()).unwrap_or(i64::MAX)),
             captured_at: OffsetDateTime::now_utc().format(&Rfc3339)?,
             data: Some(state.data.clone()),
             metadata: Some(metadata_with_context(

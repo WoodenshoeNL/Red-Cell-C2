@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 851 | 231 | 31 |
-| Bugs filed against | 94 | 35 | 9 |
+| Tasks closed | 897 | 231 | 31 |
+| Bugs filed against | 95 | 35 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
 | Quality score | 89% | 85% | 71% |
 
-*Bug rates: Claude 94/851=0.11, Codex 35/231=0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 95/897=0.11, Codex 35/231=0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -22,7 +22,7 @@ Each loop run updates the running totals and appends a review entry.
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 7 | 0 | 0 |
 | Missing tests / stale tests | 50 | 14 | 5 |
-| Clippy warnings | 6 | 0 | 1 |
+| Clippy warnings | 7 | 0 | 1 |
 | Protocol errors | 16 | 27 | 3 |
 | Security issues | 46 | 38 | 0 |
 | Architecture drift | 19 | 23 | 0 |
@@ -3890,3 +3890,15 @@ Biggest blindspot: client-cli wiremock-only testing — the REST client can pass
 Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`)
 Tests: passed (`cargo test --workspace`)
 Security posture: strong — AES-256-CTR with monotonic CTR offsets, HKDF session derivation, constant-time auth, Argon2id passwords, rate limiting on all auth surfaces, body size caps, agent/job/pivot depth limits. No production unwrap/expect, no todo!/unimplemented!, no println. Zero findings.
+
+### QA Review — 2026-03-28 00:24 — fb2d03c5..137177cf
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 46 | 1 | Closed 46 issues across teamserver/common/client-cli. One real QA finding: `red-cell-c2-12gmv` for the unfulfilled `#[expect(dead_code)]` warning in `client-cli` test builds. A TLS permission concern was investigated and closed as a false positive after verifying the existing hardening path and regression test. |
+| Codex | 0 | 0 | No task-close commits in range. |
+| Cursor | 0 | 0 | No activity in range. |
+
+Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`, `cargo test --workspace`)
+Tests: passed, but `cargo test --workspace` emitted one `red-cell-cli` rustc warning for an unfulfilled `#[expect(dead_code)]`
+Issues found: `red-cell-c2-12gmv` (Claude)

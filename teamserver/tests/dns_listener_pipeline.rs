@@ -127,6 +127,40 @@ fn dns_listener(name: &str, port: u16, domain: &str) -> ListenerConfig {
     })
 }
 
+/// Send a full Demon packet to the DNS listener with chunks delivered in the
+/// order specified by `send_order`.  Each entry in `send_order` is a chunk
+/// index (0-based) into the natural chunk sequence.  Entries may repeat
+/// (to simulate retransmission) or appear out of order.
+///
+/// Returns a `Vec` of `(seq_index, txt_answer)` pairs — one per query sent.
+async fn dns_upload_demon_packet_ordered(
+    client: &UdpSocket,
+    agent_id: u32,
+    payload: &[u8],
+    domain: &str,
+    query_id_base: u16,
+    send_order: &[usize],
+) -> Result<Vec<(usize, String)>, Box<dyn std::error::Error>> {
+    let chunks: Vec<&[u8]> = payload.chunks(39).collect();
+    let total = u16::try_from(chunks.len())?;
+    let mut results = Vec::new();
+
+    for (i, &idx) in send_order.iter().enumerate() {
+        let seq_u16 = u16::try_from(idx)?;
+        let qname = dns_upload_qname(agent_id, seq_u16, total, chunks[idx], domain);
+        let packet = build_dns_txt_query(query_id_base.wrapping_add(u16::try_from(i)?), &qname);
+        client.send(&packet).await?;
+
+        let mut buf = vec![0u8; 4096];
+        let len = timeout(Duration::from_secs(5), client.recv(&mut buf)).await??;
+        buf.truncate(len);
+        let txt = parse_dns_txt_answer(&buf).ok_or("failed to parse TXT answer")?;
+        results.push((idx, txt));
+    }
+
+    Ok(results)
+}
+
 /// Send a full Demon packet to the DNS listener by chunking it into upload queries.
 ///
 /// Returns the TXT answer from the final chunk's response (e.g. "ack", "err").
@@ -1336,5 +1370,217 @@ async fn dns_task_delivery_multi_chunk() -> Result<(), Box<dyn std::error::Error
     );
 
     manager.stop("dns-multichunk").await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Out-of-order and duplicate chunk upload tests
+// ---------------------------------------------------------------------------
+
+/// Uploading a multi-chunk DEMON_INIT with chunks arriving out of order must
+/// reassemble the original packet correctly and register the agent.
+#[tokio::test]
+async fn dns_listener_out_of_order_upload_reassembles_correctly()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None);
+    let mut event_receiver = events.subscribe();
+
+    let port = free_udp_port();
+    let domain = "c2.example.com";
+    let key: [u8; AGENT_KEY_LENGTH] = [
+        0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF,
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+        0x0F, 0x10,
+    ];
+    let iv: [u8; AGENT_IV_LENGTH] = [
+        0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xA0, 0xB0, 0xC0, 0xD0, 0xE0, 0xF0,
+        0x01,
+    ];
+    let agent_id = 0x000D_0001_u32;
+
+    manager.create(dns_listener("dns-ooo-upload", port, domain)).await?;
+    manager.start("dns-ooo-upload").await?;
+    let client = wait_for_dns_listener(port).await?;
+
+    // Build the DEMON_INIT payload and determine natural chunk count.
+    let init_body = common::valid_demon_init_body(agent_id, key, iv);
+    let num_chunks = init_body.chunks(39).count();
+    assert!(
+        num_chunks >= 3,
+        "test requires at least 3 chunks to exercise out-of-order delivery, got {num_chunks}"
+    );
+
+    // Reverse the chunk order: last chunk first, first chunk last.
+    let reversed_order: Vec<usize> = (0..num_chunks).rev().collect();
+
+    let results = dns_upload_demon_packet_ordered(
+        &client,
+        agent_id,
+        &init_body,
+        domain,
+        0xE000,
+        &reversed_order,
+    )
+    .await?;
+
+    // Intermediate chunks must return "ok"; the final chunk that completes
+    // the set must return "ack".
+    let last_txt = &results.last().expect("must have at least one result").1;
+    assert_eq!(
+        last_txt, "ack",
+        "last chunk completing the out-of-order upload must return 'ack', got '{last_txt}'"
+    );
+
+    // The agent must be fully registered with the correct key.
+    let stored = registry
+        .get(agent_id)
+        .await
+        .ok_or("agent should be registered after out-of-order DEMON_INIT upload")?;
+    assert_eq!(stored.encryption.aes_key.as_slice(), &key);
+    assert_eq!(stored.encryption.aes_iv.as_slice(), &iv);
+    assert_eq!(stored.hostname, "wkstn-01");
+
+    // AgentNew event must have fired.
+    let event = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
+    assert!(
+        matches!(event, Some(OperatorMessage::AgentNew(_))),
+        "expected AgentNew after out-of-order init, got {event:?}"
+    );
+
+    // Download the init ACK and verify decryption to confirm no data corruption.
+    let ack_payload = dns_download_response(&client, agent_id, domain, 0xE100).await?;
+    let decrypted = red_cell_common::crypto::decrypt_agent_data(&key, &iv, &ack_payload)?;
+    assert_eq!(
+        decrypted.as_slice(),
+        &agent_id.to_le_bytes(),
+        "init ACK after out-of-order upload must decrypt to the correct agent_id"
+    );
+
+    manager.stop("dns-ooo-upload").await?;
+    Ok(())
+}
+
+/// Retransmitting an already-received chunk during a multi-chunk upload must
+/// not corrupt reassembly or create duplicate agent state.
+#[tokio::test]
+async fn dns_listener_duplicate_chunk_retransmission_is_idempotent()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = Database::connect_in_memory().await?;
+    let registry = AgentRegistry::new(database.clone());
+    let events = EventBus::default();
+    let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+    let manager = ListenerManager::new(database, registry.clone(), events.clone(), sockets, None);
+    let mut event_receiver = events.subscribe();
+
+    let port = free_udp_port();
+    let domain = "c2.example.com";
+    let key: [u8; AGENT_KEY_LENGTH] = [
+        0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE,
+        0xAF, 0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD,
+        0xBE, 0xBF,
+    ];
+    let iv: [u8; AGENT_IV_LENGTH] = [
+        0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xCB, 0xCC, 0xCD, 0xCE,
+        0xCF,
+    ];
+    let agent_id = 0xDDDD_0002_u32;
+
+    manager.create(dns_listener("dns-dup-chunk", port, domain)).await?;
+    manager.start("dns-dup-chunk").await?;
+    let client = wait_for_dns_listener(port).await?;
+
+    // Build the DEMON_INIT payload.
+    let init_body = common::valid_demon_init_body(agent_id, key, iv);
+    let num_chunks = init_body.chunks(39).count();
+    assert!(
+        num_chunks >= 3,
+        "test requires at least 3 chunks to exercise duplicate retransmission, got {num_chunks}"
+    );
+
+    // Send chunks in order but retransmit chunk 0 and chunk 1 after their
+    // initial delivery: [0, 1, 0, 1, 2, 3, ..., N-1].
+    let mut send_order: Vec<usize> = Vec::new();
+    send_order.push(0);
+    send_order.push(1);
+    send_order.push(0); // retransmit chunk 0
+    send_order.push(1); // retransmit chunk 1
+    for i in 2..num_chunks {
+        send_order.push(i);
+    }
+
+    let results =
+        dns_upload_demon_packet_ordered(&client, agent_id, &init_body, domain, 0xF000, &send_order)
+            .await?;
+
+    // The final response must be "ack" — the duplicate chunks must not have
+    // confused the reassembly logic.
+    let last_txt = &results.last().expect("must have at least one result").1;
+    assert_eq!(
+        last_txt, "ack",
+        "final chunk after duplicate retransmission must return 'ack', got '{last_txt}'"
+    );
+
+    // Agent must be registered with correct key material.
+    let stored = registry
+        .get(agent_id)
+        .await
+        .ok_or("agent should be registered after upload with duplicate chunks")?;
+    assert_eq!(stored.encryption.aes_key.as_slice(), &key);
+    assert_eq!(stored.encryption.aes_iv.as_slice(), &iv);
+    assert_eq!(stored.hostname, "wkstn-01");
+
+    // Exactly one agent should exist — no duplicates from retransmission.
+    let active = registry.list_active().await;
+    assert_eq!(
+        active.len(),
+        1,
+        "duplicate chunk retransmission must not create extra agent entries"
+    );
+
+    // AgentNew must have fired exactly once.
+    let event = timeout(Duration::from_secs(5), event_receiver.recv()).await?;
+    assert!(
+        matches!(event, Some(OperatorMessage::AgentNew(_))),
+        "expected AgentNew after upload with duplicates, got {event:?}"
+    );
+
+    // Download init ACK and verify correctness.
+    let ack_payload = dns_download_response(&client, agent_id, domain, 0xF100).await?;
+    let decrypted = red_cell_common::crypto::decrypt_agent_data(&key, &iv, &ack_payload)?;
+    assert_eq!(
+        decrypted.as_slice(),
+        &agent_id.to_le_bytes(),
+        "init ACK after duplicate-chunk upload must decrypt to the correct agent_id"
+    );
+
+    // A subsequent in-order upload for a *different* agent must succeed,
+    // proving the retransmission did not poison shared state.
+    let agent_id_2 = 0xDDDD_0003_u32;
+    let key_2: [u8; AGENT_KEY_LENGTH] = [
+        0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F,
+        0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E,
+        0x2F, 0x30,
+    ];
+    let iv_2: [u8; AGENT_IV_LENGTH] = [
+        0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F,
+        0x40,
+    ];
+    let init_body_2 = common::valid_demon_init_body(agent_id_2, key_2, iv_2);
+    let result_2 =
+        dns_upload_demon_packet(&client, agent_id_2, &init_body_2, domain, 0xF200).await?;
+    assert_eq!(
+        result_2, "ack",
+        "subsequent normal upload after duplicate-chunk session must succeed"
+    );
+    assert!(
+        registry.get(agent_id_2).await.is_some(),
+        "second agent must be registered, proving no state poisoning"
+    );
+
+    manager.stop("dns-dup-chunk").await?;
     Ok(())
 }

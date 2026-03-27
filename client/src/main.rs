@@ -34,6 +34,7 @@ use transport::{
     EventKind, FileBrowserEntry, LootItem, LootKind, PayloadBuildResult, ProcessEntry,
     SharedAppState, TlsVerification,
 };
+use zeroize::Zeroizing;
 
 const WINDOW_TITLE: &str = "Red Cell Client";
 const DEFAULT_SERVER_URL: &str = "wss://127.0.0.1:40056/havoc";
@@ -602,7 +603,7 @@ struct ListenerDialogState {
     proxy_host: String,
     proxy_port: String,
     proxy_username: String,
-    proxy_password: String,
+    proxy_password: Zeroizing<String>,
     // SMB fields
     pipe_name: String,
     // External fields
@@ -626,7 +627,7 @@ impl ListenerDialogState {
             proxy_host: String::new(),
             proxy_port: String::new(),
             proxy_username: String::new(),
-            proxy_password: String::new(),
+            proxy_password: Zeroizing::new(String::new()),
             pipe_name: String::new(),
             endpoint: String::new(),
         }
@@ -659,7 +660,7 @@ impl ListenerDialogState {
             proxy_host: info.proxy_host.clone().unwrap_or_default(),
             proxy_port: info.proxy_port.clone().unwrap_or_default(),
             proxy_username: info.proxy_username.clone().unwrap_or_default(),
-            proxy_password: info.proxy_password.clone().unwrap_or_default(),
+            proxy_password: Zeroizing::new(info.proxy_password.clone().unwrap_or_default()),
             pipe_name: info
                 .extra
                 .get("PipeName")
@@ -729,7 +730,7 @@ impl ListenerDialogState {
                         None
                     },
                     proxy_password: if self.proxy_enabled {
-                        Some(self.proxy_password.clone())
+                        Some((*self.proxy_password).clone())
                     } else {
                         None
                     },
@@ -1483,7 +1484,7 @@ impl ClientApp {
 
                             ui.label("Password:");
                             ui.add(
-                                egui::TextEdit::singleline(&mut dialog.proxy_password)
+                                egui::TextEdit::singleline(&mut *dialog.proxy_password)
                                     .desired_width(300.0)
                                     .password(true),
                             );
@@ -10310,7 +10311,7 @@ mod tests {
         dialog.proxy_host = "proxy.local".to_owned();
         dialog.proxy_port = "3128".to_owned();
         dialog.proxy_username = "user".to_owned();
-        dialog.proxy_password = "pass".to_owned();
+        dialog.proxy_password = Zeroizing::new("pass".to_owned());
 
         let info = dialog.to_listener_info();
         assert_eq!(info.protocol.as_deref(), Some("Https"));
@@ -10321,6 +10322,18 @@ mod tests {
         assert_eq!(info.proxy_port.as_deref(), Some("3128"));
         assert_eq!(info.proxy_username.as_deref(), Some("user"));
         assert_eq!(info.proxy_password.as_deref(), Some("pass"));
+    }
+
+    /// The proxy_password field must be `Zeroizing<String>` so that heap memory is wiped on drop.
+    /// This test is a compile-time contract: if the field type is changed to a bare `String`,
+    /// the `Zeroizing::clone` call below will fail to compile.
+    #[test]
+    fn proxy_password_field_is_zeroizing() {
+        let mut dialog = ListenerDialogState::new_create();
+        *dialog.proxy_password = "secret".to_owned();
+        // Confirm we hold a Zeroizing<String> — the explicit type annotation is the assertion.
+        let _z: Zeroizing<String> = dialog.proxy_password.clone();
+        assert_eq!(*_z, "secret");
     }
 
     #[test]

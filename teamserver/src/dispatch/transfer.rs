@@ -897,6 +897,220 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // handle_mem_file_callback — trailing bytes (overflow scenario)
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn mem_file_callback_with_trailing_bytes_still_succeeds()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+        let agent_id: u32 = 0xDEAD_0001;
+        let request_id: u32 = 10;
+
+        // Payload: mem_file_id(0xAA) + success(1) + 128 bytes of trailing junk
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&le32(0x0000_00AA));
+        payload.extend_from_slice(&le32(1));
+        payload.extend_from_slice(&[0xFF; 128]);
+
+        let result = handle_mem_file_callback(&events, agent_id, request_id, &payload).await?;
+        assert_eq!(result, None, "handler must not produce a reply even with trailing bytes");
+
+        let event = receiver.recv().await.ok_or("expected event")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            return Err("expected AgentResponse event".into());
+        };
+        let kind = message.info.extra.get("Type").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(kind, "Good");
+        let msg_text = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            msg_text.contains("aa"),
+            "hex mem_file_id should appear in message; got: {msg_text}"
+        );
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // handle_mem_file_callback — u32::MAX boundary mem_file_id
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn mem_file_callback_u32_max_id_formats_hex_correctly()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&le32(u32::MAX));
+        payload.extend_from_slice(&le32(1));
+
+        let result = handle_mem_file_callback(&events, 0xDEAD_0002, 11, &payload).await?;
+        assert_eq!(result, None);
+
+        let event = receiver.recv().await.ok_or("expected event")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            return Err("expected AgentResponse event".into());
+        };
+        let msg_text = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            msg_text.contains("ffffffff"),
+            "u32::MAX mem_file_id should format as ffffffff; got: {msg_text}"
+        );
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // handle_mem_file_callback — zero mem_file_id
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn mem_file_callback_zero_id_success() -> Result<(), Box<dyn std::error::Error>> {
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&le32(0));
+        payload.extend_from_slice(&le32(0)); // success = false
+
+        let result = handle_mem_file_callback(&events, 0xDEAD_0003, 12, &payload).await?;
+        assert_eq!(result, None);
+
+        let event = receiver.recv().await.ok_or("expected event")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            return Err("expected AgentResponse event".into());
+        };
+        let kind = message.info.extra.get("Type").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(kind, "Error", "success=0 must produce Error; got: {kind}");
+        let msg_text = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            msg_text.contains("failed to register"),
+            "failure message expected; got: {msg_text}"
+        );
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // handle_package_dropped_callback — Type field is always "Error"
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn package_dropped_callback_type_is_error() -> Result<(), Box<dyn std::error::Error>> {
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&le32(65536));
+        payload.extend_from_slice(&le32(32768));
+
+        let result = handle_package_dropped_callback(&events, 0xAAAA_0001, 4, &payload).await?;
+        assert_eq!(result, None);
+
+        let event = receiver.recv().await.ok_or("expected event")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            return Err("expected AgentResponse event".into());
+        };
+        let kind = message.info.extra.get("Type").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(kind, "Error", "PackageDropped must always emit Error type; got: {kind}");
+        let msg_text = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            msg_text.contains("PIPE_BUFFER_MAX"),
+            "error message should reference PIPE_BUFFER_MAX; got: {msg_text}"
+        );
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // handle_package_dropped_callback — equal lengths (edge case)
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn package_dropped_callback_equal_lengths() -> Result<(), Box<dyn std::error::Error>> {
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+
+        // Edge case: package_length == max_length
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&le32(4096));
+        payload.extend_from_slice(&le32(4096));
+
+        let result = handle_package_dropped_callback(&events, 0xAAAA_0002, 5, &payload).await?;
+        assert_eq!(result, None);
+
+        let event = receiver.recv().await.ok_or("expected event")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            return Err("expected AgentResponse event".into());
+        };
+        let msg_text = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            msg_text.contains("4096"),
+            "message should contain the length value; got: {msg_text}"
+        );
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // handle_package_dropped_callback — u32::MAX boundary values
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn package_dropped_callback_u32_max_values() -> Result<(), Box<dyn std::error::Error>> {
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&le32(u32::MAX));
+        payload.extend_from_slice(&le32(u32::MAX - 1));
+
+        let result = handle_package_dropped_callback(&events, 0xAAAA_0003, 6, &payload).await?;
+        assert_eq!(result, None);
+
+        let event = receiver.recv().await.ok_or("expected event")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            return Err("expected AgentResponse event".into());
+        };
+        let msg_text = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            msg_text.contains("4294967295") && msg_text.contains("4294967294"),
+            "u32::MAX values should appear in message; got: {msg_text}"
+        );
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // handle_package_dropped_callback — trailing bytes (overflow)
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn package_dropped_callback_with_trailing_bytes_still_succeeds()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let events = EventBus::default();
+        let mut receiver = events.subscribe();
+
+        // Payload: package_length + max_length + trailing junk
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&le32(1024));
+        payload.extend_from_slice(&le32(512));
+        payload.extend_from_slice(&[0xDE; 256]);
+
+        let result = handle_package_dropped_callback(&events, 0xAAAA_0004, 7, &payload).await?;
+        assert_eq!(result, None, "handler must not produce a reply even with trailing bytes");
+
+        let event = receiver.recv().await.ok_or("expected event")?;
+        let OperatorMessage::AgentResponse(message) = event else {
+            return Err("expected AgentResponse event".into());
+        };
+        let kind = message.info.extra.get("Type").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(kind, "Error");
+        let msg_text = message.info.extra.get("Message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            msg_text.contains("1024") && msg_text.contains("512"),
+            "message should contain both sizes; got: {msg_text}"
+        );
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
     // handle_beacon_output_callback — credential line triggers persistence
     // ------------------------------------------------------------------
 

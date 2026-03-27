@@ -8606,4 +8606,273 @@ mod tests {
 
         Ok(())
     }
+
+    // ── with_demon_init_secret integration tests ────────────────────────────
+
+    /// Helper: build a `ListenerManager` configured with a DEMON_INIT secret.
+    async fn manager_with_secret(
+        secret: Vec<u8>,
+    ) -> Result<(ListenerManager, AgentRegistry, Database, EventBus), ListenerManagerError> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager =
+            ListenerManager::new(database.clone(), registry.clone(), events.clone(), sockets, None)
+                .with_demon_init_secret(Some(secret));
+        Ok((manager, registry, database, events))
+    }
+
+    /// HTTP listener configured with `with_demon_init_secret` accepts a
+    /// DEMON_INIT packet and the returned ACK is encrypted with the derived
+    /// (HKDF) session keys — not the raw agent keys.
+    #[tokio::test]
+    async fn http_listener_with_init_secret_registers_agent_and_ack_uses_derived_keys()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let secret = b"http-test-server-secret".to_vec();
+        let (manager, registry, _db, _events) = manager_with_secret(secret.clone()).await?;
+        let port = available_port()?;
+
+        manager.create(http_listener("edge-secret", port)).await?;
+        manager.start("edge-secret").await?;
+        wait_for_listener(port, false).await?;
+
+        let key = test_key(0x61);
+        let iv = test_iv(0x34);
+        let agent_id = 0xABCD_0001_u32;
+
+        let response = Client::new()
+            .post(format!("http://127.0.0.1:{port}/"))
+            .body(valid_demon_init_body(agent_id, key, iv))
+            .send()
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let ack_bytes = response.bytes().await?;
+
+        // Agent must be registered.
+        let stored = registry.get(agent_id).await.expect("agent should be registered");
+        assert_eq!(stored.hostname, "wkstn-01");
+
+        // The stored keys should be the HKDF-derived keys, not the raw ones.
+        let derived = red_cell_common::crypto::derive_session_keys(&key, &iv, &secret)?;
+        assert_eq!(stored.encryption.aes_key.as_slice(), &derived.key);
+        assert_eq!(stored.encryption.aes_iv.as_slice(), &derived.iv);
+
+        // The ACK must be decryptable with derived keys.
+        let ack_plain = decrypt_agent_data(&derived.key, &derived.iv, &ack_bytes)?;
+        assert_eq!(ack_plain.as_slice(), &agent_id.to_le_bytes());
+
+        // Decrypting the ACK with the *raw* agent keys must NOT produce the
+        // expected agent_id (proves the secret actually changed the keys).
+        let raw_plain = decrypt_agent_data(&key, &iv, &ack_bytes)?;
+        assert_ne!(
+            raw_plain.as_slice(),
+            &agent_id.to_le_bytes(),
+            "raw keys must not decrypt the ACK correctly when a secret is configured"
+        );
+
+        manager.stop("edge-secret").await?;
+        Ok(())
+    }
+
+    /// HTTP listener with init secret rejects callbacks that use the raw
+    /// (non-derived) agent keys — the callback parse fails and the listener
+    /// returns 404.
+    #[tokio::test]
+    async fn http_listener_with_init_secret_rejects_callback_with_raw_keys()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let secret = b"http-callback-reject-secret".to_vec();
+        let (manager, registry, _db, _events) = manager_with_secret(secret).await?;
+        let port = available_port()?;
+
+        manager.create(http_listener("edge-secret-cb", port)).await?;
+        manager.start("edge-secret-cb").await?;
+        wait_for_listener(port, false).await?;
+
+        let key = test_key(0x71);
+        let iv = test_iv(0x44);
+        let agent_id = 0xABCD_0002_u32;
+
+        // Register the agent via DEMON_INIT.
+        let init_resp = Client::new()
+            .post(format!("http://127.0.0.1:{port}/"))
+            .body(valid_demon_init_body(agent_id, key, iv))
+            .send()
+            .await?;
+        assert_eq!(init_resp.status(), StatusCode::OK);
+        assert!(registry.get(agent_id).await.is_some());
+
+        // Send a callback using the *raw* keys — should fail because the
+        // server stored derived keys.
+        let callback_resp = Client::new()
+            .post(format!("http://127.0.0.1:{port}/"))
+            .body(valid_demon_callback_body(
+                agent_id,
+                key,
+                iv,
+                u32::from(DemonCommand::CommandGetJob),
+                7,
+                &[],
+            ))
+            .send()
+            .await?;
+        assert_eq!(
+            callback_resp.status(),
+            StatusCode::NOT_FOUND,
+            "callback with raw keys must be rejected when init_secret is configured"
+        );
+
+        manager.stop("edge-secret-cb").await?;
+        Ok(())
+    }
+
+    /// External listener configured with `with_demon_init_secret` accepts a
+    /// DEMON_INIT and returns an ACK encrypted with HKDF-derived keys.
+    #[tokio::test]
+    async fn external_listener_with_init_secret_registers_agent_and_ack_uses_derived_keys()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let secret = b"ext-test-server-secret".to_vec();
+        let (manager, registry, _db, _events) = manager_with_secret(secret.clone()).await?;
+
+        manager.create(external_listener_config("ext-secret", "/secret")).await?;
+        manager.start("ext-secret").await?;
+
+        let state =
+            manager.external_state_for_path("/secret").await.expect("state must be registered");
+
+        let key = test_key(0x81);
+        let iv = test_iv(0x54);
+        let agent_id = 0xEEFF_0001_u32;
+        let peer: SocketAddr = "10.0.0.50:7000".parse().unwrap();
+
+        let body = valid_demon_init_body(agent_id, key, iv);
+        let result: Result<Vec<u8>, StatusCode> =
+            handle_external_request(&state, peer, &body).await;
+        let ack_bytes = result.expect("DEMON_INIT with matching secret should succeed");
+
+        // Agent must be registered.
+        let stored = registry.get(agent_id).await.expect("agent should be registered");
+
+        // The stored keys should be HKDF-derived.
+        let derived = red_cell_common::crypto::derive_session_keys(&key, &iv, &secret)?;
+        assert_eq!(stored.encryption.aes_key.as_slice(), &derived.key);
+        assert_eq!(stored.encryption.aes_iv.as_slice(), &derived.iv);
+
+        // ACK decryptable with derived keys.
+        let ack_plain = decrypt_agent_data(&derived.key, &derived.iv, &ack_bytes)?;
+        assert_eq!(ack_plain.as_slice(), &agent_id.to_le_bytes());
+
+        manager.stop("ext-secret").await?;
+        Ok(())
+    }
+
+    /// External listener with init secret rejects callbacks that use the raw
+    /// (non-derived) agent keys — `handle_external_request` returns 404.
+    #[tokio::test]
+    async fn external_listener_with_init_secret_rejects_callback_with_raw_keys()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let secret = b"ext-callback-reject-secret".to_vec();
+        let (manager, registry, _db, _events) = manager_with_secret(secret).await?;
+
+        manager.create(external_listener_config("ext-secret-cb", "/secret-cb")).await?;
+        manager.start("ext-secret-cb").await?;
+
+        let state =
+            manager.external_state_for_path("/secret-cb").await.expect("state must be registered");
+
+        let key = test_key(0x91);
+        let iv = test_iv(0x64);
+        let agent_id = 0xEEFF_0002_u32;
+        let peer: SocketAddr = "10.0.0.51:8000".parse().unwrap();
+
+        // Register agent via DEMON_INIT.
+        let init_body = valid_demon_init_body(agent_id, key, iv);
+        let init_result: Result<Vec<u8>, StatusCode> =
+            handle_external_request(&state, peer, &init_body).await;
+        assert!(init_result.is_ok());
+        assert!(registry.get(agent_id).await.is_some());
+
+        // Callback with raw keys — server stored derived keys, so parse fails.
+        let callback_body = valid_demon_callback_body(
+            agent_id,
+            key,
+            iv,
+            u32::from(DemonCommand::CommandGetJob),
+            7,
+            &[],
+        );
+        let callback_result: Result<Vec<u8>, StatusCode> =
+            handle_external_request(&state, peer, &callback_body).await;
+        assert_eq!(
+            callback_result,
+            Err(StatusCode::NOT_FOUND),
+            "callback with raw keys must be rejected when init_secret is configured"
+        );
+
+        manager.stop("ext-secret-cb").await?;
+        Ok(())
+    }
+
+    /// A manager without `with_demon_init_secret` (default no-secret path)
+    /// stores raw agent keys and accepts callbacks with those same raw keys —
+    /// confirming that the secret path is not a no-op.
+    #[tokio::test]
+    async fn http_listener_without_init_secret_stores_raw_keys_and_accepts_raw_callback()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database = Database::connect_in_memory().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let events = EventBus::default();
+        let sockets = SocketRelayManager::new(registry.clone(), events.clone());
+        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+        let port = available_port()?;
+
+        manager.create(http_listener("edge-no-secret", port)).await?;
+        manager.start("edge-no-secret").await?;
+        wait_for_listener(port, false).await?;
+
+        let key = test_key(0xA1);
+        let iv = test_iv(0x74);
+        let agent_id = 0xBEEF_0001_u32;
+
+        // Register agent.
+        let init_resp = Client::new()
+            .post(format!("http://127.0.0.1:{port}/"))
+            .body(valid_demon_init_body(agent_id, key, iv))
+            .send()
+            .await?;
+        assert_eq!(init_resp.status(), StatusCode::OK);
+
+        // ACK decryptable with raw keys.
+        let ack_bytes = init_resp.bytes().await?;
+        let ack_plain = decrypt_agent_data(&key, &iv, &ack_bytes)?;
+        assert_eq!(ack_plain.as_slice(), &agent_id.to_le_bytes());
+
+        // Stored keys are the raw keys.
+        let stored = registry.get(agent_id).await.expect("agent should be registered");
+        assert_eq!(stored.encryption.aes_key.as_slice(), &key);
+        assert_eq!(stored.encryption.aes_iv.as_slice(), &iv);
+
+        // Callback with raw keys succeeds.
+        let callback_resp = Client::new()
+            .post(format!("http://127.0.0.1:{port}/"))
+            .body(valid_demon_callback_body(
+                agent_id,
+                key,
+                iv,
+                u32::from(DemonCommand::CommandGetJob),
+                7,
+                &[],
+            ))
+            .send()
+            .await?;
+        assert_eq!(
+            callback_resp.status(),
+            StatusCode::OK,
+            "callback with raw keys must succeed when no init_secret is configured"
+        );
+
+        manager.stop("edge-no-secret").await?;
+        Ok(())
+    }
 }

@@ -2383,4 +2383,217 @@ mod tests {
         assert_eq!(item.target_id.as_deref(), Some("L1"));
         assert_eq!(item.result_status, AuditResultStatus::Failure);
     }
+
+    // ---------------------------------------------------------------
+    // Invalid filter normalization — query_audit_log
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn query_audit_log_invalid_agent_id_is_ignored() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_diverse_audit_rows(&database).await;
+
+        let baseline = query_audit_log(&database, &AuditQuery::default())
+            .await
+            .expect("baseline query should succeed");
+        assert!(baseline.total > 0, "seeded rows should exist");
+
+        for bad_id in ["not-hex", "ZZZZ", "🦀", "  ", "0xGG", "0x-1"] {
+            let query = AuditQuery { agent_id: Some(bad_id.to_owned()), ..AuditQuery::default() };
+            let page = query_audit_log(&database, &query)
+                .await
+                .unwrap_or_else(|e| panic!("query with agent_id={bad_id:?} should not error: {e}"));
+            assert_eq!(
+                page.total, baseline.total,
+                "invalid agent_id={bad_id:?} should be ignored, returning all rows"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_invalid_since_is_ignored() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_diverse_audit_rows(&database).await;
+
+        let baseline = query_audit_log(&database, &AuditQuery::default())
+            .await
+            .expect("baseline query should succeed");
+
+        for bad_ts in ["not-a-date", "2026-13-01", "yesterday", ""] {
+            let query = AuditQuery { since: Some(bad_ts.to_owned()), ..AuditQuery::default() };
+            let page = query_audit_log(&database, &query)
+                .await
+                .unwrap_or_else(|e| panic!("query with since={bad_ts:?} should not error: {e}"));
+            assert_eq!(
+                page.total, baseline.total,
+                "invalid since={bad_ts:?} should be ignored, returning all rows"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_invalid_until_is_ignored() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_diverse_audit_rows(&database).await;
+
+        let baseline = query_audit_log(&database, &AuditQuery::default())
+            .await
+            .expect("baseline query should succeed");
+
+        for bad_ts in ["not-a-date", "32/01/2026", "∞", ""] {
+            let query = AuditQuery { until: Some(bad_ts.to_owned()), ..AuditQuery::default() };
+            let page = query_audit_log(&database, &query)
+                .await
+                .unwrap_or_else(|e| panic!("query with until={bad_ts:?} should not error: {e}"));
+            assert_eq!(
+                page.total, baseline.total,
+                "invalid until={bad_ts:?} should be ignored, returning all rows"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn query_audit_log_all_invalid_filters_combined_returns_unfiltered() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        seed_diverse_audit_rows(&database).await;
+
+        let baseline = query_audit_log(&database, &AuditQuery::default())
+            .await
+            .expect("baseline query should succeed");
+
+        let query = AuditQuery {
+            agent_id: Some("ZZZZ".to_owned()),
+            since: Some("garbage".to_owned()),
+            until: Some("also-garbage".to_owned()),
+            ..AuditQuery::default()
+        };
+        let page = query_audit_log(&database, &query)
+            .await
+            .expect("query with all invalid filters should succeed");
+        assert_eq!(
+            page.total, baseline.total,
+            "all-invalid filters should be ignored, returning full result set"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Invalid filter normalization — query_session_activity
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn query_session_activity_invalid_since_is_ignored() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+
+        for action in ["operator.connect", "operator.disconnect", "operator.chat"] {
+            database
+                .audit_log()
+                .create(&AuditLogEntry {
+                    id: None,
+                    actor: "op".to_owned(),
+                    action: action.to_owned(),
+                    target_kind: "operator".to_owned(),
+                    target_id: None,
+                    details: None,
+                    occurred_at: "2026-03-10T12:00:00Z".to_owned(),
+                })
+                .await
+                .expect("seed row should insert");
+        }
+
+        let baseline = query_session_activity(&database, &SessionActivityQuery::default())
+            .await
+            .expect("baseline query should succeed");
+        assert_eq!(baseline.total, 3, "three seeded session rows expected");
+
+        for bad_ts in ["not-a-date", "yesterday", "2026-99-01", ""] {
+            let query =
+                SessionActivityQuery { since: Some(bad_ts.to_owned()), ..Default::default() };
+            let page = query_session_activity(&database, &query).await.unwrap_or_else(|e| {
+                panic!("session query with since={bad_ts:?} should not error: {e}")
+            });
+            assert_eq!(
+                page.total, baseline.total,
+                "invalid since={bad_ts:?} should be ignored for session activity"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn query_session_activity_invalid_until_is_ignored() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+
+        for action in ["operator.connect", "operator.disconnect"] {
+            database
+                .audit_log()
+                .create(&AuditLogEntry {
+                    id: None,
+                    actor: "op".to_owned(),
+                    action: action.to_owned(),
+                    target_kind: "operator".to_owned(),
+                    target_id: None,
+                    details: None,
+                    occurred_at: "2026-03-10T12:00:00Z".to_owned(),
+                })
+                .await
+                .expect("seed row should insert");
+        }
+
+        let baseline = query_session_activity(&database, &SessionActivityQuery::default())
+            .await
+            .expect("baseline query should succeed");
+        assert_eq!(baseline.total, 2, "two seeded session rows expected");
+
+        for bad_ts in ["not-a-date", "∞", "32/01/2026", ""] {
+            let query =
+                SessionActivityQuery { until: Some(bad_ts.to_owned()), ..Default::default() };
+            let page = query_session_activity(&database, &query).await.unwrap_or_else(|e| {
+                panic!("session query with until={bad_ts:?} should not error: {e}")
+            });
+            assert_eq!(
+                page.total, baseline.total,
+                "invalid until={bad_ts:?} should be ignored for session activity"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn query_session_activity_invalid_since_and_until_combined_returns_unfiltered() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+
+        for action in
+            ["operator.connect", "operator.disconnect", "operator.chat", "operator.session_timeout"]
+        {
+            database
+                .audit_log()
+                .create(&AuditLogEntry {
+                    id: None,
+                    actor: "op".to_owned(),
+                    action: action.to_owned(),
+                    target_kind: "operator".to_owned(),
+                    target_id: None,
+                    details: None,
+                    occurred_at: "2026-03-10T12:00:00Z".to_owned(),
+                })
+                .await
+                .expect("seed row should insert");
+        }
+
+        let baseline = query_session_activity(&database, &SessionActivityQuery::default())
+            .await
+            .expect("baseline query should succeed");
+        assert_eq!(baseline.total, 4, "four seeded session rows expected");
+
+        let query = SessionActivityQuery {
+            since: Some("garbage".to_owned()),
+            until: Some("also-garbage".to_owned()),
+            ..Default::default()
+        };
+        let page = query_session_activity(&database, &query)
+            .await
+            .expect("session query with all invalid timestamps should succeed");
+        assert_eq!(
+            page.total, baseline.total,
+            "invalid since+until should be ignored, returning full session activity set"
+        );
+    }
 }

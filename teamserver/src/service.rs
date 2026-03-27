@@ -2880,6 +2880,63 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn authenticate_binary_frame_returns_auth_failed() {
+        let server_verifier = test_verifier("pw");
+
+        let (mut server_ws, mut client_ws) = ws_pair().await;
+
+        let auth_handle = tokio::spawn(async move {
+            let rl = LoginRateLimiter::new();
+            let ip: IpAddr = "127.0.0.1".parse().expect("valid IP");
+            authenticate(&mut server_ws, &server_verifier, &rl, ip).await
+        });
+
+        // Send a binary frame instead of a text frame.
+        {
+            use futures_util::SinkExt as _;
+            use tokio_tungstenite::tungstenite::Message as TungMsg;
+            client_ws
+                .send(TungMsg::Binary(vec![0xDE, 0xAD, 0xBE, 0xEF].into()))
+                .await
+                .expect("client send binary");
+        }
+
+        let result = auth_handle.await.expect("join");
+        assert!(result.is_err(), "binary frame should fail auth");
+        assert!(
+            matches!(result.unwrap_err(), ServiceBridgeError::AuthenticationFailed),
+            "expected AuthenticationFailed for binary frame"
+        );
+    }
+
+    #[tokio::test]
+    async fn authenticate_close_frame_returns_auth_failed() {
+        let server_verifier = test_verifier("pw");
+
+        let (mut server_ws, mut client_ws) = ws_pair().await;
+
+        let auth_handle = tokio::spawn(async move {
+            let rl = LoginRateLimiter::new();
+            let ip: IpAddr = "127.0.0.1".parse().expect("valid IP");
+            authenticate(&mut server_ws, &server_verifier, &rl, ip).await
+        });
+
+        // Send a close frame instead of a text frame.
+        {
+            use futures_util::SinkExt as _;
+            use tokio_tungstenite::tungstenite::Message as TungMsg;
+            client_ws.send(TungMsg::Close(None)).await.expect("client send close");
+        }
+
+        let result = auth_handle.await.expect("join");
+        assert!(result.is_err(), "close frame should fail auth");
+        assert!(
+            matches!(result.unwrap_err(), ServiceBridgeError::AuthenticationFailed),
+            "expected AuthenticationFailed for close frame"
+        );
+    }
+
     // ── service_routes wiring tests ─────────────────────────────────
 
     /// Build a minimal `TeamserverState` with the given `ServiceBridge` attached.

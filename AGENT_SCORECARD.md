@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 849 | 231 | 31 |
+| Tasks closed | 851 | 231 | 31 |
 | Bugs filed against | 94 | 35 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
 | Quality score | 89% | 85% | 71% |
 
-*Bug rates: Claude 94/849=0.11, Codex 35/231=0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 94/851=0.11, Codex 35/231=0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-27 20:15 — b7854701..2d09d7a6
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed pt80a (Zeroize on AgentCryptoMaterial) and 9qejf (REST API output/upload/download endpoints). Also resolved stale bug 9xh40 (test now correct after exec() rewrite). Substantial feature work: ~1145 lines across teamserver and client-cli adding 3 new REST endpoints with full test coverage, audit logging, and cursor-based pagination. |
+| Codex | 0 | 0 | 1 housekeeping commit (test-coverage scan index advanced to 83). No dev code changes. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: passed (cargo check) | Clippy: **failed** (dead `CliError::Unsupported` variant — already tracked as red-cell-c2-zfb4u) | Tests: passed (all ~2376 tests green)
+Issues found: 0 new bugs filed (3 existing bugs from prior QA still open: red-cell-c2-zfb4u P3 clippy dead code, red-cell-c2-seggw P2 blocking IO in upload, red-cell-c2-zcths P3 struct duplication). Closed red-cell-c2-9xh40 as resolved.
 
 ### QA Review — 2026-03-27 15:30 — 517ef27a..89891cbc
 

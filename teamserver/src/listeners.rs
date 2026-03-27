@@ -510,7 +510,10 @@ impl ListenerManager {
         agent_registry.register_cleanup_hook(move |agent_id| {
             let downloads = cleanup_downloads.clone();
             async move {
-                let _ = downloads.drain_agent(agent_id).await;
+                let drained = downloads.drain_agent(agent_id).await;
+                if drained > 0 {
+                    tracing::info!(%agent_id, drained, "drained pending downloads during agent cleanup");
+                }
             }
         });
 
@@ -696,7 +699,7 @@ impl ListenerManager {
         };
 
         if listener.state.status == ListenerStatus::Running {
-            let _ = self.stop_locked(name).await?;
+            self.stop_locked(name).await?;
         }
 
         repository.delete(name).await?;
@@ -740,7 +743,7 @@ impl ListenerManager {
             match self.create_locked(config.clone()).await {
                 Ok(_) => {}
                 Err(ListenerManagerError::DuplicateListener { .. }) => {
-                    let _ = self.update_locked(config).await?;
+                    self.update_locked(config).await?;
                 }
                 Err(error) => return Err(error),
             }
@@ -810,7 +813,11 @@ impl ListenerManager {
         };
 
         handle.abort();
-        let _ = handle.await;
+        if let Err(error) = handle.await {
+            if error.is_panic() {
+                tracing::warn!(listener = name, "listener task panicked during stop: {error}");
+            }
+        }
 
         // Clean up external listener endpoint registry entries that won't get
         // deregistered inside the aborted future.
@@ -838,7 +845,14 @@ impl ListenerManager {
     ) -> Result<(), ListenerManagerError> {
         if let Some(handle) = self.active_handles.write().await.remove(name) {
             handle.abort();
-            let _ = handle.await;
+            if let Err(error) = handle.await {
+                if error.is_panic() {
+                    tracing::warn!(
+                        listener = name,
+                        "listener task panicked during profile cleanup: {error}"
+                    );
+                }
+            }
         }
 
         self.repository().delete(name).await?;

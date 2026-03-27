@@ -21,8 +21,8 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 7 | 0 | 0 |
-| Missing tests / stale tests | 47 | 14 | 5 |
-| Clippy warnings | 5 | 0 | 1 |
+| Missing tests / stale tests | 50 | 14 | 5 |
+| Clippy warnings | 6 | 0 | 1 |
 | Protocol errors | 16 | 27 | 3 |
 | Security issues | 46 | 38 | 0 |
 | Architecture drift | 19 | 23 | 0 |
@@ -40,6 +40,20 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-28 09:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 3 | missing tests (2), clippy (1) | No e2e integration test for file transfer flow (filesystem dispatch only unit-tested); no integration test for monotonic CTR mode (INIT_EXT_MONOTONIC_CTR parsed but never verified end-to-end); auth edge cases untested (empty credentials, global session cap, duplicate operator) |
+| Sonnet | 1 | clippy (1) | 20+ #[allow(dead_code)] suppressions in client-cli response models mask real dead code accumulation |
+| Codex | 0 | — | No issues found |
+| Cursor | 0 | — | No issues found |
+
+Overall codebase health: on track
+Biggest blindspot: integration test coverage for newer protocol features — monotonic CTR mode and file transfer have solid unit tests but no end-to-end verification that all the pieces (listener → parser → dispatch → persistence → event broadcast) work together correctly.
+Build: passed (cargo check clean) | Clippy: 1 pre-existing dead_code warning (CliError::Unsupported, red-cell-c2-zfb4u) | Tests: all passing (~2376 tests green)
+Security posture: strong — comprehensive review found no new exploitable vulnerabilities. Previous crypto hygiene findings (red-cell-c2-gfnrz, red-cell-c2-j1299) remain open but non-critical. No production unwrap/expect, no todo/unimplemented, comprehensive rate limiting and bounded queues verified.
 
 ### QA Review — 2026-03-27 20:15 — b7854701..2d09d7a6
 

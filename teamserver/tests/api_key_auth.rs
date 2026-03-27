@@ -182,16 +182,35 @@ async fn analyst_key_denied_admin_endpoint() {
 }
 
 #[tokio::test]
-async fn admin_key_can_access_admin_endpoint() {
+async fn admin_key_can_create_operator_and_persist() {
     let base = spawn_api_server(profile_with_api_keys()).await;
     let client = Client::new();
 
-    // POST /operators with admin key — may fail for other reasons (e.g. bad
-    // body) but should NOT be 401 or 403.
+    // POST /operators with admin key should return 201 with the created operator.
     let resp = create_operator(&client, &base, "secret-admin-value").await;
-    let status = resp.status();
-    assert_ne!(status, StatusCode::UNAUTHORIZED, "admin key should authenticate");
-    assert_ne!(status, StatusCode::FORBIDDEN, "admin key should be authorized");
+    assert_eq!(resp.status(), StatusCode::CREATED, "operator creation should succeed");
+
+    let body: serde_json::Value = resp.json().await.expect("json body");
+    assert_eq!(body["username"], "newop");
+    assert_eq!(body["role"], "Operator");
+
+    // Verify persistence: GET /operators should include the new operator.
+    let list_resp = client
+        .get(format!("{base}/api/v1/operators"))
+        .header("x-api-key", "secret-admin-value")
+        .send()
+        .await
+        .expect("list request should succeed");
+    assert_eq!(list_resp.status(), StatusCode::OK);
+
+    let operators: serde_json::Value = list_resp.json().await.expect("json body");
+    let operators = operators.as_array().expect("expected JSON array");
+    let found = operators.iter().any(|op| op["username"] == "newop");
+    assert!(found, "newly created operator should appear in operator list: {operators:?}");
+
+    // Verify idempotency guard: creating the same operator again should return 409.
+    let dup_resp = create_operator(&client, &base, "secret-admin-value").await;
+    assert_eq!(dup_resp.status(), StatusCode::CONFLICT, "duplicate creation should be rejected");
 }
 
 #[tokio::test]

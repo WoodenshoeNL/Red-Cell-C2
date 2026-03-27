@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use serde::Serialize;
 use thiserror::Error;
 
 /// Controls how the CLI verifies the teamserver's TLS certificate.
@@ -27,7 +28,7 @@ pub enum TlsMode {
 }
 
 /// Raw values loaded from a TOML config file.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct FileConfig {
     /// Teamserver base URL (e.g. `https://teamserver:40056`).
     pub server: Option<String>,
@@ -78,6 +79,15 @@ pub enum ConfigError {
         #[source]
         source: toml::de::Error,
     },
+
+    /// A config file could not be written.
+    #[error("failed to write config file {path}: {source}")]
+    #[allow(dead_code)] // Public API for future config-writing commands.
+    WriteError {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// Walk up the directory tree from `start`, returning the first
@@ -109,14 +119,81 @@ pub fn global_config_path() -> Option<PathBuf> {
 ///
 /// Missing files are silently treated as empty configs rather than errors;
 /// only files that exist but are malformed return an error.
+///
+/// On Unix, if the file exists with permissions looser than 0o600, they are
+/// silently tightened to owner-only read/write.  This guards against
+/// accidental exposure of API tokens on shared systems.
 pub fn load_config_file(path: &Path) -> Result<FileConfig, ConfigError> {
     if !path.is_file() {
         return Ok(FileConfig::default());
     }
+
+    // Tighten permissions on existing files that may have been created
+    // without restrictive mode (e.g. by a text editor or manual `echo`).
+    #[cfg(unix)]
+    tighten_permissions(path);
+
     let content = std::fs::read_to_string(path)
         .map_err(|e| ConfigError::ReadError { path: path.to_path_buf(), source: e })?;
     toml::from_str(&content)
         .map_err(|e| ConfigError::ParseError { path: path.to_path_buf(), source: e })
+}
+
+/// Write `data` to `path` with mode 0o600 on Unix (owner-only read/write).
+///
+/// On non-Unix platforms this uses default permissions.
+///
+/// Parent directories are **not** created automatically — the caller must
+/// ensure they exist.
+#[allow(dead_code)] // Public API for future config-writing commands.
+pub fn write_config_file(path: &Path, config: &FileConfig) -> Result<(), ConfigError> {
+    let content = toml::to_string_pretty(config).map_err(|e| ConfigError::WriteError {
+        path: path.to_path_buf(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+    })?;
+
+    write_bytes(path, content.as_bytes())
+        .map_err(|e| ConfigError::WriteError { path: path.to_path_buf(), source: e })
+}
+
+/// Write raw bytes to `path` with 0o600 on Unix.
+#[allow(dead_code)] // Called by write_config_file.
+fn write_bytes(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?
+    };
+
+    #[cfg(not(unix))]
+    let mut file =
+        std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(path)?;
+
+    file.write_all(data)?;
+
+    // On Unix, .mode() only applies at creation time. If the file already
+    // existed with looser permissions, explicitly tighten them.
+    #[cfg(unix)]
+    tighten_permissions(path);
+
+    Ok(())
+}
+
+/// Best-effort tighten file permissions to 0o600 on Unix.
+///
+/// Silently ignores errors (e.g. file owned by another user) so callers
+/// never fail due to a permission-hardening attempt.
+#[cfg(unix)]
+fn tighten_permissions(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
 }
 
 /// Resolve the final configuration from all sources.
@@ -384,6 +461,72 @@ timeout = 60
              see resolve() doc comment for the known-limitation explanation"
         );
     }
+
+    // ── write_config_file ──────────────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn write_config_creates_file_with_restrictive_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("test-config.toml");
+        let config = FileConfig {
+            server: Some("https://ts:40056".to_owned()),
+            token: Some("secret-tok".to_owned()),
+            timeout: None,
+        };
+        write_config_file(&path, &config).unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "config file should be owner-only (0600), got {mode:#o}");
+
+        // Verify content round-trips.
+        let loaded = load_config_file(&path).unwrap();
+        assert_eq!(loaded.server.as_deref(), Some("https://ts:40056"));
+        assert_eq!(loaded.token.as_deref(), Some("secret-tok"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_config_tightens_permissions_on_existing_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("loose.toml");
+
+        // Create an initial file with permissive (0o644) permissions.
+        fs::write(&path, "server = \"old\"").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let config =
+            FileConfig { server: Some("https://new:40056".to_owned()), token: None, timeout: None };
+        write_config_file(&path, &config).unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "permissions should be tightened to 0600, got {mode:#o}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_config_tightens_loose_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(".red-cell-cli.toml");
+        fs::write(&path, "server = \"https://ts:1\"").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let _ = load_config_file(&path).unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "load_config_file should tighten loose permissions to 0600, got {mode:#o}"
+        );
+    }
+
+    // ── resolve: partial override ──────────────────────────────────────────
 
     /// CLI provides `server`; file provides `token` — partial override.
     /// The CLI value must win for `server`; the file value must fill `token`.

@@ -83,6 +83,7 @@ pub enum CliError {
     /// cannot be fulfilled because the teamserver does not expose the
     /// necessary endpoint (e.g. agent output retrieval, file transfer).
     #[error("unsupported: {0}")]
+    #[allow(dead_code)] // Part of the public error API for future commands.
     Unsupported(String),
 
     /// Any other error not covered above.

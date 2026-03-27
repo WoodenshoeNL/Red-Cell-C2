@@ -3229,6 +3229,92 @@ mod tests {
         assert_eq!(persisted.info.active, true);
     }
 
+    // ── payload_builds CRUD round-trip tests ──────────────────────────────
+
+    #[tokio::test]
+    async fn payload_builds_crud_round_trip_with_artifact_blobs() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.payload_builds();
+
+        // Build two records with non-empty artifact blobs and all optional fields.
+        let record_a = PayloadBuildRecord {
+            id: "crud-a".to_owned(),
+            status: "done".to_owned(),
+            name: "agent-alpha.exe".to_owned(),
+            arch: "x64".to_owned(),
+            format: "exe".to_owned(),
+            listener: "https-main".to_owned(),
+            sleep_secs: Some(30),
+            artifact: Some(vec![0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE]),
+            size_bytes: Some(6),
+            error: None,
+            created_at: "2026-03-27T10:00:00Z".to_owned(),
+            updated_at: "2026-03-27T10:05:00Z".to_owned(),
+        };
+        let record_b = PayloadBuildRecord {
+            id: "crud-b".to_owned(),
+            status: "error".to_owned(),
+            name: "agent-beta.dll".to_owned(),
+            arch: "x86".to_owned(),
+            format: "dll".to_owned(),
+            listener: "dns-backup".to_owned(),
+            sleep_secs: None,
+            artifact: Some(vec![0xFF; 256]),
+            size_bytes: Some(256),
+            error: Some("linker failure".to_owned()),
+            created_at: "2026-03-27T11:00:00Z".to_owned(),
+            updated_at: "2026-03-27T11:01:00Z".to_owned(),
+        };
+
+        repo.create(&record_a).await.unwrap();
+        repo.create(&record_b).await.unwrap();
+
+        // get() must reproduce every field exactly.
+        let fetched_a = repo.get("crud-a").await.unwrap().expect("record_a should exist");
+        assert_eq!(fetched_a, record_a);
+
+        let fetched_b = repo.get("crud-b").await.unwrap().expect("record_b should exist");
+        assert_eq!(fetched_b, record_b);
+    }
+
+    #[tokio::test]
+    async fn payload_builds_list_returns_newest_first() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.payload_builds();
+
+        let mut older = stub_payload_build("list-older");
+        older.created_at = "2026-03-27T08:00:00Z".to_owned();
+        older.artifact = Some(vec![0x01, 0x02, 0x03]);
+        older.size_bytes = Some(3);
+
+        let mut newer = stub_payload_build("list-newer");
+        newer.created_at = "2026-03-27T09:00:00Z".to_owned();
+        newer.artifact = Some(vec![0xAA, 0xBB]);
+        newer.size_bytes = Some(2);
+
+        // Insert older first, then newer.
+        repo.create(&older).await.unwrap();
+        repo.create(&newer).await.unwrap();
+
+        let all = repo.list().await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].id, "list-newer", "newest record should be first");
+        assert_eq!(all[1].id, "list-older", "oldest record should be second");
+
+        // Verify artifact blobs survived the round-trip.
+        assert_eq!(all[0].artifact, Some(vec![0xAA, 0xBB]));
+        assert_eq!(all[1].artifact, Some(vec![0x01, 0x02, 0x03]));
+    }
+
+    #[tokio::test]
+    async fn payload_builds_get_returns_none_for_unknown_id() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.payload_builds();
+
+        let result = repo.get("nonexistent-build-id").await.unwrap();
+        assert!(result.is_none(), "get() should return None for unknown id");
+    }
+
     // ── payload_builds summary query tests ──────────────────────────────
 
     #[tokio::test]

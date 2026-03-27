@@ -1116,8 +1116,8 @@ where
 
 #[tokio::test]
 async fn analyst_cannot_send_agent_task_message() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = common::spawn_test_server(multi_role_profile()).await?.addr;
-    let (mut socket, _) = connect_async(format!("ws://{addr}/havoc")).await?;
+    let server = common::spawn_test_server(multi_role_profile()).await?;
+    let (mut socket, _) = connect_async(server.ws_url()).await?;
     common::login_as(&mut socket, "analyst", "analystpw").await?;
 
     let task_msg = serde_json::to_string(&OperatorMessage::AgentTask(Message {
@@ -1137,13 +1137,19 @@ async fn analyst_cannot_send_agent_task_message() -> Result<(), Box<dyn std::err
     }))?;
     socket.send(ClientMessage::Text(task_msg.into())).await?;
 
-    assert_connection_closed_after_rbac_denial(&mut socket).await
+    assert_connection_closed_after_rbac_denial(&mut socket).await?;
+
+    // Verify no side effects: no jobs should have been queued for any agent.
+    let queued = server.agent_registry.queued_jobs_all().await;
+    assert!(queued.is_empty(), "RBAC denial left queued jobs behind: {queued:?}");
+
+    Ok(())
 }
 
 #[tokio::test]
 async fn analyst_cannot_create_listener() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = common::spawn_test_server(multi_role_profile()).await?.addr;
-    let (mut socket, _) = connect_async(format!("ws://{addr}/havoc")).await?;
+    let server = common::spawn_test_server(multi_role_profile()).await?;
+    let (mut socket, _) = connect_async(server.ws_url()).await?;
     common::login_as(&mut socket, "analyst", "analystpw").await?;
 
     let msg = serde_json::to_string(&OperatorMessage::ListenerNew(Message {
@@ -1161,13 +1167,19 @@ async fn analyst_cannot_create_listener() -> Result<(), Box<dyn std::error::Erro
     }))?;
     socket.send(ClientMessage::Text(msg.into())).await?;
 
-    assert_connection_closed_after_rbac_denial(&mut socket).await
+    assert_connection_closed_after_rbac_denial(&mut socket).await?;
+
+    // Verify no side effects: no listener should have been created.
+    let listeners = server.listeners.list().await?;
+    assert!(listeners.is_empty(), "RBAC denial left a listener behind: {listeners:?}");
+
+    Ok(())
 }
 
 #[tokio::test]
 async fn analyst_cannot_edit_listener() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = common::spawn_test_server(multi_role_profile()).await?.addr;
-    let (mut socket, _) = connect_async(format!("ws://{addr}/havoc")).await?;
+    let server = common::spawn_test_server(multi_role_profile()).await?;
+    let (mut socket, _) = connect_async(server.ws_url()).await?;
     common::login_as(&mut socket, "analyst", "analystpw").await?;
 
     let msg = serde_json::to_string(&OperatorMessage::ListenerEdit(Message {
@@ -1185,13 +1197,19 @@ async fn analyst_cannot_edit_listener() -> Result<(), Box<dyn std::error::Error>
     }))?;
     socket.send(ClientMessage::Text(msg.into())).await?;
 
-    assert_connection_closed_after_rbac_denial(&mut socket).await
+    assert_connection_closed_after_rbac_denial(&mut socket).await?;
+
+    // Verify no side effects: no listener should have been created or modified.
+    let listeners = server.listeners.list().await?;
+    assert!(listeners.is_empty(), "RBAC denial left a listener behind: {listeners:?}");
+
+    Ok(())
 }
 
 #[tokio::test]
 async fn analyst_cannot_remove_listener() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = common::spawn_test_server(multi_role_profile()).await?.addr;
-    let (mut socket, _) = connect_async(format!("ws://{addr}/havoc")).await?;
+    let server = common::spawn_test_server(multi_role_profile()).await?;
+    let (mut socket, _) = connect_async(server.ws_url()).await?;
     common::login_as(&mut socket, "analyst", "analystpw").await?;
 
     let msg = serde_json::to_string(&OperatorMessage::ListenerRemove(Message {
@@ -1205,13 +1223,19 @@ async fn analyst_cannot_remove_listener() -> Result<(), Box<dyn std::error::Erro
     }))?;
     socket.send(ClientMessage::Text(msg.into())).await?;
 
-    assert_connection_closed_after_rbac_denial(&mut socket).await
+    assert_connection_closed_after_rbac_denial(&mut socket).await?;
+
+    // Verify no side effects: no listener state should have changed.
+    let listeners = server.listeners.list().await?;
+    assert!(listeners.is_empty(), "RBAC denial left unexpected listener state: {listeners:?}");
+
+    Ok(())
 }
 
 #[tokio::test]
 async fn analyst_cannot_mark_listener() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = common::spawn_test_server(multi_role_profile()).await?.addr;
-    let (mut socket, _) = connect_async(format!("ws://{addr}/havoc")).await?;
+    let server = common::spawn_test_server(multi_role_profile()).await?;
+    let (mut socket, _) = connect_async(server.ws_url()).await?;
     common::login_as(&mut socket, "analyst", "analystpw").await?;
 
     let msg = serde_json::to_string(&OperatorMessage::ListenerMark(Message {
@@ -1225,13 +1249,19 @@ async fn analyst_cannot_mark_listener() -> Result<(), Box<dyn std::error::Error>
     }))?;
     socket.send(ClientMessage::Text(msg.into())).await?;
 
-    assert_connection_closed_after_rbac_denial(&mut socket).await
+    assert_connection_closed_after_rbac_denial(&mut socket).await?;
+
+    // Verify no side effects: no listener should have been created or marked.
+    let listeners = server.listeners.list().await?;
+    assert!(listeners.is_empty(), "RBAC denial left unexpected listener state: {listeners:?}");
+
+    Ok(())
 }
 
 #[tokio::test]
 async fn operator_cannot_send_admin_message() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = common::spawn_test_server(multi_role_profile()).await?.addr;
-    let (mut socket, _) = connect_async(format!("ws://{addr}/havoc")).await?;
+    let server = common::spawn_test_server(multi_role_profile()).await?;
+    let (mut socket, _) = connect_async(server.ws_url()).await?;
     common::login_as(&mut socket, "operator", "operatorpw").await?;
 
     let msg = serde_json::to_string(&OperatorMessage::AgentRemove(Message {
@@ -1245,7 +1275,15 @@ async fn operator_cannot_send_admin_message() -> Result<(), Box<dyn std::error::
     }))?;
     socket.send(ClientMessage::Text(msg.into())).await?;
 
-    assert_connection_closed_after_rbac_denial(&mut socket).await
+    assert_connection_closed_after_rbac_denial(&mut socket).await?;
+
+    // Verify no side effects: no agents should have been removed or modified.
+    let agents = server.agent_registry.list_active().await;
+    assert!(agents.is_empty(), "RBAC denial left unexpected agent state: {agents:?}");
+    let queued = server.agent_registry.queued_jobs_all().await;
+    assert!(queued.is_empty(), "RBAC denial left queued jobs behind: {queued:?}");
+
+    Ok(())
 }
 
 #[tokio::test]

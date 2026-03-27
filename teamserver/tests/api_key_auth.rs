@@ -313,6 +313,83 @@ async fn bearer_lowercase_returns_invalid_authorization_header() {
     assert_eq!(body["error"]["code"], "invalid_authorization_header");
 }
 
+// ---------------------------------------------------------------------------
+// Conflicting header precedence tests
+// ---------------------------------------------------------------------------
+
+/// Send a GET /api/v1/agents with both `x-api-key` and `Authorization: Bearer` headers.
+async fn get_agents_with_both_headers(
+    client: &Client,
+    base: &str,
+    api_key: &str,
+    bearer_token: &str,
+) -> reqwest::Response {
+    client
+        .get(format!("{base}/api/v1/agents"))
+        .header("x-api-key", api_key)
+        .header("authorization", format!("Bearer {bearer_token}"))
+        .send()
+        .await
+        .expect("request should succeed")
+}
+
+#[tokio::test]
+async fn valid_api_key_with_invalid_bearer_succeeds() {
+    let base = spawn_api_server(profile_with_api_keys()).await;
+    let client = Client::new();
+
+    // x-api-key takes precedence — valid x-api-key should succeed even when
+    // the Authorization header carries an invalid bearer token.
+    let resp =
+        get_agents_with_both_headers(&client, &base, "secret-admin-value", "totally-wrong").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body: serde_json::Value = resp.json().await.expect("json body");
+    assert!(body.is_array(), "expected JSON array, got {body}");
+}
+
+#[tokio::test]
+async fn invalid_api_key_with_valid_bearer_returns_401() {
+    let base = spawn_api_server(profile_with_api_keys()).await;
+    let client = Client::new();
+
+    // x-api-key takes precedence — invalid x-api-key should fail even when
+    // the Authorization header carries a valid bearer token.
+    let resp =
+        get_agents_with_both_headers(&client, &base, "totally-wrong", "secret-admin-value").await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let body: serde_json::Value = resp.json().await.expect("json body");
+    assert_eq!(body["error"]["code"], "invalid_api_key");
+}
+
+#[tokio::test]
+async fn both_valid_headers_uses_api_key_identity() {
+    let base = spawn_api_server(profile_with_api_keys()).await;
+    let client = Client::new();
+
+    // Both headers carry valid keys but for different roles: x-api-key is
+    // Analyst (read-only), bearer is Admin. Since x-api-key wins, the
+    // admin-only endpoint should be forbidden.
+    let resp = client
+        .post(format!("{base}/api/v1/operators"))
+        .header("x-api-key", "secret-analyst-value")
+        .header("authorization", "Bearer secret-admin-value")
+        .header("content-type", "application/json")
+        .body(r#"{"username":"newop2","password":"somepass","role":"Operator"}"#)
+        .send()
+        .await
+        .expect("request should succeed");
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "x-api-key identity (Analyst) should win over Authorization bearer (Admin)"
+    );
+
+    let body: serde_json::Value = resp.json().await.expect("json body");
+    assert_eq!(body["error"]["code"], "forbidden");
+}
+
 /// Build a profile with a very low rate limit for testing enforcement.
 fn profile_with_low_rate_limit() -> Profile {
     Profile::parse(

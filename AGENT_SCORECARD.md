@@ -21,17 +21,17 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 7 | 0 | 0 |
-| Missing tests / stale tests | 44 | 14 | 5 |
+| Missing tests / stale tests | 45 | 14 | 5 |
 | Clippy warnings | 4 | 0 | 1 |
 | Protocol errors | 16 | 27 | 3 |
 | Security issues | 41 | 38 | 0 |
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 6 | 10 | 1 |
 | Startup / lifecycle regressions | 2 | 9 | 0 |
-| Test infrastructure / flakiness | 15 | 0 | 0 |
+| Test infrastructure / flakiness | 16 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
-| Correctness / pagination | 35 | 7 | 1 |
+| Correctness / pagination | 36 | 7 | 1 |
 | Workflow / close-hygiene | 18 | 0 | 0 |
 | Code reuse / duplication | 7 | 0 | 0 |
 
@@ -40,6 +40,19 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-27 08:30
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 3 | correctness / pagination (1), missing tests / stale tests (1), test infrastructure / flakiness (1) | dispatch silently drops unknown commands without tracing; session.rs:1223 stale test expects wrong error; service_bridge_rate_limiter_is_independent test consistently times out |
+| Codex | 0 | — | No issues found |
+| Cursor | 0 | — | No issues found |
+
+Overall codebase health: on track
+Biggest blindspot: dispatch observability — when agent sends unrecognized command IDs or sub-types, they are silently consumed with no warn/debug trace, making agent/teamserver version mismatch debugging invisible to operators.
+Build: passed (cargo check, cargo clippy — zero warnings)
+Security posture: strong — AES-256-CTR with advancing offsets, constant-time auth (subtle::ConstantTimeEq), Argon2id passwords, rate limiting on all auth surfaces, body size caps, Zeroizing on proxy passwords, redacted Debug impls on key material. Zero unwrap/expect in production, zero todo!/unimplemented!, zero println/eprintln in teamserver.
 
 ### QA Review — 2026-03-27 05:45 — 59ed32d1..517ef27a
 

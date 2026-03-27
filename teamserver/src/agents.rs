@@ -2833,6 +2833,264 @@ mod tests {
         Ok(())
     }
 
+    // ── parent_of / children_of / pivots direct tests ──────────────────
+
+    #[tokio::test]
+    async fn parent_of_returns_none_for_unlinked_agent() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let agent = sample_agent(0x2000_0001);
+        registry.insert(agent.clone()).await?;
+
+        assert_eq!(registry.parent_of(agent.agent_id).await, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn parent_of_returns_none_for_unknown_agent() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+
+        assert_eq!(registry.parent_of(0xDEAD_BEEF).await, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn parent_of_returns_direct_parent() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let parent = sample_agent(0x2000_0002);
+        let child = sample_agent(0x2000_0003);
+        registry.insert(parent.clone()).await?;
+        registry.insert(child.clone()).await?;
+        registry.add_link(parent.agent_id, child.agent_id).await?;
+
+        assert_eq!(registry.parent_of(child.agent_id).await, Some(parent.agent_id));
+        // The parent itself has no parent.
+        assert_eq!(registry.parent_of(parent.agent_id).await, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn parent_of_reflects_reparent() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let old_parent = sample_agent(0x2000_0004);
+        let new_parent = sample_agent(0x2000_0005);
+        let child = sample_agent(0x2000_0006);
+        registry.insert(old_parent.clone()).await?;
+        registry.insert(new_parent.clone()).await?;
+        registry.insert(child.clone()).await?;
+        registry.add_link(old_parent.agent_id, child.agent_id).await?;
+
+        assert_eq!(registry.parent_of(child.agent_id).await, Some(old_parent.agent_id));
+
+        registry.add_link(new_parent.agent_id, child.agent_id).await?;
+        assert_eq!(registry.parent_of(child.agent_id).await, Some(new_parent.agent_id));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn children_of_returns_empty_for_unlinked_agent() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let agent = sample_agent(0x2000_0010);
+        registry.insert(agent.clone()).await?;
+
+        assert!(registry.children_of(agent.agent_id).await.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn children_of_returns_empty_for_unknown_agent() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+
+        assert!(registry.children_of(0xDEAD_BEEF).await.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn children_of_returns_single_child() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let parent = sample_agent(0x2000_0011);
+        let child = sample_agent(0x2000_0012);
+        registry.insert(parent.clone()).await?;
+        registry.insert(child.clone()).await?;
+        registry.add_link(parent.agent_id, child.agent_id).await?;
+
+        let children = registry.children_of(parent.agent_id).await;
+        assert_eq!(children, vec![child.agent_id]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn children_of_returns_multiple_children() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let parent = sample_agent(0x2000_0020);
+        let child_a = sample_agent(0x2000_0021);
+        let child_b = sample_agent(0x2000_0022);
+        let child_c = sample_agent(0x2000_0023);
+        registry.insert(parent.clone()).await?;
+        registry.insert(child_a.clone()).await?;
+        registry.insert(child_b.clone()).await?;
+        registry.insert(child_c.clone()).await?;
+        registry.add_link(parent.agent_id, child_a.agent_id).await?;
+        registry.add_link(parent.agent_id, child_b.agent_id).await?;
+        registry.add_link(parent.agent_id, child_c.agent_id).await?;
+
+        let mut children = registry.children_of(parent.agent_id).await;
+        children.sort();
+        let mut expected = vec![child_a.agent_id, child_b.agent_id, child_c.agent_id];
+        expected.sort();
+        assert_eq!(children, expected);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn children_of_does_not_include_grandchildren() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let root = sample_agent(0x2000_0030);
+        let mid = sample_agent(0x2000_0031);
+        let leaf = sample_agent(0x2000_0032);
+        registry.insert(root.clone()).await?;
+        registry.insert(mid.clone()).await?;
+        registry.insert(leaf.clone()).await?;
+        registry.add_link(root.agent_id, mid.agent_id).await?;
+        registry.add_link(mid.agent_id, leaf.agent_id).await?;
+
+        // root's direct children should only be mid.
+        let children = registry.children_of(root.agent_id).await;
+        assert_eq!(children, vec![mid.agent_id]);
+        // mid's direct children should only be leaf.
+        let children = registry.children_of(mid.agent_id).await;
+        assert_eq!(children, vec![leaf.agent_id]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pivots_returns_default_for_unlinked_agent() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let agent = sample_agent(0x2000_0040);
+        registry.insert(agent.clone()).await?;
+
+        assert_eq!(
+            registry.pivots(agent.agent_id).await,
+            super::PivotInfo { parent: None, children: Vec::new() }
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pivots_returns_parent_and_children() -> Result<(), TeamserverError> {
+        let registry = AgentRegistry::new(test_database().await?);
+        let root = sample_agent(0x2000_0050);
+        let mid = sample_agent(0x2000_0051);
+        let leaf_a = sample_agent(0x2000_0052);
+        let leaf_b = sample_agent(0x2000_0053);
+        registry.insert(root.clone()).await?;
+        registry.insert(mid.clone()).await?;
+        registry.insert(leaf_a.clone()).await?;
+        registry.insert(leaf_b.clone()).await?;
+        registry.add_link(root.agent_id, mid.agent_id).await?;
+        registry.add_link(mid.agent_id, leaf_a.agent_id).await?;
+        registry.add_link(mid.agent_id, leaf_b.agent_id).await?;
+
+        let pivot = registry.pivots(mid.agent_id).await;
+        assert_eq!(pivot.parent, Some(root.agent_id));
+        let mut children = pivot.children;
+        children.sort();
+        let mut expected = vec![leaf_a.agent_id, leaf_b.agent_id];
+        expected.sort();
+        assert_eq!(children, expected);
+
+        // Root has children but no parent.
+        let root_pivot = registry.pivots(root.agent_id).await;
+        assert_eq!(root_pivot.parent, None);
+        assert_eq!(root_pivot.children, vec![mid.agent_id]);
+
+        // Leaves have a parent but no children.
+        let leaf_pivot = registry.pivots(leaf_a.agent_id).await;
+        assert_eq!(leaf_pivot.parent, Some(mid.agent_id));
+        assert!(leaf_pivot.children.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn disconnect_link_wide_fan_out_marks_all_children_inactive()
+    -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let root = sample_agent(0x2000_0060);
+        let mid = sample_agent(0x2000_0061);
+        let leaf_a = sample_agent(0x2000_0062);
+        let leaf_b = sample_agent(0x2000_0063);
+        let leaf_c = sample_agent(0x2000_0064);
+        registry.insert(root.clone()).await?;
+        registry.insert(mid.clone()).await?;
+        registry.insert(leaf_a.clone()).await?;
+        registry.insert(leaf_b.clone()).await?;
+        registry.insert(leaf_c.clone()).await?;
+        registry.add_link(root.agent_id, mid.agent_id).await?;
+        registry.add_link(mid.agent_id, leaf_a.agent_id).await?;
+        registry.add_link(mid.agent_id, leaf_b.agent_id).await?;
+        registry.add_link(mid.agent_id, leaf_c.agent_id).await?;
+
+        let mut affected =
+            registry.disconnect_link(root.agent_id, mid.agent_id, "fan-out disconnect").await?;
+        affected.sort();
+
+        let mut expected = vec![mid.agent_id, leaf_a.agent_id, leaf_b.agent_id, leaf_c.agent_id];
+        expected.sort();
+        assert_eq!(affected, expected);
+
+        // Every agent in the subtree must be inactive.
+        for id in &affected {
+            let state =
+                registry.get(*id).await.ok_or(TeamserverError::AgentNotFound { agent_id: *id })?;
+            assert!(!state.active, "agent 0x{id:08X} must be inactive");
+            assert_eq!(state.reason, "fan-out disconnect");
+        }
+
+        // Root remains active and unlinked.
+        let root_state = registry
+            .get(root.agent_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: root.agent_id })?;
+        assert!(root_state.active);
+        assert!(registry.children_of(root.agent_id).await.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn disconnect_link_preserves_sibling_subtrees() -> Result<(), TeamserverError> {
+        let database = test_database().await?;
+        let registry = AgentRegistry::new(database.clone());
+        let root = sample_agent(0x2000_0070);
+        let left = sample_agent(0x2000_0071);
+        let right = sample_agent(0x2000_0072);
+        let left_leaf = sample_agent(0x2000_0073);
+        registry.insert(root.clone()).await?;
+        registry.insert(left.clone()).await?;
+        registry.insert(right.clone()).await?;
+        registry.insert(left_leaf.clone()).await?;
+        registry.add_link(root.agent_id, left.agent_id).await?;
+        registry.add_link(root.agent_id, right.agent_id).await?;
+        registry.add_link(left.agent_id, left_leaf.agent_id).await?;
+
+        // Disconnect left subtree; right should be untouched.
+        let affected =
+            registry.disconnect_link(root.agent_id, left.agent_id, "left removed").await?;
+
+        assert!(affected.contains(&left.agent_id));
+        assert!(affected.contains(&left_leaf.agent_id));
+        assert!(!affected.contains(&right.agent_id));
+
+        // Right branch fully intact.
+        assert_eq!(registry.parent_of(right.agent_id).await, Some(root.agent_id));
+        assert_eq!(registry.children_of(root.agent_id).await, vec![right.agent_id]);
+        let right_state = registry
+            .get(right.agent_id)
+            .await
+            .ok_or(TeamserverError::AgentNotFound { agent_id: right.agent_id })?;
+        assert!(right_state.active);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn add_link_rejects_self_link() -> Result<(), TeamserverError> {
         let database = test_database().await?;

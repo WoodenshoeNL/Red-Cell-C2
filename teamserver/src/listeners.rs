@@ -8356,4 +8356,254 @@ mod tests {
         // Far-future datetime should not be past.
         assert!(!is_past_kill_date(Some("2099-12-31 23:59:59")));
     }
+
+    // ── to_operator_info isolated field assertions for SMB/DNS ──────────────
+
+    #[test]
+    fn smb_to_operator_info_includes_pipe_name_and_protocol() {
+        let summary = ListenerSummary {
+            name: "pivot".to_owned(),
+            protocol: ListenerProtocol::Smb,
+            state: PersistedListenerState { status: ListenerStatus::Created, last_error: None },
+            config: smb_listener("pivot", "pivot-pipe"),
+        };
+
+        let info = summary.to_operator_info();
+        assert_eq!(info.name.as_deref(), Some("pivot"));
+        assert_eq!(info.protocol.as_deref(), Some("Smb"));
+        assert_eq!(info.status.as_deref(), Some("Offline"));
+        assert_eq!(info.extra.get("PipeName").and_then(|v| v.as_str()), Some("pivot-pipe"),);
+        assert_eq!(info.extra.get("Info").and_then(|v| v.as_str()), Some("pivot-pipe"),);
+        // SMB has no real host/port — should be empty strings.
+        assert_eq!(info.extra.get("Host").and_then(|v| v.as_str()), Some(""));
+        assert_eq!(info.extra.get("Port").and_then(|v| v.as_str()), Some(""));
+    }
+
+    #[test]
+    fn smb_to_operator_info_with_last_error() {
+        let summary = ListenerSummary {
+            name: "smb-err".to_owned(),
+            protocol: ListenerProtocol::Smb,
+            state: PersistedListenerState {
+                status: ListenerStatus::Error,
+                last_error: Some("pipe busy".to_owned()),
+            },
+            config: smb_listener("smb-err", "pipe1"),
+        };
+
+        let info = summary.to_operator_info();
+        assert_eq!(info.status.as_deref(), Some("Offline"));
+        assert_eq!(info.extra.get("Error").and_then(|v| v.as_str()), Some("pipe busy"),);
+    }
+
+    #[test]
+    fn dns_to_operator_info_includes_domain_and_record_types() {
+        let summary = ListenerSummary {
+            name: "dns-edge".to_owned(),
+            protocol: ListenerProtocol::Dns,
+            state: PersistedListenerState { status: ListenerStatus::Running, last_error: None },
+            config: ListenerConfig::from(DnsListenerConfig {
+                name: "dns-edge".to_owned(),
+                host_bind: "0.0.0.0".to_owned(),
+                port_bind: 53,
+                domain: "c2.example".to_owned(),
+                record_types: vec!["A".to_owned(), "TXT".to_owned()],
+                kill_date: None,
+                working_hours: None,
+            }),
+        };
+
+        let info = summary.to_operator_info();
+        assert_eq!(info.name.as_deref(), Some("dns-edge"));
+        assert_eq!(info.protocol.as_deref(), Some("Dns"));
+        assert_eq!(info.status.as_deref(), Some("Online"));
+        assert_eq!(info.extra.get("Domain").and_then(|v| v.as_str()), Some("c2.example"),);
+        assert_eq!(info.extra.get("RecordTypes").and_then(|v| v.as_str()), Some("A,TXT"),);
+        assert_eq!(info.extra.get("Host").and_then(|v| v.as_str()), Some("0.0.0.0"),);
+        assert_eq!(info.extra.get("Port").and_then(|v| v.as_str()), Some("53"),);
+        assert_eq!(info.extra.get("Info").and_then(|v| v.as_str()), Some("c2.example"),);
+        assert_eq!(info.host_bind.as_deref(), Some("0.0.0.0"));
+        assert_eq!(info.port_bind.as_deref(), Some("53"));
+    }
+
+    #[test]
+    fn http_to_operator_info_running_status_maps_to_online() {
+        let summary = ListenerSummary {
+            name: "http-run".to_owned(),
+            protocol: ListenerProtocol::Http,
+            state: PersistedListenerState { status: ListenerStatus::Running, last_error: None },
+            config: http_listener("http-run", 8080),
+        };
+
+        let info = summary.to_operator_info();
+        assert_eq!(info.status.as_deref(), Some("Online"));
+    }
+
+    #[test]
+    fn http_to_operator_info_stopped_status_maps_to_offline() {
+        let summary = ListenerSummary {
+            name: "http-stop".to_owned(),
+            protocol: ListenerProtocol::Http,
+            state: PersistedListenerState { status: ListenerStatus::Stopped, last_error: None },
+            config: http_listener("http-stop", 8080),
+        };
+
+        let info = summary.to_operator_info();
+        assert_eq!(info.status.as_deref(), Some("Offline"));
+    }
+
+    #[test]
+    fn http_to_operator_info_without_proxy_has_disabled_proxy() {
+        let summary = ListenerSummary {
+            name: "no-proxy".to_owned(),
+            protocol: ListenerProtocol::Http,
+            state: PersistedListenerState { status: ListenerStatus::Created, last_error: None },
+            config: http_listener("no-proxy", 8080),
+        };
+
+        let info = summary.to_operator_info();
+        assert_eq!(info.proxy_enabled.as_deref(), Some("false"));
+        assert!(info.proxy_host.is_none());
+        assert!(info.proxy_port.is_none());
+        assert!(info.proxy_username.is_none());
+        assert!(info.proxy_password.is_none());
+    }
+
+    // ── listener_config_from_operator DNS isolated test ─────────────────────
+
+    #[test]
+    fn listener_config_from_operator_parses_dns() -> Result<(), ListenerManagerError> {
+        let mut info = ListenerInfo {
+            name: Some("dns-test".to_owned()),
+            protocol: Some("Dns".to_owned()),
+            host_bind: Some("0.0.0.0".to_owned()),
+            port_bind: Some("5353".to_owned()),
+            ..ListenerInfo::default()
+        };
+        info.extra.insert("Domain".to_owned(), serde_json::Value::String("c2.example".to_owned()));
+        info.extra.insert("RecordTypes".to_owned(), serde_json::Value::String("A,TXT".to_owned()));
+
+        let config = listener_config_from_operator(&info)?;
+        match config {
+            ListenerConfig::Dns(dns) => {
+                assert_eq!(dns.name, "dns-test");
+                assert_eq!(dns.host_bind, "0.0.0.0");
+                assert_eq!(dns.port_bind, 5353);
+                assert_eq!(dns.domain, "c2.example");
+                assert_eq!(dns.record_types, vec!["A", "TXT"]);
+            }
+            other => panic!("expected Dns config, got {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn listener_config_from_operator_dns_defaults_host_bind() -> Result<(), ListenerManagerError> {
+        let mut info = ListenerInfo {
+            name: Some("dns-default".to_owned()),
+            protocol: Some("Dns".to_owned()),
+            host_bind: None,
+            port_bind: Some("53".to_owned()),
+            ..ListenerInfo::default()
+        };
+        info.extra.insert("Domain".to_owned(), serde_json::Value::String("c2.test".to_owned()));
+
+        let config = listener_config_from_operator(&info)?;
+        match config {
+            ListenerConfig::Dns(dns) => {
+                assert_eq!(dns.host_bind, "0.0.0.0", "DNS should default host_bind to 0.0.0.0");
+            }
+            other => panic!("expected Dns config, got {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn listener_config_from_operator_rejects_dns_without_domain() {
+        let info = ListenerInfo {
+            name: Some("dns-no-domain".to_owned()),
+            protocol: Some("Dns".to_owned()),
+            port_bind: Some("53".to_owned()),
+            ..ListenerInfo::default()
+        };
+
+        let error = listener_config_from_operator(&info).expect_err("missing Domain should fail");
+        assert!(
+            matches!(error, ListenerManagerError::InvalidConfig { .. }),
+            "expected InvalidConfig, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn listener_config_from_operator_parses_optional_port_conn() -> Result<(), ListenerManagerError>
+    {
+        let info = ListenerInfo {
+            name: Some("port-conn-test".to_owned()),
+            protocol: Some("Http".to_owned()),
+            host_bind: Some("0.0.0.0".to_owned()),
+            host_rotation: Some("round-robin".to_owned()),
+            port_bind: Some("8443".to_owned()),
+            port_conn: Some("443".to_owned()),
+            secure: Some("false".to_owned()),
+            ..ListenerInfo::default()
+        };
+
+        let config = listener_config_from_operator(&info)?;
+        match config {
+            ListenerConfig::Http(http) => {
+                assert_eq!(http.port_conn, Some(443));
+            }
+            other => panic!("expected Http config, got {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn listener_config_from_operator_accepts_absent_port_conn() -> Result<(), ListenerManagerError>
+    {
+        let info = ListenerInfo {
+            name: Some("no-port-conn".to_owned()),
+            protocol: Some("Http".to_owned()),
+            host_bind: Some("0.0.0.0".to_owned()),
+            host_rotation: Some("round-robin".to_owned()),
+            port_bind: Some("8080".to_owned()),
+            port_conn: None,
+            secure: Some("false".to_owned()),
+            ..ListenerInfo::default()
+        };
+
+        let config = listener_config_from_operator(&info)?;
+        match config {
+            ListenerConfig::Http(http) => {
+                assert!(http.port_conn.is_none());
+            }
+            other => panic!("expected Http config, got {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    // ── repository() returns a usable handle ────────────────────────────────
+
+    #[tokio::test]
+    async fn repository_returns_usable_listener_persistence_handle()
+    -> Result<(), ListenerManagerError> {
+        let mgr = manager().await?;
+        let repo = mgr.repository();
+
+        // Initially empty.
+        let all = repo.list().await?;
+        assert!(all.is_empty());
+
+        // Create via manager, verify via repository handle.
+        mgr.create(http_listener("repo-test", 9090)).await?;
+        let all = repo.list().await?;
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].name, "repo-test");
+
+        Ok(())
+    }
 }

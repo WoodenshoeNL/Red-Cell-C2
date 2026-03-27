@@ -2596,4 +2596,47 @@ mod tests {
             "invalid since+until should be ignored, returning full session activity set"
         );
     }
+
+    #[tokio::test]
+    async fn query_audit_log_rejects_offset_exceeding_i64() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        let overflowing_offset = (i64::MAX as usize).saturating_add(1);
+        let query = AuditQuery { offset: Some(overflowing_offset), ..AuditQuery::default() };
+        let error = query_audit_log(&database, &query)
+            .await
+            .expect_err("offset exceeding i64 should be rejected");
+        match error {
+            TeamserverError::InvalidPersistedValue { field, message } => {
+                assert_eq!(field, "offset");
+                assert!(
+                    message.contains("i64"),
+                    "error message should mention i64 range, got: {message}"
+                );
+            }
+            other => panic!("expected InvalidPersistedValue for offset, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn query_session_activity_rejects_offset_exceeding_i64() {
+        let database = Database::connect_in_memory().await.expect("database should initialize");
+        let overflowing_offset = (i64::MAX as usize).saturating_add(1);
+        let query = SessionActivityQuery {
+            offset: Some(overflowing_offset),
+            ..SessionActivityQuery::default()
+        };
+        let error = query_session_activity(&database, &query)
+            .await
+            .expect_err("offset exceeding i64 should be rejected");
+        match error {
+            TeamserverError::InvalidPersistedValue { field, message } => {
+                assert_eq!(field, "offset");
+                assert!(
+                    message.contains("i64"),
+                    "error message should mention i64 range, got: {message}"
+                );
+            }
+            other => panic!("expected InvalidPersistedValue for offset, got: {other:?}"),
+        }
+    }
 }

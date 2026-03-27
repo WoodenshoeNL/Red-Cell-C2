@@ -783,8 +783,15 @@ pub struct DemonConfig {
     /// agent keys directly.  Compatible agents (Specter / Archon) must embed
     /// the same secret and perform the matching derivation.  Legacy Demon
     /// agents do not support this — leave unset for Havoc compatibility.
-    #[serde(rename = "InitSecret", default)]
-    pub init_secret: Option<String>,
+    ///
+    /// Wrapped in [`Zeroizing`] so the secret material is overwritten in heap
+    /// memory when the value is dropped.
+    #[serde(
+        rename = "InitSecret",
+        default,
+        deserialize_with = "deserialize_optional_zeroizing_string"
+    )]
+    pub init_secret: Option<Zeroizing<String>>,
     /// Whether to trust `X-Forwarded-For`.
     #[serde(rename = "TrustXForwardedFor", default)]
     pub trust_x_forwarded_for: bool,

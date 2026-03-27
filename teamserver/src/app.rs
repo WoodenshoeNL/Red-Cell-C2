@@ -650,6 +650,76 @@ mod tests {
         );
     }
 
+    /// When the shutdown callback-tracking gate is closed (i.e. shutdown has
+    /// been initiated), a request to an external listener path must be rejected
+    /// with a camouflage 404 *before* body collection or handler execution.
+    /// This guards the graceful-shutdown drain: no new callbacks should enter
+    /// the handler once the gate is closed.
+    #[tokio::test]
+    async fn fallback_returns_404_when_shutdown_denies_callback_tracking() {
+        use red_cell_common::ExternalListenerConfig;
+
+        let state = build_test_state().await;
+
+        // Register and start an external listener on "/shutdown-gate".
+        let config = red_cell_common::ListenerConfig::from(ExternalListenerConfig {
+            name: "ext-shutdown".to_owned(),
+            endpoint: "/shutdown-gate".to_owned(),
+        });
+        state.listeners.create(config).await.expect("create should succeed");
+        state.listeners.start("ext-shutdown").await.expect("start should succeed");
+
+        // Confirm the endpoint is live.
+        let ext = state
+            .listeners
+            .external_state_for_path("/shutdown-gate")
+            .await
+            .expect("external endpoint should be registered");
+        assert_eq!(ext.listener_name(), "ext-shutdown");
+
+        // Initiate shutdown so that try_track_callback() returns None.
+        state.listeners.shutdown_controller().initiate();
+
+        // Build a valid Demon init packet — identical to the happy-path test.
+        let key: [u8; 32] = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+            0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C,
+            0x1D, 0x1E, 0x1F, 0x20,
+        ];
+        let iv: [u8; 16] = [
+            0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18, 0x29, 0x3A, 0x4B, 0x5C, 0x6D, 0x7E,
+            0x8F, 0x90,
+        ];
+        let agent_id = 0xCAFE_0099;
+        let init_body = build_demon_init_packet(agent_id, key, iv);
+
+        let response = build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/shutdown-gate")
+                    .body(Body::from(init_body))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        // The shutdown gate must reject with a camouflage 404.
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "request during shutdown must return camouflage 404, not reach the handler"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("body should read");
+        assert!(body.is_empty(), "camouflage 404 must have an empty body");
+
+        // The agent must NOT have been registered — the handler was never reached.
+        assert!(
+            state.agent_registry.get(agent_id).await.is_none(),
+            "agent must not be registered when callback tracking is denied during shutdown"
+        );
+    }
+
     /// A request body with an incorrect Demon magic value on an external
     /// listener path must be silently rejected with a camouflage 404.
     /// This verifies the early magic precheck is applied to the external

@@ -4,6 +4,7 @@ use std::fs;
 use std::io::BufReader;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -213,6 +214,14 @@ pub enum PersistTlsError {
         /// Underlying filesystem error.
         source: std::io::Error,
     },
+    /// Tightening permissions on an existing key file to 0600 failed.
+    #[error("failed to harden permissions on {path}: {source}")]
+    HardenPermissions {
+        /// Path whose permissions could not be updated.
+        path: String,
+        /// Underlying filesystem error.
+        source: std::io::Error,
+    },
 }
 
 /// Resolve a durable TLS identity for a long-running service.
@@ -241,6 +250,11 @@ pub fn resolve_or_persist_tls_identity(
     }
 
     if cert_path.exists() && key_path.exists() {
+        // Re-apply 0600 so keys written by older builds with a permissive umask
+        // are hardened on every subsequent boot, not just on first generation.
+        fs::set_permissions(key_path, fs::Permissions::from_mode(0o600)).map_err(|source| {
+            PersistTlsError::HardenPermissions { path: key_path.display().to_string(), source }
+        })?;
         return load_tls_identity_from_files(cert_path, key_path).map_err(PersistTlsError::Tls);
     }
 
@@ -761,6 +775,62 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(key_mode, 0o600, "private key file must be owner-only (0600), got {key_mode:o}");
+    }
+
+    #[test]
+    fn resolve_or_persist_hardens_pre_existing_0644_key_on_reload() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::TempDir::new().expect("temporary directory should be created");
+        let cert_path = temp_dir.path().join("teamserver.tls.crt");
+        let key_path = temp_dir.path().join("teamserver.tls.key");
+
+        // Simulate an older build that wrote the key with permissive 0644 mode.
+        let identity = generate_self_signed_tls_identity(
+            &["teamserver.local".to_owned()],
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("identity generation should succeed");
+        std::fs::write(&cert_path, identity.certificate_pem())
+            .expect("certificate should be written");
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o644)
+                .open(&key_path)
+                .and_then(|mut f: std::fs::File| f.write_all(identity.private_key_pem()))
+                .expect("key should be written with 0644");
+        }
+
+        let mode_before = std::fs::metadata(&key_path)
+            .expect("key metadata should be readable")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode_before, 0o644, "precondition: key file must start with 0644");
+
+        resolve_or_persist_tls_identity(
+            &["teamserver.local".to_owned()],
+            None,
+            &cert_path,
+            &key_path,
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("reload of pre-existing files should succeed");
+
+        let mode_after = std::fs::metadata(&key_path)
+            .expect("key metadata should be readable after reload")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode_after, 0o600,
+            "private key must be hardened to 0600 on reload, was {mode_before:o}"
+        );
     }
 
     #[test]

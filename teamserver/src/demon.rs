@@ -413,6 +413,19 @@ fn parse_init_agent(
         true
     };
 
+    // Reject trailing bytes after the last parsed field.  The decrypted init
+    // metadata must be fully consumed — leftover bytes indicate a malformed or
+    // future-incompatible packet that we must not silently accept.
+    if decrypted_offset < decrypted.len() {
+        let trailing = decrypted.len() - decrypted_offset;
+        warn!(
+            agent_id = format_args!("0x{agent_id:08X}"),
+            trailing_bytes = trailing,
+            "rejecting DEMON_INIT with trailing bytes after extension flags"
+        );
+        return Err(DemonParserError::InvalidInit("trailing bytes after init metadata"));
+    }
+
     let timestamp =
         now.format(&Rfc3339).map_err(|_| DemonParserError::InvalidInit("invalid timestamp"))?;
     let kill_date = parse_kill_date(kill_date)?;
@@ -2490,6 +2503,138 @@ mod tests {
             init.agent.encryption.aes_key.as_slice(),
             &key,
             "with init_secret, session key must differ from raw agent key"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Trailing-bytes rejection after extension flags
+    // ------------------------------------------------------------------
+
+    /// Helper: build an init packet whose encrypted metadata has `extra_bytes`
+    /// appended after the extension flags field.
+    fn build_init_packet_with_trailing_bytes(
+        agent_id: u32,
+        key: [u8; AGENT_KEY_LENGTH],
+        iv: [u8; AGENT_IV_LENGTH],
+        ext_flags: u32,
+        extra: &[u8],
+    ) -> Vec<u8> {
+        let mut metadata = build_init_metadata_with_ext_flags(agent_id, ext_flags);
+        metadata.extend_from_slice(extra);
+        let encrypted =
+            encrypt_agent_data(&key, &iv, &metadata).expect("metadata encryption should succeed");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u32_be(u32::from(DemonCommand::DemonInit)));
+        payload.extend_from_slice(&u32_be(7));
+        payload.extend_from_slice(&key);
+        payload.extend_from_slice(&iv);
+        payload.extend_from_slice(&encrypted);
+
+        DemonEnvelope::new(agent_id, payload).expect("init envelope should be valid").to_bytes()
+    }
+
+    #[tokio::test]
+    async fn init_with_one_trailing_byte_after_ext_flags_is_rejected() {
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry.clone());
+        let agent_id = 0xDEAD_0001;
+        let key = test_key(0xC1);
+        let iv = test_iv(0xD1);
+        let packet = build_init_packet_with_trailing_bytes(
+            agent_id,
+            key,
+            iv,
+            INIT_EXT_MONOTONIC_CTR,
+            &[0xFF],
+        );
+
+        let err = parser
+            .parse_at(&packet, "10.0.0.99".to_owned(), datetime!(2026-03-20 12:00:00 UTC))
+            .await
+            .expect_err("trailing byte after ext flags must be rejected");
+
+        assert!(
+            err.to_string().contains("trailing bytes"),
+            "error should mention trailing bytes, got: {err}"
+        );
+
+        // Agent must not be registered.
+        assert!(
+            registry.get(agent_id).await.is_none(),
+            "agent must not be registered after trailing-byte rejection"
+        );
+    }
+
+    #[tokio::test]
+    async fn init_with_four_trailing_bytes_after_ext_flags_is_rejected() {
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry.clone());
+        let agent_id = 0xDEAD_0004;
+        let key = test_key(0xC4);
+        let iv = test_iv(0xD4);
+        let packet = build_init_packet_with_trailing_bytes(
+            agent_id,
+            key,
+            iv,
+            INIT_EXT_MONOTONIC_CTR,
+            &[0xAA, 0xBB, 0xCC, 0xDD],
+        );
+
+        let err = parser
+            .parse_at(&packet, "10.0.0.99".to_owned(), datetime!(2026-03-20 12:00:00 UTC))
+            .await
+            .expect_err("4 trailing bytes after ext flags must be rejected");
+
+        assert!(
+            err.to_string().contains("trailing bytes"),
+            "error should mention trailing bytes, got: {err}"
+        );
+
+        assert!(
+            registry.get(agent_id).await.is_none(),
+            "agent must not be registered after trailing-byte rejection"
+        );
+    }
+
+    #[tokio::test]
+    async fn init_with_trailing_bytes_after_legacy_metadata_is_rejected() {
+        // When there are no extension flags but extra bytes trail the working_hours
+        // field, those bytes look like 1-3 leftover bytes (not enough for a u32
+        // extension flag), so they should still be rejected.
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry.clone());
+        let agent_id = 0xDEAD_0003;
+        let key = test_key(0xC3);
+        let iv = test_iv(0xD3);
+
+        // Build metadata without ext flags, then append 2 trailing bytes.
+        let mut metadata = build_init_metadata(agent_id);
+        metadata.extend_from_slice(&[0x01, 0x02]);
+        let encrypted =
+            encrypt_agent_data(&key, &iv, &metadata).expect("metadata encryption should succeed");
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&u32_be(u32::from(DemonCommand::DemonInit)));
+        payload.extend_from_slice(&u32_be(7));
+        payload.extend_from_slice(&key);
+        payload.extend_from_slice(&iv);
+        payload.extend_from_slice(&encrypted);
+        let packet = DemonEnvelope::new(agent_id, payload)
+            .expect("init envelope should be valid")
+            .to_bytes();
+
+        let err = parser
+            .parse_at(&packet, "10.0.0.99".to_owned(), datetime!(2026-03-20 12:00:00 UTC))
+            .await
+            .expect_err("trailing bytes after legacy metadata must be rejected");
+
+        assert!(
+            err.to_string().contains("trailing bytes"),
+            "error should mention trailing bytes, got: {err}"
+        );
+
+        assert!(
+            registry.get(agent_id).await.is_none(),
+            "agent must not be registered after trailing-byte rejection"
         );
     }
 }

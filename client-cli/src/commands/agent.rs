@@ -160,32 +160,7 @@ pub(crate) struct TaskQueuedResponse {
     pub(crate) task_id: String,
 }
 
-/// Wire format returned by `GET /agents/{id}/output`.
-#[derive(Debug, Deserialize)]
-struct OutputPage {
-    #[allow(dead_code)]
-    total: usize,
-    entries: Vec<OutputWireEntry>,
-}
-
-/// Single entry in the `OutputPage.entries` array.
-#[derive(Debug, Deserialize)]
-struct OutputWireEntry {
-    id: i64,
-    task_id: Option<String>,
-    #[allow(dead_code)]
-    command_id: u32,
-    #[allow(dead_code)]
-    request_id: u32,
-    #[allow(dead_code)]
-    response_type: String,
-    message: String,
-    output: String,
-    command_line: Option<String>,
-    #[allow(dead_code)]
-    operator: Option<String>,
-    received_at: String,
-}
+use super::types::{OutputPage, output_url};
 
 // ── public output types ───────────────────────────────────────────────────────
 
@@ -602,10 +577,7 @@ async fn fetch_output(
     id: &str,
     since: Option<&str>,
 ) -> Result<Vec<OutputEntry>, CliError> {
-    let path = match since {
-        Some(cursor) => format!("/agents/{id}/output?since={cursor}"),
-        None => format!("/agents/{id}/output"),
-    };
+    let path = output_url(id, since);
     let page: OutputPage = client.get(&path).await?;
     Ok(page
         .entries

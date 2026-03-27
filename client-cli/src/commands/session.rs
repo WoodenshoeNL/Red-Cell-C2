@@ -181,40 +181,7 @@ struct SessionCmd {
 
 // ── local raw API response shapes for new commands ────────────────────────────
 
-/// Wire format returned by `GET /agents/{id}/output`.
-#[derive(Debug, Deserialize)]
-struct OutputPage {
-    #[allow(dead_code)]
-    total: usize,
-    entries: Vec<OutputWireEntry>,
-}
-
-/// Single entry in the `OutputPage.entries` array.
-#[derive(Debug, Deserialize)]
-struct OutputWireEntry {
-    id: i64,
-    task_id: Option<String>,
-    #[allow(dead_code)]
-    command_id: u32,
-    #[allow(dead_code)]
-    request_id: u32,
-    #[allow(dead_code)]
-    response_type: String,
-    message: String,
-    output: String,
-    command_line: Option<String>,
-    #[allow(dead_code)]
-    operator: Option<String>,
-    received_at: String,
-}
-
-/// Build the output polling URL with an optional cursor.
-fn output_url(agent_id: &str, since: Option<&str>) -> String {
-    match since {
-        Some(cursor) => format!("/agents/{agent_id}/output?since={cursor}"),
-        None => format!("/agents/{agent_id}/output"),
-    }
-}
+use super::types::{OutputPage, output_url};
 
 /// Minimal operator record returned by `GET /operators` and `POST /operators`.
 #[derive(Debug, Deserialize, Serialize)]

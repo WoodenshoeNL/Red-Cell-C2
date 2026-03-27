@@ -2,6 +2,8 @@
 
 use std::fs;
 use std::io::BufReader;
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -247,9 +249,19 @@ pub fn resolve_or_persist_tls_identity(
     fs::write(cert_path, identity.certificate_pem()).map_err(|source| {
         PersistTlsError::WriteFile { path: cert_path.display().to_string(), source }
     })?;
-    fs::write(key_path, identity.private_key_pem()).map_err(|source| {
-        PersistTlsError::WriteFile { path: key_path.display().to_string(), source }
-    })?;
+
+    // Private key must be owner-only readable (0600) to prevent exposure.
+    fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(key_path)
+        .and_then(|mut f| f.write_all(identity.private_key_pem()))
+        .map_err(|source| PersistTlsError::WriteFile {
+            path: key_path.display().to_string(),
+            source,
+        })?;
 
     Ok(identity)
 }
@@ -724,6 +736,31 @@ mod tests {
         assert!(key_path.exists(), "private key file should be written to disk");
         assert!(identity.certificate_pem().starts_with(b"-----BEGIN CERTIFICATE-----"));
         assert!(identity.private_key_pem().starts_with(b"-----BEGIN PRIVATE KEY-----"));
+    }
+
+    #[test]
+    fn resolve_or_persist_sets_private_key_permissions_to_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::TempDir::new().expect("temporary directory should be created");
+        let cert_path = temp_dir.path().join("teamserver.tls.crt");
+        let key_path = temp_dir.path().join("teamserver.tls.key");
+
+        resolve_or_persist_tls_identity(
+            &["teamserver.local".to_owned()],
+            None,
+            &cert_path,
+            &key_path,
+            TlsKeyAlgorithm::EcdsaP256,
+        )
+        .expect("first-boot generation should succeed");
+
+        let key_mode = std::fs::metadata(&key_path)
+            .expect("key file metadata should be readable")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(key_mode, 0o600, "private key file must be owner-only (0600), got {key_mode:o}");
     }
 
     #[test]

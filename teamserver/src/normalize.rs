@@ -138,6 +138,37 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
+    /// If the inner make-service's `call()` returns an error, the wrapper must
+    /// propagate it unchanged instead of masking it or producing a wrapped
+    /// service.
+    #[tokio::test]
+    async fn inner_call_error_is_propagated() {
+        use std::fmt;
+
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        struct TestError(String);
+
+        impl fmt::Display for TestError {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+
+        // A make-service that always fails on `call()`.
+        let make_svc = tower::service_fn(|_: ()| async {
+            Err::<Router, TestError>(TestError("connection factory failure".into()))
+        });
+
+        let mut nms = NormalizedMakeService::new(make_svc);
+        nms.ready().await.expect("poll_ready should succeed");
+
+        let result = nms.call(()).await;
+        assert_eq!(
+            result.expect_err("call should propagate the inner error"),
+            TestError("connection factory failure".into()),
+        );
+    }
+
     /// Requests with a trailing slash should be routed to the handler
     /// registered without one, thanks to the normalization layer.
     #[tokio::test]

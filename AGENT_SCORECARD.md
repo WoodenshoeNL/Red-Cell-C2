@@ -22,7 +22,7 @@ Each loop run updates the running totals and appends a review entry.
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 7 | 0 | 0 |
 | Missing tests / stale tests | 45 | 14 | 5 |
-| Clippy warnings | 4 | 0 | 1 |
+| Clippy warnings | 5 | 0 | 1 |
 | Protocol errors | 16 | 27 | 3 |
 | Security issues | 41 | 38 | 0 |
 | Architecture drift | 19 | 23 | 0 |
@@ -31,7 +31,7 @@ Each loop run updates the running totals and appends a review entry.
 | Test infrastructure / flakiness | 16 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
-| Correctness / pagination | 36 | 7 | 1 |
+| Correctness / pagination | 38 | 7 | 1 |
 | Workflow / close-hygiene | 18 | 0 | 0 |
 | Code reuse / duplication | 7 | 0 | 0 |
 
@@ -40,6 +40,19 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-27 12:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 3 | clippy (1), correctness (2) | CliError::Unsupported dead code blocks clippy -D warnings; unchecked `as i64` casts in loot size_bytes (filesystem.rs:444, screenshot.rs:78); error swallowing with `let _ =` on listener stop/update/join paths |
+| Codex | 0 | — | No issues found |
+| Cursor | 0 | — | No issues found |
+
+Overall codebase health: on track
+Biggest blindspot: error swallowing in listener lifecycle — stop/update/task-join errors are silently discarded, making listener failures invisible to operators.
+Build: passed (cargo check clean, cargo clippy has 1 dead_code warning in client-cli)
+Security posture: strong — no unwrap/expect in production code, no todo!/unimplemented!, no println/eprintln in teamserver. Constant-time auth, proper key redaction, bounded queues/maps.
 
 ### Arch Review — 2026-03-27 08:30
 

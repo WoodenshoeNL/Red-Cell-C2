@@ -21,10 +21,10 @@ Each loop run updates the running totals and appends a review entry.
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 7 | 0 | 0 |
-| Missing tests / stale tests | 45 | 14 | 5 |
+| Missing tests / stale tests | 47 | 14 | 5 |
 | Clippy warnings | 5 | 0 | 1 |
 | Protocol errors | 16 | 27 | 3 |
-| Security issues | 42 | 38 | 0 |
+| Security issues | 46 | 38 | 0 |
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 7 | 10 | 1 |
 | Startup / lifecycle regressions | 2 | 9 | 0 |
@@ -63,6 +63,19 @@ Issues found: 0 new bugs filed (3 existing bugs from prior QA still open: red-ce
 Build: passed | Clippy: passed (zero warnings) | Tests: build lock contention prevented full test run (multiple cargo processes)
 New issues: red-cell-c2-seggw (blocking IO in upload, P2), red-cell-c2-zcths (struct duplication, P3)
 Note: red-cell-c2-9qejf still in_progress with substantial stashed work (~1100 lines). Implementation looks solid overall — good test coverage for new endpoints, proper audit logging, cursor-based pagination. The two bugs filed are preventive catches before commit.
+
+### Arch Review — 2026-03-28 07:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 6 | security (4), missing tests (2) | init_secret not Zeroizing (config.rs:787); ikm Vec not zeroized in derive_session_keys (crypto.rs:267); TLS private key written without 0600 permissions (tls.rs:250); no recursion depth guard on pivot dispatch (pivot.rs:243); missing integration tests for process.rs and filesystem.rs subcommands |
+| Codex | 0 | — | No issues found |
+| Cursor | 0 | — | No issues found |
+
+Overall codebase health: on track
+Biggest blindspot: crypto material hygiene — the codebase has excellent Zeroize discipline in most places but missed two spots where key material (init_secret config field, HKDF input keying material) lingers on the heap after use.
+Build: passed (cargo check clean) | Clippy: 1 pre-existing dead_code warning (CliError::Unsupported, red-cell-c2-zfb4u) | Tests: all passing (~2376 tests green)
+Security posture: strong — no production unwrap/expect, no todo/unimplemented, comprehensive rate limiting, constant-time auth, bounded queues. The TLS key file permissions issue (P1) is the most actionable finding: private keys may be world-readable depending on umask.
 
 ### Arch Review — 2026-03-28 05:45
 

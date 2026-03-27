@@ -24,14 +24,14 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 45 | 14 | 5 |
 | Clippy warnings | 5 | 0 | 1 |
 | Protocol errors | 16 | 27 | 3 |
-| Security issues | 41 | 38 | 0 |
+| Security issues | 42 | 38 | 0 |
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 7 | 10 | 1 |
 | Startup / lifecycle regressions | 2 | 9 | 0 |
-| Test infrastructure / flakiness | 16 | 0 | 0 |
+| Test infrastructure / flakiness | 17 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
-| Correctness / pagination | 41 | 7 | 1 |
+| Correctness / pagination | 42 | 7 | 1 |
 | Workflow / close-hygiene | 18 | 0 | 0 |
 | Code reuse / duplication | 8 | 0 | 0 |
 
@@ -52,6 +52,19 @@ Each loop run updates the running totals and appends a review entry.
 Build: passed | Clippy: passed (zero warnings) | Tests: build lock contention prevented full test run (multiple cargo processes)
 New issues: red-cell-c2-seggw (blocking IO in upload, P2), red-cell-c2-zcths (struct duplication, P3)
 Note: red-cell-c2-9qejf still in_progress with substantial stashed work (~1100 lines). Implementation looks solid overall — good test coverage for new endpoints, proper audit logging, cursor-based pagination. The two bugs filed are preventive catches before commit.
+
+### Arch Review — 2026-03-28 05:45
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 3 | correctness (1), security (1), test flakiness (1) | Unchecked u32 addition in filesystem dir callback (filesystem.rs:64); unbounded loop counts from agent data in kerberos dispatch (kerberos.rs:117,150) enable CPU DoS; sync_profile listener tests fail intermittently under parallel runs |
+| Codex | 0 | — | No issues found |
+| Cursor | 0 | — | No issues found |
+
+Overall codebase health: on track
+Biggest blindspot: dispatch handlers that use agent-supplied counts as loop bounds without sanity limits — the parser will eventually error on buffer exhaustion, but a malicious agent can burn CPU with inflated counts before that happens.
+Build: passed (cargo check clean) | Clippy: 1 pre-existing dead_code warning (CliError::Unsupported, red-cell-c2-zfb4u) | Tests: 3 flaky failures under parallel run (sync_profile listener tests), all pass individually
+Security posture: strong — no new exploitable vulnerabilities. Previous findings (constant-time auth, bounded allocations, rate limiting, key redaction) remain solid. The kerberos DoS vector requires an authenticated agent session.
 
 ### Arch Review — 2026-03-27 20:45
 

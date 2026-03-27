@@ -39,6 +39,7 @@ use hkdf::Hkdf;
 use sha2::Sha256;
 use sha3::{Digest, Sha3_256};
 use thiserror::Error;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Agent communication key length in bytes.
 pub const AGENT_KEY_LENGTH: usize = 32;
@@ -51,7 +52,10 @@ const AGENT_CTR_BLOCK_LEN: u64 = 16;
 ///
 /// The [`Debug`] implementation deliberately redacts key and IV bytes to
 /// prevent accidental exposure of key material in logs or error chains.
-#[derive(Clone, PartialEq, Eq)]
+///
+/// Key material is automatically zeroed when this struct is dropped
+/// via [`ZeroizeOnDrop`], preventing residual secrets on the stack.
+#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct AgentCryptoMaterial {
     /// AES-256 session key.
     pub key: [u8; AGENT_KEY_LENGTH],
@@ -1108,5 +1112,18 @@ mod tests {
             message.contains("HKDF expand failed"),
             "HkdfExpand display must contain 'HKDF expand failed', got: {message}"
         );
+    }
+
+    #[test]
+    fn agent_crypto_material_zeroizes_on_drop() {
+        use zeroize::Zeroize;
+
+        let mut material =
+            AgentCryptoMaterial { key: [0xAA; AGENT_KEY_LENGTH], iv: [0xBB; AGENT_IV_LENGTH] };
+
+        // Explicit zeroize should clear the fields.
+        material.zeroize();
+        assert_eq!(material.key, [0u8; AGENT_KEY_LENGTH], "key must be zeroed after zeroize()");
+        assert_eq!(material.iv, [0u8; AGENT_IV_LENGTH], "iv must be zeroed after zeroize()");
     }
 }

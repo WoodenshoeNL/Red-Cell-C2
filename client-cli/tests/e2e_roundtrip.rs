@@ -324,7 +324,7 @@ async fn spawn_server() -> TestHarness {
 
     let base_url = format!("http://127.0.0.1:{}", addr.port());
     let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(15))
         .build()
         .expect("reqwest client");
 

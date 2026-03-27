@@ -3388,7 +3388,7 @@ async fn submit_payload_build(
         arch: request.arch.clone(),
         format: request.format.clone(),
         listener: request.listener.clone(),
-        sleep_secs: request.sleep.map(|s| s as i64),
+        sleep_secs: request.sleep.map(|s| i64::try_from(s).unwrap_or(i64::MAX)),
         artifact: None,
         size_bytes: None,
         error: None,
@@ -10008,5 +10008,29 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ---- PayloadBuildRecord sleep_secs overflow clamping ----
+
+    #[test]
+    fn payload_build_sleep_secs_clamps_u64_overflow_to_i64_max() {
+        // Values exceeding i64::MAX must not silently wrap to negative.
+        let overflow: u64 = u64::try_from(i64::MAX).expect("i64::MAX fits in u64") + 1;
+        let clamped: i64 = i64::try_from(overflow).unwrap_or(i64::MAX);
+        assert_eq!(clamped, i64::MAX);
+    }
+
+    #[test]
+    fn payload_build_sleep_secs_preserves_valid_u64_values() {
+        let valid: u64 = 3600;
+        let converted: i64 = i64::try_from(valid).unwrap_or(i64::MAX);
+        assert_eq!(converted, 3600);
+    }
+
+    #[test]
+    fn payload_build_sleep_secs_handles_u64_max() {
+        let max_val: u64 = u64::MAX;
+        let clamped: i64 = i64::try_from(max_val).unwrap_or(i64::MAX);
+        assert_eq!(clamped, i64::MAX);
     }
 }

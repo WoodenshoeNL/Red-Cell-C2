@@ -3175,4 +3175,57 @@ mod tests {
         let fetched = repo_b.get("build-shared").await.unwrap();
         assert_eq!(fetched, Some(record));
     }
+
+    // ── AgentRepository transport-state persistence tests ─────────────
+
+    #[tokio::test]
+    async fn create_full_persists_listener_ctr_offset_and_legacy_ctr() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.agents();
+        let agent = stub_agent(0xAA);
+
+        repo.create_full(&agent, "https-listener", 42, true).await.unwrap();
+
+        let persisted = repo.get_persisted(0xAA).await.unwrap().expect("agent should exist");
+        assert_eq!(persisted.listener_name, "https-listener");
+        assert_eq!(persisted.ctr_block_offset, 42);
+        assert!(persisted.legacy_ctr);
+        assert_eq!(persisted.info.agent_id, 0xAA);
+    }
+
+    #[tokio::test]
+    async fn set_legacy_ctr_on_missing_agent_returns_agent_not_found() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.agents();
+
+        let err = repo.set_legacy_ctr(0xDEAD, true).await.unwrap_err();
+        assert!(
+            matches!(err, super::TeamserverError::AgentNotFound { agent_id } if agent_id == 0xDEAD),
+            "expected AgentNotFound, got: {err:?}",
+        );
+
+        // Verify no row was created as a side-effect.
+        let fetched = repo.get_persisted(0xDEAD).await.unwrap();
+        assert!(fetched.is_none());
+    }
+
+    #[tokio::test]
+    async fn toggle_legacy_ctr_preserves_other_fields() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.agents();
+        let agent = stub_agent(0xBB);
+
+        repo.create_full(&agent, "smb-pipe", 99, true).await.unwrap();
+
+        // Toggle legacy_ctr from true → false.
+        repo.set_legacy_ctr(0xBB, false).await.unwrap();
+
+        let persisted = repo.get_persisted(0xBB).await.unwrap().expect("agent should exist");
+        assert!(!persisted.legacy_ctr, "legacy_ctr should now be false");
+        // Other transport fields must be unchanged.
+        assert_eq!(persisted.listener_name, "smb-pipe");
+        assert_eq!(persisted.ctr_block_offset, 99);
+        assert_eq!(persisted.info.agent_id, 0xBB);
+        assert_eq!(persisted.info.active, true);
+    }
 }

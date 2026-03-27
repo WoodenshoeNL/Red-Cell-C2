@@ -2888,8 +2888,18 @@ mod tests {
 
         let profile = Profile::parse(
             r#"
-            Teamserver { Host = "127.0.0.1" Port = 0 }
-            Operators { user "op" { Password = "pw1234" Role = "Operator" } }
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 0
+            }
+
+            Operators {
+              user "op" {
+                Password = "pw1234"
+                Role = "Operator"
+              }
+            }
+
             Demon {}
             "#,
         )

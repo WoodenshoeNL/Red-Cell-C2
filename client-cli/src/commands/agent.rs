@@ -746,7 +746,8 @@ async fn upload(
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD as BASE64;
 
-    let file_bytes = std::fs::read(src)
+    let file_bytes = tokio::fs::read(src)
+        .await
         .map_err(|e| CliError::General(format!("failed to read local file {src}: {e}")))?;
     let content = BASE64.encode(&file_bytes);
 

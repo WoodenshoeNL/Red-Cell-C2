@@ -19,7 +19,7 @@ use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use hmac::{Hmac, Mac};
 use red_cell_common::config::{OperatorRole, Profile};
-use red_cell_common::demon::DemonCommand;
+use red_cell_common::demon::{DemonCommand, DemonFilesystemCommand};
 use red_cell_common::operator::{AgentTaskInfo, EventCode, Message, MessageHead};
 use red_cell_common::{AgentRecord, ListenerConfig};
 use serde::{Deserialize, Serialize};
@@ -614,6 +614,56 @@ struct AgentTaskQueuedResponse {
     queued_jobs: usize,
 }
 
+/// Single output entry returned by `GET /agents/{id}/output`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+struct AgentOutputEntry {
+    /// Database row identifier — use as `since` cursor for polling.
+    id: i64,
+    /// Stable task identifier, when known.
+    task_id: Option<String>,
+    /// Callback command identifier.
+    command_id: u32,
+    /// Original request identifier.
+    request_id: u32,
+    /// Response severity/type label.
+    response_type: String,
+    /// Human-readable status text.
+    message: String,
+    /// Raw output string emitted by the agent.
+    output: String,
+    /// Operator command line associated with the request, when known.
+    command_line: Option<String>,
+    /// Operator username associated with the request, when known.
+    operator: Option<String>,
+    /// Response timestamp string.
+    received_at: String,
+}
+
+/// Paginated agent output response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
+struct AgentOutputPage {
+    /// Total number of entries returned.
+    total: usize,
+    /// Output entries in insertion order.
+    entries: Vec<AgentOutputEntry>,
+}
+
+/// Request body for `POST /agents/{id}/upload`.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+struct AgentUploadRequest {
+    /// Remote path on the target where the file should be written.
+    remote_path: String,
+    /// File content encoded as base64.
+    content: String,
+}
+
+/// Request body for `POST /agents/{id}/download`.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+struct AgentDownloadRequest {
+    /// Remote path on the target to download.
+    remote_path: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 struct LootSummary {
     id: i64,
@@ -959,6 +1009,9 @@ pub fn api_routes(api: ApiRuntime) -> Router<TeamserverState> {
         .route("/agents", get(list_agents))
         .route("/agents/{id}", get(get_agent).delete(kill_agent))
         .route("/agents/{id}/task", post(queue_agent_task))
+        .route("/agents/{id}/output", get(get_agent_output))
+        .route("/agents/{id}/upload", post(agent_upload))
+        .route("/agents/{id}/download", post(agent_download))
         .route("/audit", get(list_audit))
         .route("/session-activity", get(list_session_activity))
         .route("/credentials", get(list_credentials))
@@ -1036,6 +1089,9 @@ struct ApiInfoResponse {
         get_agent,
         kill_agent,
         queue_agent_task,
+        get_agent_output,
+        agent_upload,
+        agent_download,
         list_audit,
         list_session_activity,
         list_credentials,
@@ -1076,6 +1132,10 @@ struct ApiInfoResponse {
             PayloadBuildSubmitResponse,
             PayloadJobStatus,
             AgentTaskQueuedResponse,
+            AgentOutputEntry,
+            AgentOutputPage,
+            AgentUploadRequest,
+            AgentDownloadRequest,
             AuditPage,
             SessionActivityPage,
             CredentialPage,
@@ -1410,6 +1470,312 @@ async fn queue_agent_task(
             task_id: task.task_id,
             queued_jobs,
         }),
+    ))
+}
+
+// ── agent output / upload / download ─────────────────────────────────────────
+
+/// Query parameters for `GET /agents/{id}/output`.
+#[derive(Debug, Deserialize, IntoParams)]
+struct AgentOutputQuery {
+    /// Cursor: only return rows with `id` strictly greater than this value.
+    since: Option<i64>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/agents/{id}/output",
+    context_path = "/api/v1",
+    tag = "agents",
+    security(("api_key" = [])),
+    params(
+        ("id" = String, Path, description = "Agent id in hex (with optional 0x prefix)"),
+        AgentOutputQuery
+    ),
+    responses(
+        (status = 200, description = "Agent output entries", body = AgentOutputPage),
+        (status = 400, description = "Invalid agent id", body = ApiErrorBody),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
+        (status = 404, description = "Agent not found", body = ApiErrorBody)
+    )
+)]
+async fn get_agent_output(
+    State(state): State<TeamserverState>,
+    _identity: ReadApiAccess,
+    Path(id): Path<String>,
+    Query(query): Query<AgentOutputQuery>,
+) -> Result<Json<AgentOutputPage>, AgentApiError> {
+    let agent_id = parse_api_agent_id(&id)?;
+
+    // Verify agent exists.
+    state
+        .agent_registry
+        .get(agent_id)
+        .await
+        .ok_or(crate::TeamserverError::AgentNotFound { agent_id })?;
+
+    let records = state
+        .database
+        .agent_responses()
+        .list_for_agent_since(agent_id, query.since)
+        .await
+        .map_err(AgentApiError::Teamserver)?;
+
+    let entries: Vec<AgentOutputEntry> = records
+        .into_iter()
+        .map(|r| AgentOutputEntry {
+            id: r.id.unwrap_or(0),
+            task_id: r.task_id,
+            command_id: r.command_id,
+            request_id: r.request_id,
+            response_type: r.response_type,
+            message: r.message,
+            output: r.output,
+            command_line: r.command_line,
+            operator: r.operator,
+            received_at: r.received_at,
+        })
+        .collect();
+
+    let total = entries.len();
+    Ok(Json(AgentOutputPage { total, entries }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/agents/{id}/upload",
+    context_path = "/api/v1",
+    tag = "agents",
+    security(("api_key" = [])),
+    params(("id" = String, Path, description = "Agent id in hex (with optional 0x prefix)")),
+    request_body = AgentUploadRequest,
+    responses(
+        (status = 202, description = "Upload task queued", body = AgentTaskQueuedResponse),
+        (status = 400, description = "Invalid agent id or payload", body = ApiErrorBody),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
+        (status = 404, description = "Agent not found", body = ApiErrorBody),
+        (status = 429, description = "Agent task queue full", body = ApiErrorBody)
+    )
+)]
+async fn agent_upload(
+    State(state): State<TeamserverState>,
+    identity: TaskAgentApiAccess,
+    Path(id): Path<String>,
+    Json(body): Json<AgentUploadRequest>,
+) -> Result<(StatusCode, Json<AgentTaskQueuedResponse>), AgentApiError> {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+
+    let agent_id = parse_api_agent_id(&id)?;
+    let canonical_id = format!("{agent_id:08X}");
+    let task_id = next_task_id();
+
+    // Validate the base64 content before queuing.
+    let _ = BASE64
+        .decode(&body.content)
+        .map_err(|_| AgentCommandError::MissingField { field: "content: invalid base64" })?;
+
+    // Encode remote_path and content as the semicolon-delimited base64 pair that
+    // the existing `build_upload_jobs` helper expects in `Arguments`.
+    let remote_b64 = BASE64.encode(body.remote_path.as_bytes());
+    let arguments = format!("{remote_b64};{}", body.content);
+
+    let command_line = format!("upload {} (via REST API)", body.remote_path);
+    let task = AgentTaskInfo {
+        task_id: task_id.clone(),
+        command_line: command_line.clone(),
+        demon_id: canonical_id.clone(),
+        command_id: u32::from(DemonCommand::CommandFs).to_string(),
+        command: Some("upload".to_owned()),
+        sub_command: Some(u32::from(DemonFilesystemCommand::Upload).to_string()),
+        arguments: Some(arguments),
+        ..AgentTaskInfo::default()
+    };
+
+    let message = Message {
+        head: MessageHead {
+            event: EventCode::Session,
+            user: identity.key_id.clone(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info: task,
+    };
+
+    let queued_jobs = match execute_agent_task(
+        &state.agent_registry,
+        &state.sockets,
+        &state.events,
+        &identity.key_id,
+        identity.role,
+        message,
+    )
+    .await
+    {
+        Ok(queued_jobs) => {
+            record_audit_entry(
+                &state.database,
+                &state.webhooks,
+                &identity.key_id,
+                "agent.upload",
+                "agent",
+                Some(canonical_id.clone()),
+                audit_details(
+                    AuditResultStatus::Success,
+                    Some(agent_id),
+                    Some("upload"),
+                    Some(parameter_object([
+                        ("task_id", Value::String(task_id.clone())),
+                        ("remote_path", Value::String(body.remote_path)),
+                    ])),
+                ),
+            )
+            .await;
+            queued_jobs
+        }
+        Err(error) => {
+            record_audit_entry(
+                &state.database,
+                &state.webhooks,
+                &identity.key_id,
+                "agent.upload",
+                "agent",
+                Some(canonical_id.clone()),
+                audit_details(
+                    AuditResultStatus::Failure,
+                    Some(agent_id),
+                    Some("upload"),
+                    Some(parameter_object([
+                        ("task_id", Value::String(task_id.clone())),
+                        ("error", Value::String(error.to_string())),
+                    ])),
+                ),
+            )
+            .await;
+            return Err(error.into());
+        }
+    };
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(AgentTaskQueuedResponse { agent_id: canonical_id, task_id, queued_jobs }),
+    ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/agents/{id}/download",
+    context_path = "/api/v1",
+    tag = "agents",
+    security(("api_key" = [])),
+    params(("id" = String, Path, description = "Agent id in hex (with optional 0x prefix)")),
+    request_body = AgentDownloadRequest,
+    responses(
+        (status = 202, description = "Download task queued", body = AgentTaskQueuedResponse),
+        (status = 400, description = "Invalid agent id or payload", body = ApiErrorBody),
+        (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
+        (status = 403, description = "API key role lacks permission", body = ApiErrorBody),
+        (status = 404, description = "Agent not found", body = ApiErrorBody),
+        (status = 429, description = "Agent task queue full", body = ApiErrorBody)
+    )
+)]
+async fn agent_download(
+    State(state): State<TeamserverState>,
+    identity: TaskAgentApiAccess,
+    Path(id): Path<String>,
+    Json(body): Json<AgentDownloadRequest>,
+) -> Result<(StatusCode, Json<AgentTaskQueuedResponse>), AgentApiError> {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+
+    let agent_id = parse_api_agent_id(&id)?;
+    let canonical_id = format!("{agent_id:08X}");
+    let task_id = next_task_id();
+
+    // The filesystem download handler expects Arguments to be base64-encoded.
+    let arguments_b64 = BASE64.encode(body.remote_path.as_bytes());
+
+    let command_line = format!("download {} (via REST API)", body.remote_path);
+    let task = AgentTaskInfo {
+        task_id: task_id.clone(),
+        command_line: command_line.clone(),
+        demon_id: canonical_id.clone(),
+        command_id: u32::from(DemonCommand::CommandFs).to_string(),
+        command: Some("download".to_owned()),
+        sub_command: Some(u32::from(DemonFilesystemCommand::Download).to_string()),
+        arguments: Some(arguments_b64),
+        ..AgentTaskInfo::default()
+    };
+
+    let message = Message {
+        head: MessageHead {
+            event: EventCode::Session,
+            user: identity.key_id.clone(),
+            timestamp: String::new(),
+            one_time: String::new(),
+        },
+        info: task,
+    };
+
+    let queued_jobs = match execute_agent_task(
+        &state.agent_registry,
+        &state.sockets,
+        &state.events,
+        &identity.key_id,
+        identity.role,
+        message,
+    )
+    .await
+    {
+        Ok(queued_jobs) => {
+            record_audit_entry(
+                &state.database,
+                &state.webhooks,
+                &identity.key_id,
+                "agent.download",
+                "agent",
+                Some(canonical_id.clone()),
+                audit_details(
+                    AuditResultStatus::Success,
+                    Some(agent_id),
+                    Some("download"),
+                    Some(parameter_object([
+                        ("task_id", Value::String(task_id.clone())),
+                        ("remote_path", Value::String(body.remote_path)),
+                    ])),
+                ),
+            )
+            .await;
+            queued_jobs
+        }
+        Err(error) => {
+            record_audit_entry(
+                &state.database,
+                &state.webhooks,
+                &identity.key_id,
+                "agent.download",
+                "agent",
+                Some(canonical_id.clone()),
+                audit_details(
+                    AuditResultStatus::Failure,
+                    Some(agent_id),
+                    Some("download"),
+                    Some(parameter_object([
+                        ("task_id", Value::String(task_id.clone())),
+                        ("error", Value::String(error.to_string())),
+                    ])),
+                ),
+            )
+            .await;
+            return Err(error.into());
+        }
+    };
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(AgentTaskQueuedResponse { agent_id: canonical_id, task_id, queued_jobs }),
     ))
 }
 
@@ -9361,5 +9727,286 @@ mod tests {
             assert_eq!(s.size_bytes, Some(1024));
             assert_eq!(s.format, "exe");
         }
+    }
+
+    // ── GET /agents/{id}/output ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_agent_output_returns_empty_page_for_agent_with_no_output() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let (app, registry, _) = test_router_with_database(
+            database,
+            Some((60, "reader", "secret-reader", OperatorRole::Operator)),
+        )
+        .await;
+
+        let agent = sample_agent(0xDEAD_0001);
+        registry.insert(agent).await.expect("insert");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/agents/DEAD0001/output")
+                    .header(API_KEY_HEADER, "secret-reader")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["total"], 0);
+        assert_eq!(body["entries"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn get_agent_output_returns_persisted_responses() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let agent_id = 0xDEAD_0002u32;
+
+        let (app, registry, _) = test_router_with_database(
+            database.clone(),
+            Some((60, "reader", "secret-reader", OperatorRole::Operator)),
+        )
+        .await;
+
+        // Register agent via registry (persists to DB for FK constraint).
+        registry.insert(sample_agent(agent_id)).await.expect("insert");
+
+        // Insert a response record.
+        let record = crate::database::AgentResponseRecord {
+            id: None,
+            agent_id,
+            command_id: 21,
+            request_id: 1,
+            response_type: "Good".to_owned(),
+            message: "Process List".to_owned(),
+            output: "whoami output".to_owned(),
+            command_line: Some("whoami".to_owned()),
+            task_id: Some("task-abc".to_owned()),
+            operator: Some("neo".to_owned()),
+            received_at: "2026-03-27T00:00:00Z".to_owned(),
+            extra: None,
+        };
+        database.agent_responses().create(&record).await.expect("create response");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/agents/DEAD0002/output")
+                    .header(API_KEY_HEADER, "secret-reader")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["total"], 1);
+        assert_eq!(body["entries"][0]["task_id"], "task-abc");
+        assert_eq!(body["entries"][0]["output"], "whoami output");
+        assert_eq!(body["entries"][0]["command_line"], "whoami");
+    }
+
+    #[tokio::test]
+    async fn get_agent_output_since_cursor_filters_older_entries() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let agent_id = 0xDEAD_0003u32;
+
+        let (app, registry, _) = test_router_with_database(
+            database.clone(),
+            Some((60, "reader", "secret-reader", OperatorRole::Operator)),
+        )
+        .await;
+
+        registry.insert(sample_agent(agent_id)).await.expect("insert");
+
+        let record1 = crate::database::AgentResponseRecord {
+            id: None,
+            agent_id,
+            command_id: 21,
+            request_id: 1,
+            response_type: "Good".to_owned(),
+            message: "first".to_owned(),
+            output: "output-1".to_owned(),
+            command_line: None,
+            task_id: Some("t1".to_owned()),
+            operator: None,
+            received_at: "2026-03-27T00:00:00Z".to_owned(),
+            extra: None,
+        };
+        let id1 = database.agent_responses().create(&record1).await.expect("create r1");
+
+        let record2 = crate::database::AgentResponseRecord {
+            id: None,
+            agent_id,
+            command_id: 21,
+            request_id: 2,
+            response_type: "Good".to_owned(),
+            message: "second".to_owned(),
+            output: "output-2".to_owned(),
+            command_line: None,
+            task_id: Some("t2".to_owned()),
+            operator: None,
+            received_at: "2026-03-27T00:01:00Z".to_owned(),
+            extra: None,
+        };
+        database.agent_responses().create(&record2).await.expect("create r2");
+
+        // Request with since=id1 should only return the second record.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(&format!("/agents/DEAD0003/output?since={id1}"))
+                    .header(API_KEY_HEADER, "secret-reader")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json(response).await;
+        assert_eq!(body["total"], 1);
+        assert_eq!(body["entries"][0]["task_id"], "t2");
+    }
+
+    #[tokio::test]
+    async fn get_agent_output_returns_404_for_unknown_agent() {
+        let app = test_router(Some((60, "reader", "secret-reader", OperatorRole::Operator))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/agents/FFFFFFFF/output")
+                    .header(API_KEY_HEADER, "secret-reader")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── POST /agents/{id}/upload ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn agent_upload_queues_task_for_existing_agent() {
+        let (app, registry, _) = test_router_with_registry(Some((
+            60,
+            "tasker",
+            "secret-tasker",
+            OperatorRole::Operator,
+        )))
+        .await;
+
+        let agent_id = 0xDEAD_0010u32;
+        registry.insert(sample_agent(agent_id)).await.expect("insert");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/agents/DEAD0010/upload")
+                    .header(API_KEY_HEADER, "secret-tasker")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_string(&serde_json::json!({
+                            "remote_path": "C:\\temp\\payload.bin",
+                            "content": "SGVsbG8gV29ybGQ="
+                        }))
+                        .expect("json"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = read_json(response).await;
+        assert_eq!(body["agent_id"], "DEAD0010");
+        assert!(!body["task_id"].as_str().expect("task_id").is_empty());
+    }
+
+    #[tokio::test]
+    async fn agent_upload_returns_404_for_unknown_agent() {
+        let app = test_router(Some((60, "tasker", "secret-tasker", OperatorRole::Operator))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/agents/FFFFFFFF/upload")
+                    .header(API_KEY_HEADER, "secret-tasker")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"remote_path":"C:\\x","content":"AA=="}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── POST /agents/{id}/download ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn agent_download_queues_task_for_existing_agent() {
+        let (app, registry, _) = test_router_with_registry(Some((
+            60,
+            "tasker",
+            "secret-tasker",
+            OperatorRole::Operator,
+        )))
+        .await;
+
+        let agent_id = 0xDEAD_0020u32;
+        registry.insert(sample_agent(agent_id)).await.expect("insert");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/agents/DEAD0020/download")
+                    .header(API_KEY_HEADER, "secret-tasker")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_string(&serde_json::json!({
+                            "remote_path": "C:\\Users\\neo\\Documents\\secret.txt"
+                        }))
+                        .expect("json"),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = read_json(response).await;
+        assert_eq!(body["agent_id"], "DEAD0020");
+        assert!(!body["task_id"].as_str().expect("task_id").is_empty());
+    }
+
+    #[tokio::test]
+    async fn agent_download_returns_404_for_unknown_agent() {
+        let app = test_router(Some((60, "tasker", "secret-tasker", OperatorRole::Operator))).await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/agents/FFFFFFFF/download")
+                    .header(API_KEY_HEADER, "secret-tasker")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"remote_path":"C:\\x"}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

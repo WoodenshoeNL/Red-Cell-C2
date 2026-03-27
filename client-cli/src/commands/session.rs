@@ -34,8 +34,8 @@
 //! | `agent.exec` | `id`, `command` | `wait`, `timeout` |
 //! | `agent.output` | `id` | `since` |
 //! | `agent.kill` | `id` | `wait`, `timeout` |
-//! | `agent.upload` | `id` | — | **unsupported** — REST API lacks endpoint |
-//! | `agent.download` | `id` | — | **unsupported** — REST API lacks endpoint |
+//! | `agent.upload` | `id`, `src`, `dst` | — |
+//! | `agent.download` | `id`, `src` | `dst` |
 //! | `listener.list` | — | — |
 //! | `listener.show` | `name` | — |
 //! | `listener.create` | `name`, `type` | `port`, `host`, `domain`, `pipe_name`, `endpoint`, `secure`, `config_json` |
@@ -159,9 +159,13 @@ struct SessionCmd {
     /// Sleep interval in seconds to bake into the payload (`payload.build`).
     #[serde(default)]
     sleep: Option<u64>,
-    /// Destination file path for `payload.download`.
+    /// Destination / local file path for `payload.download` and `agent.download`.
     #[serde(default)]
     dst: Option<String>,
+    /// Source / local file path for `agent.upload`, or remote path for
+    /// `agent.download`.
+    #[serde(default)]
+    src: Option<String>,
 
     // ── log commands ──────────────────────────────────────────────────────────
     /// Operator name filter for `log.list`.
@@ -176,6 +180,41 @@ struct SessionCmd {
 }
 
 // ── local raw API response shapes for new commands ────────────────────────────
+
+/// Wire format returned by `GET /agents/{id}/output`.
+#[derive(Debug, Deserialize)]
+struct OutputPage {
+    #[allow(dead_code)]
+    total: usize,
+    entries: Vec<OutputWireEntry>,
+}
+
+/// Single entry in the `OutputPage.entries` array.
+#[derive(Debug, Deserialize)]
+struct OutputWireEntry {
+    id: i64,
+    task_id: Option<String>,
+    #[allow(dead_code)]
+    command_id: u32,
+    #[allow(dead_code)]
+    request_id: u32,
+    #[allow(dead_code)]
+    response_type: String,
+    message: String,
+    output: String,
+    command_line: Option<String>,
+    #[allow(dead_code)]
+    operator: Option<String>,
+    received_at: String,
+}
+
+/// Build the output polling URL with an optional cursor.
+fn output_url(agent_id: &str, since: Option<&str>) -> String {
+    match since {
+        Some(cursor) => format!("/agents/{agent_id}/output?since={cursor}"),
+        None => format!("/agents/{agent_id}/output"),
+    }
+}
 
 /// Minimal operator record returned by `GET /operators` and `POST /operators`.
 #[derive(Debug, Deserialize, Serialize)]
@@ -376,13 +415,22 @@ async fn dispatch(
         }
 
         "agent.output" => {
-            // The teamserver does not expose a REST output endpoint.
-            // Operators should use the WebSocket client for live output.
-            Err(CliError::Unsupported(
-                "agent output is not yet available via the REST API; \
-                 use the WebSocket client (red-cell-client) to receive command output"
-                    .to_owned(),
-            ))
+            let id = agent_id(msg, default_agent)?;
+            let page: OutputPage = client.get(&output_url(id, msg.since.as_deref())).await?;
+            let entries: Vec<serde_json::Value> = page
+                .entries
+                .into_iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "id": e.id,
+                        "task_id": e.task_id,
+                        "command": e.command_line,
+                        "output": if e.output.is_empty() { e.message } else { e.output },
+                        "received_at": e.received_at,
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!(entries))
         }
 
         "agent.kill" => {
@@ -392,17 +440,66 @@ async fn dispatch(
             kill(client, id, wait, timeout_secs).await
         }
 
-        "agent.upload" => Err(CliError::Unsupported(
-            "file upload is not yet supported via the REST API; \
-             use the WebSocket client (red-cell-client) for file transfers"
-                .to_owned(),
-        )),
+        "agent.upload" => {
+            let id = agent_id(msg, default_agent)?;
+            let src = msg.src.as_deref().ok_or_else(|| {
+                CliError::InvalidArgs("agent.upload requires a \"src\" field".to_owned())
+            })?;
+            let dst = msg.dst.as_deref().ok_or_else(|| {
+                CliError::InvalidArgs("agent.upload requires a \"dst\" field".to_owned())
+            })?;
 
-        "agent.download" => Err(CliError::Unsupported(
-            "file download is not yet supported via the REST API; \
-             use the WebSocket client (red-cell-client) for file transfers"
-                .to_owned(),
-        )),
+            use base64::Engine;
+            use base64::engine::general_purpose::STANDARD as BASE64;
+
+            let file_bytes = std::fs::read(src)
+                .map_err(|e| CliError::General(format!("failed to read local file {src}: {e}")))?;
+            let content = BASE64.encode(&file_bytes);
+
+            #[derive(Serialize)]
+            struct Body<'a> {
+                remote_path: &'a str,
+                content: &'a str,
+            }
+
+            let resp: TaskQueuedResponse = client
+                .post(
+                    &format!("/agents/{id}/upload"),
+                    &Body { remote_path: dst, content: &content },
+                )
+                .await?;
+
+            Ok(serde_json::json!({
+                "agent_id": id,
+                "job_id": resp.task_id,
+                "local_path": src,
+                "remote_path": dst
+            }))
+        }
+
+        "agent.download" => {
+            let id = agent_id(msg, default_agent)?;
+            let src = msg.src.as_deref().ok_or_else(|| {
+                CliError::InvalidArgs(
+                    "agent.download requires a \"src\" field (remote path)".to_owned(),
+                )
+            })?;
+
+            #[derive(Serialize)]
+            struct Body<'a> {
+                remote_path: &'a str,
+            }
+
+            let resp: TaskQueuedResponse =
+                client.post(&format!("/agents/{id}/download"), &Body { remote_path: src }).await?;
+
+            Ok(serde_json::json!({
+                "agent_id": id,
+                "job_id": resp.task_id,
+                "remote_path": src,
+                "local_path": msg.dst.as_deref().unwrap_or("")
+            }))
+        }
 
         // ── listener ──────────────────────────────────────────────────────────
         "listener.list" => {
@@ -574,27 +671,16 @@ async fn dispatch(
 /// Submits the command via `POST /agents/{id}/task` using the Demon
 /// `AgentTaskInfo` wire format.
 ///
-/// With `wait=true`, returns [`CliError::Unsupported`] because the REST API
-/// does not expose a command-output endpoint; the documented session contract
-/// (`agent.exec` with `wait: true` returning `output` and `exit_code`) cannot
-/// be fulfilled without it.
+/// With `wait=true`, polls `GET /agents/{id}/output` until an entry matching
+/// the submitted task appears, or the timeout expires.
 #[instrument(skip(client))]
 async fn exec(
     client: &ApiClient,
     agent_id: &str,
     command: &str,
     wait: bool,
-    _timeout_secs: u64,
+    timeout_secs: u64,
 ) -> Result<serde_json::Value, CliError> {
-    if wait {
-        return Err(CliError::Unsupported(
-            "agent.exec with wait=true requires command-output retrieval which is not yet \
-             available via the REST API; submit without wait and use the WebSocket client \
-             (red-cell-client) to observe output"
-                .to_owned(),
-        ));
-    }
-
     #[derive(Serialize)]
     struct Body<'a> {
         #[serde(rename = "CommandLine")]
@@ -614,7 +700,38 @@ async fn exec(
         )
         .await?;
 
-    Ok(serde_json::json!({"job_id": resp.task_id}))
+    if !wait {
+        return Ok(serde_json::json!({"job_id": resp.task_id}));
+    }
+
+    // Poll the output endpoint for the task's result.
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let mut cursor: Option<String> = None;
+
+    loop {
+        if Instant::now() >= deadline {
+            return Err(CliError::Timeout(format!(
+                "timed out waiting for output from task {} after {timeout_secs}s",
+                resp.task_id
+            )));
+        }
+
+        sleep(POLL_INTERVAL).await;
+
+        let page: OutputPage = client.get(&output_url(agent_id, cursor.as_deref())).await?;
+
+        for entry in &page.entries {
+            cursor = Some(entry.id.to_string());
+            if entry.task_id.as_deref() == Some(resp.task_id.as_str()) {
+                let output = if entry.output.is_empty() { &entry.message } else { &entry.output };
+                return Ok(serde_json::json!({
+                    "job_id": resp.task_id,
+                    "output": output,
+                    "exit_code": serde_json::Value::Null
+                }));
+            }
+        }
+    }
 }
 
 /// Send a kill command to an agent, optionally waiting until it is dead.
@@ -1120,10 +1237,10 @@ mod tests {
         );
     }
 
-    // ── dispatch: agent.exec with wait=true returns Unsupported ────────────────
+    // ── dispatch: agent.exec with wait=true against unreachable server ────────
 
     #[tokio::test]
-    async fn dispatch_agent_exec_wait_returns_unsupported() {
+    async fn dispatch_agent_exec_wait_returns_server_unreachable() {
         use crate::config::ResolvedConfig;
         let cfg = ResolvedConfig {
             server: "https://127.0.0.1:1".to_owned(),
@@ -1138,8 +1255,8 @@ mod tests {
         .expect("parse");
         let result = dispatch(&client, &msg, None).await;
         assert!(
-            matches!(result, Err(CliError::Unsupported(_))),
-            "expected Unsupported for agent.exec with wait=true, got {result:?}"
+            matches!(result, Err(CliError::ServerUnreachable(_))),
+            "expected ServerUnreachable for agent.exec with wait=true against no server, got {result:?}"
         );
     }
 
@@ -1181,10 +1298,10 @@ mod tests {
         );
     }
 
-    // ── dispatch: agent.output ────────────────────────────────────────────────
+    // ── dispatch: agent.output against unreachable server ───────────────────
 
     #[tokio::test]
-    async fn dispatch_agent_output_without_since_returns_unsupported() {
+    async fn dispatch_agent_output_without_since_returns_server_unreachable() {
         use crate::config::ResolvedConfig;
         let cfg = ResolvedConfig {
             server: "https://127.0.0.1:1".to_owned(),
@@ -1197,13 +1314,13 @@ mod tests {
             serde_json::from_str(r#"{"cmd":"agent.output","id":"agent1"}"#).expect("parse");
         let result = dispatch(&client, &msg, None).await;
         assert!(
-            matches!(result, Err(CliError::Unsupported(_))),
-            "expected Unsupported error (output not available via REST API), got {result:?}"
+            matches!(result, Err(CliError::ServerUnreachable(_))),
+            "expected ServerUnreachable for agent.output against no server, got {result:?}"
         );
     }
 
     #[tokio::test]
-    async fn dispatch_agent_output_with_since_returns_unsupported() {
+    async fn dispatch_agent_output_with_since_returns_server_unreachable() {
         use crate::config::ResolvedConfig;
         let cfg = ResolvedConfig {
             server: "https://127.0.0.1:1".to_owned(),
@@ -1217,19 +1334,15 @@ mod tests {
                 .expect("parse");
         let result = dispatch(&client, &msg, None).await;
         assert!(
-            matches!(result, Err(CliError::Unsupported(_))),
-            "expected Unsupported error (output not available via REST API), got {result:?}"
+            matches!(result, Err(CliError::ServerUnreachable(_))),
+            "expected ServerUnreachable for agent.output against no server, got {result:?}"
         );
     }
 
-    // ── dispatch: agent.upload / agent.download — unsupported via REST ────────
-    // These commands are recognised but return `Unsupported` because the REST
-    // API does not expose file-transfer endpoints.  This keeps session mode in
-    // contract with the CLI surface (the commands exist, they just can't be
-    // fulfilled yet).
+    // ── dispatch: agent.upload / agent.download — validation errors ──────────
 
     #[tokio::test]
-    async fn dispatch_agent_upload_returns_unsupported() {
+    async fn dispatch_agent_upload_requires_src_field() {
         use crate::config::ResolvedConfig;
         let cfg = ResolvedConfig {
             server: "https://127.0.0.1:1".to_owned(),
@@ -1242,13 +1355,13 @@ mod tests {
             serde_json::from_str(r#"{"cmd":"agent.upload","id":"agent1"}"#).expect("parse");
         let result = dispatch(&client, &msg, None).await;
         assert!(
-            matches!(result, Err(CliError::Unsupported(_))),
-            "agent.upload must return Unsupported (not unknown command), got {result:?}"
+            matches!(result, Err(CliError::InvalidArgs(_))),
+            "agent.upload without src must return InvalidArgs, got {result:?}"
         );
     }
 
     #[tokio::test]
-    async fn dispatch_agent_download_returns_unsupported() {
+    async fn dispatch_agent_download_requires_src_field() {
         use crate::config::ResolvedConfig;
         let cfg = ResolvedConfig {
             server: "https://127.0.0.1:1".to_owned(),
@@ -1261,8 +1374,8 @@ mod tests {
             serde_json::from_str(r#"{"cmd":"agent.download","id":"agent1"}"#).expect("parse");
         let result = dispatch(&client, &msg, None).await;
         assert!(
-            matches!(result, Err(CliError::Unsupported(_))),
-            "agent.download must return Unsupported (not unknown command), got {result:?}"
+            matches!(result, Err(CliError::InvalidArgs(_))),
+            "agent.download without src must return InvalidArgs, got {result:?}"
         );
     }
 
@@ -1872,10 +1985,10 @@ mod tests {
         assert_eq!(result["job_id"], "TASK-ABC");
     }
 
-    /// `exec wait=true` — returns `CliError::Unsupported` because the REST API
-    /// does not provide command output retrieval.
+    /// `exec wait=true` — submits the task then fails because the server is
+    /// unreachable.
     #[tokio::test]
-    async fn exec_wait_true_returns_unsupported() {
+    async fn exec_wait_true_returns_server_unreachable() {
         use crate::config::ResolvedConfig;
         let cfg = ResolvedConfig {
             server: "https://127.0.0.1:1".to_owned(),
@@ -1887,8 +2000,8 @@ mod tests {
         let result = exec(&client, "agent1", "whoami", true, 60).await;
 
         assert!(
-            matches!(result, Err(CliError::Unsupported(_))),
-            "exec wait=true must return Unsupported, got {result:?}"
+            matches!(result, Err(CliError::ServerUnreachable(_))),
+            "exec wait=true must return ServerUnreachable against no server, got {result:?}"
         );
     }
 

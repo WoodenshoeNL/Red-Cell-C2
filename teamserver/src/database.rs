@@ -1186,6 +1186,27 @@ impl AgentResponseRepository {
         rows.into_iter().map(TryInto::try_into).collect()
     }
 
+    /// List persisted responses for an agent with cursor-based pagination.
+    ///
+    /// When `since_id` is `Some(id)`, only rows with `id > since_id` are
+    /// returned, enabling efficient polling for new output.
+    pub async fn list_for_agent_since(
+        &self,
+        agent_id: u32,
+        since_id: Option<i64>,
+    ) -> Result<Vec<AgentResponseRecord>, TeamserverError> {
+        let min_id = since_id.unwrap_or(0);
+        let rows = sqlx::query_as::<_, AgentResponseRow>(
+            "SELECT * FROM ts_agent_responses WHERE agent_id = ? AND id > ? ORDER BY id",
+        )
+        .bind(i64::from(agent_id))
+        .bind(min_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
     /// Return every persisted response in insertion order.
     pub async fn list(&self) -> Result<Vec<AgentResponseRecord>, TeamserverError> {
         let rows =
@@ -2001,9 +2022,9 @@ impl PayloadBuildRepository {
 #[cfg(test)]
 mod tests {
     use super::{
-        AuditLogEntry, AuditLogFilter, Database, LinkRecord, ListenerStatus, LootFilter,
-        LootRecord, PersistedOperator, bool_from_i64, i64_from_u64, parse_operator_role,
-        u32_from_i64, u64_from_i64,
+        AgentResponseRecord, AuditLogEntry, AuditLogFilter, Database, LinkRecord, ListenerStatus,
+        LootFilter, LootRecord, PersistedOperator, bool_from_i64, i64_from_u64,
+        parse_operator_role, u32_from_i64, u64_from_i64,
     };
     use red_cell_common::config::OperatorRole;
     use red_cell_common::{AgentEncryptionInfo, AgentRecord, HttpListenerConfig, ListenerConfig};
@@ -3023,5 +3044,80 @@ mod tests {
             !repo.update_role("ghost", OperatorRole::Admin).await.expect("update"),
             "should return false for missing user"
         );
+    }
+
+    // ── AgentResponseRepository::list_for_agent_since ───────────────────
+
+    #[tokio::test]
+    async fn list_for_agent_since_returns_all_when_no_cursor() {
+        let db = Database::connect_in_memory().await.expect("db");
+        seed_agents(&db, &[100]).await;
+        let repo = db.agent_responses();
+
+        let record = AgentResponseRecord {
+            id: None,
+            agent_id: 100,
+            command_id: 21,
+            request_id: 1,
+            response_type: "Good".to_owned(),
+            message: "ok".to_owned(),
+            output: "hello".to_owned(),
+            command_line: None,
+            task_id: Some("t1".to_owned()),
+            operator: None,
+            received_at: "2026-03-27T00:00:00Z".to_owned(),
+            extra: None,
+        };
+        repo.create(&record).await.expect("create");
+
+        let all = repo.list_for_agent_since(100, None).await.expect("query");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].output, "hello");
+    }
+
+    #[tokio::test]
+    async fn list_for_agent_since_filters_by_cursor() {
+        let db = Database::connect_in_memory().await.expect("db");
+        seed_agents(&db, &[101]).await;
+        let repo = db.agent_responses();
+
+        let r1 = AgentResponseRecord {
+            id: None,
+            agent_id: 101,
+            command_id: 21,
+            request_id: 1,
+            response_type: "Good".to_owned(),
+            message: "first".to_owned(),
+            output: "out-1".to_owned(),
+            command_line: None,
+            task_id: Some("t1".to_owned()),
+            operator: None,
+            received_at: "2026-03-27T00:00:00Z".to_owned(),
+            extra: None,
+        };
+        let id1 = repo.create(&r1).await.expect("create r1");
+
+        let r2 = AgentResponseRecord {
+            id: None,
+            agent_id: 101,
+            command_id: 21,
+            request_id: 2,
+            response_type: "Good".to_owned(),
+            message: "second".to_owned(),
+            output: "out-2".to_owned(),
+            command_line: None,
+            task_id: Some("t2".to_owned()),
+            operator: None,
+            received_at: "2026-03-27T00:01:00Z".to_owned(),
+            extra: None,
+        };
+        repo.create(&r2).await.expect("create r2");
+
+        let after_first = repo.list_for_agent_since(101, Some(id1)).await.expect("query");
+        assert_eq!(after_first.len(), 1);
+        assert_eq!(after_first[0].output, "out-2");
+
+        let empty = repo.list_for_agent_since(101, Some(id1 + 100)).await.expect("query");
+        assert!(empty.is_empty());
     }
 }

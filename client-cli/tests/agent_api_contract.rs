@@ -315,10 +315,10 @@ async fn old_post_agents_kill_route_returns_404() {
     );
 }
 
-/// Accessing `/api/v1/agents/{id}/output` (old CLI route) returns 404, not
-/// 200, because no such endpoint is registered.
+/// `GET /api/v1/agents/{id}/output` returns 200 with an empty page for an
+/// agent that has no persisted output.
 #[tokio::test]
-async fn old_get_agent_output_route_returns_404() {
+async fn get_agent_output_returns_empty_page_for_known_agent() {
     let (state, registry) = build_test_state().await;
     registry.insert(sample_agent(AGENT_ID_U32)).await.expect("insert agent");
 
@@ -327,8 +327,8 @@ async fn old_get_agent_output_route_returns_404() {
 
     assert_eq!(
         response.status(),
-        StatusCode::NOT_FOUND,
-        "/agents/{{id}}/output must not exist — CLI must not call this path"
+        StatusCode::OK,
+        "/agents/{{id}}/output must return 200 for a known agent"
     );
 }
 

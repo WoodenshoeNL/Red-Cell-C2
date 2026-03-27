@@ -4203,6 +4203,7 @@ name = "red-cell-cli"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
  "clap",
  "comfy-table",
  "dirs 5.0.1",

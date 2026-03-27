@@ -29,7 +29,7 @@ use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::sync::Mutex;
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, warn};
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
 use utoipa::{IntoParams, Modify, OpenApi, ToSchema};
 use utoipa_swagger_ui::SwaggerUi;
@@ -3428,16 +3428,19 @@ async fn submit_payload_build(
 
     tokio::spawn(async move {
         // Mark running.
-        let _ = db
+        if let Err(e) = db
             .payload_builds()
             .update_status(&build_job_id, "running", None, None, None, None, &now_rfc3339())
-            .await;
+            .await
+        {
+            warn!(build_id = %build_job_id, error = %e, "failed to update payload build status to running");
+        }
 
         match payload_builder.build_payload(&listener_config, &build_request, |_progress| {}).await
         {
             Ok(artifact) => {
                 let size = i64::try_from(artifact.bytes.len()).unwrap_or(i64::MAX);
-                let _ = db
+                if let Err(e) = db
                     .payload_builds()
                     .update_status(
                         &build_job_id,
@@ -3448,7 +3451,10 @@ async fn submit_payload_build(
                         None,
                         &now_rfc3339(),
                     )
-                    .await;
+                    .await
+                {
+                    warn!(build_id = %build_job_id, error = %e, "failed to update payload build status to done");
+                }
 
                 record_audit_entry(
                     &db,
@@ -3471,7 +3477,7 @@ async fn submit_payload_build(
                 .await;
             }
             Err(err) => {
-                let _ = db
+                if let Err(e) = db
                     .payload_builds()
                     .update_status(
                         &build_job_id,
@@ -3482,7 +3488,10 @@ async fn submit_payload_build(
                         Some(&err.to_string()),
                         &now_rfc3339(),
                     )
-                    .await;
+                    .await
+                {
+                    warn!(build_id = %build_job_id, error = %e, "failed to update payload build status to error");
+                }
 
                 record_audit_entry(
                     &db,

@@ -108,10 +108,22 @@ pub(super) async fn handle_kerberos_callback(
     Ok(None)
 }
 
+/// Maximum number of sessions or tickets we accept from a single agent payload.
+/// Protects against malicious payloads that set counts to `u32::MAX` to burn CPU.
+const MAX_KERBEROS_LIST_ITEMS: u32 = 10_000;
+
 pub(super) fn format_kerberos_klist(
     parser: &mut CallbackParser<'_>,
 ) -> Result<String, CommandDispatchError> {
     let session_count = parser.read_u32("kerberos session count")?;
+    if session_count > MAX_KERBEROS_LIST_ITEMS {
+        return Err(CommandDispatchError::InvalidCallbackPayload {
+            command_id: u32::from(DemonCommand::CommandKerberos),
+            message: format!(
+                "kerberos session count {session_count} exceeds maximum {MAX_KERBEROS_LIST_ITEMS}"
+            ),
+        });
+    }
     let mut output = String::new();
 
     for _ in 0..session_count {
@@ -129,6 +141,14 @@ pub(super) fn format_kerberos_klist(
         let dns_domain = parser.read_utf16("kerberos dns domain")?;
         let upn = parser.read_utf16("kerberos upn")?;
         let ticket_count = parser.read_u32("kerberos ticket count")?;
+        if ticket_count > MAX_KERBEROS_LIST_ITEMS {
+            return Err(CommandDispatchError::InvalidCallbackPayload {
+                command_id: u32::from(DemonCommand::CommandKerberos),
+                message: format!(
+                    "kerberos ticket count {ticket_count} exceeds maximum {MAX_KERBEROS_LIST_ITEMS}"
+                ),
+            });
+        }
 
         output.push_str(&format!("UserName                : {username}\n"));
         output.push_str(&format!("Domain                  : {domain}\n"));
@@ -1326,5 +1346,79 @@ mod tests {
         let result = super::format_filetime(high, low);
         // Should not panic — the result is either a date or a raw number.
         assert!(!result.is_empty(), "u64::MAX filetime should produce non-empty output");
+    }
+
+    // ── Bounds-check tests for session_count / ticket_count ──
+
+    #[test]
+    fn format_kerberos_klist_rejects_excessive_session_count() {
+        let mut payload = Vec::new();
+        push_u32(&mut payload, MAX_KERBEROS_LIST_ITEMS + 1);
+
+        let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandKerberos));
+        let err = format_kerberos_klist(&mut parser).unwrap_err();
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn format_kerberos_klist_rejects_excessive_ticket_count() {
+        let mut payload = Vec::new();
+        push_u32(&mut payload, 1); // session_count = 1
+        push_session_header(
+            &mut payload,
+            "user",
+            "DOM",
+            0,
+            0,
+            0,
+            "S-1-5-21-0",
+            0,
+            0,
+            2,
+            "Kerberos",
+            "DC",
+            "dom.local",
+            "user@dom.local",
+            MAX_KERBEROS_LIST_ITEMS + 1, // excessive ticket_count
+        );
+
+        let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandKerberos));
+        let err = format_kerberos_klist(&mut parser).unwrap_err();
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn format_kerberos_klist_accepts_at_limit_session_count() {
+        // session_count exactly at the limit should be accepted (will fail due to
+        // missing data, but should NOT fail on the bounds check itself).
+        let mut payload = Vec::new();
+        push_u32(&mut payload, MAX_KERBEROS_LIST_ITEMS);
+
+        let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandKerberos));
+        let err = format_kerberos_klist(&mut parser).unwrap_err();
+        // Should fail on truncated data, NOT on the bounds check
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload from truncated data, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn format_kerberos_klist_rejects_u32_max_session_count() {
+        let mut payload = Vec::new();
+        push_u32(&mut payload, u32::MAX);
+
+        let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandKerberos));
+        let err = format_kerberos_klist(&mut parser).unwrap_err();
+        assert!(
+            matches!(err, CommandDispatchError::InvalidCallbackPayload { .. }),
+            "expected InvalidCallbackPayload, got {err:?}"
+        );
     }
 }

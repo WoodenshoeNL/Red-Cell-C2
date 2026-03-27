@@ -2016,6 +2016,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn build_reconnect_ack_returns_invalid_stored_crypto_for_bad_iv() {
+        let registry = test_registry().await;
+        let agent_id: u32 = 0xBAD0_0006;
+        let agent = agent_with_raw_crypto(agent_id, vec![0xCC; AGENT_KEY_LENGTH], vec![0xDD; 2]);
+        registry.insert(agent).await.expect("insert should succeed");
+
+        let error =
+            build_reconnect_ack(&registry, agent_id).await.expect_err("bad IV must be rejected");
+
+        match &error {
+            DemonParserError::InvalidStoredCryptoEncoding { agent_id: err_id, field, .. } => {
+                assert_eq!(*err_id, agent_id);
+                assert_eq!(*field, "aes_iv");
+            }
+            other => panic!("expected InvalidStoredCryptoEncoding for aes_iv, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
     async fn callback_parse_returns_invalid_stored_crypto_for_bad_key() {
         let registry = test_registry().await;
         let agent_id: u32 = 0xBAD0_0004;

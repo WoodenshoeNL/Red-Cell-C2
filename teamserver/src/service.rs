@@ -2899,15 +2899,13 @@ mod tests {
             .expect("in-memory database should initialize");
         let agent_registry = crate::AgentRegistry::new(database.clone());
         let events = crate::EventBus::new(8);
-        let sockets =
-            crate::SocketRelayManager::new(agent_registry.clone(), events.clone());
+        let sockets = crate::SocketRelayManager::new(agent_registry.clone(), events.clone());
         crate::TeamserverState {
             profile: profile.clone(),
             database: database.clone(),
             auth: crate::AuthService::from_profile(&profile)
                 .expect("auth service should initialize"),
-            api: crate::ApiRuntime::from_profile(&profile)
-                .expect("rng should work in tests"),
+            api: crate::ApiRuntime::from_profile(&profile).expect("rng should work in tests"),
             events: events.clone(),
             connections: crate::OperatorConnectionManager::new(),
             agent_registry: agent_registry.clone(),
@@ -2949,11 +2947,7 @@ mod tests {
         // The route is registered; without WebSocket upgrade headers the extractor
         // rejects the request, but the status must NOT be 404 (unmounted) or
         // 405 (wrong method).
-        assert_ne!(
-            response.status(),
-            StatusCode::NOT_FOUND,
-            "GET /svc-bridge should be mounted"
-        );
+        assert_ne!(response.status(), StatusCode::NOT_FOUND, "GET /svc-bridge should be mounted");
         assert_ne!(
             response.status(),
             StatusCode::METHOD_NOT_ALLOWED,
@@ -2976,9 +2970,7 @@ mod tests {
         let app = service_routes(&bridge).with_state(state);
 
         let response = app
-            .oneshot(
-                Request::post("/svc-bridge").body(String::new()).expect("request"),
-            )
+            .oneshot(Request::post("/svc-bridge").body(String::new()).expect("request"))
             .await
             .expect("router should respond");
 
@@ -3008,11 +3000,7 @@ mod tests {
             .await
             .expect("router should respond");
 
-        assert_eq!(
-            response.status(),
-            StatusCode::NOT_FOUND,
-            "unregistered path should return 404"
-        );
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "unregistered path should return 404");
     }
 
     #[tokio::test]
@@ -3032,9 +3020,7 @@ mod tests {
         let app = service_routes(&bridge).with_state(state);
 
         let response = app
-            .oneshot(
-                Request::get("/no-leading-slash").body(String::new()).expect("request"),
-            )
+            .oneshot(Request::get("/no-leading-slash").body(String::new()).expect("request"))
             .await
             .expect("router should respond");
 
@@ -3054,9 +3040,7 @@ mod tests {
         let app2 = service_routes(&bridge2).with_state(state2);
 
         let response2 = app2
-            .oneshot(
-                Request::get("//no-leading-slash").body(String::new()).expect("request"),
-            )
+            .oneshot(Request::get("//no-leading-slash").body(String::new()).expect("request"))
             .await
             .expect("router should respond");
 

@@ -3228,4 +3228,94 @@ mod tests {
         assert_eq!(persisted.info.agent_id, 0xBB);
         assert_eq!(persisted.info.active, true);
     }
+
+    // ── payload_builds summary query tests ──────────────────────────────
+
+    #[tokio::test]
+    async fn get_summary_returns_metadata_without_artifact() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.payload_builds();
+
+        let mut record = stub_payload_build("sum-001");
+        record.artifact = Some(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        record.size_bytes = Some(4);
+        record.status = "done".to_owned();
+        repo.create(&record).await.unwrap();
+
+        let summary = repo.get_summary("sum-001").await.unwrap().expect("should exist");
+        assert_eq!(summary.id, "sum-001");
+        assert_eq!(summary.status, "done");
+        assert_eq!(summary.name, "test-payload");
+        assert_eq!(summary.arch, "x64");
+        assert_eq!(summary.format, "exe");
+        assert_eq!(summary.listener, "http-default");
+        assert_eq!(summary.sleep_secs, Some(10));
+        assert_eq!(summary.size_bytes, Some(4));
+        assert!(summary.error.is_none());
+        assert_eq!(summary.created_at, "2026-03-27T00:00:00Z");
+        assert_eq!(summary.updated_at, "2026-03-27T00:00:00Z");
+        // PayloadBuildSummary has no artifact field — this is enforced at compile time.
+    }
+
+    #[tokio::test]
+    async fn get_summary_returns_none_for_missing_id() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.payload_builds();
+
+        let result = repo.get_summary("nonexistent-id").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_summaries_returns_metadata_ordered_by_created_at_desc() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.payload_builds();
+
+        // Insert builds with distinct timestamps (oldest first).
+        let mut b1 = stub_payload_build("ls-001");
+        b1.created_at = "2026-03-27T01:00:00Z".to_owned();
+        b1.name = "first".to_owned();
+
+        let mut b2 = stub_payload_build("ls-002");
+        b2.created_at = "2026-03-27T02:00:00Z".to_owned();
+        b2.name = "second".to_owned();
+        b2.artifact = Some(vec![0xFF; 128]);
+        b2.size_bytes = Some(128);
+
+        let mut b3 = stub_payload_build("ls-003");
+        b3.created_at = "2026-03-27T03:00:00Z".to_owned();
+        b3.name = "third".to_owned();
+
+        repo.create(&b1).await.unwrap();
+        repo.create(&b2).await.unwrap();
+        repo.create(&b3).await.unwrap();
+
+        let summaries = repo.list_summaries().await.unwrap();
+        assert_eq!(summaries.len(), 3);
+
+        // Descending order: newest first.
+        assert_eq!(summaries[0].id, "ls-003");
+        assert_eq!(summaries[0].name, "third");
+        assert_eq!(summaries[1].id, "ls-002");
+        assert_eq!(summaries[1].name, "second");
+        assert_eq!(summaries[1].size_bytes, Some(128));
+        assert_eq!(summaries[2].id, "ls-001");
+        assert_eq!(summaries[2].name, "first");
+
+        // Verify metadata fields are present.
+        for s in &summaries {
+            assert_eq!(s.arch, "x64");
+            assert_eq!(s.format, "exe");
+            assert_eq!(s.listener, "http-default");
+        }
+    }
+
+    #[tokio::test]
+    async fn list_summaries_empty_table_returns_empty_vec() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.payload_builds();
+
+        let summaries = repo.list_summaries().await.unwrap();
+        assert!(summaries.is_empty());
+    }
 }

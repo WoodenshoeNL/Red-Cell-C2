@@ -1,5 +1,7 @@
 mod common;
 
+use std::time::Duration;
+
 use futures_util::SinkExt;
 use red_cell_common::HttpListenerConfig;
 use red_cell_common::config::Profile;
@@ -1232,13 +1234,23 @@ async fn stale_ctr_offset_callback_returns_404_and_preserves_state()
     let init_ack = decrypt_agent_data_at_offset(&key, &iv, ctr_offset, &init_bytes)?;
     assert_eq!(init_ack.as_slice(), &agent_id.to_le_bytes());
 
-    let agent_new = common::read_operator_message(&mut harness.socket).await?;
+    let agent_new = tokio::time::timeout(
+        Duration::from_secs(10),
+        common::read_operator_message(&mut harness.socket),
+    )
+    .await
+    .map_err(|_| "timed out waiting for AgentNew message")??;
     assert!(matches!(agent_new, OperatorMessage::AgentNew(_)));
 
     // --- First callback at offset 0 -------------------------------------------------
     let task = operator_task_message("AA", "checkin", "12345678", DemonCommand::CommandCheckin)?;
     harness.socket.send(ClientMessage::Text(task.into())).await?;
-    let _task_echo = common::read_operator_message(&mut harness.socket).await?;
+    let _task_echo = tokio::time::timeout(
+        Duration::from_secs(10),
+        common::read_operator_message(&mut harness.socket),
+    )
+    .await
+    .map_err(|_| "timed out waiting for first task echo")??;
 
     let valid_response = harness
         .client
@@ -1294,7 +1306,12 @@ async fn stale_ctr_offset_callback_returns_404_and_preserves_state()
     // --- Third callback also succeeds -----------------------------------------------
     let task2 = operator_task_message("BB", "checkin", "12345678", DemonCommand::CommandCheckin)?;
     harness.socket.send(ClientMessage::Text(task2.into())).await?;
-    let _task2_echo = common::read_operator_message(&mut harness.socket).await?;
+    let _task2_echo = tokio::time::timeout(
+        Duration::from_secs(10),
+        common::read_operator_message(&mut harness.socket),
+    )
+    .await
+    .map_err(|_| "timed out waiting for second task echo")??;
 
     let recovery_response = harness
         .client

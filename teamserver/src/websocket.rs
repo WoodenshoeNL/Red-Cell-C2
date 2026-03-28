@@ -5431,18 +5431,41 @@ mod tests {
         .await?;
         assert_eq!(queued, 1, "checkin command should queue exactly one job");
 
-        // Allow the spawn_blocking inside invoke_callbacks to complete.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Poll until the spawn_blocking inside invoke_callbacks appends to the
+        // tracker list, or until 10 s elapse.  A fixed sleep is racy under
+        // cargo test --workspace concurrency (Argon2id in parallel tests causes
+        // CPU contention that can push the callback well past 100 ms).
+        //
+        // Py<T> does not implement Clone without a GIL token, so wrap it in
+        // Arc to share across poll iterations.
+        let tracker = std::sync::Arc::new(tracker);
+        let deadline = std::time::Duration::from_secs(10);
+        let (count, cmd_line) = tokio::time::timeout(deadline, async {
+            loop {
+                let tracker_ref = tracker.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    Python::with_gil(|py| -> PyResult<Option<(usize, String)>> {
+                        let list = tracker_ref.bind(py);
+                        if list.is_empty() {
+                            return Ok(None);
+                        }
+                        let count = list.len();
+                        let first = list.get_item(0)?.extract::<String>()?;
+                        Ok(Some((count, first)))
+                    })
+                })
+                .await
+                .expect("spawn_blocking panicked")
+                .expect("Python GIL error");
 
-        let (count, cmd_line) = tokio::task::spawn_blocking(move || {
-            Python::with_gil(|py| -> PyResult<(usize, String)> {
-                let list = tracker.bind(py);
-                let count = list.len();
-                let first = list.get_item(0)?.extract::<String>()?;
-                Ok((count, first))
-            })
+                if let Some(pair) = result {
+                    break pair;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
         })
-        .await??;
+        .await
+        .expect("timed out waiting for task_created callback after 10 s");
 
         assert_eq!(count, 1, "exactly one task_created callback should have fired");
         assert_eq!(cmd_line, "checkin");

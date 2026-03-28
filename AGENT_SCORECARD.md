@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 923 | 231 | 31 |
+| Tasks closed | 924 | 231 | 31 |
 | Bugs filed against | 98 | 35 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
 | Quality score | 89% | 85% | 71% |
 
-*Bug rates: Claude 97/923=0.11, Codex 35/231=0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 98/924=0.11, Codex 35/231=0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -4038,3 +4038,14 @@ Issues filed: 0
 
 Build: lib tests 2689 passed, 0 failed; integration suite mock_demon_agent_checkin 14 passed, 1 failed (8kaig)
 Issues found: red-cell-c2-8kaig (P3, test-flakiness, Claude)
+
+### QA Review — 2026-03-28 18:15 — 64ddaf25..05355826
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed red-cell-c2-8kaig (stale_ctr_offset flaky test). Fix: added `tokio::time::timeout(Duration::from_secs(10), ...)` to three unbounded `read_operator_message` awaits in `stale_ctr_offset_callback_returns_404_and_preserves_state`. Test passes in isolation (20.8 s). |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: cargo check passed; cargo clippy clean (0 warnings); lib tests 54 passed; stale_ctr_offset_callback test passes in isolation
+Issues found: none

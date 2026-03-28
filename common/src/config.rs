@@ -264,6 +264,19 @@ impl Profile {
             validate_discord_webhook_url(&discord.url, &mut errors);
         }
 
+        if let Some(secret) = &self.demon.init_secret {
+            if secret.is_empty() {
+                errors.push(
+                    "Demon.InitSecret must not be empty when specified — omit the field to disable HKDF derivation".to_owned(),
+                );
+            } else if secret.len() < 16 {
+                errors.push(format!(
+                    "Demon.InitSecret is {} byte(s); minimum is 16 bytes (128 bits) to provide useful HKDF salt entropy",
+                    secret.len()
+                ));
+            }
+        }
+
         for peer in &self.demon.trusted_proxy_peers {
             let trimmed = peer.trim();
             if trimmed.is_empty() {
@@ -1741,6 +1754,114 @@ mod tests {
                 && message.contains("2001:db8::/129")
                 && message.contains("invalid prefix length")
         }));
+    }
+
+    #[test]
+    fn rejects_empty_init_secret() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {
+              InitSecret = ""
+            }
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("empty InitSecret should be invalid");
+        assert!(
+            error.errors.iter().any(|msg| msg.contains("InitSecret") && msg.contains("empty")),
+            "expected an InitSecret error, got: {:?}",
+            error.errors
+        );
+    }
+
+    #[test]
+    fn rejects_init_secret_shorter_than_minimum() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {
+              InitSecret = "tooshort"
+            }
+            "#,
+        )
+        .expect("profile should parse");
+
+        let error = profile.validate().expect_err("short InitSecret should be invalid");
+        assert!(
+            error.errors.iter().any(|msg| msg.contains("InitSecret") && msg.contains("minimum")),
+            "expected a minimum-length InitSecret error, got: {:?}",
+            error.errors
+        );
+    }
+
+    #[test]
+    fn accepts_init_secret_at_minimum_length() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {
+              InitSecret = "exactly16bytesok"
+            }
+            "#,
+        )
+        .expect("profile should parse");
+
+        profile.validate().expect("16-byte InitSecret should be accepted");
+    }
+
+    #[test]
+    fn accepts_absent_init_secret() {
+        let profile = Profile::parse(
+            r#"
+            Teamserver {
+              Host = "127.0.0.1"
+              Port = 40056
+            }
+
+            Operators {
+              user "neo" {
+                Password = "password1234"
+              }
+            }
+
+            Demon {}
+            "#,
+        )
+        .expect("profile should parse");
+
+        profile.validate().expect("absent InitSecret should be accepted");
     }
 
     #[test]

@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 907 | 231 | 31 |
-| Bugs filed against | 96 | 35 | 9 |
+| Tasks closed | 919 | 231 | 31 |
+| Bugs filed against | 97 | 35 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
 | Quality score | 89% | 85% | 71% |
 
-*Bug rates: Claude 96/907=0.11, Codex 35/231=0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 97/919=0.11, Codex 35/231=0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 8 | 11 | 1 |
 | Startup / lifecycle regressions | 2 | 9 | 0 |
-| Test infrastructure / flakiness | 19 | 0 | 0 |
+| Test infrastructure / flakiness | 20 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
 | Correctness / pagination | 43 | 7 | 1 |
@@ -40,6 +40,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-28 15:15 — 4a9bac24..5730adeb
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 12 | 1 | Closed nc0l4 (specter dispatch), jx4nd/wgjvv (specter Dir flags/timestamps), g8r0p (init_secret validation), ev9ei (client-cli fake JSON), cxzp3 (DownloadTracker count cap), yh3pv/38nh0/y9jxm (flaky test fixes), 0n4db/tqbur (specter PID fix), lnts3 (legacy-CTR warning). Bug filed: red-cell-c2-p7yt6 — rate-limiter flake fix (b04d7ad0) insufficient; test still fails. |
+| Codex | 0 | 0 | No activity in range. |
+| Cursor | 0 | 0 | No activity in range. |
+
+Build: cargo check passed; cargo clippy passed (zero warnings); cargo test --lib 2172 passed, 0 failed; e2e repeated_wrong_passwords_trigger_rate_limiter_lockout still failing under concurrency.
+Issues found: 1 new bug filed (red-cell-c2-p7yt6, attributed to Claude — insufficient timing fix)
 
 ### Arch Review — 2026-03-28 14:10
 

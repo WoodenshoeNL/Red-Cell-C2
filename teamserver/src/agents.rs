@@ -257,6 +257,20 @@ impl AgentRegistry {
     /// When `legacy_ctr` is `true`, AES-CTR resets to block offset 0 for every packet
     /// (Demon/Archon compatibility).  When `false`, the monotonic block offset advances
     /// across packets (Specter behaviour).
+    ///
+    /// # Security warning — legacy CTR mode
+    ///
+    /// `legacy_ctr = true` causes the teamserver to use **the same AES-CTR keystream
+    /// (key, IV, offset 0) for every packet**.  This is a two-time-pad: any passive
+    /// network observer who captures two ciphertexts `C1` and `C2` from the same agent
+    /// can compute `C1 ⊕ C2 = P1 ⊕ P2` and, with knowledge of the Demon protocol
+    /// structure (which is public), recover both plaintexts entirely.
+    ///
+    /// Legacy mode exists solely for backward compatibility with Havoc Demon and Archon
+    /// agents that do not send the `INIT_EXT_MONOTONIC_CTR` extension flag during
+    /// `DEMON_INIT`.  **Use it only in controlled environments where traffic
+    /// confidentiality is not a requirement.**  All new agent builds should set
+    /// `INIT_EXT_MONOTONIC_CTR` so the teamserver registers them with `legacy_ctr = false`.
     #[instrument(skip(self, agent, listener_name), fields(agent_id = format_args!("0x{:08X}", agent.agent_id), listener_name = %listener_name, ctr_block_offset, legacy_ctr))]
     pub async fn insert_full(
         &self,
@@ -276,6 +290,16 @@ impl AgentRegistry {
                 max_registered_agents: self.max_registered_agents,
                 registered: entries.len(),
             });
+        }
+
+        if legacy_ctr {
+            warn!(
+                agent_id = format_args!("0x{:08X}", agent.agent_id),
+                "agent registered in LEGACY CTR mode: AES keystream is reset to offset 0 for \
+                 every packet — this is a two-time-pad vulnerability (C1⊕C2=P1⊕P2). \
+                 Only deploy legacy-mode agents in controlled environments. \
+                 Upgrade agents to set INIT_EXT_MONOTONIC_CTR to eliminate this risk."
+            );
         }
 
         self.repository.create_full(&agent, listener_name, ctr_block_offset, legacy_ctr).await?;
@@ -573,6 +597,8 @@ impl AgentRegistry {
         let entry =
             self.entry(agent_id).await.ok_or(TeamserverError::AgentNotFound { agent_id })?;
         // Legacy mode never advances — every packet starts at block 0.
+        // This is intentional for Demon/Archon compatibility but creates a two-time-pad;
+        // see the security warning on `insert_full`.
         if entry.legacy_ctr.load(Ordering::Relaxed) {
             return Ok(());
         }
@@ -942,6 +968,8 @@ impl AgentRegistry {
         let mut packages = Vec::with_capacity(jobs.len());
 
         // In legacy mode every packet uses offset 0 — no lock or persistence needed.
+        // SECURITY: this reuses the same keystream for every packet (two-time-pad);
+        // see the warning on `insert_full`.
         if legacy {
             for job in jobs {
                 let payload = if job.payload.is_empty() {
@@ -998,6 +1026,8 @@ impl AgentRegistry {
         advance: bool,
     ) -> Result<Vec<u8>, TeamserverError> {
         // Legacy Demon/Archon agents reset CTR to 0 for every packet.
+        // SECURITY: reusing the same (key, IV, offset=0) keystream for every packet is a
+        // two-time-pad — see the warning on `insert_full`.
         if entry.legacy_ctr.load(Ordering::Relaxed) {
             return Ok(encrypt_agent_data_at_offset(key, iv, 0, plaintext)?);
         }
@@ -1027,6 +1057,8 @@ impl AgentRegistry {
         advance: bool,
     ) -> Result<Vec<u8>, TeamserverError> {
         // Legacy Demon/Archon agents reset CTR to 0 for every packet.
+        // SECURITY: reusing the same (key, IV, offset=0) keystream for every packet is a
+        // two-time-pad — see the warning on `insert_full`.
         if entry.legacy_ctr.load(Ordering::Relaxed) {
             return Ok(decrypt_agent_data_at_offset(key, iv, 0, ciphertext)?);
         }
@@ -3911,7 +3943,10 @@ mod tests {
         let ct1 = registry.encrypt_for_agent(agent.agent_id, plaintext).await?;
         let ct2 = registry.encrypt_for_agent(agent.agent_id, plaintext).await?;
 
-        // Both must be identical (same offset 0 keystream)
+        // Both must be identical (same offset 0 keystream).
+        // NOTE: identical ciphertext for the same plaintext is a known two-time-pad
+        // weakness in legacy mode — documented in the security warning on `insert_full`.
+        // This behaviour is preserved intentionally for Havoc Demon/Archon compatibility.
         assert_eq!(ct1, ct2, "legacy mode must produce identical ciphertext for same plaintext");
         // Offset must remain at 0
         assert_eq!(registry.ctr_offset(agent.agent_id).await?, 0);

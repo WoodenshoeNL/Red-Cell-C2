@@ -269,6 +269,60 @@ pub fn valid_demon_init_body(
         .to_bytes()
 }
 
+/// Build a valid Demon `DemonInit` envelope with extension flags appended after the standard
+/// metadata fields.  Used to register agents that opt into monotonic CTR mode
+/// (`INIT_EXT_MONOTONIC_CTR`).
+///
+/// All metadata fields take the same fixed test values as [`valid_demon_init_body`];
+/// only the trailing `ext_flags` word differs.
+pub fn valid_demon_init_body_with_ext_flags(
+    agent_id: u32,
+    key: [u8; AGENT_KEY_LENGTH],
+    iv: [u8; AGENT_IV_LENGTH],
+    ext_flags: u32,
+) -> Vec<u8> {
+    let mut metadata = Vec::new();
+    metadata.extend_from_slice(&agent_id.to_be_bytes());
+    add_length_prefixed_bytes_be(&mut metadata, b"wkstn-01");
+    add_length_prefixed_bytes_be(&mut metadata, b"operator");
+    add_length_prefixed_bytes_be(&mut metadata, b"REDCELL");
+    add_length_prefixed_bytes_be(&mut metadata, b"10.0.0.25");
+    add_length_prefixed_utf16_be(&mut metadata, "C:\\Windows\\explorer.exe");
+    metadata.extend_from_slice(&1337_u32.to_be_bytes());
+    metadata.extend_from_slice(&1338_u32.to_be_bytes());
+    metadata.extend_from_slice(&512_u32.to_be_bytes());
+    metadata.extend_from_slice(&2_u32.to_be_bytes());
+    metadata.extend_from_slice(&1_u32.to_be_bytes());
+    metadata.extend_from_slice(&0x401000_u64.to_be_bytes());
+    metadata.extend_from_slice(&10_u32.to_be_bytes());
+    metadata.extend_from_slice(&0_u32.to_be_bytes());
+    metadata.extend_from_slice(&1_u32.to_be_bytes());
+    metadata.extend_from_slice(&0_u32.to_be_bytes());
+    metadata.extend_from_slice(&22000_u32.to_be_bytes());
+    metadata.extend_from_slice(&9_u32.to_be_bytes());
+    metadata.extend_from_slice(&15_u32.to_be_bytes());
+    metadata.extend_from_slice(&20_u32.to_be_bytes());
+    metadata.extend_from_slice(&1_893_456_000_u64.to_be_bytes());
+    metadata.extend_from_slice(&0b101010_u32.to_be_bytes());
+    // Specter/monotonic extension: append ext_flags after working_hours.
+    metadata.extend_from_slice(&ext_flags.to_be_bytes());
+
+    let encrypted =
+        encrypt_agent_data(&key, &iv, &metadata).expect("metadata encryption should succeed");
+    let payload = [
+        u32::from(DemonCommand::DemonInit).to_be_bytes().as_slice(),
+        7_u32.to_be_bytes().as_slice(),
+        key.as_slice(),
+        iv.as_slice(),
+        encrypted.as_slice(),
+    ]
+    .concat();
+
+    DemonEnvelope::new(agent_id, payload)
+        .unwrap_or_else(|error| panic!("failed to build demon init request body: {error}"))
+        .to_bytes()
+}
+
 /// Build a valid Demon callback envelope (post-registration) for the given parameters.
 ///
 /// `ctr_offset` must be the cumulative AES-CTR block offset at the time of this call.

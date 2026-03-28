@@ -4013,3 +4013,17 @@ Issues found: 1 new bug filed (`red-cell-c2-y9jxm`, attributed to Claude)
 
 Build: check passed; clippy passed (clean); all 56 test suites passed (0 failures)
 Issues found: none
+
+### Arch Review — 2026-03-28 17:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 0 | — | No new issues found. All previously-filed arch findings resolved in recent commits: webhook Semaphore cap (wy2j1 ✓), plugin-test poll loop (6sj8r ✓), client-cli serde_json fallback (pgm8m ✓), rate-limiter timing (p7yt6 ✓). All `while !parser.is_empty()` loops verified bounded by packet size via `CallbackParser::read_bytes`. Deferred CTR advance on parse failure confirmed correct. DNS response-cleanup uses `DNS_UPLOAD_TIMEOUT_SECS` for both upload and response TTL — minor naming inconsistency, not a bug. `s as u64` casts in api.rs read path benign (stored values always ≥ 0). Two `unwrap()` calls in app.rs confirmed test-only (`#[cfg(test)]`). |
+| Codex | 0 | — | No issues found |
+| Cursor | 0 | — | No issues found |
+
+Overall codebase health: on track — strongest review pass to date; zero new findings across security, protocol, error-handling, resource management, and test coverage.
+Biggest blindspot: `DNS_UPLOAD_TIMEOUT_SECS` constant name covers both upload and response-side cleanup; a reader adjusting only the upload TTL would inadvertently change response cleanup too. Not filed (naming only, both uses are intentionally the same value).
+Build: `cargo check --workspace` clean; `cargo clippy --workspace -- -D warnings` zero warnings; `cargo test --workspace --lib` 2686+ tests all passing.
+Security posture: strong — AES-256-CTR monotonic-offset advance, HKDF key derivation with `Zeroizing` IKM, Argon2id passwords, `subtle::ConstantTimeEq` on all auth comparisons, per-IP rate limiting on every auth surface, bounded queues/maps (`MAX_REGISTERED_AGENTS`, `MAX_JOB_QUEUE_DEPTH`, `MAX_PIVOT_CHAIN_DEPTH`, `MAX_CONCURRENT_DOWNLOADS_PER_AGENT`, `MAX_KERBEROS_LIST_ITEMS`, `delivery_semaphore`), `AgentCryptoMaterial: Zeroize+ZeroizeOnDrop`. No production `unwrap`/`expect`, no `todo!`/`unimplemented!`, no `println!`/`eprintln!` in teamserver.
+Issues filed: 0

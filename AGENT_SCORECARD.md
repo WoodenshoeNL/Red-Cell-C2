@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 927 | 231 | 31 |
-| Bugs filed against | 99 | 35 | 9 |
-| Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
-| Quality score | 89% | 85% | 71% |
+| Tasks closed | 928 | 231 | 31 |
+| Bugs filed against | 99 | 36 | 9 |
+| Bug rate (bugs/task) | 0.11 | 0.16 | 0.29 |
+| Quality score | 89% | 84% | 71% |
 
-*Bug rates: Claude 99/927=0.11, Codex 35/231=0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 99/928=0.11, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 8 | 11 | 1 |
 | Startup / lifecycle regressions | 2 | 9 | 0 |
-| Test infrastructure / flakiness | 21 | 0 | 0 |
+| Test infrastructure / flakiness | 21 | 1 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
 | Correctness / pagination | 43 | 7 | 1 |
@@ -4089,3 +4089,14 @@ Biggest blindspot: none identified — all previously noted gaps (mq363, wj185, 
 Build: `cargo check --workspace` clean; `cargo clippy --workspace -- -D warnings` zero warnings; `cargo test --lib --workspace` 2694 tests all passing; integration suites (mock_demon_agent_checkin, malformed_demon_packets, smb_listener, http/external/dns listener pipeline) all pass.
 Security posture: strong — no regressions; cert pinning active in all Rust agents.
 Issues filed: 0
+
+### QA Review — 2026-03-28 — 6beae88..13fa751
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed mq363 (replace unreachable!() with if-let in emit_error_to). Fix is correct and minimal. |
+| Codex | 0 | 1 | Filed gczvs: reverse_port_forward_add_local_relays_data flaky under parallel execution — assertion fails (left:0, right:1) intermittently in cargo test --workspace; passes in isolation. Root cause: relay_count read before state machine advances. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: cargo check passed; cargo clippy clean (0 warnings); lib tests pass in isolation (52/52); cargo test --workspace shows intermittent failure in phantom relay test (pre-existing, not introduced this range)
+Issues found: red-cell-c2-gczvs (P3, test-flakiness, Codex) — reverse_port_forward_add_local_relays_data races under parallel execution

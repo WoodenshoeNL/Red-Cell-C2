@@ -1393,8 +1393,11 @@ async fn repeated_wrong_passwords_trigger_rate_limiter_lockout()
     }
 
     // --- Phase 2: the next attempt must be rejected by the rate limiter ---
-    let start = Instant::now();
     let (mut socket, _) = connect_async(format!("ws://{addr}/havoc")).await?;
+    // Start timing only after the connection is established so that TCP setup
+    // latency and OS scheduler jitter from parallel Argon2id hashing do not
+    // inflate the measurement.
+    let start = Instant::now();
 
     // The rate-limited path rejects *before* reading a login frame, so we
     // intentionally do NOT send any login message. The server should push an
@@ -1417,13 +1420,13 @@ async fn repeated_wrong_passwords_trigger_rate_limiter_lockout()
 
     // The rate-limited rejection must be substantially faster than the normal
     // 2 s FAILED_LOGIN_DELAY, proving the limiter short-circuited the
-    // authentication flow.  The threshold is generous (3 s) to stay stable
-    // under cargo test --workspace concurrency where Argon2id delays running in
-    // parallel may cause CPU contention.
+    // authentication flow.  Timing starts *after* connect_async so that TCP
+    // setup latency and Argon2id CPU contention from parallel tests do not
+    // inflate the measurement.
     let elapsed = start.elapsed();
     assert!(
-        elapsed < Duration::from_millis(3000),
-        "rate-limited rejection took {elapsed:?}, expected < 3 s — \
+        elapsed < Duration::from_millis(1500),
+        "rate-limited rejection took {elapsed:?}, expected < 1.5 s — \
          limiter may not be short-circuiting"
     );
 

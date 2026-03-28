@@ -104,6 +104,43 @@ fn getpwd_payload(path: &str) -> Vec<u8> {
     p
 }
 
+/// Build a `CommandFs` / `DemonFilesystemCommand::Download` mode=0 (start) payload.
+///
+/// Wire layout (all LE):
+///   u32 subcommand | u32 mode=0 | u32 file_id | u64 expected_size | utf16 remote_path
+fn download_start_payload(file_id: u32, expected_size: u64, remote_path: &str) -> Vec<u8> {
+    let mut p = (u32::from(DemonFilesystemCommand::Download)).to_le_bytes().to_vec();
+    p.extend_from_slice(&0_u32.to_le_bytes()); // mode = 0 (start)
+    p.extend_from_slice(&file_id.to_le_bytes());
+    p.extend_from_slice(&expected_size.to_le_bytes());
+    p.extend_from_slice(&le_utf16(remote_path));
+    p
+}
+
+/// Build a `CommandFs` / `DemonFilesystemCommand::Download` mode=1 (chunk) payload.
+///
+/// Wire layout (all LE):
+///   u32 subcommand | u32 mode=1 | u32 file_id | bytes chunk
+fn download_chunk_payload(file_id: u32, chunk: &[u8]) -> Vec<u8> {
+    let mut p = (u32::from(DemonFilesystemCommand::Download)).to_le_bytes().to_vec();
+    p.extend_from_slice(&1_u32.to_le_bytes()); // mode = 1 (chunk)
+    p.extend_from_slice(&file_id.to_le_bytes());
+    p.extend_from_slice(&le_bytes(chunk));
+    p
+}
+
+/// Build a `CommandFs` / `DemonFilesystemCommand::Download` mode=2 (close) payload.
+///
+/// Wire layout (all LE):
+///   u32 subcommand | u32 mode=2 | u32 file_id | u32 reason (0=success)
+fn download_close_payload(file_id: u32, reason: u32) -> Vec<u8> {
+    let mut p = (u32::from(DemonFilesystemCommand::Download)).to_le_bytes().to_vec();
+    p.extend_from_slice(&2_u32.to_le_bytes()); // mode = 2 (close)
+    p.extend_from_slice(&file_id.to_le_bytes());
+    p.extend_from_slice(&reason.to_le_bytes());
+    p
+}
+
 // ── Shared keys / IVs ────────────────────────────────────────────────────────
 //
 // Each test uses a unique (agent_id, key, iv) triple so tests can run in
@@ -139,6 +176,14 @@ const KEY_D: [u8; AGENT_KEY_LENGTH] = [
 ];
 const IV_D: [u8; AGENT_IV_LENGTH] = [
     0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF, 0xB0,
+];
+
+const KEY_E: [u8; AGENT_KEY_LENGTH] = [
+    0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xCB, 0xCC, 0xCD, 0xCE, 0xCF, 0xD0,
+    0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF, 0xE0,
+];
+const IV_E: [u8; AGENT_IV_LENGTH] = [
+    0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xEB, 0xEC, 0xED, 0xEE, 0xEF, 0xF0,
 ];
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -404,5 +449,221 @@ async fn getpwd_callback_broadcasts_current_directory() -> Result<(), Box<dyn st
 
     socket.close(None).await?;
     server.listeners.stop("fs-pwd-test").await?;
+    Ok(())
+}
+
+/// E2E integration test: full file-download flow via `CommandFs` / `Download` callbacks.
+///
+/// Sequence:
+/// 1. Register agent, subscribe operator WebSocket.
+/// 2. Agent sends mode=0 (start): server emits `download-progress / Started`.
+/// 3. Agent sends mode=1 (chunk): server emits `download-progress / InProgress`.
+/// 4. Agent sends mode=2 (close, reason=0): server emits `loot-new` then `download`.
+/// 5. Loot record is verified in the database.
+///
+/// This exercises the full reassembly → persistence → event-broadcast path that
+/// the per-function unit tests in `dispatch/filesystem.rs` do not cover.
+#[tokio::test]
+async fn download_flow_emits_progress_loot_and_complete_events()
+-> Result<(), Box<dyn std::error::Error>> {
+    let server = common::spawn_test_server(common::default_test_profile()).await?;
+    let (listener_port, listener_guard) = common::available_port_excluding(server.addr.port())?;
+    let client = reqwest::Client::new();
+
+    let (mut socket, _) = connect_async(server.ws_url()).await?;
+    common::login(&mut socket).await?;
+
+    server
+        .listeners
+        .create(common::http_listener_config("fs-download-test", listener_port))
+        .await?;
+    drop(listener_guard);
+    server.listeners.start("fs-download-test").await?;
+    common::wait_for_listener(listener_port).await?;
+
+    let agent_id = 0xDD01_0005_u32;
+    let ctr_offset = common::register_agent(&client, listener_port, agent_id, KEY_E, IV_E).await?;
+
+    let agent_new = common::read_operator_message(&mut socket).await?;
+    assert!(matches!(agent_new, OperatorMessage::AgentNew(_)), "expected AgentNew");
+
+    let file_id: u32 = 0x0000_0042;
+    let remote_path = "C:\\Users\\operator\\Documents\\secrets.zip";
+    let file_data: &[u8] = b"PK\x03\x04fake-zip-content-for-test";
+    let expected_size = file_data.len() as u64;
+    let request_id = 0x10_u32;
+
+    // ── Step 1: mode=0 (start) ───────────────────────────────────────────────
+    let start_payload = download_start_payload(file_id, expected_size, remote_path);
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            KEY_E,
+            IV_E,
+            ctr_offset,
+            u32::from(DemonCommand::CommandFs),
+            request_id,
+            &start_payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let started_event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(started_msg) = started_event else {
+        panic!("expected AgentResponse for download-start, got {started_event:?}");
+    };
+    assert_eq!(started_msg.info.demon_id, format!("{agent_id:08X}"));
+    assert_eq!(
+        started_msg.info.extra.get("MiscType").and_then(|v| v.as_str()),
+        Some("download-progress"),
+        "start event must have MiscType=download-progress"
+    );
+    assert_eq!(
+        started_msg.info.extra.get("State").and_then(|v| v.as_str()),
+        Some("Started"),
+        "start event must have State=Started"
+    );
+    assert_eq!(
+        started_msg.info.extra.get("FileName").and_then(|v| v.as_str()),
+        Some(remote_path),
+        "start event must carry the remote path"
+    );
+    assert_eq!(
+        started_msg.info.extra.get("FileID").and_then(|v| v.as_str()),
+        Some(format!("{file_id:08X}").as_str()),
+        "start event must carry the file ID"
+    );
+
+    // ── Step 2: mode=1 (chunk) ───────────────────────────────────────────────
+    let chunk_payload = download_chunk_payload(file_id, file_data);
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            KEY_E,
+            IV_E,
+            ctr_offset,
+            u32::from(DemonCommand::CommandFs),
+            request_id,
+            &chunk_payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let inprogress_event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(inprogress_msg) = inprogress_event else {
+        panic!("expected AgentResponse for download-chunk, got {inprogress_event:?}");
+    };
+    assert_eq!(
+        inprogress_msg.info.extra.get("MiscType").and_then(|v| v.as_str()),
+        Some("download-progress"),
+        "chunk event must have MiscType=download-progress"
+    );
+    assert_eq!(
+        inprogress_msg.info.extra.get("State").and_then(|v| v.as_str()),
+        Some("InProgress"),
+        "chunk event must have State=InProgress"
+    );
+    assert_eq!(
+        inprogress_msg.info.extra.get("CurrentSize").and_then(|v| v.as_str()),
+        Some(expected_size.to_string().as_str()),
+        "chunk event CurrentSize must equal the chunk length"
+    );
+
+    // ── Step 3: mode=2 (close, reason=0 = success) ───────────────────────────
+    let close_payload = download_close_payload(file_id, 0);
+    client
+        .post(format!("http://127.0.0.1:{listener_port}/"))
+        .body(common::valid_demon_callback_body(
+            agent_id,
+            KEY_E,
+            IV_E,
+            ctr_offset,
+            u32::from(DemonCommand::CommandFs),
+            request_id,
+            &close_payload,
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+
+    // Server broadcasts loot-new then download-complete in that order.
+    let loot_event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(loot_msg) = loot_event else {
+        panic!("expected AgentResponse for loot-new, got {loot_event:?}");
+    };
+    assert_eq!(
+        loot_msg.info.extra.get("MiscType").and_then(|v| v.as_str()),
+        Some("loot-new"),
+        "first close event must have MiscType=loot-new"
+    );
+    assert_eq!(
+        loot_msg.info.extra.get("LootKind").and_then(|v| v.as_str()),
+        Some("download"),
+        "loot-new event must have LootKind=download"
+    );
+    assert!(
+        loot_msg
+            .info
+            .extra
+            .get("LootName")
+            .and_then(|v| v.as_str())
+            .map(|n| n.ends_with("secrets.zip"))
+            .unwrap_or(false),
+        "loot-new LootName must include the filename"
+    );
+
+    let complete_event = common::read_operator_message(&mut socket).await?;
+    let OperatorMessage::AgentResponse(complete_msg) = complete_event else {
+        panic!("expected AgentResponse for download-complete, got {complete_event:?}");
+    };
+    assert_eq!(
+        complete_msg.info.extra.get("MiscType").and_then(|v| v.as_str()),
+        Some("download"),
+        "second close event must have MiscType=download"
+    );
+    assert_eq!(
+        complete_msg.info.extra.get("Type").and_then(|v| v.as_str()),
+        Some("Good"),
+        "download-complete event must have Type=Good"
+    );
+    assert_eq!(
+        complete_msg.info.extra.get("FileName").and_then(|v| v.as_str()),
+        Some(remote_path),
+        "download-complete event must carry the remote path"
+    );
+    // MiscData carries the base64-encoded file content.
+    let misc_data = complete_msg
+        .info
+        .extra
+        .get("MiscData")
+        .and_then(|v| v.as_str())
+        .expect("download-complete must include MiscData");
+    use base64::Engine as _;
+    let decoded = base64::engine::general_purpose::STANDARD.decode(misc_data)?;
+    assert_eq!(decoded, file_data, "MiscData must round-trip the file bytes");
+
+    // ── Step 4: verify persistence ───────────────────────────────────────────
+    let loot_records = server.database.loot().list_for_agent(agent_id).await?;
+    assert_eq!(loot_records.len(), 1, "exactly one loot record must be persisted");
+    let record = &loot_records[0];
+    assert_eq!(record.agent_id, agent_id);
+    assert_eq!(record.kind, "download");
+    assert!(
+        record.name.ends_with("secrets.zip"),
+        "loot record name must include the filename, got {:?}",
+        record.name
+    );
+    assert_eq!(
+        record.size_bytes,
+        Some(i64::try_from(expected_size).expect("file size fits in i64")),
+        "loot record size_bytes must match the transferred data length"
+    );
+
+    socket.close(None).await?;
+    server.listeners.stop("fs-download-test").await?;
     Ok(())
 }

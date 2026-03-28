@@ -2819,16 +2819,15 @@ mod tests {
             stream.write_all(&buffer[..read]).await.expect("write target");
         });
 
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve port");
-        let bind_port = listener.local_addr().expect("bind addr").port();
-        drop(listener);
-
+        // Pass port 0 so the OS assigns an available port atomically, eliminating the
+        // TOCTOU race that caused this test to fail non-deterministically under parallel
+        // execution (reserve-port-then-drop would let another test grab the port).
         let mut payload = Vec::new();
         payload.extend_from_slice(
             &(DemonSocketCommand::ReversePortForwardAddLocal as i32).to_le_bytes(),
         );
         payload.extend_from_slice(&(u32::from(Ipv4Addr::LOCALHOST) as i32).to_le_bytes());
-        payload.extend_from_slice(&(i32::from(bind_port)).to_le_bytes());
+        payload.extend_from_slice(&0_i32.to_le_bytes());
         payload.extend_from_slice(&(u32::from(Ipv4Addr::LOCALHOST) as i32).to_le_bytes());
         payload.extend_from_slice(&(i32::from(target_port)).to_le_bytes());
 
@@ -2847,6 +2846,10 @@ mod tests {
             u32::from(DemonSocketCommand::ReversePortForwardAddLocal)
         );
         assert_eq!(read_u32(payload, &mut offset), 1);
+        // Skip socket_id and bind_addr fields to reach the bound port assigned by the OS.
+        let _socket_id = read_u32(payload, &mut offset);
+        let _bind_addr = read_u32(payload, &mut offset);
+        let bind_port = read_u32(payload, &mut offset) as u16;
 
         let mut client = tokio::net::TcpStream::connect(("127.0.0.1", bind_port))
             .await

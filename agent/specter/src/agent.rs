@@ -228,8 +228,9 @@ impl SpecterAgent {
             return base;
         }
         let jitter_range = base * u64::from(self.config.sleep_jitter) / 100;
-        let jitter = rand::random::<u64>() % (jitter_range + 1);
-        base.saturating_sub(jitter / 2) + jitter / 2
+        let spread = jitter_range.saturating_mul(2);
+        let jitter = rand::random::<u64>() % (spread.saturating_add(1));
+        base.saturating_sub(jitter_range).saturating_add(jitter)
     }
 
     /// Return the agent ID.
@@ -443,16 +444,23 @@ mod tests {
 
     #[test]
     fn compute_sleep_delay_with_jitter_is_in_range() {
+        // 50% jitter on 10000ms → jitter_range=5000, so output ∈ [5000, 15000].
         let config =
             SpecterConfig { sleep_delay_ms: 10000, sleep_jitter: 50, ..Default::default() };
         let agent = SpecterAgent::new(config).expect("agent");
-        for _ in 0..100 {
+        let mut seen_min = u64::MAX;
+        let mut seen_max = u64::MIN;
+        for _ in 0..200 {
             let delay = agent.compute_sleep_delay();
-            // With 50% jitter on 10000ms, delay should be roughly 5000–15000
-            // but our formula keeps it within [base - jitter_range/2, base + jitter_range/2]
-            assert!(delay > 0);
-            assert!(delay <= 15000);
+            assert!((5000..=15000).contains(&delay), "delay {delay} out of [5000, 15000]");
+            seen_min = seen_min.min(delay);
+            seen_max = seen_max.max(delay);
         }
+        // Over 200 draws the spread must be non-trivial (> 100ms) — catches a cancelled jitter.
+        assert!(
+            seen_max - seen_min > 100,
+            "jitter produced no spread: min={seen_min} max={seen_max}"
+        );
     }
 
     #[test]

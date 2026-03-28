@@ -24,7 +24,7 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 50 | 14 | 5 |
 | Clippy warnings | 7 | 0 | 1 |
 | Protocol errors | 16 | 27 | 3 |
-| Security issues | 48 | 39 | 0 |
+| Security issues | 49 | 39 | 0 |
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 8 | 11 | 1 |
 | Startup / lifecycle regressions | 2 | 9 | 0 |
@@ -40,6 +40,21 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-28 16:00
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 1 | security | emit_error_to fallback (session.rs:948) injects cmd without JSON escaping — dead code today but unsafe pattern. Filed red-cell-c2-ldxa8. |
+| Codex | 0 | — | No new issues found |
+| Cursor | 0 | — | No new issues found |
+| Human (Michel) | 2 | security (1), correctness (1) | danger_accept_invalid_certs(true) in Specter and Phantom transport (red-cell-c2-wj185, P2); Specter compute_sleep_delay jitter formula always returns base — jitter non-functional (red-cell-c2-hxh03, P3) |
+
+Overall codebase health: on track
+Biggest blindspot: both Rust agents (Specter, Phantom) accept any TLS certificate from the teamserver — a network-positioned adversary can silently MITM all agent traffic. Since the inner AES-CTR layer lacks authentication (no AEAD), this is exploitable for injection in legacy-CTR mode. No certificate pinning is implemented.
+Build: cargo check passed; cargo clippy passed (zero warnings); cargo test --workspace 2173 passed, 0 failed
+Issues filed: red-cell-c2-wj185 (security P2, TLS cert bypass), red-cell-c2-hxh03 (bug P3, jitter formula), red-cell-c2-ldxa8 (quality P4, emit_error_to fallback)
+Security posture: moderate concern — agent↔teamserver channel lacks mutual authentication at the TLS layer. All teamserver-side crypto, auth, and rate-limiting patterns remain strong.
 
 ### QA Review — 2026-03-28 15:15 — 4a9bac24..5730adeb
 

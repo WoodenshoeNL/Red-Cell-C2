@@ -39,7 +39,7 @@ use hkdf::Hkdf;
 use sha2::Sha256;
 use sha3::{Digest, Sha3_256};
 use thiserror::Error;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Agent communication key length in bytes.
 pub const AGENT_KEY_LENGTH: usize = 32;
@@ -263,8 +263,10 @@ pub fn derive_session_keys(
     }
 
     // Concatenate agent key + IV as the input keying material so both values
-    // contribute entropy to the derived output.
-    let mut ikm = Vec::with_capacity(AGENT_KEY_LENGTH + AGENT_IV_LENGTH);
+    // contribute entropy to the derived output.  Use Zeroizing so the heap
+    // allocation is wiped on drop, consistent with the zeroize discipline used
+    // elsewhere in this module.
+    let mut ikm = Zeroizing::new(Vec::with_capacity(AGENT_KEY_LENGTH + AGENT_IV_LENGTH));
     ikm.extend_from_slice(agent_key);
     ikm.extend_from_slice(agent_iv);
 

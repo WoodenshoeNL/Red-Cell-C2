@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 900 | 231 | 31 |
+| Tasks closed | 903 | 231 | 31 |
 | Bugs filed against | 95 | 35 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
 | Quality score | 89% | 85% | 71% |
 
-*Bug rates: Claude 95/900=0.11, Codex 35/231=0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 95/903=0.11, Codex 35/231=0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -3922,6 +3922,18 @@ Security posture: generally strong. The legacy-CTR finding is a known design tra
 | Agent | Tasks closed | Bugs filed | Notes |
 |-------|-------------|------------|-------|
 | Claude | 3 | 0 | Closed `red-cell-c2-gfnrz`, `red-cell-c2-zzf6q`, and `red-cell-c2-ys7rt`. Reviewed the corresponding common/teamserver changes plus the new `process_dispatch` integration suite; no new QA findings in this window. |
+| Codex | 0 | 0 | No task-close commits in range. |
+| Cursor | 0 | 0 | No activity in range. |
+
+Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`, `cargo test --workspace`)
+Tests: passed; `cargo test --workspace` still emits the pre-existing `client-cli/src/error.rs:79` unfulfilled `#[expect(dead_code)]` warning already tracked by open bugs
+Issues found: 0 new bugs filed
+
+### QA Review — 2026-03-28 05:02 — 309f833f..c353bc92
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 0 | Closed `red-cell-c2-7ww3k`, `red-cell-c2-yqpys`, and `red-cell-c2-eekja`. Reviewed the new `filesystem_dispatch` integration coverage and the `client-cli` dead-code cleanup; no new regressions found in this window. |
 | Codex | 0 | 0 | No task-close commits in range. |
 | Cursor | 0 | 0 | No activity in range. |
 

@@ -12,7 +12,7 @@ use red_cell_common::config::Profile;
 use reqwest::StatusCode;
 use serde::Serialize;
 use thiserror::Error;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore};
 use tracing::warn;
 
 use crate::{AuditRecord, AuditResultStatus};
@@ -20,6 +20,12 @@ use crate::{AuditRecord, AuditResultStatus};
 const SUCCESS_COLOR: u32 = 0x002E_CC71;
 const FAILURE_COLOR: u32 = 0x00E7_4C3C;
 const DISCORD_WEBHOOK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Maximum number of concurrent in-flight detached delivery tasks.
+///
+/// When this limit is reached, new events are dropped with a warning rather
+/// than allowing unbounded task accumulation under a slow/unavailable endpoint.
+const MAX_CONCURRENT_DELIVERIES: usize = 256;
 
 /// Backoff delays for webhook retries: 1 s, 2 s, 4 s (up to 3 retries).
 const RETRY_DELAYS: [Duration; 3] =
@@ -34,6 +40,12 @@ pub struct AuditWebhookNotifier {
     discord_failure_count: Arc<AtomicU64>,
     /// Per-attempt backoff delays (first retry after delays[0], etc.).
     retry_delays: Arc<[Duration]>,
+    /// Caps the number of concurrently in-flight detached delivery tasks.
+    ///
+    /// A task acquires one permit before being spawned and releases it when it
+    /// completes (or is dropped).  Calls that cannot acquire a permit immediately
+    /// drop the event with a warning instead of queuing it.
+    delivery_semaphore: Arc<Semaphore>,
 }
 
 impl Default for AuditWebhookNotifier {
@@ -43,6 +55,7 @@ impl Default for AuditWebhookNotifier {
             delivery_state: Arc::new(DeliveryState::default()),
             discord_failure_count: Arc::new(AtomicU64::new(0)),
             retry_delays: Arc::from(RETRY_DELAYS.as_slice()),
+            delivery_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_DELIVERIES)),
         }
     }
 }
@@ -66,6 +79,7 @@ impl AuditWebhookNotifier {
             delivery_state: Arc::new(DeliveryState::default()),
             discord_failure_count: Arc::new(AtomicU64::new(0)),
             retry_delays: Arc::from(RETRY_DELAYS.as_slice()),
+            delivery_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_DELIVERIES)),
         }
     }
 
@@ -134,10 +148,29 @@ impl AuditWebhookNotifier {
                 return;
             }
 
+            // Enforce the concurrency cap.  try_acquire_owned() succeeds immediately
+            // or returns an error — we never block the caller.
+            let permit = match self.delivery_semaphore.clone().try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    // Cap exceeded: drop the event rather than accumulating tasks.
+                    self.delivery_state.pending.fetch_sub(1, Ordering::SeqCst);
+                    self.delivery_state.notify_if_drained();
+                    warn!(
+                        actor = record.actor,
+                        action = record.action,
+                        "webhook delivery dropped: concurrency cap ({MAX_CONCURRENT_DELIVERIES}) reached"
+                    );
+                    return;
+                }
+            };
+
             let delivery_state = self.delivery_state.clone();
             let failure_count = self.discord_failure_count.clone();
             let retry_delays = self.retry_delays.clone();
             tokio::spawn(async move {
+                // Hold the permit for the full lifetime of this task.
+                let _permit = permit;
                 // Initial attempt.
                 let mut last_err = match discord.send(&record).await {
                     Ok(()) => {
@@ -394,7 +427,7 @@ mod tests {
     use axum::{Json, Router, http::StatusCode as HttpStatusCode, routing::post};
     use serde_json::{Value, json};
     use tokio::net::TcpListener;
-    use tokio::sync::mpsc;
+    use tokio::sync::{Semaphore, mpsc};
 
     use super::{AuditWebhookNotifier, WebhookError};
     use crate::{AuditRecord, AuditResultStatus};
@@ -1088,6 +1121,7 @@ mod tests {
             delivery_state: Arc::new(super::DeliveryState::default()),
             discord_failure_count: Arc::new(AtomicU64::new(0)),
             retry_delays: Arc::from([].as_slice()),
+            delivery_semaphore: Arc::new(Semaphore::new(super::MAX_CONCURRENT_DELIVERIES)),
         }
     }
 
@@ -1565,6 +1599,54 @@ mod tests {
         .await
         .expect("shutdown should complete immediately with pending=0");
         assert!(drained, "shutdown must return true when no deliveries are pending");
+    }
+
+    /// Events submitted when the concurrency cap is exhausted must be dropped with
+    /// a warning rather than spawning an unbounded number of tasks.
+    ///
+    /// The test builds a notifier whose semaphore is pre-exhausted (cap = 0) so
+    /// every `notify_audit_record_detached` call hits the cap immediately.  No
+    /// tasks should be spawned, the pending counter must stay at zero, and no
+    /// payload must reach the mock server.
+    #[tokio::test]
+    async fn detached_events_dropped_when_concurrency_cap_is_reached() {
+        let (address, mut receiver, server) = webhook_server(HttpStatusCode::OK).await;
+        let profile = discord_profile(address);
+
+        // Build a notifier with an already-exhausted semaphore (cap = 0).
+        let notifier = AuditWebhookNotifier {
+            delivery_semaphore: Arc::new(Semaphore::new(0)),
+            ..AuditWebhookNotifier::from_profile(&profile)
+        };
+
+        // Fire several detached notifications — all should be dropped.
+        for i in 0..5 {
+            notifier.notify_audit_record_detached(sample_record(500 + i));
+        }
+
+        // Yield so any erroneously spawned tasks get a chance to run.
+        tokio::task::yield_now().await;
+
+        // No payload must have reached the server.
+        assert!(
+            receiver.try_recv().is_err(),
+            "no webhook request should be sent when the concurrency cap is exhausted"
+        );
+
+        // The pending counter must be zero — dropped events must not inflate it.
+        assert_eq!(
+            notifier.delivery_state.pending.load(Ordering::SeqCst),
+            0,
+            "pending counter must be zero after all events are dropped at the cap"
+        );
+
+        // shutdown must drain immediately (nothing in flight).
+        assert!(
+            notifier.shutdown(Duration::from_millis(100)).await,
+            "shutdown must return true immediately when no tasks were spawned"
+        );
+
+        server.abort();
     }
 
     /// Multiple guards: `shutdown` must continue to block after the first guard is

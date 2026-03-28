@@ -4075,3 +4075,17 @@ Issues found: none
 
 Build: cargo check passed; cargo clippy clean (0 warnings); all tests passed (10 suites, 0 failures)
 Issues found: red-cell-c2-mq363 (P3, unwrap/expect category) — unreachable!() used as fallback in session.rs:948
+
+### Arch Review — 2026-03-28 — f7663c38..HEAD
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 0 | — | No new issues found. mq363 (`unreachable!()` in `emit_error_to`) confirmed closed in d623df72 — `if-let` path now handles the `AgentOutput::Error` variant correctly. Certificate pinning (`danger_accept_invalid_certs` removed, wj185) verified in both `agent/specter` and `agent/phantom` transport modules. All `unwrap`/`expect`/`todo!`/`unimplemented!` calls in teamserver confirmed test-only or compile-time-dead. |
+| Codex | 0 | — | No activity in range. |
+| Cursor | 0 | — | No activity in range. |
+
+Overall codebase health: on track — clean build, zero clippy warnings, 2694 lib tests passing, all integration suites pass.
+Biggest blindspot: none identified — all previously noted gaps (mq363, wj185, hxh03, ldxa8, 8kaig) are confirmed resolved.
+Build: `cargo check --workspace` clean; `cargo clippy --workspace -- -D warnings` zero warnings; `cargo test --lib --workspace` 2694 tests all passing; integration suites (mock_demon_agent_checkin, malformed_demon_packets, smb_listener, http/external/dns listener pipeline) all pass.
+Security posture: strong — no regressions; cert pinning active in all Rust agents.
+Issues filed: 0

@@ -26,12 +26,12 @@ Each loop run updates the running totals and appends a review entry.
 | Protocol errors | 16 | 27 | 3 |
 | Security issues | 48 | 39 | 0 |
 | Architecture drift | 19 | 23 | 0 |
-| Memory / resource leaks | 7 | 11 | 1 |
+| Memory / resource leaks | 8 | 11 | 1 |
 | Startup / lifecycle regressions | 2 | 9 | 0 |
-| Test infrastructure / flakiness | 18 | 0 | 0 |
+| Test infrastructure / flakiness | 19 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
-| Correctness / pagination | 42 | 7 | 1 |
+| Correctness / pagination | 43 | 7 | 1 |
 | Workflow / close-hygiene | 18 | 0 | 0 |
 | Code reuse / duplication | 8 | 0 | 0 |
 
@@ -40,6 +40,19 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-28 14:10
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 3 | test flakiness (1), correctness (1), memory/resource (1) | execute_agent_task_fires_plugin_task_created_event still flaky (100ms sleep, missed in b04d7ad0 fix); client-cli streaming error JSON built via string interpolation — malformed if error message contains `"` or `\n`; webhook notifier spawns unbounded Tokio tasks with no concurrency cap |
+| Codex | 0 | — | No new issues found |
+| Cursor | 0 | — | No new issues found |
+
+Overall codebase health: on track
+Biggest blindspot: client-cli streaming error paths emit hand-rolled JSON strings that can break if the underlying serde error message contains special characters — automated pipeline consumers will receive malformed JSON on stderr.
+Build: passed (cargo check clean, clippy zero warnings) | Tests: 1 flaky test failure under concurrent execution (execute_agent_task_fires_plugin_task_created_event, passes in isolation) | Issues filed: red-cell-c2-6sj8r (flaky test), red-cell-c2-pgm8m (malformed error JSON), red-cell-c2-wy2j1 (unbounded webhook tasks)
+Security posture: strong — no new security vulnerabilities found. All crypto, auth, rate-limiting, and bounded-allocation patterns remain intact.
 
 ### Arch Review — 2026-03-28 12:15
 

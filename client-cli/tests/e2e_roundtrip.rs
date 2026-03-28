@@ -323,8 +323,11 @@ async fn spawn_server() -> TestHarness {
     });
 
     let base_url = format!("http://127.0.0.1:{}", addr.port());
+    // Use a generous timeout so the tests remain stable under cargo test
+    // --workspace concurrency, where CPU contention from parallel integration
+    // tests can delay a request well beyond the 15 s window.
     let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(30))
         .build()
         .expect("reqwest client");
 

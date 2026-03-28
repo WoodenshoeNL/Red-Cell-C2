@@ -392,8 +392,11 @@ async fn rate_limited_login_does_not_produce_audit_entry() -> Result<(), Box<dyn
         let _ = attempt_login(server.addr, "operator", "wrong").await;
     }
 
-    // Record how many audit entries exist after the pre-rate-limit failures.
-    let baseline_entries = poll_audit_entries(&server.database, 1, Duration::from_secs(10)).await;
+    // Wait until all 5 non-rate-limited failures have been recorded in the audit
+    // log before snapping the baseline.  Waiting for just 1 entry is racy under
+    // cargo test --workspace concurrency: if the 7th attempt arrives before all 5
+    // prior failures are committed, the count can drift.
+    let baseline_entries = poll_audit_entries(&server.database, 5, Duration::from_secs(30)).await;
     let baseline_login_count = login_audit_entries(&baseline_entries).len();
 
     // Now send one more attempt — this should be rate-limited and produce

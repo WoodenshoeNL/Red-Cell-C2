@@ -124,10 +124,37 @@ git push
 
 ### 6. Verify — all four must pass
 
+Use `CARGO_FLAGS` from the **Cargo scope** section of your Zone Constraint if one is present.
+Fall back to `--workspace` when no zone is active.
+
+**Step 1 — type/syntax check (abort if this fails):**
+
 ```bash
-cargo check --workspace
-cargo test --workspace
-cargo clippy --workspace -- -D warnings
+cargo check $CARGO_FLAGS
+```
+
+If `cargo check` fails, fix the errors before proceeding. Do not run tests against broken code.
+
+**Step 2 — run tests:**
+
+Prefer `cargo nextest run` (faster parallel runner). Fall back to `cargo test` if nextest is not installed.
+
+```bash
+# preferred:
+cargo nextest run $CARGO_FLAGS
+# fallback if nextest is absent:
+cargo test $CARGO_FLAGS
+```
+
+**Step 3 — lint:**
+
+```bash
+cargo clippy $CARGO_FLAGS -- -D warnings
+```
+
+**Step 4 — format check:**
+
+```bash
 cargo fmt --check
 ```
 

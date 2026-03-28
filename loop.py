@@ -366,6 +366,18 @@ def extract_text_from_stream(raw_lines: list) -> str:
 
 # ── Zone constraint ────────────────────────────────────────────────────────────
 
+# Zone → Rust package names for scoped builds/tests.
+# None means use --workspace (changes can affect all crates, e.g. common).
+# []   means no Rust crate at all (agent zone — skip cargo entirely).
+ZONE_PACKAGES = {
+    "teamserver": ["red-cell", "red-cell-common"],
+    "client":     ["red-cell-client", "red-cell-common"],
+    "client-cli": ["red-cell-cli", "red-cell-common"],
+    "common":     None,   # --workspace: changes here can break any crate
+    "agent":      [],     # no Rust crate
+}
+
+
 def build_zone_block(zones: list) -> str:
     """Build a zone constraint block for injection into agent prompts."""
     if not zones:
@@ -374,6 +386,48 @@ def build_zone_block(zones: list) -> str:
     for z in zones:
         allowed_paths.extend(ZONES.get(z, [f"{z}/"]))
     paths_list = "\n".join(f"- `{p}`" for p in allowed_paths)
+
+    # Compute cargo flags for all named zones.
+    # None entry → --workspace; [] entry → no Rust; list → -p <pkg> ...
+    pkgs_seen: set = set()
+    pkgs_ordered: list = []
+    use_workspace = False
+    has_no_rust = False
+    for z in zones:
+        packages = ZONE_PACKAGES.get(z)
+        if packages is None:
+            use_workspace = True
+        elif len(packages) == 0:
+            has_no_rust = True
+        else:
+            for pkg in packages:
+                if pkg not in pkgs_seen:
+                    pkgs_seen.add(pkg)
+                    pkgs_ordered.append(pkg)
+
+    if use_workspace or (pkgs_ordered and len(zones) > 1):
+        cargo_flags = "--workspace"
+    elif pkgs_ordered:
+        cargo_flags = " ".join(f"-p {pkg}" for pkg in pkgs_ordered)
+    else:
+        cargo_flags = None  # pure agent zone — no Rust
+
+    if cargo_flags:
+        cargo_scope_section = f"""
+### Cargo scope for this zone
+
+Use **`{cargo_flags}`** for all cargo commands (check, nextest, clippy).
+Do NOT use `--workspace` unless explicitly listed above.
+"""
+    elif has_no_rust:
+        cargo_scope_section = """
+### Cargo scope for this zone
+
+This zone has no Rust crate — skip all cargo commands.
+"""
+    else:
+        cargo_scope_section = ""
+
     return f"""
 ---
 
@@ -383,7 +437,7 @@ You are operating in zone(s): {', '.join(f'`{z}`' for z in zones)}
 
 **STRICT**: Only modify files inside:
 {paths_list}
-
+{cargo_scope_section}
 ### If a test outside your zone fails
 
 Before filing a bug, check `docs/known-failures.md`:

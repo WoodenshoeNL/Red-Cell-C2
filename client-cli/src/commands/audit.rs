@@ -16,7 +16,7 @@ use tracing::instrument;
 
 use crate::AuditCommands;
 use crate::client::ApiClient;
-use crate::error::{CliError, EXIT_SUCCESS};
+use crate::error::{CliError, ERROR_CODE_SERIALIZE_FAILED, EXIT_SUCCESS};
 use crate::output::{OutputFormat, TextRow, print_error, print_success};
 
 /// Number of entries fetched by `log tail` (without --follow).
@@ -247,7 +247,10 @@ fn print_entry_line(fmt: &OutputFormat, entry: &AuditEntry) {
             });
             match serde_json::to_string(&line) {
                 Ok(s) => println!("{s}"),
-                Err(_) => println!(r#"{{"ts":"","operator":"","action":""}}"#),
+                Err(e) => eprintln!(
+                    r#"{{"ok":false,"error":"{code}","message":"failed to serialize audit entry: {e}"}}"#,
+                    code = ERROR_CODE_SERIALIZE_FAILED,
+                ),
             }
         }
         OutputFormat::Text => {

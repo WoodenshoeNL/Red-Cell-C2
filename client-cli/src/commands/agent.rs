@@ -22,7 +22,7 @@ use tracing::instrument;
 
 use crate::AgentCommands;
 use crate::client::ApiClient;
-use crate::error::{CliError, EXIT_SUCCESS};
+use crate::error::{CliError, ERROR_CODE_SERIALIZE_FAILED, EXIT_SUCCESS};
 use crate::output::{OutputFormat, TextRender, TextRow, print_error, print_success};
 
 /// Default polling timeout for `--wait` operations, in seconds.
@@ -621,7 +621,10 @@ async fn watch_output(
                             let line = serde_json::json!({"ok": true, "data": entry});
                             match serde_json::to_string(&line) {
                                 Ok(s) => println!("{s}"),
-                                Err(_) => println!(r#"{{"ok":true}}"#),
+                                Err(e) => eprintln!(
+                                    r#"{{"ok":false,"error":"{code}","message":"failed to serialize output entry: {e}"}}"#,
+                                    code = ERROR_CODE_SERIALIZE_FAILED,
+                                ),
                             }
                         }
                         OutputFormat::Text => {

@@ -42,6 +42,8 @@ pub const ERROR_CODE_INVALID_ARGS: &str = "INVALID_ARGS";
 pub const ERROR_CODE_SERVER_ERROR: &str = "SERVER_ERROR";
 /// Machine-readable error code for features not yet available.
 pub const ERROR_CODE_UNSUPPORTED: &str = "UNSUPPORTED";
+/// Machine-readable error code for an in-process serialization failure (serde_json).
+pub const ERROR_CODE_SERIALIZE_FAILED: &str = "SERIALIZE_FAILED";
 
 /// All errors that a CLI command can produce.
 #[derive(Debug, Error)]

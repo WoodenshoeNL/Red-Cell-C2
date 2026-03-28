@@ -229,10 +229,11 @@ struct BuildStatus {
 }
 
 /// A single audit record returned by `GET /audit`.
+///
+/// Subset of `teamserver::audit::AuditRecord` — the server also sends `id`
+/// and `parameters` which are silently ignored by serde.
 #[derive(Debug, Deserialize, Serialize)]
 struct RawAuditRecord {
-    #[allow(dead_code)]
-    id: i64,
     actor: String,
     action: String,
     agent_id: Option<String>,
@@ -240,10 +241,10 @@ struct RawAuditRecord {
 }
 
 /// Paged audit response from `GET /audit`.
+///
+/// Pagination metadata (`total`, `limit`, `offset`) is silently ignored by serde.
 #[derive(Debug, Deserialize)]
 struct RawAuditPage {
-    #[allow(dead_code)]
-    total: usize,
     items: Vec<RawAuditRecord>,
 }
 

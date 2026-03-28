@@ -26,32 +26,26 @@ const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 // ── raw API response shapes ───────────────────────────────────────────────────
 
-/// Mirrors `teamserver::audit::AuditRecord` exactly.
+/// Mirrors the fields of `teamserver::audit::AuditRecord` that are consumed
+/// by the CLI.  The server also sends `id`, `parameters` which are silently
+/// ignored by serde — no `deny_unknown_fields` is set.
 #[derive(Debug, Deserialize)]
 struct RawAuditRecord {
-    #[allow(dead_code)]
-    id: i64,
     actor: String,
     action: String,
     target_kind: String,
     target_id: Option<String>,
     agent_id: Option<String>,
     command: Option<String>,
-    #[allow(dead_code)]
-    parameters: Option<serde_json::Value>,
     result_status: String,
     occurred_at: String,
 }
 
-/// Mirrors `teamserver::audit::AuditPage` exactly.
+/// Mirrors `teamserver::audit::AuditPage`.  Pagination metadata (`total`,
+/// `limit`, `offset`) is silently ignored by serde — no `deny_unknown_fields`
+/// is set.
 #[derive(Debug, Deserialize)]
 struct RawAuditPage {
-    #[allow(dead_code)]
-    total: usize,
-    #[allow(dead_code)]
-    limit: usize,
-    #[allow(dead_code)]
-    offset: usize,
     items: Vec<RawAuditRecord>,
 }
 
@@ -336,14 +330,12 @@ mod tests {
         occurred_at: &str,
     ) -> RawAuditRecord {
         RawAuditRecord {
-            id: 1,
             actor: actor.to_owned(),
             action: action.to_owned(),
             target_kind: target_kind.to_owned(),
             target_id: target_id.map(ToOwned::to_owned),
             agent_id: agent_id.map(ToOwned::to_owned),
             command: command.map(ToOwned::to_owned),
-            parameters: None,
             result_status: result_status.to_owned(),
             occurred_at: occurred_at.to_owned(),
         }

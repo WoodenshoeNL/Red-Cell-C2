@@ -27,6 +27,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(2_000);
 
 // ── raw API response shapes ───────────────────────────────────────────────────
 
+/// The server also sends `size_bytes` which is silently ignored by serde.
 #[derive(Debug, Deserialize)]
 struct RawPayloadSummary {
     id: String,
@@ -34,8 +35,6 @@ struct RawPayloadSummary {
     arch: String,
     format: String,
     built_at: String,
-    #[allow(dead_code)] // reserved for future list output
-    size_bytes: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -449,7 +448,6 @@ mod tests {
             arch: "x86_64".to_owned(),
             format: "dll".to_owned(),
             built_at: "2026-01-01T00:00:00Z".to_owned(),
-            size_bytes: Some(1024),
         };
         let row = payload_row_from_raw(raw);
         assert_eq!(row.id, "id1");

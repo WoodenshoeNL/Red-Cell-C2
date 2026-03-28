@@ -3,29 +3,25 @@
 use serde::Deserialize;
 
 /// Wire format returned by `GET /agents/{id}/output`.
+///
+/// The server also sends `total` (pagination metadata) which is silently
+/// ignored by serde.
 #[derive(Debug, Deserialize)]
 pub(crate) struct OutputPage {
-    #[allow(dead_code)]
-    pub(crate) total: usize,
     pub(crate) entries: Vec<OutputWireEntry>,
 }
 
 /// Single entry in the `OutputPage.entries` array.
+///
+/// The server also sends `command_id`, `request_id`, `response_type`, and
+/// `operator` which are silently ignored by serde.
 #[derive(Debug, Deserialize)]
 pub(crate) struct OutputWireEntry {
     pub(crate) id: i64,
     pub(crate) task_id: Option<String>,
-    #[allow(dead_code)]
-    pub(crate) command_id: u32,
-    #[allow(dead_code)]
-    pub(crate) request_id: u32,
-    #[allow(dead_code)]
-    pub(crate) response_type: String,
     pub(crate) message: String,
     pub(crate) output: String,
     pub(crate) command_line: Option<String>,
-    #[allow(dead_code)]
-    pub(crate) operator: Option<String>,
     pub(crate) received_at: String,
 }
 

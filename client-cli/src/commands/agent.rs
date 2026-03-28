@@ -39,20 +39,16 @@ const POLL_INTERVAL: Duration = Duration::from_millis(1_000);
 /// server response without loss of data.  All PascalCase renames match
 /// the `#[serde(rename = "…")]` attributes on `ApiAgentInfo`.
 ///
-/// Some fields are captured here for schema completeness but are not
-/// forwarded to `RawAgent` — they are required by serde for a
-/// successful deserialisation and are intentionally unused afterwards.
+/// Only the fields consumed by [`From<ApiAgentWire>`] are declared here.
+/// The server sends additional fields (`Reason`, `Note`, `BaseAddress`,
+/// `ProcessTID`, `ProcessPPID`, `OSBuild`, `KillDate`, `WorkingHours`) that
+/// are silently ignored by serde — no `deny_unknown_fields` is set.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct ApiAgentWire {
     #[serde(rename = "AgentID")]
     agent_id: u32,
     #[serde(rename = "Active")]
     active: bool,
-    #[serde(rename = "Reason")]
-    reason: String,
-    #[serde(rename = "Note")]
-    note: String,
     #[serde(rename = "Hostname")]
     hostname: String,
     #[serde(rename = "Username")]
@@ -65,32 +61,20 @@ struct ApiAgentWire {
     internal_ip: String,
     #[serde(rename = "ProcessName")]
     process_name: String,
-    #[serde(rename = "BaseAddress")]
-    base_address: u64,
     #[serde(rename = "ProcessPID")]
     process_pid: u32,
-    #[serde(rename = "ProcessTID")]
-    process_tid: u32,
-    #[serde(rename = "ProcessPPID")]
-    process_ppid: u32,
     #[serde(rename = "ProcessArch")]
     process_arch: String,
     #[serde(rename = "Elevated")]
     elevated: bool,
     #[serde(rename = "OSVersion")]
     os_version: String,
-    #[serde(rename = "OSBuild")]
-    os_build: u32,
     #[serde(rename = "OSArch")]
     os_arch: String,
     #[serde(rename = "SleepDelay")]
     sleep_delay: u32,
     #[serde(rename = "SleepJitter")]
     sleep_jitter: u32,
-    #[serde(rename = "KillDate")]
-    kill_date: Option<i64>,
-    #[serde(rename = "WorkingHours")]
-    working_hours: Option<i32>,
     #[serde(rename = "FirstCallIn")]
     first_call_in: String,
     #[serde(rename = "LastCallIn")]

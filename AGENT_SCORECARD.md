@@ -9,18 +9,18 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 924 | 231 | 31 |
-| Bugs filed against | 98 | 35 | 9 |
+| Tasks closed | 927 | 231 | 31 |
+| Bugs filed against | 99 | 35 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
 | Quality score | 89% | 85% | 71% |
 
-*Bug rates: Claude 98/924=0.11, Codex 35/231=0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 99/927=0.11, Codex 35/231=0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
-| unwrap / expect in production | 7 | 0 | 0 |
+| unwrap / expect in production | 8 | 0 | 0 |
 | Missing tests / stale tests | 50 | 14 | 5 |
 | Clippy warnings | 7 | 0 | 1 |
 | Protocol errors | 16 | 27 | 3 |
@@ -4064,3 +4064,14 @@ Issues found: red-cell-c2-8kaig (P3, test-flakiness, Claude)
 
 Build: cargo check passed; cargo clippy clean (0 warnings); lib tests 54 passed; stale_ctr_offset_callback test passes in isolation
 Issues found: none
+
+### QA Review — 2026-03-28 — 0535582..6beae88
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 1 | Closed wj185 (cert pinning), hxh03 (jitter fix), ldxa8 (cmd injection fix). Filed mq363: unreachable!() in emit_error_to production path. |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: cargo check passed; cargo clippy clean (0 warnings); all tests passed (10 suites, 0 failures)
+Issues found: red-cell-c2-mq363 (P3, unwrap/expect category) — unreachable!() used as fallback in session.rs:948

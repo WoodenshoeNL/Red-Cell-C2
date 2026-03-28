@@ -10,7 +10,7 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 923 | 231 | 31 |
-| Bugs filed against | 97 | 35 | 9 |
+| Bugs filed against | 98 | 35 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
 | Quality score | 89% | 85% | 71% |
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 8 | 11 | 1 |
 | Startup / lifecycle regressions | 2 | 9 | 0 |
-| Test infrastructure / flakiness | 20 | 0 | 0 |
+| Test infrastructure / flakiness | 21 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
 | Correctness / pagination | 43 | 7 | 1 |
@@ -4027,3 +4027,14 @@ Biggest blindspot: `DNS_UPLOAD_TIMEOUT_SECS` constant name covers both upload an
 Build: `cargo check --workspace` clean; `cargo clippy --workspace -- -D warnings` zero warnings; `cargo test --workspace --lib` 2686+ tests all passing.
 Security posture: strong — AES-256-CTR monotonic-offset advance, HKDF key derivation with `Zeroizing` IKM, Argon2id passwords, `subtle::ConstantTimeEq` on all auth comparisons, per-IP rate limiting on every auth surface, bounded queues/maps (`MAX_REGISTERED_AGENTS`, `MAX_JOB_QUEUE_DEPTH`, `MAX_PIVOT_CHAIN_DEPTH`, `MAX_CONCURRENT_DOWNLOADS_PER_AGENT`, `MAX_KERBEROS_LIST_ITEMS`, `delivery_semaphore`), `AgentCryptoMaterial: Zeroize+ZeroizeOnDrop`. No production `unwrap`/`expect`, no `todo!`/`unimplemented!`, no `println!`/`eprintln!` in teamserver.
 Issues filed: 0
+
+### QA — Background Test Run — 2026-03-28 17:15
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 1 | `stale_ctr_offset_callback_returns_404_and_preserves_state` (mock_demon_agent_checkin.rs) fails under parallel execution — 7 tests simultaneously over 60 s; this one did not recover. Passes in isolation. Root cause: `read_operator_message` awaits have no explicit deadline. Filed red-cell-c2-8kaig (P3, test-flakiness). Attributed to Claude (co-author: a9a4d185). |
+| Codex | 0 | 0 | No activity. |
+| Cursor | 0 | 0 | No activity. |
+
+Build: lib tests 2689 passed, 0 failed; integration suite mock_demon_agent_checkin 14 passed, 1 failed (8kaig)
+Issues found: red-cell-c2-8kaig (P3, test-flakiness, Claude)

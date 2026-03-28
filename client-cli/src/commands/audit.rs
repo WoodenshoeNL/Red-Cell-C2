@@ -248,8 +248,12 @@ fn print_entry_line(fmt: &OutputFormat, entry: &AuditEntry) {
             match serde_json::to_string(&line) {
                 Ok(s) => println!("{s}"),
                 Err(e) => eprintln!(
-                    r#"{{"ok":false,"error":"{code}","message":"failed to serialize audit entry: {e}"}}"#,
-                    code = ERROR_CODE_SERIALIZE_FAILED,
+                    "{}",
+                    serde_json::json!({
+                        "ok": false,
+                        "error": ERROR_CODE_SERIALIZE_FAILED,
+                        "message": format!("failed to serialize audit entry: {e}"),
+                    })
                 ),
             }
         }

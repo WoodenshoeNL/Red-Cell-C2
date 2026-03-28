@@ -41,6 +41,20 @@ Each loop run updates the running totals and appends a review entry.
 
 <!-- QA and arch loops append entries below this line -->
 
+### Arch Review — 2026-03-28 12:15
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 0 | — | No new issues found. All previous security findings resolved: init_secret Zeroizing ✓, TLS key 0600 ✓, HKDF IKM Zeroizing ✓, pivot recursion guard ✓, filesystem checked_add ✓, kerberos MAX_KERBEROS_LIST_ITEMS ✓. |
+| Codex | 0 | — | No issues found |
+| Cursor | 0 | — | No issues found |
+
+Overall codebase health: on track
+Biggest blindspot: DownloadTracker.start() still lacks a per-agent concurrent count cap (red-cell-c2-cxzp3, P2 open) — an agent can call start() with many file_ids, growing the in-memory HashMap without hitting any byte-count gate until append() is called.
+Build: passed (cargo check clean) | Clippy: passed (zero warnings, #[allow(dead_code)] on CliError::Unsupported correctly in place) | Tests: 2376 passing (2169 teamserver lib + 327 common; integration tests not run due to timeout, consistent with prior runs)
+Security posture: strong — constant-time auth via subtle::ConstantTimeEq, Argon2id passwords, per-IP rate limiting on all auth surfaces, bounded allocations, Zeroizing on all key material, 0600 TLS key permissions. No production unwrap/expect, no todo/unimplemented!, no println/eprintln in teamserver. All 6 previously-filed open issues remain tracked.
+Open issues: cxzp3 (P2, DownloadTracker concurrent cap), g8r0p (P3, empty init_secret degrades HKDF), ev9ei (P3, client-cli fake JSON fallback), y9jxm/38nh0/yh3pv (P3 flaky tests). nc0l4 (P2, Specter dispatch) in progress with partial implementation (Sleep/Fs/Proc/Exit handled; ProcList/Net/Token/etc. still missing).
+
 ### Arch Review — 2026-03-28 09:00
 
 | Agent | Findings | Categories | Notes |

@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 919 | 231 | 31 |
+| Tasks closed | 923 | 231 | 31 |
 | Bugs filed against | 97 | 35 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
 | Quality score | 89% | 85% | 71% |
 
-*Bug rates: Claude 97/919=0.11, Codex 35/231=0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 97/923=0.11, Codex 35/231=0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -4002,3 +4002,14 @@ Tests: all known integration suites pass; `monotonic_ctr_checkin.rs` integration
 
 Build: check passed; clippy passed; tests failed (`cargo test --workspace`: `client-cli/tests/e2e_roundtrip.rs` timed out in `operator_create_deserializes_through_real_tcp`)
 Issues found: 1 new bug filed (`red-cell-c2-y9jxm`, attributed to Claude)
+
+### QA Review — 2026-03-28 16:30 — dfd4ff33..c16b8608
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 4 | 0 | Closed p7yt6 (rate-limiter timing flake fix — move clock start after connect), wy2j1 (cap AuditWebhookNotifier concurrency with Semaphore), pgm8m (client-cli serde_json::json! for streaming error fallback), 6sj8r (replace fixed sleep with poll loop in plugin task_created test). All fixes clean: good test coverage, no new violations. |
+| Codex | 0 | 0 | No activity in range. |
+| Cursor | 0 | 0 | No activity in range. |
+
+Build: check passed; clippy passed (clean); all 56 test suites passed (0 failures)
+Issues found: none

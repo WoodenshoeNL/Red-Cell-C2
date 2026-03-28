@@ -48,8 +48,19 @@ Then review the actual diff:
 
 ```bash
 git diff $BASE..$HEAD_SHA --stat
-git diff $BASE..$HEAD_SHA -- '*.rs' '*.toml' '*.md'
 ```
+
+Read the stat output to understand which files changed. Then read only the files that are
+relevant to your review — do NOT pipe the full diff into your context. For each file you
+want to inspect, run:
+
+```bash
+git diff $BASE..$HEAD_SHA -- <path/to/file.rs>
+```
+
+Limit yourself to the files that are new, security-relevant, or flagged by the stat as
+having large changes. Skip files that are purely mechanical (checkpoint updates,
+`issues.jsonl` churn, lockfile changes).
 
 ---
 
@@ -91,10 +102,28 @@ For each file changed, which agent's commit last touched it?
 
 If any Rust source files exist under `teamserver/`, `client/`, or `common/`:
 
+**Step 4a — type check first (abort if this fails):**
+
 ```bash
 cargo check --workspace 2>&1
-cargo clippy --workspace -- -D warnings 2>&1
+```
+
+If `cargo check` fails, record the errors and skip 4b and 4c — do not waste time
+running tests against broken code. File a bug for the breakage.
+
+**Step 4b — run tests:**
+
+```bash
+# preferred:
+cargo nextest run --workspace 2>&1
+# fallback if nextest is absent:
 cargo test --workspace 2>&1
+```
+
+**Step 4c — lint:**
+
+```bash
+cargo clippy --workspace -- -D warnings 2>&1
 ```
 
 If no workspace crates have been implemented yet, skip this step.

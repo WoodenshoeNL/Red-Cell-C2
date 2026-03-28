@@ -275,6 +275,15 @@ pub(super) async fn dispatch_builtin_packages(
     agent_id: u32,
     packages: &[DemonCallbackPackage],
 ) -> Result<Option<Vec<u8>>, CommandDispatchError> {
+    use crate::agents::MAX_PIVOT_CHAIN_DEPTH;
+
+    if context.pivot_dispatch_depth >= MAX_PIVOT_CHAIN_DEPTH {
+        return Err(CommandDispatchError::PivotDispatchDepthExceeded {
+            depth: context.pivot_dispatch_depth,
+            max_depth: MAX_PIVOT_CHAIN_DEPTH,
+        });
+    }
+
     let mut dispatcher =
         CommandDispatcher::with_max_download_bytes(context.downloads.max_download_bytes);
     dispatcher.register_builtin_handlers(
@@ -285,6 +294,7 @@ pub(super) async fn dispatch_builtin_packages(
             sockets: context.sockets.clone(),
             downloads: context.downloads.clone(),
             plugins: context.plugins.cloned(),
+            pivot_dispatch_depth: context.pivot_dispatch_depth + 1,
         },
         false,
     );
@@ -725,6 +735,7 @@ mod tests {
             sockets: &sockets,
             downloads: &downloads,
             plugins: None,
+            pivot_dispatch_depth: 0,
         };
 
         let result = handle_pivot_command_callback(context, AGENT_ID, &mut parser).await;
@@ -828,6 +839,7 @@ mod tests {
             sockets: &sockets,
             downloads: &downloads,
             plugins: None,
+            pivot_dispatch_depth: 0,
         };
 
         let result = handle_pivot_command_callback(context, AGENT_ID, &mut parser).await;
@@ -864,6 +876,7 @@ mod tests {
             sockets: &sockets,
             downloads: &downloads,
             plugins: None,
+            pivot_dispatch_depth: 0,
         };
 
         let result = handle_pivot_command_callback(context, AGENT_ID, &mut parser).await;
@@ -899,6 +912,7 @@ mod tests {
             sockets: &sockets,
             downloads: &downloads,
             plugins: None,
+            pivot_dispatch_depth: 0,
         };
 
         let packages = vec![DemonCallbackPackage {
@@ -927,6 +941,85 @@ mod tests {
             msg.info.output.contains("dispatched output text"),
             "event output must contain the dispatched text"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dispatch_builtin_packages_at_max_depth_returns_depth_exceeded_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::agents::MAX_PIVOT_CHAIN_DEPTH;
+        use crate::dispatch::CommandDispatchError;
+
+        let (database, registry, events, sockets, downloads) = setup_dispatch_context().await;
+
+        let child_id: u32 = 0xDEAD_C0DE;
+        let child_key = test_key(0xAA);
+        let child_iv = test_iv(0xBB);
+        registry.insert(sample_agent_info(child_id, child_key, child_iv)).await?;
+
+        // A context that is already AT the depth limit should be rejected.
+        let context = BuiltinDispatchContext {
+            registry: &registry,
+            events: &events,
+            database: &database,
+            sockets: &sockets,
+            downloads: &downloads,
+            plugins: None,
+            pivot_dispatch_depth: MAX_PIVOT_CHAIN_DEPTH,
+        };
+
+        let packages = vec![DemonCallbackPackage {
+            command_id: u32::from(DemonCommand::CommandOutput),
+            request_id: 0x01,
+            payload: command_output_payload("should not reach handler"),
+        }];
+
+        let result = dispatch_builtin_packages(context, child_id, &packages).await;
+        assert!(result.is_err(), "dispatch at max depth must fail");
+        assert!(
+            matches!(
+                result.unwrap_err(),
+                CommandDispatchError::PivotDispatchDepthExceeded {
+                    depth,
+                    max_depth,
+                } if depth == MAX_PIVOT_CHAIN_DEPTH && max_depth == MAX_PIVOT_CHAIN_DEPTH
+            ),
+            "error must be PivotDispatchDepthExceeded with correct depth values"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dispatch_builtin_packages_just_below_max_depth_succeeds()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::agents::MAX_PIVOT_CHAIN_DEPTH;
+
+        let (database, registry, events, sockets, downloads) = setup_dispatch_context().await;
+
+        let child_id: u32 = 0xC0DE_CAFE;
+        let child_key = test_key(0x33);
+        let child_iv = test_iv(0x44);
+        registry.insert(sample_agent_info(child_id, child_key, child_iv)).await?;
+
+        // One below the limit must still succeed.
+        let context = BuiltinDispatchContext {
+            registry: &registry,
+            events: &events,
+            database: &database,
+            sockets: &sockets,
+            downloads: &downloads,
+            plugins: None,
+            pivot_dispatch_depth: MAX_PIVOT_CHAIN_DEPTH - 1,
+        };
+
+        let packages = vec![DemonCallbackPackage {
+            command_id: u32::from(DemonCommand::CommandOutput),
+            request_id: 0x02,
+            payload: command_output_payload("near limit"),
+        }];
+
+        let result = dispatch_builtin_packages(context, child_id, &packages).await;
+        assert!(result.is_ok(), "dispatch just below max depth must succeed: {result:?}");
         Ok(())
     }
 
@@ -1537,6 +1630,7 @@ mod tests {
             sockets: &sockets,
             downloads: &downloads,
             plugins: None,
+            pivot_dispatch_depth: 0,
         };
 
         let result = handle_pivot_callback(context, AGENT_ID, REQUEST_ID, &payload).await;
@@ -1557,6 +1651,7 @@ mod tests {
             sockets: &sockets,
             downloads: &downloads,
             plugins: None,
+            pivot_dispatch_depth: 0,
         };
 
         let result = handle_pivot_callback(context, AGENT_ID, REQUEST_ID, &[]).await;
@@ -1580,6 +1675,7 @@ mod tests {
             sockets: &sockets,
             downloads: &downloads,
             plugins: None,
+            pivot_dispatch_depth: 0,
         };
 
         let _result = handle_pivot_callback(context, AGENT_ID, REQUEST_ID, &payload).await;

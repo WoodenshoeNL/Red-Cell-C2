@@ -109,6 +109,9 @@ struct BuiltinDispatchContext<'a> {
     sockets: &'a SocketRelayManager,
     downloads: &'a DownloadTracker,
     plugins: Option<&'a PluginRuntime>,
+    /// Current pivot dispatch nesting depth — incremented each time a pivot
+    /// command callback is recursively dispatched through a child agent.
+    pivot_dispatch_depth: usize,
 }
 
 #[derive(Clone)]
@@ -119,6 +122,8 @@ struct BuiltinHandlerDependencies {
     sockets: SocketRelayManager,
     downloads: DownloadTracker,
     plugins: Option<PluginRuntime>,
+    /// Pivot dispatch nesting depth captured at handler-registration time.
+    pivot_dispatch_depth: usize,
 }
 
 /// Error returned while routing or executing a Demon command handler.
@@ -164,6 +169,16 @@ pub enum CommandDispatchError {
         file_id: u32,
         /// Configured maximum number of bytes allowed in memory across all active downloads.
         max_total_download_bytes: usize,
+    },
+    /// A pivot command callback was nested deeper than `MAX_PIVOT_CHAIN_DEPTH`.
+    #[error(
+        "pivot dispatch depth {depth} exceeds maximum ({max_depth}); possible recursive envelope attack"
+    )]
+    PivotDispatchDepthExceeded {
+        /// The depth that was rejected.
+        depth: usize,
+        /// The configured maximum allowed depth.
+        max_depth: usize,
     },
 }
 
@@ -211,8 +226,15 @@ impl CommandDispatcher {
         dependencies: BuiltinHandlerDependencies,
         include_get_job: bool,
     ) {
-        let BuiltinHandlerDependencies { registry, events, database, sockets, downloads, plugins } =
-            dependencies;
+        let BuiltinHandlerDependencies {
+            registry,
+            events,
+            database,
+            sockets,
+            downloads,
+            plugins,
+            pivot_dispatch_depth,
+        } = dependencies;
 
         if include_get_job {
             let get_job_registry = registry.clone();
@@ -725,6 +747,7 @@ impl CommandDispatcher {
                         sockets: &sockets,
                         downloads: &downloads,
                         plugins: plugins.as_ref(),
+                        pivot_dispatch_depth,
                     };
                     pivot::handle_pivot_callback(context, agent_id, request_id, &payload).await
                 })
@@ -788,6 +811,7 @@ impl CommandDispatcher {
                 sockets,
                 downloads: dispatcher.downloads.clone(),
                 plugins,
+                pivot_dispatch_depth: 0,
             },
             true,
         );

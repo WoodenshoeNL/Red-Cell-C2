@@ -318,7 +318,7 @@ pub(super) async fn handle_beacon_output_callback(
                         started_at,
                     },
                 )
-                .await;
+                .await?;
             events.broadcast(download_progress_event(
                 agent_id,
                 u32::from(DemonCommand::BeaconOutput),
@@ -459,7 +459,8 @@ mod tests {
                     started_at: "2026-03-17T00:00:00Z".to_owned(),
                 },
             )
-            .await;
+            .await
+            .expect("start should succeed");
 
         // Payload: List subcommand + file_id + progress(500 of 1000 = 50%) + state(Running=1)
         let mut payload = Vec::new();
@@ -550,7 +551,8 @@ mod tests {
                     started_at: "2026-03-17T00:00:00Z".to_owned(),
                 },
             )
-            .await;
+            .await
+            .expect("start should succeed");
     }
 
     // ------------------------------------------------------------------

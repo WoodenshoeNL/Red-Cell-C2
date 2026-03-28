@@ -188,7 +188,7 @@ pub(super) async fn handle_filesystem_callback(
                                 started_at,
                             },
                         )
-                        .await;
+                        .await?;
                     events.broadcast(download_progress_event(
                         agent_id,
                         u32::from(DemonCommand::CommandFs),
@@ -1052,7 +1052,7 @@ mod tests {
         let file_id = 7;
         let state = sample_download_state();
 
-        tracker.start(agent_id, file_id, state.clone()).await;
+        tracker.start(agent_id, file_id, state.clone()).await.expect("start should succeed");
         let finished = tracker.finish(agent_id, file_id).await;
         assert_eq!(finished, Some(state));
     }
@@ -1063,7 +1063,10 @@ mod tests {
         let agent_id = 0x1234_5678;
         let file_id = 7;
 
-        tracker.start(agent_id, file_id, sample_download_state()).await;
+        tracker
+            .start(agent_id, file_id, sample_download_state())
+            .await
+            .expect("start should succeed");
         let first = tracker.finish(agent_id, file_id).await;
         assert!(first.is_some());
 
@@ -1077,7 +1080,10 @@ mod tests {
         let agent_id = 0x1234_5678;
         let file_id = 7;
 
-        tracker.start(agent_id, file_id, sample_download_state()).await;
+        tracker
+            .start(agent_id, file_id, sample_download_state())
+            .await
+            .expect("start should succeed");
         let _ = tracker.finish(agent_id, file_id).await;
 
         let err = tracker.append(agent_id, file_id, b"late chunk").await.unwrap_err();
@@ -1094,7 +1100,10 @@ mod tests {
         let wrong_agent = 0x2222_2222;
         let file_id = 1;
 
-        tracker.start(agent_id, file_id, sample_download_state()).await;
+        tracker
+            .start(agent_id, file_id, sample_download_state())
+            .await
+            .expect("start should succeed");
         let result = tracker.finish(wrong_agent, file_id).await;
         assert!(result.is_none(), "finish with wrong agent_id should return None");
     }
@@ -1106,7 +1115,10 @@ mod tests {
         let file_id = 1;
         let wrong_file_id = 99;
 
-        tracker.start(agent_id, file_id, sample_download_state()).await;
+        tracker
+            .start(agent_id, file_id, sample_download_state())
+            .await
+            .expect("start should succeed");
         let result = tracker.finish(agent_id, wrong_file_id).await;
         assert!(result.is_none(), "finish with wrong file_id should return None");
     }

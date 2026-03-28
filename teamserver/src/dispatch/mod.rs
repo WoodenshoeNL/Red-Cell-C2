@@ -42,6 +42,10 @@ type Handler = dyn Fn(u32, u32, Vec<u8>) -> HandlerFuture + Send + Sync + 'stati
 
 use crate::DEFAULT_MAX_DOWNLOAD_BYTES;
 const DOWNLOAD_TRACKER_AGGREGATE_CAP_MULTIPLIER: usize = 4;
+/// Maximum number of simultaneous in-progress downloads tracked per agent.
+/// A compromised agent can send unlimited Download mode=0 (start) packets, each consuming heap
+/// memory before any byte-level cap activates. This count cap closes that gap.
+const MAX_CONCURRENT_DOWNLOADS_PER_AGENT: usize = 32;
 const DOTNET_INFO_PATCHED: u32 = 0x1;
 const DOTNET_INFO_NET_VERSION: u32 = 0x2;
 const DOTNET_INFO_ENTRYPOINT_EXECUTED: u32 = 0x3;
@@ -52,6 +56,7 @@ const DOTNET_INFO_FAILED: u32 = 0x5;
 pub(crate) struct DownloadTracker {
     max_download_bytes: usize,
     max_total_download_bytes: usize,
+    max_concurrent_downloads_per_agent: usize,
     inner: Arc<RwLock<DownloadTrackerState>>,
 }
 
@@ -169,6 +174,18 @@ pub enum CommandDispatchError {
         file_id: u32,
         /// Configured maximum number of bytes allowed in memory across all active downloads.
         max_total_download_bytes: usize,
+    },
+    /// A new download start was rejected because the per-agent concurrent-download cap was reached.
+    #[error(
+        "agent 0x{agent_id:08X} already has {max_concurrent} concurrent downloads in progress; rejecting new download 0x{file_id:08X}"
+    )]
+    DownloadConcurrentLimitExceeded {
+        /// Agent that attempted to open a new download.
+        agent_id: u32,
+        /// File identifier from the rejected start request.
+        file_id: u32,
+        /// Configured maximum number of concurrent in-progress downloads allowed per agent.
+        max_concurrent: usize,
     },
     /// A pivot command callback was nested deeper than `MAX_PIVOT_CHAIN_DEPTH`.
     #[error(
@@ -934,14 +951,31 @@ impl DownloadTracker {
         Self {
             max_download_bytes,
             max_total_download_bytes: max_total_download_bytes.max(max_download_bytes),
+            max_concurrent_downloads_per_agent: MAX_CONCURRENT_DOWNLOADS_PER_AGENT,
             inner: Arc::new(RwLock::new(DownloadTrackerState::default())),
         }
     }
 
-    async fn start(&self, agent_id: u32, file_id: u32, state: DownloadState) {
+    async fn start(
+        &self,
+        agent_id: u32,
+        file_id: u32,
+        state: DownloadState,
+    ) -> Result<(), CommandDispatchError> {
         let mut tracker = self.inner.write().await;
+        // Replacing an existing entry for the same (agent, file) pair does not count against the
+        // cap — remove it first so the count below reflects truly new slots being consumed.
         self.remove_locked(&mut tracker, agent_id, file_id);
+        let active = tracker.downloads.keys().filter(|(aid, _)| *aid == agent_id).count();
+        if active >= self.max_concurrent_downloads_per_agent {
+            return Err(CommandDispatchError::DownloadConcurrentLimitExceeded {
+                agent_id,
+                file_id,
+                max_concurrent: self.max_concurrent_downloads_per_agent,
+            });
+        }
         tracker.downloads.insert((agent_id, file_id), TrackedDownload { state });
+        Ok(())
     }
 
     async fn append(
@@ -4093,7 +4127,8 @@ mod tests {
                     started_at: "2026-03-11T09:00:00Z".to_owned(),
                 },
             )
-            .await;
+            .await
+            .expect("start should succeed");
 
         let first =
             tracker.append(0xABCD_EF51, 0x41, b"abc").await.expect("first chunk should append");
@@ -4134,7 +4169,8 @@ mod tests {
                     started_at: "2026-03-11T09:10:00Z".to_owned(),
                 },
             )
-            .await;
+            .await
+            .expect("start should succeed");
 
         let partial = tracker
             .append(0xABCD_EF54, 0x44, b"partial")
@@ -4173,7 +4209,8 @@ mod tests {
                         started_at: "2026-03-11T09:25:00Z".to_owned(),
                     },
                 )
-                .await;
+                .await
+                .expect("start should succeed");
             let state = tracker.append(agent_id, file_id, data).await.expect("chunk should append");
             assert_eq!(state.data, data);
         }
@@ -4220,7 +4257,8 @@ mod tests {
                     started_at: "2026-03-11T09:05:00Z".to_owned(),
                 },
             )
-            .await;
+            .await
+            .expect("start should succeed");
 
         let partial = tracker
             .append(0xABCD_EF53, 0x43, b"12")
@@ -4260,7 +4298,8 @@ mod tests {
                         started_at: "2026-03-11T09:15:00Z".to_owned(),
                     },
                 )
-                .await;
+                .await
+                .expect("start should succeed");
         }
 
         assert_eq!(
@@ -4313,7 +4352,8 @@ mod tests {
                         started_at: "2026-03-11T09:20:00Z".to_owned(),
                     },
                 )
-                .await;
+                .await
+                .expect("start should succeed");
         }
 
         tracker.append(0xABCD_EF56, 0x60, b"12").await.expect("first partial should append");
@@ -4357,6 +4397,102 @@ mod tests {
                 started_at: "2026-03-11T09:20:00Z".to_owned(),
             })
         );
+    }
+
+    #[tokio::test]
+    async fn download_tracker_rejects_start_when_per_agent_cap_is_reached() {
+        // Use a tracker with a tiny per-agent cap so we don't need to create 32 entries.
+        let mut tracker = DownloadTracker::with_limits(1024, 1024 * 64);
+        tracker.max_concurrent_downloads_per_agent = 2;
+        let agent_id = 0xDEAD_BEEF;
+
+        let make_state = |file_id: u32| DownloadState {
+            request_id: file_id,
+            remote_path: format!("C:\\Temp\\file_{file_id:08x}.bin"),
+            expected_size: 64,
+            data: Vec::new(),
+            started_at: "2026-03-28T00:00:00Z".to_owned(),
+        };
+
+        tracker.start(agent_id, 0x01, make_state(0x01)).await.expect("first start should succeed");
+        tracker
+            .start(agent_id, 0x02, make_state(0x02))
+            .await
+            .expect("second start should succeed (at cap)");
+
+        let err = tracker
+            .start(agent_id, 0x03, make_state(0x03))
+            .await
+            .expect_err("third start should be rejected (over cap)");
+        assert!(
+            matches!(
+                err,
+                CommandDispatchError::DownloadConcurrentLimitExceeded {
+                    agent_id: 0xDEAD_BEEF,
+                    file_id: 0x03,
+                    max_concurrent: 2,
+                }
+            ),
+            "unexpected error variant: {err:?}"
+        );
+        // The rejected entry must not have been inserted.
+        assert_eq!(tracker.active_for_agent(agent_id).await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn download_tracker_per_agent_cap_does_not_affect_other_agents() {
+        let mut tracker = DownloadTracker::with_limits(1024, 1024 * 64);
+        tracker.max_concurrent_downloads_per_agent = 1;
+
+        let make_state = |file_id: u32| DownloadState {
+            request_id: file_id,
+            remote_path: format!("C:\\Temp\\file_{file_id:08x}.bin"),
+            expected_size: 64,
+            data: Vec::new(),
+            started_at: "2026-03-28T00:00:00Z".to_owned(),
+        };
+
+        tracker.start(0xAAAA_0001, 0x10, make_state(0x10)).await.expect("agent A start ok");
+        tracker.start(0xBBBB_0002, 0x20, make_state(0x20)).await.expect("agent B start ok");
+
+        // Agent A is now at its cap — agent B should still be unaffected.
+        let err = tracker
+            .start(0xAAAA_0001, 0x11, make_state(0x11))
+            .await
+            .expect_err("agent A second start should be rejected");
+        assert!(matches!(
+            err,
+            CommandDispatchError::DownloadConcurrentLimitExceeded { agent_id: 0xAAAA_0001, .. }
+        ));
+
+        // Agent B can still open another download.
+        tracker
+            .start(0xBBBB_0002, 0x21, make_state(0x21))
+            .await
+            .expect_err("agent B second start should also be rejected (cap=1)");
+    }
+
+    #[tokio::test]
+    async fn download_tracker_restart_same_file_id_does_not_count_as_new_slot() {
+        let mut tracker = DownloadTracker::with_limits(1024, 1024 * 64);
+        tracker.max_concurrent_downloads_per_agent = 1;
+        let agent_id = 0xCAFE_BABE;
+
+        let make_state = |file_id: u32| DownloadState {
+            request_id: file_id,
+            remote_path: format!("C:\\Temp\\file_{file_id:08x}.bin"),
+            expected_size: 64,
+            data: Vec::new(),
+            started_at: "2026-03-28T00:00:00Z".to_owned(),
+        };
+
+        tracker.start(agent_id, 0x01, make_state(0x01)).await.expect("initial start");
+        // Re-starting the same (agent, file) pair must replace the old entry, not consume an extra slot.
+        tracker
+            .start(agent_id, 0x01, make_state(0x01))
+            .await
+            .expect("restart of same file_id should succeed");
+        assert_eq!(tracker.active_for_agent(agent_id).await.len(), 1);
     }
 
     #[tokio::test]

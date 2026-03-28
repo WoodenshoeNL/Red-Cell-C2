@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 903 | 231 | 31 |
-| Bugs filed against | 95 | 35 | 9 |
+| Tasks closed | 907 | 231 | 31 |
+| Bugs filed against | 96 | 35 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.15 | 0.29 |
 | Quality score | 89% | 85% | 71% |
 
-*Bug rates: Claude 95/903=0.11, Codex 35/231=0.15, Cursor 9/31=0.29*
+*Bug rates: Claude 96/907=0.11, Codex 35/231=0.15, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 7 | 11 | 1 |
 | Startup / lifecycle regressions | 2 | 9 | 0 |
-| Test infrastructure / flakiness | 17 | 0 | 0 |
+| Test infrastructure / flakiness | 18 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
 | Correctness / pagination | 42 | 7 | 1 |
@@ -3953,3 +3953,14 @@ Overall codebase health: on track
 Biggest blindspot: the post-authentication resource exhaustion surface in DownloadTracker. Byte caps exist but a count cap is missing. The init_secret misconfiguration risk is low-likelihood but high-silent-impact.
 Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`)
 Tests: all known integration suites pass; `monotonic_ctr_checkin.rs` integration test is in-progress (issue arrry, untracked in git) and compiles correctly
+
+### QA Review — 2026-03-28 07:46 — c353bc92..4a9bac24
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 4 | 1 | Closed `red-cell-c2-ssug3`, `red-cell-c2-arrry`, `red-cell-c2-sb115`, and `red-cell-c2-12gmv`. The new monotonic-CTR integration coverage and the `CliError::Unsupported` dead-code cleanup both look correct, but `cargo test --workspace` exposed a remaining `client-cli` real-TCP timeout flake (`red-cell-c2-y9jxm`). |
+| Codex | 0 | 0 | No task-close commits in range. |
+| Cursor | 0 | 0 | No activity in range. |
+
+Build: check passed; clippy passed; tests failed (`cargo test --workspace`: `client-cli/tests/e2e_roundtrip.rs` timed out in `operator_create_deserializes_through_real_tcp`)
+Issues found: 1 new bug filed (`red-cell-c2-y9jxm`, attributed to Claude)

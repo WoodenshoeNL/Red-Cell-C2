@@ -76,7 +76,7 @@ pub enum CliError {
 
     /// The requested feature is not yet supported by the teamserver.
     #[error("unsupported: {0}")]
-    #[expect(dead_code, reason = "reserved for commands against unimplemented endpoints")]
+    #[allow(dead_code)]
     Unsupported(String),
 
     /// Any other error not covered above.

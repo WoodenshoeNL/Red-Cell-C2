@@ -24,7 +24,7 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 50 | 14 | 5 |
 | Clippy warnings | 7 | 0 | 1 |
 | Protocol errors | 16 | 27 | 3 |
-| Security issues | 46 | 38 | 0 |
+| Security issues | 47 | 38 | 0 |
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 7 | 10 | 1 |
 | Startup / lifecycle regressions | 2 | 9 | 0 |
@@ -3902,3 +3902,17 @@ Security posture: strong — AES-256-CTR with monotonic CTR offsets, HKDF sessio
 Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`, `cargo test --workspace`)
 Tests: passed, but `cargo test --workspace` emitted one `red-cell-cli` rustc warning for an unfulfilled `#[expect(dead_code)]`
 Issues found: `red-cell-c2-12gmv` (Claude)
+
+### Arch Review — 2026-03-28 14:15
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude (Opus) | 2 | security (1), completeness (1) | `red-cell-c2-lnts3`: legacy-CTR mode reuses AES keystream at offset 0 for all Demon/Archon agents — two-time-pad vulnerability (intentional compat tradeoff, undocumented risk). `red-cell-c2-nc0l4`: Specter agent run() loop receives tasking but discards it without any command dispatch — agent is a transport skeleton with no post-exploitation capability. |
+| Claude (Sonnet) | 1 | correctness (1) | `red-cell-c2-ev9ei`: client-cli audit/agent watch-mode emits hardcoded fake JSON to stdout when serde_json::to_string() fails instead of writing an error to stderr — violates the machine-readable output contract. |
+| Codex | 0 | — | No attributable findings. |
+| Cursor | 0 | — | No attributable findings. |
+
+Overall codebase health: on track
+Biggest blindspot: Specter agent is a dead-end transport layer — operators queuing jobs via the teamserver UI will never see any output from a Specter agent because the agent discards all tasking without executing it.
+Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`) | Tests: all passing
+Security posture: generally strong. The legacy-CTR finding is a known design tradeoff for Havoc backward-compat, but it is not documented as a risk for operators. All other security controls (rate limiting, bounded queues, HKDF session keys, constant-time auth, no production unwrap/panic) remain solid.

@@ -9,6 +9,12 @@ pub struct SpecterConfig {
     pub callback_url: String,
     /// Optional HKDF init secret matching the listener's `init_secret` setting.
     pub init_secret: Option<String>,
+    /// PEM-encoded certificate to pin for TLS connections to the teamserver.
+    ///
+    /// When set, only the teamserver presenting this certificate (or one signed by it) is
+    /// trusted. When `None`, the system CA store is used instead.  Baked in at compile time
+    /// via the `SPECTER_PINNED_CERT_PEM` environment variable.
+    pub pinned_cert_pem: Option<String>,
     /// User-Agent string sent in HTTP callbacks.
     pub user_agent: String,
     /// Sleep delay between callbacks in milliseconds.
@@ -42,6 +48,8 @@ impl Default for SpecterConfig {
         Self {
             callback_url: String::from("https://127.0.0.1:40056/"),
             init_secret: None,
+            // Baked in at compile time — set SPECTER_PINNED_CERT_PEM when building the implant.
+            pinned_cert_pem: option_env!("SPECTER_PINNED_CERT_PEM").map(str::to_string),
             user_agent: String::from(
                 "Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36",
             ),

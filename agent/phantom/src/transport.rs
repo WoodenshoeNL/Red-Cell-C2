@@ -14,12 +14,21 @@ pub struct HttpTransport {
 
 impl HttpTransport {
     /// Build a transport from the current agent configuration.
+    ///
+    /// If `config.pinned_cert_pem` is set, the provided PEM certificate is added as the only
+    /// trusted root so the transport only accepts the pinned teamserver certificate.  When no
+    /// pinned cert is configured, the system CA store is used instead.
     pub fn new(config: &PhantomConfig) -> Result<Self, PhantomError> {
-        let client = reqwest::Client::builder()
-            .user_agent(&config.user_agent)
-            .danger_accept_invalid_certs(true)
-            .build()
-            .map_err(|error| PhantomError::Transport(error.to_string()))?;
+        let mut builder = reqwest::Client::builder().user_agent(&config.user_agent);
+
+        if let Some(pem) = &config.pinned_cert_pem {
+            let cert = reqwest::Certificate::from_pem(pem.as_bytes()).map_err(|error| {
+                PhantomError::Transport(format!("invalid pinned certificate: {error}"))
+            })?;
+            builder = builder.add_root_certificate(cert);
+        }
+
+        let client = builder.build().map_err(|error| PhantomError::Transport(error.to_string()))?;
 
         Ok(Self { client, callback_url: config.callback_url.clone() })
     }
@@ -59,9 +68,38 @@ mod tests {
     use super::HttpTransport;
     use crate::config::PhantomConfig;
 
+    /// Generate a self-signed PEM certificate for testing.
+    fn test_cert_pem() -> String {
+        let cert = rcgen::generate_simple_self_signed(["localhost".to_string()])
+            .expect("test cert generation");
+        cert.cert.pem()
+    }
+
     #[test]
     fn transport_builds_from_default_config() {
         assert!(HttpTransport::new(&PhantomConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn transport_builds_with_pinned_cert() {
+        let config = PhantomConfig { pinned_cert_pem: Some(test_cert_pem()), ..Default::default() };
+        assert!(HttpTransport::new(&config).is_ok());
+    }
+
+    #[test]
+    fn transport_rejects_invalid_pinned_cert_pem() {
+        // PEM markers are present but the base64 content is malformed.
+        // With the rustls backend, reqwest defers PEM parsing to build() time, so the error
+        // surfaces there — we just assert that building fails with a Transport error.
+        let config = PhantomConfig {
+            pinned_cert_pem: Some(
+                "-----BEGIN CERTIFICATE-----\n!!!NOT-VALID-BASE64!!!\n-----END CERTIFICATE-----\n"
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
+        let err = HttpTransport::new(&config).expect_err("invalid PEM should fail");
+        assert!(matches!(&err, crate::error::PhantomError::Transport(_)));
     }
 
     #[tokio::test]

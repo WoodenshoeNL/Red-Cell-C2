@@ -3645,6 +3645,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "rand 0.9.2",
+ "rcgen 0.13.2",
  "red-cell-common",
  "reqwest",
  "tempfile",
@@ -4138,6 +4139,19 @@ checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
 
 [[package]]
 name = "rcgen"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75e669e5202259b5314d1ea5397316ad400819437857b90861765f24c4cf80a2"
+dependencies = [
+ "pem",
+ "ring",
+ "rustls-pki-types",
+ "time",
+ "yasna",
+]
+
+[[package]]
+name = "rcgen"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10b99e0098aa4082912d4c649628623db6aba77335e4f4569ff5083a6448b32e"
@@ -4267,7 +4281,7 @@ dependencies = [
  "hcl-rs",
  "hex-literal",
  "hkdf",
- "rcgen",
+ "rcgen 0.14.7",
  "rustls-pemfile",
  "serde",
  "serde_json",
@@ -4947,6 +4961,7 @@ dependencies = [
  "axum",
  "futures-util",
  "rand 0.9.2",
+ "rcgen 0.13.2",
  "red-cell",
  "red-cell-common",
  "reqwest",

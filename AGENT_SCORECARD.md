@@ -24,9 +24,9 @@ Each loop run updates the running totals and appends a review entry.
 | Missing tests / stale tests | 50 | 14 | 5 |
 | Clippy warnings | 7 | 0 | 1 |
 | Protocol errors | 16 | 27 | 3 |
-| Security issues | 47 | 38 | 0 |
+| Security issues | 48 | 39 | 0 |
 | Architecture drift | 19 | 23 | 0 |
-| Memory / resource leaks | 7 | 10 | 1 |
+| Memory / resource leaks | 7 | 11 | 1 |
 | Startup / lifecycle regressions | 2 | 9 | 0 |
 | Test infrastructure / flakiness | 17 | 0 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
@@ -3940,3 +3940,16 @@ Issues found: 0 new bugs filed
 Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`, `cargo test --workspace`)
 Tests: passed; `cargo test --workspace` still emits the pre-existing `client-cli/src/error.rs:79` unfulfilled `#[expect(dead_code)]` warning already tracked by open bugs
 Issues found: 0 new bugs filed
+
+### Arch Review — 2026-03-28 05:22
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude Sonnet 4.6 | 0 | — | No new findings. |
+| Codex | 1 | memory / resource leaks (1) | `red-cell-c2-cxzp3`: DownloadTracker.start() has no concurrent-count cap — an authenticated agent can exhaust server heap by opening unbounded parallel downloads with distinct file_ids before any bytes are appended. Codex added byte caps in "fix: cap and prune partial download buffers" but missed the entry-count dimension. |
+| Claude Opus 4.6 | 1 | security (1) | `red-cell-c2-g8r0p`: init_secret accepts empty string and silently degrades HKDF to a fixed-salt mode — empty b"" salt makes derived session keys reproducible by anyone who knows the agent key+IV, defeating the server-side hardening entirely. No min-length validation in Profile::validate(). |
+
+Overall codebase health: on track
+Biggest blindspot: the post-authentication resource exhaustion surface in DownloadTracker. Byte caps exist but a count cap is missing. The init_secret misconfiguration risk is low-likelihood but high-silent-impact.
+Build: passed (`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`)
+Tests: all known integration suites pass; `monotonic_ctr_checkin.rs` integration test is in-progress (issue arrry, untracked in git) and compiles correctly

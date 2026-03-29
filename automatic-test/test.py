@@ -32,6 +32,7 @@ from typing import Optional
 # Ensure lib/ is importable
 sys.path.insert(0, str(Path(__file__).parent))
 
+from lib import ScenarioSkipped
 from lib.cli import CliConfig
 from lib.deploy import TargetConfig
 
@@ -95,8 +96,14 @@ class RunContext:
     dry_run: bool
 
 
-def run_scenario(scenario_id: str, path: Path, ctx: RunContext) -> bool:
-    """Load and run a scenario module. Returns True on pass, False on fail."""
+def run_scenario(scenario_id: str, path: Path, ctx: RunContext) -> str:
+    """Load and run a scenario module.
+
+    Returns one of:
+        ``"passed"``  — scenario ran and all assertions succeeded
+        ``"skipped"`` — scenario raised :class:`lib.ScenarioSkipped` (not a failure)
+        ``"failed"``  — scenario raised any other exception
+    """
     module_name = f"scenarios.{path.stem}"
     spec = importlib.util.spec_from_file_location(module_name, path)
     mod = importlib.util.module_from_spec(spec)
@@ -108,18 +115,22 @@ def run_scenario(scenario_id: str, path: Path, ctx: RunContext) -> bool:
 
     if ctx.dry_run:
         print("  [DRY RUN] skipping execution")
-        return True
+        return "passed"
 
     start = time.monotonic()
     try:
         mod.run(ctx)
         elapsed = time.monotonic() - start
         print(f"  ✓ PASSED ({elapsed:.1f}s)")
-        return True
+        return "passed"
+    except ScenarioSkipped as exc:
+        elapsed = time.monotonic() - start
+        print(f"  ~ SKIPPED ({elapsed:.1f}s): {exc}")
+        return "skipped"
     except Exception as exc:
         elapsed = time.monotonic() - start
         print(f"  ✗ FAILED ({elapsed:.1f}s): {exc}")
-        return False
+        return "failed"
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -189,16 +200,20 @@ def main():
     print(f"Dry run:  {ctx.dry_run}")
     print(f"Scenarios: {', '.join(sid for sid, _ in selected)}")
 
-    passed = failed = 0
+    passed = failed = skipped = 0
     for sid, path in selected:
-        ok = run_scenario(sid, path, ctx)
-        if ok:
+        outcome = run_scenario(sid, path, ctx)
+        if outcome == "passed":
             passed += 1
+        elif outcome == "skipped":
+            skipped += 1
         else:
             failed += 1
 
+    total = passed + failed + skipped
     print(f"\n{'═' * 60}")
-    print(f"  Results: {passed} passed, {failed} failed out of {passed + failed} scenarios")
+    skip_note = f", {skipped} skipped" if skipped else ""
+    print(f"  Results: {passed} passed, {failed} failed{skip_note} out of {total} scenarios")
     print(f"{'═' * 60}\n")
     sys.exit(0 if failed == 0 else 1)
 

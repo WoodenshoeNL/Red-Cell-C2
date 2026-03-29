@@ -25,6 +25,8 @@ DESCRIPTION = "RBAC enforcement"
 
 import uuid
 
+from lib import ScenarioSkipped
+
 
 def _short_id() -> str:
     """Return a short unique hex suffix to avoid name collisions across runs."""
@@ -59,11 +61,10 @@ def run(ctx):
     # ── Step 1: Skip when no analyst/viewer API key is configured ─────────────
     analyst_key = env.get("analyst_operator", {}).get("api_key", "")
     if not analyst_key:
-        print(
-            "  [skip] RBAC enforcement test — "
+        raise ScenarioSkipped(
+            "RBAC enforcement test — "
             "set analyst_operator.api_key in config/env.toml to enable"
         )
-        return
 
     viewer_cfg = CliConfig(server=cli.server, token=analyst_key)
     uid = _short_id()

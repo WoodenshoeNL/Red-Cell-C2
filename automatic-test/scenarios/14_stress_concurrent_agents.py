@@ -51,6 +51,8 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 
+from lib import ScenarioSkipped
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -245,8 +247,7 @@ def run(ctx):
     Skips silently when ctx.linux is None.
     """
     if ctx.linux is None:
-        print("  [skip] ctx.linux is None — Linux target required for this scenario")
-        return
+        raise ScenarioSkipped("ctx.linux is None — Linux target required for this scenario")
 
     from lib.cli import (
         CliError,

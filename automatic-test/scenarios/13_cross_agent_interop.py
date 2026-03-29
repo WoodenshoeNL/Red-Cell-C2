@@ -36,6 +36,8 @@ import tempfile
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from lib import ScenarioSkipped
+
 
 def _short_id() -> str:
     """Return a short unique hex suffix to avoid name collisions across test runs."""
@@ -265,11 +267,9 @@ def run(ctx):
     Skips silently when either ctx.linux or ctx.windows is None.
     """
     if ctx.linux is None:
-        print("  [skip] ctx.linux is None — Linux target required for this scenario")
-        return
+        raise ScenarioSkipped("ctx.linux is None — Linux target required for this scenario")
     if ctx.windows is None:
-        print("  [skip] ctx.windows is None — Windows target required for this scenario")
-        return
+        raise ScenarioSkipped("ctx.windows is None — Windows target required for this scenario")
 
     from lib.cli import (
         agent_kill,

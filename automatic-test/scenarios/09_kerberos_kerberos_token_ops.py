@@ -28,6 +28,8 @@ import os
 import tempfile
 import uuid
 
+from lib import ScenarioSkipped
+
 
 def _short_id() -> str:
     """Return a short unique hex suffix to avoid name collisions across test runs."""
@@ -46,8 +48,7 @@ def run(ctx):
     Skips silently when ctx.windows is None.
     """
     if ctx.windows is None:
-        print("  [skip] ctx.windows is None — no Windows target configured")
-        return
+        raise ScenarioSkipped("ctx.windows is None — no Windows target configured")
 
     from lib.cli import (
         CliError,

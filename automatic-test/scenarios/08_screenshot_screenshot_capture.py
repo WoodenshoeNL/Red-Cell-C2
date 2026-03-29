@@ -30,6 +30,8 @@ import os
 import tempfile
 import uuid
 
+from lib import ScenarioSkipped
+
 
 # ── image header signatures ──────────────────────────────────────────────────
 
@@ -89,11 +91,10 @@ def run(ctx):
     """
     target, payload_fmt, is_windows = _target_for_screenshot(ctx)
     if target is None:
-        print(
-            "  [skip] no suitable screenshot target configured — "
+        raise ScenarioSkipped(
+            "no suitable screenshot target configured — "
             "need Windows target or Linux with DISPLAY/Xvfb"
         )
-        return
 
     from lib.cli import (
         CliError,

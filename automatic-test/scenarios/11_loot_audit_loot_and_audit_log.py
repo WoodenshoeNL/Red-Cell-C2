@@ -43,6 +43,8 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 
+from lib import ScenarioSkipped
+
 
 def _short_id() -> str:
     """Return a short unique hex suffix to avoid name collisions across runs."""
@@ -81,8 +83,7 @@ def run(ctx):
     """
     target, payload_fmt, is_windows, remote_src_file = _target_and_fmt(ctx)
     if target is None:
-        print("  [skip] no target configured (ctx.linux and ctx.windows are both None)")
-        return
+        raise ScenarioSkipped("no target configured (ctx.linux and ctx.windows are both None)")
 
     from lib.cli import (
         CliError,

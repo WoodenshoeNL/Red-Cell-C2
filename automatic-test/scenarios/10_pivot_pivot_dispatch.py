@@ -42,6 +42,8 @@ DESCRIPTION = "Pivot chain dispatch"
 
 import uuid
 
+from lib import ScenarioSkipped
+
 
 def _short_id() -> str:
     """Return a short unique hex suffix to avoid name collisions across runs."""
@@ -84,21 +86,18 @@ def run(ctx):
     # ── A. Require at least two targets ─────────────────────────────────────
     target_count = sum(1 for t in (ctx.linux, ctx.windows) if t is not None)
     if target_count < 2:
-        print(f"  [skip] {_SKIP_ONE_TARGET}")
-        return
+        raise ScenarioSkipped(_SKIP_ONE_TARGET)
 
     # ── B/C/D. Mixed or Linux-only: Phantom not yet available ───────────────
     # A proper SMB pivot chain requires two Windows hosts.
     # A TCP pivot chain requires the Phantom Linux agent (not yet implemented).
     if ctx.linux is not None and ctx.windows is None:
-        print(f"  [skip] {_SKIP_LINUX_ONLY}")
-        return
+        raise ScenarioSkipped(_SKIP_LINUX_ONLY)
 
     if ctx.linux is not None and ctx.windows is not None:
         # Mixed pair: would need Phantom for a Linux parent node.
-        print(f"  [skip] {_SKIP_MIXED_TARGETS}")
         _print_future_plan()
-        return
+        raise ScenarioSkipped(_SKIP_MIXED_TARGETS)
 
     # If we somehow reach here with two Windows targets (ctx.windows is
     # non-None but no Linux) we would execute the full SMB pivot test.
@@ -108,10 +107,12 @@ def run(ctx):
     #
     # NOTE: remove this guard and wire up ctx.windows2 in test.py when
     # a second Windows target is available.
-    print("  [skip] two-Windows pivot path not yet reachable — "
-          "harness config supports only one [windows] target; "
-          "add ctx.windows2 to RunContext and targets.toml to enable")
     _print_future_plan()
+    raise ScenarioSkipped(
+        "two-Windows pivot path not yet reachable — "
+        "harness config supports only one [windows] target; "
+        "add ctx.windows2 to RunContext and targets.toml to enable"
+    )
 
 
 def _print_future_plan():

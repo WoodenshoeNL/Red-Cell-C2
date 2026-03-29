@@ -4256,3 +4256,13 @@ Build: passed (`cargo check --workspace` ✓; no Rust source changes in range, t
 | Cursor | 0 | 0 | No activity in range. |
 
 Build: skipped (no Rust source changes in range)
+
+### QA Review — 2026-03-30 — ca378144..ecd93412
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 0 | No dev-agent activity in range; only commit is prior QA checkpoint/scorecard update. |
+| Codex | 0 | 0 | No activity in range. |
+| Cursor | 0 | 0 | No activity in range. |
+
+Build: skipped (no Rust source changes in range)

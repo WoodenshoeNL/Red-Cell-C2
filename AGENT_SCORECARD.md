@@ -9,21 +9,21 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 963 | 231 | 31 |
-| Bugs filed against | 113 | 36 | 9 |
+| Tasks closed | 967 | 231 | 31 |
+| Bugs filed against | 116 | 36 | 9 |
 | Bug rate (bugs/task) | 0.12 | 0.16 | 0.29 |
 | Quality score | 88% | 84% | 71% |
 
-*Bug rates: Claude 113/963=0.12, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 116/967=0.12, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 8 | 0 | 0 |
-| Missing tests / stale tests | 51 | 14 | 5 |
+| Missing tests / stale tests | 52 | 14 | 5 |
 | Clippy warnings | 7 | 0 | 1 |
-| Protocol errors | 16 | 27 | 3 |
+| Protocol errors | 17 | 27 | 3 |
 | Security issues | 49 | 39 | 0 |
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 9 | 11 | 1 |
@@ -31,7 +31,7 @@ Each loop run updates the running totals and appends a review entry.
 | Test infrastructure / flakiness | 23 | 1 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
-| Correctness / pagination | 47 | 7 | 1 |
+| Correctness / pagination | 48 | 7 | 1 |
 | Workflow / close-hygiene | 22 | 0 | 0 |
 | Code reuse / duplication | 8 | 0 | 0 |
 
@@ -4216,3 +4216,13 @@ Security posture: teamserver auth/crypto surfaces remain strong, but operational
 | Cursor | 0 | 0 | No activity in range. |
 
 Build: failed (`cargo check --workspace` passed; `cargo clippy --workspace -- -D warnings` passed; `cargo test --workspace` failed in `red-cell` integration test `repeated_wrong_passwords_trigger_rate_limiter_lockout`, outside the reviewed files, while the worktree also contains unrelated local changes in `teamserver/src/dispatch/mod.rs`)
+
+### QA Review — 2026-03-29 23:01 — c99b9f03..6bea8459
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 4 | 3 | Closed `red-cell-c2-27k6g`, `red-cell-c2-sj3eh`, `red-cell-c2-skhxx`, and `red-cell-c2-r832p`. Filed `red-cell-c2-w8bcm` because Specter now emits process callback payloads in big-endian even though the teamserver parser and Phantom expect little-endian, `red-cell-c2-dee10` because Specter's Windows `proc grep` hardcodes every match as x64 instead of honoring WOW64 state, and `red-cell-c2-qha5u` because the new Specter e2e suite bakes in that same wrong callback byte order instead of validating the real teamserver contract. |
+| Codex | 0 | 0 | No activity in range. |
+| Cursor | 0 | 0 | No activity in range. |
+
+Build: passed (`cargo check --workspace`, `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`; `cargo test` also emitted a non-fatal pre-existing `red-cell-cli` unused-import warning in `client-cli/src/commands/loot.rs`)

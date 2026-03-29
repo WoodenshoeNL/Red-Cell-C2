@@ -1,0 +1,23 @@
+# automatic-test/config/targets.toml.example
+#
+# Copy this file to targets.toml and fill in your values.
+# targets.toml is gitignored — never commit real credentials.
+
+[linux]
+host     = "192.168.x.x"
+port     = 22
+user     = "testuser"
+# Path to SSH private key (use ssh-keygen to generate one for the test user)
+key      = "~/.ssh/red_cell_test"
+# Directory on the target where payloads will be uploaded and executed
+work_dir = "/tmp/rc-test"
+
+[windows]
+host     = "192.168.x.x"
+port     = 22
+user     = "testuser"
+# Password used for SSH (or leave empty and set key= instead)
+password = ""
+key      = ""
+# Directory on the target where payloads will be uploaded and executed
+work_dir = "C:\\Temp\\rc-test"

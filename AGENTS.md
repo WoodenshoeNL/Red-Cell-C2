@@ -2,7 +2,18 @@
 
 ## Goal
 
-Rewrite of the [Havoc C2 framework](./src/Havoc) in Rust — teamserver and operator client. The original Demon agent (C/ASM) is kept as-is; protocol compatibility is maintained.
+**Phase 1 — Complete.** Rust rewrite of the [Havoc C2 framework](./src/Havoc):
+teamserver, operator GUI client (`red-cell-client`), and AI-agent CLI client
+(`red-cell-cli`). The original Demon agent (C/ASM) is kept as-is; Demon protocol
+compatibility is maintained.
+
+**Phase 2 — Active.** Two objectives running in parallel:
+1. **Testing** — manual operator test plan + automated end-to-end harness
+   (`automatic-test/`) exercising the full `red-cell-cli → teamserver → agent`
+   flow on real Ubuntu Desktop and Windows 11 targets.
+2. **Additional agents** — implement Archon, Phantom, and Specter in sequence
+   (see *Agent Variants* below). Archon first (C/ASM fork of Demon, compile +
+   test parity), then Phantom (Rust, Linux), then Specter (Rust, Windows).
 
 ## Onboarding (new VM setup)
 
@@ -17,7 +28,7 @@ Rewrite of the [Havoc C2 framework](./src/Havoc) in Rust — teamserver and oper
 
 | Concern | Decision |
 |---|---|
-| **Repo structure** | Cargo workspace: `./teamserver`, `./client`, `./client-cli`, `./common` at repo root. Agent source in `./agent/`. Profiles in `./profiles/`. |
+| **Repo structure** | Cargo workspace: `./teamserver`, `./client`, `./client-cli`, `./common` at repo root. Agent source in `./agent/`. Profiles in `./profiles/`. Automated test harness in `./automatic-test/`. Docs in `./docs/`. |
 | **Binaries** | `red-cell` (teamserver), `red-cell-client` (operator GUI), `red-cell-cli` (AI-agent CLI) |
 | **Rust edition** | 2024, latest stable |
 | **Teamserver framework** | Axum + Tokio |
@@ -28,7 +39,8 @@ Rewrite of the [Havoc C2 framework](./src/Havoc) in Rust — teamserver and oper
 | **Client UI** | egui (pure Rust, immediate-mode) |
 | **Plugin system** | Python via PyO3 (client + teamserver) |
 | **New features** | RBAC, REST API, DNS listener, structured audit logging |
-| **Testing** | Full suite: unit + integration (mock Demon agent) + E2E |
+| **Agent builds** | Demon and Archon: cross-compiled C/ASM via `mingw-w64` + `nasm` (same toolchain as Demon). Phantom and Specter: `cargo build --target x86_64-unknown-linux-gnu` / `x86_64-pc-windows-gnu`. |
+| **Testing** | Unit + integration (mock Demon agent) + E2E automated harness (`automatic-test/test.py`) + manual test plan (see `docs/test-plan.md`). |
 
 ## client-cli Design Spec (`red-cell-cli`)
 
@@ -133,7 +145,10 @@ Each zone maps to a workspace crate. Issues carry a `zone:<name>` beads label.
 | `client-cli` | `client-cli/` | `zone:client-cli` |
 | `client` | `client/` | `zone:client` |
 | `common` | `common/` | `zone:common` |
-| `agent` | `agent/` | `zone:agent` |
+| `archon` | `agent/archon/` | `zone:archon` |
+| `phantom` | `agent/phantom/` | `zone:phantom` |
+| `specter` | `agent/specter/` | `zone:specter` |
+| `autotest` | `automatic-test/` | `zone:autotest` |
 
 ### Running a zone-scoped dev loop
 
@@ -181,12 +196,104 @@ Teamserver profiles live in `./profiles/` (`.yaotl` config files + TLS certs). T
 
 ### Agent Variants (`./agent/`)
 
-| Directory | Name | Language | Policy |
-|-----------|------|----------|--------|
-| `agent/demon/` | **Demon** | C/ASM | **Frozen** — pristine copy of the Havoc Demon. Do not modify. Replace with upstream to update. |
-| `agent/archon/` | **Archon** | C/ASM | **Mutable** — enhanced fork of Demon. Changes and improvements welcome. |
-| `agent/specter/` | **Specter** | Rust | **New** — ground-up Rust rewrite targeting full Demon protocol/feature parity. |
-| `agent/phantom/` | **Phantom** | Rust | **Mutable** — Linux agent scaffold with Demon-compatible transport. |
+| Directory | Name | Language | Status | Policy |
+|-----------|------|----------|--------|--------|
+| `agent/demon/` | **Demon** | C/ASM | ✅ Production | **Frozen** — pristine Havoc Demon copy. Do not modify. Replace with upstream to update. |
+| `agent/archon/` | **Archon** | C/ASM | 🔨 Phase 2a | **Fork of Demon.** Initially identical to Demon — compile + test parity first. Enhancements in a later phase. Build: same toolchain as Demon (`mingw-w64` + `nasm`). |
+| `agent/phantom/` | **Phantom** | Rust | 🔨 Phase 2b | **Linux Rust agent.** Demon-compatible transport. Linux-specific capabilities. Build: `cargo build --target x86_64-unknown-linux-gnu`. |
+| `agent/specter/` | **Specter** | Rust | 🔨 Phase 2c | **Windows Rust agent.** Full Demon protocol/feature parity. Build: `cargo build --target x86_64-pc-windows-gnu`. |
+
+### Agent build commands
+
+```bash
+# Demon / Archon (C/ASM, cross-compiled for Windows)
+cd agent/archon
+make          # uses the same Makefile structure as agent/demon
+
+# Phantom (Rust, Linux)
+cd agent/phantom
+cargo build --release --target x86_64-unknown-linux-gnu
+
+# Specter (Rust, Windows cross-compile from Linux)
+cd agent/specter
+cargo build --release --target x86_64-pc-windows-gnu
+```
+
+## Phase 2: Real-World Testing
+
+### Automated test harness (`automatic-test/`)
+
+The harness drives the full `red-cell-cli → teamserver → agent` flow against real
+target machines. All interaction goes through `red-cell-cli` (JSON output, stable
+exit codes) so AI agents can run it unattended and file bugs for failures.
+
+```
+automatic-test/
+  test.py                     # main runner: --scenario all|01|02|...
+  config/
+    env.toml                  # teamserver URL + operator credentials (commit safe)
+    targets.toml              # test-machine SSH details — GITIGNORED
+    targets.toml.example      # template with placeholders
+  scenarios/
+    01_auth.py                # login, token expiry, RBAC enforcement
+    02_listeners.py           # HTTP/DNS/SMB create/start/stop/delete
+    03_payload_build.py       # all format × arch combos, PE validation
+    04_agent_linux.py         # deploy → checkin → command suite on Ubuntu
+    05_agent_windows.py       # deploy → checkin → command suite on Windows 11
+    06_file_transfer.py       # upload + download round-trip
+    07_process_ops.py         # list, kill, inject
+    08_screenshot.py          # screenshot capture + loot entry
+    09_kerberos.py            # token operations
+    10_pivot.py               # pivot chain dispatch
+    11_loot_audit.py          # loot entries, audit log completeness
+    12_rbac.py                # role enforcement across all endpoints
+  lib/
+    cli.py                    # subprocess wrapper for red-cell-cli
+    deploy.py                 # SSH/SCP helpers (Linux + Windows)
+    wait.py                   # poll helpers: wait_for_agent, wait_for_output
+  PROMPTS/
+    AGENT_TEST_PROMPT.md      # prompt for AI-agent-driven test runs
+```
+
+**Running the harness:**
+```bash
+cd automatic-test
+# Run all scenarios against both targets
+python3 test.py --scenario all
+
+# Run a single scenario
+python3 test.py --scenario 04
+
+# Dry-run (validate config only, no actual deployment)
+python3 test.py --dry-run
+```
+
+### Target machines
+
+| Target | OS | Deploy method |
+|--------|----|---------------|
+| `linux-test` | Ubuntu Desktop (latest LTS) | SSH + SCP |
+| `windows-test` | Windows 11 | SSH (OpenSSH for Windows) |
+
+Connection details live in `automatic-test/config/targets.toml` (gitignored).
+See `automatic-test/config/targets.toml.example` for the required fields.
+
+For Windows SSH setup, see `docs/win11-ssh-setup.md`.
+
+### Manual test plan
+
+A checklist-style test plan for operator-driven validation lives in
+`docs/test-plan.md`. It covers every layer: auth, listeners, payload generation,
+agent commands, events, loot, plugins, and the REST API.
+
+### Zone for test harness work
+
+Use `--zone autotest` when running a dev loop against `automatic-test/`:
+```bash
+./loop.py --agent claude --loop dev --zone autotest
+```
+
+---
 
 ## Stopping a Dev Loop
 

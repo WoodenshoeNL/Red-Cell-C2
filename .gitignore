@@ -45,3 +45,6 @@ src/Havoc/profiles/*.tls.key
 Running
 target-codex-x86m/
 data/
+
+# Automated test harness — credentials (never commit)
+automatic-test/config/targets.toml

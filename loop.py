@@ -47,7 +47,10 @@ ZONES = {
     "client":     ["client/"],
     "teamserver": ["teamserver/"],
     "common":     ["common/"],
-    "agent":      ["agent/"],
+    "archon":     ["agent/archon/"],
+    "phantom":    ["agent/phantom/"],
+    "specter":    ["agent/specter/"],
+    "autotest":   ["automatic-test/"],
 }
 
 # Dev loops use agent-specific prompts (Co-Authored-By differs per agent)
@@ -368,13 +371,16 @@ def extract_text_from_stream(raw_lines: list) -> str:
 
 # Zone → Rust package names for scoped builds/tests.
 # None means use --workspace (changes can affect all crates, e.g. common).
-# []   means no Rust crate at all (agent zone — skip cargo entirely).
+# []   means no Rust crate at all (C/ASM or Python zone — skip cargo entirely).
 ZONE_PACKAGES = {
     "teamserver": ["red-cell", "red-cell-common"],
     "client":     ["red-cell-client", "red-cell-common"],
     "client-cli": ["red-cell-cli", "red-cell-common"],
-    "common":     None,   # --workspace: changes here can break any crate
-    "agent":      [],     # no Rust crate
+    "common":     None,      # --workspace: changes here can break any crate
+    "archon":     [],        # C/ASM — no Rust crate
+    "phantom":    [],        # Rust agent — built separately, not in workspace
+    "specter":    [],        # Rust agent — built separately, not in workspace
+    "autotest":   [],        # Python — no Rust crate
 }
 
 

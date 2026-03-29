@@ -187,15 +187,18 @@ struct CacheKey {
     ext: &'static str,
 }
 
-/// Compute a content-addressed cache key for a Demon payload build.
+/// Compute a content-addressed cache key for a payload build.
 ///
 /// The hash covers every input that determines the compiled output:
 /// - Teamserver version (from `CARGO_PKG_VERSION`)
+/// - Agent variant name (e.g. `"demon"`, `"archon"`) — ensures that builds
+///   for different agent types never collide even when all other inputs match
 /// - Target architecture
 /// - Output format
 /// - Packed binary config bytes embedded in the PE
 /// - Binary-patch configuration applied after compilation
 fn compute_cache_key(
+    agent_name: &str,
     arch: Architecture,
     format: OutputFormat,
     config_bytes: &[u8],
@@ -203,6 +206,8 @@ fn compute_cache_key(
 ) -> Result<CacheKey, serde_json::Error> {
     let mut hasher = Sha256::new();
     hasher.update(env!("CARGO_PKG_VERSION").as_bytes());
+    hasher.update(b"\x00");
+    hasher.update(agent_name.as_bytes());
     hasher.update(b"\x00");
     hasher.update(arch.suffix().as_bytes());
     hasher.update(b"\x00");
@@ -544,6 +549,7 @@ impl PayloadBuilderService {
         // to the listener or demon configuration produces a distinct cache entry.
         let config_bytes = pack_config(listener, &config)?;
         let cache_key = compute_cache_key(
+            agent_name,
             architecture,
             format,
             &config_bytes,
@@ -920,7 +926,9 @@ impl PayloadBuilderService {
         F: FnMut(BuildProgress),
     {
         let stager_key_bytes = stager_cache_bytes(listener)?;
+        // Staged shellcode stagers are always built from the Demon source tree.
         let cache_key = compute_cache_key(
+            "demon",
             architecture,
             OutputFormat::StagedShellcode,
             &stager_key_bytes,
@@ -4150,9 +4158,11 @@ mod tests {
     fn compute_cache_key_differs_by_architecture() {
         let config_bytes = b"config";
         let key_x64 =
-            compute_cache_key(Architecture::X64, OutputFormat::Exe, config_bytes, None).unwrap();
+            compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, config_bytes, None)
+                .unwrap();
         let key_x86 =
-            compute_cache_key(Architecture::X86, OutputFormat::Exe, config_bytes, None).unwrap();
+            compute_cache_key("demon", Architecture::X86, OutputFormat::Exe, config_bytes, None)
+                .unwrap();
         assert_ne!(key_x64.hex, key_x86.hex, "x64 and x86 must produce different cache keys");
     }
 
@@ -4160,18 +4170,22 @@ mod tests {
     fn compute_cache_key_differs_by_format() {
         let config_bytes = b"config";
         let key_exe =
-            compute_cache_key(Architecture::X64, OutputFormat::Exe, config_bytes, None).unwrap();
+            compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, config_bytes, None)
+                .unwrap();
         let key_dll =
-            compute_cache_key(Architecture::X64, OutputFormat::Dll, config_bytes, None).unwrap();
+            compute_cache_key("demon", Architecture::X64, OutputFormat::Dll, config_bytes, None)
+                .unwrap();
         assert_ne!(key_exe.hex, key_dll.hex, "Exe and Dll must produce different cache keys");
     }
 
     #[test]
     fn compute_cache_key_differs_by_config_bytes() {
         let key_a =
-            compute_cache_key(Architecture::X64, OutputFormat::Exe, b"config-a", None).unwrap();
+            compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, b"config-a", None)
+                .unwrap();
         let key_b =
-            compute_cache_key(Architecture::X64, OutputFormat::Exe, b"config-b", None).unwrap();
+            compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, b"config-b", None)
+                .unwrap();
         assert_ne!(
             key_a.hex, key_b.hex,
             "different config bytes must produce different cache keys"
@@ -4180,17 +4194,21 @@ mod tests {
 
     #[test]
     fn compute_cache_key_ext_matches_format() {
-        let key_exe = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"c", None).unwrap();
+        let key_exe =
+            compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, b"c", None).unwrap();
         let key_bin =
-            compute_cache_key(Architecture::X64, OutputFormat::Shellcode, b"c", None).unwrap();
+            compute_cache_key("demon", Architecture::X64, OutputFormat::Shellcode, b"c", None)
+                .unwrap();
         assert_eq!(key_exe.ext, ".exe");
         assert_eq!(key_bin.ext, ".bin");
     }
 
     #[test]
     fn compute_cache_key_deterministic() {
-        let a = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"same", None).unwrap();
-        let b = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"same", None).unwrap();
+        let a = compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, b"same", None)
+            .unwrap();
+        let b = compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, b"same", None)
+            .unwrap();
         assert_eq!(a.hex, b.hex, "identical inputs must produce the same cache key");
     }
 
@@ -4202,9 +4220,10 @@ mod tests {
             replace_strings_x86: std::collections::BTreeMap::new(),
         };
         let key_none =
-            compute_cache_key(Architecture::X64, OutputFormat::Exe, b"cfg", None).unwrap();
+            compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, b"cfg", None).unwrap();
         let key_some =
-            compute_cache_key(Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch)).unwrap();
+            compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch))
+                .unwrap();
         assert_ne!(
             key_none.hex, key_some.hex,
             "present vs absent binary_patch must produce different cache keys"
@@ -4223,10 +4242,22 @@ mod tests {
             replace_strings_x64: [("old".into(), "new-b".into())].into_iter().collect(),
             replace_strings_x86: std::collections::BTreeMap::new(),
         };
-        let key_a = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch_a))
-            .unwrap();
-        let key_b = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch_b))
-            .unwrap();
+        let key_a = compute_cache_key(
+            "demon",
+            Architecture::X64,
+            OutputFormat::Exe,
+            b"cfg",
+            Some(&patch_a),
+        )
+        .unwrap();
+        let key_b = compute_cache_key(
+            "demon",
+            Architecture::X64,
+            OutputFormat::Exe,
+            b"cfg",
+            Some(&patch_b),
+        )
+        .unwrap();
         assert_ne!(
             key_a.hex, key_b.hex,
             "different binary_patch content must produce different cache keys"
@@ -4257,10 +4288,22 @@ mod tests {
             replace_strings_x64: std::collections::BTreeMap::new(),
             replace_strings_x86: std::collections::BTreeMap::new(),
         };
-        let key_a = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch_a))
-            .unwrap();
-        let key_b = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch_b))
-            .unwrap();
+        let key_a = compute_cache_key(
+            "demon",
+            Architecture::X64,
+            OutputFormat::Exe,
+            b"cfg",
+            Some(&patch_a),
+        )
+        .unwrap();
+        let key_b = compute_cache_key(
+            "demon",
+            Architecture::X64,
+            OutputFormat::Exe,
+            b"cfg",
+            Some(&patch_b),
+        )
+        .unwrap();
         assert_ne!(
             key_a.hex, key_b.hex,
             "different header magic_mz_x64 must produce different cache keys"
@@ -4291,10 +4334,22 @@ mod tests {
             replace_strings_x64: std::collections::BTreeMap::new(),
             replace_strings_x86: std::collections::BTreeMap::new(),
         };
-        let key_a = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch_a))
-            .unwrap();
-        let key_b = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch_b))
-            .unwrap();
+        let key_a = compute_cache_key(
+            "demon",
+            Architecture::X64,
+            OutputFormat::Exe,
+            b"cfg",
+            Some(&patch_a),
+        )
+        .unwrap();
+        let key_b = compute_cache_key(
+            "demon",
+            Architecture::X64,
+            OutputFormat::Exe,
+            b"cfg",
+            Some(&patch_b),
+        )
+        .unwrap();
         assert_ne!(
             key_a.hex, key_b.hex,
             "different header compile_time must produce different cache keys"
@@ -4325,10 +4380,22 @@ mod tests {
             replace_strings_x64: std::collections::BTreeMap::new(),
             replace_strings_x86: std::collections::BTreeMap::new(),
         };
-        let key_a = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch_a))
-            .unwrap();
-        let key_b = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch_b))
-            .unwrap();
+        let key_a = compute_cache_key(
+            "demon",
+            Architecture::X64,
+            OutputFormat::Exe,
+            b"cfg",
+            Some(&patch_a),
+        )
+        .unwrap();
+        let key_b = compute_cache_key(
+            "demon",
+            Architecture::X64,
+            OutputFormat::Exe,
+            b"cfg",
+            Some(&patch_b),
+        )
+        .unwrap();
         assert_ne!(
             key_a.hex, key_b.hex,
             "different header image_size_x64 must produce different cache keys"
@@ -4347,10 +4414,22 @@ mod tests {
             replace_strings_x64: std::collections::BTreeMap::new(),
             replace_strings_x86: [("old".into(), "new-b".into())].into_iter().collect(),
         };
-        let key_a = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch_a))
-            .unwrap();
-        let key_b = compute_cache_key(Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch_b))
-            .unwrap();
+        let key_a = compute_cache_key(
+            "demon",
+            Architecture::X64,
+            OutputFormat::Exe,
+            b"cfg",
+            Some(&patch_a),
+        )
+        .unwrap();
+        let key_b = compute_cache_key(
+            "demon",
+            Architecture::X64,
+            OutputFormat::Exe,
+            b"cfg",
+            Some(&patch_b),
+        )
+        .unwrap();
         assert_ne!(
             key_a.hex, key_b.hex,
             "different replace_strings_x86 must produce different cache keys"
@@ -4373,9 +4452,11 @@ mod tests {
             replace_strings_x86: [("e".into(), "f".into())].into_iter().collect(),
         };
         let key_1 =
-            compute_cache_key(Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch)).unwrap();
+            compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch))
+                .unwrap();
         let key_2 =
-            compute_cache_key(Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch)).unwrap();
+            compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, b"cfg", Some(&patch))
+                .unwrap();
         assert_eq!(
             key_1.hex, key_2.hex,
             "identical binary_patch configs must produce identical cache keys"
@@ -4396,30 +4477,50 @@ mod tests {
         // Generate keys varying exactly one dimension at a time from a baseline.
         let keys: Vec<String> = vec![
             // baseline
-            compute_cache_key(Architecture::X64, OutputFormat::Exe, config, None).unwrap().hex,
+            compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, config, None)
+                .unwrap()
+                .hex,
             // vary arch
-            compute_cache_key(Architecture::X86, OutputFormat::Exe, config, None).unwrap().hex,
+            compute_cache_key("demon", Architecture::X86, OutputFormat::Exe, config, None)
+                .unwrap()
+                .hex,
             // vary format
-            compute_cache_key(Architecture::X64, OutputFormat::Dll, config, None).unwrap().hex,
-            compute_cache_key(Architecture::X64, OutputFormat::ServiceExe, config, None)
+            compute_cache_key("demon", Architecture::X64, OutputFormat::Dll, config, None)
                 .unwrap()
                 .hex,
-            compute_cache_key(Architecture::X64, OutputFormat::ReflectiveDll, config, None)
+            compute_cache_key("demon", Architecture::X64, OutputFormat::ServiceExe, config, None)
                 .unwrap()
                 .hex,
-            compute_cache_key(Architecture::X64, OutputFormat::Shellcode, config, None)
+            compute_cache_key(
+                "demon",
+                Architecture::X64,
+                OutputFormat::ReflectiveDll,
+                config,
+                None,
+            )
+            .unwrap()
+            .hex,
+            compute_cache_key("demon", Architecture::X64, OutputFormat::Shellcode, config, None)
                 .unwrap()
                 .hex,
-            compute_cache_key(Architecture::X64, OutputFormat::StagedShellcode, config, None)
-                .unwrap()
-                .hex,
-            compute_cache_key(Architecture::X64, OutputFormat::RawShellcode, config, None)
+            compute_cache_key(
+                "demon",
+                Architecture::X64,
+                OutputFormat::StagedShellcode,
+                config,
+                None,
+            )
+            .unwrap()
+            .hex,
+            compute_cache_key("demon", Architecture::X64, OutputFormat::RawShellcode, config, None)
                 .unwrap()
                 .hex,
             // vary config bytes
-            compute_cache_key(Architecture::X64, OutputFormat::Exe, b"other", None).unwrap().hex,
+            compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, b"other", None)
+                .unwrap()
+                .hex,
             // vary binary_patch
-            compute_cache_key(Architecture::X64, OutputFormat::Exe, config, Some(&patch))
+            compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, config, Some(&patch))
                 .unwrap()
                 .hex,
         ];
@@ -4432,6 +4533,70 @@ mod tests {
             unique.len(),
             keys.len()
         );
+    }
+
+    #[test]
+    fn compute_cache_key_differs_by_agent_name() {
+        let config_bytes = b"config";
+        let key_demon =
+            compute_cache_key("demon", Architecture::X64, OutputFormat::Exe, config_bytes, None)
+                .unwrap();
+        let key_archon =
+            compute_cache_key("archon", Architecture::X64, OutputFormat::Exe, config_bytes, None)
+                .unwrap();
+        assert_ne!(
+            key_demon.hex, key_archon.hex,
+            "demon and archon must produce different cache keys for identical other inputs"
+        );
+    }
+
+    /// Regression test: Demon and Archon builds with identical listener/config/arch/format
+    /// must not share a cache entry.  Before the fix, `compute_cache_key` omitted the agent
+    /// variant from the hash, so the second build would return the first build's bytes.
+    #[tokio::test]
+    async fn build_payload_demon_and_archon_do_not_share_cache()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        let nasm_ok = "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = \"-o\" ]; then shift; printf 'asm' > \"$1\"; break; fi; shift; done\n";
+        // Compiler writes "demon-bytes" when building Demon and "archon-bytes" when building
+        // Archon.  We detect a collision if the Archon request returns "demon-bytes".
+        let gcc_demon = "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = \"-o\" ]; then shift; printf 'demon-bytes' > \"$1\"; break; fi; shift; done\n";
+
+        let (service, listener, demon_request) = setup_build_fixture(&temp, nasm_ok, gcc_demon)?;
+
+        // First build: Demon — cache miss, compiler writes "demon-bytes".
+        let demon_artifact = service.build_payload(&listener, &demon_request, |_| {}).await?;
+        assert_eq!(demon_artifact.bytes, b"demon-bytes");
+
+        // Create a minimal Archon source tree so the existence check passes.
+        let archon_root = temp.path().join("agent/archon");
+        for dir in ["src/core", "src/crypt", "src/inject", "src/asm", "src/main", "include"] {
+            std::fs::create_dir_all(archon_root.join(dir))?;
+        }
+        std::fs::write(archon_root.join("src/core/a.c"), "int x = 1;")?;
+        std::fs::write(archon_root.join("src/asm/test.x64.asm"), "bits 64")?;
+        std::fs::write(archon_root.join("src/main/MainExe.c"), "int main(void){return 0;}")?;
+        std::fs::write(archon_root.join("src/main/MainSvc.c"), "int main(void){return 0;}")?;
+        std::fs::write(archon_root.join("src/main/MainDll.c"), "int main(void){return 0;}")?;
+        std::fs::write(archon_root.join("src/Demon.c"), "int demo = 1;")?;
+
+        let archon_request =
+            BuildPayloadRequestInfo { agent_type: "Archon".to_owned(), ..demon_request.clone() };
+
+        // Second build: Archon with identical listener/config/arch/format.
+        // The cache key must differ from Demon's, so we get a cache miss (full build).
+        let mut hit_messages = Vec::new();
+        // The build may succeed or fail depending on stub output — we only care about
+        // whether a cache hit was reported.
+        let _ = service
+            .build_payload(&listener, &archon_request, |m| hit_messages.push(m.message.clone()))
+            .await;
+
+        assert!(
+            !hit_messages.iter().any(|m| m.contains("cache hit")),
+            "Archon build must not hit the Demon cache entry; messages: {hit_messages:?}"
+        );
+        Ok(())
     }
 
     // ──────────────────────────────────────────────────────────────────────

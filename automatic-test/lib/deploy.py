@@ -12,7 +12,6 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 
 @dataclass
@@ -21,35 +20,38 @@ class TargetConfig:
     port: int
     user: str
     work_dir: str
-    key: Optional[str] = None
-    password: Optional[str] = None  # used only if key is absent
+    key: str  # path to SSH private key — required, password auth is not supported
+
+    def __post_init__(self) -> None:
+        if not self.key:
+            raise ValueError(
+                f"SSH target {self.user}@{self.host}: 'key' is required — "
+                "password authentication is not supported (BatchMode=yes is always set). "
+                "Generate a key with ssh-keygen and set key= in targets.toml."
+            )
 
 
 def _ssh_args(target: TargetConfig) -> list[str]:
-    args = [
+    return [
         "ssh",
         "-p", str(target.port),
         "-o", "StrictHostKeyChecking=no",
         "-o", "BatchMode=yes",
         "-o", "ConnectTimeout=10",
+        "-i", target.key,
+        f"{target.user}@{target.host}",
     ]
-    if target.key:
-        args += ["-i", target.key]
-    args.append(f"{target.user}@{target.host}")
-    return args
 
 
 def _scp_args(target: TargetConfig) -> list[str]:
-    args = [
+    return [
         "scp",
         "-P", str(target.port),
         "-o", "StrictHostKeyChecking=no",
         "-o", "BatchMode=yes",
         "-o", "ConnectTimeout=10",
+        "-i", target.key,
     ]
-    if target.key:
-        args += ["-i", target.key]
-    return args
 
 
 class DeployError(Exception):

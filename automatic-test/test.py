@@ -27,7 +27,6 @@ import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 # Ensure lib/ is importable
 sys.path.insert(0, str(Path(__file__).parent))
@@ -67,8 +66,7 @@ def make_target(cfg: dict) -> TargetConfig:
         port=cfg.get("port", 22),
         user=cfg["user"],
         work_dir=cfg["work_dir"],
-        key=cfg.get("key") or None,
-        password=cfg.get("password") or None,
+        key=cfg.get("key", ""),
     )
 
 

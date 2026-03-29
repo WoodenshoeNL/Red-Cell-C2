@@ -2,12 +2,17 @@
 #
 # Copy this file to targets.toml and fill in your values.
 # targets.toml is gitignored — never commit real credentials.
+#
+# Key-based SSH authentication is required for all targets.
+# Password authentication is not supported (BatchMode=yes is always set).
+# Generate a dedicated test key with:
+#   ssh-keygen -t ed25519 -f ~/.ssh/red_cell_test -N ""
 
 [linux]
 host     = "192.168.x.x"
 port     = 22
 user     = "testuser"
-# Path to SSH private key (use ssh-keygen to generate one for the test user)
+# Path to SSH private key (required)
 key      = "~/.ssh/red_cell_test"
 # Directory on the target where payloads will be uploaded and executed
 work_dir = "/tmp/rc-test"
@@ -16,8 +21,7 @@ work_dir = "/tmp/rc-test"
 host     = "192.168.x.x"
 port     = 22
 user     = "testuser"
-# Password used for SSH (or leave empty and set key= instead)
-password = ""
-key      = ""
+# Path to SSH private key (required — see docs/win11-ssh-setup.md)
+key      = "~/.ssh/red_cell_test"
 # Directory on the target where payloads will be uploaded and executed
 work_dir = "C:\\Temp\\rc-test"

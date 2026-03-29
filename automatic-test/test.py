@@ -46,7 +46,7 @@ def load_env(path: Path) -> dict:
 def load_targets(path: Path) -> dict:
     if not path.exists():
         print(f"[WARN] {path} not found — deploy scenarios will be skipped.")
-        print(f"       Copy {path.with_suffix('.example')} to {path} and fill in your values.")
+        print(f"       Copy {path.parent / (path.name + '.example')} to {path} and fill in your values.")
         return {}
     with open(path, "rb") as f:
         return tomllib.load(f)

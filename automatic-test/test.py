@@ -160,15 +160,16 @@ def main():
     targets_raw = load_targets(config_dir / "targets.toml")
 
     cli_cfg = make_cli_config(env)
-    linux_target = make_target(targets_raw["linux"]) if "linux" in targets_raw else None
-    windows_target = make_target(targets_raw["windows"]) if "windows" in targets_raw else None
-    windows2_target = make_target(targets_raw["windows2"]) if "windows2" in targets_raw else None
 
-    if args.target == "linux":
-        windows_target = None
-        windows2_target = None
-    elif args.target == "windows":
-        linux_target = None
+    # Apply --target filter before constructing TargetConfig objects so that
+    # an intentionally-incomplete stanza for the disabled target does not
+    # trigger the key-validation ValueError before filtering takes effect.
+    use_linux = args.target in ("linux", "both")
+    use_windows = args.target in ("windows", "both")
+
+    linux_target = make_target(targets_raw["linux"]) if (use_linux and "linux" in targets_raw) else None
+    windows_target = make_target(targets_raw["windows"]) if (use_windows and "windows" in targets_raw) else None
+    windows2_target = make_target(targets_raw["windows2"]) if (use_windows and "windows2" in targets_raw) else None
 
     ctx = RunContext(
         cli=cli_cfg,

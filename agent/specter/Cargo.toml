@@ -12,7 +12,9 @@ name = "specter"
 path = "src/main.rs"
 
 [lints.rust]
-unsafe_code = "forbid"
+# Windows-specific platform helpers require unsafe Win32 FFI calls.
+# Changed from "forbid" so individual modules may opt in with #[allow(unsafe_code)].
+unsafe_code = "deny"
 
 [lints.clippy]
 dbg_macro = "deny"
@@ -28,6 +30,13 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 rand = "0.9"
 anyhow = "1"
+
+[target.'cfg(windows)'.dependencies]
+# Win32 API bindings for Windows-native metadata collection (OS version, etc.).
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_SystemInformation",
+] }
 
 [dev-dependencies]
 rcgen = "0.13"

@@ -18,3 +18,8 @@ rustflags = ["-L", ".python-lib"]
 # memory pressure past the 50% oomd threshold for >20s.  4 jobs keeps builds
 # reasonably fast while keeping peak RSS well below the kill threshold.
 jobs = 4
+
+# Specter cross-compile: x86_64 Windows from Linux.
+# Requires: sudo apt-get install mingw-w64
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"

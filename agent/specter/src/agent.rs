@@ -309,18 +309,14 @@ impl SpecterAgent {
     }
 }
 
-/// Get the hostname of the current machine.
+/// Get the hostname of the current machine via platform-native API.
 fn hostname() -> String {
-    std::env::var("HOSTNAME")
-        .or_else(|_| std::env::var("COMPUTERNAME"))
-        .unwrap_or_else(|_| String::from("unknown"))
+    crate::platform::hostname()
 }
 
-/// Get the current username.
+/// Get the current username via platform-native API.
 fn username() -> String {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .unwrap_or_else(|_| String::from("unknown"))
+    crate::platform::username()
 }
 
 /// Get a local IP address (best effort).
@@ -329,18 +325,19 @@ fn local_ip() -> String {
 }
 
 /// Get the OS major version.
+///
+/// On Windows this calls `RtlGetVersion` via the platform module.
+/// On other platforms returns 0 (scaffold placeholder).
 fn os_major() -> u32 {
-    if cfg!(target_os = "linux") {
-        // Linux doesn't have Windows version numbers; use a placeholder
-        0
-    } else {
-        10 // Windows 10+
-    }
+    crate::platform::os_version().0
 }
 
 /// Get the OS build number.
+///
+/// On Windows this calls `RtlGetVersion` via the platform module.
+/// On other platforms returns 0 (scaffold placeholder).
 fn os_build() -> u32 {
-    0
+    crate::platform::os_version().2
 }
 
 #[cfg(test)]

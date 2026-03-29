@@ -67,6 +67,7 @@ def make_target(cfg: dict) -> TargetConfig:
         user=cfg["user"],
         work_dir=cfg["work_dir"],
         key=cfg.get("key", ""),
+        display=cfg.get("display", ""),
     )
 
 

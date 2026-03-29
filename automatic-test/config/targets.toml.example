@@ -16,6 +16,10 @@ user     = "testuser"
 key      = "~/.ssh/red_cell_test"
 # Directory on the target where payloads will be uploaded and executed
 work_dir = "/tmp/rc-test"
+# X11 DISPLAY value for screenshot scenarios (optional).
+# Set this if the target has an Xvfb or interactive display session.
+# Example: start Xvfb with `Xvfb :99 -screen 0 1920x1080x24 &` and set:
+# display  = ":99"
 
 [windows]
 host     = "192.168.x.x"

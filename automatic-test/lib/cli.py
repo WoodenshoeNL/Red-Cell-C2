@@ -194,3 +194,31 @@ def loot_list(
 def loot_download(cfg: CliConfig, loot_id: int, dst: str) -> dict:
     """Download raw loot bytes to a local file.  Returns the result dict."""
     return _run(cfg, "loot", "download", str(loot_id), "--out", dst)
+
+
+# ── Audit log ─────────────────────────────────────────────────────────────────
+
+def log_list(
+    cfg: CliConfig,
+    operator: str | None = None,
+    action: str | None = None,
+    agent_id: str | None = None,
+    since: str | None = None,
+    limit: int | None = None,
+) -> list[dict]:
+    """Return audit log entries (newest first), optionally filtered.
+
+    Each entry has keys: ts, operator, action, agent_id, detail, result_status.
+    """
+    args = ["log", "list"]
+    if operator:
+        args += ["--operator", operator]
+    if action:
+        args += ["--action", action]
+    if agent_id:
+        args += ["--agent", agent_id]
+    if since:
+        args += ["--since", since]
+    if limit is not None:
+        args += ["--limit", str(limit)]
+    return _run(cfg, *args)

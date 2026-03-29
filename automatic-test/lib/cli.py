@@ -64,11 +64,15 @@ def _run(cfg: CliConfig, *args: str) -> dict[str, Any]:
 # ── Auth ────────────────────────────────────────────────────────────────────
 
 def login(cfg: CliConfig) -> str:
-    """Authenticate and return a session token."""
-    data = _run(cfg, "auth", "login",
-                "--username", cfg.token,  # cfg.token holds the password pre-login
-                "--server", cfg.server)
-    return data["token"]
+    """Verify the configured API key and return it.
+
+    The REST API uses static API keys — there is no username/password login
+    endpoint.  This helper validates the key by performing an authenticated
+    status request and returns the key unchanged on success.  A CliError with
+    exit_code 3 is raised if the key is rejected.
+    """
+    status(cfg)  # raises CliError (exit 3) if the key is invalid
+    return cfg.token
 
 
 def status(cfg: CliConfig) -> dict[str, Any]:
@@ -145,3 +149,18 @@ def agent_download(cfg: CliConfig, agent_id: str, src: str, dst: str) -> dict:
 
 def agent_kill(cfg: CliConfig, agent_id: str) -> dict:
     return _run(cfg, "agent", "kill", agent_id, "--wait")
+
+
+# ── Operators ────────────────────────────────────────────────────────────────
+
+def operator_list(cfg: CliConfig) -> list[dict]:
+    return _run(cfg, "operator", "list")
+
+
+def operator_create(cfg: CliConfig, username: str, password: str, role: str) -> dict:
+    return _run(cfg, "operator", "create", username,
+                "--password", password, "--role", role)
+
+
+def operator_delete(cfg: CliConfig, username: str) -> dict:
+    return _run(cfg, "operator", "delete", username)

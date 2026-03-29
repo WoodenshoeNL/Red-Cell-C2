@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 929 | 231 | 31 |
-| Bugs filed against | 100 | 36 | 9 |
+| Tasks closed | 937 | 231 | 31 |
+| Bugs filed against | 105 | 36 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.16 | 0.29 |
 | Quality score | 89% | 84% | 71% |
 
-*Bug rates: Claude 100/929=0.11, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 105/937=0.11, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -27,12 +27,12 @@ Each loop run updates the running totals and appends a review entry.
 | Security issues | 49 | 39 | 0 |
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 8 | 11 | 1 |
-| Startup / lifecycle regressions | 2 | 9 | 0 |
+| Startup / lifecycle regressions | 3 | 9 | 0 |
 | Test infrastructure / flakiness | 22 | 1 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
-| Correctness / pagination | 43 | 7 | 1 |
-| Workflow / close-hygiene | 18 | 0 | 0 |
+| Correctness / pagination | 45 | 7 | 1 |
+| Workflow / close-hygiene | 20 | 0 | 0 |
 | Code reuse / duplication | 8 | 0 | 0 |
 
 ---
@@ -4111,3 +4111,13 @@ Issues found: red-cell-c2-gczvs (P3, test-flakiness, Codex) — reverse_port_for
 
 Build: cargo check passed; cargo clippy -p phantom clean (0 warnings); cargo test --workspace: phantom 52/52 passed; teamserver auth_audit_trail FAILED (1 test: rate_limited_login_does_not_produce_audit_entry, both runs consistent: left:7, right:6)
 Issues found: red-cell-c2-116g2 (P2, test-infrastructure, Claude — insufficient fix in b04d7ad0)
+
+### QA Review — 2026-03-29 15:38 — 1e5e1af9..14260772
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 8 | 5 | Closed red-cell-c2-ncfap, 71h8j, r50uq, kosce, m4zsd, ruw6p, hbkog, and b5h4s. Filed red-cell-c2-p0q3j (`--scenario all` hard-fails on open stubs), red-cell-c2-eknf0 (smoke-test traceback when `red-cell-cli` is missing), red-cell-c2-ukz0j (documented password SSH path is unusable), red-cell-c2-vg71e (wrong `targets.toml.example` setup hint), and red-cell-c2-8dh5j (committed `__pycache__` artifacts). |
+| Codex | 0 | 0 | No activity in range. |
+| Cursor | 0 | 0 | No activity in range. |
+
+Build: cargo check passed; cargo clippy passed (0 warnings); cargo test --workspace passed, including `auth_audit_trail`

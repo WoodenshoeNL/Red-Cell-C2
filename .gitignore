@@ -48,3 +48,7 @@ data/
 
 # Automated test harness — credentials (never commit)
 automatic-test/config/targets.toml
+
+# Python bytecode artifacts (autotest harness)
+automatic-test/**/__pycache__/
+automatic-test/**/*.pyc

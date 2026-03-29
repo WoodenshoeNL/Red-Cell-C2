@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 955 | 231 | 31 |
+| Tasks closed | 961 | 231 | 31 |
 | Bugs filed against | 113 | 36 | 9 |
 | Bug rate (bugs/task) | 0.12 | 0.16 | 0.29 |
 | Quality score | 88% | 84% | 71% |
 
-*Bug rates: Claude 113/955=0.12, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 113/961=0.12, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -4182,3 +4182,13 @@ Build: cargo check passed; cargo test --workspace failed on the already-open `re
 | Cursor | 0 | 0 | No activity in range. |
 
 Build: passed (`cargo check --workspace`, `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`)
+
+### QA Review — 2026-03-29 20:45 — c174a5e9..ca83fc5f
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 6 | 0 | Closed `red-cell-c2-eea49`, `red-cell-c2-3zhne`, `red-cell-c2-h8ajw`, `red-cell-c2-hy9xl`, `red-cell-c2-ok1hx`, and `red-cell-c2-9xfx5`. Reviewed the corresponding fixes in `teamserver/src/payload_builder.rs`, `teamserver/tests/external_listener_pipeline.rs`, `automatic-test/test.py`, and autotest scenarios 10/13. The remaining commit in range (`perf(prompts): apply QA + arch loop optimisations to Codex prompts`) is prompt-only and carried no QA findings. |
+| Codex | 0 | 0 | No activity in range. |
+| Cursor | 0 | 0 | No activity in range. |
+
+Build: passed (`cargo check --workspace`, `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`; `cargo nextest` not installed, so `cargo test` was used)

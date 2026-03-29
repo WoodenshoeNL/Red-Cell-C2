@@ -34,47 +34,69 @@ git log --oneline -5
 
 ## Step 2 — Map the Codebase
 
-```bash
-find teamserver common client -name '*.rs' | sort
-find teamserver common client -name 'Cargo.toml' | xargs grep -l '^\[package\]' | sort
-find teamserver common client -name '*.rs' | xargs wc -l | sort -rn | head -30
-grep -rn '^pub ' common/src/ | grep -v '^\s*//' | head -60
-```
+Get a full structural picture before reading any code. Use your Glob and Grep tools
+directly — do not shell out to `find` or `grep` for these.
+
+- Glob `teamserver/**/*.rs`, `common/**/*.rs`, `client/**/*.rs` to list all source files
+- Glob `**/Cargo.toml` to find crate roots
+- For each `.rs` file, note its path; mentally flag files whose names suggest they are
+  security-sensitive (`crypto`, `auth`, `session`, `key`, `handshake`, `protocol`,
+  `dispatch`) or structurally important (`main`, `lib`, `mod`, `handler`, `router`)
+- Grep `^pub ` in `common/src/` to map the shared API surface
+
+Do not read any file contents yet — only build the map.
 
 ---
 
-## Step 3 — Read the Core Files in Full
+## Step 3 — Read Files Selectively
 
-```bash
-cat common/src/lib.rs
-cat common/src/domain.rs
-cat common/src/config.rs
-cat teamserver/src/main.rs
-cat teamserver/src/lib.rs
-```
+Using the map from Step 2, read files in the following priority order. Use your Read
+tool for each file — do NOT cat everything in one shell loop.
 
-Then read every teamserver module and integration test:
+**Tier 1 — always read in full:**
+- `common/src/lib.rs`, `common/src/domain.rs`, `common/src/config.rs`
+- `teamserver/src/main.rs`, `teamserver/src/lib.rs` (or equivalent top-level)
+- Any file whose name contains: `crypto`, `auth`, `session`, `key`, `handshake`,
+  `protocol`, `dispatch`, `kerberos`
 
-```bash
-find teamserver/src -name '*.rs' | sort | while read f; do
-  echo "====== $f ======"
-  cat "$f"
-done
+**Tier 2 — read in full if they exist:**
+- All remaining `teamserver/src/*.rs` files (handlers, routers, listeners)
+- All `teamserver/tests/*.rs` integration tests
 
-find teamserver/tests -name '*.rs' 2>/dev/null | while read f; do
-  echo "====== $f ======"
-  cat "$f"
-done
-```
+**Tier 3 — skim (read first 60 lines, then full read only if something looks wrong):**
+- `client/src/` files
+- `client-cli/src/` files
+
+Work through tier 1 before tier 2. Do not load all files simultaneously — read one,
+note findings, then continue. If a file is very large (>500 lines), read it in chunks
+using offset/limit rather than all at once.
 
 ---
 
 ## Step 4 — Build and Test
 
+**Step 4a — type check first (abort if this fails):**
+
 ```bash
 cargo check --workspace 2>&1
-cargo clippy --workspace -- -D warnings 2>&1
+```
+
+If `cargo check` fails, record the errors and skip 4b and 4c — do not waste time
+running tests against broken code. File a bug for the breakage.
+
+**Step 4b — run tests:**
+
+```bash
+# preferred:
+cargo nextest run --workspace 2>&1
+# fallback if nextest is absent:
 cargo test --workspace 2>&1
+```
+
+**Step 4c — lint:**
+
+```bash
+cargo clippy --workspace -- -D warnings 2>&1
 ```
 
 Note every warning, error, and test failure.
@@ -151,17 +173,21 @@ Compare code to `AGENTS.md`:
 
 ## Step 6 — Attribute Findings to Agents
 
-For each finding, determine which agent wrote the code:
+Before filing issues, determine which agent wrote the problematic code. Use a single
+`git log` call per file rather than one `git show` per commit:
 
 ```bash
-git log --format="%H %s" -- path/to/file.rs | head -5 | while read hash title; do
-  agent=$(git show "$hash" --no-patch --format="%b" \
-    | grep "Co-Authored-By:" | sed 's/Co-Authored-By: //' | head -1)
-  echo "$hash | ${agent:-unknown} | $title"
-done
+# For each file with a finding, get the last few commits and their authors in one call:
+git log --format="%H | %s | %b" -5 -- path/to/file.rs | grep -E "^|Co-Authored-By"
 ```
 
-Keep a tally per agent by category.
+Or batch multiple files at once:
+
+```bash
+git log --format="%H %aN %s" -- file1.rs file2.rs file3.rs | head -20
+```
+
+Keep a mental tally per agent: how many findings, and of what category.
 
 ---
 

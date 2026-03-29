@@ -458,14 +458,39 @@ async fn show(client: &ApiClient, id: &str) -> Result<AgentDetail, CliError> {
     Ok(agent_detail_from_raw(raw))
 }
 
+/// Map a user-supplied command name to a Demon `CommandID` decimal string.
+///
+/// Built-in agent commands that do not go through the generic job/shell
+/// handler (command ID 21 = `DemonCommand::CommandJob`) are listed here so
+/// the CLI can route them to the correct handler without the caller needing
+/// to know numeric IDs.
+///
+/// | User command | CommandID | Demon constant |
+/// |---|---|---|
+/// | `screenshot` | `2510` | `CommandScreenshot` |
+/// | anything else | `21` | `CommandJob` |
+fn command_id_for(cmd: &str) -> &'static str {
+    // Only the first word is checked so that future parameterised commands
+    // like `screenshot /path/to/save.png` route correctly.
+    let verb = cmd.split_whitespace().next().unwrap_or(cmd);
+    match verb {
+        "screenshot" => "2510",
+        _ => "21",
+    }
+}
+
 /// `agent exec <id> --cmd <cmd>` — submit a command task to an agent.
 ///
 /// POSTs to `POST /agents/{id}/task` using the Demon `AgentTaskInfo` wire
 /// format and returns immediately with the server-assigned task ID.
 ///
+/// Built-in commands such as `screenshot` are routed to their specific Demon
+/// `CommandID`; all other commands use the generic shell handler (ID 21).
+///
 /// # Examples
 /// ```text
 /// red-cell-cli agent exec abc123 --cmd "whoami"
+/// red-cell-cli agent exec abc123 --cmd "screenshot"
 /// ```
 #[instrument(skip(client))]
 async fn exec_submit(client: &ApiClient, id: &str, cmd: &str) -> Result<JobSubmitted, CliError> {
@@ -476,10 +501,9 @@ async fn exec_submit(client: &ApiClient, id: &str, cmd: &str) -> Result<JobSubmi
     struct Body<'a> {
         #[serde(rename = "CommandLine")]
         command_line: &'a str,
-        /// Numeric demon command identifier as a decimal string.
-        /// `21` = `DemonCommand::CommandJob` — the generic job/shell command.
+        /// Numeric Demon command identifier as a decimal string.
         #[serde(rename = "CommandID")]
-        command_id: &'static str,
+        command_id: &'a str,
         /// Target agent identifier (upper-hex).  The server normalises this
         /// value; an empty string is replaced with the path parameter.
         #[serde(rename = "DemonID")]
@@ -489,10 +513,11 @@ async fn exec_submit(client: &ApiClient, id: &str, cmd: &str) -> Result<JobSubmi
         task_id: &'static str,
     }
 
+    let cid = command_id_for(cmd);
     let resp: TaskQueuedResponse = client
         .post(
             &format!("/agents/{id}/task"),
-            &Body { command_line: cmd, command_id: "21", demon_id: id, task_id: "" },
+            &Body { command_line: cmd, command_id: cid, demon_id: id, task_id: "" },
         )
         .await?;
     Ok(JobSubmitted { job_id: resp.task_id })
@@ -1238,6 +1263,25 @@ mod tests {
         assert_eq!(agents[0].hostname, "HOST-A");
         assert_eq!(agents[0].status, "alive");
         assert_eq!(agents[0].os, "Windows Server 2022 x64");
+    }
+
+    // ── command_id_for ────────────────────────────────────────────────────────
+
+    #[test]
+    fn command_id_for_screenshot_returns_2510() {
+        assert_eq!(command_id_for("screenshot"), "2510");
+    }
+
+    #[test]
+    fn command_id_for_shell_cmd_returns_21() {
+        assert_eq!(command_id_for("whoami"), "21");
+        assert_eq!(command_id_for("dir C:\\"), "21");
+        assert_eq!(command_id_for("ps aux"), "21");
+    }
+
+    #[test]
+    fn command_id_for_empty_returns_21() {
+        assert_eq!(command_id_for(""), "21");
     }
 
     // ── exec_wait / fetch_output / watch_output ────────────────────────────────

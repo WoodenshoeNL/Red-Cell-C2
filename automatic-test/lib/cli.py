@@ -164,3 +164,33 @@ def operator_create(cfg: CliConfig, username: str, password: str, role: str) -> 
 
 def operator_delete(cfg: CliConfig, username: str) -> dict:
     return _run(cfg, "operator", "delete", username)
+
+
+# ── Loot ─────────────────────────────────────────────────────────────────────
+
+def loot_list(
+    cfg: CliConfig,
+    kind: str | None = None,
+    agent_id: str | None = None,
+    operator: str | None = None,
+    since: str | None = None,
+    limit: int | None = None,
+) -> list[dict]:
+    """Return the loot list, optionally filtered by kind, agent, operator, or time."""
+    args = ["loot", "list"]
+    if kind:
+        args += ["--kind", kind]
+    if agent_id:
+        args += ["--agent", agent_id]
+    if operator:
+        args += ["--operator", operator]
+    if since:
+        args += ["--since", since]
+    if limit is not None:
+        args += ["--limit", str(limit)]
+    return _run(cfg, *args)
+
+
+def loot_download(cfg: CliConfig, loot_id: int, dst: str) -> dict:
+    """Download raw loot bytes to a local file.  Returns the result dict."""
+    return _run(cfg, "loot", "download", str(loot_id), "--out", dst)

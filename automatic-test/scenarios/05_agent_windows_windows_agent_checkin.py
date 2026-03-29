@@ -1,10 +1,31 @@
 """
 Scenario 05_agent_windows: Windows agent checkin
 
-Deploy Demon to Windows 11 via SSH, wait for checkin, run command suite
+Deploy Demon to Windows 11 via SSH, wait for checkin, run command suite.
+
+Skip if ctx.windows is None.
+
+Steps:
+  1. Create + start HTTP listener
+  2. Build Demon EXE (x64) for Windows target
+  3. Deploy via SSH/SCP to Windows 11 test machine
+  4. Execute payload in background on target
+  5. Wait for agent checkin
+  6. Run command suite: whoami, dir C:\\, ipconfig
+  7. Kill agent, stop listener, clean up work_dir on target
 """
 
 DESCRIPTION = "Windows agent checkin"
+
+import base64
+import os
+import tempfile
+import uuid
+
+
+def _short_id() -> str:
+    """Return a short unique hex suffix to avoid name collisions across test runs."""
+    return uuid.uuid4().hex[:8]
 
 
 def run(ctx):
@@ -15,6 +36,155 @@ def run(ctx):
     ctx.env     — raw env.toml dict
     ctx.dry_run — bool
 
-    Raise any exception to mark the scenario as FAILED.
+    Raises AssertionError with a descriptive message on any failure.
+    Skips silently when ctx.windows is None.
     """
-    raise NotImplementedError("Scenario 05_agent_windows not yet implemented")
+    if ctx.windows is None:
+        print("  [skip] ctx.windows is None — no Windows target configured")
+        return
+
+    from lib.cli import (
+        CliError,
+        agent_exec,
+        agent_kill,
+        agent_list,
+        listener_create,
+        listener_delete,
+        listener_start,
+        listener_stop,
+        payload_build,
+    )
+    from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
+    from lib.wait import poll, TimeoutError as WaitTimeout
+
+    cli = ctx.cli
+    target = ctx.windows
+    uid = _short_id()
+    listener_name = f"test-windows-{uid}"
+    listener_port = ctx.env.get("listeners", {}).get("windows_port", 19082)
+    remote_payload = f"{target.work_dir}\\agent-{uid}.exe"
+
+    # Collect pre-existing agent IDs so we can identify the new checkin.
+    try:
+        pre_existing_ids = {a["id"] for a in agent_list(cli)}
+    except Exception:
+        pre_existing_ids = set()
+
+    local_payload = tempfile.mktemp(suffix=".exe")  # cleaned up in finally
+
+    # ── Step 1: Create + start HTTP listener ────────────────────────────────
+    print(f"  [listener] creating HTTP listener {listener_name!r} on port {listener_port}")
+    listener_create(cli, listener_name, "http", port=listener_port)
+    listener_start(cli, listener_name)
+    print("  [listener] started")
+
+    agent_id = None
+    try:
+        # ── Step 2: Build Demon payload ──────────────────────────────────────
+        print("  [payload] building Demon EXE x64 for Windows target")
+        result = payload_build(
+            cli, agent="demon", listener=listener_name, arch="x64", fmt="exe"
+        )
+        raw = base64.b64decode(result["bytes"])
+        assert len(raw) > 0, "payload is empty"
+        print(f"  [payload] built ({len(raw)} bytes)")
+
+        with open(local_payload, "wb") as fh:
+            fh.write(raw)
+
+        # ── Step 3: Deploy via SCP ───────────────────────────────────────────
+        print(f"  [deploy] ensuring work dir {target.work_dir!r} on target")
+        ensure_work_dir(target)
+        print(f"  [deploy] uploading payload → {remote_payload}")
+        upload(target, local_payload, remote_payload)
+        print("  [deploy] uploaded")
+
+        # ── Step 4: Execute payload in background ────────────────────────────
+        print("  [exec] launching payload in background on target")
+        execute_background(target, remote_payload)
+
+        # ── Step 5: Wait for agent checkin ───────────────────────────────────
+        checkin_timeout = ctx.env.get("timeouts", {}).get("agent_checkin", 60)
+        print(f"  [wait] waiting up to {checkin_timeout}s for agent checkin")
+
+        def _new_agent_appeared():
+            agents = agent_list(cli)
+            new = [a for a in agents if a["id"] not in pre_existing_ids]
+            return new
+
+        new_agents = poll(
+            fn=_new_agent_appeared,
+            predicate=lambda agents: len(agents) > 0,
+            timeout=checkin_timeout,
+            description="new Windows agent checkin",
+        )
+        agent_id = new_agents[0]["id"]
+        print(f"  [wait] agent checked in: {agent_id}")
+
+        # ── Step 6: Command suite ────────────────────────────────────────────
+
+        # whoami → DOMAIN\username format
+        print("  [cmd] whoami")
+        result = agent_exec(cli, agent_id, "whoami", wait=True, timeout=30)
+        whoami_out = result.get("output", "").strip()
+        assert whoami_out, "whoami returned empty output"
+        assert "\\" in whoami_out, (
+            f"whoami output {whoami_out!r} does not contain '\\' "
+            f"— expected DOMAIN\\username format"
+        )
+        print(f"  [cmd] whoami passed: {whoami_out!r}")
+
+        # dir C:\ → non-empty output
+        print("  [cmd] dir C:\\")
+        result = agent_exec(cli, agent_id, "dir C:\\", wait=True, timeout=30)
+        dir_out = result.get("output", "").strip()
+        assert dir_out, "dir C:\\ returned empty output"
+        print(f"  [cmd] dir C:\\ passed ({len(dir_out.splitlines())} lines)")
+
+        # ipconfig → contains 'IPv4 Address'
+        print("  [cmd] ipconfig")
+        result = agent_exec(cli, agent_id, "ipconfig", wait=True, timeout=30)
+        ipconfig_out = result.get("output", "").strip()
+        assert ipconfig_out, "ipconfig returned empty output"
+        assert "IPv4 Address" in ipconfig_out, (
+            f"ipconfig output does not contain 'IPv4 Address':\n{ipconfig_out[:500]}"
+        )
+        print("  [cmd] ipconfig passed")
+
+        print("  [suite] all commands passed")
+
+    finally:
+        # ── Step 7: Kill agent, stop listener, clean up ──────────────────────
+        if agent_id:
+            print(f"  [cleanup] killing agent {agent_id}")
+            try:
+                agent_kill(cli, agent_id)
+            except Exception as exc:
+                print(f"  [cleanup] agent kill failed (non-fatal): {exc}")
+
+        print(f"  [cleanup] stopping/deleting listener {listener_name!r}")
+        try:
+            listener_stop(cli, listener_name)
+        except Exception:
+            pass
+        try:
+            listener_delete(cli, listener_name)
+        except Exception:
+            pass
+
+        print("  [cleanup] removing work_dir on target")
+        try:
+            run_remote(
+                target,
+                f'powershell -Command "Remove-Item -Recurse -Force -Path \'{target.work_dir}\'"',
+                timeout=15,
+            )
+        except Exception as exc:
+            print(f"  [cleanup] work_dir removal failed (non-fatal): {exc}")
+
+        try:
+            os.unlink(local_payload)
+        except Exception:
+            pass
+
+        print("  [cleanup] done")

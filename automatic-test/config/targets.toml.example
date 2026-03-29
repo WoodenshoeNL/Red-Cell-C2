@@ -29,3 +29,12 @@ user     = "testuser"
 key      = "~/.ssh/red_cell_test"
 # Directory on the target where payloads will be uploaded and executed
 work_dir = "C:\\Temp\\rc-test"
+
+# Optional second Windows target — required only for scenario 10 (SMB pivot chain).
+# Both [windows] and [windows2] hosts must be able to reach each other over SMB (TCP 445).
+# [windows2]
+# host     = "192.168.x.x"
+# port     = 22
+# user     = "testuser"
+# key      = "~/.ssh/red_cell_test"
+# work_dir = "C:\\Temp\\rc-test"

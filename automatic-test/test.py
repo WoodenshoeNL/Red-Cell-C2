@@ -89,8 +89,9 @@ def discover_scenarios() -> dict[str, Path]:
 @dataclass
 class RunContext:
     cli: CliConfig
-    linux: Optional[TargetConfig]
-    windows: Optional[TargetConfig]
+    linux: TargetConfig | None
+    windows: TargetConfig | None
+    windows2: TargetConfig | None
     env: dict
     dry_run: bool
 
@@ -161,9 +162,11 @@ def main():
     cli_cfg = make_cli_config(env)
     linux_target = make_target(targets_raw["linux"]) if "linux" in targets_raw else None
     windows_target = make_target(targets_raw["windows"]) if "windows" in targets_raw else None
+    windows2_target = make_target(targets_raw["windows2"]) if "windows2" in targets_raw else None
 
     if args.target == "linux":
         windows_target = None
+        windows2_target = None
     elif args.target == "windows":
         linux_target = None
 
@@ -171,6 +174,7 @@ def main():
         cli=cli_cfg,
         linux=linux_target,
         windows=windows_target,
+        windows2=windows2_target,
         env=env,
         dry_run=args.dry_run,
     )
@@ -196,6 +200,7 @@ def main():
     print(f"Server:   {env['server']['url']}")
     print(f"Linux:    {linux_target.host if linux_target else 'disabled'}")
     print(f"Windows:  {windows_target.host if windows_target else 'disabled'}")
+    print(f"Windows2: {windows2_target.host if windows2_target else 'disabled'}")
     print(f"Dry run:  {ctx.dry_run}")
     print(f"Scenarios: {', '.join(sid for sid, _ in selected)}")
 

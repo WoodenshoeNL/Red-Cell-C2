@@ -5,13 +5,15 @@ Spin up two different agent types simultaneously and verify they operate
 independently against the same teamserver without interfering with each other.
 
 Skip if either ctx.linux or ctx.windows is None — both targets are required.
+Skip if Phantom is not available on the teamserver — this scenario specifically
+tests Demon-vs-Phantom isolation and must not silently degrade to Demon-vs-Demon.
 
 Steps:
   1.  Create + start two HTTP listeners (one per agent)
   2.  Build Demon EXE (x64) for Windows target
   3.  Build Phantom ELF (x64) for Linux target
-      (falls back to Demon bin if Phantom payload is unavailable)
-  4.  Deploy Demon to Windows, Phantom/Demon to Linux
+      (skip if Phantom payload is unavailable)
+  4.  Deploy Demon to Windows, Phantom to Linux
   5.  Execute both payloads in background
   6.  Wait for both agents to check in
   7.  Run identical command set on both agents concurrently
@@ -28,7 +30,7 @@ Why this matters:
 
 from __future__ import annotations
 
-DESCRIPTION = "Cross-agent interoperability: session isolation between Demon and Phantom"
+DESCRIPTION = "Cross-agent interoperability: session isolation between Demon (Windows) and Phantom (Linux)"
 
 import base64
 import os
@@ -83,9 +85,13 @@ def _build_and_deploy_windows(cli, target, listener_name, uid):
 
 
 def _build_and_deploy_linux(cli, target, listener_name, uid):
-    """Build Phantom ELF (or Demon bin as fallback) and deploy to Linux target.
+    """Build Phantom ELF and deploy to Linux target.
 
-    Returns (remote_payload, agent_type) where agent_type is 'phantom' or 'demon'.
+    Raises ScenarioSkipped if the teamserver cannot produce a Phantom payload —
+    this scenario requires two *different* agent types and must not silently
+    degrade to Demon-vs-Demon.
+
+    Returns remote_payload path.
     """
     from lib.cli import CliError, payload_build
     from lib.deploy import ensure_work_dir, execute_background, run_remote, upload
@@ -93,24 +99,18 @@ def _build_and_deploy_linux(cli, target, listener_name, uid):
     remote_payload = f"{target.work_dir}/agent-{uid}.bin"
     local_payload = tempfile.mktemp(suffix=".bin")
 
-    # Try Phantom first; fall back to Demon bin if the server doesn't have
-    # a Phantom build registered yet (prerequisite not yet complete).
-    agent_type = "phantom"
-    raw = None
+    print(f"  [linux] building Phantom ELF x64 for listener {listener_name!r}")
     try:
-        print(f"  [linux] building Phantom ELF x64 for listener {listener_name!r}")
         result = payload_build(cli, agent="phantom", listener=listener_name, arch="x64", fmt="elf")
         raw = base64.b64decode(result["bytes"])
         if len(raw) == 0:
             raise CliError("EMPTY_PAYLOAD", "Phantom payload is empty", 1)
-        print(f"  [linux] Phantom ELF built ({len(raw)} bytes)")
     except Exception as exc:
-        print(f"  [linux] Phantom unavailable ({exc}), falling back to Demon bin")
-        agent_type = "demon"
-        result = payload_build(cli, agent="demon", listener=listener_name, arch="x64", fmt="bin")
-        raw = base64.b64decode(result["bytes"])
-        assert len(raw) > 0, "Demon fallback payload is empty"
-        print(f"  [linux] Demon bin built ({len(raw)} bytes)")
+        raise ScenarioSkipped(
+            f"Phantom unavailable — skipping cross-agent interop test ({exc}). "
+            "Complete the Phantom agent implementation before running scenario 13."
+        ) from exc
+    print(f"  [linux] Phantom ELF built ({len(raw)} bytes)")
 
     with open(local_payload, "wb") as fh:
         fh.write(raw)
@@ -127,7 +127,7 @@ def _build_and_deploy_linux(cli, target, listener_name, uid):
         except OSError:
             pass
 
-    return remote_payload, agent_type
+    return remote_payload
 
 
 # ── Isolation checks ─────────────────────────────────────────────────────────
@@ -264,7 +264,9 @@ def run(ctx):
     ctx.dry_run — bool
 
     Raises AssertionError with a descriptive message on any failure.
-    Skips silently when either ctx.linux or ctx.windows is None.
+    Raises ScenarioSkipped when either ctx.linux or ctx.windows is None,
+    or when the teamserver cannot produce a Phantom payload (Phantom not yet
+    implemented) — both agents must be different types for this test to be valid.
     """
     if ctx.linux is None:
         raise ScenarioSkipped("ctx.linux is None — Linux target required for this scenario")
@@ -318,7 +320,6 @@ def run(ctx):
         # Deploy in parallel to reduce total setup time.
         win_remote_payload = None
         lin_remote_payload = None
-        lin_agent_type = "unknown"
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             win_future = pool.submit(
@@ -334,9 +335,9 @@ def run(ctx):
                 if future is win_future:
                     win_remote_payload = future.result()
                 else:
-                    lin_remote_payload, lin_agent_type = future.result()
+                    lin_remote_payload = future.result()
 
-        print(f"  [deploy] both payloads deployed (Linux: {lin_agent_type})")
+        print("  [deploy] both payloads deployed (Windows: Demon, Linux: Phantom)")
 
         # ── Step 6: Wait for both agents to check in ─────────────────────────
         checkin_timeout = ctx.env.get("timeouts", {}).get("agent_checkin", 90)

@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 943 | 231 | 31 |
-| Bugs filed against | 109 | 36 | 9 |
+| Tasks closed | 945 | 231 | 31 |
+| Bugs filed against | 110 | 36 | 9 |
 | Bug rate (bugs/task) | 0.12 | 0.16 | 0.29 |
 | Quality score | 88% | 84% | 71% |
 
-*Bug rates: Claude 109/943=0.12, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 110/945=0.12, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -31,7 +31,7 @@ Each loop run updates the running totals and appends a review entry.
 | Test infrastructure / flakiness | 23 | 1 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
-| Correctness / pagination | 45 | 7 | 1 |
+| Correctness / pagination | 46 | 7 | 1 |
 | Workflow / close-hygiene | 21 | 0 | 0 |
 | Code reuse / duplication | 8 | 0 | 0 |
 
@@ -4162,3 +4162,13 @@ Build: cargo check passed; cargo test --workspace failed to compile (`teamserver
 | Cursor | 0 | 0 | No activity in range. |
 
 Build: cargo check passed. `cargo test --workspace` / `cargo clippy --workspace -- -D warnings` in the main worktree were contaminated by unrelated unstaged changes outside this review range, so they were not used for attribution.
+
+### QA Review — 2026-03-29 18:54 — b7e455bc..be569d06
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 1 | Closed `red-cell-c2-7t0uj` and `red-cell-c2-p1py9`. Filed `red-cell-c2-h8ajw` because the new Archon payload path reuses the existing payload cache key, which still ignores agent variant and can return cached Demon bytes for an Archon build. |
+| Codex | 0 | 0 | No activity in range. |
+| Cursor | 0 | 0 | No activity in range. |
+
+Build: cargo check passed; cargo test --workspace failed on the already-open `red-cell-c2-eea49` compile error (`teamserver/tests/external_listener_pipeline.rs:62` missing `rate_limiter`); cargo clippy --workspace -- -D warnings passed

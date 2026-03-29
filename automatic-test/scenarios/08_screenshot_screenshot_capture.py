@@ -279,7 +279,11 @@ def run(ctx):
         print("  [cleanup] removing work_dir on target")
         try:
             if is_windows:
-                run_remote(target, f"rmdir /S /Q {target.work_dir}", timeout=15)
+                run_remote(
+                    target,
+                    f'powershell -Command "Remove-Item -Recurse -Force -Path \'{target.work_dir}\'"',
+                    timeout=15,
+                )
             else:
                 run_remote(target, f"rm -rf {target.work_dir}", timeout=15)
         except Exception as exc:

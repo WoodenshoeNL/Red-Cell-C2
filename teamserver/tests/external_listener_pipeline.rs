@@ -68,6 +68,7 @@ async fn spawn_server_with_fallback() -> Result<common::TestServer, Box<dyn std:
         events,
         sockets,
         webhooks,
+        rate_limiter: LoginRateLimiter::new(),
     })
 }
 

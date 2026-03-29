@@ -7,10 +7,11 @@
 # Must be run as root or with sudo.
 #
 # Usage:
-#   sudo ./install.sh                  # install everything (teamserver + client)
+#   sudo ./install.sh                  # install everything (teamserver + client + agents)
 #   sudo ./install.sh --teamserver     # teamserver only
 #   sudo ./install.sh --client         # client only
-#   sudo ./install.sh --teamserver --client  # explicit both
+#   sudo ./install.sh --agents         # Rust cross-compile targets for Phantom + Specter
+#   sudo ./install.sh --teamserver --client  # explicit combination
 
 set -euo pipefail
 
@@ -26,28 +27,31 @@ info() { echo -e "${BOLD}[--]${NC}    $*"; }
 
 INSTALL_TEAMSERVER=0
 INSTALL_CLIENT=0
+INSTALL_AGENTS=0
 
 for arg in "$@"; do
     case "$arg" in
         --teamserver) INSTALL_TEAMSERVER=1 ;;
         --client)     INSTALL_CLIENT=1 ;;
+        --agents)     INSTALL_AGENTS=1 ;;
         --help|-h)
-            echo "Usage: sudo $0 [--teamserver] [--client]"
-            echo "  (no flags = install both)"
+            echo "Usage: sudo $0 [--teamserver] [--client] [--agents]"
+            echo "  (no flags = install all)"
             exit 0
             ;;
         *)
             fail "Unknown argument: $arg"
-            echo "Usage: sudo $0 [--teamserver] [--client]"
+            echo "Usage: sudo $0 [--teamserver] [--client] [--agents]"
             exit 1
             ;;
     esac
 done
 
-# Default: install both if no flags given
-if [[ "$INSTALL_TEAMSERVER" -eq 0 && "$INSTALL_CLIENT" -eq 0 ]]; then
+# Default: install all if no flags given
+if [[ "$INSTALL_TEAMSERVER" -eq 0 && "$INSTALL_CLIENT" -eq 0 && "$INSTALL_AGENTS" -eq 0 ]]; then
     INSTALL_TEAMSERVER=1
     INSTALL_CLIENT=1
+    INSTALL_AGENTS=1
 fi
 
 # ── Sudo / root check ─────────────────────────────────────────────────────────
@@ -69,13 +73,11 @@ fi
 
 echo ""
 echo -e "${BOLD}=== Red-Cell-C2 Production Installer ===${NC}"
-if [[ "$INSTALL_TEAMSERVER" -eq 1 && "$INSTALL_CLIENT" -eq 1 ]]; then
-    info "Installing: teamserver + client"
-elif [[ "$INSTALL_TEAMSERVER" -eq 1 ]]; then
-    info "Installing: teamserver only"
-else
-    info "Installing: client only"
-fi
+WHAT_INSTALLING=()
+[[ "$INSTALL_TEAMSERVER" -eq 1 ]] && WHAT_INSTALLING+=("teamserver")
+[[ "$INSTALL_CLIENT"     -eq 1 ]] && WHAT_INSTALLING+=("client")
+[[ "$INSTALL_AGENTS"     -eq 1 ]] && WHAT_INSTALLING+=("agent toolchains")
+info "Installing: $(IFS='+'; echo "${WHAT_INSTALLING[*]}")"
 echo ""
 
 # ── 1. System packages ────────────────────────────────────────────────────────
@@ -211,7 +213,51 @@ if [[ "$INSTALL_CLIENT" -eq 1 ]]; then
     create_dir "$SCRIPT_DIR/logs"
 fi
 
-# ── 5. Binary checks ──────────────────────────────────────────────────────────
+# ── 5. Agent Rust toolchains (agents only) ────────────────────────────────────
+
+if [[ "$INSTALL_AGENTS" -eq 1 ]]; then
+    echo ""
+    echo "--- agent Rust cross-compile targets ---"
+
+    if ! command -v rustup &>/dev/null; then
+        fail "rustup not found — install Rust first: https://rustup.rs"
+        exit 1
+    fi
+
+    # Phantom: statically-linked Linux binaries
+    info "Adding Rust target: x86_64-unknown-linux-musl (Phantom x64)"
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        sudo -u "$SUDO_USER" rustup target add x86_64-unknown-linux-musl
+    else
+        rustup target add x86_64-unknown-linux-musl
+    fi
+
+    info "Adding Rust target: aarch64-unknown-linux-musl (Phantom arm64)"
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        sudo -u "$SUDO_USER" rustup target add aarch64-unknown-linux-musl
+    else
+        rustup target add aarch64-unknown-linux-musl
+    fi
+
+    # musl-tools provides musl-gcc wrapper needed by the musl targets
+    apt-get install -y --no-install-recommends musl-tools
+
+    # aarch64 cross-linker
+    apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+
+    # Specter: Windows PE binaries (uses MinGW linker from --teamserver)
+    info "Adding Rust target: x86_64-pc-windows-gnu (Specter x64)"
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        sudo -u "$SUDO_USER" rustup target add x86_64-pc-windows-gnu
+    else
+        rustup target add x86_64-pc-windows-gnu
+    fi
+
+    ok "agent Rust targets installed"
+    warn "Specter requires MinGW-w64 linker — run --teamserver if not already done."
+fi
+
+# ── 6. Binary checks ──────────────────────────────────────────────────────────
 
 echo ""
 echo "--- binaries ---"
@@ -229,7 +275,7 @@ check_binary() {
 [[ "$INSTALL_TEAMSERVER" -eq 1 ]] && check_binary "red-cell"        "$SCRIPT_DIR/target/release/red-cell"
 [[ "$INSTALL_CLIENT"     -eq 1 ]] && check_binary "red-cell-client" "$SCRIPT_DIR/target/release/red-cell-client"
 
-# ── 6. Summary ────────────────────────────────────────────────────────────────
+# ── 7. Summary ────────────────────────────────────────────────────────────────
 
 echo ""
 echo -e "${BOLD}=== Installation complete ===${NC}"
@@ -244,5 +290,13 @@ fi
 if [[ "$INSTALL_CLIENT" -eq 1 ]]; then
     echo "Client:"
     echo "  ./target/release/red-cell-client"
+    echo ""
+fi
+
+if [[ "$INSTALL_AGENTS" -eq 1 ]]; then
+    echo "Agent builds:"
+    echo "  Phantom:  cd phantom && cargo build --release --target x86_64-unknown-linux-musl"
+    echo "  Specter:  cd specter && cargo build --release --target x86_64-pc-windows-gnu"
+    echo "  Archon:   cd archon && make   (requires --teamserver for nasm + MinGW)"
     echo ""
 fi

@@ -1,0 +1,28 @@
+Teamserver {
+    Host = "127.0.0.1"
+    Port = 40099
+
+    Build {
+        Compiler64 = "data/x86_64-w64-mingw32-cross/bin/x86_64-w64-mingw32-gcc"
+        Compiler86 = "data/i686-w64-mingw32-cross/bin/i686-w64-mingw32-gcc"
+        Nasm = "/usr/bin/nasm"
+    }
+}
+
+Operators {
+    user "testop" {
+        Password = "test-password-1234"
+    }
+}
+
+Demon {
+    Sleep = 1
+    Jitter = 0
+
+    TrustXForwardedFor = false
+
+    Injection {
+        Spawn64 = "C:\\Windows\\System32\\notepad.exe"
+        Spawn32 = "C:\\Windows\\SysWOW64\\notepad.exe"
+    }
+}

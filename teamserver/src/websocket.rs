@@ -134,6 +134,10 @@ impl LoginRateLimiter {
     }
 
     /// Return `true` if the given IP has not exceeded the failed-attempt threshold.
+    ///
+    /// This is a read-only check used only in tests to inspect limiter state.
+    /// Production callers should use [`try_acquire`] instead.
+    #[cfg(test)]
     pub(crate) async fn is_allowed(&self, ip: IpAddr) -> bool {
         let mut windows = self.windows.lock().await;
         let Some(window) = windows.get_mut(&ip) else {
@@ -148,7 +152,49 @@ impl LoginRateLimiter {
         window.attempts < MAX_FAILED_LOGIN_ATTEMPTS
     }
 
+    /// Atomically check whether this IP is under the rate-limit threshold and,
+    /// if so, reserve a slot for this attempt.
+    ///
+    /// Returns `true` if the attempt is allowed (and has been pre-counted),
+    /// `false` if the IP is currently rate-limited.
+    ///
+    /// This method is race-free: concurrent calls from the same IP cannot all
+    /// pass the check before any attempt is recorded.
+    ///
+    /// On successful authentication the caller must call [`record_success`] to
+    /// clear the counter.  On failure no further call is needed — the attempt is
+    /// already counted.
+    pub(crate) async fn try_acquire(&self, ip: IpAddr) -> bool {
+        let mut windows = self.windows.lock().await;
+        let now = Instant::now();
+
+        prune_expired_windows(&mut windows, LOGIN_WINDOW_DURATION, now);
+        if !windows.contains_key(&ip) && windows.len() >= MAX_LOGIN_ATTEMPT_WINDOWS {
+            evict_oldest_windows(&mut windows, MAX_LOGIN_ATTEMPT_WINDOWS / 2);
+        }
+
+        let window = windows.entry(ip).or_default();
+
+        if now.duration_since(window.window_start) >= LOGIN_WINDOW_DURATION {
+            // Expired window: reset and allow this attempt as the first.
+            window.attempts = 1;
+            window.window_start = now;
+            return true;
+        }
+
+        if window.attempts >= MAX_FAILED_LOGIN_ATTEMPTS {
+            return false;
+        }
+
+        window.attempts += 1;
+        true
+    }
+
     /// Record a failed login attempt from the given IP.
+    ///
+    /// Used only in tests to pre-populate limiter state.  Production callers
+    /// should use [`try_acquire`] instead, which atomically checks and records.
+    #[cfg(test)]
     pub(crate) async fn record_failure(&self, ip: IpAddr) {
         let mut windows = self.windows.lock().await;
         let now = Instant::now();
@@ -414,7 +460,7 @@ async fn handle_authentication(
     client_ip: IpAddr,
     socket: &mut WebSocket,
 ) -> Result<(), ()> {
-    if !rate_limiter.is_allowed(client_ip).await {
+    if !rate_limiter.try_acquire(client_ip).await {
         warn!(
             %connection_id,
             %client_ip,
@@ -517,7 +563,6 @@ async fn handle_authentication(
         }
         Ok(AuthenticationResult::Failure(failure)) => {
             tokio::time::sleep(FAILED_LOGIN_DELAY).await;
-            rate_limiter.record_failure(client_ip).await;
             log_operator_action(
                 database,
                 webhooks,
@@ -538,7 +583,6 @@ async fn handle_authentication(
         }
         Err(AuthError::InvalidLoginMessage) => {
             tokio::time::sleep(FAILED_LOGIN_DELAY).await;
-            rate_limiter.record_failure(client_ip).await;
             log_operator_action(
                 database,
                 webhooks,
@@ -561,7 +605,6 @@ async fn handle_authentication(
         Err(AuthError::InvalidMessageJson(error)) => {
             warn!(%connection_id, %error, "failed to parse operator login message");
             tokio::time::sleep(FAILED_LOGIN_DELAY).await;
-            rate_limiter.record_failure(client_ip).await;
             log_operator_action(
                 database,
                 webhooks,
@@ -592,7 +635,6 @@ async fn handle_authentication(
             | AuthError::ProfileOperator { .. },
         ) => {
             tokio::time::sleep(FAILED_LOGIN_DELAY).await;
-            rate_limiter.record_failure(client_ip).await;
             send_login_error(socket, "", AuthenticationFailure::InvalidCredentials, connection_id)
                 .await;
             return Err(());
@@ -600,7 +642,6 @@ async fn handle_authentication(
         Err(AuthError::PasswordVerifier(error)) => {
             warn!(%connection_id, %error, "operator authentication verifier error");
             tokio::time::sleep(FAILED_LOGIN_DELAY).await;
-            rate_limiter.record_failure(client_ip).await;
             send_login_error(socket, "", AuthenticationFailure::InvalidCredentials, connection_id)
                 .await;
             return Err(());
@@ -608,7 +649,6 @@ async fn handle_authentication(
         Err(AuthError::Persistence(error)) => {
             warn!(%connection_id, %error, "operator authentication persistence failed");
             tokio::time::sleep(FAILED_LOGIN_DELAY).await;
-            rate_limiter.record_failure(client_ip).await;
             send_login_error(socket, "", AuthenticationFailure::InvalidCredentials, connection_id)
                 .await;
             return Err(());
@@ -4955,12 +4995,13 @@ mod tests {
         let limiter = LoginRateLimiter::new();
         let ip: IpAddr = "192.168.1.10".parse().expect("valid IP");
 
+        // try_acquire atomically checks and records; after MAX attempts the
+        // next call must be rejected.
         for _ in 0..super::MAX_FAILED_LOGIN_ATTEMPTS {
-            assert!(limiter.is_allowed(ip).await);
-            limiter.record_failure(ip).await;
+            assert!(limiter.try_acquire(ip).await);
         }
 
-        assert!(!limiter.is_allowed(ip).await);
+        assert!(!limiter.try_acquire(ip).await);
     }
 
     #[tokio::test]

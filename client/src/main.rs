@@ -406,7 +406,7 @@ impl Default for DockState {
             open_tabs: vec![DockTab::TeamserverChat],
             selected: Some(DockTab::TeamserverChat),
             top_fraction: 0.35,
-            event_viewer_open: true,
+            event_viewer_open: false,
             top_split_fraction: 0.6,
         }
     }
@@ -2465,10 +2465,6 @@ impl ClientApp {
                 }
                 if ui.button("Session Graph").clicked() {
                     self.session_panel.dock.open_tab(DockTab::SessionGraph);
-                    ui.close();
-                }
-                if ui.button("Scripts").clicked() {
-                    self.session_panel.dock.open_tab(DockTab::Scripts);
                     ui.close();
                 }
                 if ui.button("Loot").clicked() {

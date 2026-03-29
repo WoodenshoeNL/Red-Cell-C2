@@ -392,8 +392,9 @@ async fn authenticate(
     rate_limiter: &LoginRateLimiter,
     client_ip: IpAddr,
 ) -> Result<Uuid, ServiceBridgeError> {
-    // Check rate limit before processing the attempt.
-    if !rate_limiter.is_allowed(client_ip).await {
+    // Atomically check and reserve a slot; rate_limiter.record_failure is not
+    // needed afterwards — try_acquire already counted this attempt.
+    if !rate_limiter.try_acquire(client_ip).await {
         warn!(%client_ip, "service auth rate limited");
         return Err(ServiceBridgeError::RateLimited);
     }
@@ -442,7 +443,6 @@ async fn authenticate(
         Ok(Uuid::new_v4())
     } else {
         tokio::time::sleep(FAILED_AUTH_DELAY).await;
-        rate_limiter.record_failure(client_ip).await;
         Err(ServiceBridgeError::AuthenticationFailed)
     }
 }

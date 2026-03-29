@@ -1,0 +1,33 @@
+# Red-Cell-C2 TODO — human-action items
+# Items that require manual steps (cannot be done by automated agents).
+# Mark done with [x] when complete.
+
+## Test infrastructure
+
+[ ] Ensure Python 3.11+ is available (required for tomllib in automatic-test/):
+      python3 --version   # must be >= 3.11
+
+[ ] Build red-cell-cli and put it on PATH before running the test harness:
+      cargo build -p red-cell-cli
+      export PATH="$PWD/target/debug:$PATH"
+
+[ ] Copy and fill in the targets config:
+      cp automatic-test/config/targets.toml.example automatic-test/config/targets.toml
+    Edit the file with SSH connection details for the Linux and Windows test VMs.
+    This file is gitignored — never commit it (contains credentials / IP addresses).
+
+[ ] Authorise your SSH key on the test VMs:
+      Linux VM  — see docs/ubuntu-test-setup.md
+      Windows VM — see docs/win11-ssh-setup.md
+
+## Agent build toolchains
+
+[ ] Run the agent toolchain installer to add Rust cross-compile targets for
+    Phantom (Linux/musl) and Specter (Windows/mingw):
+      sudo ./install.sh --agents
+    See docs/agent-toolchain-setup.md for what this installs and manual steps.
+
+[ ] Verify Archon builds (C/ASM, uses existing nasm + mingw toolchains):
+      cd archon && make
+    This requires nasm and the mingw-w64 cross-compilers, which are installed
+    by `sudo ./install.sh --teamserver`.

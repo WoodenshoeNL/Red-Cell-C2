@@ -1,0 +1,14 @@
+# automatic-test Python dependencies
+#
+# All test harness code uses only the Python standard library (Python >= 3.11).
+# No third-party packages are required.
+#
+# Runtime prerequisites (not installable via pip — see notes below):
+#   python >= 3.11   tomllib became stdlib in 3.11; older versions will break
+#   red-cell-cli     Rust CLI binary; build with: cargo build -p red-cell-cli
+#   ssh + scp        OpenSSH client; on Ubuntu: apt-get install openssh-client
+#
+# To verify:
+#   python3 --version                # must be 3.11+
+#   red-cell-cli --version           # must resolve from PATH
+#   ssh -V                           # any recent OpenSSH client

@@ -65,6 +65,27 @@ async fn poll_audit_entries(
     }
 }
 
+/// Wait until at least `expected_count` `operator.login` entries have been
+/// written, then return **all** audit entries.
+///
+/// Polling on login-only entries ensures that non-login entries (e.g.
+/// `operator.connect` from concurrent tests) do not cause the poll to return
+/// prematurely before all expected login entries are committed.
+async fn poll_login_audit_entries(
+    database: &red_cell::Database,
+    expected_count: usize,
+    max_wait: Duration,
+) -> Vec<red_cell::AuditLogEntry> {
+    let start = tokio::time::Instant::now();
+    loop {
+        let entries = database.audit_log().list().await.expect("audit log query failed");
+        if login_audit_entries(&entries).len() >= expected_count || start.elapsed() > max_wait {
+            return entries;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// Filter audit entries to only `operator.login` actions.
 fn login_audit_entries(entries: &[red_cell::AuditLogEntry]) -> Vec<&red_cell::AuditLogEntry> {
     entries.iter().filter(|e| e.action == "operator.login").collect()
@@ -393,10 +414,12 @@ async fn rate_limited_login_does_not_produce_audit_entry() -> Result<(), Box<dyn
     }
 
     // Wait until all 5 non-rate-limited failures have been recorded in the audit
-    // log before snapping the baseline.  Waiting for just 1 entry is racy under
-    // cargo test --workspace concurrency: if the 7th attempt arrives before all 5
-    // prior failures are committed, the count can drift.
-    let baseline_entries = poll_audit_entries(&server.database, 5, Duration::from_secs(30)).await;
+    // log before snapping the baseline.  Polling on login-only entries avoids
+    // a race where a non-login entry (e.g. session_timeout) causes the total-
+    // entry count to reach 5 before all 5 login entries are committed, allowing
+    // the 6th loop attempt to slip through before the rate limiter is updated.
+    let baseline_entries =
+        poll_login_audit_entries(&server.database, 5, Duration::from_secs(30)).await;
     let baseline_login_count = login_audit_entries(&baseline_entries).len();
 
     // Now send one more attempt — this should be rate-limited and produce

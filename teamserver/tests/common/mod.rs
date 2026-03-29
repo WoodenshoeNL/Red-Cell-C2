@@ -40,6 +40,7 @@ pub struct TestServer {
     pub events: EventBus,
     pub sockets: SocketRelayManager,
     pub webhooks: AuditWebhookNotifier,
+    pub rate_limiter: LoginRateLimiter,
 }
 
 impl TestServer {
@@ -64,6 +65,7 @@ pub async fn spawn_test_server(profile: Profile) -> Result<TestServer, Box<dyn s
         None,
     );
     let webhooks = AuditWebhookNotifier::from_profile(&profile);
+    let rate_limiter = LoginRateLimiter::new();
     let state = TeamserverState {
         profile: profile.clone(),
         database: database.clone(),
@@ -76,7 +78,7 @@ pub async fn spawn_test_server(profile: Profile) -> Result<TestServer, Box<dyn s
         payload_builder: PayloadBuilderService::disabled_for_tests(),
         sockets: sockets.clone(),
         webhooks: webhooks.clone(),
-        login_rate_limiter: LoginRateLimiter::new(),
+        login_rate_limiter: rate_limiter.clone(),
         shutdown: red_cell::ShutdownController::new(),
         service_bridge: None,
     };
@@ -97,6 +99,7 @@ pub async fn spawn_test_server(profile: Profile) -> Result<TestServer, Box<dyn s
         events,
         sockets,
         webhooks,
+        rate_limiter,
     })
 }
 

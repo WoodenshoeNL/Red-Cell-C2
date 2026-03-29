@@ -135,10 +135,9 @@ impl LoginRateLimiter {
 
     /// Return `true` if the given IP has not exceeded the failed-attempt threshold.
     ///
-    /// This is a read-only check used only in tests to inspect limiter state.
-    /// Production callers should use [`try_acquire`] instead.
-    #[cfg(test)]
-    pub(crate) async fn is_allowed(&self, ip: IpAddr) -> bool {
+    /// Read-only check for tests and diagnostics; production code should use
+    /// [`try_acquire`] (which atomically checks **and** reserves a slot).
+    pub async fn is_allowed(&self, ip: IpAddr) -> bool {
         let mut windows = self.windows.lock().await;
         let Some(window) = windows.get_mut(&ip) else {
             return true;
@@ -190,12 +189,13 @@ impl LoginRateLimiter {
         true
     }
 
-    /// Record a failed login attempt from the given IP.
+    /// Record a failed login attempt from the given IP without going through
+    /// the full WebSocket login flow.
     ///
-    /// Used only in tests to pre-populate limiter state.  Production callers
+    /// Intended for tests that need to pre-populate the limiter without
+    /// incurring `FAILED_LOGIN_DELAY` on every attempt.  Production callers
     /// should use [`try_acquire`] instead, which atomically checks and records.
-    #[cfg(test)]
-    pub(crate) async fn record_failure(&self, ip: IpAddr) {
+    pub async fn record_failure(&self, ip: IpAddr) {
         let mut windows = self.windows.lock().await;
         let now = Instant::now();
 

@@ -8,6 +8,7 @@
 
 mod common;
 
+use std::net::IpAddr;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -59,27 +60,6 @@ async fn poll_audit_entries(
     loop {
         let entries = database.audit_log().list().await.expect("audit log query failed");
         if entries.len() >= expected_count || start.elapsed() > max_wait {
-            return entries;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-/// Wait until at least `expected_count` `operator.login` entries have been
-/// written, then return **all** audit entries.
-///
-/// Polling on login-only entries ensures that non-login entries (e.g.
-/// `operator.connect` from concurrent tests) do not cause the poll to return
-/// prematurely before all expected login entries are committed.
-async fn poll_login_audit_entries(
-    database: &red_cell::Database,
-    expected_count: usize,
-    max_wait: Duration,
-) -> Vec<red_cell::AuditLogEntry> {
-    let start = tokio::time::Instant::now();
-    loop {
-        let entries = database.audit_log().list().await.expect("audit log query failed");
-        if login_audit_entries(&entries).len() >= expected_count || start.elapsed() > max_wait {
             return entries;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -407,23 +387,34 @@ async fn rate_limited_login_does_not_produce_audit_entry() -> Result<(), Box<dyn
     // so no audit entry is expected. This test verifies that invariant.
     let server = common::spawn_test_server(common::default_test_profile()).await?;
 
-    // Exhaust the rate limiter by sending enough failed login attempts.
-    // The LoginRateLimiter blocks after MAX_LOGIN_FAILED_ATTEMPTS (5) failures.
-    for _ in 0..6 {
-        let _ = attempt_login(server.addr, "operator", "wrong").await;
+    // Seed the rate limiter directly via the test-only helper rather than by
+    // sending real login attempts.  Sending real requests relies on measuring
+    // the number of audit entries committed before the window fills, which is
+    // racy under heavy workspace load: tokio::time::sleep(FAILED_LOGIN_DELAY)
+    // can overshoot significantly on a loaded machine, pushing the total
+    // elapsed time past LOGIN_WINDOW_DURATION (60 s) and causing a spurious
+    // window reset that allows extra attempts — and extra audit entries —
+    // before the rate limiter blocks again.
+    //
+    // record_failure() updates the in-process rate-limiter state shared with
+    // the Axum handler (LoginRateLimiter wraps an Arc<Mutex<…>>), so the
+    // handler will see the limiter as exhausted without any real requests.
+    let test_ip = IpAddr::from([127, 0, 0, 1]);
+    for _ in 0..5 {
+        server.rate_limiter.record_failure(test_ip).await;
     }
+    debug_assert!(
+        !server.rate_limiter.is_allowed(test_ip).await,
+        "rate limiter must be blocking after seeding"
+    );
 
-    // Wait until all 5 non-rate-limited failures have been recorded in the audit
-    // log before snapping the baseline.  Polling on login-only entries avoids
-    // a race where a non-login entry (e.g. session_timeout) causes the total-
-    // entry count to reach 5 before all 5 login entries are committed, allowing
-    // the 6th loop attempt to slip through before the rate limiter is updated.
+    // No real login attempts have been made, so the audit log is empty.
     let baseline_entries =
-        poll_login_audit_entries(&server.database, 5, Duration::from_secs(30)).await;
+        server.database.audit_log().list().await.expect("audit log query failed");
     let baseline_login_count = login_audit_entries(&baseline_entries).len();
 
-    // Now send one more attempt — this should be rate-limited and produce
-    // no additional audit entry.
+    // Send one attempt — the rate limiter should reject it before authentication
+    // runs, so no audit entry should be written.
     let _ = attempt_login(server.addr, "operator", "wrong").await;
 
     // Give a small window for any (unexpected) audit entry to be flushed.

@@ -225,10 +225,20 @@ pub struct PayloadBuilderService {
     inner: Arc<PayloadBuilderInner>,
 }
 
+/// Per-request agent identity passed through the private build pipeline.
+struct AgentBuildContext<'a> {
+    /// Lowercase agent name used in output file names (e.g. `"demon"`, `"archon"`).
+    name: &'a str,
+    /// Root of the agent C/ASM source tree to compile.
+    source_root: &'a Path,
+}
+
 #[derive(Clone, Debug)]
 struct PayloadBuilderInner {
     toolchain: Toolchain,
     source_root: PathBuf,
+    /// Source root for the Archon agent fork — points at `agent/archon/`.
+    archon_source_root: PathBuf,
     shellcode_x64_template: PathBuf,
     shellcode_x86_template: PathBuf,
     /// Pre-compiled DllLdr position-independent loader (x64 only).
@@ -438,6 +448,7 @@ impl PayloadBuilderService {
         };
 
         let source_root = repo_root.join("src/Havoc/payloads/Demon");
+        let archon_source_root = repo_root.join("agent/archon");
         let shellcode_x64_template = repo_root.join("src/Havoc/payloads/Shellcode.x64.bin");
         let shellcode_x86_template = repo_root.join("src/Havoc/payloads/Shellcode.x86.bin");
         let dllldr_x64_template = repo_root.join("src/Havoc/payloads/DllLdr.x64.bin");
@@ -457,12 +468,17 @@ impl PayloadBuilderService {
             }
         }
 
+        // Archon source root is optional at startup — it may not be present on
+        // all developer machines.  Missing Archon source is only an error when
+        // an operator actually requests an Archon payload.
+
         let cache = PayloadCache::new(repo_root.join("target/payload-cache"));
 
         Ok(Self {
             inner: Arc::new(PayloadBuilderInner {
                 toolchain,
                 source_root,
+                archon_source_root,
                 shellcode_x64_template,
                 shellcode_x86_template,
                 dllldr_x64_template,
@@ -487,11 +503,27 @@ impl PayloadBuilderService {
     where
         F: FnMut(BuildProgress),
     {
-        if request.agent_type.trim() != "Demon" {
-            return Err(PayloadBuildError::InvalidRequest {
-                message: format!("unsupported agent type `{}`", request.agent_type),
-            });
-        }
+        // Resolve the agent name and source root for this build request.
+        let agent_type = request.agent_type.trim();
+        let (agent_name, source_root) = match agent_type {
+            "Demon" => ("demon", &self.inner.source_root),
+            "Archon" => {
+                if !self.inner.archon_source_root.exists() {
+                    return Err(PayloadBuildError::ToolchainUnavailable {
+                        message: format!(
+                            "Archon source tree not found at {}",
+                            self.inner.archon_source_root.display()
+                        ),
+                    });
+                }
+                ("archon", &self.inner.archon_source_root)
+            }
+            other => {
+                return Err(PayloadBuildError::InvalidRequest {
+                    message: format!("unsupported agent type `{other}`"),
+                });
+            }
+        };
 
         let architecture = Architecture::parse(&request.arch)?;
         let format = OutputFormat::parse(&request.format)?;
@@ -523,7 +555,8 @@ impl PayloadBuilderService {
                 level: "Info".to_owned(),
                 message: "cache hit — returning cached artifact".to_owned(),
             });
-            let file_name = format!("demon{}{}", architecture.suffix(), format.file_extension());
+            let file_name =
+                format!("{agent_name}{}{}", architecture.suffix(), format.file_extension());
             return Ok(PayloadArtifact {
                 bytes: cached,
                 file_name,
@@ -534,10 +567,19 @@ impl PayloadBuilderService {
         progress(BuildProgress { level: "Info".to_owned(), message: "starting build".to_owned() });
 
         let temp_dir = TempDir::new()?;
+        let agent_ctx = AgentBuildContext { name: agent_name, source_root };
         let compiled = self
-            .build_impl(listener, architecture, format, &config, temp_dir.path(), &mut progress)
+            .build_impl(
+                listener,
+                architecture,
+                format,
+                &config,
+                &agent_ctx,
+                temp_dir.path(),
+                &mut progress,
+            )
             .await?;
-        let file_name = format!("demon{}{}", architecture.suffix(), format.file_extension());
+        let file_name = format!("{agent_name}{}{}", architecture.suffix(), format.file_extension());
 
         self.inner.cache.put(&cache_key, &compiled).await;
 
@@ -565,6 +607,7 @@ impl PayloadBuilderService {
                     nasm_version: unknown_version,
                 },
                 source_root: root.join("src/Havoc/payloads/Demon"),
+                archon_source_root: PathBuf::from("/nonexistent/agent/archon"),
                 shellcode_x64_template: root.join("src/Havoc/payloads/Shellcode.x64.bin"),
                 shellcode_x86_template: root.join("src/Havoc/payloads/Shellcode.x86.bin"),
                 dllldr_x64_template: root.join("src/Havoc/payloads/DllLdr.x64.bin"),
@@ -594,6 +637,7 @@ impl PayloadBuilderService {
     fn with_paths_for_tests(
         toolchain: Toolchain,
         source_root: PathBuf,
+        archon_source_root: PathBuf,
         shellcode_x64_template: PathBuf,
         shellcode_x86_template: PathBuf,
         dllldr_x64_template: PathBuf,
@@ -606,6 +650,7 @@ impl PayloadBuilderService {
             inner: Arc::new(PayloadBuilderInner {
                 toolchain,
                 source_root,
+                archon_source_root,
                 shellcode_x64_template,
                 shellcode_x86_template,
                 dllldr_x64_template,
@@ -623,6 +668,7 @@ impl PayloadBuilderService {
         architecture: Architecture,
         format: OutputFormat,
         config: &Map<String, Value>,
+        agent: &AgentBuildContext<'_>,
         compile_dir: &Path,
         progress: &mut F,
     ) -> Result<Vec<u8>, PayloadBuildError>
@@ -640,6 +686,7 @@ impl PayloadBuilderService {
                     architecture,
                     OutputFormat::Dll,
                     config,
+                    agent,
                     compile_dir,
                     true,
                     progress,
@@ -688,6 +735,7 @@ impl PayloadBuilderService {
                     architecture,
                     OutputFormat::Dll,
                     config,
+                    agent,
                     compile_dir,
                     true,
                     progress,
@@ -719,6 +767,7 @@ impl PayloadBuilderService {
                 architecture,
                 format,
                 config,
+                agent,
                 compile_dir,
                 false,
                 progress,
@@ -731,12 +780,14 @@ impl PayloadBuilderService {
         Ok(bytes)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn compile_portable_executable<F>(
         &self,
         listener: &ListenerConfig,
         architecture: Architecture,
         format: OutputFormat,
         config: &Map<String, Value>,
+        agent: &AgentBuildContext<'_>,
         compile_dir: &Path,
         shellcode_define: bool,
         progress: &mut F,
@@ -750,10 +801,16 @@ impl PayloadBuilderService {
             message: format!("config size [{} bytes]", config_bytes.len()),
         });
 
-        let output_path =
-            compile_dir.join(format!("demon{}{}", architecture.suffix(), format.file_extension()));
+        let output_path = compile_dir.join(format!(
+            "{}{}{}",
+            agent.name,
+            architecture.suffix(),
+            format.file_extension()
+        ));
         let defines = build_defines(listener, config_bytes.as_slice(), shellcode_define)?;
-        let object_files = self.compile_asm_objects(architecture, compile_dir, progress).await?;
+        let object_files = self
+            .compile_asm_objects(architecture, agent.source_root, compile_dir, progress)
+            .await?;
         let compiler = match architecture {
             Architecture::X64 => &self.inner.toolchain.compiler_x64,
             Architecture::X86 => &self.inner.toolchain.compiler_x86,
@@ -761,9 +818,9 @@ impl PayloadBuilderService {
 
         let mut args: Vec<OsString> = Vec::new();
         args.extend(object_files.into_iter().map(|path| path.into_os_string()));
-        for path in c_sources(&self.inner.source_root)? {
+        for path in c_sources(agent.source_root)? {
             args.push(
-                path.strip_prefix(&self.inner.source_root)
+                path.strip_prefix(agent.source_root)
                     .map_err(|source| PayloadBuildError::ToolchainUnavailable {
                         message: format!(
                             "failed to relativize source path {}: {source}",
@@ -786,7 +843,7 @@ impl PayloadBuilderService {
             level: "Info".to_owned(),
             message: "compiling source".to_owned(),
         });
-        run_command(compiler, &args, &self.inner.source_root, progress).await?;
+        run_command(compiler, &args, agent.source_root, progress).await?;
         progress(BuildProgress {
             level: "Info".to_owned(),
             message: "finished compiling source".to_owned(),
@@ -802,6 +859,7 @@ impl PayloadBuilderService {
     async fn compile_asm_objects<F>(
         &self,
         architecture: Architecture,
+        source_root: &Path,
         compile_dir: &Path,
         progress: &mut F,
     ) -> Result<Vec<PathBuf>, PayloadBuildError>
@@ -810,7 +868,7 @@ impl PayloadBuilderService {
     {
         let mut objects = Vec::new();
 
-        for source in asm_sources(&self.inner.source_root, architecture)? {
+        for source in asm_sources(source_root, architecture)? {
             let file_stem =
                 source.file_stem().and_then(|value| value.to_str()).ok_or_else(|| {
                     PayloadBuildError::ToolchainUnavailable {
@@ -818,7 +876,7 @@ impl PayloadBuilderService {
                     }
                 })?;
             let object_path = compile_dir.join(format!("{file_stem}.o"));
-            let relative = source.strip_prefix(&self.inner.source_root).map_err(|error| {
+            let relative = source.strip_prefix(source_root).map_err(|error| {
                 PayloadBuildError::ToolchainUnavailable {
                     message: format!(
                         "failed to relativize assembly source {}: {error}",
@@ -836,7 +894,7 @@ impl PayloadBuilderService {
                     OsString::from("-o"),
                     object_path.as_os_str().to_os_string(),
                 ],
-                &self.inner.source_root,
+                source_root,
                 progress,
             )
             .await?;
@@ -3255,6 +3313,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn build_payload_archon_rejects_missing_source_tree()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // `disabled_for_tests` points archon_source_root at a non-existent path.
+        let service = PayloadBuilderService::disabled_for_tests();
+        let request = BuildPayloadRequestInfo {
+            agent_type: "Archon".to_owned(),
+            listener: "http".to_owned(),
+            arch: "x64".to_owned(),
+            format: "Windows Exe".to_owned(),
+            config: r#"{"Sleep":"5","Jitter":"0","Sleep Technique":"WaitForSingleObjectEx","Injection":{"Alloc":"Win32","Execute":"Win32","Spawn64":"a","Spawn32":"b"}}"#.to_owned(),
+        };
+        let listener = ListenerConfig::Http(Box::new(HttpListenerConfig {
+            name: "http".to_owned(),
+            kill_date: None,
+            working_hours: None,
+            hosts: vec!["listener.local".to_owned()],
+            host_bind: "0.0.0.0".to_owned(),
+            host_rotation: "round-robin".to_owned(),
+            port_bind: 443,
+            port_conn: Some(443),
+            method: None,
+            behind_redirector: false,
+            trusted_proxy_peers: Vec::new(),
+            user_agent: None,
+            headers: Vec::new(),
+            uris: Vec::new(),
+            host_header: None,
+            secure: false,
+            cert: None,
+            response: None,
+            proxy: None,
+        }));
+
+        let error = service
+            .build_payload(&listener, &request, |_| {})
+            .await
+            .expect_err("missing archon source tree should be rejected");
+        assert!(
+            matches!(error, PayloadBuildError::ToolchainUnavailable { .. }),
+            "expected ToolchainUnavailable, got {error:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn build_payload_rejects_unsupported_architecture()
     -> Result<(), Box<dyn std::error::Error>> {
         let service = PayloadBuilderService::disabled_for_tests();
@@ -3404,6 +3507,7 @@ mod tests {
                 nasm_version: unknown_version,
             },
             source_root,
+            temp.path().join("agent/archon"),
             shellcode_root.join("Shellcode.x64.bin"),
             shellcode_root.join("Shellcode.x86.bin"),
             shellcode_root.join("DllLdr.x64.bin"),
@@ -3542,6 +3646,7 @@ mod tests {
                 nasm_version: unknown_version,
             },
             source_root,
+            temp.path().join("agent/archon"),
             shellcode_root.join("Shellcode.x64.bin"),
             shellcode_root.join("Shellcode.x86.bin"),
             shellcode_root.join("DllLdr.x64.bin"),
@@ -3829,6 +3934,7 @@ mod tests {
                 nasm_version: unknown_version,
             },
             source_root,
+            temp.path().join("agent/archon"),
             shellcode_root.join("Shellcode.x64.bin"),
             shellcode_root.join("Shellcode.x86.bin"),
             shellcode_root.join("DllLdr.x64.bin"),
@@ -4815,6 +4921,7 @@ mod tests {
                 nasm_version: unknown_version,
             },
             source_root,
+            temp.path().join("agent/archon"),
             shellcode_root.join("Shellcode.x64.bin"),
             shellcode_root.join("Shellcode.x86.bin"),
             shellcode_root.join("DllLdr.x64.bin"),
@@ -5084,6 +5191,7 @@ mod tests {
                 },
             },
             PathBuf::from("/nonexistent/src"),
+            PathBuf::from("/nonexistent/archon"),
             PathBuf::from("/nonexistent/sc64"),
             PathBuf::from("/nonexistent/sc86"),
             PathBuf::from("/nonexistent/dllldr"),

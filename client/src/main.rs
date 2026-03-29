@@ -1535,6 +1535,11 @@ impl ClientApp {
                                     "Demon".to_owned(),
                                     "Demon",
                                 );
+                                ui.selectable_value(
+                                    &mut dialog.agent_type,
+                                    "Archon".to_owned(),
+                                    "Archon",
+                                );
                             });
                         ui.end_row();
                     },

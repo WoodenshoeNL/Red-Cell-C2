@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.19)
-project( Demon C )
+project( Archon C )
 
-set( PROJECT_NAME Demon )
+set( PROJECT_NAME Archon )
 
 # set compiler settings
 set( CMAKE_C_STANDARD 11 )

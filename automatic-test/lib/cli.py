@@ -37,12 +37,19 @@ def _run(cfg: CliConfig, *args: str) -> dict[str, Any]:
     env["RC_TOKEN"] = cfg.token
     env.update(cfg.extra_env)
 
-    result = subprocess.run(
-        [cfg.binary, "--output", "json", "--timeout", str(cfg.timeout), *args],
-        capture_output=True,
-        text=True,
-        env=env,
-    )
+    try:
+        result = subprocess.run(
+            [cfg.binary, "--output", "json", "--timeout", str(cfg.timeout), *args],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+    except FileNotFoundError:
+        raise CliError(
+            "BINARY_NOT_FOUND",
+            f"CLI binary not found: {cfg.binary!r} — is it installed and on PATH?",
+            127,
+        )
 
     stdout = result.stdout.strip()
     if stdout:

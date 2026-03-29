@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 961 | 231 | 31 |
+| Tasks closed | 963 | 231 | 31 |
 | Bugs filed against | 113 | 36 | 9 |
 | Bug rate (bugs/task) | 0.12 | 0.16 | 0.29 |
 | Quality score | 88% | 84% | 71% |
 
-*Bug rates: Claude 113/961=0.12, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 113/963=0.12, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -4206,3 +4206,13 @@ Overall codebase health: drifting
 Biggest blindspot: the Rust agent variants still look greener than they are because default validation does not exercise enough real lifecycle coverage, while both agents still emit placeholder DEMON_INIT metadata that will mislead operators in live use.
 Build: cargo check passed; cargo clippy passed; cargo test --workspace passed; cargo nextest not installed, so cargo test was used
 Security posture: teamserver auth/crypto surfaces remain strong, but operational correctness is slipping in the newer agent variants due to placeholder host metadata and incomplete end-to-end coverage.
+
+### QA Review — 2026-03-29 21:15 — ca83fc5f..c99b9f03
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 2 | 0 | Closed `red-cell-c2-3mwb1` and `red-cell-c2-wruls`. Reviewed the Phantom and Specter metadata changes directly; no new attributable QA findings in the reviewed files. |
+| Codex | 0 | 0 | No activity in range. |
+| Cursor | 0 | 0 | No activity in range. |
+
+Build: failed (`cargo check --workspace` passed; `cargo clippy --workspace -- -D warnings` passed; `cargo test --workspace` failed in `red-cell` integration test `repeated_wrong_passwords_trigger_rate_limiter_lockout`, outside the reviewed files, while the worktree also contains unrelated local changes in `teamserver/src/dispatch/mod.rs`)

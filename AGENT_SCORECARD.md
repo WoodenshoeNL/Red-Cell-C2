@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 938 | 231 | 31 |
-| Bugs filed against | 108 | 36 | 9 |
+| Tasks closed | 943 | 231 | 31 |
+| Bugs filed against | 109 | 36 | 9 |
 | Bug rate (bugs/task) | 0.12 | 0.16 | 0.29 |
 | Quality score | 88% | 84% | 71% |
 
-*Bug rates: Claude 108/938=0.12, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 109/943=0.12, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -32,7 +32,7 @@ Each loop run updates the running totals and appends a review entry.
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
 | Correctness / pagination | 45 | 7 | 1 |
-| Workflow / close-hygiene | 20 | 0 | 0 |
+| Workflow / close-hygiene | 21 | 0 | 0 |
 | Code reuse / duplication | 8 | 0 | 0 |
 
 ---
@@ -4152,3 +4152,13 @@ Build: skipped (no product code changes since last review; range contains only p
 | Cursor | 0 | 0 | No activity in range. |
 
 Build: cargo check passed; cargo test --workspace failed to compile (`teamserver/tests/external_listener_pipeline.rs:62` missing `rate_limiter`); cargo clippy --workspace -- -D warnings passed
+
+### QA Review — 2026-03-29 18:19 — b6141c03..b7e455bc
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 5 | 1 | Closed `red-cell-c2-5o35l`, `red-cell-c2-35fxo`, `red-cell-c2-h6wj8`, `red-cell-c2-n8v2l`, and `red-cell-c2-ilq7b`. Filed `red-cell-c2-3zhne` because Scenario 10 was closed as implemented even though the current harness can only skip and cannot model the required second Windows target. |
+| Codex | 0 | 0 | No activity in range. |
+| Cursor | 0 | 0 | No activity in range. |
+
+Build: cargo check passed. `cargo test --workspace` / `cargo clippy --workspace -- -D warnings` in the main worktree were contaminated by unrelated unstaged changes outside this review range, so they were not used for attribution.

@@ -31,7 +31,7 @@ Each loop run updates the running totals and appends a review entry.
 | Test infrastructure / flakiness | 23 | 1 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
-| Correctness / pagination | 48 | 7 | 1 |
+| Correctness / pagination | 49 | 8 | 1 |
 | Workflow / close-hygiene | 22 | 0 | 0 |
 | Code reuse / duplication | 8 | 0 | 0 |
 
@@ -40,6 +40,20 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### Arch Review — 2026-03-30 01:45
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 1 | correctness/code-reuse | evict_oldest_windows K:Copy bound forces duplicated eviction logic in UnknownCallbackProbeAuditLimiter (listeners.rs:140-151). Filed red-cell-c2-qv1p0 (P3). |
+| Codex | 1 | correctness | Phantom CommandSleep handler doesn't update config.sleep_delay_ms — execute() has no access to config, so sleep interval silently never changes. Filed red-cell-c2-6vb9d (P2). |
+| Cursor | 0 | — | No new issues found |
+
+Overall codebase health: on track
+Biggest blindspot: Phantom CommandSleep is a silent no-op — operator sends sleep command, sees success callback, but agent beacons at original interval forever. Specter implements this correctly (passes config: &mut SpecterConfig to dispatch), but Phantom's execute() only receives PhantomState.
+Build: cargo check passed; cargo clippy passed (0 warnings); lib tests for common/teamserver pass (integration test timeout due to VM OOMD pressure, consistent with prior runs)
+Issues filed: red-cell-c2-6vb9d (Codex, correctness P2, Phantom sleep no-op), red-cell-c2-qv1p0 (Claude, code-reuse P3, evict_oldest_windows K:Copy constraint)
+Security posture: strong — no new security vulnerabilities. TLS cert bypass fixed (wj185 closed). Webhook hardening (zvj3t) remains open P1. All crypto, auth, rate-limiting, and bounded-allocation patterns remain intact. Constant-time token lookup, Argon2id passwords, Zeroizing on all key material verified.
 
 ### Arch Review — 2026-03-28 16:00
 

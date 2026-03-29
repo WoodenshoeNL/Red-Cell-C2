@@ -214,23 +214,26 @@ def _assert_isolation(
     print("  [isolation] all cross-agent isolation checks passed")
 
 
-def _wait_for_two_agents(cli, pre_existing_ids: set, timeout: int) -> tuple[str, str]:
-    """Block until exactly two new agent IDs appear.  Returns (id1, id2)."""
-    from lib.wait import poll, TimeoutError as WaitTimeout
+def _wait_for_two_agents(cli, pre_existing_ids: set, timeout: int) -> list[dict]:
+    """Block until exactly two new agent records appear.
+
+    Returns the list of new agent dicts (each containing at least ``id`` and
+    ``listener``).  The caller is responsible for assigning IDs by inspecting
+    the ``listener`` field — do **not** rely on list order.
+    """
+    from lib.wait import poll
 
     def _new_agents():
         from lib.cli import agent_list
         agents = agent_list(cli)
         return [a for a in agents if a["id"] not in pre_existing_ids]
 
-    new = poll(
+    return poll(
         fn=_new_agents,
         predicate=lambda agents: len(agents) >= 2,
         timeout=timeout,
         description="two new agent checkins",
     )
-    # Return the two newest IDs
-    return new[0]["id"], new[1]["id"]
 
 
 def _wait_for_agents_disconnected(
@@ -342,11 +345,32 @@ def run(ctx):
         # ── Step 6: Wait for both agents to check in ─────────────────────────
         checkin_timeout = ctx.env.get("timeouts", {}).get("agent_checkin", 90)
         print(f"  [wait] waiting up to {checkin_timeout}s for both agents to check in")
-        win_agent_id, lin_agent_id = _wait_for_two_agents(
-            cli, pre_existing_ids, timeout=checkin_timeout
-        )
-        print(f"  [wait] Windows agent: {win_agent_id}")
-        print(f"  [wait] Linux agent:   {lin_agent_id}")
+        new_agents = _wait_for_two_agents(cli, pre_existing_ids, timeout=checkin_timeout)
+
+        # Assign IDs by listener name — not by list order — to avoid swapping
+        # the Windows and Linux agents when the checkin order is non-deterministic.
+        for agent in new_agents:
+            agent_listener = agent.get("listener", "")
+            if agent_listener == listener_win_name:
+                win_agent_id = agent["id"]
+            elif agent_listener == listener_lin_name:
+                lin_agent_id = agent["id"]
+
+        if win_agent_id is None:
+            received = [a.get("listener") for a in new_agents]
+            raise AssertionError(
+                f"No new agent checked in on Windows listener {listener_win_name!r}. "
+                f"Listeners seen: {received}"
+            )
+        if lin_agent_id is None:
+            received = [a.get("listener") for a in new_agents]
+            raise AssertionError(
+                f"No new agent checked in on Linux listener {listener_lin_name!r}. "
+                f"Listeners seen: {received}"
+            )
+
+        print(f"  [wait] Windows agent: {win_agent_id} (listener: {listener_win_name!r})")
+        print(f"  [wait] Linux agent:   {lin_agent_id} (listener: {listener_lin_name!r})")
 
         # ── Step 7: Run command suite on both agents concurrently ─────────────
         print("  [suite] running command suite on both agents concurrently")

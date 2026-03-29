@@ -4192,3 +4192,17 @@ Build: passed (`cargo check --workspace`, `cargo test --workspace`, `cargo clipp
 | Cursor | 0 | 0 | No activity in range. |
 
 Build: passed (`cargo check --workspace`, `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`; `cargo nextest` not installed, so `cargo test` was used)
+
+### Arch Review — 2026-03-29 20:55
+
+| Agent | Findings | Categories | Notes |
+|-------|---------|------------|-------|
+| Claude | 0 | — | No new issues found in Claude-authored code this pass. |
+| Codex | 0 | — | No new issues found in Codex-authored code this pass. |
+| Cursor | 0 | — | No new issues found in Cursor-authored code this pass. |
+| Human (Michel) | 5 | correctness (2), missing tests / stale tests (2), protocol / observability (1) | Phantom still registers placeholder Linux metadata (red-cell-c2-3mwb1); Specter still uses scaffold metadata for core Windows fields (red-cell-c2-wruls); unknown Demon callbacks are dropped as successful no-ops (red-cell-c2-27k6g); Phantom's E2E test is feature-gated out of default workspace validation (red-cell-c2-skhxx); Specter lacks equivalent full lifecycle integration coverage (red-cell-c2-r832p). |
+
+Overall codebase health: drifting
+Biggest blindspot: the Rust agent variants still look greener than they are because default validation does not exercise enough real lifecycle coverage, while both agents still emit placeholder DEMON_INIT metadata that will mislead operators in live use.
+Build: cargo check passed; cargo clippy passed; cargo test --workspace passed; cargo nextest not installed, so cargo test was used
+Security posture: teamserver auth/crypto surfaces remain strong, but operational correctness is slipping in the newer agent variants due to placeholder host metadata and incomplete end-to-end coverage.

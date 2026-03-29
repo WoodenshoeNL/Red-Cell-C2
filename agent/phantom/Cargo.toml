@@ -7,9 +7,6 @@ repository.workspace = true
 rust-version.workspace = true
 description = "Rust Linux agent scaffold for Red Cell C2 with Demon-compatible transport primitives"
 
-[features]
-integration = []
-
 [[bin]]
 name = "phantom"
 path = "src/main.rs"

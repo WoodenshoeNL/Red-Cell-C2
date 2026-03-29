@@ -4,12 +4,7 @@
 //! the Phantom agent through a complete lifecycle: init handshake, checkins,
 //! shell command, filesystem ops, process listing, network enumeration, and exit.
 //!
-//! Gated behind the `integration` cargo feature so they don't run in normal
-//! `cargo test`.
-//!
-//! Run with: `cargo test --package phantom --features integration`
-
-#![cfg(feature = "integration")]
+//! Run with: `cargo test --package phantom` (or `cargo nextest run --package phantom`)
 
 use std::io::{Read, Write};
 use std::net::TcpListener;

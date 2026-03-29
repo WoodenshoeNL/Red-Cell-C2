@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 928 | 231 | 31 |
+| Tasks closed | 929 | 231 | 31 |
 | Bugs filed against | 99 | 36 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.16 | 0.29 |
 | Quality score | 89% | 84% | 71% |
 
-*Bug rates: Claude 99/928=0.11, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 99/929=0.11, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -4100,3 +4100,14 @@ Issues filed: 0
 
 Build: cargo check passed; cargo clippy clean (0 warnings); lib tests pass in isolation (52/52); cargo test --workspace shows intermittent failure in phantom relay test (pre-existing, not introduced this range)
 Issues found: red-cell-c2-gczvs (P3, test-flakiness, Codex) — reverse_port_forward_add_local_relays_data races under parallel execution
+
+### QA Review — 2026-03-29 12:15 — 9b322f80..1e5e1af9
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 1 | 0 | Closed gczvs: eliminated TOCTOU race in reverse_port_forward_add_local test by passing port 0 to let OS assign port atomically, then reading bound port from response payload. |
+| Codex | 0 | 0 | No activity in range. |
+| Cursor | 0 | 0 | No activity in range. |
+
+Build: cargo check passed; cargo clippy -p phantom clean (0 warnings); cargo test --workspace 52 phantom tests passed, 0 failed (including reverse_port_forward_add_local_relays_data)
+Issues found: 0 — clean fix, no new problems introduced

@@ -10,18 +10,18 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 938 | 231 | 31 |
-| Bugs filed against | 107 | 36 | 9 |
-| Bug rate (bugs/task) | 0.11 | 0.16 | 0.29 |
-| Quality score | 89% | 84% | 71% |
+| Bugs filed against | 108 | 36 | 9 |
+| Bug rate (bugs/task) | 0.12 | 0.16 | 0.29 |
+| Quality score | 88% | 84% | 71% |
 
-*Bug rates: Claude 107/938=0.11, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 108/938=0.12, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 8 | 0 | 0 |
-| Missing tests / stale tests | 50 | 14 | 5 |
+| Missing tests / stale tests | 51 | 14 | 5 |
 | Clippy warnings | 7 | 0 | 1 |
 | Protocol errors | 16 | 27 | 3 |
 | Security issues | 49 | 39 | 0 |
@@ -4142,3 +4142,13 @@ Issues found: red-cell-c2-3m7bg (P2, test-infrastructure, Claude), red-cell-c2-4
 | Cursor | 0 | 0 | No activity in range. |
 
 Build: skipped (no product code changes since last review; range contains only prior QA bookkeeping)
+
+### QA Review — 2026-03-29 17:44 — 6b2177b4..b6141c03
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 1 | Reviewed 1 product-code commit (`ed1c1243`) plus 2 workflow commits. Filed `red-cell-c2-eea49` because the auth-audit test fix adds `TestServer.rate_limiter` but leaves `external_listener_pipeline`'s manual `TestServer` initializer stale, so `cargo test --workspace` no longer builds. |
+| Codex | 0 | 0 | No activity in range. |
+| Cursor | 0 | 0 | No activity in range. |
+
+Build: cargo check passed; cargo test --workspace failed to compile (`teamserver/tests/external_listener_pipeline.rs:62` missing `rate_limiter`); cargo clippy --workspace -- -D warnings passed

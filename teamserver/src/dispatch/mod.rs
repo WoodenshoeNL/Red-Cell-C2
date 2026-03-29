@@ -197,6 +197,18 @@ pub enum CommandDispatchError {
         /// The configured maximum allowed depth.
         max_depth: usize,
     },
+    /// No handler is registered for the command identifier carried by the callback.
+    #[error(
+        "no handler registered for command 0x{command_id:08X} from agent 0x{agent_id:08X} (request 0x{request_id:08X})"
+    )]
+    UnknownCommand {
+        /// Agent that sent the callback.
+        agent_id: u32,
+        /// Unrecognised command identifier.
+        command_id: u32,
+        /// Request identifier from the callback header.
+        request_id: u32,
+    },
 }
 
 /// Central registry of Demon command handlers keyed by command identifier.
@@ -863,13 +875,7 @@ impl CommandDispatcher {
         payload: &[u8],
     ) -> Result<Option<Vec<u8>>, CommandDispatchError> {
         let Some(handler) = self.handlers.get(&command_id).cloned() else {
-            warn!(
-                agent_id,
-                command_id,
-                request_id,
-                "no handler registered for command_id — callback silently dropped"
-            );
-            return Ok(None);
+            return Err(CommandDispatchError::UnknownCommand { agent_id, command_id, request_id });
         };
 
         handler(agent_id, request_id, payload.to_vec()).await
@@ -1979,13 +1985,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_returns_none_for_unregistered_commands()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn dispatch_errors_for_unregistered_commands() {
         let dispatcher = CommandDispatcher::new();
+        let agent_id = 0x4141_4141_u32;
+        let command_id = 0x9999_u32;
+        let request_id = 7_u32;
 
-        assert_eq!(dispatcher.dispatch(0x4141_4141, 0x9999, 7, b"payload").await?, None);
-        assert!(!dispatcher.handles_command(0x9999));
-        Ok(())
+        let err = dispatcher
+            .dispatch(agent_id, command_id, request_id, b"payload")
+            .await
+            .expect_err("dispatch to unregistered command_id must return Err");
+
+        assert!(
+            matches!(
+                err,
+                CommandDispatchError::UnknownCommand {
+                    agent_id: a,
+                    command_id: c,
+                    request_id: r,
+                } if a == agent_id && c == command_id && r == request_id
+            ),
+            "unexpected error variant: {err:?}"
+        );
+        assert!(!dispatcher.handles_command(command_id));
     }
 
     #[tokio::test]

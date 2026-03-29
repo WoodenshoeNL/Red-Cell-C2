@@ -10,11 +10,11 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 929 | 231 | 31 |
-| Bugs filed against | 99 | 36 | 9 |
+| Bugs filed against | 100 | 36 | 9 |
 | Bug rate (bugs/task) | 0.11 | 0.16 | 0.29 |
 | Quality score | 89% | 84% | 71% |
 
-*Bug rates: Claude 99/929=0.11, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 100/929=0.11, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -28,7 +28,7 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 8 | 11 | 1 |
 | Startup / lifecycle regressions | 2 | 9 | 0 |
-| Test infrastructure / flakiness | 21 | 1 | 0 |
+| Test infrastructure / flakiness | 22 | 1 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
 | Correctness / pagination | 43 | 7 | 1 |
@@ -4105,9 +4105,9 @@ Issues found: red-cell-c2-gczvs (P3, test-flakiness, Codex) — reverse_port_for
 
 | Agent | Tasks closed | Bugs filed | Notes |
 |-------|-------------|------------|-------|
-| Claude | 1 | 0 | Closed gczvs: eliminated TOCTOU race in reverse_port_forward_add_local test by passing port 0 to let OS assign port atomically, then reading bound port from response payload. |
+| Claude | 1 | 1 | Closed gczvs: TOCTOU fix in phantom relay test — clean. Bug filed: red-cell-c2-116g2 — rate_limited_login_does_not_produce_audit_entry consistently fails (7≠6); b04d7ad0 fix (Claude) insufficient. |
 | Codex | 0 | 0 | No activity in range. |
 | Cursor | 0 | 0 | No activity in range. |
 
-Build: cargo check passed; cargo clippy -p phantom clean (0 warnings); cargo test --workspace 52 phantom tests passed, 0 failed (including reverse_port_forward_add_local_relays_data)
-Issues found: 0 — clean fix, no new problems introduced
+Build: cargo check passed; cargo clippy -p phantom clean (0 warnings); cargo test --workspace: phantom 52/52 passed; teamserver auth_audit_trail FAILED (1 test: rate_limited_login_does_not_produce_audit_entry, both runs consistent: left:7, right:6)
+Issues found: red-cell-c2-116g2 (P2, test-infrastructure, Claude — insufficient fix in b04d7ad0)

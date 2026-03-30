@@ -1602,7 +1602,8 @@ mod tests {
             events,
             sockets,
             Some(runtime.clone()),
-        );
+        )
+        .with_demon_allow_legacy_ctr(true);
         runtime.attach_listener_manager(listeners).await;
 
         let handle = std::thread::spawn(move || {
@@ -2873,7 +2874,8 @@ havoc.RegisterCommand("scan", "second scan", run_scan)
         );
 
         let listeners =
-            ListenerManager::new(database, registry, events, sockets, Some(runtime.clone()));
+            ListenerManager::new(database, registry, events, sockets, Some(runtime.clone()))
+                .with_demon_allow_legacy_ctr(true);
         runtime.attach_listener_manager(listeners).await;
 
         // After attaching, listener_manager() should succeed.

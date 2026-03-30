@@ -811,6 +811,22 @@ pub struct DemonConfig {
     /// Explicit redirector peers or networks allowed to supply forwarded client IP headers.
     #[serde(rename = "TrustedProxyPeers", default, deserialize_with = "deserialize_one_or_many")]
     pub trusted_proxy_peers: Vec<String>,
+    /// Opt in to accepting legacy-CTR Demon/Archon sessions.
+    ///
+    /// Legacy CTR mode resets the AES-CTR keystream to block offset 0 for every packet,
+    /// creating a two-time-pad vulnerability: any passive observer who captures two
+    /// ciphertexts `C1` and `C2` can compute `C1 ⊕ C2 = P1 ⊕ P2` and — combined with
+    /// knowledge of the public Demon protocol structure — recover both plaintexts.
+    ///
+    /// When `false` (the default), the teamserver **rejects** any `DEMON_INIT` that does
+    /// not set the `INIT_EXT_MONOTONIC_CTR` extension flag.  Set to `true` only when you
+    /// need to support unmodified Havoc Demon or Archon builds that do not negotiate
+    /// monotonic CTR, and only in environments where traffic confidentiality is not a
+    /// requirement.
+    ///
+    /// HCL profile key: `AllowLegacyCtr` (boolean, default `false`).
+    #[serde(rename = "AllowLegacyCtr", default)]
+    pub allow_legacy_ctr: bool,
 }
 
 /// Spawn-to process defaults for injection.

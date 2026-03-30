@@ -632,6 +632,7 @@ impl PayloadBuilderService {
                     init_secret: None,
                     trust_x_forwarded_for: false,
                     trusted_proxy_peers: Vec::new(),
+                    allow_legacy_ctr: false,
                 },
                 binary_patch: None,
                 cache: PayloadCache::new(PathBuf::from("/nonexistent/payload-cache")),
@@ -2545,6 +2546,7 @@ mod tests {
                 init_secret: None,
                 trust_x_forwarded_for: false,
                 trusted_proxy_peers: Vec::new(),
+                allow_legacy_ctr: false,
             },
         )?;
 
@@ -3188,6 +3190,7 @@ mod tests {
                 init_secret: None,
                 trust_x_forwarded_for: false,
                 trusted_proxy_peers: Vec::new(),
+                allow_legacy_ctr: false,
             },
             service: None,
             api: None,
@@ -3534,6 +3537,7 @@ mod tests {
                 init_secret: None,
                 trust_x_forwarded_for: false,
                 trusted_proxy_peers: Vec::new(),
+                allow_legacy_ctr: false,
             },
             None,
             cache_dir,
@@ -3673,6 +3677,7 @@ mod tests {
                 init_secret: None,
                 trust_x_forwarded_for: false,
                 trusted_proxy_peers: Vec::new(),
+                allow_legacy_ctr: false,
             },
             None,
             cache_dir,
@@ -3961,6 +3966,7 @@ mod tests {
                 init_secret: None,
                 trust_x_forwarded_for: false,
                 trusted_proxy_peers: Vec::new(),
+                allow_legacy_ctr: false,
             },
             None,
             cache_dir,
@@ -5105,6 +5111,7 @@ mod tests {
                 init_secret: None,
                 trust_x_forwarded_for: false,
                 trusted_proxy_peers: Vec::new(),
+                allow_legacy_ctr: false,
             },
             None,
             cache_dir,
@@ -5375,6 +5382,7 @@ mod tests {
                 init_secret: None,
                 trust_x_forwarded_for: false,
                 trusted_proxy_peers: Vec::new(),
+                allow_legacy_ctr: false,
             },
             None,
             cache_dir.clone(),
@@ -5827,6 +5835,7 @@ mod tests {
                 init_secret: None,
                 trust_x_forwarded_for: false,
                 trusted_proxy_peers: Vec::new(),
+                allow_legacy_ctr: false,
             },
         )?;
         // Request values should override profile defaults.
@@ -5857,6 +5866,7 @@ mod tests {
                 init_secret: None,
                 trust_x_forwarded_for: false,
                 trusted_proxy_peers: Vec::new(),
+                allow_legacy_ctr: false,
             },
         )?;
         assert_eq!(config["Injection"]["Spawn64"], Value::String("custom64.exe".to_owned()));
@@ -5882,6 +5892,7 @@ mod tests {
                 init_secret: None,
                 trust_x_forwarded_for: false,
                 trusted_proxy_peers: Vec::new(),
+                allow_legacy_ctr: false,
             },
         )
         .expect_err("non-object JSON should be rejected");

@@ -117,6 +117,9 @@ struct BuiltinDispatchContext<'a> {
     /// Current pivot dispatch nesting depth — incremented each time a pivot
     /// command callback is recursively dispatched through a child agent.
     pivot_dispatch_depth: usize,
+    /// Whether to accept pivot-child DEMON_INIT packets that use legacy AES-CTR
+    /// (no `INIT_EXT_MONOTONIC_CTR` flag).  Mirrors `DemonConfig::allow_legacy_ctr`.
+    allow_legacy_ctr: bool,
 }
 
 #[derive(Clone)]
@@ -129,6 +132,9 @@ struct BuiltinHandlerDependencies {
     plugins: Option<PluginRuntime>,
     /// Pivot dispatch nesting depth captured at handler-registration time.
     pivot_dispatch_depth: usize,
+    /// Mirrors `DemonConfig::allow_legacy_ctr` — controls whether child-agent
+    /// pivot registrations may use legacy (non-monotonic) AES-CTR.
+    allow_legacy_ctr: bool,
 }
 
 /// Error returned while routing or executing a Demon command handler.
@@ -263,6 +269,7 @@ impl CommandDispatcher {
             downloads,
             plugins,
             pivot_dispatch_depth,
+            allow_legacy_ctr,
         } = dependencies;
 
         if include_get_job {
@@ -777,6 +784,7 @@ impl CommandDispatcher {
                         downloads: &downloads,
                         plugins: plugins.as_ref(),
                         pivot_dispatch_depth,
+                        allow_legacy_ctr,
                     };
                     pivot::handle_pivot_callback(context, agent_id, request_id, &payload).await
                 })
@@ -820,6 +828,7 @@ impl CommandDispatcher {
             sockets,
             plugins,
             DownloadTracker::from_max_download_bytes(max_download_bytes),
+            false,
         )
     }
 
@@ -830,6 +839,7 @@ impl CommandDispatcher {
         sockets: SocketRelayManager,
         plugins: Option<PluginRuntime>,
         downloads: DownloadTracker,
+        allow_legacy_ctr: bool,
     ) -> Self {
         let mut dispatcher = Self::with_downloads(downloads);
         dispatcher.register_builtin_handlers(
@@ -841,6 +851,7 @@ impl CommandDispatcher {
                 downloads: dispatcher.downloads.clone(),
                 plugins,
                 pivot_dispatch_depth: 0,
+                allow_legacy_ctr,
             },
             true,
         );
@@ -10589,7 +10600,7 @@ mod tests {
         let custom_cap: usize = 2048;
         let tracker = DownloadTracker::new(custom_cap);
         let dispatcher = CommandDispatcher::with_builtin_handlers_and_downloads(
-            registry, events, database, sockets, None, tracker,
+            registry, events, database, sockets, None, tracker, true,
         );
 
         // Every built-in command must be registered.
@@ -10661,6 +10672,7 @@ mod tests {
             sockets,
             None,
             tracker,
+            true,
         );
 
         // Dispatching CommandGetJob for an agent with no queued jobs should return None

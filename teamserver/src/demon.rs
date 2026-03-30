@@ -105,6 +105,16 @@ pub enum DemonParserError {
     /// The parser found malformed or incomplete metadata in a `DEMON_INIT` request.
     #[error("invalid demon init payload: {0}")]
     InvalidInit(&'static str),
+    /// The agent negotiated legacy CTR mode but the operator has not opted in.
+    ///
+    /// Set `AllowLegacyCtr = true` in the `Demon` section of your profile to accept
+    /// legacy Demon/Archon sessions, accepting the two-time-pad risk.
+    #[error(
+        "DEMON_INIT rejected: agent requires legacy CTR mode (no INIT_EXT_MONOTONIC_CTR flag) \
+         and AllowLegacyCtr is not enabled in the profile — \
+         set AllowLegacyCtr = true in the Demon block to accept insecure sessions"
+    )]
+    LegacyCtrNotAllowed,
 }
 
 /// Parser for incoming Demon transport packets backed by the teamserver agent registry.
@@ -118,13 +128,23 @@ pub struct DemonPacketParser {
     /// stored as the session key.  Compatible agents (Specter / Archon) must
     /// perform the same derivation.  Legacy Demon agents do not support this.
     init_secret: Option<Vec<u8>>,
+    /// Whether to accept DEMON_INIT registrations that negotiate legacy CTR mode.
+    ///
+    /// When `false` (the default), any `DEMON_INIT` that does not set the
+    /// `INIT_EXT_MONOTONIC_CTR` extension flag is rejected with
+    /// [`DemonParserError::LegacyCtrNotAllowed`].  Set to `true` only after the
+    /// operator has explicitly opted in via `AllowLegacyCtr = true` in the profile.
+    allow_legacy_ctr: bool,
 }
 
 impl DemonPacketParser {
     /// Create a packet parser that resolves agent session keys from the provided registry.
+    ///
+    /// Legacy CTR mode is **disabled** by default; DEMON_INIT packets that do not
+    /// negotiate monotonic CTR are rejected.
     #[must_use]
     pub fn new(registry: AgentRegistry) -> Self {
-        Self { registry, init_secret: None }
+        Self { registry, init_secret: None, allow_legacy_ctr: false }
     }
 
     /// Create a packet parser with HKDF-based session key derivation enabled.
@@ -132,9 +152,24 @@ impl DemonPacketParser {
     /// When `init_secret` is `Some`, the teamserver derives session keys from
     /// agent-supplied material mixed with the secret via HKDF-SHA256, preventing
     /// unauthenticated agents from choosing their own session keys.
+    ///
+    /// Legacy CTR mode is **disabled** by default; use
+    /// [`with_allow_legacy_ctr`](Self::with_allow_legacy_ctr) to opt in.
     #[must_use]
     pub fn with_init_secret(registry: AgentRegistry, init_secret: Option<Vec<u8>>) -> Self {
-        Self { registry, init_secret }
+        Self { registry, init_secret, allow_legacy_ctr: false }
+    }
+
+    /// Enable or disable acceptance of legacy-CTR DEMON_INIT registrations.
+    ///
+    /// When `false` (the default), any DEMON_INIT that does not set the
+    /// `INIT_EXT_MONOTONIC_CTR` flag is rejected immediately.  Set to `true`
+    /// only when the operator has explicitly opted in via `AllowLegacyCtr = true`
+    /// in the profile `Demon` block.
+    #[must_use]
+    pub fn with_allow_legacy_ctr(mut self, allow: bool) -> Self {
+        self.allow_legacy_ctr = allow;
+        self
     }
 
     /// Parse an incoming Demon request and update the registry for newly registered agents.
@@ -210,6 +245,18 @@ impl DemonPacketParser {
                 now,
                 self.init_secret.as_deref(),
             )?;
+
+            if legacy_ctr && !self.allow_legacy_ctr {
+                warn!(
+                    agent_id = format_args!("0x{:08X}", envelope.header.agent_id),
+                    listener_name,
+                    "rejecting DEMON_INIT: agent negotiated legacy CTR mode and \
+                     AllowLegacyCtr is not enabled — set AllowLegacyCtr = true in \
+                     the Demon profile block to accept insecure sessions"
+                );
+                return Err(DemonParserError::LegacyCtrNotAllowed);
+            }
+
             self.registry.insert_full(agent.clone(), listener_name, 0, legacy_ctr).await?;
 
             return Ok(ParsedDemonPacket::Init(Box::new(ParsedDemonInit {
@@ -607,6 +654,16 @@ mod tests {
     };
     use crate::{AgentRegistry, Database};
 
+    /// Create a packet parser that accepts legacy-CTR registrations.
+    ///
+    /// Use this in tests that send `build_init_packet` (no `INIT_EXT_MONOTONIC_CTR`
+    /// flag) and expect the registration to succeed.  The production default is
+    /// `allow_legacy_ctr = false`; tests that exercise the rejection path should use
+    /// `DemonPacketParser::new(registry)` directly.
+    fn legacy_parser(registry: AgentRegistry) -> DemonPacketParser {
+        DemonPacketParser::new(registry).with_allow_legacy_ctr(true)
+    }
+
     /// Generate a non-degenerate test key from a seed byte.
     /// Each byte differs, so no repeating-pattern check will flag it.
     fn test_key(seed: u8) -> [u8; AGENT_KEY_LENGTH] {
@@ -819,7 +876,7 @@ mod tests {
     #[tokio::test]
     async fn parse_registers_new_agent_from_demon_init() {
         let registry = test_registry().await;
-        let parser = DemonPacketParser::new(registry.clone());
+        let parser = legacy_parser(registry.clone());
         let key = test_key(0x41);
         let iv = test_iv(0x24);
         let packet = build_init_packet(0x1234_5678, key, iv);
@@ -853,7 +910,7 @@ mod tests {
     #[tokio::test]
     async fn parse_preserves_signed_working_hours_bitmask_from_demon_init() {
         let registry = test_registry().await;
-        let parser = DemonPacketParser::new(registry);
+        let parser = legacy_parser(registry);
         let key = test_key(0x41);
         let iv = test_iv(0x24);
         let working_hours = i32::MIN | 0x2A;
@@ -874,7 +931,7 @@ mod tests {
     #[tokio::test]
     async fn parse_stores_no_kill_date_when_init_kill_date_is_zero() {
         let registry = test_registry().await;
-        let parser = DemonPacketParser::new(registry);
+        let parser = legacy_parser(registry);
         let key = test_key(0x51);
         let iv = test_iv(0x34);
         let packet =
@@ -895,7 +952,7 @@ mod tests {
     #[tokio::test]
     async fn parse_for_listener_persists_accepting_listener_name() {
         let registry = test_registry().await;
-        let parser = DemonPacketParser::new(registry.clone());
+        let parser = legacy_parser(registry.clone());
         let packet = build_init_packet(0x2233_4455, test_key(0x31), test_iv(0x42));
 
         parser
@@ -909,7 +966,7 @@ mod tests {
     #[tokio::test]
     async fn parse_decrypts_callback_packages_for_existing_agent() {
         let registry = test_registry().await;
-        let parser = DemonPacketParser::new(registry.clone());
+        let parser = legacy_parser(registry.clone());
         let key = test_key(0x41);
         let iv = test_iv(0x24);
         let init_packet = build_init_packet(0x0102_0304, key, iv);
@@ -947,7 +1004,7 @@ mod tests {
     #[tokio::test]
     async fn parse_returns_reconnect_for_existing_agent_init_probe() {
         let registry = test_registry().await;
-        let parser = DemonPacketParser::new(registry.clone());
+        let parser = legacy_parser(registry.clone());
         let key = test_key(0x41);
         let iv = test_iv(0x24);
         let init_packet = build_init_packet(0x1111_2222, key, iv);
@@ -984,7 +1041,7 @@ mod tests {
     #[tokio::test]
     async fn parse_rejects_duplicate_full_init_without_mutating_registered_agent() {
         let registry = test_registry().await;
-        let parser = DemonPacketParser::new(registry.clone());
+        let parser = legacy_parser(registry.clone());
         let agent_id = 0x1111_2222;
         let first_key = test_key(0x41);
         let first_iv = test_iv(0x24);
@@ -1028,7 +1085,7 @@ mod tests {
         let agent_id: u32 = 0xAABB_CCDD;
 
         let init_packet = build_init_packet(agent_id, key, iv);
-        let parser = DemonPacketParser::new(registry.clone());
+        let parser = legacy_parser(registry.clone());
         parser
             .parse_at(&init_packet, "10.0.0.1".to_owned(), datetime!(2026-03-09 19:40:00 UTC))
             .await
@@ -1047,7 +1104,7 @@ mod tests {
         let database =
             Database::connect(temp_db_path()).await.expect("temp database should initialize");
         let registry = AgentRegistry::new(database.clone());
-        let parser = DemonPacketParser::new(registry.clone());
+        let parser = legacy_parser(registry.clone());
         let key = test_key(0x55);
         let iv = test_iv(0x66);
         let agent_id: u32 = 0x1122_3344;
@@ -1075,7 +1132,7 @@ mod tests {
         let database =
             Database::connect(temp_db_path()).await.expect("temp database should initialize");
         let registry = AgentRegistry::new(database.clone());
-        let parser = DemonPacketParser::new(registry);
+        let parser = legacy_parser(registry);
         let key = test_key(0x57);
         let iv = test_iv(0x68);
         let agent_id: u32 = 0x2233_4455;
@@ -1141,7 +1198,7 @@ mod tests {
         // would advance the CTR offset unconditionally, permanently breaking the legitimate
         // agent's next callback.
         let registry = test_registry().await;
-        let parser = DemonPacketParser::new(registry.clone());
+        let parser = legacy_parser(registry.clone());
         let agent_id = 0xDEAD_BEEF_u32;
         let key = test_key(0xAA);
         let iv = test_iv(0xBB);
@@ -1206,7 +1263,7 @@ mod tests {
         let agent_id: u32 = 0x5566_7788;
 
         let init_packet = build_init_packet(agent_id, key, iv);
-        let parser = DemonPacketParser::new(registry.clone());
+        let parser = legacy_parser(registry.clone());
         parser
             .parse_at(&init_packet, "10.0.0.4".to_owned(), datetime!(2026-03-09 19:46:00 UTC))
             .await
@@ -1226,7 +1283,7 @@ mod tests {
     #[tokio::test]
     async fn successive_messages_use_same_keystream_in_legacy_mode() {
         let registry = test_registry().await;
-        let parser = DemonPacketParser::new(registry.clone());
+        let parser = legacy_parser(registry.clone());
         let key = test_key(0x77);
         let iv = test_iv(0x88);
         let agent_id: u32 = 0xDEAD_BEEF;
@@ -1360,7 +1417,7 @@ mod tests {
         let database =
             Database::connect(temp_db_path()).await.expect("temp database should initialize");
         let registry = AgentRegistry::with_max_registered_agents(database, 1);
-        let parser = DemonPacketParser::new(registry.clone());
+        let parser = legacy_parser(registry.clone());
 
         parser
             .parse_at(
@@ -1698,7 +1755,7 @@ mod tests {
     #[tokio::test]
     async fn parse_checkin_with_truncated_inner_payload_returns_parse_error() {
         let registry = test_registry().await;
-        let parser = DemonPacketParser::new(registry.clone());
+        let parser = legacy_parser(registry.clone());
         let key = test_key(0x41);
         let iv = test_iv(0x24);
         let agent_id: u32 = 0x0A0B_0C0D;
@@ -2155,7 +2212,7 @@ mod tests {
         let agent_id: u32 = 0x1234_5678;
 
         let init_packet = build_init_packet(agent_id, key, iv);
-        let parser = DemonPacketParser::new(registry.clone());
+        let parser = legacy_parser(registry.clone());
         parser
             .parse_at(&init_packet, "10.0.0.10".to_owned(), datetime!(2026-03-19 10:00:00 UTC))
             .await
@@ -2193,7 +2250,7 @@ mod tests {
         let agent_id: u32 = 0xAAAA_BBBB;
 
         let init_packet = build_init_packet(agent_id, key, iv);
-        let parser = DemonPacketParser::new(registry.clone());
+        let parser = legacy_parser(registry.clone());
         parser
             .parse_at(&init_packet, "10.0.0.11".to_owned(), datetime!(2026-03-19 10:01:00 UTC))
             .await
@@ -2224,7 +2281,7 @@ mod tests {
         let agent_id: u32 = 0xCCDD_EEFF;
 
         let init_packet = build_init_packet(agent_id, key, iv);
-        let parser = DemonPacketParser::new(registry.clone());
+        let parser = legacy_parser(registry.clone());
         parser
             .parse_at(&init_packet, "10.0.0.12".to_owned(), datetime!(2026-03-19 10:02:00 UTC))
             .await
@@ -2262,7 +2319,7 @@ mod tests {
         let agent_id: u32 = 0x1111_2222;
 
         let init_packet = build_init_packet(agent_id, key, iv);
-        let parser = DemonPacketParser::new(registry.clone());
+        let parser = legacy_parser(registry.clone());
         parser
             .parse_at(&init_packet, "10.0.0.13".to_owned(), datetime!(2026-03-19 10:03:00 UTC))
             .await
@@ -2292,7 +2349,8 @@ mod tests {
     async fn parse_init_with_init_secret_derives_different_session_keys() {
         let registry = test_registry().await;
         let secret = b"test-server-secret-value".to_vec();
-        let parser = DemonPacketParser::with_init_secret(registry.clone(), Some(secret));
+        let parser = DemonPacketParser::with_init_secret(registry.clone(), Some(secret))
+            .with_allow_legacy_ctr(true);
         let key = test_key(0x41);
         let iv = test_iv(0x24);
         let packet = build_init_packet(0xAABB_CCDD, key, iv);
@@ -2326,7 +2384,7 @@ mod tests {
     #[tokio::test]
     async fn parse_init_without_init_secret_stores_raw_keys() {
         let registry = test_registry().await;
-        let parser = DemonPacketParser::new(registry.clone());
+        let parser = legacy_parser(registry.clone());
         let key = test_key(0x41);
         let iv = test_iv(0x24);
         let packet = build_init_packet(0xDDCC_BBAA, key, iv);
@@ -2356,7 +2414,7 @@ mod tests {
     #[tokio::test]
     async fn parse_legacy_init_without_ext_flags_registers_legacy_ctr() {
         let registry = test_registry().await;
-        let parser = DemonPacketParser::new(registry.clone());
+        let parser = legacy_parser(registry.clone());
         let agent_id = 0xAAAA_1111;
         let key = test_key(0xC1);
         let iv = test_iv(0xD2);
@@ -2406,7 +2464,7 @@ mod tests {
     #[tokio::test]
     async fn parse_init_with_zero_ext_flags_registers_legacy_ctr() {
         let registry = test_registry().await;
-        let parser = DemonPacketParser::new(registry.clone());
+        let parser = legacy_parser(registry.clone());
         let agent_id = 0xCCCC_3333;
         let key = test_key(0xA5);
         let iv = test_iv(0xB6);
@@ -2426,6 +2484,74 @@ mod tests {
         assert!(
             registry.legacy_ctr(agent_id).await.expect("legacy_ctr should be queryable"),
             "init with ext_flags=0 must register with legacy_ctr = true"
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_legacy_init_rejected_when_allow_legacy_ctr_disabled() {
+        // Default parser has allow_legacy_ctr = false — must reject Demon/Archon agents
+        // that do not set INIT_EXT_MONOTONIC_CTR.
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry.clone());
+        let agent_id = 0xEEEE_0001;
+        let key = test_key(0xA1);
+        let iv = test_iv(0xB1);
+        let packet = build_init_packet(agent_id, key, iv);
+
+        let err = parser
+            .parse_at(&packet, "10.0.0.60".to_owned(), datetime!(2026-03-30 00:00:00 UTC))
+            .await
+            .expect_err("legacy CTR init must be rejected when allow_legacy_ctr = false");
+
+        assert!(
+            matches!(err, DemonParserError::LegacyCtrNotAllowed),
+            "expected LegacyCtrNotAllowed, got: {err}"
+        );
+        assert!(registry.get(agent_id).await.is_none(), "rejected agent must not be registered");
+    }
+
+    #[tokio::test]
+    async fn parse_zero_ext_flags_init_rejected_when_allow_legacy_ctr_disabled() {
+        // Extension flags present but zero — still counts as legacy mode and must be
+        // rejected when allow_legacy_ctr = false.
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry.clone());
+        let agent_id = 0xEEEE_0002;
+        let key = test_key(0xA2);
+        let iv = test_iv(0xB2);
+        let packet = build_init_packet_with_ext_flags(agent_id, key, iv, 0);
+
+        let err = parser
+            .parse_at(&packet, "10.0.0.61".to_owned(), datetime!(2026-03-30 00:00:00 UTC))
+            .await
+            .expect_err("zero ext_flags init must be rejected when allow_legacy_ctr = false");
+
+        assert!(
+            matches!(err, DemonParserError::LegacyCtrNotAllowed),
+            "expected LegacyCtrNotAllowed, got: {err}"
+        );
+        assert!(registry.get(agent_id).await.is_none(), "rejected agent must not be registered");
+    }
+
+    #[tokio::test]
+    async fn parse_monotonic_ctr_init_succeeds_regardless_of_allow_legacy_ctr() {
+        // INIT_EXT_MONOTONIC_CTR → not legacy → succeeds even when allow_legacy_ctr = false.
+        let registry = test_registry().await;
+        let parser = DemonPacketParser::new(registry.clone()); // allow_legacy_ctr = false
+        let agent_id = 0xEEEE_0003;
+        let key = test_key(0xA3);
+        let iv = test_iv(0xB3);
+        let packet = build_init_packet_with_ext_flags(agent_id, key, iv, INIT_EXT_MONOTONIC_CTR);
+
+        parser
+            .parse_at(&packet, "10.0.0.62".to_owned(), datetime!(2026-03-30 00:00:00 UTC))
+            .await
+            .expect("monotonic CTR init must succeed regardless of allow_legacy_ctr setting");
+
+        assert!(registry.get(agent_id).await.is_some(), "monotonic CTR agent must be registered");
+        assert!(
+            !registry.legacy_ctr(agent_id).await.expect("legacy_ctr should be queryable"),
+            "monotonic CTR agent must not be in legacy mode"
         );
     }
 

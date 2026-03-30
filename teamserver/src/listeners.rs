@@ -473,6 +473,12 @@ pub struct ListenerManager {
     /// being stored as the session key.  Corresponds to `DemonConfig.init_secret`
     /// in the HCL profile.
     demon_init_secret: Option<Vec<u8>>,
+    /// Whether to accept DEMON_INIT registrations that negotiate legacy CTR mode.
+    ///
+    /// Mirrors `DemonConfig.allow_legacy_ctr` from the HCL profile.  Defaults to
+    /// `false`; must be explicitly enabled by the operator before the teamserver
+    /// will accept agents that do not set `INIT_EXT_MONOTONIC_CTR`.
+    demon_allow_legacy_ctr: bool,
 }
 
 impl ListenerManager {
@@ -531,6 +537,7 @@ impl ListenerManager {
             operations: Arc::new(Mutex::new(())),
             external_endpoints: Arc::new(RwLock::new(BTreeMap::new())),
             demon_init_secret: None,
+            demon_allow_legacy_ctr: false,
         }
     }
 
@@ -542,6 +549,17 @@ impl ListenerManager {
     #[must_use]
     pub fn with_demon_init_secret(mut self, secret: Option<Vec<u8>>) -> Self {
         self.demon_init_secret = secret;
+        self
+    }
+
+    /// Control whether listener parsers accept DEMON_INIT registrations in legacy CTR mode.
+    ///
+    /// When `false` (the default), any agent that does not negotiate
+    /// `INIT_EXT_MONOTONIC_CTR` is rejected.  Set to `true` only when the operator has
+    /// explicitly opted in via `AllowLegacyCtr = true` in the profile `Demon` block.
+    #[must_use]
+    pub fn with_demon_allow_legacy_ctr(mut self, allow: bool) -> Self {
+        self.demon_allow_legacy_ctr = allow;
         self
     }
 
@@ -1040,6 +1058,7 @@ impl HttpListenerState {
         unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
         shutdown: ShutdownController,
         init_secret: Option<Vec<u8>>,
+        allow_legacy_ctr: bool,
     ) -> Result<Self, ListenerManagerError> {
         let method = parse_method(config)?;
         let trusted_proxy_peers = config
@@ -1070,7 +1089,8 @@ impl HttpListenerState {
             trusted_proxy_peers,
             registry: registry.clone(),
             database: database.clone(),
-            parser: DemonPacketParser::with_init_secret(registry.clone(), init_secret),
+            parser: DemonPacketParser::with_init_secret(registry.clone(), init_secret)
+                .with_allow_legacy_ctr(allow_legacy_ctr),
             dispatcher: CommandDispatcher::with_builtin_handlers_and_downloads(
                 registry.clone(),
                 events.clone(),
@@ -1078,6 +1098,7 @@ impl HttpListenerState {
                 sockets,
                 plugins,
                 downloads,
+                allow_legacy_ctr,
             ),
             events,
             demon_init_rate_limiter,
@@ -1129,12 +1150,14 @@ impl SmbListenerState {
         unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
         shutdown: ShutdownController,
         init_secret: Option<Vec<u8>>,
+        allow_legacy_ctr: bool,
     ) -> Self {
         Self {
             config: config.clone(),
             registry: registry.clone(),
             database: database.clone(),
-            parser: DemonPacketParser::with_init_secret(registry.clone(), init_secret),
+            parser: DemonPacketParser::with_init_secret(registry.clone(), init_secret)
+                .with_allow_legacy_ctr(allow_legacy_ctr),
             events: events.clone(),
             demon_init_rate_limiter,
             unknown_callback_probe_audit_limiter,
@@ -1146,6 +1169,7 @@ impl SmbListenerState {
                 sockets,
                 plugins,
                 downloads,
+                allow_legacy_ctr,
             ),
         }
     }
@@ -1404,6 +1428,7 @@ async fn spawn_http_listener_runtime(
     unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
     shutdown: ShutdownController,
     init_secret: Option<Vec<u8>>,
+    allow_legacy_ctr: bool,
 ) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
     let state = Arc::new(HttpListenerState::build(
         config,
@@ -1417,6 +1442,7 @@ async fn spawn_http_listener_runtime(
         unknown_callback_probe_audit_limiter,
         shutdown,
         init_secret,
+        allow_legacy_ctr,
     )?);
     let address = format!("{}:{}", config.host_bind, config.port_bind);
     let listener = TcpListener::bind(address.as_str()).await.map_err(|error| {
@@ -1750,6 +1776,7 @@ async fn spawn_smb_listener_runtime(
     unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
     shutdown: ShutdownController,
     init_secret: Option<Vec<u8>>,
+    allow_legacy_ctr: bool,
 ) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
     let state = Arc::new(SmbListenerState::build(
         config,
@@ -1763,6 +1790,7 @@ async fn spawn_smb_listener_runtime(
         unknown_callback_probe_audit_limiter,
         shutdown,
         init_secret,
+        allow_legacy_ctr,
     ));
     let listener_name = normalized_smb_pipe_name(&config.pipe_name);
     let socket_name = smb_local_socket_name(&config.pipe_name).map_err(|error| {
@@ -1980,12 +2008,14 @@ fn spawn_external_listener_runtime(
     shutdown: ShutdownController,
     external_endpoints: Arc<RwLock<BTreeMap<String, Arc<ExternalListenerState>>>>,
     init_secret: Option<Vec<u8>>,
+    allow_legacy_ctr: bool,
 ) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
     let state = Arc::new(ExternalListenerState {
         config: config.clone(),
         registry: registry.clone(),
         database: database.clone(),
-        parser: DemonPacketParser::with_init_secret(registry.clone(), init_secret),
+        parser: DemonPacketParser::with_init_secret(registry.clone(), init_secret)
+            .with_allow_legacy_ctr(allow_legacy_ctr),
         events: events.clone(),
         demon_init_rate_limiter,
         unknown_callback_probe_audit_limiter,
@@ -1997,6 +2027,7 @@ fn spawn_external_listener_runtime(
             sockets,
             plugins,
             downloads,
+            allow_legacy_ctr,
         ),
     });
 
@@ -2099,6 +2130,7 @@ impl ListenerManager {
                     self.unknown_callback_probe_audit_limiter.clone(),
                     self.shutdown.clone(),
                     self.demon_init_secret.clone(),
+                    self.demon_allow_legacy_ctr,
                 )
                 .await
             }
@@ -2115,6 +2147,7 @@ impl ListenerManager {
                     self.unknown_callback_probe_audit_limiter.clone(),
                     self.shutdown.clone(),
                     self.demon_init_secret.clone(),
+                    self.demon_allow_legacy_ctr,
                 )
                 .await
             }
@@ -2131,6 +2164,7 @@ impl ListenerManager {
                     self.unknown_callback_probe_audit_limiter.clone(),
                     self.shutdown.clone(),
                     self.demon_init_secret.clone(),
+                    self.demon_allow_legacy_ctr,
                 )
                 .await
             }
@@ -2147,6 +2181,7 @@ impl ListenerManager {
                 self.shutdown.clone(),
                 self.external_endpoints.clone(),
                 self.demon_init_secret.clone(),
+                self.demon_allow_legacy_ctr,
             ),
         }?;
 
@@ -2306,12 +2341,14 @@ impl DnsListenerState {
         unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
         shutdown: ShutdownController,
         init_secret: Option<Vec<u8>>,
+        allow_legacy_ctr: bool,
     ) -> Self {
         Self {
             config: config.clone(),
             registry: registry.clone(),
             database: database.clone(),
-            parser: DemonPacketParser::with_init_secret(registry.clone(), init_secret),
+            parser: DemonPacketParser::with_init_secret(registry.clone(), init_secret)
+                .with_allow_legacy_ctr(allow_legacy_ctr),
             events: events.clone(),
             dispatcher: CommandDispatcher::with_builtin_handlers_and_downloads(
                 registry.clone(),
@@ -2320,6 +2357,7 @@ impl DnsListenerState {
                 sockets,
                 plugins,
                 downloads,
+                allow_legacy_ctr,
             ),
             demon_init_rate_limiter,
             unknown_callback_probe_audit_limiter,
@@ -2973,6 +3011,7 @@ async fn spawn_dns_listener_runtime(
     unknown_callback_probe_audit_limiter: UnknownCallbackProbeAuditLimiter,
     shutdown: ShutdownController,
     init_secret: Option<Vec<u8>>,
+    allow_legacy_ctr: bool,
 ) -> Result<ListenerRuntimeFuture, ListenerManagerError> {
     if dns_allowed_query_types(&config.record_types).is_none() {
         return Err(ListenerManagerError::StartFailed {
@@ -2996,6 +3035,7 @@ async fn spawn_dns_listener_runtime(
         unknown_callback_probe_audit_limiter,
         shutdown,
         init_secret,
+        allow_legacy_ctr,
     ));
     let addr = format!("{}:{}", config.host_bind, config.port_bind);
 
@@ -3818,7 +3858,8 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        Ok(ListenerManager::new(database, registry, events, sockets, None))
+        Ok(ListenerManager::new(database, registry, events, sockets, None)
+            .with_demon_allow_legacy_ctr(true))
     }
 
     #[tokio::test]
@@ -4782,7 +4823,8 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let manager = ListenerManager::new(database, registry, events, sockets, None);
+        let manager = ListenerManager::new(database, registry, events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
         let port = available_port()?;
         let agent_id = 0x1234_5678;
         let config = ListenerConfig::from(HttpListenerConfig {
@@ -4852,7 +4894,8 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let manager = ListenerManager::new(database, registry, events, sockets, None);
+        let manager = ListenerManager::new(database, registry, events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
         let port = available_port()?;
         let agent_id = 1;
         let key = test_key(0x41);
@@ -4996,7 +5039,8 @@ mod tests {
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
         let manager =
-            ListenerManager::new(database.clone(), registry.clone(), events.clone(), sockets, None);
+            ListenerManager::new(database.clone(), registry.clone(), events.clone(), sockets, None)
+                .with_demon_allow_legacy_ctr(true);
         let mut event_receiver = events.subscribe();
         let port = available_port()?;
 
@@ -5042,7 +5086,8 @@ mod tests {
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
         let manager =
-            ListenerManager::new(database.clone(), registry.clone(), events, sockets, None);
+            ListenerManager::new(database.clone(), registry.clone(), events, sockets, None)
+                .with_demon_allow_legacy_ctr(true);
         let port = available_port()?;
 
         manager.create(http_listener("edge-http-audit-init", port)).await?;
@@ -5087,7 +5132,8 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
         let port = available_port()?;
 
         manager.create(http_listener("edge-http-peer-ip", port)).await?;
@@ -5117,7 +5163,8 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
         let port = available_port()?;
 
         manager
@@ -5152,7 +5199,8 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
         let port = available_port()?;
 
         manager.create(http_listener("edge-http-init-limit", port)).await?;
@@ -5191,7 +5239,8 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
         let port = available_port()?;
         let key = test_key(0x51);
         let iv = test_iv(0x19);
@@ -5229,7 +5278,8 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
         let port = available_port()?;
         let key = test_key(0x31);
         let iv = test_iv(0x17);
@@ -5295,7 +5345,8 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
         let port = available_port()?;
         let key = test_key(0x52);
         let iv = test_iv(0x1A);
@@ -5339,7 +5390,8 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let manager = ListenerManager::new(database.clone(), registry, events, sockets, None);
+        let manager = ListenerManager::new(database.clone(), registry, events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
         let port = available_port()?;
         let client = Client::new();
         // Use an agent_id that is never registered so decrypt_from_agent returns AgentNotFound.
@@ -5413,7 +5465,8 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let manager = ListenerManager::new(database.clone(), registry, events, sockets, None);
+        let manager = ListenerManager::new(database.clone(), registry, events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
         let port = available_port()?;
         let client = Client::new();
         let agent_id = 0xDEAD_BEEF;
@@ -5484,7 +5537,8 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
         let port = available_port()?;
         let key = test_key(0x61);
         let iv = test_iv(0x27);
@@ -5573,7 +5627,8 @@ mod tests {
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
         let manager =
-            ListenerManager::new(database.clone(), registry.clone(), events.clone(), sockets, None);
+            ListenerManager::new(database.clone(), registry.clone(), events.clone(), sockets, None)
+                .with_demon_allow_legacy_ctr(true);
         let mut event_receiver = events.subscribe();
         let port = available_port()?;
         let key = test_key(0x71);
@@ -5657,7 +5712,8 @@ mod tests {
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
         let manager =
-            ListenerManager::new(database.clone(), registry.clone(), events.clone(), sockets, None);
+            ListenerManager::new(database.clone(), registry.clone(), events.clone(), sockets, None)
+                .with_demon_allow_legacy_ctr(true);
         let mut event_receiver = events.subscribe();
         let pipe_name = unique_smb_pipe_name("init");
 
@@ -5703,7 +5759,8 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
         let pipe_name = unique_smb_pipe_name("init-limit");
 
         manager.create(smb_listener("edge-smb-init-limit", &pipe_name)).await?;
@@ -5806,7 +5863,8 @@ mod tests {
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
         let manager =
-            ListenerManager::new(database.clone(), registry.clone(), events.clone(), sockets, None);
+            ListenerManager::new(database.clone(), registry.clone(), events.clone(), sockets, None)
+                .with_demon_allow_legacy_ctr(true);
         let mut event_receiver = events.subscribe();
         let pipe_name = unique_smb_pipe_name("pivot-init");
         let parent_id = 0x1111_2222;
@@ -5860,7 +5918,8 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
         let pipe_name = unique_smb_pipe_name("jobs");
         let key = test_key(0x61);
         let iv = test_iv(0x27);
@@ -6679,6 +6738,7 @@ mod tests {
             UnknownCallbackProbeAuditLimiter::new(),
             ShutdownController::new(),
             None,
+            true,
         )
     }
 
@@ -6701,6 +6761,7 @@ mod tests {
             UnknownCallbackProbeAuditLimiter::new(),
             ShutdownController::new(),
             None,
+            true,
         )
         .await
         .expect("dns runtime should start");
@@ -6731,6 +6792,7 @@ mod tests {
             UnknownCallbackProbeAuditLimiter::new(),
             shutdown,
             None,
+            true,
         )
         .await
     }
@@ -7070,6 +7132,7 @@ mod tests {
             UnknownCallbackProbeAuditLimiter::new(),
             shutdown.clone(),
             None,
+            true,
         )
         .await
         .expect("dns runtime should start");
@@ -7346,6 +7409,7 @@ mod tests {
             UnknownCallbackProbeAuditLimiter::new(),
             ShutdownController::new(),
             None,
+            false,
         )
         .await
         {
@@ -8060,7 +8124,8 @@ mod tests {
             sockets,
             None,
             1024 * 1024,
-        );
+        )
+        .with_demon_allow_legacy_ctr(true);
 
         // agent_registry() must return the same underlying handle: an insert via the returned
         // registry is visible through the original handle.
@@ -8144,7 +8209,8 @@ mod tests {
             sockets,
             None,
             1024,
-        );
+        )
+        .with_demon_allow_legacy_ctr(true);
 
         // Register a spy hook after construction to confirm the full cleanup chain fires.
         // Hooks run in registration order: the download-drain hook runs first, then the spy.
@@ -8252,7 +8318,8 @@ mod tests {
         runtime.register_callback_for_test(PluginEvent::AgentRegistered, callback).await?;
 
         // Start a real HTTP listener, submit a valid DemonInit, and assert it succeeds.
-        let manager = ListenerManager::new(database, registry, events, sockets, None);
+        let manager = ListenerManager::new(database, registry, events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
         let port = available_port()?;
         manager.create(http_listener("plugin-init-wiring", port)).await?;
         manager.start("plugin-init-wiring").await?;
@@ -8341,7 +8408,8 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let manager = ListenerManager::new(database, registry, events, sockets, None);
+        let manager = ListenerManager::new(database, registry, events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
 
         let config = external_listener_config("ext1", "/bridge");
 
@@ -8380,7 +8448,8 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let manager = ListenerManager::new(database, registry, events, sockets, None);
+        let manager = ListenerManager::new(database, registry, events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
 
         let config = external_listener_config("ext-info", "/c2");
         manager.create(config).await.expect("create should succeed");
@@ -8429,7 +8498,8 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let manager = ListenerManager::new(database, registry, events, sockets, None);
+        let manager = ListenerManager::new(database, registry, events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
 
         assert!(
             manager.external_state_for_path("/nonexistent").await.is_none(),
@@ -8443,7 +8513,8 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let manager = ListenerManager::new(database, registry, events, sockets, None);
+        let manager = ListenerManager::new(database, registry, events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
 
         let config = external_listener_config("ext-persist", "/persist");
         manager.create(config).await.expect("create");
@@ -8466,7 +8537,8 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let manager = ListenerManager::new(database, registry, events, sockets, None);
+        let manager = ListenerManager::new(database, registry, events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
 
         // Create two external listeners with distinct endpoints.
         manager.create(external_listener_config("ext-a", "/alpha")).await.expect("create ext-a");
@@ -8502,7 +8574,8 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
 
         manager.create(external_listener_config("ext-rate", "/rate")).await.expect("create");
         manager.start("ext-rate").await.expect("start");
@@ -8539,7 +8612,8 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let manager = ListenerManager::new(database, registry, events, sockets, None);
+        let manager = ListenerManager::new(database, registry, events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
 
         manager
             .create(external_listener_config("ext-shutdown", "/shutdown"))
@@ -8968,6 +9042,7 @@ mod tests {
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
         let manager =
             ListenerManager::new(database.clone(), registry.clone(), events.clone(), sockets, None)
+                .with_demon_allow_legacy_ctr(true)
                 .with_demon_init_secret(Some(secret));
         Ok((manager, registry, database, events))
     }
@@ -9173,7 +9248,8 @@ mod tests {
         let registry = AgentRegistry::new(database.clone());
         let events = EventBus::default();
         let sockets = SocketRelayManager::new(registry.clone(), events.clone());
-        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None);
+        let manager = ListenerManager::new(database, registry.clone(), events, sockets, None)
+            .with_demon_allow_legacy_ctr(true);
         let port = available_port()?;
 
         manager.create(http_listener("edge-no-secret", port)).await?;

@@ -31,6 +31,12 @@ Demon {
 
     TrustXForwardedFor = false
 
+    # Set AllowLegacyCtr = true ONLY when using unmodified Havoc Demon or Archon
+    # builds that do not negotiate INIT_EXT_MONOTONIC_CTR.  Legacy CTR mode resets
+    # the AES-CTR keystream to offset 0 every packet (two-time-pad risk).
+    # Default: false (rejects legacy-mode agents).
+    AllowLegacyCtr = true
+
     Injection {
         Spawn64 = "C:\\Windows\\System32\\notepad.exe"
         Spawn32 = "C:\\Windows\\SysWOW64\\notepad.exe"

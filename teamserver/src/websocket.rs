@@ -2884,7 +2884,8 @@ mod tests {
                 events: events.clone(),
                 connections: OperatorConnectionManager::new(),
                 registry: registry.clone(),
-                listeners: ListenerManager::new(database, registry, events, sockets.clone(), None),
+                listeners: ListenerManager::new(database, registry, events, sockets.clone(), None)
+                    .with_demon_allow_legacy_ctr(true),
                 payload_builder: PayloadBuilderService::disabled_for_tests(),
                 sockets,
                 webhooks: AuditWebhookNotifier::from_profile(&profile),

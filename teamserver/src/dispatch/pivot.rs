@@ -28,6 +28,7 @@ pub(super) async fn handle_pivot_callback(
                 agent_id,
                 request_id,
                 &mut parser,
+                context.allow_legacy_ctr,
             )
             .await
         }
@@ -95,6 +96,7 @@ async fn handle_pivot_connect_callback(
     parent_agent_id: u32,
     request_id: u32,
     parser: &mut CallbackParser<'_>,
+    allow_legacy_ctr: bool,
 ) -> Result<Option<Vec<u8>>, CommandDispatchError> {
     let success = parser.read_u32("pivot connect success")?;
     if success == 0 {
@@ -159,6 +161,7 @@ async fn handle_pivot_connect_callback(
         let external_ip =
             registry.get(parent_agent_id).await.map(|agent| agent.external_ip).unwrap_or_default();
         let parsed = DemonPacketParser::new(registry.clone())
+            .with_allow_legacy_ctr(allow_legacy_ctr)
             .parse_for_listener(&inner, external_ip, &listener_name)
             .await;
         let agent = match parsed {
@@ -295,6 +298,7 @@ pub(super) async fn dispatch_builtin_packages(
             downloads: context.downloads.clone(),
             plugins: context.plugins.cloned(),
             pivot_dispatch_depth: context.pivot_dispatch_depth + 1,
+            allow_legacy_ctr: context.allow_legacy_ctr,
         },
         false,
     );
@@ -736,6 +740,7 @@ mod tests {
             downloads: &downloads,
             plugins: None,
             pivot_dispatch_depth: 0,
+            allow_legacy_ctr: true,
         };
 
         let result = handle_pivot_command_callback(context, AGENT_ID, &mut parser).await;
@@ -840,6 +845,7 @@ mod tests {
             downloads: &downloads,
             plugins: None,
             pivot_dispatch_depth: 0,
+            allow_legacy_ctr: true,
         };
 
         let result = handle_pivot_command_callback(context, AGENT_ID, &mut parser).await;
@@ -877,6 +883,7 @@ mod tests {
             downloads: &downloads,
             plugins: None,
             pivot_dispatch_depth: 0,
+            allow_legacy_ctr: true,
         };
 
         let result = handle_pivot_command_callback(context, AGENT_ID, &mut parser).await;
@@ -913,6 +920,7 @@ mod tests {
             downloads: &downloads,
             plugins: None,
             pivot_dispatch_depth: 0,
+            allow_legacy_ctr: true,
         };
 
         let packages = vec![DemonCallbackPackage {
@@ -966,6 +974,7 @@ mod tests {
             downloads: &downloads,
             plugins: None,
             pivot_dispatch_depth: MAX_PIVOT_CHAIN_DEPTH,
+            allow_legacy_ctr: true,
         };
 
         let packages = vec![DemonCallbackPackage {
@@ -1010,6 +1019,7 @@ mod tests {
             downloads: &downloads,
             plugins: None,
             pivot_dispatch_depth: MAX_PIVOT_CHAIN_DEPTH - 1,
+            allow_legacy_ctr: true,
         };
 
         let packages = vec![DemonCallbackPackage {
@@ -1263,9 +1273,15 @@ mod tests {
         let payload = connect_payload(1, &inner_envelope);
         let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandPivot));
 
-        let result =
-            handle_pivot_connect_callback(&registry, &events, parent_id, REQUEST_ID, &mut parser)
-                .await;
+        let result = handle_pivot_connect_callback(
+            &registry,
+            &events,
+            parent_id,
+            REQUEST_ID,
+            &mut parser,
+            true,
+        )
+        .await;
         assert!(result.is_ok(), "reconnect must succeed: {result:?}");
 
         // First event: AgentUpdate (mark) for the reconnected child.
@@ -1317,9 +1333,15 @@ mod tests {
         let payload = connect_payload(1, &inner_envelope);
         let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandPivot));
 
-        let result =
-            handle_pivot_connect_callback(&registry, &events, parent_id, REQUEST_ID, &mut parser)
-                .await;
+        let result = handle_pivot_connect_callback(
+            &registry,
+            &events,
+            parent_id,
+            REQUEST_ID,
+            &mut parser,
+            true,
+        )
+        .await;
         assert!(result.is_ok(), "reconnect of active agent must succeed: {result:?}");
 
         // Should get AgentUpdate (mark) — not AgentNew.
@@ -1346,9 +1368,15 @@ mod tests {
         push_u32(&mut payload, 5); // error code
         let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandPivot));
 
-        let result =
-            handle_pivot_connect_callback(&registry, &events, parent_id, REQUEST_ID, &mut parser)
-                .await;
+        let result = handle_pivot_connect_callback(
+            &registry,
+            &events,
+            parent_id,
+            REQUEST_ID,
+            &mut parser,
+            true,
+        )
+        .await;
         assert!(result.is_ok(), "failure path must return Ok(None): {result:?}");
 
         let resp_event = rx.recv().await.expect("should receive AgentResponse event");
@@ -1457,9 +1485,15 @@ mod tests {
         let payload = connect_payload(1, &inner_envelope);
         let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandPivot));
 
-        let result =
-            handle_pivot_connect_callback(&registry, &events, parent_id, REQUEST_ID, &mut parser)
-                .await;
+        let result = handle_pivot_connect_callback(
+            &registry,
+            &events,
+            parent_id,
+            REQUEST_ID,
+            &mut parser,
+            true,
+        )
+        .await;
         assert!(result.is_ok(), "new-agent pivot connect must succeed: {result:?}");
         assert!(matches!(result, Ok(None)), "handler should return Ok(None)");
 
@@ -1512,9 +1546,15 @@ mod tests {
         let payload = connect_payload(1, &inner_envelope);
         let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandPivot));
 
-        let result =
-            handle_pivot_connect_callback(&registry, &events, parent_id, REQUEST_ID, &mut parser)
-                .await;
+        let result = handle_pivot_connect_callback(
+            &registry,
+            &events,
+            parent_id,
+            REQUEST_ID,
+            &mut parser,
+            true,
+        )
+        .await;
         assert!(result.is_ok(), "new-agent connect must succeed: {result:?}");
 
         // Child must be registered with a listener name.
@@ -1540,9 +1580,15 @@ mod tests {
         let payload = connect_payload(1, &inner_envelope);
         let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandPivot));
 
-        let result =
-            handle_pivot_connect_callback(&registry, &events, parent_id, REQUEST_ID, &mut parser)
-                .await;
+        let result = handle_pivot_connect_callback(
+            &registry,
+            &events,
+            parent_id,
+            REQUEST_ID,
+            &mut parser,
+            true,
+        )
+        .await;
         assert!(result.is_err(), "invalid init metadata must return an error");
 
         let error = result.unwrap_err();
@@ -1588,9 +1634,15 @@ mod tests {
         let payload = connect_payload(1, &inner_envelope);
         let mut parser = CallbackParser::new(&payload, u32::from(DemonCommand::CommandPivot));
 
-        let result =
-            handle_pivot_connect_callback(&registry, &events, parent_id, REQUEST_ID, &mut parser)
-                .await;
+        let result = handle_pivot_connect_callback(
+            &registry,
+            &events,
+            parent_id,
+            REQUEST_ID,
+            &mut parser,
+            true,
+        )
+        .await;
         assert!(result.is_err(), "non-DemonInit inner command must be rejected");
 
         let error = result.unwrap_err();
@@ -1631,6 +1683,7 @@ mod tests {
             downloads: &downloads,
             plugins: None,
             pivot_dispatch_depth: 0,
+            allow_legacy_ctr: true,
         };
 
         let result = handle_pivot_callback(context, AGENT_ID, REQUEST_ID, &payload).await;
@@ -1652,6 +1705,7 @@ mod tests {
             downloads: &downloads,
             plugins: None,
             pivot_dispatch_depth: 0,
+            allow_legacy_ctr: true,
         };
 
         let result = handle_pivot_callback(context, AGENT_ID, REQUEST_ID, &[]).await;
@@ -1676,6 +1730,7 @@ mod tests {
             downloads: &downloads,
             plugins: None,
             pivot_dispatch_depth: 0,
+            allow_legacy_ctr: true,
         };
 
         let _result = handle_pivot_callback(context, AGENT_ID, REQUEST_ID, &payload).await;

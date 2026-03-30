@@ -5081,7 +5081,8 @@ mod tests {
             events.clone(),
             sockets.clone(),
             None,
-        );
+        )
+        .with_demon_allow_legacy_ctr(true);
         let api = ApiRuntime::from_profile(&profile).expect("rng should work in tests");
         let app = api_routes(api.clone()).with_state(TeamserverState {
             profile: profile.clone(),
@@ -5773,7 +5774,8 @@ mod tests {
             events.clone(),
             sockets.clone(),
             None,
-        );
+        )
+        .with_demon_allow_legacy_ctr(true);
 
         let api = ApiRuntime::from_profile(&profile).expect("rng should work in tests");
         let auth =
@@ -6872,7 +6874,8 @@ mod tests {
             events.clone(),
             sockets.clone(),
             None,
-        );
+        )
+        .with_demon_allow_legacy_ctr(true);
         let api = ApiRuntime::from_profile(&profile).expect("rng should work in tests");
         let auth = AuthService::from_profile(&profile).expect("auth service should initialize");
 
@@ -7444,7 +7447,8 @@ mod tests {
             events.clone(),
             sockets.clone(),
             None,
-        );
+        )
+        .with_demon_allow_legacy_ctr(true);
 
         // Build a profile with both admin and analyst keys.
         let profile = Profile::parse(

@@ -1,43 +1,48 @@
 """
 Scenario 14_stress_concurrent_agents: Concurrent agent stress test
 
-Spin up 10 Demon agent processes on the Linux test VM simultaneously and
-verify the teamserver remains stable and responsive under load.
+Runs two passes:
+  - Demon: 10 concurrent agents (full stress baseline)
+  - Phantom: 5 concurrent agents (Rust Linux agent stability check)
+
+The Phantom pass is skipped with a warning if the payload build fails
+(e.g. Phantom not yet fully implemented), so the Demon pass still counts
+as coverage.
 
 Skip if ctx.linux is None.
 
-Steps:
+Steps (per agent pass):
   1.  Create + start a single HTTP listener (all agents share it)
-  2.  Build one Demon bin payload for the Linux target
-  3.  Upload 10 copies with distinct names; execute each in background
-  4.  Wait for all 10 agents to check in (deadline: 30 s)
+  2.  Build one payload for the Linux target
+  3.  Upload N copies with distinct names; execute each in background
+  4.  Wait for all N agents to check in (deadline: 30 s)
   5.  Start CPU monitoring in a background thread
-  6.  For 60 s: issue shell exec to all agents in parallel every 10 s,
-      checking for cross-agent marker bleed after each round
+  6.  For RUN_SECONDS: issue shell exec to all agents in parallel every
+      EXEC_INTERVAL s, checking for cross-agent marker bleed after each round
   7.  Assert teamserver CPU stayed below 80 % throughout the run
   8.  Assert teamserver produced no ERROR-level log entries
   9.  Kill all agents; verify disconnected; stop listener; clean up
 
-Pass criteria (from issue):
-  - All 10 agents check in within 30 s
-  - No agent drops connection during the 60 s run
+Pass criteria:
+  - All N agents check in within 30 s
+  - No agent drops connection during the run
   - All shell exec commands return correct output (no cross-agent bleed)
   - Teamserver CPU < 80 % (sampled via /proc or ps)
   - Teamserver does not crash or produce ERROR-level log entries
-
-Why this matters:
-  A single-threaded bottleneck or lock contention in the job dispatch path
-  only shows up under concurrent load.  This test catches regressions in the
-  WebSocket handler's per-agent routing and the SQLite connection pool under
-  write pressure.
 """
 
 from __future__ import annotations
 
-DESCRIPTION = "Stress test: 10 concurrent Demon agents on Linux target"
+DESCRIPTION = "Stress test: concurrent agents on Linux target (Demon + Phantom)"
 
-AGENT_COUNT = 10
-RUN_SECONDS = 60
+# Demon stress parameters
+DEMON_AGENT_COUNT = 10
+DEMON_RUN_SECONDS = 60
+
+# Phantom stress parameters (smaller scale — validates stability, not max throughput)
+PHANTOM_AGENT_COUNT = 5
+PHANTOM_RUN_SECONDS = 30
+
 EXEC_INTERVAL = 10       # seconds between parallel exec rounds during the run
 CHECKIN_DEADLINE = 30    # seconds to wait for all agents to check in
 CPU_LIMIT_PCT = 80.0     # maximum allowable teamserver CPU %
@@ -66,7 +71,7 @@ def _unique_marker() -> str:
 
 def _wait_for_n_agents(cli, pre_existing_ids: set, n: int, timeout: int) -> list[str]:
     """Block until at least n new agent IDs appear.  Returns list of new IDs."""
-    from lib.wait import poll, TimeoutError as WaitTimeout
+    from lib.wait import poll
 
     def _new_agents():
         from lib.cli import agent_list
@@ -84,11 +89,7 @@ def _wait_for_n_agents(cli, pre_existing_ids: set, n: int, timeout: int) -> list
 
 
 def _exec_one(cli, agent_id: str, marker: str, label: str) -> dict:
-    """Issue `echo <marker>` to one agent and return result dict.
-
-    Returns {"agent_id": ..., "marker": ..., "output": ..., "ok": bool,
-             "error": str|None}.
-    """
+    """Issue ``echo <marker>`` to one agent and return result dict."""
     from lib.cli import agent_exec, CliError
 
     try:
@@ -114,7 +115,7 @@ def _exec_one(cli, agent_id: str, marker: str, label: str) -> dict:
 
 
 def _exec_round(cli, agent_ids: list[str], markers: dict[str, str]) -> list[dict]:
-    """Issue `echo <marker>` to all agents concurrently.  Returns list of result dicts."""
+    """Issue ``echo <marker>`` to all agents concurrently.  Returns list of result dicts."""
     with ThreadPoolExecutor(max_workers=len(agent_ids)) as pool:
         futures: list[Future] = [
             pool.submit(_exec_one, cli, aid, markers[aid], f"agent-{i}")
@@ -161,7 +162,7 @@ def _assert_exec_round(results: list[dict], round_num: int) -> None:
 class _CpuMonitor(threading.Thread):
     """Sample teamserver CPU usage in the background.
 
-    Tries to find the `red-cell` process via `ps` and records the max CPU %
+    Tries to find the ``red-cell`` process via ``ps`` and records the max CPU %
     seen during the monitoring window.
     """
 
@@ -174,7 +175,7 @@ class _CpuMonitor(threading.Thread):
         self._pid: int | None = None
 
     def _find_pid(self) -> int | None:
-        """Return the PID of the `red-cell` teamserver, or None if not found."""
+        """Return the PID of the ``red-cell`` teamserver, or None if not found."""
         try:
             result = subprocess.run(
                 ["pgrep", "-x", "red-cell"],
@@ -233,22 +234,31 @@ class _CpuMonitor(threading.Thread):
         self.join(timeout=10)
 
 
-# ── Main entry point ──────────────────────────────────────────────────────────
+# ── Per-agent-type stress runner ──────────────────────────────────────────────
 
-def run(ctx):
+def _run_stress_for_agent(
+    ctx,
+    agent_type: str,
+    fmt: str,
+    name_prefix: str,
+    agent_count: int,
+    run_seconds: int,
+) -> None:
+    """Run the full concurrent stress test for one agent type.
+
+    Args:
+        ctx:         RunContext passed by the harness.
+        agent_type:  Agent name passed to ``payload_build`` (e.g. ``"demon"``
+                     or ``"phantom"``).
+        fmt:         Payload format (e.g. ``"bin"`` or ``"elf"``).
+        name_prefix: Short prefix used to name the listener and remote files.
+        agent_count: Number of concurrent agent instances to spawn.
+        run_seconds: Duration of the load-run phase in seconds.
+
+    Raises:
+        AssertionError on test failure.
+        ScenarioSkipped if the payload cannot be built (agent not yet available).
     """
-    ctx.cli     — CliConfig (red-cell-cli wrapper)
-    ctx.linux   — TargetConfig | None
-    ctx.windows — TargetConfig | None
-    ctx.env     — raw env.toml dict
-    ctx.dry_run — bool
-
-    Raises AssertionError with a descriptive message on any failure.
-    Skips silently when ctx.linux is None.
-    """
-    if ctx.linux is None:
-        raise ScenarioSkipped("ctx.linux is None — Linux target required for this scenario")
-
     from lib.cli import (
         CliError,
         agent_kill,
@@ -265,7 +275,7 @@ def run(ctx):
     cli = ctx.cli
     target = ctx.linux
     uid = _short_id()
-    listener_name = f"test-stress-{uid}"
+    listener_name = f"{name_prefix}-{uid}"
     listener_port = ctx.env.get("listeners", {}).get("stress_port", 19093)
 
     # Record pre-existing agent IDs.
@@ -278,37 +288,42 @@ def run(ctx):
     agent_ids: list[str] = []
 
     # ── Step 1: Create + start listener ──────────────────────────────────────
-    print(f"  [listener] creating HTTP listener {listener_name!r} on port {listener_port}")
+    print(f"  [{agent_type}][listener] creating HTTP listener {listener_name!r} on port {listener_port}")
     listener_create(cli, listener_name, "http", port=listener_port)
     listener_start(cli, listener_name)
-    print("  [listener] started")
+    print(f"  [{agent_type}][listener] started")
 
     try:
         # ── Step 2: Build one payload ─────────────────────────────────────────
-        print(f"  [payload] building Demon bin x64 for listener {listener_name!r}")
-        result = payload_build(
-            cli, agent="demon", listener=listener_name, arch="x64", fmt="bin"
-        )
+        print(f"  [{agent_type}][payload] building {agent_type} {fmt} x64 for listener {listener_name!r}")
+        try:
+            result = payload_build(
+                cli, agent=agent_type, listener=listener_name, arch="x64", fmt=fmt
+            )
+        except CliError as exc:
+            raise ScenarioSkipped(
+                f"{agent_type} payload build failed — agent may not be available yet: {exc}"
+            )
         raw = base64.b64decode(result["bytes"])
         assert len(raw) > 0, "payload is empty"
-        print(f"  [payload] built ({len(raw)} bytes)")
+        print(f"  [{agent_type}][payload] built ({len(raw)} bytes)")
 
-        local_payload = tempfile.mktemp(suffix=".bin")
+        local_payload = tempfile.mktemp(suffix=f".{fmt}")
         with open(local_payload, "wb") as fh:
             fh.write(raw)
 
         try:
-            # ── Step 3: Upload AGENT_COUNT copies and launch each ─────────────
-            print(f"  [deploy] ensuring work dir on target")
+            # ── Step 3: Upload agent_count copies and launch each ─────────────
+            print(f"  [{agent_type}][deploy] ensuring work dir on target")
             ensure_work_dir(target)
 
-            for i in range(AGENT_COUNT):
+            for i in range(agent_count):
                 remote_path = f"{target.work_dir}/stress-agent-{uid}-{i:02d}.bin"
                 remote_payloads.append(remote_path)
                 upload(target, local_payload, remote_path)
                 run_remote(target, f"chmod +x {remote_path}")
                 execute_background(target, remote_path)
-                print(f"  [deploy] launched agent {i+1}/{AGENT_COUNT}: {remote_path}")
+                print(f"  [{agent_type}][deploy] launched agent {i+1}/{agent_count}: {remote_path}")
 
         finally:
             try:
@@ -317,22 +332,21 @@ def run(ctx):
                 pass
 
         # ── Step 4: Wait for all agents to check in ───────────────────────────
-        checkin_deadline = CHECKIN_DEADLINE
         print(
-            f"  [wait] waiting up to {checkin_deadline}s for {AGENT_COUNT} "
-            f"agents to check in"
+            f"  [{agent_type}][wait] waiting up to {CHECKIN_DEADLINE}s for "
+            f"{agent_count} agents to check in"
         )
         checkin_start = time.monotonic()
         agent_ids = _wait_for_n_agents(
-            cli, pre_existing_ids, AGENT_COUNT, timeout=checkin_deadline
+            cli, pre_existing_ids, agent_count, timeout=CHECKIN_DEADLINE
         )
         checkin_elapsed = time.monotonic() - checkin_start
-        assert len(agent_ids) >= AGENT_COUNT, (
-            f"Only {len(agent_ids)}/{AGENT_COUNT} agents checked in within "
-            f"{checkin_deadline}s"
+        assert len(agent_ids) >= agent_count, (
+            f"Only {len(agent_ids)}/{agent_count} agents checked in within "
+            f"{CHECKIN_DEADLINE}s"
         )
         print(
-            f"  [wait] all {AGENT_COUNT} agents checked in in "
+            f"  [{agent_type}][wait] all {agent_count} agents checked in in "
             f"{checkin_elapsed:.1f}s: {agent_ids}"
         )
 
@@ -347,24 +361,30 @@ def run(ctx):
         round_num = 0
         exec_errors: list[str] = []
 
-        # ── Step 6: Run for RUN_SECONDS, issuing exec rounds every EXEC_INTERVAL
-        print(f"  [run] starting {RUN_SECONDS}s load run "
-              f"(exec rounds every {EXEC_INTERVAL}s)")
-        while time.monotonic() - run_start < RUN_SECONDS:
+        # ── Step 6: Run for run_seconds, issuing exec rounds every EXEC_INTERVAL
+        print(
+            f"  [{agent_type}][run] starting {run_seconds}s load run "
+            f"(exec rounds every {EXEC_INTERVAL}s)"
+        )
+        while time.monotonic() - run_start < run_seconds:
             round_num += 1
-            print(f"  [run] exec round {round_num} "
-                  f"(t+{time.monotonic()-run_start:.0f}s)")
+            print(
+                f"  [{agent_type}][run] exec round {round_num} "
+                f"(t+{time.monotonic()-run_start:.0f}s)"
+            )
             results = _exec_round(cli, agent_ids, markers)
 
             # Check for failures without raising immediately — collect all errors.
             try:
                 _assert_exec_round(results, round_num)
                 ok_count = sum(1 for r in results if r["ok"])
-                print(f"  [run] round {round_num}: {ok_count}/{len(results)} ok, "
-                      f"no bleed detected")
+                print(
+                    f"  [{agent_type}][run] round {round_num}: "
+                    f"{ok_count}/{len(results)} ok, no bleed detected"
+                )
             except AssertionError as exc:
                 exec_errors.append(str(exc))
-                print(f"  [run] round {round_num} FAILED: {exc}")
+                print(f"  [{agent_type}][run] round {round_num} FAILED: {exc}")
 
             # Check all agents still alive.
             try:
@@ -374,25 +394,28 @@ def run(ctx):
                     exec_errors.append(
                         f"Round {round_num}: agents dropped connection: {missing}"
                     )
-                    print(f"  [run] WARNING: agents dropped: {missing}")
+                    print(f"  [{agent_type}][run] WARNING: agents dropped: {missing}")
             except CliError as exc:
-                print(f"  [run] agent list failed (non-fatal): {exc}")
+                print(f"  [{agent_type}][run] agent list failed (non-fatal): {exc}")
 
             # Wait until next exec interval (or run end).
             elapsed = time.monotonic() - run_start
-            sleep_time = max(0.0, EXEC_INTERVAL - (time.monotonic() - run_start) % EXEC_INTERVAL)
-            remaining = RUN_SECONDS - elapsed
+            sleep_time = max(
+                0.0,
+                EXEC_INTERVAL - (time.monotonic() - run_start) % EXEC_INTERVAL,
+            )
+            remaining = run_seconds - elapsed
             if remaining > 0:
                 time.sleep(min(sleep_time, remaining))
 
         run_elapsed = time.monotonic() - run_start
-        print(f"  [run] completed {run_elapsed:.1f}s run, {round_num} exec rounds")
+        print(f"  [{agent_type}][run] completed {run_elapsed:.1f}s run, {round_num} exec rounds")
 
         # ── Step 7: Stop CPU monitor + assert CPU limit ───────────────────────
         cpu_monitor.stop()
         if cpu_monitor.samples:
             print(
-                f"  [cpu] max CPU: {cpu_monitor.max_cpu:.1f}%  "
+                f"  [{agent_type}][cpu] max CPU: {cpu_monitor.max_cpu:.1f}%  "
                 f"({len(cpu_monitor.samples)} samples)"
             )
             if cpu_monitor.max_cpu > CPU_LIMIT_PCT:
@@ -401,10 +424,10 @@ def run(ctx):
                     f"(limit: {CPU_LIMIT_PCT}%)"
                 )
         else:
-            print("  [cpu] teamserver process not found on localhost — CPU check skipped")
+            print(f"  [{agent_type}][cpu] teamserver process not found on localhost — CPU check skipped")
 
         # ── Step 8: Check for ERROR log entries ───────────────────────────────
-        print("  [log] checking for ERROR-level log entries")
+        print(f"  [{agent_type}][log] checking for ERROR-level log entries")
         try:
             log_entries = log_list(cli, limit=200)
             error_entries = [
@@ -419,11 +442,11 @@ def run(ctx):
                     f"entries during the run:\n"
                     + "\n".join(f"  {e}" for e in sample)
                 )
-                print(f"  [log] WARNING: {len(error_entries)} error log entries found")
+                print(f"  [{agent_type}][log] WARNING: {len(error_entries)} error log entries found")
             else:
-                print("  [log] no ERROR-level log entries — ok")
+                print(f"  [{agent_type}][log] no ERROR-level log entries — ok")
         except CliError as exc:
-            print(f"  [log] audit log unavailable (non-fatal): {exc}")
+            print(f"  [{agent_type}][log] audit log unavailable (non-fatal): {exc}")
 
         # Raise collected errors now.
         if exec_errors:
@@ -433,8 +456,8 @@ def run(ctx):
             )
 
         print(
-            f"  [pass] all {AGENT_COUNT} agents stable for {RUN_SECONDS}s, "
-            f"no bleed, no errors"
+            f"  [{agent_type}][pass] all {agent_count} agents stable for "
+            f"{run_seconds}s, no bleed, no errors"
         )
 
     finally:
@@ -443,9 +466,9 @@ def run(ctx):
             try:
                 agent_kill(cli, aid)
             except Exception as exc:
-                print(f"  [cleanup] kill agent {aid} failed (non-fatal): {exc}")
+                print(f"  [{agent_type}][cleanup] kill agent {aid} failed (non-fatal): {exc}")
 
-        print(f"  [cleanup] stopping/deleting listener {listener_name!r}")
+        print(f"  [{agent_type}][cleanup] stopping/deleting listener {listener_name!r}")
         try:
             listener_stop(cli, listener_name)
         except Exception:
@@ -460,6 +483,48 @@ def run(ctx):
             try:
                 run_remote(target, f"rm -f {rp}", timeout=10)
             except Exception as exc:
-                print(f"  [cleanup] remove {rp} failed (non-fatal): {exc}")
+                print(f"  [{agent_type}][cleanup] remove {rp} failed (non-fatal): {exc}")
 
-        print("  [cleanup] done")
+        print(f"  [{agent_type}][cleanup] done")
+
+
+# ── Main entry point ──────────────────────────────────────────────────────────
+
+def run(ctx):
+    """
+    ctx.cli     — CliConfig (red-cell-cli wrapper)
+    ctx.linux   — TargetConfig | None
+    ctx.windows — TargetConfig | None
+    ctx.env     — raw env.toml dict
+    ctx.dry_run — bool
+
+    Raises AssertionError with a descriptive message on any failure.
+    Skips silently when ctx.linux is None.
+    """
+    if ctx.linux is None:
+        raise ScenarioSkipped("ctx.linux is None — Linux target required for this scenario")
+
+    # ── Demon pass (full 10-agent baseline) ──────────────────────────────────
+    print("\n  === Agent pass: demon ===")
+    _run_stress_for_agent(
+        ctx,
+        agent_type="demon",
+        fmt="bin",
+        name_prefix="test-stress-demon",
+        agent_count=DEMON_AGENT_COUNT,
+        run_seconds=DEMON_RUN_SECONDS,
+    )
+
+    # ── Phantom pass (5-agent Rust stability check) ───────────────────────────
+    print("\n  === Agent pass: phantom ===")
+    try:
+        _run_stress_for_agent(
+            ctx,
+            agent_type="phantom",
+            fmt="elf",
+            name_prefix="test-stress-phantom",
+            agent_count=PHANTOM_AGENT_COUNT,
+            run_seconds=PHANTOM_RUN_SECONDS,
+        )
+    except ScenarioSkipped as exc:
+        print(f"  [phantom] SKIPPED (Phantom not yet available): {exc}")

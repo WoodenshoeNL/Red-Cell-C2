@@ -82,10 +82,20 @@ impl MockSpecterCrypto {
 
     /// Decrypt an incoming callback packet and advance the shared CTR.
     ///
-    /// Callback envelope payload layout:
-    /// `[command_id:4,BE][request_id:4,BE][encrypted([payload_len:4,BE][payload…])]`
+    /// The Demon protocol uses a two-layer encoding:
     ///
-    /// Returns `(command_id, request_id, decrypted_payload)`.
+    /// * **Outer envelope** (not encrypted): `[command_id:4,BE][request_id:4,BE]`
+    ///   These fields are big-endian per the Demon wire protocol, matching what the
+    ///   teamserver's `parse_callback_packages` reads with `read_u32_be`.
+    ///
+    /// * **Encrypted inner payload**: `[payload_len:4,BE][payload_bytes…]`
+    ///   The length prefix is big-endian (matching `read_length_prefixed_bytes_be`).
+    ///   The `payload_bytes` themselves are **little-endian** — individual fields are
+    ///   encoded with `write_u32_le` / `write_utf16le` so they are compatible with
+    ///   the teamserver's `CallbackParser::read_u32` / `read_utf16` methods.
+    ///
+    /// Returns `(command_id, request_id, decrypted_payload_bytes)`.  The caller
+    /// must decode `decrypted_payload_bytes` with little-endian helpers.
     fn decrypt_callback(&mut self, body: &[u8]) -> (u32, u32, Vec<u8>) {
         let envelope = DemonEnvelope::from_bytes(body).expect("parse callback envelope");
         assert_eq!(envelope.header.agent_id, self.agent_id, "agent_id mismatch in callback");
@@ -278,26 +288,13 @@ fn build_sleep_payload(delay_ms: u32, jitter: u32) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
-// Response payload decoder helpers — big-endian (agent → server)
+// Response payload decoder helpers — little-endian (agent → server payload body)
+//
+// The outer Demon callback envelope fields (command_id, request_id, payload_len)
+// are big-endian per the Demon wire protocol and are handled by `decrypt_callback`
+// above.  The payload *content* returned by that function is little-endian, matching
+// the Rust teamserver's `CallbackParser::read_u32`/`read_utf16`/etc. methods.
 // ---------------------------------------------------------------------------
-
-#[allow(dead_code)]
-fn be_u32(data: &[u8], offset: usize) -> u32 {
-    u32::from_be_bytes(data[offset..offset + 4].try_into().expect("be_u32"))
-}
-
-#[allow(dead_code)]
-fn be_bytes(data: &[u8], offset: usize) -> (&[u8], usize) {
-    let len = be_u32(data, offset) as usize;
-    (&data[offset + 4..offset + 4 + len], offset + 4 + len)
-}
-
-#[allow(dead_code)]
-fn be_utf16(data: &[u8], offset: usize) -> (String, usize) {
-    let (raw, next) = be_bytes(data, offset);
-    let utf16: Vec<u16> = raw.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-    (String::from_utf16_lossy(&utf16), next)
-}
 
 fn le_u32(data: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(data[offset..offset + 4].try_into().expect("le_u32"))

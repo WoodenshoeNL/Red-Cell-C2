@@ -2569,6 +2569,31 @@ async fn update_listener(
             return Err(error);
         }
     };
+    // Invalidate any cached payload builds that embed the old listener config.
+    // Errors are non-fatal: log and continue so the update itself still succeeds.
+    match state
+        .database
+        .payload_builds()
+        .invalidate_done_builds_for_listener(&summary.name, &now_rfc3339())
+        .await
+    {
+        Ok(0) => {}
+        Ok(count) => {
+            tracing::info!(
+                listener = %summary.name,
+                invalidated = count,
+                "invalidated stale payload build records after listener config change"
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                listener = %summary.name,
+                error = %err,
+                "failed to invalidate payload build records after listener config change"
+            );
+        }
+    }
+
     record_audit_entry(
         &state.database,
         &state.webhooks,
@@ -3582,6 +3607,7 @@ async fn get_payload_job(
         (status = 200, description = "Raw payload binary", content_type = "application/octet-stream"),
         (status = 401, description = "Missing or invalid API key", body = ApiErrorBody),
         (status = 404, description = "Payload not found or not yet built", body = ApiErrorBody),
+        (status = 410, description = "Payload is stale — listener config changed after this payload was built", body = ApiErrorBody),
         (status = 429, description = "Rate limit exceeded", body = ApiErrorBody),
     )
 )]
@@ -3612,6 +3638,14 @@ async fn download_payload(
             )
                 .into_response()
         }
+        Ok(Some(record)) if record.status == "stale" => json_error_response(
+            StatusCode::GONE,
+            "payload_stale",
+            format!(
+                "payload '{id}' is stale — the listener config was updated after this \
+                 payload was built; submit a new build request"
+            ),
+        ),
         Ok(Some(_)) => json_error_response(
             StatusCode::NOT_FOUND,
             "payload_not_ready",
@@ -9489,6 +9523,109 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let body = read_json(response).await;
         assert_eq!(body["error"]["code"], "payload_not_found");
+    }
+
+    #[tokio::test]
+    async fn download_payload_returns_gone_for_stale_build() {
+        let database = Database::connect_in_memory().await.expect("database");
+        let record = crate::PayloadBuildRecord {
+            id: "dl-stale".to_owned(),
+            status: "stale".to_owned(),
+            name: "demon.x64.exe".to_owned(),
+            arch: "x64".to_owned(),
+            format: "exe".to_owned(),
+            listener: "http1".to_owned(),
+            sleep_secs: None,
+            artifact: Some(vec![0x4D, 0x5A]),
+            size_bytes: Some(2),
+            error: None,
+            created_at: "2026-03-31T10:00:00Z".to_owned(),
+            updated_at: "2026-03-31T11:00:00Z".to_owned(),
+        };
+        database.payload_builds().create(&record).await.expect("create");
+
+        let (app, _, _) = test_router_with_database(
+            database,
+            Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)),
+        )
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/payloads/dl-stale/download")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::GONE);
+        let body = read_json(response).await;
+        assert_eq!(body["error"]["code"], "payload_stale");
+    }
+
+    #[tokio::test]
+    async fn update_listener_invalidates_done_payload_builds() {
+        let database = Database::connect_in_memory().await.expect("database");
+
+        // Seed a "done" payload build for the listener we will update.
+        let done_record = crate::PayloadBuildRecord {
+            id: "inv-api-a".to_owned(),
+            status: "done".to_owned(),
+            name: "demon.x64.exe".to_owned(),
+            arch: "x64".to_owned(),
+            format: "exe".to_owned(),
+            listener: "pivot".to_owned(),
+            sleep_secs: None,
+            artifact: Some(vec![0xDE, 0xAD]),
+            size_bytes: Some(2),
+            error: None,
+            created_at: "2026-03-31T10:00:00Z".to_owned(),
+            updated_at: "2026-03-31T10:00:00Z".to_owned(),
+        };
+        database.payload_builds().create(&done_record).await.expect("create build record");
+
+        let (app, _, _) = test_router_with_database(
+            database.clone(),
+            Some((60, "rest-admin", "secret-admin", OperatorRole::Admin)),
+        )
+        .await;
+
+        // Create the listener first so the update endpoint has something to mutate.
+        let _ = app
+            .clone()
+            .oneshot(create_listener_request(
+                &smb_listener_json("pivot", "old-pipe"),
+                "secret-admin",
+            ))
+            .await
+            .expect("create listener response");
+
+        // Update the listener config (pipe name changes).
+        let update_response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/listeners/pivot")
+                    .header(API_KEY_HEADER, "secret-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(smb_listener_json("pivot", "new-pipe")))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(update_response.status(), StatusCode::OK);
+
+        // The previously "done" build must now be "stale".
+        let fetched = database
+            .payload_builds()
+            .get("inv-api-a")
+            .await
+            .expect("db query")
+            .expect("record should exist");
+        assert_eq!(fetched.status, "stale", "done build should be stale after listener update");
     }
 
     // ── RBAC: analyst can read payloads but not build ───────────────────

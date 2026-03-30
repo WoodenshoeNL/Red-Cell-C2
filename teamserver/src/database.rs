@@ -1987,6 +1987,27 @@ impl PayloadBuildRepository {
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
+    /// Mark all `"done"` payload build records for `listener` as `"stale"`.
+    ///
+    /// Called when a listener's configuration is updated so that existing
+    /// artifacts embedding the old callback address can no longer be downloaded.
+    /// Returns the number of records invalidated.
+    pub async fn invalidate_done_builds_for_listener(
+        &self,
+        listener: &str,
+        updated_at: &str,
+    ) -> Result<u64, TeamserverError> {
+        let result = sqlx::query(
+            "UPDATE ts_payload_builds SET status = 'stale', updated_at = ? \
+             WHERE listener = ? AND status = 'done'",
+        )
+        .bind(updated_at)
+        .bind(listener)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     /// Update the status and optional artifact of a build record.
     pub async fn update_status(
         &self,
@@ -3545,5 +3566,96 @@ mod tests {
         assert_eq!(fetched.name, "original-name.exe");
         assert_eq!(fetched.artifact, Some(vec![0x01, 0x02]));
         assert_eq!(fetched.size_bytes, Some(2));
+    }
+
+    // ── payload_builds invalidate_done_builds_for_listener tests ────────
+
+    #[tokio::test]
+    async fn invalidate_done_builds_for_listener_marks_done_records_stale() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.payload_builds();
+
+        // Two "done" builds for the target listener and one for another listener.
+        let mut a = stub_payload_build("inv-a");
+        a.status = "done".to_owned();
+        a.listener = "http-main".to_owned();
+        a.artifact = Some(vec![0xDE, 0xAD]);
+        a.size_bytes = Some(2);
+
+        let mut b = stub_payload_build("inv-b");
+        b.status = "done".to_owned();
+        b.listener = "http-main".to_owned();
+        b.artifact = Some(vec![0xBE, 0xEF]);
+        b.size_bytes = Some(2);
+
+        let mut other = stub_payload_build("inv-other");
+        other.status = "done".to_owned();
+        other.listener = "dns-backup".to_owned();
+        other.artifact = Some(vec![0xFF]);
+        other.size_bytes = Some(1);
+
+        repo.create(&a).await.unwrap();
+        repo.create(&b).await.unwrap();
+        repo.create(&other).await.unwrap();
+
+        let count = repo
+            .invalidate_done_builds_for_listener("http-main", "2026-03-31T00:00:00Z")
+            .await
+            .unwrap();
+        assert_eq!(count, 2, "both done builds for http-main should be invalidated");
+
+        // The two http-main builds must now be "stale".
+        let fetched_a = repo.get("inv-a").await.unwrap().expect("inv-a should exist");
+        assert_eq!(fetched_a.status, "stale");
+        assert_eq!(fetched_a.updated_at, "2026-03-31T00:00:00Z");
+
+        let fetched_b = repo.get("inv-b").await.unwrap().expect("inv-b should exist");
+        assert_eq!(fetched_b.status, "stale");
+
+        // The dns-backup build must be untouched.
+        let fetched_other = repo.get("inv-other").await.unwrap().expect("inv-other should exist");
+        assert_eq!(fetched_other.status, "done");
+    }
+
+    #[tokio::test]
+    async fn invalidate_done_builds_for_listener_ignores_non_done_records() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.payload_builds();
+
+        // A pending and an error record for the same listener — must not be touched.
+        let mut pending = stub_payload_build("inv-pend");
+        pending.status = "pending".to_owned();
+        pending.listener = "http-main".to_owned();
+
+        let mut errored = stub_payload_build("inv-err");
+        errored.status = "error".to_owned();
+        errored.listener = "http-main".to_owned();
+
+        repo.create(&pending).await.unwrap();
+        repo.create(&errored).await.unwrap();
+
+        let count = repo
+            .invalidate_done_builds_for_listener("http-main", "2026-03-31T00:00:00Z")
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "no done records exist — nothing should be invalidated");
+
+        let fetched_pend = repo.get("inv-pend").await.unwrap().expect("inv-pend should exist");
+        assert_eq!(fetched_pend.status, "pending");
+
+        let fetched_err = repo.get("inv-err").await.unwrap().expect("inv-err should exist");
+        assert_eq!(fetched_err.status, "error");
+    }
+
+    #[tokio::test]
+    async fn invalidate_done_builds_for_listener_returns_zero_for_unknown_listener() {
+        let db = Database::connect_in_memory().await.unwrap();
+        let repo = db.payload_builds();
+
+        let count = repo
+            .invalidate_done_builds_for_listener("nonexistent-listener", "2026-03-31T00:00:00Z")
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }

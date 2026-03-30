@@ -1,11 +1,12 @@
 //! .NET CLR hosting for inline assembly execution.
 //!
-//! On Windows this module loads the CLR via `CLRCreateInstance`, creates an
-//! AppDomain, loads a .NET assembly, and invokes its entry point.  Assembly
-//! stdout is captured via a named pipe and returned as callback output.
+//! **Status: not yet implemented.**  The protocol framing and callback constants
+//! are wired up, but actual CLR hosting (loading an assembly and invoking its
+//! entry point) is not implemented on any platform.  All calls to
+//! [`dotnet_execute`] return a single [`DOTNET_INFO_FAILED`] callback.
 //!
-//! On non-Windows targets the module returns a failure callback immediately —
-//! .NET CLR hosting is only available on Windows.
+//! Tracking issue: see the beads issue for "Implement CLR hosting in Specter
+//! dotnet_execute (COM vtable FFI for ICorRuntimeHost)".
 
 use tracing::warn;
 
@@ -42,80 +43,31 @@ pub struct DotnetResult {
 
 /// Execute a .NET assembly using the CLR.
 ///
+/// **Not yet implemented** — returns [`DOTNET_INFO_FAILED`] on all platforms.
+///
+/// Full CLR hosting requires COM interop via `CLRCreateInstance` →
+/// `ICorRuntimeHost` → `Load_3` → `EntryPoint` → `Invoke_3`.  That FFI work
+/// is tracked in a separate issue; until it lands this function is a
+/// well-labelled stub.
+///
 /// # Arguments
 ///
 /// * `_pipe_name` — Named pipe path for stdout capture (UTF-16LE decoded).
 /// * `_app_domain` — AppDomain name (UTF-16LE decoded).
-/// * `net_version` — Target CLR version string (e.g. `"v4.0.30319"`).
-/// * `assembly_data` — Raw .NET PE bytes.
+/// * `_net_version` — Target CLR version string (e.g. `"v4.0.30319"`).
+/// * `_assembly_data` — Raw .NET PE bytes.
 /// * `_assembly_args` — Command-line arguments for the assembly (UTF-16LE decoded).
 #[cfg(windows)]
-#[allow(unsafe_code)]
 pub fn dotnet_execute(
     _pipe_name: &str,
     _app_domain: &str,
-    net_version: &str,
-    assembly_data: &[u8],
+    _net_version: &str,
+    _assembly_data: &[u8],
     _assembly_args: &str,
 ) -> DotnetResult {
-    // CLR hosting requires COM interop via the mscoree.dll CLRCreateInstance API.
-    // This is a substantial undertaking involving:
-    //   1. CLRCreateInstance → ICLRMetaHost
-    //   2. GetRuntime(version) → ICLRRuntimeInfo
-    //   3. GetInterface → ICorRuntimeHost
-    //   4. Start() + CreateDomain()
-    //   5. Load_3(SafeArray of PE bytes)
-    //   6. EntryPoint → Invoke_3(args)
-    //
-    // For now we report the CLR version and then report failure, since the full
-    // COM vtable FFI is not yet wired up.  The protocol handling is complete so
-    // that the teamserver receives proper callbacks.
-
-    if assembly_data.is_empty() {
-        return DotnetResult {
-            callbacks: vec![DotnetCallback { info_id: DOTNET_INFO_FAILED, payload: Vec::new() }],
-            output: Vec::new(),
-        };
-    }
-
-    // Try to load mscoree.dll
-    let mscoree_name = b"mscoree.dll\0";
-    let mscoree =
-        unsafe { windows_sys::Win32::System::LibraryLoader::LoadLibraryA(mscoree_name.as_ptr()) };
-
-    if mscoree == 0 {
-        warn!("dotnet: failed to load mscoree.dll — CLR not available");
-        return DotnetResult {
-            callbacks: vec![DotnetCallback { info_id: DOTNET_INFO_FAILED, payload: Vec::new() }],
-            output: Vec::new(),
-        };
-    }
-
-    // Report the CLR version we're attempting to use
-    let version_callback = DotnetCallback {
-        info_id: DOTNET_INFO_NET_VERSION,
-        payload: {
-            // Encode version as UTF-16LE with null terminator, length-prefixed
-            let utf16: Vec<u8> = net_version
-                .encode_utf16()
-                .chain(std::iter::once(0u16))
-                .flat_map(|c| c.to_le_bytes())
-                .collect();
-            let mut p = Vec::new();
-            p.extend_from_slice(&(utf16.len() as u32).to_le_bytes());
-            p.extend_from_slice(&utf16);
-            p
-        },
-    };
-
-    // Full CLR hosting via COM vtable calls requires extensive unsafe FFI
-    // that is tracked separately.  For now, report the version and then
-    // indicate failure so the operator knows the CLR path was attempted.
+    warn!("dotnet_execute: CLR hosting is not yet implemented — returning failure");
     DotnetResult {
-        callbacks: vec![
-            version_callback,
-            DotnetCallback { info_id: DOTNET_INFO_FAILED, payload: Vec::new() },
-        ],
+        callbacks: vec![DotnetCallback { info_id: DOTNET_INFO_FAILED, payload: Vec::new() }],
         output: Vec::new(),
     }
 }
@@ -257,16 +209,31 @@ pub fn enumerate_clr_versions() -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// Both Windows and non-Windows stubs return exactly one FAILED callback.
     #[test]
-    fn dotnet_execute_empty_assembly_returns_failed() {
-        let result = dotnet_execute("pipe", "domain", "v4.0.30319", &[], "");
-        assert!(!result.callbacks.is_empty());
-        assert!(result.callbacks.iter().any(|c| c.info_id == DOTNET_INFO_FAILED));
+    fn dotnet_execute_always_returns_single_failed_callback() {
+        for assembly in [b"".as_ref(), b"MZ\x90\x00".as_ref()] {
+            let result = dotnet_execute("pipe", "domain", "v4.0.30319", assembly, "");
+            assert_eq!(result.callbacks.len(), 1, "expected single callback for {:?}", assembly);
+            assert_eq!(result.callbacks[0].info_id, DOTNET_INFO_FAILED);
+            assert!(result.output.is_empty());
+        }
     }
 
+    /// On non-Windows the stub immediately returns a single FAILED callback.
     #[cfg(not(windows))]
     #[test]
     fn non_windows_dotnet_returns_failed() {
+        let result = dotnet_execute("pipe", "domain", "v4.0.30319", b"MZ\x90\x00", "args");
+        assert_eq!(result.callbacks.len(), 1);
+        assert_eq!(result.callbacks[0].info_id, DOTNET_INFO_FAILED);
+    }
+
+    /// On Windows the stub also returns a single FAILED callback regardless of
+    /// assembly content — CLR hosting is not yet implemented.
+    #[cfg(windows)]
+    #[test]
+    fn windows_dotnet_non_empty_assembly_returns_failed() {
         let result = dotnet_execute("pipe", "domain", "v4.0.30319", b"MZ\x90\x00", "args");
         assert_eq!(result.callbacks.len(), 1);
         assert_eq!(result.callbacks[0].info_id, DOTNET_INFO_FAILED);

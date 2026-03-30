@@ -7,8 +7,10 @@ use red_cell_common::crypto::{
 use red_cell_common::demon::{DemonCommand, DemonMessage};
 use tracing::{info, warn};
 
+use std::collections::HashMap;
+
 use crate::config::SpecterConfig;
-use crate::dispatch::{self, DispatchResult};
+use crate::dispatch::{self, DispatchResult, MemFileStore};
 use crate::download::DownloadTracker;
 use crate::error::SpecterError;
 use crate::protocol::{
@@ -35,6 +37,8 @@ pub struct SpecterAgent {
     token_vault: TokenVault,
     /// Active file downloads being streamed back to the teamserver.
     downloads: DownloadTracker,
+    /// In-memory file staging area for `CommandMemFile` chunks.
+    mem_files: MemFileStore,
     /// Socket state for SOCKS5 proxy and reverse port forwarding.
     socket_state: SocketState,
 }
@@ -69,6 +73,7 @@ impl SpecterAgent {
             ctr_offset: 0,
             token_vault: TokenVault::new(),
             downloads: DownloadTracker::new(),
+            mem_files: HashMap::new(),
             socket_state: SocketState::new(),
         })
     }
@@ -207,6 +212,7 @@ impl SpecterAgent {
                     &mut self.config,
                     &mut self.token_vault,
                     &mut self.downloads,
+                    &mut self.mem_files,
                 );
                 if self.handle_dispatch_result(package.request_id, result).await {
                     // Exit requested — terminate.

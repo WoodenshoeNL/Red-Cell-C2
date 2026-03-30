@@ -137,7 +137,7 @@ impl PhantomAgent {
 
         let mut exit_requested = false;
         for package in tasking.packages {
-            execute(&package, &mut self.state).await?;
+            execute(&package, &mut self.config, &mut self.state).await?;
             for callback in self.state.drain_callbacks() {
                 let payload = callback.payload()?;
                 let packet = build_callback_packet(

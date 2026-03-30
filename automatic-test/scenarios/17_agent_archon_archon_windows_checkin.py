@@ -119,9 +119,12 @@ def run(ctx) -> None:
     listener_port = ctx.env.get("listeners", {}).get("windows_port", 19082)
     remote_payload = f"{target.work_dir}\\archon-{uid}.exe"
 
-    # Archon-specific extension commands from env.toml [archon.extensions]
+    # Archon-specific extension commands from env.toml.
+    # Canonical TOML format:  [[archon.extensions]]  (array-of-tables → list[dict])
+    # Legacy single-entry:    [archon.extensions]    (table → dict) — normalised below.
+    _ext_raw = ctx.env.get("archon", {}).get("extensions", [])
     archon_extensions: list[dict] = (
-        ctx.env.get("archon", {}).get("extensions", [])
+        [_ext_raw] if isinstance(_ext_raw, dict) else list(_ext_raw)
     )
 
     # Collect pre-existing agent IDs so we can identify the new checkin.

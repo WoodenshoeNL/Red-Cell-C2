@@ -22,9 +22,9 @@ use std::process::{Command as SysCommand, Stdio};
 use std::time::UNIX_EPOCH;
 
 use red_cell_common::demon::{
-    DemonCommand, DemonConfigKey, DemonFilesystemCommand, DemonInjectError, DemonInjectWay,
-    DemonJobCommand, DemonKerberosCommand, DemonNetCommand, DemonPackage, DemonProcessCommand,
-    DemonTokenCommand, DemonTransferCommand,
+    DemonCallback, DemonCommand, DemonConfigKey, DemonFilesystemCommand, DemonInjectError,
+    DemonInjectWay, DemonJobCommand, DemonKerberosCommand, DemonNetCommand, DemonPackage,
+    DemonProcessCommand, DemonTokenCommand, DemonTransferCommand,
 };
 use tracing::{info, warn};
 
@@ -105,6 +105,21 @@ impl Response {
     }
 }
 
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Build a [`BeaconOutput`] / [`DemonCallback::ErrorMessage`] response so the
+/// operator receives an immediate error rather than waiting on a task that will
+/// never complete.
+///
+/// Payload wire format (all LE): `[callback_type: u32][len: u32][text bytes]`
+fn unimplemented_command_response(cmd: DemonCommand) -> DispatchResult {
+    let text = format!("specter does not implement command {cmd:?} yet");
+    let mut payload = Vec::new();
+    write_u32_le(&mut payload, u32::from(DemonCallback::ErrorMessage));
+    write_bytes_le(&mut payload, text.as_bytes());
+    DispatchResult::Respond(Response::new(DemonCommand::BeaconOutput, payload))
+}
+
 // ─── Top-level dispatch ───────────────────────────────────────────────────────
 
 /// Route a single decoded [`DemonPackage`] to the appropriate handler.
@@ -167,8 +182,8 @@ pub fn dispatch(
         // These are agent-to-server callbacks; ignore if received from server.
         DemonCommand::CommandOutput | DemonCommand::BeaconOutput => DispatchResult::Ignore,
         _ => {
-            info!(command = ?cmd, "unhandled command — ignoring");
-            DispatchResult::Ignore
+            info!(command = ?cmd, "unhandled command — returning error to operator");
+            unimplemented_command_response(cmd)
         }
     }
 }
@@ -7997,6 +8012,52 @@ mod tests {
         assert!(
             matches!(result, DispatchResult::Ignore),
             "CommandGetJob from server must be ignored"
+        );
+    }
+
+    // ── unimplemented command error response ─────────────────────────────────
+
+    #[test]
+    fn dispatch_unhandled_command_returns_beacon_output_error_message() {
+        // CommandPivot is not yet implemented in Specter — it falls into the `_` arm.
+        let mut config = SpecterConfig::default();
+        let package = DemonPackage::new(DemonCommand::CommandPivot, 42, vec![]);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond, got something else — operator task would hang forever");
+        };
+        assert_eq!(
+            resp.command_id,
+            u32::from(DemonCommand::BeaconOutput),
+            "unimplemented command response must use BeaconOutput"
+        );
+        // First u32 LE in payload must be DemonCallback::ErrorMessage (0x0d).
+        let callback_type =
+            u32::from_le_bytes(resp.payload[0..4].try_into().expect("callback type u32"));
+        assert_eq!(
+            callback_type,
+            u32::from(DemonCallback::ErrorMessage),
+            "callback type must be ErrorMessage (0x0d)"
+        );
+        // The text payload must mention the command name.
+        let text_len =
+            u32::from_le_bytes(resp.payload[4..8].try_into().expect("text len u32")) as usize;
+        let text = std::str::from_utf8(&resp.payload[8..8 + text_len]).expect("utf8 text");
+        assert!(
+            text.contains("specter does not implement"),
+            "error text must mention 'specter does not implement', got: {text:?}"
+        );
+        assert!(
+            text.contains("CommandPivot"),
+            "error text must include the command name, got: {text:?}"
         );
     }
 

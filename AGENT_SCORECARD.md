@@ -4320,3 +4320,17 @@ Build: skipped (no Rust source changes in range)
 | Cursor | 0 | 0 | No activity in range. |
 
 Build: passed (cargo check clean, workspace compiles)
+
+### Arch Review — 2026-03-30 09:00
+
+| Agent | Findings | Categories | Notes |
+|-------|----------|------------|-------|
+| Claude | 0 | — | No new issues found |
+| Codex | 0 | — | No new issues found |
+| Cursor | 0 | — | No new issues found |
+
+Overall codebase health: on track
+Biggest blindspots: Phantom CommandSleep (red-cell-c2-6vb9d) remains open — operator sees success callback but agent never changes interval. Webhook client fallback (red-cell-c2-zvj3t, P1) drops SSRF protection on builder failure.
+Build: cargo check passed; cargo clippy passed (0 warnings); cargo test ran in background (VM OOMD pressure, consistent with prior runs)
+Issues filed: none
+Security posture: strong — TLS bypass (wj185) confirmed fixed in both Specter and Phantom transports. All crypto, auth, rate-limiting, constant-time comparisons, and bounded allocations verified intact. DNS C2 upload slot design reviewed and confirmed intentional (DEMON_INIT must work pre-registration; per-IP and global caps are correct mitigations).

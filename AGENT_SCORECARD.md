@@ -10,18 +10,18 @@ Each loop run updates the running totals and appends a review entry.
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
 | Tasks closed | 994 | 231 | 31 |
-| Bugs filed against | 125 | 36 | 9 |
+| Bugs filed against | 126 | 36 | 9 |
 | Bug rate (bugs/task) | 0.13 | 0.16 | 0.29 |
 | Quality score | 87% | 84% | 71% |
 
-*Bug rates: Claude 125/994=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 126/994=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
 | Violation type | Claude | Codex | Cursor |
 |----------------|-------:|------:|-------:|
 | unwrap / expect in production | 8 | 0 | 0 |
-| Missing tests / stale tests | 52 | 14 | 5 |
+| Missing tests / stale tests | 53 | 14 | 5 |
 | Clippy warnings | 7 | 0 | 1 |
 | Protocol errors | 19 | 27 | 3 |
 | Security issues | 49 | 39 | 0 |
@@ -4472,6 +4472,16 @@ Build: skipped (no Rust source changes in range; `python3 automatic-test/test.py
 | Cursor | 0 | 0 | No activity in range. |
 
 Build: skipped (no committed Rust source changes in range)
+
+### QA Review — 2026-03-30 21:36 — 9b82421c..d4719d6d
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 0 | 1 | No committed dev-agent activity in range, but current uncommitted work on `red-cell-c2-nh28n` breaks `cargo nextest run --workspace`; filed `red-cell-c2-apkr0` for the pivot dispatch test regression. |
+| Codex | 0 | 0 | No activity in range. |
+| Cursor | 0 | 0 | No activity in range. |
+
+Build: failed (`cargo check --workspace` passed; `cargo clippy --workspace -- -D warnings` passed; `cargo nextest run --workspace` failed with 3 teamserver dispatch tests in the current worktree)
 
 ### QA Review — 2026-03-30 20:50 — d928d0f4..9b82421c
 

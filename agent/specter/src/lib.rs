@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod config;
 pub mod dispatch;
+pub mod download;
 pub mod error;
 pub mod platform;
 pub mod protocol;

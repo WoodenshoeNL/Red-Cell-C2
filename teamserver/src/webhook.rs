@@ -65,14 +65,24 @@ impl AuditWebhookNotifier {
     #[must_use]
     pub fn from_profile(profile: &Profile) -> Self {
         let discord =
-            profile.webhook.as_ref().and_then(|webhook| webhook.discord.as_ref()).map(|config| {
-                Arc::new(DiscordWebhook {
-                    url: config.url.clone(),
-                    username: config.user.clone(),
-                    avatar_url: config.avatar_url.clone(),
-                    client: discord_webhook_client(),
-                })
-            });
+            profile.webhook.as_ref().and_then(|webhook| webhook.discord.as_ref()).and_then(
+                |config| match discord_webhook_client() {
+                    Ok(client) => Some(Arc::new(DiscordWebhook {
+                        url: config.url.clone(),
+                        username: config.user.clone(),
+                        avatar_url: config.avatar_url.clone(),
+                        client,
+                    })),
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            "failed to build hardened Discord webhook client — \
+                             webhook notifications disabled"
+                        );
+                        None
+                    }
+                },
+            );
 
         Self {
             discord,
@@ -266,14 +276,13 @@ impl DeliveryState {
     }
 }
 
-fn discord_webhook_client() -> reqwest::Client {
+fn discord_webhook_client() -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
         .timeout(DISCORD_WEBHOOK_TIMEOUT)
         // Disable redirects: a redirect-following client can be used to pivot to internal
         // services (SSRF) if an attacker controls DNS for the configured webhook hostname.
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
 }
 
 #[derive(Debug)]
@@ -1647,6 +1656,53 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    /// `discord_webhook_client()` must return `Ok` and the resulting client must
+    /// reject redirects — a 302 response must not be followed.
+    #[tokio::test]
+    async fn discord_webhook_client_rejects_redirects() {
+        // Spin up a server that responds with a 302 redirect to a second server.
+        let (final_addr, mut final_rx, final_server) = webhook_server(HttpStatusCode::OK).await;
+        let redirect_app = Router::new().route(
+            "/",
+            post(move || async move {
+                (HttpStatusCode::FOUND, [("location", format!("http://{final_addr}/"))], "")
+            }),
+        );
+        let redirect_listener =
+            TcpListener::bind("127.0.0.1:0").await.expect("redirect listener should bind");
+        let redirect_addr =
+            redirect_listener.local_addr().expect("redirect address should resolve");
+        let redirect_server = tokio::spawn(async move {
+            axum::serve(redirect_listener, redirect_app)
+                .await
+                .expect("redirect server should not fail");
+        });
+
+        let client = super::discord_webhook_client().expect("client builder should succeed");
+        let response = client
+            .post(format!("http://{redirect_addr}/"))
+            .json(&json!({"test": true}))
+            .send()
+            .await
+            .expect("request should complete");
+
+        // The client must NOT follow the redirect — it should return the 302 directly.
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::FOUND,
+            "client must not follow redirects"
+        );
+
+        // The redirect target must not have received a request.
+        assert!(
+            final_rx.try_recv().is_err(),
+            "redirect target must not receive a request when redirects are disabled"
+        );
+
+        redirect_server.abort();
+        final_server.abort();
     }
 
     /// Multiple guards: `shutdown` must continue to block after the first guard is

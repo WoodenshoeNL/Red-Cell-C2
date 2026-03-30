@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 1003 | 231 | 31 |
-| Bugs filed against | 130 | 36 | 9 |
+| Tasks closed | 1008 | 231 | 31 |
+| Bugs filed against | 132 | 36 | 9 |
 | Bug rate (bugs/task) | 0.13 | 0.16 | 0.29 |
 | Quality score | 87% | 84% | 71% |
 
-*Bug rates: Claude 130/1003=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 132/1008=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -23,7 +23,7 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 8 | 0 | 0 |
 | Missing tests / stale tests | 54 | 14 | 5 |
 | Clippy warnings | 7 | 0 | 1 |
-| Protocol errors | 19 | 27 | 3 |
+| Protocol errors | 20 | 27 | 3 |
 | Security issues | 50 | 39 | 0 |
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 9 | 11 | 1 |
@@ -31,7 +31,7 @@ Each loop run updates the running totals and appends a review entry.
 | Test infrastructure / flakiness | 27 | 1 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
-| Correctness / pagination | 54 | 8 | 1 |
+| Correctness / pagination | 55 | 8 | 1 |
 | Workflow / close-hygiene | 22 | 0 | 0 |
 | Code reuse / duplication | 8 | 0 | 0 |
 
@@ -40,6 +40,16 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-31 01:00 — 8923da2d..adcc1683
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 5 | 2 | Closed: red-cell-c2-pptw6, red-cell-c2-3rd52, red-cell-c2-z0fam, red-cell-c2-qv1p0, red-cell-c2-ya99p. Filed: red-cell-c2-5zo42 (re-registration announced as AgentNew/new agent), red-cell-c2-w7qca (identical listener PUTs unnecessarily stale finished payloads). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: failed — `cargo check --workspace` passed, `cargo clippy --workspace -- -D warnings` passed, and `cargo nextest run --workspace` failed only on the pre-existing pivot legacy-CTR regression already tracked in `red-cell-c2-apkr0`
 
 ### QA Review — 2026-03-30 18:42 — 6dc83d48..7164bddb
 

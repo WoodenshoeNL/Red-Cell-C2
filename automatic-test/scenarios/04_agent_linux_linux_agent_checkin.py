@@ -2,9 +2,9 @@
 Scenario 04_agent_linux: Linux agent checkin
 
 Deploy a Linux agent to Ubuntu, wait for checkin, run command suite.
-Runs twice: first with Demon (bin), then with Phantom (elf).  The Phantom
-pass is skipped with a warning if the payload build fails (e.g. Phantom not
-yet fully implemented), so the Demon pass still counts as coverage.
+Runs once for Demon (always).  The Phantom pass runs only when
+``"phantom"`` is listed in ``agents.available`` in env.toml; if it is listed
+and the payload build fails, the scenario fails so the regression is caught.
 
 Skip if ctx.linux is None.
 
@@ -45,10 +45,9 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
 
     Raises:
         AssertionError on test failure.
-        ScenarioSkipped if the payload cannot be built (agent not yet available).
+        CliError if the payload build fails (propagates as a scenario failure).
     """
     from lib.cli import (
-        CliError,
         agent_exec,
         agent_kill,
         agent_list,
@@ -86,14 +85,9 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
     try:
         # ── Step 2: Build agent payload ──────────────────────────────────────
         print(f"  [{agent_type}][payload] building {agent_type} {fmt} x64 for Linux target")
-        try:
-            result = payload_build(
-                cli, agent=agent_type, listener=listener_name, arch="x64", fmt=fmt
-            )
-        except CliError as exc:
-            raise ScenarioSkipped(
-                f"{agent_type} payload build failed — agent may not be available yet: {exc}"
-            )
+        result = payload_build(
+            cli, agent=agent_type, listener=listener_name, arch="x64", fmt=fmt
+        )
         raw = base64.b64decode(result["bytes"])
         assert len(raw) > 0, "payload is empty"
         print(f"  [{agent_type}][payload] built ({len(raw)} bytes)")
@@ -227,8 +221,9 @@ def run(ctx):
     _run_for_agent(ctx, agent_type="demon", fmt="bin", name_prefix="test-linux-demon")
 
     # ── Phantom pass (Rust Linux agent) ─────────────────────────────────────
+    available_agents = set(ctx.env.get("agents", {}).get("available", ["demon"]))
     print("\n  === Agent pass: phantom ===")
-    try:
+    if "phantom" not in available_agents:
+        print("  [phantom] SKIPPED — 'phantom' not listed in agents.available")
+    else:
         _run_for_agent(ctx, agent_type="phantom", fmt="elf", name_prefix="test-linux-phantom")
-    except ScenarioSkipped as exc:
-        print(f"  [phantom] SKIPPED (Phantom not yet available): {exc}")

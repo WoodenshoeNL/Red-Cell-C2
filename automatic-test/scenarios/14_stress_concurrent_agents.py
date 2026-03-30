@@ -257,7 +257,7 @@ def _run_stress_for_agent(
 
     Raises:
         AssertionError on test failure.
-        ScenarioSkipped if the payload cannot be built (agent not yet available).
+        CliError if the payload build fails (propagates as a scenario failure).
     """
     from lib.cli import (
         CliError,
@@ -296,14 +296,9 @@ def _run_stress_for_agent(
     try:
         # ── Step 2: Build one payload ─────────────────────────────────────────
         print(f"  [{agent_type}][payload] building {agent_type} {fmt} x64 for listener {listener_name!r}")
-        try:
-            result = payload_build(
-                cli, agent=agent_type, listener=listener_name, arch="x64", fmt=fmt
-            )
-        except CliError as exc:
-            raise ScenarioSkipped(
-                f"{agent_type} payload build failed — agent may not be available yet: {exc}"
-            )
+        result = payload_build(
+            cli, agent=agent_type, listener=listener_name, arch="x64", fmt=fmt
+        )
         raw = base64.b64decode(result["bytes"])
         assert len(raw) > 0, "payload is empty"
         print(f"  [{agent_type}][payload] built ({len(raw)} bytes)")
@@ -516,8 +511,11 @@ def run(ctx):
     )
 
     # ── Phantom pass (5-agent Rust stability check) ───────────────────────────
+    available_agents = set(ctx.env.get("agents", {}).get("available", ["demon"]))
     print("\n  === Agent pass: phantom ===")
-    try:
+    if "phantom" not in available_agents:
+        print("  [phantom] SKIPPED — 'phantom' not listed in agents.available")
+    else:
         _run_stress_for_agent(
             ctx,
             agent_type="phantom",
@@ -526,5 +524,3 @@ def run(ctx):
             agent_count=PHANTOM_AGENT_COUNT,
             run_seconds=PHANTOM_RUN_SECONDS,
         )
-    except ScenarioSkipped as exc:
-        print(f"  [phantom] SKIPPED (Phantom not yet available): {exc}")

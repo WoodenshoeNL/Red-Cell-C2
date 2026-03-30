@@ -6,8 +6,8 @@ Upload and download files through an active agent.
 Linux passes (Demon bin + Phantom elf): upload/download/SHA-256 against Linux target.
 Windows passes (Demon exe + Specter exe): same operations against Windows 11 target.
 
-Each pass is skipped with a warning if the payload build fails (agent not yet
-implemented), so earlier passes still count as coverage.
+Phantom/Specter passes run only when listed in ``agents.available`` in env.toml;
+build failures for listed agents fail the scenario instead of silently skipping.
 
 Steps (per Linux agent pass):
   1. Create + start HTTP listener
@@ -70,10 +70,9 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
 
     Raises:
         AssertionError on test failure.
-        ScenarioSkipped if the payload cannot be built (agent not yet available).
+        CliError if the payload build fails (propagates as a scenario failure).
     """
     from lib.cli import (
-        CliError,
         agent_download,
         agent_exec,
         agent_kill,
@@ -116,14 +115,9 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
     try:
         # ── Step 2: Build agent payload ──────────────────────────────────────
         print(f"  [{agent_type}][payload] building {agent_type} {fmt} x64 for Linux target")
-        try:
-            result = payload_build(
-                cli, agent=agent_type, listener=listener_name, arch="x64", fmt=fmt
-            )
-        except CliError as exc:
-            raise ScenarioSkipped(
-                f"{agent_type} payload build failed — agent may not be available yet: {exc}"
-            )
+        result = payload_build(
+            cli, agent=agent_type, listener=listener_name, arch="x64", fmt=fmt
+        )
         raw = base64.b64decode(result["bytes"])
         assert len(raw) > 0, "payload is empty"
         print(f"  [{agent_type}][payload] built ({len(raw)} bytes)")
@@ -283,10 +277,9 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str, name_prefix: str) -> 
 
     Raises:
         AssertionError on test failure.
-        ScenarioSkipped if the payload cannot be built (agent not yet available).
+        CliError if the payload build fails (propagates as a scenario failure).
     """
     from lib.cli import (
-        CliError,
         agent_download,
         agent_exec,
         agent_kill,
@@ -329,14 +322,9 @@ def _run_for_agent_windows(ctx, agent_type: str, fmt: str, name_prefix: str) -> 
     try:
         # ── Step 2: Build agent payload ──────────────────────────────────────
         print(f"  [{agent_type}][payload] building {agent_type} {fmt} x64 for Windows target")
-        try:
-            result = payload_build(
-                cli, agent=agent_type, listener=listener_name, arch="x64", fmt=fmt
-            )
-        except CliError as exc:
-            raise ScenarioSkipped(
-                f"{agent_type} payload build failed — agent may not be available yet: {exc}"
-            )
+        result = payload_build(
+            cli, agent=agent_type, listener=listener_name, arch="x64", fmt=fmt
+        )
         raw = base64.b64decode(result["bytes"])
         assert len(raw) > 0, "payload is empty"
         print(f"  [{agent_type}][payload] built ({len(raw)} bytes)")
@@ -487,6 +475,7 @@ def run(ctx):
     Skips Windows passes when ctx.windows is None.
     """
     ran_any = False
+    available_agents = set(ctx.env.get("agents", {}).get("available", ["demon"]))
 
     if ctx.linux is not None:
         ran_any = True
@@ -496,10 +485,10 @@ def run(ctx):
 
         # ── Phantom pass (Rust Linux agent) ─────────────────────────────────
         print("\n  === Agent pass: phantom (Linux) ===")
-        try:
+        if "phantom" not in available_agents:
+            print("  [phantom] SKIPPED — 'phantom' not listed in agents.available")
+        else:
             _run_for_agent(ctx, agent_type="phantom", fmt="elf", name_prefix="test-ftransfer-phantom")
-        except ScenarioSkipped as exc:
-            print(f"  [phantom] SKIPPED (Phantom not yet available): {exc}")
     else:
         print("  [skip] ctx.linux is None — skipping Linux agent passes")
 
@@ -507,17 +496,14 @@ def run(ctx):
         ran_any = True
         # ── Demon Windows pass ───────────────────────────────────────────────
         print("\n  === Agent pass: demon (Windows) ===")
-        try:
-            _run_for_agent_windows(ctx, agent_type="demon", fmt="exe", name_prefix="test-ftransfer-win-demon")
-        except ScenarioSkipped as exc:
-            print(f"  [demon-windows] SKIPPED: {exc}")
+        _run_for_agent_windows(ctx, agent_type="demon", fmt="exe", name_prefix="test-ftransfer-win-demon")
 
         # ── Specter pass (Rust Windows agent) ───────────────────────────────
         print("\n  === Agent pass: specter (Windows) ===")
-        try:
+        if "specter" not in available_agents:
+            print("  [specter] SKIPPED — 'specter' not listed in agents.available")
+        else:
             _run_for_agent_windows(ctx, agent_type="specter", fmt="exe", name_prefix="test-ftransfer-specter")
-        except ScenarioSkipped as exc:
-            print(f"  [specter] SKIPPED (Specter not yet available): {exc}")
     else:
         print("  [skip] ctx.windows is None — skipping Windows agent passes")
 

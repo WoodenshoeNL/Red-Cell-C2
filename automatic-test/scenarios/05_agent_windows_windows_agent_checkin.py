@@ -2,9 +2,9 @@
 Scenario 05_agent_windows: Windows agent checkin
 
 Deploy a Windows agent to Windows 11 via SSH, wait for checkin, run command suite.
-Runs twice: first with Demon (exe), then with Specter (exe).  The Specter
-pass is skipped with a warning if the payload build fails (e.g. Specter not
-yet fully implemented), so the Demon pass still counts as coverage.
+Runs once for Demon (always).  The Specter pass runs only when
+``"specter"`` is listed in ``agents.available`` in env.toml; if it is listed
+and the payload build fails, the scenario fails so the regression is caught.
 
 Skip if ctx.windows is None.
 
@@ -45,10 +45,9 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
 
     Raises:
         AssertionError on test failure.
-        ScenarioSkipped if the payload cannot be built (agent not yet available).
+        CliError if the payload build fails (propagates as a scenario failure).
     """
     from lib.cli import (
-        CliError,
         agent_exec,
         agent_kill,
         agent_list,
@@ -86,14 +85,9 @@ def _run_for_agent(ctx, agent_type: str, fmt: str, name_prefix: str) -> None:
     try:
         # ── Step 2: Build agent payload ──────────────────────────────────────
         print(f"  [{agent_type}][payload] building {agent_type} {fmt} x64 for Windows target")
-        try:
-            result = payload_build(
-                cli, agent=agent_type, listener=listener_name, arch="x64", fmt=fmt
-            )
-        except CliError as exc:
-            raise ScenarioSkipped(
-                f"{agent_type} payload build failed — agent may not be available yet: {exc}"
-            )
+        result = payload_build(
+            cli, agent=agent_type, listener=listener_name, arch="x64", fmt=fmt
+        )
         raw = base64.b64decode(result["bytes"])
         assert len(raw) > 0, "payload is empty"
         print(f"  [{agent_type}][payload] built ({len(raw)} bytes)")
@@ -218,8 +212,9 @@ def run(ctx):
     _run_for_agent(ctx, agent_type="demon", fmt="exe", name_prefix="test-windows-demon")
 
     # ── Specter pass (Rust Windows agent) ───────────────────────────────────
+    available_agents = set(ctx.env.get("agents", {}).get("available", ["demon"]))
     print("\n  === Agent pass: specter ===")
-    try:
+    if "specter" not in available_agents:
+        print("  [specter] SKIPPED — 'specter' not listed in agents.available")
+    else:
         _run_for_agent(ctx, agent_type="specter", fmt="exe", name_prefix="test-windows-specter")
-    except ScenarioSkipped as exc:
-        print(f"  [specter] SKIPPED (Specter not yet available): {exc}")

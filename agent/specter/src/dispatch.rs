@@ -1094,6 +1094,13 @@ struct GrepMatch {
     arch: u32,
 }
 
+/// Convert a WOW64 flag to the wire arch value used by the Demon protocol.
+///
+/// Mirrors Phantom's encoding: `is_wow64 ? 86 : 64`.
+fn arch_from_wow64(is_wow64: bool) -> u32 {
+    if is_wow64 { 86 } else { 64 }
+}
+
 /// One virtual-memory region from a process address-space query.
 struct MemRegion {
     base_addr: u64,
@@ -1210,7 +1217,13 @@ fn grep_processes(name_filter: &str) -> Vec<GrepMatch> {
     enum_processes()
         .into_iter()
         .filter(|p| p.name.to_lowercase().contains(&filter_lower))
-        .map(|p| GrepMatch { name: p.name, pid: p.pid, ppid: p.ppid, user: p.user, arch: 64 })
+        .map(|p| GrepMatch {
+            arch: arch_from_wow64(p.is_wow64),
+            name: p.name,
+            pid: p.pid,
+            ppid: p.ppid,
+            user: p.user,
+        })
         .collect()
 }
 
@@ -1360,7 +1373,13 @@ fn grep_processes(name_filter: &str) -> Vec<GrepMatch> {
     enum_processes()
         .into_iter()
         .filter(|p| p.name.to_lowercase().contains(&filter_lower))
-        .map(|p| GrepMatch { name: p.name, pid: p.pid, ppid: p.ppid, user: p.user, arch: 64 })
+        .map(|p| GrepMatch {
+            arch: arch_from_wow64(p.is_wow64),
+            name: p.name,
+            pid: p.pid,
+            ppid: p.ppid,
+            user: p.user,
+        })
         .collect()
 }
 
@@ -4980,6 +4999,13 @@ mod tests {
             &mut Vec::new(),
         );
         assert!(matches!(result, DispatchResult::Ignore));
+    }
+
+    #[test]
+    fn arch_from_wow64_encodes_correctly() {
+        // Mirrors Phantom's convention: is_wow64=true → 86, is_wow64=false → 64.
+        assert_eq!(arch_from_wow64(true), 86, "WOW64 process must report arch=86");
+        assert_eq!(arch_from_wow64(false), 64, "native x64 process must report arch=64");
     }
 
     // ── handle_proc_memory ───────────────────────────────────────────────────

@@ -8,6 +8,7 @@ use red_cell_common::demon::{DemonCommand, DemonMessage};
 use tracing::{info, warn};
 
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::SpecterConfig;
 use crate::dispatch::{self, DispatchResult, MemFileStore};
@@ -158,17 +159,46 @@ impl SpecterAgent {
         Ok(message)
     }
 
+    /// Check whether the configured kill date has been reached.
+    ///
+    /// The kill date is stored as a Windows FILETIME value (100-nanosecond
+    /// intervals since January 1, 1601 UTC) — the same format used by the
+    /// Havoc Demon agent and the Go teamserver's `EpochTimeToSystemTime`.
+    /// Returns `true` when the current time meets or exceeds the deadline.
+    fn reached_kill_date(&self) -> bool {
+        let Some(kill_date) = self.config.kill_date else {
+            return false;
+        };
+        let now = current_filetime();
+        now >= kill_date
+    }
+
     /// Run the main agent loop: init, then dispatch server tasking repeatedly.
     ///
     /// Each iteration:
-    /// 1. Sleeps for the configured interval (with optional jitter).
-    /// 2. Sends a `CommandCheckin` heartbeat.
-    /// 3. Sends `CommandGetJob` and dispatches any returned task packages.
-    /// 4. Sends a response callback for each dispatched command.
+    /// 1. Checks whether the kill date has been reached; if so, notifies the
+    ///    teamserver with `CommandKillDate` and terminates.
+    /// 2. Sleeps for the configured interval (with optional jitter).
+    /// 3. Sends a `CommandCheckin` heartbeat.
+    /// 4. Sends `CommandGetJob` and dispatches any returned task packages.
+    /// 5. Sends a response callback for each dispatched command.
     pub async fn run(&mut self) -> Result<(), SpecterError> {
         self.init_handshake().await?;
 
         loop {
+            // ── Kill-date check ─────────────────────────────────────────
+            if self.reached_kill_date() {
+                info!(
+                    agent_id = format_args!("0x{:08X}", self.agent_id),
+                    kill_date = ?self.config.kill_date,
+                    "kill date reached — notifying teamserver and exiting"
+                );
+                // Best-effort: notify the server. If the send fails we still
+                // exit — the whole point of a kill date is unconditional cleanup.
+                let _ = self.send_callback(DemonCommand::CommandKillDate, 0, &[]).await;
+                return Ok(());
+            }
+
             let delay = self.compute_sleep_delay();
             tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
 
@@ -438,6 +468,24 @@ impl SpecterAgent {
     }
 }
 
+/// Windows FILETIME epoch offset: January 1, 1970 expressed as 100-nanosecond
+/// intervals since January 1, 1601 UTC.
+const UNIX_TIME_START: i64 = 0x019D_B1DE_D53E_8000;
+
+/// Number of 100-nanosecond intervals per second.
+const TICKS_PER_SECOND: i64 = 10_000_000;
+
+/// Return the current UTC time as a Windows FILETIME value (100-nanosecond
+/// intervals since January 1, 1601).
+///
+/// This mirrors the Havoc Demon's `GetSystemFileTime()` and the Go
+/// teamserver's `EpochTimeToSystemTime()`.
+fn current_filetime() -> i64 {
+    let unix_secs =
+        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    unix_secs.saturating_mul(TICKS_PER_SECOND).saturating_add(UNIX_TIME_START)
+}
+
 /// Get the hostname of the current machine via platform-native API.
 fn hostname() -> String {
     crate::platform::hostname()
@@ -678,5 +726,57 @@ mod tests {
             agent.ctr_offset() > start_offset,
             "CTR offset must advance after decrypting job payloads"
         );
+    }
+
+    // ── Kill-date tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn current_filetime_returns_reasonable_value() {
+        let ft = current_filetime();
+        // Must be after 2020-01-01 in FILETIME ticks.
+        let year_2020_ft: i64 = 132_224_352_000_000_000;
+        assert!(ft > year_2020_ft, "filetime {ft} should be after 2020");
+    }
+
+    #[test]
+    fn reached_kill_date_false_when_none() {
+        let config = SpecterConfig { kill_date: None, ..Default::default() };
+        let agent = SpecterAgent::new(config).expect("agent");
+        assert!(!agent.reached_kill_date());
+    }
+
+    #[test]
+    fn reached_kill_date_false_when_future() {
+        // Set kill date far in the future (year ~2100).
+        let future_ft: i64 = 160_000_000_000_000_000;
+        let config = SpecterConfig { kill_date: Some(future_ft), ..Default::default() };
+        let agent = SpecterAgent::new(config).expect("agent");
+        assert!(!agent.reached_kill_date());
+    }
+
+    #[test]
+    fn reached_kill_date_true_when_past() {
+        // Set kill date to a past time (year 2020).
+        let past_ft: i64 = 132_224_352_000_000_000;
+        let config = SpecterConfig { kill_date: Some(past_ft), ..Default::default() };
+        let agent = SpecterAgent::new(config).expect("agent");
+        assert!(agent.reached_kill_date());
+    }
+
+    #[test]
+    fn reached_kill_date_true_when_zero_timestamp() {
+        // Zero stored as None, so should not trigger.
+        let config = SpecterConfig { kill_date: None, ..Default::default() };
+        let agent = SpecterAgent::new(config).expect("agent");
+        assert!(!agent.reached_kill_date());
+    }
+
+    #[test]
+    fn filetime_conversion_matches_havoc_epoch() {
+        // Verify our constants match the Havoc Go teamserver:
+        // EpochTimeToSystemTime(0) should return UNIX_TIME_START.
+        let ft_at_unix_epoch =
+            0_i64.saturating_mul(TICKS_PER_SECOND).saturating_add(UNIX_TIME_START);
+        assert_eq!(ft_at_unix_epoch, 0x019D_B1DE_D53E_8000);
     }
 }

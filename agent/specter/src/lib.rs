@@ -5,6 +5,7 @@ pub mod config;
 pub mod dispatch;
 pub mod download;
 pub mod error;
+pub mod pivot;
 pub mod platform;
 pub mod protocol;
 pub mod socket;

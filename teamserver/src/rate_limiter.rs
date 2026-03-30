@@ -43,7 +43,7 @@ pub fn prune_expired_windows<K>(
 /// Entries are ranked by `window_start`; the `to_remove` entries with the
 /// earliest starts are dropped first.  Does nothing when
 /// `windows.len() <= target_size`.
-pub fn evict_oldest_windows<K: Eq + Hash + Copy>(
+pub fn evict_oldest_windows<K: Eq + Hash + Clone>(
     windows: &mut HashMap<K, AttemptWindow>,
     target_size: usize,
 ) {
@@ -52,7 +52,7 @@ pub fn evict_oldest_windows<K: Eq + Hash + Copy>(
     }
 
     let to_remove = windows.len() - target_size;
-    let mut entries: Vec<_> = windows.iter().map(|(k, w)| (*k, w.window_start)).collect();
+    let mut entries: Vec<_> = windows.iter().map(|(k, w)| (k.clone(), w.window_start)).collect();
     entries.sort_unstable_by_key(|(_, window_start)| *window_start);
     for (k, _) in entries.into_iter().take(to_remove) {
         windows.remove(&k);
@@ -233,6 +233,31 @@ mod tests {
         evict_oldest_windows(&mut windows, 0);
 
         assert!(windows.is_empty(), "empty map with target_size=0 must remain empty");
+    }
+
+    #[test]
+    fn evict_works_with_string_keys() {
+        let mut windows: HashMap<String, AttemptWindow> = HashMap::new();
+        let base = Instant::now() - Duration::from_secs(100);
+        for i in 0u8..5 {
+            windows.insert(
+                format!("listener\0192.168.0.{i}"),
+                AttemptWindow {
+                    attempts: 1,
+                    window_start: base + Duration::from_secs(u64::from(i)),
+                },
+            );
+        }
+
+        evict_oldest_windows(&mut windows, 2);
+
+        assert_eq!(windows.len(), 2);
+        // The 2 youngest (i=3,4) must remain; the 3 oldest (i=0..2) must be gone.
+        assert!(!windows.contains_key("listener\0192.168.0.0"));
+        assert!(!windows.contains_key("listener\0192.168.0.1"));
+        assert!(!windows.contains_key("listener\0192.168.0.2"));
+        assert!(windows.contains_key("listener\0192.168.0.3"));
+        assert!(windows.contains_key("listener\0192.168.0.4"));
     }
 
     #[test]

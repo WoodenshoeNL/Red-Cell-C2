@@ -138,17 +138,7 @@ impl UnknownCallbackProbeAuditLimiter {
             && windows.len() >= MAX_UNKNOWN_CALLBACK_PROBE_AUDIT_WINDOWS
         {
             let target_size = MAX_UNKNOWN_CALLBACK_PROBE_AUDIT_WINDOWS / 2;
-            let to_remove = windows.len().saturating_sub(target_size);
-            if to_remove > 0 {
-                let mut entries: Vec<_> = windows
-                    .iter()
-                    .map(|(key, window)| (key.clone(), window.window_start))
-                    .collect();
-                entries.sort_unstable_by_key(|(_, window_start)| *window_start);
-                for (key, _) in entries.into_iter().take(to_remove) {
-                    windows.remove(&key);
-                }
-            }
+            evict_oldest_windows(&mut windows, target_size);
         }
 
         let window = windows.entry(source).or_default();

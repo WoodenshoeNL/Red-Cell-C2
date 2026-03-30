@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 983 | 231 | 31 |
-| Bugs filed against | 121 | 36 | 9 |
-| Bug rate (bugs/task) | 0.12 | 0.16 | 0.29 |
-| Quality score | 88% | 84% | 71% |
+| Tasks closed | 989 | 231 | 31 |
+| Bugs filed against | 124 | 36 | 9 |
+| Bug rate (bugs/task) | 0.13 | 0.16 | 0.29 |
+| Quality score | 87% | 84% | 71% |
 
-*Bug rates: Claude 121/983=0.12, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 124/989=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -28,10 +28,10 @@ Each loop run updates the running totals and appends a review entry.
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 9 | 11 | 1 |
 | Startup / lifecycle regressions | 4 | 9 | 0 |
-| Test infrastructure / flakiness | 24 | 1 | 0 |
+| Test infrastructure / flakiness | 25 | 1 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
-| Correctness / pagination | 51 | 8 | 1 |
+| Correctness / pagination | 53 | 8 | 1 |
 | Workflow / close-hygiene | 22 | 0 | 0 |
 | Code reuse / duplication | 8 | 0 | 0 |
 
@@ -40,6 +40,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-30 18:42 — 6dc83d48..7164bddb
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 6 | 3 | Closed: red-cell-c2-5gqbg, red-cell-c2-1ptj4, red-cell-c2-ole83, red-cell-c2-dee10, red-cell-c2-qha5u, red-cell-c2-vv5l0. Filed: red-cell-c2-mlnjn (CommandJob wiring gap), red-cell-c2-7fv0y (.NET inline execute stub), red-cell-c2-d6j6z (autotest false-skip on payload build failure). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: passed — `cargo check`, `cargo nextest`, and `cargo clippy` for `agent/specter` all passed
+Notes: Specter’s new BOF/.NET command family compiles and tests cleanly, but two newly closed features remain behaviorally incomplete on Windows, and the updated autotest scenarios can now hide agent build regressions as skips instead of failures.
 
 ### QA Review — 2026-03-30 17:45 — 61b8df93..60062516
 

@@ -183,7 +183,8 @@ impl PhantomAgent {
     fn compute_sleep_delay(&self) -> u64 {
         let base = u64::from(self.config.sleep_delay_ms);
         let now = current_local_time();
-        if let Some(working_hours) = self.config.working_hours
+        let working_hours = self.state.working_hours().or(self.config.working_hours);
+        if let Some(working_hours) = working_hours
             && !is_within_working_hours_at(working_hours, now)
             && base > 0
         {

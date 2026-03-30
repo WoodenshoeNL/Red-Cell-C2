@@ -281,15 +281,18 @@ fn build_sleep_payload(delay_ms: u32, jitter: u32) -> Vec<u8> {
 // Response payload decoder helpers — big-endian (agent → server)
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 fn be_u32(data: &[u8], offset: usize) -> u32 {
     u32::from_be_bytes(data[offset..offset + 4].try_into().expect("be_u32"))
 }
 
+#[allow(dead_code)]
 fn be_bytes(data: &[u8], offset: usize) -> (&[u8], usize) {
     let len = be_u32(data, offset) as usize;
     (&data[offset + 4..offset + 4 + len], offset + 4 + len)
 }
 
+#[allow(dead_code)]
 fn be_utf16(data: &[u8], offset: usize) -> (String, usize) {
     let (raw, next) = be_bytes(data, offset);
     let utf16: Vec<u16> = raw.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
@@ -574,8 +577,8 @@ async fn scenario_3_shell_command_echo() {
         "first callback must be CommandProc"
     );
     assert_eq!(cb0.request_id, 100);
-    // Payload starts with a subcommand (BE u32 = Create = 4).
-    let subcmd = be_u32(&cb0.payload, 0);
+    // Payload starts with a subcommand (LE u32 = Create = 4).
+    let subcmd = le_u32(&cb0.payload, 0);
     assert_eq!(subcmd, u32::from(DemonProcessCommand::Create));
 
     // Callback 1: captured output.
@@ -586,8 +589,8 @@ async fn scenario_3_shell_command_echo() {
         "second callback must be CommandOutput"
     );
     assert_eq!(cb1.request_id, 100);
-    // Output payload is a BE-length-prefixed byte slice.
-    let (output_bytes, _) = be_bytes(&cb1.payload, 0);
+    // Output payload is a LE-length-prefixed byte slice.
+    let (output_bytes, _) = le_bytes(&cb1.payload, 0);
     let output = std::str::from_utf8(output_bytes).expect("output must be UTF-8");
     assert!(
         output.contains("specter-ok"),
@@ -629,16 +632,16 @@ async fn scenario_4_filesystem_dir_and_getpwd() {
     let cb0 = &callbacks[0];
     assert_eq!(cb0.command_id, u32::from(DemonCommand::CommandFs));
     assert_eq!(cb0.request_id, 200);
-    let subcmd = be_u32(&cb0.payload, 0);
+    let subcmd = le_u32(&cb0.payload, 0);
     assert_eq!(subcmd, u32::from(DemonFilesystemCommand::Dir), "Dir subcommand must be 1");
 
     // Callback 1: GetPwd result — non-empty working directory.
     let cb1 = &callbacks[1];
     assert_eq!(cb1.command_id, u32::from(DemonCommand::CommandFs));
     assert_eq!(cb1.request_id, 201);
-    let subcmd = be_u32(&cb1.payload, 0);
+    let subcmd = le_u32(&cb1.payload, 0);
     assert_eq!(subcmd, u32::from(DemonFilesystemCommand::GetPwd), "GetPwd subcommand must be 9");
-    let (pwd, _) = be_utf16(&cb1.payload, 4);
+    let (pwd, _) = le_utf16(&cb1.payload, 4);
     assert!(!pwd.is_empty(), "GetPwd must return a non-empty working directory path");
 }
 
@@ -781,13 +784,13 @@ async fn scenario_7_sleep_command_then_exit() {
     let callbacks = server.join().expect("server thread");
     assert_eq!(callbacks.len(), 1, "sleep must echo new values back in 1 callback");
 
-    // Verify the sleep echo: BE u32 delay_ms + BE u32 jitter_pct.
+    // Verify the sleep echo: LE u32 delay_ms + LE u32 jitter_pct.
     let cb = &callbacks[0];
     assert_eq!(cb.command_id, u32::from(DemonCommand::CommandSleep));
     assert_eq!(cb.request_id, 500);
     assert_eq!(cb.payload.len(), 8, "sleep echo payload is 8 bytes (delay + jitter)");
-    let echoed_delay = be_u32(&cb.payload, 0);
-    let echoed_jitter = be_u32(&cb.payload, 4);
+    let echoed_delay = le_u32(&cb.payload, 0);
+    let echoed_jitter = le_u32(&cb.payload, 4);
     assert_eq!(echoed_delay, 10, "echoed delay must match the sent value");
     assert_eq!(echoed_jitter, 5, "echoed jitter must match the sent value");
 }

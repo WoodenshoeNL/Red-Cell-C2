@@ -192,7 +192,7 @@ pub(super) fn format_kerberos_klist(
             output
                 .push_str(&format!("\tEnd time        : {}\n", format_filetime(end_high, end_low)));
             output.push_str(&format!(
-                "\tRewnew time     : {}\n",
+                "\tRenew time      : {}\n",
                 format_filetime(renew_high, renew_low)
             ));
             output.push_str(&format!(

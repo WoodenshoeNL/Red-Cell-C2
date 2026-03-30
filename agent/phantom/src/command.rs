@@ -895,6 +895,18 @@ pub(crate) async fn execute(
                 exit_method,
             });
         }
+        // Windows-only commands: return explicit not-supported errors.
+        command @ (DemonCommand::CommandToken
+        | DemonCommand::CommandInlineExecute
+        | DemonCommand::CommandJob
+        | DemonCommand::CommandPsImport
+        | DemonCommand::CommandAssemblyInlineExecute
+        | DemonCommand::CommandAssemblyListVersions) => {
+            state.queue_callback(PendingCallback::Error {
+                request_id: package.request_id,
+                text: format!("command {command:?} is not supported on Linux"),
+            });
+        }
         command => {
             state.queue_callback(PendingCallback::Error {
                 request_id: package.request_id,
@@ -5764,5 +5776,55 @@ mod tests {
         let addr = super::resolve_dlopen_in_target(libc_base);
         assert!(addr.is_some(), "should resolve dlopen in own process");
         assert!(addr.expect("checked") > libc_base, "dlopen should be past libc base");
+    }
+
+    // ---- Windows-only command rejection tests ----
+
+    /// Helper: verify a Windows-only command returns a not-supported error.
+    async fn assert_windows_only_rejected(command: DemonCommand) {
+        let package = DemonPackage::new(command, 77, Vec::new());
+        let mut state = PhantomState::default();
+
+        execute(&package, &mut state).await.expect("execute");
+
+        let callbacks = state.drain_callbacks();
+        let [PendingCallback::Error { request_id, text }] = callbacks.as_slice() else {
+            panic!("expected single Error callback for {command:?}, got: {callbacks:?}");
+        };
+        assert_eq!(*request_id, 77);
+        assert!(
+            text.contains("not supported on Linux"),
+            "expected 'not supported on Linux' in error for {command:?}, got: {text}",
+        );
+    }
+
+    #[tokio::test]
+    async fn windows_only_command_token_rejected() {
+        assert_windows_only_rejected(DemonCommand::CommandToken).await;
+    }
+
+    #[tokio::test]
+    async fn windows_only_command_inline_execute_rejected() {
+        assert_windows_only_rejected(DemonCommand::CommandInlineExecute).await;
+    }
+
+    #[tokio::test]
+    async fn windows_only_command_job_rejected() {
+        assert_windows_only_rejected(DemonCommand::CommandJob).await;
+    }
+
+    #[tokio::test]
+    async fn windows_only_command_ps_import_rejected() {
+        assert_windows_only_rejected(DemonCommand::CommandPsImport).await;
+    }
+
+    #[tokio::test]
+    async fn windows_only_command_assembly_inline_execute_rejected() {
+        assert_windows_only_rejected(DemonCommand::CommandAssemblyInlineExecute).await;
+    }
+
+    #[tokio::test]
+    async fn windows_only_command_assembly_list_versions_rejected() {
+        assert_windows_only_rejected(DemonCommand::CommandAssemblyListVersions).await;
     }
 }

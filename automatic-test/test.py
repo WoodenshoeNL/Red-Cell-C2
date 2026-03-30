@@ -22,6 +22,8 @@ import argparse
 import importlib
 import importlib.util
 import os
+import shutil
+import subprocess
 import sys
 import time
 import tomllib
@@ -70,6 +72,55 @@ def make_target(cfg: dict) -> TargetConfig:
         key=cfg.get("key", ""),
         display=cfg.get("display", ""),
     )
+
+
+# ── Toolchain pre-flight ─────────────────────────────────────────────────────
+
+# Scenario IDs that require payload-build toolchain tools.
+_PAYLOAD_SCENARIOS = {"03"}
+
+_TOOLCHAIN_TOOLS = [
+    ("x86_64-w64-mingw32-gcc", ["x86_64-w64-mingw32-gcc", "--version"]),
+    ("nasm",                   ["nasm", "--version"]),
+]
+
+
+def check_toolchain(selected_ids: set[str]) -> bool:
+    """Return True if all required toolchain tools are present.
+
+    Only checks when at least one payload scenario is selected.  Prints a
+    clear, actionable error for each missing tool so the operator knows
+    exactly what to install before retrying.
+    """
+    if not (selected_ids & _PAYLOAD_SCENARIOS):
+        return True  # no payload scenarios selected — nothing to check
+
+    print(f"\n{'─' * 60}")
+    print("  Toolchain pre-flight")
+    print(f"{'─' * 60}")
+
+    all_ok = True
+    for name, cmd in _TOOLCHAIN_TOOLS:
+        if shutil.which(cmd[0]) is None:
+            _install = {"x86_64-w64-mingw32-gcc": "mingw-w64", "nasm": "nasm"}.get(name, name)
+            print(
+                f"  ✗ {name}: not found\n"
+                f"    Install it with: apt install {_install}\n"
+                f"    Payload builds (scenario 03) will fail without this tool."
+            )
+            all_ok = False
+            continue
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+            print(f"  ✓ {name}: present")
+        except subprocess.CalledProcessError as exc:
+            print(
+                f"  ✗ {name}: returned exit code {exc.returncode}\n"
+                f"    {exc.stderr.decode(errors='replace').strip()}"
+            )
+            all_ok = False
+
+    return all_ok
 
 
 # ── Unit tests ───────────────────────────────────────────────────────────────
@@ -253,6 +304,19 @@ def main():
     if not ctx.dry_run and not args.skip_unit:
         if not run_unit_tests():
             print("\n[ERROR] Unit tests failed — aborting scenario run.")
+            sys.exit(1)
+
+    # Pre-flight: verify payload-build toolchain tools are present when any
+    # payload scenario is selected.  A missing compiler or assembler produces
+    # a cryptic build error deep inside scenario 03; catching it here gives
+    # the operator a clear, actionable message before anything runs.
+    if not ctx.dry_run:
+        selected_ids = {sid for sid, _ in selected}
+        if not check_toolchain(selected_ids):
+            print(
+                "\n[ERROR] Toolchain pre-flight failed — install the missing "
+                "tools listed above and retry."
+            )
             sys.exit(1)
 
     passed = failed = skipped = 0

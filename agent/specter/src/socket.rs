@@ -262,11 +262,12 @@ impl SocketState {
                     );
                     return Ok(());
                 }
-                let bound_port = listener
-                    .local_addr()
-                    .map(|addr| u32::from(addr.port()))
-                    .unwrap_or(bind_port);
-                info!(listener_id, bind_addr, bound_port, forward_addr, forward_port, "rportfwd added");
+                let bound_port =
+                    listener.local_addr().map(|addr| u32::from(addr.port())).unwrap_or(bind_port);
+                info!(
+                    listener_id,
+                    bind_addr, bound_port, forward_addr, forward_port, "rportfwd added"
+                );
                 self.reverse_port_forwards.insert(
                     listener_id,
                     ReversePortForward {
@@ -339,11 +340,7 @@ impl SocketState {
         self.queue_response(request_id, encode_socket_clear(true));
     }
 
-    fn handle_rportfwd_remove(
-        &mut self,
-        request_id: u32,
-        rest: &[u8],
-    ) -> Result<(), SocketError> {
+    fn handle_rportfwd_remove(&mut self, request_id: u32, rest: &[u8]) -> Result<(), SocketError> {
         let mut offset = 0;
         let socket_id = parse_u32_le(rest, &mut offset)?;
         if self.reverse_port_forwards.contains_key(&socket_id) {
@@ -359,11 +356,7 @@ impl SocketState {
 
     // ─── SOCKS proxy handlers ───────────────────────────────────────────────
 
-    fn handle_socks_proxy_add(
-        &mut self,
-        request_id: u32,
-        rest: &[u8],
-    ) -> Result<(), SocketError> {
+    fn handle_socks_proxy_add(&mut self, request_id: u32, rest: &[u8]) -> Result<(), SocketError> {
         let mut offset = 0;
         let bind_addr = parse_u32_le(rest, &mut offset)?;
         let bind_port = parse_u32_le(rest, &mut offset)?;
@@ -381,15 +374,11 @@ impl SocketState {
                     );
                     return Ok(());
                 }
-                let bound_port = listener
-                    .local_addr()
-                    .map(|addr| u32::from(addr.port()))
-                    .unwrap_or(bind_port);
+                let bound_port =
+                    listener.local_addr().map(|addr| u32::from(addr.port())).unwrap_or(bind_port);
                 info!(listener_id, bind_addr, bound_port, "socks proxy added");
-                self.socks_proxies.insert(
-                    listener_id,
-                    SocksProxy { listener, bind_addr, bind_port: bound_port },
-                );
+                self.socks_proxies
+                    .insert(listener_id, SocksProxy { listener, bind_addr, bind_port: bound_port });
                 self.queue_response(
                     request_id,
                     encode_socks_proxy_add(true, listener_id, bind_addr, bound_port),
@@ -446,11 +435,7 @@ impl SocketState {
 
     // ─── Socket I/O handlers ────────────────────────────────────────────────
 
-    fn handle_socket_read(
-        &mut self,
-        request_id: u32,
-        rest: &[u8],
-    ) -> Result<(), SocketError> {
+    fn handle_socket_read(&mut self, request_id: u32, rest: &[u8]) -> Result<(), SocketError> {
         let mut offset = 0;
         let socket_id = parse_u32_le(rest, &mut offset)?;
         let socket_type_raw = parse_u32_le(rest, &mut offset)?;
@@ -469,11 +454,7 @@ impl SocketState {
         Ok(())
     }
 
-    fn handle_socket_write(
-        &mut self,
-        request_id: u32,
-        rest: &[u8],
-    ) -> Result<(), SocketError> {
+    fn handle_socket_write(&mut self, request_id: u32, rest: &[u8]) -> Result<(), SocketError> {
         let mut offset = 0;
         let socket_id = parse_u32_le(rest, &mut offset)?;
         let data = parse_bytes_le(rest, &mut offset)?;
@@ -541,10 +522,7 @@ impl SocketState {
                         forward_port: 0,
                     },
                 );
-                self.queue_response(
-                    request_id,
-                    encode_socket_connect(true, socket_id, 0),
-                );
+                self.queue_response(request_id, encode_socket_connect(true, socket_id, 0));
             }
             Err(error_code) => {
                 self.queue_response(
@@ -689,9 +667,7 @@ impl SocketState {
             loop {
                 match listener.listener.accept() {
                     Ok((stream, _peer)) => {
-                        stream
-                            .set_nonblocking(true)
-                            .map_err(|e| SocketError::Io(e.to_string()))?;
+                        stream.set_nonblocking(true).map_err(|e| SocketError::Io(e.to_string()))?;
                         accepted.push((
                             listener_id,
                             listener.mode,
@@ -727,7 +703,13 @@ impl SocketState {
                     );
                     self.queue_response(
                         0,
-                        encode_socket_open(socket_id, bind_addr, bind_port, forward_addr, forward_port),
+                        encode_socket_open(
+                            socket_id,
+                            bind_addr,
+                            bind_port,
+                            forward_addr,
+                            forward_port,
+                        ),
                     );
 
                     if !self.reverse_port_forwards.contains_key(&listener_id) {
@@ -768,9 +750,7 @@ impl SocketState {
             loop {
                 match proxy.listener.accept() {
                     Ok((stream, _peer)) => {
-                        stream
-                            .set_nonblocking(true)
-                            .map_err(|e| SocketError::Io(e.to_string()))?;
+                        stream.set_nonblocking(true).map_err(|e| SocketError::Io(e.to_string()))?;
                         accepted.push((server_id, stream));
                     }
                     Err(e) if e.kind() == ErrorKind::WouldBlock => break,
@@ -912,10 +892,8 @@ impl SocketState {
                             client.state = SocksClientState::Request { buffer: remainder };
                         }
                         Some(Err(method)) => {
-                            let _ = write_all_nonblocking(
-                                &mut client.stream,
-                                &[SOCKS_VERSION, method],
-                            );
+                            let _ =
+                                write_all_nonblocking(&mut client.stream, &[SOCKS_VERSION, method]);
                             removals.push(client_id);
                         }
                     }
@@ -931,12 +909,8 @@ impl SocketState {
                         None => {}
                         Some(Ok((consumed, request))) => {
                             let remainder = buffer.split_off(consumed);
-                            match connect_socks_target(
-                                request.atyp,
-                                &request.address,
-                                request.port,
-                            )
-                            .await
+                            match connect_socks_target(request.atyp, &request.address, request.port)
+                                .await
                             {
                                 Ok(mut target) => {
                                     if send_socks_reply(
@@ -951,11 +925,11 @@ impl SocketState {
                                         removals.push(client_id);
                                         continue;
                                     }
-                                    if !remainder.is_empty() {
-                                        if write_all_nonblocking(&mut target, &remainder).is_err() {
-                                            removals.push(client_id);
-                                            continue;
-                                        }
+                                    if !remainder.is_empty()
+                                        && write_all_nonblocking(&mut target, &remainder).is_err()
+                                    {
+                                        removals.push(client_id);
+                                        continue;
                                     }
                                     client.state = SocksClientState::Relay { target };
                                 }
@@ -1038,16 +1012,20 @@ async fn connect_socks_target(atyp: u8, host: &[u8], port: u16) -> Result<TcpStr
                 .collect();
             format!(
                 "{:x}:{:x}:{:x}:{:x}:{:x}:{:x}:{:x}:{:x}:{port}",
-                segments[0], segments[1], segments[2], segments[3],
-                segments[4], segments[5], segments[6], segments[7],
+                segments[0],
+                segments[1],
+                segments[2],
+                segments[3],
+                segments[4],
+                segments[5],
+                segments[6],
+                segments[7],
             )
         }
         _ => return Err(1),
     };
 
-    let stream = TokioTcpStream::connect(&target)
-        .await
-        .map_err(|e| raw_socket_error(&e))?;
+    let stream = TokioTcpStream::connect(&target).await.map_err(|e| raw_socket_error(&e))?;
     let stream = stream.into_std().map_err(|e| raw_socket_error(&e))?;
     stream.set_nonblocking(true).map_err(|e| raw_socket_error(&e))?;
     Ok(stream)
@@ -1173,8 +1151,8 @@ fn send_socks_reply(
     let mut response = vec![SOCKS_VERSION, reply, 0, atyp];
     match atyp {
         3 => {
-            let length =
-                u8::try_from(address.len()).map_err(|_| SocketError::Parse("SOCKS domain too long"))?;
+            let length = u8::try_from(address.len())
+                .map_err(|_| SocketError::Parse("SOCKS domain too long"))?;
             response.push(length);
             response.extend_from_slice(address);
         }
@@ -1225,8 +1203,8 @@ fn encode_bool(value: bool) -> Vec<u8> {
 }
 
 fn encode_bytes(value: &[u8]) -> Result<Vec<u8>, SocketError> {
-    let len = u32::try_from(value.len())
-        .map_err(|_| SocketError::Parse("socket payload too large"))?;
+    let len =
+        u32::try_from(value.len()).map_err(|_| SocketError::Parse("socket payload too large"))?;
     let mut out = Vec::with_capacity(4 + value.len());
     out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(value);
@@ -1395,19 +1373,13 @@ mod tests {
     #[test]
     fn parse_socks_greeting_no_acceptable_method() {
         let greeting = [5, 2, 1, 2]; // version 5, 2 methods, neither is 0
-        assert_eq!(
-            try_parse_socks_greeting(&greeting),
-            Some(Err(SOCKS_METHOD_NOT_ACCEPTABLE))
-        );
+        assert_eq!(try_parse_socks_greeting(&greeting), Some(Err(SOCKS_METHOD_NOT_ACCEPTABLE)));
     }
 
     #[test]
     fn parse_socks_greeting_wrong_version() {
         let greeting = [4, 1, 0]; // SOCKS4, not SOCKS5
-        assert_eq!(
-            try_parse_socks_greeting(&greeting),
-            Some(Err(SOCKS_METHOD_NOT_ACCEPTABLE))
-        );
+        assert_eq!(try_parse_socks_greeting(&greeting), Some(Err(SOCKS_METHOD_NOT_ACCEPTABLE)));
     }
 
     #[test]
@@ -1460,10 +1432,7 @@ mod tests {
     fn parse_socks_request_unsupported_atyp() {
         let request = [5, 1, 0, 5, 0, 0, 0, 0, 0, 0]; // atyp 5 is invalid
         let result = try_parse_socks_request(&request);
-        assert!(matches!(
-            result,
-            Some(Err(SocksRequestError::AddressTypeNotSupported))
-        ));
+        assert!(matches!(result, Some(Err(SocksRequestError::AddressTypeNotSupported))));
     }
 
     #[test]
@@ -1534,7 +1503,9 @@ mod tests {
     async fn handle_rportfwd_list_empty() {
         let mut state = SocketState::new();
         let mut payload = Vec::new();
-        payload.extend_from_slice(&(u32::from(DemonSocketCommand::ReversePortForwardList)).to_le_bytes());
+        payload.extend_from_slice(
+            &(u32::from(DemonSocketCommand::ReversePortForwardList)).to_le_bytes(),
+        );
         state.handle_command(1, &payload).await.expect("handle");
         let responses = state.drain_responses();
         assert_eq!(responses.len(), 1);
@@ -1556,10 +1527,7 @@ mod tests {
         state.handle_command(1, &payload).await.expect("handle");
         let responses = state.drain_responses();
         assert_eq!(responses.len(), 1);
-        assert_eq!(
-            responses[0].payload,
-            encode_u32(u32::from(DemonSocketCommand::SocksProxyList))
-        );
+        assert_eq!(responses[0].payload, encode_u32(u32::from(DemonSocketCommand::SocksProxyList)));
     }
 
     // ── Socket command: SocksProxyClear ─────────────────────────────────────
@@ -1581,7 +1549,9 @@ mod tests {
     async fn handle_rportfwd_clear_empty() {
         let mut state = SocketState::new();
         let mut payload = Vec::new();
-        payload.extend_from_slice(&(u32::from(DemonSocketCommand::ReversePortForwardClear)).to_le_bytes());
+        payload.extend_from_slice(
+            &(u32::from(DemonSocketCommand::ReversePortForwardClear)).to_le_bytes(),
+        );
         state.handle_command(1, &payload).await.expect("handle");
         let responses = state.drain_responses();
         assert_eq!(responses.len(), 1);
@@ -1618,7 +1588,9 @@ mod tests {
     async fn handle_rportfwd_add_binds_listener() {
         let mut state = SocketState::new();
         let mut payload = Vec::new();
-        payload.extend_from_slice(&(u32::from(DemonSocketCommand::ReversePortForwardAdd)).to_le_bytes());
+        payload.extend_from_slice(
+            &(u32::from(DemonSocketCommand::ReversePortForwardAdd)).to_le_bytes(),
+        );
         payload.extend_from_slice(&0x7F000001_u32.to_le_bytes()); // bind addr
         payload.extend_from_slice(&0_u32.to_le_bytes()); // port 0
         payload.extend_from_slice(&0x7F000001_u32.to_le_bytes()); // forward addr
@@ -1698,7 +1670,8 @@ mod tests {
 
         // Add
         let mut add_payload = Vec::new();
-        add_payload.extend_from_slice(&(u32::from(DemonSocketCommand::SocksProxyAdd)).to_le_bytes());
+        add_payload
+            .extend_from_slice(&(u32::from(DemonSocketCommand::SocksProxyAdd)).to_le_bytes());
         add_payload.extend_from_slice(&0x7F000001_u32.to_le_bytes());
         add_payload.extend_from_slice(&0_u32.to_le_bytes());
         state.handle_command(1, &add_payload).await.expect("add");
@@ -1711,7 +1684,8 @@ mod tests {
 
         // Remove
         let mut rm_payload = Vec::new();
-        rm_payload.extend_from_slice(&(u32::from(DemonSocketCommand::SocksProxyRemove)).to_le_bytes());
+        rm_payload
+            .extend_from_slice(&(u32::from(DemonSocketCommand::SocksProxyRemove)).to_le_bytes());
         rm_payload.extend_from_slice(&socket_id.to_le_bytes());
         state.handle_command(2, &rm_payload).await.expect("remove");
         let responses = state.drain_responses();
@@ -1728,7 +1702,9 @@ mod tests {
 
         // Add
         let mut add_payload = Vec::new();
-        add_payload.extend_from_slice(&(u32::from(DemonSocketCommand::ReversePortForwardAdd)).to_le_bytes());
+        add_payload.extend_from_slice(
+            &(u32::from(DemonSocketCommand::ReversePortForwardAdd)).to_le_bytes(),
+        );
         add_payload.extend_from_slice(&0x7F000001_u32.to_le_bytes());
         add_payload.extend_from_slice(&0_u32.to_le_bytes());
         add_payload.extend_from_slice(&0x7F000001_u32.to_le_bytes());
@@ -1743,7 +1719,9 @@ mod tests {
 
         // Remove
         let mut rm_payload = Vec::new();
-        rm_payload.extend_from_slice(&(u32::from(DemonSocketCommand::ReversePortForwardRemove)).to_le_bytes());
+        rm_payload.extend_from_slice(
+            &(u32::from(DemonSocketCommand::ReversePortForwardRemove)).to_le_bytes(),
+        );
         rm_payload.extend_from_slice(&listener_id.to_le_bytes());
         state.handle_command(2, &rm_payload).await.expect("remove");
         let responses = state.drain_responses();

@@ -47,13 +47,16 @@ pub enum DispatchResult {
 pub struct Response {
     /// Demon command ID for the outgoing packet header.
     pub command_id: u32,
+    /// Request ID to use for the callback.  When zero the agent loop falls back
+    /// to the request ID from the originating task package.
+    pub request_id: u32,
     /// Payload bytes already serialised in big-endian wire format.
     pub payload: Vec<u8>,
 }
 
 impl Response {
     fn new(cmd: DemonCommand, payload: Vec<u8>) -> Self {
-        Self { command_id: cmd.into(), payload }
+        Self { command_id: cmd.into(), request_id: 0, payload }
     }
 }
 

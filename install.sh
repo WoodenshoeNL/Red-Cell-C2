@@ -255,6 +255,20 @@ if [[ "$INSTALL_AGENTS" -eq 1 ]]; then
 
     ok "agent Rust targets installed"
     warn "Specter requires MinGW-w64 linker — run --teamserver if not already done."
+
+    # cargo-nextest — faster test runner used by the QA loop
+    if command -v cargo-nextest &>/dev/null; then
+        ok "cargo-nextest already installed"
+    else
+        info "Installing cargo-nextest..."
+        NEXTEST_USER="${SUDO_USER:-root}"
+        NEXTEST_CARGO_BIN="$(eval echo ~$NEXTEST_USER)/.cargo/bin"
+        if curl -LsSf https://get.nexte.st/latest/linux | sudo -u "$NEXTEST_USER" tar zxf - -C "$NEXTEST_CARGO_BIN" 2>/dev/null; then
+            ok "cargo-nextest installed"
+        else
+            warn "cargo-nextest install failed — QA loop will fall back to cargo test"
+        fi
+    fi
 fi
 
 # ── 6. Binary checks ──────────────────────────────────────────────────────────

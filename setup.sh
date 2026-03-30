@@ -189,6 +189,20 @@ else
     fi
 fi
 
+# ── 8b. cargo-nextest — faster test runner ────────────────────────────────────
+echo ""
+echo "--- cargo-nextest ---"
+if command -v cargo-nextest &>/dev/null; then
+    ok "cargo-nextest: $(cargo nextest --version 2>/dev/null | head -1)"
+else
+    warn "cargo-nextest not found — installing (used by QA loop for cargo nextest run)"
+    if curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ~/.cargo/bin 2>/dev/null; then
+        ok "cargo-nextest installed"
+    else
+        warn "cargo-nextest install failed — QA loop will fall back to cargo test"
+    fi
+fi
+
 # ── 9. Logs directory ─────────────────────────────────────────────────────────
 mkdir -p "$SCRIPT_DIR/logs"
 ok "logs/ directory ready"

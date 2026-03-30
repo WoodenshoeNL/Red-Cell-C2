@@ -211,6 +211,7 @@ def run_agent(
         log_handles.append(open(extra_log_file, "w"))
 
     raw_lines = []
+    seen_result = False
     try:
         for line in proc.stdout:
             # Always write raw line to log files
@@ -227,6 +228,9 @@ def run_agent(
                         formatted = format_stream_event(event)
                         if formatted is not None:
                             print(formatted, flush=True)
+                        if event.get("type") == "result":
+                            seen_result = True
+                            break
                     except json.JSONDecodeError:
                         print(line, end="", flush=True)
             else:
@@ -235,7 +239,23 @@ def run_agent(
         for fh in log_handles:
             fh.close()
 
-    proc.wait()
+    if seen_result:
+        # Claude signalled end_turn but may not close stdout; don't wait for EOF.
+        try:
+            proc.stdout.close()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+    else:
+        proc.wait()
 
     if is_stream_json:
         return proc.returncode, extract_text_from_stream(raw_lines)

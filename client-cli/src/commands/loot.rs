@@ -244,7 +244,6 @@ fn percent_encode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::output::TextRender as _;
 
     fn sample_raw() -> RawLootSummary {
         RawLootSummary {

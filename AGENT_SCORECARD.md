@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 967 | 231 | 31 |
-| Bugs filed against | 119 | 36 | 9 |
+| Tasks closed | 973 | 231 | 31 |
+| Bugs filed against | 121 | 36 | 9 |
 | Bug rate (bugs/task) | 0.12 | 0.16 | 0.29 |
 | Quality score | 88% | 84% | 71% |
 
-*Bug rates: Claude 119/967=0.12, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 121/973=0.12, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -23,7 +23,7 @@ Each loop run updates the running totals and appends a review entry.
 | unwrap / expect in production | 8 | 0 | 0 |
 | Missing tests / stale tests | 52 | 14 | 5 |
 | Clippy warnings | 7 | 0 | 1 |
-| Protocol errors | 18 | 27 | 3 |
+| Protocol errors | 19 | 27 | 3 |
 | Security issues | 49 | 39 | 0 |
 | Architecture drift | 19 | 23 | 0 |
 | Memory / resource leaks | 9 | 11 | 1 |
@@ -31,7 +31,7 @@ Each loop run updates the running totals and appends a review entry.
 | Test infrastructure / flakiness | 24 | 1 | 0 |
 | Audit attribution errors | 0 | 2 | 0 |
 | Availability / timeout regressions | 2 | 5 | 0 |
-| Correctness / pagination | 50 | 8 | 1 |
+| Correctness / pagination | 51 | 8 | 1 |
 | Workflow / close-hygiene | 22 | 0 | 0 |
 | Code reuse / duplication | 8 | 0 | 0 |
 
@@ -40,6 +40,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-30 10:48 — 0040925b..d191494b
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 6 | 2 | Closed: w8bcm (Specter LE fix), zvj3t (webhook hardening), w7ucl (CommandTransfer), tqt2p (CommandKillDate), ixgrd (CommandConfig), zywnr (CommandPivot). Bugs: red-cell-c2-5nybd (P1, Specter incomplete LE fix — sleep/fs/exec callbacks still BE), red-cell-c2-ya99p (P3, Phantom unchecked `as u32` casts in transfer command). |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: passed — cargo check clean, clippy clean (0 warnings), cargo test 100% pass (all workspace crates)
+Notes: Heavy Phantom feature velocity (4 commands implemented). Specter LE byte-order fix was partially applied — process callbacks fixed but sleep/fs/exec remain BE (P1 filed). One infrastructure fix (loop.py result-event break) and setup script improvements also landed.
 
 ### QA Review — 2026-03-30 — 0a0e144c..61074a96
 

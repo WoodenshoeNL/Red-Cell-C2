@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 995 | 231 | 31 |
+| Tasks closed | 998 | 231 | 31 |
 | Bugs filed against | 128 | 36 | 9 |
 | Bug rate (bugs/task) | 0.13 | 0.16 | 0.29 |
 | Quality score | 87% | 84% | 71% |
 
-*Bug rates: Claude 128/995=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 128/998=0.13, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -4502,3 +4502,13 @@ Build: failed (`cargo check --workspace` passed; `cargo clippy --workspace -- -D
 | Cursor | 0 | 0 | No activity in range. |
 
 Build: skipped (no committed Rust source changes in range)
+
+### QA Review — 2026-03-30 23:20 — ab3af200..1b78b0a6
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 3 | 0 | Closed: red-cell-c2-6vb9d, red-cell-c2-ybtir, red-cell-c2-opmwh. Reviewed Phantom sleep fix, Specter unimplemented-command response, shared rate-limiter helper, and the kerberos typo/script changes; no new attributable issues found. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: failed — `cargo check --workspace` passed, `cargo clippy --workspace -- -D warnings` passed, and `cargo nextest run --workspace` still fails on the pre-existing pivot legacy-CTR regressions already tracked in `red-cell-c2-apkr0`

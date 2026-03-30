@@ -1,0 +1,34 @@
+[package]
+name = "red-cell-common-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+# Keep this crate out of the parent workspace so `cargo fuzz` can manage it
+# as its own isolated build environment.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.red-cell-common]
+path = ".."
+
+# Envelope / header layer (big-endian transport framing).
+[[bin]]
+name = "demon_envelope"
+path = "fuzz_targets/demon_envelope.rs"
+test = false
+doc = false
+bench = false
+
+# Package / message layer (little-endian command stream).
+[[bin]]
+name = "demon_message"
+path = "fuzz_targets/demon_message.rs"
+test = false
+doc = false
+bench = false

@@ -9,12 +9,12 @@ Each loop run updates the running totals and appends a review entry.
 
 | Metric | Claude | Codex | Cursor |
 |--------|-------:|------:|-------:|
-| Tasks closed | 979 | 231 | 31 |
+| Tasks closed | 983 | 231 | 31 |
 | Bugs filed against | 121 | 36 | 9 |
 | Bug rate (bugs/task) | 0.12 | 0.16 | 0.29 |
 | Quality score | 88% | 84% | 71% |
 
-*Bug rates: Claude 121/979=0.12, Codex 36/231=0.16, Cursor 9/31=0.29*
+*Bug rates: Claude 121/983=0.12, Codex 36/231=0.16, Cursor 9/31=0.29*
 
 ## Violation Breakdown
 
@@ -40,6 +40,17 @@ Each loop run updates the running totals and appends a review entry.
 ## Review Log
 
 <!-- QA and arch loops append entries below this line -->
+
+### QA Review — 2026-03-30 17:45 — 61b8df93..60062516
+
+| Agent | Tasks closed | Bugs filed | Notes |
+|-------|-------------|------------|-------|
+| Claude | 4 | 0 | Closed: i7iwa (CommandKerberos), j8t0i (CommandConfig), v5eer (CommandKillDate), lphdl (CommandScreenshot). All Specter agent zone. |
+| Codex | 0 | 0 | No activity this period. |
+| Cursor | 0 | 0 | No activity this period. |
+
+Build: passed — cargo check clean, clippy clean (0 warnings), cargo test 100% pass
+Notes: ~1960 lines added across 4 Specter features. Kerberos module (669 LOC) is well-structured with proper LSA handle lifecycle management and non-Windows stubs. Screenshot uses GDI with correct resource cleanup. Kill-date uses FILETIME with saturating arithmetic. Config handler covers all DemonConfigKey variants. Zero `unwrap()`/`expect()` in production code. Comprehensive unit tests for all new handlers. One issue remains in_progress (red-cell-c2-1ptj4, BOF/inline-execute family).
 
 ### QA Review — 2026-03-30 14:30 — 8df6a4e7..cfa468ac
 

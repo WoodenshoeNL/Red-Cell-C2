@@ -27,6 +27,7 @@ pub(crate) enum PendingCallback {
     Output { request_id: u32, text: String },
     Error { request_id: u32, text: String },
     Exit { request_id: u32, exit_method: u32 },
+    KillDate { request_id: u32 },
     Structured { command_id: u32, request_id: u32, payload: Vec<u8> },
     MemFileAck { request_id: u32, mem_file_id: u32, success: bool },
     FsUpload { request_id: u32, file_size: u32, path: String },
@@ -46,6 +47,8 @@ pub(crate) struct PhantomState {
     socks_clients: HashMap<u32, SocksClient>,
     downloads: Vec<ActiveDownload>,
     pending_callbacks: Vec<PendingCallback>,
+    /// Kill date set dynamically by the teamserver via `CommandKillDate`.
+    kill_date: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -253,6 +256,23 @@ impl PhantomState {
 
     fn queue_callback(&mut self, callback: PendingCallback) {
         self.pending_callbacks.push(callback);
+    }
+
+    /// Return the kill date set dynamically by the teamserver, if any.
+    pub(crate) fn kill_date(&self) -> Option<i64> {
+        self.kill_date
+    }
+
+    /// Set or clear the dynamic kill date (Unix timestamp in seconds).
+    #[cfg(test)]
+    pub(crate) fn set_kill_date(&mut self, kill_date: Option<i64>) {
+        self.kill_date = kill_date;
+    }
+
+    /// Queue a `CommandKillDate` callback to notify the teamserver that
+    /// the kill date has been reached.
+    pub(crate) fn queue_kill_date_callback(&mut self) {
+        self.queue_callback(PendingCallback::KillDate { request_id: 0 });
     }
 
     /// Read a chunk from each running download and queue file-write callbacks.
@@ -763,6 +783,20 @@ pub(crate) async fn execute(
         }
         DemonCommand::CommandTransfer => {
             execute_transfer(package.request_id, &package.payload, state)?;
+        }
+        DemonCommand::CommandKillDate => {
+            let mut parser = TaskParser::new(&package.payload);
+            let kill_date = parser.int64()?;
+            state.kill_date = if kill_date > 0 { Some(kill_date) } else { None };
+            let label = if kill_date > 0 {
+                format!("kill date set to {kill_date}")
+            } else {
+                String::from("kill date disabled")
+            };
+            state.queue_callback(PendingCallback::Output {
+                request_id: package.request_id,
+                text: label,
+            });
         }
         DemonCommand::CommandExit => {
             let mut parser = TaskParser::new(&package.payload);
@@ -2685,6 +2719,7 @@ impl PendingCallback {
             Self::Output { .. } => u32::from(DemonCommand::CommandOutput),
             Self::Error { .. } => u32::from(DemonCommand::CommandError),
             Self::Exit { .. } => u32::from(DemonCommand::CommandExit),
+            Self::KillDate { .. } => u32::from(DemonCommand::CommandKillDate),
             Self::Structured { command_id, .. } => *command_id,
             Self::MemFileAck { .. } => u32::from(DemonCommand::CommandMemFile),
             Self::FsUpload { .. } => u32::from(DemonCommand::CommandFs),
@@ -2700,6 +2735,7 @@ impl PendingCallback {
             Self::Output { request_id, .. }
             | Self::Error { request_id, .. }
             | Self::Exit { request_id, .. }
+            | Self::KillDate { request_id, .. }
             | Self::Structured { request_id, .. }
             | Self::MemFileAck { request_id, .. }
             | Self::FsUpload { request_id, .. }
@@ -2720,6 +2756,7 @@ impl PendingCallback {
                 Ok(payload)
             }
             Self::Exit { exit_method, .. } => Ok(encode_u32(*exit_method)),
+            Self::KillDate { .. } => Ok(Vec::new()),
             Self::Structured { payload, .. } => Ok(payload.clone()),
             Self::MemFileAck { mem_file_id, success, .. } => {
                 let mut payload = Vec::new();
@@ -3717,5 +3754,74 @@ mod tests {
         assert_eq!(*command_id, u32::from(DemonCommand::CommandFs));
         // Cat should not create tracked downloads.
         assert!(state.downloads.is_empty());
+    }
+
+    #[tokio::test]
+    async fn execute_kill_date_stores_timestamp() {
+        let timestamp: i64 = 1_800_000_000;
+        let payload = timestamp.to_le_bytes().to_vec();
+        let package = DemonPackage::new(DemonCommand::CommandKillDate, 50, payload);
+        let mut state = PhantomState::default();
+
+        execute(&package, &mut state).await.expect("execute kill date");
+        assert_eq!(state.kill_date(), Some(timestamp));
+
+        let callbacks = state.drain_callbacks();
+        assert_eq!(callbacks.len(), 1);
+        let PendingCallback::Output { request_id, text } = &callbacks[0] else {
+            panic!("expected Output callback, got: {callbacks:?}");
+        };
+        assert_eq!(*request_id, 50);
+        assert!(text.contains("1800000000"));
+    }
+
+    #[tokio::test]
+    async fn execute_kill_date_zero_disables() {
+        let payload = 0_i64.to_le_bytes().to_vec();
+        let package = DemonPackage::new(DemonCommand::CommandKillDate, 51, payload);
+        let mut state = PhantomState::default();
+
+        execute(&package, &mut state).await.expect("execute kill date zero");
+        assert_eq!(state.kill_date(), None);
+
+        let callbacks = state.drain_callbacks();
+        let PendingCallback::Output { text, .. } = &callbacks[0] else {
+            panic!("expected Output callback");
+        };
+        assert!(text.contains("disabled"));
+    }
+
+    #[tokio::test]
+    async fn execute_kill_date_updates_existing() {
+        let mut state = PhantomState::default();
+
+        // Set initial kill date.
+        let payload = 1_800_000_000_i64.to_le_bytes().to_vec();
+        let package = DemonPackage::new(DemonCommand::CommandKillDate, 60, payload);
+        execute(&package, &mut state).await.expect("set initial");
+        state.drain_callbacks();
+
+        // Update to a new kill date.
+        let payload = 1_900_000_000_i64.to_le_bytes().to_vec();
+        let package = DemonPackage::new(DemonCommand::CommandKillDate, 61, payload);
+        execute(&package, &mut state).await.expect("update");
+        assert_eq!(state.kill_date(), Some(1_900_000_000));
+    }
+
+    #[test]
+    fn kill_date_callback_has_correct_command_id() {
+        let callback = PendingCallback::KillDate { request_id: 0 };
+        assert_eq!(callback.command_id(), u32::from(DemonCommand::CommandKillDate));
+        assert_eq!(callback.request_id(), 0);
+        assert!(callback.payload().expect("payload").is_empty());
+    }
+
+    #[test]
+    fn queue_kill_date_callback_adds_to_pending() {
+        let mut state = PhantomState::default();
+        state.queue_kill_date_callback();
+        let callbacks = state.drain_callbacks();
+        assert_eq!(callbacks.len(), 1);
+        assert!(matches!(callbacks[0], PendingCallback::KillDate { request_id: 0 }));
     }
 }

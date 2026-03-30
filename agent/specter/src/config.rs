@@ -27,6 +27,28 @@ pub struct SpecterConfig {
     pub working_hours: Option<i32>,
     /// Spoofed parent PID for child process creation (set by `CommandProcPpidSpoof`).
     pub ppid_spoof: Option<u32>,
+    /// Verbose output flag (set by `CommandConfig` / `ImplantVerbose`).
+    pub verbose: bool,
+    /// Sleep obfuscation technique identifier.
+    pub sleep_technique: u32,
+    /// Whether COFF execution uses a dedicated thread.
+    pub coffee_threaded: bool,
+    /// Whether COFF execution uses a Vectored Exception Handler.
+    pub coffee_veh: bool,
+    /// Default memory allocation technique identifier.
+    pub memory_alloc: u32,
+    /// Default memory execution technique identifier.
+    pub memory_execute: u32,
+    /// Default process injection technique identifier.
+    pub inject_technique: u32,
+    /// Sleep-obfuscation spoof thread start address: `(library, function, offset)`.
+    pub spf_thread_addr: Option<(String, String, u32)>,
+    /// Injection spoof address: `(library, function, offset)`.
+    pub inject_spoof_addr: Option<(String, String, u32)>,
+    /// Default 64-bit spawn process path for injection.
+    pub spawn64: Option<String>,
+    /// Default 32-bit spawn process path for injection.
+    pub spawn32: Option<String>,
 }
 
 impl SpecterConfig {
@@ -60,6 +82,17 @@ impl Default for SpecterConfig {
             kill_date: None,
             working_hours: None,
             ppid_spoof: None,
+            verbose: false,
+            sleep_technique: 0,
+            coffee_threaded: false,
+            coffee_veh: false,
+            memory_alloc: 0,
+            memory_execute: 0,
+            inject_technique: 0,
+            spf_thread_addr: None,
+            inject_spoof_addr: None,
+            spawn64: None,
+            spawn32: None,
         }
     }
 }
